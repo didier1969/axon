@@ -3,8 +3,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use axon_core::embedder::{
@@ -45,6 +45,17 @@ use notify_debouncer_full::notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use serde_json::json;
 use tracing::{debug, error, info, warn};
+
+#[path = "main_background/host_pressure.rs"]
+mod host_pressure;
+#[path = "main_background/memory_config.rs"]
+mod memory_config;
+
+use host_pressure::sample_host_pressure;
+use memory_config::{
+    current_rss_bytes, federation_orchestrator_enabled, memory_limit_bytes,
+    memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, parse_rss_from_statm,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GovernorMode {
@@ -122,8 +133,6 @@ static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MEMORY_TRIM_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MEMORY_TRIM_SUCCESSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
-static HOST_PRESSURE_SAMPLER: LazyLock<Mutex<HostPressureSampler>> =
-    LazyLock::new(|| Mutex::new(HostPressureSampler::default()));
 
 #[derive(Debug, Clone, Copy)]
 struct AdmissionControllerDecision {
@@ -186,6 +195,11 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub ingress_flush_count: u64,
     pub ingress_last_flush_duration_ms: u64,
     pub ingress_last_promoted_count: u64,
+    pub ingress_promoted_total: u64,
+    pub ingress_last_durably_persisted_count: u64,
+    pub ingress_durably_persisted_total: u64,
+    pub ingress_last_excluded_from_pending_count: u64,
+    pub ingress_excluded_from_pending_total: u64,
     pub memory_trim_attempts_total: u64,
     pub memory_trim_successes_total: u64,
     pub cpu_load: f64,
@@ -208,6 +222,33 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub file_vectorization_queue_queued: usize,
     pub file_vectorization_queue_inflight: usize,
     pub file_vectorization_queue_depth: usize,
+    pub vector_chunks_embedded_total: u64,
+    pub chunk_embeddings_per_second: f64,
+    pub chunk_embeddings_rate_window_ms: u64,
+    pub prepare_inflight_chunks_current: u64,
+    pub ready_queue_chunks_current: u64,
+    pub ready_queue_chunks_small: u64,
+    pub ready_queue_chunks_medium: u64,
+    pub ready_queue_chunks_large: u64,
+    pub ready_batches_small: u64,
+    pub ready_batches_medium: u64,
+    pub ready_batches_large: u64,
+    pub mixed_fallback_batches_total: u64,
+    pub homogeneous_batches_total: u64,
+    pub last_consumed_batch_lane: String,
+    pub active_small_max_tokens: u64,
+    pub active_medium_max_tokens: u64,
+    pub ready_replenishment_deficit_current: u64,
+    pub oldest_ready_batch_age_ms_current: u64,
+    pub last_embed_attempt_wall_ms: u64,
+    pub avg_embed_attempt_wall_ms: f64,
+    pub max_embed_attempt_wall_ms: u64,
+    pub last_embed_gap_ms: u64,
+    pub avg_embed_gap_ms: f64,
+    pub max_embed_gap_ms: u64,
+    pub graph_workers_started_total: u64,
+    pub graph_workers_active_current: u64,
+    pub graph_worker_heartbeat_at_ms: u64,
     pub runtime_truth_last_heartbeat_at_ms: u64,
     pub runtime_truth_last_good_payload_at_ms: u64,
     pub runtime_truth_stale_after_ms: u64,
@@ -221,25 +262,6 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub semantic_underfeed: bool,
     pub semantic_ready_reserve_target: usize,
     pub utility_first_scheduler_hold_window_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct HostPressureSnapshot {
-    cpu_load: f64,
-    ram_load: f64,
-    io_wait: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ProcStatSample {
-    total: u64,
-    idle: u64,
-    iowait: u64,
-}
-
-#[derive(Debug, Default)]
-struct HostPressureSampler {
-    previous: Option<ProcStatSample>,
 }
 
 pub(crate) fn start_memory_watchdog() {
@@ -329,6 +351,10 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
 }
 
 pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
+    if !shadow_optimizer_enabled() {
+        info!("Shadow optimizer disabled; graph-first runtime keeps optimizer off the hot path.");
+        return;
+    }
     std::thread::spawn(move || {
         let engine = HeuristicPolicyEngine;
         let mut governor = GovernorLoopState::new();
@@ -364,7 +390,8 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
                 .as_ref()
                 .map(|value| {
                     let qualifies = signals.file_vectorization_queue_depth >= 32
-                        && signals.ready_queue_depth_current == 0
+                        && signals.ready_queue_chunks_current == 0
+                        && signals.prepare_inflight_chunks_current == 0
                         && value.throughput_chunks_per_hour <= 0.0
                         && value.throughput_files_per_hour <= 0.0
                         && value.penalty_liveness == 0.0;
@@ -524,6 +551,18 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
     });
 }
 
+pub(crate) fn shadow_optimizer_enabled() -> bool {
+    std::env::var("AXON_ENABLE_SHADOW_OPTIMIZER")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn spawn_runtime_trace_logger(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
@@ -633,6 +672,8 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "reason": controller.reason,
                     "target_embed_batch_chunks": controller.target_embed_batch_chunks,
                     "target_files_per_cycle": controller.target_files_per_cycle,
+                    "gpu_ready_low_watermark_chunks": controller.gpu_ready_low_watermark_chunks,
+                    "gpu_ready_high_watermark_chunks": controller.gpu_ready_high_watermark_chunks,
                     "avg_chunks_per_embed_call": controller.avg_chunks_per_embed_call,
                     "avg_files_per_embed_call": controller.avg_files_per_embed_call,
                     "embed_ms_per_chunk": controller.embed_ms_per_chunk,
@@ -815,8 +856,8 @@ fn resolve_governor_state(
     }
     if consecutive_zero_progress_windows >= 4
         && signals.file_vectorization_queue_depth >= 32
-        && signals.ready_queue_depth_current == 0
-        && signals.prepare_inflight_current == 0
+        && signals.ready_queue_chunks_current == 0
+        && signals.prepare_inflight_chunks_current == 0
     {
         return GovernorState::Freeze;
     }
@@ -927,6 +968,10 @@ mod governor_tests {
             canonical_vector_backlog_depth: 32,
             ready_queue_depth_current: 1,
             ready_queue_depth_max: 1,
+            ready_queue_chunks_current: 16,
+            ready_queue_chunks_max: 16,
+            ready_replenishment_deficit_current: 0,
+            ready_replenishment_deficit_max: 0,
             active_claimed_current: 0,
             prepare_claimed_current: 0,
             ready_claimed_current: 0,
@@ -935,6 +980,8 @@ mod governor_tests {
             persist_claimed_current: 0,
             prepare_inflight_current: 0,
             prepare_inflight_max: 0,
+            prepare_inflight_chunks_current: 0,
+            prepare_inflight_chunks_max: 0,
             gpu_idle_wait_ms_total: 0,
             prepare_queue_wait_ms_total: 0,
             prepare_reply_wait_ms_total: 0,
@@ -957,6 +1004,9 @@ mod governor_tests {
             canonical_files_embedded_total: 0,
             chunk_embedding_writes_total: 0,
             files_completed_total: 1,
+            target_ready_chunks_current: 96,
+            gpu_ready_low_watermark_chunks: 32,
+            gpu_ready_high_watermark_chunks: 64,
         }
     }
 
@@ -1382,6 +1432,9 @@ pub(crate) fn runtime_telemetry_snapshot(
     queue: &QueueStore,
     ingress_buffer: &SharedIngressBuffer,
 ) -> RuntimeTelemetrySnapshot {
+    let runtime_mode = axon_core::runtime_mode::AxonRuntimeMode::from_env();
+    let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
+    let graph_runtime_enabled = runtime_mode.ingestion_enabled();
     let budget = queue.memory_budget_snapshot();
     let queue_depth = queue.common_len();
     let service_pressure = service_guard::current_pressure();
@@ -1406,10 +1459,19 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or((0, 0));
     let graph_projection_queue_depth =
         graph_projection_queue_queued + graph_projection_queue_inflight;
-    let persisted_file_pending_depth = store.count_persisted_file_pending().unwrap_or(0);
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = store
-        .fetch_file_vectorization_queue_counts()
-        .unwrap_or((0, 0));
+    let persisted_file_pending_depth = if graph_runtime_enabled {
+        store.count_persisted_file_pending().unwrap_or(0)
+    } else {
+        0
+    };
+    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) =
+        if vector_runtime_enabled {
+            store
+                .fetch_file_vectorization_queue_counts()
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
     let runtime_truth_feed = service_guard::current_runtime_truth_feed();
@@ -1422,19 +1484,41 @@ pub(crate) fn runtime_telemetry_snapshot(
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(120_000);
-    let orphan_vectorization_files = store.count_orphaned_file_vectorization_files().unwrap_or(0);
-    let stale_vector_inflight_files = store
-        .count_stale_inflight_file_vectorization_files(now_ms, stale_threshold_ms)
-        .unwrap_or(0);
-    let oldest_graph_pending_age_ms = store.oldest_graph_pending_age_ms(now_ms).unwrap_or(0);
-    let oldest_semantic_pending_age_ms = store.oldest_semantic_pending_age_ms(now_ms).unwrap_or(0);
+    let orphan_vectorization_files = if vector_runtime_enabled {
+        store.count_orphaned_file_vectorization_files().unwrap_or(0)
+    } else {
+        0
+    };
+    let stale_vector_inflight_files = if vector_runtime_enabled {
+        store
+            .count_stale_inflight_file_vectorization_files(now_ms, stale_threshold_ms)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let oldest_graph_pending_age_ms = if graph_runtime_enabled {
+        store.oldest_graph_pending_age_ms(now_ms).unwrap_or(0)
+    } else {
+        0
+    };
+    let oldest_semantic_pending_age_ms = if vector_runtime_enabled {
+        store.oldest_semantic_pending_age_ms(now_ms).unwrap_or(0)
+    } else {
+        0
+    };
+    let effective_graph_scheduler_depth = if service_guard::graph_workers_active_current() > 0 {
+        persisted_file_pending_depth
+    } else {
+        0
+    };
     let utility_scheduler = current_utility_first_scheduler_diagnostics(
-        persisted_file_pending_depth,
+        effective_graph_scheduler_depth,
         file_vectorization_queue_depth,
         service_pressure,
     );
 
     let interactive_priority = service_guard::current_interactive_priority();
+    let vector_runtime = service_guard::vector_runtime_metrics();
 
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
@@ -1483,6 +1567,11 @@ pub(crate) fn runtime_telemetry_snapshot(
         ingress_flush_count: ingress_metrics.flush_count,
         ingress_last_flush_duration_ms: ingress_metrics.last_flush_duration_ms,
         ingress_last_promoted_count: ingress_metrics.last_promoted_count,
+        ingress_promoted_total: ingress_metrics.promoted_total,
+        ingress_last_durably_persisted_count: ingress_metrics.last_durably_persisted_count,
+        ingress_durably_persisted_total: ingress_metrics.durably_persisted_total,
+        ingress_last_excluded_from_pending_count: ingress_metrics.last_excluded_from_pending_count,
+        ingress_excluded_from_pending_total: ingress_metrics.excluded_from_pending_total,
         memory_trim_attempts_total: MEMORY_TRIM_ATTEMPTS_TOTAL.load(Ordering::Relaxed),
         memory_trim_successes_total: MEMORY_TRIM_SUCCESSES_TOTAL.load(Ordering::Relaxed),
         cpu_load: host_pressure.cpu_load,
@@ -1506,6 +1595,33 @@ pub(crate) fn runtime_telemetry_snapshot(
         file_vectorization_queue_queued,
         file_vectorization_queue_inflight,
         file_vectorization_queue_depth,
+        vector_chunks_embedded_total: service_guard::vector_chunks_embedded_total(),
+        chunk_embeddings_per_second: service_guard::vector_chunk_embeddings_per_second(),
+        chunk_embeddings_rate_window_ms: service_guard::vector_chunk_embeddings_rate_window_ms(),
+        prepare_inflight_chunks_current: vector_runtime.prepare_inflight_chunks_current,
+        ready_queue_chunks_current: vector_runtime.ready_queue_chunks_current,
+        ready_queue_chunks_small: vector_runtime.ready_queue_chunks_small,
+        ready_queue_chunks_medium: vector_runtime.ready_queue_chunks_medium,
+        ready_queue_chunks_large: vector_runtime.ready_queue_chunks_large,
+        ready_batches_small: vector_runtime.ready_batches_small,
+        ready_batches_medium: vector_runtime.ready_batches_medium,
+        ready_batches_large: vector_runtime.ready_batches_large,
+        mixed_fallback_batches_total: vector_runtime.mixed_fallback_batches_total,
+        homogeneous_batches_total: vector_runtime.homogeneous_batches_total,
+        last_consumed_batch_lane: vector_runtime.last_consumed_batch_lane.as_str().to_string(),
+        active_small_max_tokens: vector_runtime.active_small_max_tokens,
+        active_medium_max_tokens: vector_runtime.active_medium_max_tokens,
+        ready_replenishment_deficit_current: vector_runtime.ready_replenishment_deficit_current,
+        oldest_ready_batch_age_ms_current: vector_runtime.oldest_ready_batch_age_ms_current,
+        last_embed_attempt_wall_ms: vector_runtime.last_embed_attempt_wall_ms,
+        avg_embed_attempt_wall_ms: vector_runtime.avg_embed_attempt_wall_ms,
+        max_embed_attempt_wall_ms: vector_runtime.max_embed_attempt_wall_ms,
+        last_embed_gap_ms: vector_runtime.last_embed_gap_ms,
+        avg_embed_gap_ms: vector_runtime.avg_embed_gap_ms,
+        max_embed_gap_ms: vector_runtime.max_embed_gap_ms,
+        graph_workers_started_total: service_guard::graph_workers_started_total(),
+        graph_workers_active_current: service_guard::graph_workers_active_current(),
+        graph_worker_heartbeat_at_ms: service_guard::graph_worker_heartbeat_at_ms(),
         runtime_truth_last_heartbeat_at_ms: runtime_truth_feed.last_heartbeat_at_ms.unwrap_or(0),
         runtime_truth_last_good_payload_at_ms: runtime_truth_feed
             .last_good_payload_at_ms
@@ -1845,121 +1961,6 @@ fn spawn_subtree_hint_scans(
     }
 }
 
-fn sample_host_pressure() -> HostPressureSnapshot {
-    let cpu_sample = read_proc_stat_sample();
-    let ram_load = read_ram_load_percent();
-
-    match HOST_PRESSURE_SAMPLER.lock() {
-        Ok(mut sampler) => {
-            let previous = sampler.previous;
-            sampler.previous = cpu_sample;
-
-            let (cpu_load, io_wait) = match (previous, cpu_sample) {
-                (Some(previous), Some(current)) => compute_cpu_and_io_percent(previous, current),
-                _ => (0.0, 0.0),
-            };
-
-            HostPressureSnapshot {
-                cpu_load,
-                ram_load,
-                io_wait,
-            }
-        }
-        Err(_) => HostPressureSnapshot {
-            cpu_load: 0.0,
-            ram_load,
-            io_wait: 0.0,
-        },
-    }
-}
-
-fn read_proc_stat_sample() -> Option<ProcStatSample> {
-    let content = std::fs::read_to_string("/proc/stat").ok()?;
-    let line = content.lines().find(|line| line.starts_with("cpu "))?;
-    let mut values = line.split_whitespace().skip(1);
-    let user = values.next()?.parse::<u64>().ok()?;
-    let nice = values.next()?.parse::<u64>().ok()?;
-    let system = values.next()?.parse::<u64>().ok()?;
-    let idle = values.next()?.parse::<u64>().ok()?;
-    let iowait = values.next()?.parse::<u64>().ok()?;
-    let irq = values
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let softirq = values
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let steal = values
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let total = user + nice + system + idle + iowait + irq + softirq + steal;
-
-    Some(ProcStatSample {
-        total,
-        idle,
-        iowait,
-    })
-}
-
-fn compute_cpu_and_io_percent(previous: ProcStatSample, current: ProcStatSample) -> (f64, f64) {
-    let total_delta = current.total.saturating_sub(previous.total);
-    if total_delta == 0 {
-        return (0.0, 0.0);
-    }
-
-    let idle_delta = current.idle.saturating_sub(previous.idle);
-    let iowait_delta = current.iowait.saturating_sub(previous.iowait);
-    let busy_delta = total_delta.saturating_sub(idle_delta);
-    let cpu_load = ((busy_delta as f64) / (total_delta as f64) * 100.0).clamp(0.0, 100.0);
-    let io_wait = ((iowait_delta as f64) / (total_delta as f64) * 100.0).clamp(0.0, 100.0);
-
-    (cpu_load, io_wait)
-}
-
-fn read_ram_load_percent() -> f64 {
-    let content = match std::fs::read_to_string("/proc/meminfo") {
-        Ok(content) => content,
-        Err(_) => return 0.0,
-    };
-
-    let mut total_kb = None;
-    let mut available_kb = None;
-    let mut free_kb = None;
-    let mut buffers_kb = None;
-    let mut cached_kb = None;
-
-    for line in content.lines() {
-        let mut parts = line.split_whitespace();
-        let key = parts.next().unwrap_or_default();
-        let value = parts
-            .next()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        match key {
-            "MemTotal:" => total_kb = Some(value),
-            "MemAvailable:" => available_kb = Some(value),
-            "MemFree:" => free_kb = Some(value),
-            "Buffers:" => buffers_kb = Some(value),
-            "Cached:" => cached_kb = Some(value),
-            _ => {}
-        }
-    }
-
-    let total_kb = total_kb.unwrap_or(0);
-    if total_kb == 0 {
-        return 0.0;
-    }
-
-    let available_kb = available_kb
-        .unwrap_or(free_kb.unwrap_or(0) + buffers_kb.unwrap_or(0) + cached_kb.unwrap_or(0));
-    let used_kb = total_kb.saturating_sub(available_kb);
-
-    ((used_kb as f64) / (total_kb as f64) * 100.0).clamp(0.0, 100.0)
-}
-
 fn plan_admissions(
     queue: &QueueStore,
     candidates: Vec<PendingFile>,
@@ -2145,24 +2146,6 @@ fn enqueue_claimed_files(
             }
         }
     }
-}
-
-pub(crate) fn spawn_initial_scan(
-    store: Arc<GraphStore>,
-    project_root: String,
-    project_code: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    std::thread::spawn(move || {
-        run_initial_scan(
-            store,
-            project_root,
-            project_code,
-            file_ingress_guard,
-            ingress_buffer,
-        );
-    });
 }
 
 fn run_initial_scan(
@@ -2447,61 +2430,6 @@ pub(crate) fn spawn_ingress_promoter(
     });
 }
 
-fn parse_rss_from_statm(content: &str) -> Option<u64> {
-    content
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u64>().ok())
-}
-
-fn current_rss_bytes() -> Option<u64> {
-    let page_size = 4096;
-    let content = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let rss_pages = parse_rss_from_statm(&content)?;
-    Some(rss_pages * page_size)
-}
-
-fn memory_reclaimer_enabled() -> bool {
-    std::env::var("AXON_ENABLE_MEMORY_RECLAIMER")
-        .ok()
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off"
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn federation_orchestrator_enabled() -> bool {
-    std::env::var("AXON_ENABLE_FEDERATION_ORCHESTRATOR")
-        .ok()
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no"
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn memory_reclaimer_min_anon_bytes() -> u64 {
-    std::env::var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|mb| mb.saturating_mul(1024 * 1024))
-        .unwrap_or(4 * 1024 * 1024 * 1024)
-}
-
-fn memory_limit_bytes() -> u64 {
-    let gb = std::env::var("AXON_MEMORY_LIMIT_GB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v >= 2)
-        .unwrap_or(14);
-    gb * 1024 * 1024 * 1024
-}
-
 fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
     let Some(preferred_root) = preferred_root else {
         return Vec::new();
@@ -2634,7 +2562,6 @@ fn claim_policy(
     if service_pressure == ServicePressure::Critical
         || rss_ratio >= 0.92
         || budget_exhaustion_ratio >= 0.98
-        || queue_len >= 6_000
     {
         return ClaimPolicy {
             mode: ClaimMode::Paused,
@@ -3263,6 +3190,25 @@ mod tests {
     }
 
     #[test]
+    fn test_shadow_optimizer_disabled_by_default() {
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_SHADOW_OPTIMIZER");
+        }
+        assert!(!super::shadow_optimizer_enabled());
+    }
+
+    #[test]
+    fn test_shadow_optimizer_enabled_via_env() {
+        unsafe {
+            std::env::set_var("AXON_ENABLE_SHADOW_OPTIMIZER", "true");
+        }
+        assert!(super::shadow_optimizer_enabled());
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_SHADOW_OPTIMIZER");
+        }
+    }
+
+    #[test]
     fn test_memory_reclaimer_can_be_disabled_with_env() {
         unsafe {
             std::env::set_var("AXON_ENABLE_MEMORY_RECLAIMER", "false");
@@ -3395,6 +3341,19 @@ mod tests {
         );
         assert_eq!(policy.claim_count, 0);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn test_claim_policy_does_not_pause_solely_on_large_queue() {
+        let policy = claim_policy(
+            8_000,
+            0.10,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        assert_eq!(policy.mode.label(), "guarded");
+        assert!(policy.claim_count > 0);
     }
 
     #[test]

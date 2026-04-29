@@ -14,6 +14,7 @@ DEFAULT_MAX_CORE_REGRESSION_MS = 250.0
 DEFAULT_MAX_STACK_REGRESSION_MS = 500.0
 DEFAULT_MAX_SYMBOL_REGRESSION_MS = 400.0
 DEFAULT_LOAD_RATIO_WARN = 1.25
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_summary(path: Path) -> dict[str, Any]:
@@ -142,7 +143,7 @@ def main() -> int:
     parser.add_argument(
         "--runs-root",
         type=Path,
-        default=Path("/home/dstadel/projects/axon/.axon/mcp-measure-runs"),
+        default=PROJECT_ROOT / ".axon" / "mcp-measure-runs",
         help="Default root used when --base/--candidate are omitted",
     )
     parser.add_argument("--json-out", type=Path, help="Optional JSON output path")

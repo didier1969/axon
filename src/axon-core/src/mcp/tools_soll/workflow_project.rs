@@ -1,0 +1,343 @@
+use super::*;
+
+fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
+    if path.contains(required_path) {
+        return true;
+    }
+
+    if required_path == "tests.rs" {
+        let normalized = path.replace('\\', "/");
+        return normalized.ends_with("_test.rs")
+            || normalized.ends_with("_tests.rs")
+            || normalized.ends_with("/tests.rs")
+            || normalized.contains("/tests/")
+            || normalized.contains("/test/");
+    }
+
+    false
+}
+
+impl McpServer {
+    pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let diff_paths = args.get("diff_paths")?.as_array()?;
+        let message = args.get("message")?.as_str()?;
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let rows_raw = self
+            .graph_store
+            .query_json(
+                "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND status='active'",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        let mut violations = Vec::new();
+
+        for row in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            let id = &row[0];
+            let meta: serde_json::Value =
+                serde_json::from_str(&row[3]).unwrap_or_else(|_| serde_json::json!({}));
+
+            let trigger_path = meta
+                .get("trigger_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let required_path = meta
+                .get("required_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let enforcement = meta
+                .get("enforcement")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if trigger_path.is_empty() || required_path.is_empty() || enforcement != "strict" {
+                continue;
+            }
+
+            let trigger_clean = trigger_path.replace("*", "");
+            let triggered = diff_paths.iter().any(|p| {
+                p.as_str()
+                    .map(|path_str| path_str.contains(&trigger_clean))
+                    .unwrap_or(false)
+            });
+
+            if triggered {
+                let satisfied = diff_paths.iter().any(|p| {
+                    p.as_str()
+                        .map(|path_str| path_satisfies_required_path(path_str, required_path))
+                        .unwrap_or(false)
+                });
+
+                if !satisfied {
+                    let phase = meta.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                    let phase_str = if phase.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" [Phase: {}]", phase)
+                    };
+                    violations.push(serde_json::json!({
+                        "rule": format!("{} - {}", id, row[1]),
+                        "diagnostic": format!("{}{} requires matching test coverage: '{}'.", id, phase_str, required_path),
+                        "remediation_plan": format!("Add/update '{}' coverage, then retry axon_commit_work.", required_path)
+                    }));
+                }
+            }
+        }
+
+        if !violations.is_empty() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Violation: {}\nRemediation: {}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
+                "isError": true,
+                "data": { "violations": violations }
+            }));
+        }
+
+        if dry_run {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Validation réussie (Dry Run). Aucun commit effectué. Le message '{}' est valide.", message) }]
+            }));
+        }
+
+        let export_args = serde_json::json!({});
+        let export_res = self.axon_export_soll(&export_args);
+        let mut export_report = String::new();
+        if let Some(res) = export_res {
+            if soll_tool_is_error(Some(&res)) {
+                return Some(res);
+            }
+            if let Some(txt) = soll_tool_text(Some(&res)) {
+                export_report = txt;
+            }
+        }
+
+        let mut add_cmd = std::process::Command::new("git");
+        add_cmd.arg("add");
+        for p in diff_paths {
+            if let Some(path_str) = p.as_str() {
+                add_cmd.arg(path_str);
+            }
+        }
+        let add_out = add_cmd.output();
+        if let Err(e) = add_out {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Git add failed: {}", e) }],
+                "isError": true
+            }));
+        }
+
+        let commit_out = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output();
+
+        match commit_out {
+            Ok(output) => {
+                let status = if output.status.success() {
+                    format!(
+                        "Commit effectué avec succès.\n{}",
+                        String::from_utf8_lossy(&output.stdout)
+                    )
+                } else {
+                    format!(
+                        "Commit échoué.\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                };
+                Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report (not auto-staged):\n{}", status, export_report) }]
+                }))
+            }
+            Err(e) => Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Git commit failed: {}", e) }],
+                "isError": true
+            })),
+        }
+    }
+
+    pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let project_path = match args.get("project_path").and_then(|value| value.as_str()) {
+            Some(path) if !path.trim().is_empty() => path.trim(),
+            _ => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": "`project_path` est obligatoire pour `axon_init_project`." }],
+                    "isError": true
+                }))
+            }
+        };
+        let project_name = match self.derive_project_name_from_path(project_path) {
+            Ok(name) => name,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
+        let project_code = match self.assign_project_code_for_init(&project_name, project_path) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
+        if let Some(requested_code) = args.get("project_code").and_then(|value| value.as_str()) {
+            let requested = match self
+                .validate_explicit_canonical_project_code(Some(requested_code), "axon_init_project")
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    return Some(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                        "isError": true
+                    }))
+                }
+            };
+            if requested != project_code {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: `project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code) }],
+                    "isError": true
+                }));
+            }
+        }
+        let concept_text = args
+            .get("concept_document_url_or_text")
+            .and_then(|v| v.as_str());
+
+        if let Err(e) = self.graph_store.sync_project_registry_entry(
+            &project_code,
+            Some(&project_name),
+            Some(project_path),
+        ) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
+                "isError": true
+            }));
+        }
+        if let Err(e) = self.ensure_soll_registry_row(&project_code) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'initialisation SOLL du projet: {}", e) }],
+                "isError": true
+            }));
+        }
+
+        let rows_raw = self.graph_store.query_json(
+            "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_code='PRO'",
+        ).unwrap_or_else(|_| "[]".to_string());
+
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        let mut rules_text = String::new();
+        for row in rows {
+            if row.len() >= 3 {
+                rules_text.push_str(&format!("- **{}**: {} ({})\n", row[0], row[1], row[2]));
+            }
+        }
+
+        let mut response_text = format!(
+            "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
+            project_name, project_code
+        );
+
+        if concept_text.is_some() {
+            response_text.push_str(&format!(
+                "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
+                project_code
+            ));
+        }
+
+        response_text.push_str(&format!(
+            "Code projet attribué par le serveur: `{}`.\n\n",
+            project_code
+        ));
+        response_text.push_str("Voici les règles globales disponibles. Lesquelles souhaitez-vous activer, ignorer ou spécialiser pour ce projet ?\n");
+        response_text.push_str(&rules_text);
+        response_text
+            .push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": response_text }],
+            "data": {
+                "project_code": project_code,
+                "project_name": project_name,
+                "project_path": project_path
+            }
+        }))
+    }
+
+    pub(crate) fn axon_apply_guidelines(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let project_code = match self.require_registered_mutation_project_code(
+            args.get("project_code").and_then(|value| value.as_str()),
+            "axon_apply_guidelines",
+        ) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
+        let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
+
+        let mut applied = Vec::new();
+        for id_val in accepted_ids {
+            let global_id = id_val.as_str().unwrap_or("");
+            let row_raw = self.graph_store.query_json(&format!(
+                "SELECT title, description, metadata FROM soll.Node WHERE id = '{}' AND type='Guideline'",
+                escape_sql(global_id)
+            )).unwrap_or_else(|_| "[]".to_string());
+
+            let rows: Vec<Vec<String>> = serde_json::from_str(&row_raw).unwrap_or_default();
+            if let Some(row) = rows.first() {
+                if row.len() < 3 {
+                    continue;
+                }
+                let title = &row[0];
+                let desc = &row[1];
+                let meta = &row[2];
+
+                let (_scope_code, p_code, prefix, num) = match self
+                    .next_soll_numeric_id(&project_code, "guideline")
+                {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return Some(serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Erreur registre SOLL: {}", e) }],
+                            "isError": true
+                        }))
+                    }
+                };
+                let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
+
+                let _ = self.graph_store.execute_param(
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+                     VALUES (?, 'Guideline', ?, ?, ?, 'active', ?)",
+                    &serde_json::json!([local_id, p_code, title, desc, meta])
+                );
+
+                let _ = self.graph_store.execute_param(
+                    "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, 'INHERITS_FROM', '{}')",
+                    &serde_json::json!([local_id, global_id])
+                );
+
+                applied.push(local_id);
+            }
+        }
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": format!("Héritage appliqué. Nouvelles règles locales créées: {:?}", applied) }]
+        }))
+    }
+}

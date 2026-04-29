@@ -21,7 +21,7 @@ from statistics import mean
 from typing import Any
 
 
-PROJECT_ROOT = Path("/home/dstadel/projects/axon")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GRAPH_ROOT = PROJECT_ROOT / ".axon" / "graph_v2"
 IST_DB = GRAPH_ROOT / "ist.db"
 IST_WAL = GRAPH_ROOT / "ist.db.wal"
@@ -413,10 +413,10 @@ def run_mode(
                 pass
 
     start_arg = {
-        "full": "--full",
-        "graph_only": "--graph-only",
-        "read_only": "--read-only",
-        "mcp_only": "--mcp-only",
+        "brain_only": "--brain-only",
+        "indexer_graph": "--indexer-graph",
+        "indexer_vector": "--indexer-vector",
+        "indexer_full": "--indexer-full",
     }[mode]
     start_code, start_output = run_script("scripts/start.sh", [start_arg], check=False)
     (run_dir / f"{mode}-start.log").write_text(start_output)
@@ -518,7 +518,7 @@ def run_mode(
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Qualify MCP responsiveness and recovery under load.")
     parser.add_argument("--url", default=MCP_URL, help=f"MCP URL (default: {MCP_URL})")
-    parser.add_argument("--modes", default="mcp_only,full", help="Comma-separated runtime modes to compare")
+    parser.add_argument("--modes", default="brain_only,indexer_full", help="Comma-separated runtime modes to compare")
     parser.add_argument("--duration", type=int, default=120, help="Load duration per mode in seconds")
     parser.add_argument("--warmup", type=int, default=5, help="Warm-up seconds after runtime readiness")
     parser.add_argument("--concurrency", type=int, default=4, help="Parallel request workers")
@@ -538,7 +538,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     modes = [mode.strip() for mode in args.modes.split(",") if mode.strip()]
     for mode in modes:
-        if mode not in {"full", "graph_only", "read_only", "mcp_only"}:
+        if mode not in {"brain_only", "indexer_graph", "indexer_vector", "indexer_full"}:
             raise SystemExit(f"Unsupported mode: {mode}")
     if args.duration <= 0 or args.concurrency <= 0 or args.timeout <= 0 or args.warmup < 0:
         raise SystemExit("duration, concurrency and timeout must be > 0; warmup must be >= 0")

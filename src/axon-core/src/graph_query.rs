@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
@@ -25,6 +26,46 @@ enum ReadRoute {
 }
 
 impl GraphStore {
+    fn normalize_attached_soll_query<'a>(&self, query: &'a str) -> Cow<'a, str> {
+        if !self.soll_attached || !query.contains("soll.") {
+            return Cow::Borrowed(query);
+        }
+
+        fn is_identifier_char(byte: u8) -> bool {
+            byte.is_ascii_alphanumeric() || byte == b'_'
+        }
+
+        let bytes = query.as_bytes();
+        let mut cursor = 0usize;
+        let mut rewritten = String::with_capacity(query.len() + 32);
+        let mut changed = false;
+
+        while let Some(relative) = query[cursor..].find("soll.") {
+            let absolute = cursor + relative;
+            let preceded_by_identifier =
+                absolute > 0 && is_identifier_char(bytes[absolute.saturating_sub(1)]);
+            let already_fully_qualified = query[absolute + 5..].starts_with("main.");
+
+            if preceded_by_identifier || already_fully_qualified {
+                rewritten.push_str(&query[cursor..absolute + 5]);
+                cursor = absolute + 5;
+                continue;
+            }
+
+            rewritten.push_str(&query[cursor..absolute]);
+            rewritten.push_str("soll.main.");
+            cursor = absolute + 5;
+            changed = true;
+        }
+
+        if !changed {
+            return Cow::Borrowed(query);
+        }
+
+        rewritten.push_str(&query[cursor..]);
+        Cow::Owned(rewritten)
+    }
+
     fn reader_only_ist_unavailable_error(&self) -> anyhow::Error {
         let contract = self.reader_snapshot_freshness_contract();
         let reason = contract
@@ -113,6 +154,7 @@ impl GraphStore {
     }
 
     fn query_count_on_writer(&self, query: &str) -> Result<i64> {
+        let normalized = self.normalize_attached_soll_query(query);
         let writer = self
             .pool
             .writer_ctx
@@ -120,7 +162,10 @@ impl GraphStore {
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
             let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
-            Ok(count_fn(*writer, CString::new(query)?.as_ptr()))
+            Ok(count_fn(
+                *writer,
+                CString::new(normalized.as_ref())?.as_ptr(),
+            ))
         }
     }
 
@@ -214,8 +259,9 @@ impl GraphStore {
         query: &str,
         freshness: ReadFreshness,
     ) -> Result<i64> {
+        let normalized = self.normalize_attached_soll_query(query);
         match self.select_read_route(query, freshness) {
-            ReadRoute::Writer => self.query_count_on_writer(query),
+            ReadRoute::Writer => self.query_count_on_writer(normalized.as_ref()),
             ReadRoute::Reader => {
                 let guard = self
                     .pool
@@ -236,13 +282,19 @@ impl GraphStore {
                     return unsafe {
                         let count_fn: LibSymbol<QueryCountFunc> =
                             self.pool.lib.get(b"duckdb_query_count\0")?;
-                        Ok(count_fn(*writer, CString::new(query)?.as_ptr()))
+                        Ok(count_fn(
+                            *writer,
+                            CString::new(normalized.as_ref())?.as_ptr(),
+                        ))
                     };
                 }
                 unsafe {
                     let count_fn: LibSymbol<QueryCountFunc> =
                         self.pool.lib.get(b"duckdb_query_count\0")?;
-                    let result = Ok(count_fn(*guard, CString::new(query)?.as_ptr()));
+                    let result = Ok(count_fn(
+                        *guard,
+                        CString::new(normalized.as_ref())?.as_ptr(),
+                    ));
                     drop(guard);
                     result
                 }
@@ -551,6 +603,7 @@ impl GraphStore {
     }
 
     pub fn execute(&self, query: &str) -> Result<()> {
+        let normalized = self.normalize_attached_soll_query(query);
         let guard = self
             .pool
             .writer_ctx
@@ -558,11 +611,13 @@ impl GraphStore {
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
-            if !exec_fn(*guard, CString::new(query)?.as_ptr()) {
-                return Err(anyhow!("Writer Error: {}", query));
+            if !exec_fn(*guard, CString::new(normalized.as_ref())?.as_ptr()) {
+                return Err(anyhow!("Writer Error: {}", normalized.as_ref()));
             }
         }
-        self.mark_writer_commit_visible();
+        if !self.reader_only_ist_mode {
+            self.mark_writer_commit_visible();
+        }
         Ok(())
     }
 
@@ -655,7 +710,8 @@ impl GraphStore {
             }
 
             for q in queries {
-                let c_query = match CString::new(q.as_str()) {
+                let normalized = self.normalize_attached_soll_query(q);
+                let c_query = match CString::new(normalized.as_ref()) {
                     Ok(c) => c,
                     Err(e) => {
                         if let Ok(rb) = CString::new("ROLLBACK;") {
@@ -668,7 +724,10 @@ impl GraphStore {
                     if let Ok(rb) = CString::new("ROLLBACK;") {
                         let _ = exec_fn(*guard, rb.as_ptr());
                     }
-                    return Err(anyhow!("Batch Writer Error on query: {}", q));
+                    return Err(anyhow!(
+                        "Batch Writer Error on query: {}",
+                        normalized.as_ref()
+                    ));
                 }
             }
 
@@ -676,15 +735,18 @@ impl GraphStore {
                 return Err(anyhow!("Batch Writer Error: COMMIT failed"));
             }
         }
-        self.mark_writer_commit_visible();
+        if !self.reader_only_ist_mode {
+            self.mark_writer_commit_visible();
+        }
         Ok(())
     }
 
     pub(crate) fn query_on_ctx(&self, query: &str, ctx: *mut std::ffi::c_void) -> Result<String> {
+        let normalized = self.normalize_attached_soll_query(query);
         unsafe {
             let query_fn: LibSymbol<QueryJsonFunc> = self.pool.lib.get(b"duckdb_query_json\0")?;
             let free_fn: LibSymbol<FreeStrFunc> = self.pool.lib.get(b"duckdb_free_string\0")?;
-            let ptr = query_fn(ctx, CString::new(query)?.as_ptr());
+            let ptr = query_fn(ctx, CString::new(normalized.as_ref())?.as_ptr());
             if ptr.is_null() {
                 return Ok("[]".to_string());
             }
@@ -805,6 +867,20 @@ mod tests {
             *reader_guard = reader_ptr;
         }
         store.refresh_reader_snapshot().unwrap();
+    }
+
+    #[test]
+    fn normalize_attached_soll_query_qualifies_legacy_soll_paths() {
+        let tempdir = tempdir().unwrap();
+        let store = GraphStore::new(tempdir.path().to_str().unwrap()).unwrap();
+
+        let normalized = store
+            .normalize_attached_soll_query("SELECT * FROM soll.Registry WHERE id = 'AXON_GLOBAL'");
+
+        assert_eq!(
+            normalized.as_ref(),
+            "SELECT * FROM soll.main.Registry WHERE id = 'AXON_GLOBAL'"
+        );
     }
 
     #[test]

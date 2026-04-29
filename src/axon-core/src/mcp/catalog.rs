@@ -1,50 +1,20 @@
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
+use crate::runtime_topology::current_runtime_process_role;
 use serde_json::{json, Value};
 
 fn is_public_tool(name: &str) -> bool {
-    !matches!(
-        name,
-        "refine_lattice"
-            | "diagnose_indexing"
-            | "diff"
-            | "semantic_clones"
-            | "bidi_trace"
-            | "api_break_check"
-            | "simulate_mutation"
-            | "schema_overview"
-            | "list_labels_tables"
-            | "query_examples"
-            | "cypher"
-            | "debug"
-            | "truth_check"
-            | "resume_vectorization"
-    )
+    !matches!(name, "resume_vectorization")
 }
 
 pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
-    matches!(
-        name,
-        "query"
-            | "inspect"
-            | "audit"
-            | "impact"
-            | "health"
-            | "diagnose_indexing"
-            | "diff"
-            | "semantic_clones"
-            | "architectural_drift"
-            | "bidi_trace"
-            | "api_break_check"
-            | "simulate_mutation"
-            | "truth_check"
-            | "retrieve_context"
-    )
+    let _ = name;
+    false
 }
 
 fn tool_available_in_runtime(name: &str) -> bool {
     let runtime_mode = AxonRuntimeMode::from_env();
-    if name == "resume_vectorization" && matches!(runtime_mode, AxonRuntimeMode::McpOnly) {
+    if name == "resume_vectorization" && matches!(runtime_mode, AxonRuntimeMode::BrainOnly) {
         return false;
     }
     let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
@@ -53,25 +23,60 @@ fn tool_available_in_runtime(name: &str) -> bool {
             .ok()
             .as_deref(),
     );
+    let split_brain_public_authority = matches!(
+        current_runtime_process_role(),
+        crate::runtime_topology::AxonProcessRole::Brain
+    ) && matches!(
+        std::env::var("AXON_SPLIT_SHADOW_ONLY")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    );
 
     if requires_indexed_runtime(name) {
-        return matches!(
-            runtime_profile,
-            AxonRuntimeOperationalProfile::FullAutonomous
-        );
+        return split_brain_public_authority
+            || matches!(
+                runtime_profile,
+                AxonRuntimeOperationalProfile::IndexerFullAutonomous
+            );
     }
 
     match runtime_mode {
-        AxonRuntimeMode::Full
-        | AxonRuntimeMode::GraphOnly
-        | AxonRuntimeMode::ReadOnly
-        | AxonRuntimeMode::McpOnly => true,
+        AxonRuntimeMode::BrainOnly
+        | AxonRuntimeMode::IndexerGraph
+        | AxonRuntimeMode::IndexerVector
+        | AxonRuntimeMode::IndexerFull => true,
     }
 }
 
 pub(crate) fn tools_catalog(include_internal: bool) -> Value {
     let mut catalog = json!({
         "tools": [
+            {
+                "name": "help",
+                "description": "[LLM-only] Aide compacte optimisée pour clients LLM: routage des outils Axon, règles d'entrée explicite, et rappel du skill `axon-engineering-protocol`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "enum": ["overview", "routing", "soll", "delivery", "runtime"],
+                            "description": "Sujet optionnel. Par défaut: overview compact."
+                        },
+                        "intent": {
+                            "type": "string",
+                            "enum": ["understand_symbol", "prepare_edit", "commit_work", "stabilize_soll", "runtime_check"],
+                            "description": "Intention LLM optionnelle. Retourne un protocole minimal machine-actionnable."
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Nom d'un outil MCP. Retourne son contrat d'entrée, ses exemples compacts et son prochain geste recommandé."
+                        }
+                    },
+                    "required": []
+                }
+            },
             {
                 "name": "refine_lattice",
                 "description": "[SYSTEM] Raffinement avancé du graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif) et approfondir l'analyse structurelle.",
@@ -205,23 +210,36 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_apply_plan",
-                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones, visions, concepts) avec dry-run, relations canoniques et rapport created/updated/skipped/errors. Mutation async: lire `job_status` jusqu'à terminal. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Code projet canonique existant (ex: AXO). Le serveur attribue ensuite `preview_id` et les IDs canoniques créés." },
+                        "author": { "type": "string", "description": "Auteur de la preview/révision. Recommandé pour audit." },
                         "dry_run": { "type": "boolean", "description": "Si true, ne modifie rien et produit seulement le plan d'action." },
                         "plan": {
                             "type": "object",
+                            "description": "Collections optionnelles par type. Chaque item accepte `logical_key`, `title`, `description`, `status`, `metadata` et champs métier du type. `logical_key` rend l'opération idempotente.",
                             "properties": {
                                 "pillars": { "type": "array", "items": { "type": "object" } },
                                 "requirements": { "type": "array", "items": { "type": "object" } },
                                 "decisions": { "type": "array", "items": { "type": "object" } },
-                                "milestones": { "type": "array", "items": { "type": "object" } }
+                                "milestones": { "type": "array", "items": { "type": "object" } },
+                                "visions": { "type": "array", "items": { "type": "object" } },
+                                "concepts": { "type": "array", "items": { "type": "object" } }
                             }
+                        },
+                        "relations": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "Liens à créer: `{source_id,target_id,relation_type}`. `source_id`/`target_id` peuvent référencer un `logical_key` créé dans le même plan."
+                        },
+                        "reserved_preview_id": {
+                            "type": "string",
+                            "description": "Optionnel interne/tests. En usage normal, omettre: le serveur attribue `preview_id`."
                         }
                     },
-                    "required": ["plan"]
+                    "required": ["project_code", "plan"]
                 }
             },
             {
@@ -238,7 +256,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Retourne le contexte intentionnel compact d'un projet (visions, requirements, decisions, revisions), prêt pour consommation LLM et steering opérateur. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -250,7 +268,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_work_plan",
-                "description": "[SOLL] Produit un plan de travail ideal read-only a partir du graphe intentionnel, avec waves paralleles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Produit un plan de travail read-only à partir du graphe intentionnel canonique, avec waves parallèles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -258,6 +276,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "limit": { "type": "integer" },
                         "top": { "type": "integer" },
                         "include_ist": { "type": "boolean" },
+                        "include_validation_details": { "type": "boolean", "description": "Par défaut false pour préserver le contexte LLM. Mettre true seulement si les détails complets de `soll_verify_requirements` sont nécessaires." },
                         "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
                     },
                     "required": ["project_code"]
@@ -300,7 +319,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_export",
-                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel canonique dans un document Markdown horodaté. Les exports canoniques vivent sous `docs/vision/`; les snapshots historiques relus seulement vivent sous `docs/archive/soll-exports/`. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -311,7 +330,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_generate_docs",
-                "description": "[SOLL] Génère une documentation humaine navigable dérivée de SOLL sous forme de site statique HTML+Mermaid. En mode canonique, maintient aussi un root global multi-projets sous docs/derived/soll/index.html. Cette sortie est non canonique: elle sert à la lecture, pas au restore. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Génère une documentation humaine navigable dérivée de SOLL sous forme de site statique HTML+Mermaid. Maintient la lecture dérivée sous `docs/derived/soll/`, y compris le root global multi-projets. Cette sortie est explicitement non canonique: lecture oui, restore non. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -324,7 +343,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "restore_soll",
-                "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Restaure les entités conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite, et doit être réservé aux flux de restauration explicites. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -335,7 +354,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_validate",
-                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Validation en lecture seule du graphe intentionnel: cohérence structurelle, completeness et repair_guidance, sans modifier SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -564,7 +583,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "audit",
-                "description": "[GOVERNANCE/EXPERT] Vérification de conformité approfondie (sécurité, qualité, anti-patterns, dette technique). À réserver aux diagnostics experts plutôt qu'au premier choix LLM.",
+                "description": "[GOVERNANCE] Vérification de conformité approfondie (sécurité, qualité, anti-patterns, dette technique).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -590,7 +609,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "health",
-                "description": "[GOVERNANCE/EXPERT] Rapport de santé agrégé (code mort, lacunes de tests, points d'entrée). À réserver aux diagnostics experts plutôt qu'au premier choix LLM.",
+                "description": "[GOVERNANCE] Rapport de santé agrégé (code mort, lacunes de tests, points d'entrée).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -615,7 +634,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "batch",
-                "description": "[SYSTEM/EXPERT] Orchestration experte d'appels multiples pour optimiser la performance ou piloter des outils avancés.",
+                "description": "[SYSTEM] Orchestration d'appels multiples pour optimiser la performance ou piloter plusieurs outils.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -695,7 +714,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "schema_overview",
-                "description": "[SYSTEM] Vue d'ensemble du schéma SQL Axon (tables main/soll, volumétrie colonnes).",
+                "description": "[LLM/ADVANCED] Vue d'ensemble du schéma SQL Axon pour exploration structurée quand les outils produit (`query`, `inspect`, `retrieve_context`, `soll_*`) ne suffisent pas. Lecture seulement.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -704,7 +723,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "list_labels_tables",
-                "description": "[SYSTEM] Inventaire des tables/labels principales et colonnes clés pour démarrer des requêtes sans connaissance interne.",
+                "description": "[LLM/ADVANCED] Inventaire compact des tables/labels et colonnes clés. À utiliser avant `cypher`/SQL brut pour éviter les requêtes inventées.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -713,7 +732,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "query_examples",
-                "description": "[SYSTEM] Exemples de requêtes prêtes à l'emploi pour exploration, backlog, erreurs et bridges inter-langages.",
+                "description": "[LLM/ADVANCED] Exemples de requêtes prêtes à l'emploi pour exploration structurée, backlog, erreurs et bridges inter-langages. Sert de garde-fou avant requête brute.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -722,7 +741,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "cypher",
-                "description": "[SYSTEM] Interface avancée pour requêtes graphe brutes et exploration profonde de la structure Axon.",
+                "description": "[LLM/ADVANCED] Interface de requête graphe brute en lecture. À utiliser seulement après `schema_overview`, `list_labels_tables` ou `query_examples`, lorsque la surface produit ne répond pas assez finement.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

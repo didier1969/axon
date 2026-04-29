@@ -49,8 +49,26 @@ static VECTOR_PREPARE_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_INFLIGHT_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_INFLIGHT_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PREPARE_INFLIGHT_CHUNKS_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PREPARE_INFLIGHT_CHUNKS_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_READY_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_READY_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_QUEUE_CHUNKS_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_QUEUE_CHUNKS_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_QUEUE_CHUNKS_SMALL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_QUEUE_CHUNKS_MEDIUM: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_QUEUE_CHUNKS_LARGE: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_BATCHES_SMALL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_BATCHES_MEDIUM: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_BATCHES_LARGE: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_BATCHES_MIXED: AtomicU64 = AtomicU64::new(0);
+static VECTOR_HOMOGENEOUS_BATCHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_MIXED_FALLBACK_BATCHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LAST_CONSUMED_BATCH_LANE_CODE: AtomicU64 = AtomicU64::new(0);
+static VECTOR_ACTIVE_SMALL_MAX_TOKENS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_ACTIVE_MEDIUM_MAX_TOKENS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_REPLENISHMENT_DEFICIT_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_ACTIVE_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_READY_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
@@ -75,18 +93,29 @@ static VECTOR_EMBED_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_INFLIGHT_STARTED_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LAST_EMBED_ATTEMPT_WALL_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_EMBED_ATTEMPT_WALL_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_EMBED_ATTEMPT_WALL_MS_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LAST_EMBED_FINISHED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LAST_EMBED_GAP_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_EMBED_GAP_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_EMBED_GAP_SAMPLES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_EMBED_GAP_MS_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_RESTARTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GRAPH_WORKERS_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GRAPH_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GRAPH_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
+static GRAPH_WORKER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_STATE_CODE: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_TRANSITION_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_SUCCESS_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_FAULT_AT_MS: AtomicU64 = AtomicU64::new(0);
-static GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
-static GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_STAGE_LATENCY_WINDOWS: OnceLock<Mutex<VectorStageLatencyWindows>> = OnceLock::new();
+static VECTOR_EMBED_THROUGHPUT_SAMPLES: OnceLock<Mutex<VecDeque<(u64, u64)>>> = OnceLock::new();
 static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 static RUNTIME_WORK_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 static LAST_RUNTIME_WAKEUP_AT_MS: AtomicU64 = AtomicU64::new(0);
@@ -116,6 +145,8 @@ static RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_TRUTH_STALE_AFTER_MS: AtomicU64 =
     AtomicU64::new(RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS);
 static RUNTIME_TRUTH_DEGRADED_REASON: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static VECTOR_LAST_WORKER_ADMISSION_REASON: OnceLock<Mutex<String>> = OnceLock::new();
+static VECTOR_LAST_ALLOWED_GPU_WORKERS: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_WAKE_TIMESTAMPS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 static QUIESCENT_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 static QUIESCENT_USEFUL_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
@@ -125,8 +156,9 @@ const SERVICE_RECOVERY_WINDOW_MS: u64 = 15_000;
 #[allow(dead_code)]
 const INTERACTIVE_PRIORITY_IDLE_MS: u64 = 2_500;
 const VECTOR_STAGE_WINDOW_CAPACITY: usize = 256;
-const GRAPH_PRIORITY_SOFT_DOMINANCE_HOLD_MS: u64 = 2_000;
-const GRAPH_PRIORITY_SEMANTIC_READY_RESERVE_FLOOR: u64 = 2;
+const VECTOR_EMBED_THROUGHPUT_WINDOW_MS: u64 = 5_000;
+const VECTOR_EMBED_THROUGHPUT_HISTORY_MS: u64 = 60_000;
+const VECTOR_EMBED_THROUGHPUT_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy)]
 pub enum ServiceKind {
@@ -263,6 +295,48 @@ impl VectorLaneState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorBatchLaneKind {
+    #[default]
+    Unknown,
+    Small,
+    Medium,
+    Large,
+    Mixed,
+}
+
+impl VectorBatchLaneKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Unknown => 0,
+            Self::Small => 1,
+            Self::Medium => 2,
+            Self::Large => 3,
+            Self::Mixed => 4,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Small,
+            2 => Self::Medium,
+            3 => Self::Large,
+            4 => Self::Mixed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VectorRuntimeMetrics {
     pub fetch_ms_total: u64,
     pub embed_ms_total: u64,
@@ -295,8 +369,26 @@ pub struct VectorRuntimeMetrics {
     pub prepare_queue_depth_max: u64,
     pub prepare_inflight_current: u64,
     pub prepare_inflight_max: u64,
+    pub prepare_inflight_chunks_current: u64,
+    pub prepare_inflight_chunks_max: u64,
     pub ready_queue_depth_current: u64,
     pub ready_queue_depth_max: u64,
+    pub ready_queue_chunks_current: u64,
+    pub ready_queue_chunks_max: u64,
+    pub ready_queue_chunks_small: u64,
+    pub ready_queue_chunks_medium: u64,
+    pub ready_queue_chunks_large: u64,
+    pub ready_batches_small: u64,
+    pub ready_batches_medium: u64,
+    pub ready_batches_large: u64,
+    pub ready_batches_mixed: u64,
+    pub homogeneous_batches_total: u64,
+    pub mixed_fallback_batches_total: u64,
+    pub last_consumed_batch_lane: VectorBatchLaneKind,
+    pub active_small_max_tokens: u64,
+    pub active_medium_max_tokens: u64,
+    pub ready_replenishment_deficit_current: u64,
+    pub ready_replenishment_deficit_max: u64,
     pub active_claimed_current: u64,
     pub prepare_claimed_current: u64,
     pub ready_claimed_current: u64,
@@ -321,15 +413,27 @@ pub struct VectorRuntimeMetrics {
     pub embed_inflight_started_at_ms: u64,
     pub embed_inflight_texts_current: u64,
     pub embed_inflight_text_bytes_current: u64,
+    pub last_embed_attempt_wall_ms: u64,
+    pub avg_embed_attempt_wall_ms: f64,
+    pub max_embed_attempt_wall_ms: u64,
+    pub last_embed_gap_ms: u64,
+    pub avg_embed_gap_ms: f64,
+    pub max_embed_gap_ms: u64,
     pub vector_workers_started_total: u64,
     pub vector_workers_stopped_total: u64,
     pub vector_workers_active_current: u64,
     pub vector_worker_heartbeat_at_ms: u64,
     pub vector_worker_restarts_total: u64,
+    pub graph_workers_started_total: u64,
+    pub graph_workers_stopped_total: u64,
+    pub graph_workers_active_current: u64,
+    pub graph_worker_heartbeat_at_ms: u64,
     pub vector_lane_state: VectorLaneState,
     pub vector_lane_last_transition_at_ms: u64,
     pub vector_lane_last_success_at_ms: u64,
     pub vector_lane_last_fault_at_ms: u64,
+    pub chunk_embeddings_per_second: f64,
+    pub chunk_embeddings_rate_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +451,16 @@ pub struct VectorRuntimeLatencySummaries {
     pub db_write: VectorStageLatencySummary,
     pub completion_check: VectorStageLatencySummary,
     pub mark_done: VectorStageLatencySummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VectorPipelineStageTelemetry {
+    pub prepare_ms_total: u64,
+    pub ready_wait_ms_total: u64,
+    pub inference_ms_total: u64,
+    pub output_extract_ms_total: u64,
+    pub persist_ms_total: u64,
+    pub finalize_ms_total: u64,
 }
 
 #[derive(Debug, Default)]
@@ -550,11 +664,12 @@ pub fn current_runtime_quiescent_state(
         return RuntimeQuiescentState::ActiveBacklog;
     }
 
-    if metrics.ready_queue_depth_current > 0
+    if metrics.ready_queue_chunks_current > 0
+        || metrics.prepare_inflight_chunks_current > 0
+        || metrics.ready_replenishment_deficit_current > 0
         || metrics.prepare_queue_depth_current > 0
         || metrics.persist_queue_depth_current > 0
         || metrics.active_claimed_current > 0
-        || metrics.prepare_claimed_current > 0
         || metrics.persist_claimed_current > 0
     {
         return RuntimeQuiescentState::DrainingResidualWork;
@@ -822,6 +937,9 @@ pub fn record_vector_embed_call(chunks: u64, files_touched: u64) {
     VECTOR_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
     VECTOR_CHUNKS_EMBEDDED_TOTAL.fetch_add(chunks, Ordering::Relaxed);
     VECTOR_FILES_TOUCHED_TOTAL.fetch_add(files_touched, Ordering::Relaxed);
+    if chunks > 0 {
+        record_vector_embed_throughput_sample(now_ms(), chunks);
+    }
 }
 
 pub fn record_vector_embed_inputs(texts: u64, text_bytes: u64, clone_ms: u64) {
@@ -836,16 +954,38 @@ pub fn record_vector_embed_breakdown(transform_ms: u64, export_ms: u64) {
 }
 
 pub fn record_vector_embed_attempt(texts: u64, text_bytes: u64) {
+    let now = now_ms();
     VECTOR_EMBED_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
-    VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.store(now_ms(), Ordering::Relaxed);
+    let last_finished_at = VECTOR_LAST_EMBED_FINISHED_AT_MS.load(Ordering::Relaxed);
+    if last_finished_at > 0 && now >= last_finished_at {
+        let gap_ms = now.saturating_sub(last_finished_at);
+        VECTOR_LAST_EMBED_GAP_MS.store(gap_ms, Ordering::Relaxed);
+        VECTOR_EMBED_GAP_MS_TOTAL.fetch_add(gap_ms, Ordering::Relaxed);
+        VECTOR_EMBED_GAP_SAMPLES_TOTAL.fetch_add(1, Ordering::Relaxed);
+        update_atomic_max(&VECTOR_EMBED_GAP_MS_MAX, gap_ms);
+    }
+    VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.store(now, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT.store(texts, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT.store(text_bytes, Ordering::Relaxed);
 }
 
 pub fn record_vector_embed_attempt_finished() {
+    let finished_at = now_ms();
+    let started_at = VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.load(Ordering::Relaxed);
+    if started_at > 0 && finished_at >= started_at {
+        let wall_ms = finished_at.saturating_sub(started_at);
+        VECTOR_LAST_EMBED_ATTEMPT_WALL_MS.store(wall_ms, Ordering::Relaxed);
+        VECTOR_EMBED_ATTEMPT_WALL_MS_TOTAL.fetch_add(wall_ms, Ordering::Relaxed);
+        update_atomic_max(&VECTOR_EMBED_ATTEMPT_WALL_MS_MAX, wall_ms);
+    }
+    VECTOR_LAST_EMBED_FINISHED_AT_MS.store(finished_at, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT.store(0, Ordering::Relaxed);
+}
+
+pub fn current_last_embed_finished_at_ms() -> u64 {
+    VECTOR_LAST_EMBED_FINISHED_AT_MS.load(Ordering::Relaxed)
 }
 
 pub fn record_vector_worker_started() {
@@ -871,6 +1011,26 @@ pub fn record_vector_worker_heartbeat() {
 
 pub fn record_vector_worker_restart() {
     VECTOR_WORKER_RESTARTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_graph_worker_started() {
+    GRAPH_WORKERS_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    GRAPH_WORKERS_ACTIVE_CURRENT.fetch_add(1, Ordering::Relaxed);
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_graph_worker_stopped() {
+    GRAPH_WORKERS_STOPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let _ = GRAPH_WORKERS_ACTIVE_CURRENT.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |current| Some(current.saturating_sub(1)),
+    );
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_graph_worker_heartbeat() {
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
 }
 
 pub fn record_vector_lane_state(state: VectorLaneState) {
@@ -1006,6 +1166,11 @@ pub fn record_vector_prepare_inflight_depth(depth: u64) {
     update_atomic_max(&VECTOR_PREPARE_INFLIGHT_MAX, depth);
 }
 
+pub fn record_vector_prepare_inflight_chunks(chunks: u64) {
+    VECTOR_PREPARE_INFLIGHT_CHUNKS_CURRENT.store(chunks, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_PREPARE_INFLIGHT_CHUNKS_MAX, chunks);
+}
+
 pub fn record_vector_finalize_queue_depth(depth: u64) {
     VECTOR_FINALIZE_QUEUE_DEPTH_CURRENT.store(depth, Ordering::Relaxed);
     update_atomic_max(&VECTOR_FINALIZE_QUEUE_DEPTH_MAX, depth);
@@ -1014,6 +1179,67 @@ pub fn record_vector_finalize_queue_depth(depth: u64) {
 pub fn record_vector_ready_queue_depth(depth: u64) {
     VECTOR_READY_QUEUE_DEPTH_CURRENT.store(depth, Ordering::Relaxed);
     update_atomic_max(&VECTOR_READY_QUEUE_DEPTH_MAX, depth);
+}
+
+pub fn record_vector_ready_queue_chunks(chunks: u64) {
+    VECTOR_READY_QUEUE_CHUNKS_CURRENT.store(chunks, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_READY_QUEUE_CHUNKS_MAX, chunks);
+}
+
+pub fn record_vector_ready_queue_lane_chunks(small: u64, medium: u64, large: u64) {
+    VECTOR_READY_QUEUE_CHUNKS_SMALL.store(small, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_MEDIUM.store(medium, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_LARGE.store(large, Ordering::Relaxed);
+}
+
+pub fn record_vector_ready_queue_lane_batches(small: u64, medium: u64, large: u64, mixed: u64) {
+    VECTOR_READY_BATCHES_SMALL.store(small, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_MEDIUM.store(medium, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_LARGE.store(large, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_MIXED.store(mixed, Ordering::Relaxed);
+}
+
+pub fn record_vector_batch_shape(homogeneous: bool) {
+    if homogeneous {
+        VECTOR_HOMOGENEOUS_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        VECTOR_MIXED_FALLBACK_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn record_vector_last_consumed_batch_lane(lane: VectorBatchLaneKind) {
+    VECTOR_LAST_CONSUMED_BATCH_LANE_CODE.store(lane.code(), Ordering::Relaxed);
+}
+
+pub fn record_vector_active_lane_thresholds(small_max_tokens: u64, medium_max_tokens: u64) {
+    VECTOR_ACTIVE_SMALL_MAX_TOKENS.store(small_max_tokens, Ordering::Relaxed);
+    VECTOR_ACTIVE_MEDIUM_MAX_TOKENS.store(medium_max_tokens, Ordering::Relaxed);
+}
+
+pub fn record_vector_ready_replenishment_requested(count: u64) {
+    if count == 0 {
+        return;
+    }
+    let next = VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT
+        .fetch_add(count, Ordering::Relaxed)
+        .saturating_add(count);
+    update_atomic_max(&VECTOR_READY_REPLENISHMENT_DEFICIT_MAX, next);
+}
+
+pub fn record_vector_ready_replenishment_fulfilled(count: u64) {
+    if count == 0 {
+        return;
+    }
+    let _ = VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |current| Some(current.saturating_sub(count)),
+    );
+}
+
+pub fn set_vector_ready_replenishment_deficit(current: u64) {
+    VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT.store(current, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_READY_REPLENISHMENT_DEFICIT_MAX, current);
 }
 
 pub fn record_vector_active_claimed(depth: u64) {
@@ -1055,22 +1281,9 @@ pub fn record_vector_canonical_backlog_depth(depth: u64) {
 }
 
 pub fn record_graph_vector_priority_context(
-    graph_backlog_depth: usize,
-    semantic_backlog_depth: usize,
+    _graph_backlog_depth: usize,
+    _semantic_backlog_depth: usize,
 ) {
-    let now_ms = now_ms();
-    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT
-        .store(semantic_backlog_depth as u64, Ordering::Relaxed);
-    if semantic_backlog_depth == 0 {
-        GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(0, Ordering::Relaxed);
-        return;
-    }
-    if graph_backlog_depth > 0 {
-        GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(
-            now_ms.saturating_add(GRAPH_PRIORITY_SOFT_DOMINANCE_HOLD_MS),
-            Ordering::Relaxed,
-        );
-    }
 }
 
 pub fn record_vector_oldest_ready_batch_age_ms(latency_ms: u64) {
@@ -1100,6 +1313,30 @@ pub fn vectorization_requeued_for_interactive_total() -> u64 {
 
 pub fn vectorization_resumed_after_interactive_total() -> u64 {
     VECTORIZATION_RESUMED_AFTER_INTERACTIVE_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn graph_workers_started_total() -> u64 {
+    GRAPH_WORKERS_STARTED_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn graph_workers_active_current() -> u64 {
+    GRAPH_WORKERS_ACTIVE_CURRENT.load(Ordering::Relaxed)
+}
+
+pub fn graph_worker_heartbeat_at_ms() -> u64 {
+    GRAPH_WORKER_HEARTBEAT_AT_MS.load(Ordering::Relaxed)
+}
+
+pub fn vector_chunks_embedded_total() -> u64 {
+    VECTOR_CHUNKS_EMBEDDED_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn vector_chunk_embeddings_per_second() -> f64 {
+    vector_chunk_embeddings_per_second_at(now_ms(), VECTOR_EMBED_THROUGHPUT_WINDOW_MS)
+}
+
+pub fn vector_chunk_embeddings_rate_window_ms() -> u64 {
+    VECTOR_EMBED_THROUGHPUT_WINDOW_MS
 }
 
 pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
@@ -1137,8 +1374,31 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
         prepare_queue_depth_max: VECTOR_PREPARE_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
         prepare_inflight_current: VECTOR_PREPARE_INFLIGHT_CURRENT.load(Ordering::Relaxed),
         prepare_inflight_max: VECTOR_PREPARE_INFLIGHT_MAX.load(Ordering::Relaxed),
+        prepare_inflight_chunks_current: VECTOR_PREPARE_INFLIGHT_CHUNKS_CURRENT
+            .load(Ordering::Relaxed),
+        prepare_inflight_chunks_max: VECTOR_PREPARE_INFLIGHT_CHUNKS_MAX.load(Ordering::Relaxed),
         ready_queue_depth_current: VECTOR_READY_QUEUE_DEPTH_CURRENT.load(Ordering::Relaxed),
         ready_queue_depth_max: VECTOR_READY_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
+        ready_queue_chunks_current: VECTOR_READY_QUEUE_CHUNKS_CURRENT.load(Ordering::Relaxed),
+        ready_queue_chunks_max: VECTOR_READY_QUEUE_CHUNKS_MAX.load(Ordering::Relaxed),
+        ready_queue_chunks_small: VECTOR_READY_QUEUE_CHUNKS_SMALL.load(Ordering::Relaxed),
+        ready_queue_chunks_medium: VECTOR_READY_QUEUE_CHUNKS_MEDIUM.load(Ordering::Relaxed),
+        ready_queue_chunks_large: VECTOR_READY_QUEUE_CHUNKS_LARGE.load(Ordering::Relaxed),
+        ready_batches_small: VECTOR_READY_BATCHES_SMALL.load(Ordering::Relaxed),
+        ready_batches_medium: VECTOR_READY_BATCHES_MEDIUM.load(Ordering::Relaxed),
+        ready_batches_large: VECTOR_READY_BATCHES_LARGE.load(Ordering::Relaxed),
+        ready_batches_mixed: VECTOR_READY_BATCHES_MIXED.load(Ordering::Relaxed),
+        homogeneous_batches_total: VECTOR_HOMOGENEOUS_BATCHES_TOTAL.load(Ordering::Relaxed),
+        mixed_fallback_batches_total: VECTOR_MIXED_FALLBACK_BATCHES_TOTAL.load(Ordering::Relaxed),
+        last_consumed_batch_lane: VectorBatchLaneKind::from_code(
+            VECTOR_LAST_CONSUMED_BATCH_LANE_CODE.load(Ordering::Relaxed),
+        ),
+        active_small_max_tokens: VECTOR_ACTIVE_SMALL_MAX_TOKENS.load(Ordering::Relaxed),
+        active_medium_max_tokens: VECTOR_ACTIVE_MEDIUM_MAX_TOKENS.load(Ordering::Relaxed),
+        ready_replenishment_deficit_current: VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT
+            .load(Ordering::Relaxed),
+        ready_replenishment_deficit_max: VECTOR_READY_REPLENISHMENT_DEFICIT_MAX
+            .load(Ordering::Relaxed),
         active_claimed_current: VECTOR_ACTIVE_CLAIMED_CURRENT.load(Ordering::Relaxed),
         prepare_claimed_current: VECTOR_PREPARE_CLAIMED_CURRENT.load(Ordering::Relaxed),
         ready_claimed_current: VECTOR_READY_CLAIMED_CURRENT.load(Ordering::Relaxed),
@@ -1166,11 +1426,21 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
         embed_inflight_texts_current: VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT.load(Ordering::Relaxed),
         embed_inflight_text_bytes_current: VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT
             .load(Ordering::Relaxed),
+        last_embed_attempt_wall_ms: VECTOR_LAST_EMBED_ATTEMPT_WALL_MS.load(Ordering::Relaxed),
+        avg_embed_attempt_wall_ms: 0.0,
+        max_embed_attempt_wall_ms: VECTOR_EMBED_ATTEMPT_WALL_MS_MAX.load(Ordering::Relaxed),
+        last_embed_gap_ms: VECTOR_LAST_EMBED_GAP_MS.load(Ordering::Relaxed),
+        avg_embed_gap_ms: 0.0,
+        max_embed_gap_ms: VECTOR_EMBED_GAP_MS_MAX.load(Ordering::Relaxed),
         vector_workers_started_total: VECTOR_WORKERS_STARTED_TOTAL.load(Ordering::Relaxed),
         vector_workers_stopped_total: VECTOR_WORKERS_STOPPED_TOTAL.load(Ordering::Relaxed),
         vector_workers_active_current: VECTOR_WORKERS_ACTIVE_CURRENT.load(Ordering::Relaxed),
         vector_worker_heartbeat_at_ms: VECTOR_WORKER_HEARTBEAT_AT_MS.load(Ordering::Relaxed),
         vector_worker_restarts_total: VECTOR_WORKER_RESTARTS_TOTAL.load(Ordering::Relaxed),
+        graph_workers_started_total: GRAPH_WORKERS_STARTED_TOTAL.load(Ordering::Relaxed),
+        graph_workers_stopped_total: GRAPH_WORKERS_STOPPED_TOTAL.load(Ordering::Relaxed),
+        graph_workers_active_current: GRAPH_WORKERS_ACTIVE_CURRENT.load(Ordering::Relaxed),
+        graph_worker_heartbeat_at_ms: GRAPH_WORKER_HEARTBEAT_AT_MS.load(Ordering::Relaxed),
         vector_lane_state: VectorLaneState::from_code(
             VECTOR_LANE_STATE_CODE.load(Ordering::Relaxed),
         ),
@@ -1178,11 +1448,18 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
             .load(Ordering::Relaxed),
         vector_lane_last_success_at_ms: VECTOR_LANE_LAST_SUCCESS_AT_MS.load(Ordering::Relaxed),
         vector_lane_last_fault_at_ms: VECTOR_LANE_LAST_FAULT_AT_MS.load(Ordering::Relaxed),
+        chunk_embeddings_per_second: vector_chunk_embeddings_per_second(),
+        chunk_embeddings_rate_window_ms: VECTOR_EMBED_THROUGHPUT_WINDOW_MS,
     };
-    if graph_priority_soft_dominance_active(now_ms()) {
-        metrics.ready_queue_depth_current = metrics
-            .ready_queue_depth_current
-            .max(GRAPH_PRIORITY_SEMANTIC_READY_RESERVE_FLOOR);
+    if metrics.embed_attempts_total > 0 {
+        metrics.avg_embed_attempt_wall_ms = VECTOR_EMBED_ATTEMPT_WALL_MS_TOTAL
+            .load(Ordering::Relaxed) as f64
+            / metrics.embed_attempts_total as f64;
+    }
+    let gap_samples = VECTOR_EMBED_GAP_SAMPLES_TOTAL.load(Ordering::Relaxed);
+    if gap_samples > 0 {
+        metrics.avg_embed_gap_ms =
+            VECTOR_EMBED_GAP_MS_TOTAL.load(Ordering::Relaxed) as f64 / gap_samples as f64;
     }
     metrics
 }
@@ -1197,6 +1474,27 @@ pub fn vector_runtime_latency_summaries() -> VectorRuntimeLatencySummaries {
         db_write: summarize_window(&windows.db_write),
         completion_check: summarize_window(&windows.completion_check),
         mark_done: summarize_window(&windows.mark_done),
+    }
+}
+
+pub fn vector_pipeline_stage_telemetry() -> VectorPipelineStageTelemetry {
+    VectorPipelineStageTelemetry {
+        prepare_ms_total: VECTOR_PREPARE_REPLY_WAIT_MS_TOTAL
+            .load(Ordering::Relaxed)
+            .saturating_add(VECTOR_PREPARE_SEND_WAIT_MS_TOTAL.load(Ordering::Relaxed))
+            .saturating_add(VECTOR_PREPARE_QUEUE_WAIT_MS_TOTAL.load(Ordering::Relaxed)),
+        ready_wait_ms_total: VECTOR_GPU_IDLE_WAIT_MS_TOTAL.load(Ordering::Relaxed),
+        inference_ms_total: VECTOR_EMBED_TRANSFORM_MS_TOTAL.load(Ordering::Relaxed),
+        output_extract_ms_total: VECTOR_EMBED_EXPORT_MS_TOTAL.load(Ordering::Relaxed),
+        persist_ms_total: VECTOR_DB_WRITE_MS_TOTAL
+            .load(Ordering::Relaxed)
+            .saturating_add(VECTOR_PERSIST_SEND_WAIT_MS_TOTAL.load(Ordering::Relaxed))
+            .saturating_add(VECTOR_PERSIST_QUEUE_WAIT_MS_TOTAL.load(Ordering::Relaxed)),
+        finalize_ms_total: VECTOR_COMPLETION_CHECK_MS_TOTAL
+            .load(Ordering::Relaxed)
+            .saturating_add(VECTOR_MARK_DONE_MS_TOTAL.load(Ordering::Relaxed))
+            .saturating_add(VECTOR_FINALIZE_SEND_WAIT_MS_TOTAL.load(Ordering::Relaxed))
+            .saturating_add(VECTOR_FINALIZE_QUEUE_WAIT_MS_TOTAL.load(Ordering::Relaxed)),
     }
 }
 
@@ -1244,8 +1542,26 @@ pub fn reset_for_tests() {
     VECTOR_PREPARE_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
     VECTOR_PREPARE_INFLIGHT_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_PREPARE_INFLIGHT_MAX.store(0, Ordering::Relaxed);
+    VECTOR_PREPARE_INFLIGHT_CHUNKS_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_PREPARE_INFLIGHT_CHUNKS_MAX.store(0, Ordering::Relaxed);
     VECTOR_READY_QUEUE_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_READY_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_MAX.store(0, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_SMALL.store(0, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_MEDIUM.store(0, Ordering::Relaxed);
+    VECTOR_READY_QUEUE_CHUNKS_LARGE.store(0, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_SMALL.store(0, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_MEDIUM.store(0, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_LARGE.store(0, Ordering::Relaxed);
+    VECTOR_READY_BATCHES_MIXED.store(0, Ordering::Relaxed);
+    VECTOR_HOMOGENEOUS_BATCHES_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_MIXED_FALLBACK_BATCHES_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_LAST_CONSUMED_BATCH_LANE_CODE.store(0, Ordering::Relaxed);
+    VECTOR_ACTIVE_SMALL_MAX_TOKENS.store(0, Ordering::Relaxed);
+    VECTOR_ACTIVE_MEDIUM_MAX_TOKENS.store(0, Ordering::Relaxed);
+    VECTOR_READY_REPLENISHMENT_DEFICIT_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_READY_REPLENISHMENT_DEFICIT_MAX.store(0, Ordering::Relaxed);
     VECTOR_ACTIVE_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_PREPARE_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_READY_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
@@ -1270,17 +1586,27 @@ pub fn reset_for_tests() {
     VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_LAST_EMBED_ATTEMPT_WALL_MS.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_ATTEMPT_WALL_MS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_ATTEMPT_WALL_MS_MAX.store(0, Ordering::Relaxed);
+    VECTOR_LAST_EMBED_FINISHED_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_LAST_EMBED_GAP_MS.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_GAP_MS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_GAP_SAMPLES_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_GAP_MS_MAX.store(0, Ordering::Relaxed);
     VECTOR_WORKERS_STARTED_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_WORKERS_STOPPED_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_WORKERS_ACTIVE_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_WORKER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_WORKER_RESTARTS_TOTAL.store(0, Ordering::Relaxed);
+    GRAPH_WORKERS_STARTED_TOTAL.store(0, Ordering::Relaxed);
+    GRAPH_WORKERS_STOPPED_TOTAL.store(0, Ordering::Relaxed);
+    GRAPH_WORKERS_ACTIVE_CURRENT.store(0, Ordering::Relaxed);
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_STATE_CODE.store(VectorLaneState::Starting.code(), Ordering::Relaxed);
     VECTOR_LANE_LAST_TRANSITION_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_SUCCESS_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_FAULT_AT_MS.store(0, Ordering::Relaxed);
-    GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(0, Ordering::Relaxed);
-    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     LAST_RUNTIME_WAKEUP_AT_MS.store(0, Ordering::Relaxed);
     LAST_QUIESCENT_ENTERED_AT_MS.store(0, Ordering::Relaxed);
     LAST_QUIESCENT_EXITED_AT_MS.store(0, Ordering::Relaxed);
@@ -1316,10 +1642,58 @@ pub fn reset_for_tests() {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .clear();
+    vector_embed_throughput_samples()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
 }
 
 fn vector_stage_latency_windows() -> &'static Mutex<VectorStageLatencyWindows> {
     VECTOR_STAGE_LATENCY_WINDOWS.get_or_init(|| Mutex::new(VectorStageLatencyWindows::default()))
+}
+
+fn vector_embed_throughput_samples() -> &'static Mutex<VecDeque<(u64, u64)>> {
+    VECTOR_EMBED_THROUGHPUT_SAMPLES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn record_vector_embed_throughput_sample(now_ms: u64, chunks: u64) {
+    let mut samples = vector_embed_throughput_samples()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    while samples.len() >= VECTOR_EMBED_THROUGHPUT_CAPACITY {
+        samples.pop_front();
+    }
+    samples.push_back((now_ms, chunks));
+    let cutoff = now_ms.saturating_sub(VECTOR_EMBED_THROUGHPUT_HISTORY_MS);
+    while matches!(samples.front(), Some((at_ms, _)) if *at_ms < cutoff) {
+        samples.pop_front();
+    }
+}
+
+fn vector_chunk_embeddings_per_second_at(now_ms: u64, window_ms: u64) -> f64 {
+    let mut samples = vector_embed_throughput_samples()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let history_cutoff = now_ms.saturating_sub(VECTOR_EMBED_THROUGHPUT_HISTORY_MS);
+    while matches!(samples.front(), Some((at_ms, _)) if *at_ms < history_cutoff) {
+        samples.pop_front();
+    }
+    let cutoff = now_ms.saturating_sub(window_ms);
+    let mut chunks_total = 0u64;
+    let mut oldest_in_window = None;
+    for (at_ms, chunks) in samples.iter().copied() {
+        if at_ms >= cutoff {
+            chunks_total = chunks_total.saturating_add(chunks);
+            oldest_in_window = oldest_in_window.or(Some(at_ms));
+        }
+    }
+    let Some(oldest_at_ms) = oldest_in_window else {
+        return 0.0;
+    };
+    let elapsed_ms = now_ms
+        .saturating_sub(oldest_at_ms)
+        .clamp(1_000, window_ms.max(1_000));
+    chunks_total as f64 / (elapsed_ms as f64 / 1_000.0)
 }
 
 fn runtime_wake_timestamps() -> &'static Mutex<VecDeque<u64>> {
@@ -1431,6 +1805,30 @@ fn update_atomic_max(target: &AtomicU64, candidate: u64) {
 
 fn runtime_truth_degraded_reason_cell() -> &'static Mutex<Option<String>> {
     RUNTIME_TRUTH_DEGRADED_REASON.get_or_init(|| Mutex::new(None))
+}
+
+fn vector_last_worker_admission_reason_cell() -> &'static Mutex<String> {
+    VECTOR_LAST_WORKER_ADMISSION_REASON.get_or_init(|| Mutex::new("unknown".to_string()))
+}
+
+pub fn record_vector_worker_admission_reason(reason: &str, allowed_gpu_workers: usize) {
+    let mut guard = vector_last_worker_admission_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard.clear();
+    guard.push_str(reason);
+    VECTOR_LAST_ALLOWED_GPU_WORKERS.store(allowed_gpu_workers as u64, Ordering::Relaxed);
+}
+
+pub fn current_vector_worker_admission_reason() -> String {
+    vector_last_worker_admission_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+pub fn current_allowed_gpu_workers() -> u64 {
+    VECTOR_LAST_ALLOWED_GPU_WORKERS.load(Ordering::Relaxed)
 }
 
 fn runtime_truth_feed_at(now_ms: u64) -> RuntimeTruthFeed {
@@ -1595,11 +1993,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn graph_priority_soft_dominance_active(now_ms: u64) -> bool {
-    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT.load(Ordering::Relaxed) > 0
-        && GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.load(Ordering::Relaxed) > now_ms
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1699,6 +2092,34 @@ mod tests {
         assert_eq!(
             current_interactive_priority_at(50_500),
             InteractivePriority::BackgroundNormal
+        );
+    }
+
+    #[test]
+    fn test_vector_runtime_metrics_reports_real_ready_depth_without_graph_floor() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+        record_vector_ready_queue_depth(0);
+        record_graph_vector_priority_context(1, 16);
+
+        assert_eq!(vector_runtime_metrics().ready_queue_depth_current, 0);
+    }
+
+    #[test]
+    fn test_vector_ready_replenishment_deficit_tracks_request_and_fulfillment() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_vector_ready_replenishment_requested(3);
+        record_vector_ready_replenishment_fulfilled(1);
+        let metrics = vector_runtime_metrics();
+        assert_eq!(metrics.ready_replenishment_deficit_current, 2);
+        assert_eq!(metrics.ready_replenishment_deficit_max, 3);
+
+        record_vector_ready_replenishment_fulfilled(10);
+        assert_eq!(
+            vector_runtime_metrics().ready_replenishment_deficit_current,
+            0
         );
     }
 
@@ -1826,6 +2247,33 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_pipeline_stage_telemetry_exposes_tensorrt_ready_names() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_vector_prepare_reply_wait_ms(3);
+        record_vector_prepare_send_wait_ms(5);
+        record_vector_prepare_queue_wait_ms(7);
+        record_vector_gpu_idle_wait_ms(11);
+        record_vector_embed_breakdown(13, 17);
+        record_vector_stage_ms(VectorStageKind::DbWrite, 19);
+        record_vector_persist_send_wait_ms(23);
+        record_vector_persist_queue_wait_ms(29);
+        record_vector_stage_ms(VectorStageKind::CompletionCheck, 31);
+        record_vector_stage_ms(VectorStageKind::MarkDone, 37);
+        record_vector_finalize_send_wait_ms(41);
+        record_vector_finalize_queue_wait_ms(43);
+
+        let telemetry = vector_pipeline_stage_telemetry();
+        assert_eq!(telemetry.prepare_ms_total, 15);
+        assert_eq!(telemetry.ready_wait_ms_total, 11);
+        assert_eq!(telemetry.inference_ms_total, 13);
+        assert_eq!(telemetry.output_extract_ms_total, 17);
+        assert_eq!(telemetry.persist_ms_total, 71);
+        assert_eq!(telemetry.finalize_ms_total, 152);
+    }
+
+    #[test]
     fn test_vector_embed_attempt_tracks_inflight_state_until_finished() {
         let _guard = TEST_GUARD.lock().unwrap();
         reset_for_tests();
@@ -1867,6 +2315,39 @@ mod tests {
         let stopped = vector_runtime_metrics();
         assert_eq!(stopped.vector_workers_stopped_total, 1);
         assert_eq!(stopped.vector_workers_active_current, 0);
+    }
+
+    #[test]
+    fn test_graph_worker_liveness_tracks_start_heartbeat_and_stop() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_graph_worker_started();
+        assert_eq!(graph_workers_started_total(), 1);
+        assert_eq!(graph_workers_active_current(), 1);
+        assert!(graph_worker_heartbeat_at_ms() > 0);
+
+        record_graph_worker_heartbeat();
+        assert!(graph_worker_heartbeat_at_ms() > 0);
+
+        record_graph_worker_stopped();
+        assert_eq!(graph_workers_active_current(), 0);
+    }
+
+    #[test]
+    fn test_vector_chunk_embedding_rate_tracks_recent_throughput() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_vector_embed_call(64, 2);
+
+        let metrics = vector_runtime_metrics();
+        assert_eq!(metrics.chunks_embedded_total, 64);
+        assert_eq!(
+            metrics.chunk_embeddings_rate_window_ms,
+            VECTOR_EMBED_THROUGHPUT_WINDOW_MS
+        );
+        assert!(metrics.chunk_embeddings_per_second >= 64.0);
     }
 
     #[test]

@@ -3,9 +3,17 @@
 use anyhow::Result;
 
 use crate::graph::GraphStore;
+use crate::runtime_mode::AxonRuntimeMode;
+
+fn structural_graph_analytics_available() -> bool {
+    !matches!(AxonRuntimeMode::from_env(), AxonRuntimeMode::BrainOnly)
+}
 
 impl GraphStore {
     pub fn get_security_audit(&self, project: &str) -> Result<(i64, String)> {
+        if !structural_graph_analytics_available() {
+            return Ok((100, "[]".to_string()));
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -63,6 +71,9 @@ impl GraphStore {
     }
 
     pub fn get_coverage_score(&self, project: &str) -> Result<i64> {
+        if !structural_graph_analytics_available() {
+            return Ok(0);
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let total = if scoped {
@@ -91,6 +102,9 @@ impl GraphStore {
         &self,
         project: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
+        if !structural_graph_analytics_available() {
+            return Ok(serde_json::Map::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -136,6 +150,9 @@ impl GraphStore {
         &self,
         project: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
+        if !structural_graph_analytics_available() {
+            return Ok(serde_json::Map::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -180,6 +197,9 @@ impl GraphStore {
     }
 
     pub fn get_telemetry_score(&self, project: &str) -> Result<i64> {
+        if !structural_graph_analytics_available() {
+            return Ok(100);
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -201,6 +221,9 @@ impl GraphStore {
     }
 
     pub fn get_dead_code_count(&self, project: &str) -> Result<i64> {
+        if !structural_graph_analytics_available() {
+            return Ok(0);
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -226,6 +249,9 @@ impl GraphStore {
     }
 
     pub fn get_wrapper_candidates(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -291,6 +317,9 @@ impl GraphStore {
     }
 
     pub fn get_feature_envy_candidates(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -364,6 +393,9 @@ impl GraphStore {
     }
 
     pub fn get_detour_candidates(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -448,6 +480,9 @@ impl GraphStore {
     }
 
     pub fn get_abstraction_detour_candidates(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -507,6 +542,9 @@ impl GraphStore {
     }
 
     pub fn get_orphan_code_symbols(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -601,6 +639,9 @@ impl GraphStore {
     }
 
     pub fn get_circular_dependencies(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
@@ -660,6 +701,9 @@ impl GraphStore {
     }
 
     pub fn get_circular_dependency_count_fast(&self, project: &str) -> Result<i64> {
+        if !structural_graph_analytics_available() {
+            return Ok(0);
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -696,6 +740,9 @@ impl GraphStore {
         domain_path: &str,
         infra_path: &str,
     ) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped_project = project.replace('\'', "''");
         let escaped_domain = domain_path.replace('\'', "''");
@@ -738,6 +785,9 @@ impl GraphStore {
     }
 
     pub fn get_unsafe_exposure(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -789,6 +839,9 @@ impl GraphStore {
     }
 
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {

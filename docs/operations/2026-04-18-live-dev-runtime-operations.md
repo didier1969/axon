@@ -54,6 +54,23 @@ The intent is simple:
 - `live` keeps responsiveness
 - `dev` yields first under pressure
 
+## Standard Live Topology
+
+The standard live topology is:
+
+- `brain_only` brain runtime as the public MCP authority and SOLL writer
+- dashboard enabled on the brain runtime
+- `indexer_graph` indexer runtime as IST writer
+- vectorization disabled by default; `indexer_vector` and `indexer_full` are explicit operator actions
+
+Canonical command:
+
+```bash
+./scripts/start-split.sh
+```
+
+This is governed by `DEC-AXO-020`.
+
 ## Lifecycle Commands
 
 Start:

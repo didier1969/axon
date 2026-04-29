@@ -4,6 +4,7 @@ use crate::embedder::{
 };
 use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::graph::GraphStore;
+use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{
     duckdb_memory_snapshot, process_memory_snapshot, DuckDbMemorySnapshot, ProcessMemorySnapshot,
 };
@@ -51,6 +52,10 @@ pub struct RuntimeSignalsWindow {
     pub canonical_vector_backlog_depth: usize,
     pub ready_queue_depth_current: u64,
     pub ready_queue_depth_max: u64,
+    pub ready_queue_chunks_current: u64,
+    pub ready_queue_chunks_max: u64,
+    pub ready_replenishment_deficit_current: u64,
+    pub ready_replenishment_deficit_max: u64,
     pub active_claimed_current: u64,
     pub prepare_claimed_current: u64,
     pub ready_claimed_current: u64,
@@ -59,6 +64,8 @@ pub struct RuntimeSignalsWindow {
     pub persist_claimed_current: u64,
     pub prepare_inflight_current: u64,
     pub prepare_inflight_max: u64,
+    pub prepare_inflight_chunks_current: u64,
+    pub prepare_inflight_chunks_max: u64,
     pub gpu_idle_wait_ms_total: u64,
     pub prepare_queue_wait_ms_total: u64,
     pub prepare_reply_wait_ms_total: u64,
@@ -81,6 +88,9 @@ pub struct RuntimeSignalsWindow {
     pub canonical_files_embedded_total: u64,
     pub canonical_chunks_embedded_last_minute: u64,
     pub canonical_files_embedded_last_minute: u64,
+    pub target_ready_chunks_current: u64,
+    pub gpu_ready_low_watermark_chunks: u64,
+    pub gpu_ready_high_watermark_chunks: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -123,6 +133,30 @@ pub struct ActionProfile {
     pub target_max_inflight_persists: usize,
     pub target_embed_micro_batch_max_items: usize,
     pub target_embed_micro_batch_max_total_tokens: usize,
+}
+
+fn front_chunk_supply(signals: &RuntimeSignalsWindow) -> u64 {
+    signals
+        .ready_queue_chunks_current
+        .saturating_add(signals.prepare_inflight_chunks_current)
+}
+
+fn runtime_target_ready_chunks(
+    current: &RuntimeTuningState,
+    signals: &RuntimeSignalsWindow,
+) -> u64 {
+    let compatibility_floor = signals
+        .gpu_ready_high_watermark_chunks
+        .max(signals.gpu_ready_low_watermark_chunks)
+        .max(current.chunk_batch_size as u64);
+    signals.target_ready_chunks_current.max(compatibility_floor)
+}
+
+fn profile_target_ready_chunks(profile: &ActionProfile) -> u64 {
+    profile
+        .target_chunk_batch_size
+        .saturating_mul(profile.target_ready_queue_depth)
+        .max(profile.target_chunk_batch_size) as u64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -362,14 +396,18 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     < policy
                         .max_vram_used_mb
                         .saturating_sub(gpu_headroom_margin_mb);
+            let current_target_ready_chunks = runtime_target_ready_chunks(&current_state, signals);
+            let current_front_supply = front_chunk_supply(signals);
             let cpu_prepare_underfeed = host.gpu_present
                 && backlog_depth >= 32
                 && signals.gpu_utilization_ratio < gpu_underutilized_ratio
                 && signals.cpu_usage_ratio < policy.max_cpu_ratio * 0.75
                 && signals.ram_available_ratio >= policy.min_ram_available_ratio
-                && signals.ready_queue_depth_current
-                    < current_state.vector_ready_queue_depth as u64
-                && signals.prepare_inflight_current <= signals.vector_workers_active_current.max(1);
+                && current_front_supply < current_target_ready_chunks
+                && signals.prepare_inflight_chunks_current
+                    <= profile
+                        .target_chunk_batch_size
+                        .max(current_state.chunk_batch_size) as u64;
             let warmup_active = host.gpu_present
                 && backlog_depth >= warmup_backlog_threshold
                 && analytics.chunks_embedded_current_hour == 0
@@ -431,7 +469,7 @@ impl PolicyEngine for HeuristicPolicyEngine {
             if cpu_prepare_underfeed {
                 let opens_cpu_prepare_side = profile.target_file_vectorization_batch_size
                     > current_state.file_vectorization_batch_size
-                    || profile.target_ready_queue_depth > current_state.vector_ready_queue_depth
+                    || profile_target_ready_chunks(profile) > current_target_ready_chunks
                     || profile.target_embed_micro_batch_max_items
                         > current_state.embed_micro_batch_max_items
                     || profile.target_embed_micro_batch_max_total_tokens
@@ -442,7 +480,7 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     score += score_cpu_prepare_underfeed_file_batch_bonus;
                     reasons.push("cpu_prepare_underfeed_open_file_batch");
                 }
-                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+                if profile_target_ready_chunks(profile) > current_target_ready_chunks {
                     score += score_cpu_prepare_underfeed_ready_depth_bonus;
                     reasons.push("cpu_prepare_underfeed_open_ready_depth");
                 }
@@ -458,17 +496,17 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     score += score_cpu_prepare_underfeed_micro_tokens_bonus;
                     reasons.push("cpu_prepare_underfeed_open_micro_tokens");
                 }
-                if signals.ready_queue_depth_current == 0 {
-                    let ready_depth_delta = profile
-                        .target_ready_queue_depth
-                        .saturating_sub(current_state.vector_ready_queue_depth);
+                if current_front_supply == 0 {
+                    let ready_chunk_delta = profile_target_ready_chunks(profile)
+                        .saturating_sub(current_target_ready_chunks);
                     let file_batch_delta = profile
                         .target_file_vectorization_batch_size
                         .saturating_sub(current_state.file_vectorization_batch_size);
                     let micro_items_delta = profile
                         .target_embed_micro_batch_max_items
                         .saturating_sub(current_state.embed_micro_batch_max_items);
-                    if ready_depth_delta >= 4 {
+                    if ready_chunk_delta >= current_state.chunk_batch_size.saturating_mul(4) as u64
+                    {
                         score += score_cpu_prepare_underfeed_buffer_fill_bonus;
                         reasons.push("cpu_prepare_underfeed_fill_ready_buffer");
                     }
@@ -514,7 +552,7 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     score += score_controller_low_density_file_batch_bonus;
                     reasons.push("controller_low_density_open_file_batch");
                 }
-                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+                if profile_target_ready_chunks(profile) > current_target_ready_chunks {
                     score += score_controller_low_density_ready_depth_bonus;
                     reasons.push("controller_low_density_open_ready_depth");
                 }
@@ -561,10 +599,8 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 score -= score_overly_small_batch_penalty;
                 reasons.push("overly_small_batch");
             }
-            if signals.ready_queue_depth_current == 0
-                && signals.file_vectorization_queue_depth >= 32
-            {
-                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+            if current_front_supply == 0 && signals.file_vectorization_queue_depth >= 32 {
+                if profile_target_ready_chunks(profile) > current_target_ready_chunks {
                     score += score_ready_depth_starvation_bonus;
                     reasons.push("ready_depth_relieves_starvation");
                 }
@@ -582,7 +618,7 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 reasons.push("persist_relief");
             }
             if signals.cpu_usage_ratio > policy.max_cpu_ratio * 0.9
-                && profile.target_ready_queue_depth > current_state.vector_ready_queue_depth
+                && profile_target_ready_chunks(profile) > current_target_ready_chunks
             {
                 score -= score_overdeep_queue_penalty;
                 reasons.push("avoid_overdeep_ready_under_cpu_pressure");
@@ -621,7 +657,7 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     score += score_bottleneck_backlog_open_tokens_bonus;
                     reasons.push("bottleneck_prefers_micro_batch_tokens_growth");
                 }
-                if signals.ready_queue_depth_current > 0
+                if current_front_supply > 0
                     && signals.gpu_utilization_ratio >= gpu_underutilized_ratio
                 {
                     score += score_bottleneck_gpu_busy_bonus;
@@ -698,8 +734,8 @@ impl PolicyEngine for LiveBanditPolicyEngine {
             let larger_chunk_batch = profile.target_chunk_batch_size > current.chunk_batch_size;
             let larger_file_batch = profile.target_file_vectorization_batch_size
                 > current.file_vectorization_batch_size;
-            let larger_ready_depth =
-                profile.target_ready_queue_depth > current.vector_ready_queue_depth;
+            let larger_ready_depth = profile_target_ready_chunks(profile)
+                > runtime_target_ready_chunks(&current, signals);
             let larger_micro_items =
                 profile.target_embed_micro_batch_max_items > current.embed_micro_batch_max_items;
             let larger_micro_tokens = profile.target_embed_micro_batch_max_total_tokens
@@ -728,7 +764,7 @@ impl PolicyEngine for LiveBanditPolicyEngine {
             };
 
             let anchor_fill_bonus = if signals.file_vectorization_queue_depth >= 256
-                && signals.ready_queue_depth_current == 0
+                && front_chunk_supply(signals) == 0
                 && profile.label.starts_with("anchor_")
             {
                 let mut bonus = anchor_fill_bonus_weight;
@@ -745,7 +781,7 @@ impl PolicyEngine for LiveBanditPolicyEngine {
             };
 
             let gpu_idle_penalty = if signals.file_vectorization_queue_depth >= 32
-                && signals.ready_queue_depth_current == 0
+                && front_chunk_supply(signals) == 0
                 && !larger_ready_depth
                 && !larger_file_batch
             {
@@ -812,7 +848,18 @@ pub fn collect_host_snapshot() -> HostSnapshot {
         cpu_cores: profile.cpu_cores,
         ram_total_bytes: profile.ram_total_gb.saturating_mul(1024 * 1024 * 1024),
         gpu_present: profile.gpu_present,
-        gpu_name: if provider.provider_effective.eq_ignore_ascii_case("cuda") || gpu.total_mb > 0 {
+        gpu_name: if provider
+            .provider_effective
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("cuda")
+            || provider
+                .provider_effective
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("tensorrt")
+            || gpu.total_mb > 0
+        {
             Some("nvidia".to_string())
         } else {
             None
@@ -873,6 +920,9 @@ fn optimizer_allowed_actuators() -> Vec<String> {
 
 pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindow {
     let now_ms = now_ms();
+    let runtime_mode = AxonRuntimeMode::from_env();
+    let graph_runtime_enabled = runtime_mode.ingestion_enabled();
+    let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
     let memory = process_memory_snapshot();
     let duckdb_memory = duckdb_memory_snapshot(store);
     let gpu = current_gpu_memory_snapshot().unwrap_or(crate::embedder::GpuMemorySnapshot {
@@ -885,28 +935,56 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
             gpu_utilization_ratio: 0.0,
             memory_utilization_ratio: 0.0,
         });
-    let (file_vectorization_queue_queued, _file_vectorization_queue_inflight) = store
-        .fetch_file_vectorization_queue_counts()
-        .unwrap_or((0, 0));
-    let (vector_outbox_queued, vector_outbox_inflight) =
-        store.fetch_vector_persist_outbox_counts().unwrap_or((0, 0));
-    let (graph_projection_queue_queued, graph_projection_queue_inflight) = store
-        .fetch_graph_projection_queue_counts()
-        .unwrap_or((0, 0));
+    let (file_vectorization_queue_queued, _file_vectorization_queue_inflight) =
+        if vector_runtime_enabled {
+            store
+                .fetch_file_vectorization_queue_counts()
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+    let (vector_outbox_queued, vector_outbox_inflight) = if vector_runtime_enabled {
+        store.fetch_vector_persist_outbox_counts().unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    let (graph_projection_queue_queued, graph_projection_queue_inflight) = if graph_runtime_enabled
+    {
+        store
+            .fetch_graph_projection_queue_counts()
+            .unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
     service_guard::record_graph_vector_priority_context(
         graph_projection_queue_queued + graph_projection_queue_inflight,
         file_vectorization_queue_queued,
     );
     let vector_latency = service_guard::vector_runtime_latency_summaries();
     let vector_runtime = service_guard::vector_runtime_metrics();
+    let controller = current_vector_batch_controller_diagnostics(&embedding_lane_config_from_env());
     let (cpu_usage_ratio, ram_available_ratio, io_wait_ratio) = read_host_pressure_ratios();
     let canonical_backlog_depth = file_vectorization_queue_queued
-        .saturating_add(vector_runtime.active_claimed_current as usize)
-        .saturating_add(vector_runtime.prepare_claimed_current as usize)
-        .saturating_add(vector_runtime.ready_claimed_current as usize)
-        .saturating_add(vector_runtime.persist_claimed_current as usize)
         .saturating_add(vector_outbox_queued)
         .saturating_add(vector_outbox_inflight);
+    let current_state = current_runtime_tuning_state();
+    let target_ready_chunks_current = profile_target_ready_chunks(&ActionProfile {
+        id: String::new(),
+        label: String::new(),
+        target_vector_workers: current_state.vector_workers,
+        target_chunk_batch_size: controller.target_embed_batch_chunks,
+        target_file_vectorization_batch_size: controller.target_files_per_cycle,
+        target_ready_queue_depth: current_state.vector_ready_queue_depth,
+        target_persist_queue_bound: current_state.vector_persist_queue_bound,
+        target_max_inflight_persists: current_state.vector_max_inflight_persists,
+        target_embed_micro_batch_max_items: current_state.embed_micro_batch_max_items,
+        target_embed_micro_batch_max_total_tokens: current_state.embed_micro_batch_max_total_tokens,
+    })
+    .max(
+        vector_runtime
+            .ready_queue_chunks_current
+            .saturating_add(vector_runtime.ready_replenishment_deficit_current),
+    );
     RuntimeSignalsWindow {
         window_start_ms: now_ms.saturating_sub(60_000),
         window_end_ms: now_ms,
@@ -927,6 +1005,10 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         canonical_vector_backlog_depth: canonical_backlog_depth,
         ready_queue_depth_current: vector_runtime.ready_queue_depth_current,
         ready_queue_depth_max: vector_runtime.ready_queue_depth_max,
+        ready_queue_chunks_current: vector_runtime.ready_queue_chunks_current,
+        ready_queue_chunks_max: vector_runtime.ready_queue_chunks_max,
+        ready_replenishment_deficit_current: vector_runtime.ready_replenishment_deficit_current,
+        ready_replenishment_deficit_max: vector_runtime.ready_replenishment_deficit_max,
         active_claimed_current: vector_runtime.active_claimed_current,
         prepare_claimed_current: vector_runtime.prepare_claimed_current,
         ready_claimed_current: vector_runtime.ready_claimed_current,
@@ -935,6 +1017,8 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         persist_claimed_current: vector_runtime.persist_claimed_current,
         prepare_inflight_current: vector_runtime.prepare_inflight_current,
         prepare_inflight_max: vector_runtime.prepare_inflight_max,
+        prepare_inflight_chunks_current: vector_runtime.prepare_inflight_chunks_current,
+        prepare_inflight_chunks_max: vector_runtime.prepare_inflight_chunks_max,
         gpu_idle_wait_ms_total: vector_runtime.gpu_idle_wait_ms_total,
         prepare_queue_wait_ms_total: vector_runtime.prepare_queue_wait_ms_total,
         prepare_reply_wait_ms_total: vector_runtime.prepare_reply_wait_ms_total,
@@ -955,51 +1039,77 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
             .to_string(),
         chunk_embedding_writes_total: vector_runtime.chunks_embedded_total,
         files_completed_total: vector_runtime.files_completed_total,
-        canonical_chunk_embeddings_total: canonical_count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'",
-                CHUNK_MODEL_ID.replace('\'', "''")
-            ),
-        ) as u64,
-        canonical_files_embedded_total: canonical_count(
-            store,
-            &format!(
-                "SELECT COUNT(DISTINCT c.file_path) \
-             FROM ChunkEmbedding ce \
-             JOIN Chunk c ON c.id = ce.chunk_id \
-             WHERE ce.model_id = '{}'",
-                CHUNK_MODEL_ID.replace('\'', "''")
-            ),
-        ) as u64,
-        canonical_chunks_embedded_last_minute: canonical_count(
-            store,
-            &format!(
-                "SELECT COUNT(*) FROM ChunkEmbedding \
-             WHERE model_id = '{}' \
-               AND COALESCE(embedded_at_ms, 0) >= {}",
-                CHUNK_MODEL_ID.replace('\'', "''"),
-                now_ms.saturating_sub(60_000)
-            ),
-        ) as u64,
-        canonical_files_embedded_last_minute: canonical_count(
-            store,
-            &format!(
-                "SELECT COUNT(DISTINCT c.file_path) \
-             FROM ChunkEmbedding ce \
-             JOIN Chunk c ON c.id = ce.chunk_id \
-             WHERE ce.model_id = '{}' \
-               AND COALESCE(ce.embedded_at_ms, 0) >= {}",
-                CHUNK_MODEL_ID.replace('\'', "''"),
-                now_ms.saturating_sub(60_000)
-            ),
-        ) as u64,
+        canonical_chunk_embeddings_total: if vector_runtime_enabled {
+            canonical_count(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'",
+                    CHUNK_MODEL_ID.replace('\'', "''")
+                ),
+            ) as u64
+        } else {
+            0
+        },
+        canonical_files_embedded_total: if vector_runtime_enabled {
+            canonical_count(
+                store,
+                &format!(
+                    "SELECT COUNT(DISTINCT c.file_path) \
+                 FROM ChunkEmbedding ce \
+                 JOIN Chunk c ON c.id = ce.chunk_id \
+                 WHERE ce.model_id = '{}'",
+                    CHUNK_MODEL_ID.replace('\'', "''")
+                ),
+            ) as u64
+        } else {
+            0
+        },
+        canonical_chunks_embedded_last_minute: if vector_runtime_enabled {
+            canonical_count(
+                store,
+                &format!(
+                    "SELECT COUNT(*) FROM ChunkEmbedding \
+                 WHERE model_id = '{}' \
+                   AND COALESCE(embedded_at_ms, 0) >= {}",
+                    CHUNK_MODEL_ID.replace('\'', "''"),
+                    now_ms.saturating_sub(60_000)
+                ),
+            ) as u64
+        } else {
+            0
+        },
+        canonical_files_embedded_last_minute: if vector_runtime_enabled {
+            canonical_count(
+                store,
+                &format!(
+                    "SELECT COUNT(DISTINCT c.file_path) \
+                 FROM ChunkEmbedding ce \
+                 JOIN Chunk c ON c.id = ce.chunk_id \
+                 WHERE ce.model_id = '{}' \
+                   AND COALESCE(ce.embedded_at_ms, 0) >= {}",
+                    CHUNK_MODEL_ID.replace('\'', "''"),
+                    now_ms.saturating_sub(60_000)
+                ),
+            ) as u64
+        } else {
+            0
+        },
+        target_ready_chunks_current,
+        gpu_ready_low_watermark_chunks: controller.gpu_ready_low_watermark_chunks as u64,
+        gpu_ready_high_watermark_chunks: controller.gpu_ready_high_watermark_chunks as u64,
     }
 }
 
 pub fn collect_recent_analytics_window(store: &GraphStore) -> RecentAnalyticsWindow {
     let now_ms = now_ms();
     let bucket_start_ms = (now_ms / 3_600_000) * 3_600_000;
+    if !AxonRuntimeMode::from_env().semantic_workers_enabled() {
+        return RecentAnalyticsWindow {
+            collected_at_ms: now_ms,
+            current_hour_bucket_start_ms: bucket_start_ms,
+            ..RecentAnalyticsWindow::default()
+        };
+    }
     let query = format!(
         "SELECT COALESCE(sum(chunks_embedded), 0), \
                 COALESCE(sum(files_vector_ready), 0), \
@@ -1159,8 +1269,7 @@ fn aggressive_embedding_anchor_profiles(
     );
 
     if signals.gpu_utilization_ratio < gpu_underutilized_ratio
-        && (backlog_scale >= 1_024
-            || (backlog_scale >= 256 && signals.ready_queue_depth_current == 0))
+        && (backlog_scale >= 1_024 || (backlog_scale >= 256 && front_chunk_supply(signals) == 0))
     {
         push_anchor(
             "anchor_gpu_fill",
@@ -1286,13 +1395,13 @@ pub fn observe_reward(
         0.0
     };
     let ready_queue_continuity_bonus =
-        if current.file_vectorization_queue_depth >= 32 && current.ready_queue_depth_current > 0 {
+        if current.file_vectorization_queue_depth >= 32 && front_chunk_supply(current) > 0 {
             reward_ready_queue_nonempty_bonus
         } else {
             0.0
         };
     let underfed_backlog_penalty = if current.file_vectorization_queue_depth >= 32
-        && current.ready_queue_depth_current == 0
+        && front_chunk_supply(current) == 0
         && current.gpu_utilization_ratio < warmup_gpu_underutilized_ratio
     {
         reward_underfed_backlog_penalty
@@ -1644,8 +1753,14 @@ mod tests {
             embed_inflight_started_at_ms: 0,
             ready_queue_depth_current: 0,
             ready_queue_depth_max: 0,
+            ready_queue_chunks_current: 0,
+            ready_queue_chunks_max: 0,
+            ready_replenishment_deficit_current: 0,
+            ready_replenishment_deficit_max: 0,
             prepare_inflight_current: 0,
             prepare_inflight_max: 0,
+            prepare_inflight_chunks_current: 0,
+            prepare_inflight_chunks_max: 0,
             persist_queue_depth_current: 0,
             persist_queue_depth_max: 0,
             persist_claimed_current: 0,
@@ -1663,6 +1778,9 @@ mod tests {
             canonical_files_embedded_total: 10,
             canonical_chunks_embedded_last_minute: 100,
             canonical_files_embedded_last_minute: 10,
+            target_ready_chunks_current: 96,
+            gpu_ready_low_watermark_chunks: 32,
+            gpu_ready_high_watermark_chunks: 64,
         }
     }
 
@@ -1882,6 +2000,8 @@ mod tests {
         let mut current_signals = signals();
         current_signals.file_vectorization_queue_depth = 8_192;
         current_signals.ready_queue_depth_current = 0;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 0;
         let mut current_policy = policy();
         current_policy.allowed_actuators = vec![
             "chunk_batch_size".to_string(),
@@ -1909,6 +2029,8 @@ mod tests {
         let mut current_signals = signals();
         current_signals.file_vectorization_queue_depth = 8_192;
         current_signals.ready_queue_depth_current = 0;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 0;
         let mut current_policy = policy();
         current_policy.allowed_actuators = vec![
             "chunk_batch_size".to_string(),
@@ -1968,6 +2090,7 @@ mod tests {
         current.canonical_chunks_embedded_last_minute = 220;
         current.canonical_files_embedded_last_minute = 12;
         current.ready_queue_depth_current = 4;
+        current.ready_queue_chunks_current = 128;
         current.gpu_utilization_ratio = 0.55;
         let obs = observe_reward("d2", &previous, &current, &policy(), 0.0);
         assert!(obs.reward > obs.throughput_chunks_per_hour);
@@ -1980,11 +2103,14 @@ mod tests {
         underfed.window_end_ms = 120_000;
         underfed.canonical_chunks_embedded_last_minute = 1;
         underfed.ready_queue_depth_current = 0;
+        underfed.ready_queue_chunks_current = 0;
+        underfed.prepare_inflight_chunks_current = 0;
         underfed.gpu_utilization_ratio = 0.10;
         underfed.file_vectorization_queue_depth = 256;
 
         let mut fed = underfed.clone();
         fed.ready_queue_depth_current = 4;
+        fed.ready_queue_chunks_current = 128;
         fed.gpu_utilization_ratio = 0.55;
 
         let underfed_obs = observe_reward("d3-underfed", &previous, &underfed, &policy(), 0.0);
@@ -2052,6 +2178,8 @@ mod tests {
         current_signals.gpu_utilization_ratio = 0.12;
         current_signals.ready_queue_depth_current = 0;
         current_signals.prepare_inflight_current = 1;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 64;
         current_signals.vector_workers_active_current = 1;
         current_signals.cpu_usage_ratio = 0.24;
         current_signals.ram_available_ratio = 0.55;
@@ -2117,6 +2245,8 @@ mod tests {
         let mut current_signals = signals();
         current_signals.file_vectorization_queue_depth = 256;
         current_signals.ready_queue_depth_current = 0;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 0;
         current_signals.gpu_utilization_ratio = 0.62;
 
         let mut current_policy = policy();
@@ -2160,6 +2290,8 @@ mod tests {
         let mut current_signals = signals();
         current_signals.file_vectorization_queue_depth = 2_048;
         current_signals.ready_queue_depth_current = 0;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 0;
         let mut current_policy = policy();
         current_policy.allowed_actuators = vec![
             "chunk_batch_size".to_string(),
@@ -2218,6 +2350,8 @@ mod tests {
         current_signals.gpu_utilization_ratio = 0.12;
         current_signals.ready_queue_depth_current = 0;
         current_signals.prepare_inflight_current = 1;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 64;
         current_signals.vector_workers_active_current = 1;
         current_signals.cpu_usage_ratio = 0.24;
         current_signals.ram_available_ratio = 0.55;
@@ -2276,6 +2410,8 @@ mod tests {
         current_signals.gpu_utilization_ratio = 0.12;
         current_signals.ready_queue_depth_current = 0;
         current_signals.prepare_inflight_current = 1;
+        current_signals.ready_queue_chunks_current = 0;
+        current_signals.prepare_inflight_chunks_current = 64;
         current_signals.persist_queue_depth_current = 3;
         current_signals.vector_workers_active_current = 1;
         current_signals.cpu_usage_ratio = 0.24;

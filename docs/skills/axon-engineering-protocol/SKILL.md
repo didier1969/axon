@@ -1,285 +1,415 @@
 ---
 name: axon-engineering-protocol
-description: Use in the Axon repository when selecting MCP tools, runtime entrypoints, SOLL mutation flow, or qualification paths. Covers canonical operator routing, identity rules, async follow-up, and client-facing endpoint truth.
+description: Use when working in the Axon repository and choosing MCP tools, runtime entrypoints, SOLL mutation paths, qualification commands, or live/dev release actions.
 ---
 
 # Axon Engineering Protocol
 
-## Core Rule
-- Read IST/SOLL first, mutate second, certify before commit.
-- Treat MCP output as authoritative. Do not invent IDs, project codes, or intent links.
+## Overview
+Axon is MCP-first. Read truth from MCP before inferring from files or shell output.
 
-## Runtime Rule
-- Axon now has two valid runtime authorities:
-  - `live`: stable truth runtime
-  - `dev`: isolated development runtime
-- Use explicit entrypoints:
-  - `./scripts/axon-live ...`
-  - `./scripts/axon-dev ...`
-  - or `./scripts/axon --instance live|dev ...`
-- `live` and `dev` share the same MCP surface, but not the same ports, sockets, pidfiles, or databases.
-- `status` is always the first truth surface.
-- Distinguish:
-  - MCP `status` = protocol truth
-  - `scripts/status*.sh` = local lifecycle probe
-- Distinguish endpoint classes:
-  - `instance_identity.*_url` = runtime-local host truth
-  - `advertised_endpoints.*` = client-facing endpoint truth for isolated clients/subagents
-- Isolated clients must prefer `advertised_endpoints` when available; do not treat loopback runtime URLs as externally reachable by default.
-- For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
-- For unified runtime qualification, prefer `./scripts/axon qualify ...` on `dev` by default.
-- Use `./scripts/axon --instance live qualify ...` only when you explicitly want to assess the promoted live runtime.
-- `qualify` now captures runtime truth from `status(mode="full")` and archives:
-  - `runtime-status.json`
-  - `runtime-quiescent-summary.json`
-- `runtime_quiescent` is part of qualification truth:
-  - `pass` keeps `runtime_smoke` green
-  - `watch` or `blocked` degrades `runtime_smoke` to `warn`
-  - missing quiescent surface also degrades to `warn`
-- Do not mutate `live` implicitly from development workflows.
-- For release work on `live`, use the topological checklist:
-  1. prefer `./scripts/axon promote-live-safe --project AXO`
-  2. only fall back to the manual sequence for expert recovery:
-     `./scripts/axon release-preflight`
-     `./scripts/axon create-release-manifest --state qualified`
-     `./scripts/axon promote-live --manifest <manifest> --restart-live`
-  3. verify MCP `status`
-  4. only then treat the release as `promoted`
-- `promote-live-safe` is the canonical operator path because it hard-gates:
-  - canonical artifact rebuild
-  - release preflight
-  - manifest creation
-  - live restart + MCP runtime identity check
-  - final `qualify-mcp` core quality/latency gate
-  - final `status-live.sh`
-- if `HEAD` changes during the one-shot sequence, `promote-live-safe` must fail closed and restart from the top.
-- `release-preflight` must prove both metadata and artifact-body integrity:
-  - `bin/axon-core.build-info` matches `git describe`
-  - `bin/axon-core` checksum matches recorded artifact checksum
-  - workspace `bin/axon-core` matches the canonical workspace release target `.axon/cargo-target/release/axon-core`
-- During release or rollback:
-  - MCP `status` is final runtime truth
-  - `scripts/status*.sh` remains advisory only
-  - `pending` and `current` must never drift silently
+Core rule:
+- read `IST`/`SOLL` first
+- mutate second
+- certify before commit
 
-## Identity Contract
-- Canonical IDs are server-owned: `TYPE-CODE-NNN`.
-- `CODE` comes from `.axon/meta.json`, mirrored into `soll.ProjectCodeRegistry`.
-- `axon_init_project` assigns `project_code` server-side and returns it; the LLM does not invent project codes.
-- When a public mutation is async, the acceptance payload is authoritative:
-  - `data.known_ids`
-  - `data.next_action`
-  - `data.result_contract`
-  - canonical follow-up via `job_status`
-- LLMs use returned IDs; they do not fabricate them.
-- For batch plans, use `logical_key`; the server resolves canonical IDs.
+Never invent:
+- canonical IDs
+- `project_code`
+- intent links
+- runtime authority
+
+## First Truth
+Use these in order:
+1. `status`
+2. `mcp_surface_diagnostics` if client/server binding looks stale
+3. `project_status` if the task is project-scoped
+4. `project_registry_lookup` if project identity is unclear
+
+Truth hierarchy:
+- MCP `status` = runtime/protocol truth
+- `project_status` = compact project truth
+- `scripts/status*.sh` = local lifecycle probe only
+- `README` / docs = supporting context, not runtime truth
+
+## Runtime Model
+Two operator instances:
+- `live` = stable truth runtime
+- `dev` = isolated development runtime
+
+Use:
+- `./scripts/axon --instance live ...`
+- `./scripts/axon --instance dev ...`
+- or `./scripts/axon-live ...` / `./scripts/axon-dev ...`
+
+Shared contract:
+- `live` and `dev` expose the same public MCP product surface
+- ports, sockets, pidfiles, and state roots differ
+
+Standard authority model:
+- `brain` = public MCP authority
+- `brain` = `SOLL` writer authority
+- `indexer` = canonical `IST` writer authority
+- fresh indexed projections come from `indexer`
+
+Authority rule:
+- public MCP status must not expose topology names or topology choices
+- there is one runtime deployment contract, not `split`, `monolith`, or `standard` product variants
+- describe runtime truth through `process_role`, writer authorities, readiness, freshness, and convergence
+
+Dashboard rule:
+- dashboard is an observation surface
+- it is not canonical authority for ingestion, `IST`, `MCP`, `SQL`, or release truth
+
+Endpoint rule:
+- `instance_identity.*_url` = runtime-local truth
+- `advertised_endpoints.*` = client-facing truth
+- isolated clients should prefer `advertised_endpoints`
 
 ## Surface Model
+Assume:
 - one public MCP product surface
-- two execution flows only:
-  - `sync` by default
-  - `async` only for allowlisted heavy operations
-- the current async allowlist is published by `status` and `mcp_surface_diagnostics`; treat server truth as canonical
-- classify a tool as `async` only if it is semantically heavy or repeatedly fails the `p95 < 200 ms` interaction budget
+- `sync` by default
+- `async` only for allowlisted heavy operations
 
-## Contract Families
-- richer operator-facing public tools now tend to expose:
-  - `operator_guidance`
-  - `next_action`
-- the strongest diagnostic/actionable public surfaces currently include:
-  - `project_status`
-  - `project_registry_lookup`
-  - `inspect`
-  - `path`
-  - `impact`
-  - `change_safety`
-- async follow-up is canonicalized around:
-  - `job_status`
-  - `known_ids`
-  - `result_contract`
-  - `polling_guidance`
-  - `recovery_hint`
-  - `result_data`
+Public information surface stays available in `brain_only`.
+If freshness is missing:
+- degrade payloads explicitly
+- do not hide public read tools
 
-## Core/Public Tools
-- `status`: runtime truth, availability, degradation, public surface.
-- `mcp_surface_diagnostics`: compact diagnostics for server truth vs possible stale client binding.
-- `mcp_surface_diagnostics` now exposes explicit client freshness semantics:
-  - `session_freshness_status`
-  - `canonical_refresh_instruction`
-  - `safe_to_rely_on_now`
-  - `may_require_client_refresh`
-- `./scripts/axon sync-codex-mcp-config`: operator path to print or explicitly refresh Codex MCP config from advertised endpoints.
-- `project_status`: compact live situation for one project.
-- `project_registry_lookup`: resolve canonical project identity from code, name, or path.
-- `query`: discovery / broad recall.
-- `inspect`: precise zoom on a known target.
-- `retrieve_context`: answerable evidence packet for LLM work.
-- prefer `retrieve_context(..., mode="intent")` for project steering, SOLL mutation suggestions, concept docs, and implementation plan recovery.
-- `why`: rationale view.
-- `path`: topology / flow view.
-- `impact`: blast radius for change.
-- `anomalies`: structural findings; for SOLL/greenfield intent, treat it as heuristic unless it explicitly aligns with canonical completeness.
-- `change_safety`: practical mutation safety.
-- `conception_view`: derived module/interface/contract/flow map.
-- `snapshot_history`, `snapshot_diff`: derived structural memory.
-- advanced graph/system exploration: `refine_lattice`, `cypher`, `debug`, `schema_overview`, `list_labels_tables`, `query_examples`
-- advanced runtime/analysis tools: `health`, `audit`, `batch`, `truth_check`, `diagnose_indexing`, `diff`, `semantic_clones`, `architectural_drift`, `bidi_trace`, `api_break_check`, `simulate_mutation`, `resume_vectorization`, `job_status`
-- `axon_pre_flight_check`, `axon_commit_work`: validated delivery workflow.
-- SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_generate_docs`, `soll_verify_requirements`, `soll_relation_schema`, `soll_manager`, `infer_soll_mutation`, `entrench_nuance`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
+Internal-only tools:
+- are transport or implementation primitives
+- are not hidden product value surfaces
 
-## Expert/Internal Tools
-- no additional MCP tools should be treated as hidden product surface by default
-- true internals remain transport or implementation primitives outside the normal MCP tool contract
-
-## First-Choice Routing
+## Tool Routing
+Default routing:
 1. `status`
-2. `mcp_surface_diagnostics` if the client-visible tool binding seems inconsistent with the public surface advertised by the server
-   - if isolated clients cannot reach Axon while the runtime is healthy, compare `instance_identity` vs `advertised_endpoints`
-3. `project_status` if you need the current project situation
-4. `project_registry_lookup` if project identity is uncertain
-5. `axon_init_project` when you want project initialization with canonical identity returned immediately
-6. `query` / `inspect` / `retrieve_context`
-   - `query` = discover
-   - `inspect` = zoom
-   - `retrieve_context` = compact answerable context
-7. `impact` before risky refactor/change
-8. `why` when rationale matters
-9. `path` when flow/topology matters
-10. `anomalies` for cleanup, refactor, debt, or structural review
-11. `change_safety` before risky mutation
-12. `conception_view` if a derived architecture map is needed
-13. `soll_relation_schema` when SOLL link policy, valid target kinds, or canonical incoming/outgoing graph edges are unclear
-14. `job_status` as the canonical follow-up for the async allowlist only, using the returned `polling_guidance`
-15. `axon_pre_flight_check`
-16. `axon_commit_work`
+2. `project_status`
+3. `query` / `inspect` / `retrieve_context`
+4. `impact`
+5. `why`
+6. `path`
+7. `anomalies`
+8. `change_safety`
+9. `conception_view`
+10. SOLL mutation tools
+11. `axon_pre_flight_check`
+12. `axon_commit_work`
+
+Use:
+- `query` = discover broadly
+- `inspect` = zoom on a known target
+- `retrieve_context` = compact answerable packet
+- `impact` = blast radius
+- `why` = rationale
+- `path` = source-sink flow
+- `anomalies` = structural findings
+- `change_safety` = mutation safety
+- `conception_view` = derived architecture map
+- `schema_overview` / `list_labels_tables` / `query_examples` = advanced read-only schema guidance when product tools are insufficient
+- `cypher` = advanced read-only graph query escape hatch after schema/examples, not the default answer path
+
+Prefer:
+- `project_status` over composing many probes
+- `retrieve_context` over raw recall when context must stay compact
+- `mode=brief` unless expansion is necessary
+- product tools before raw schema/query tools
+
+## Fallback Search
+If the first Axon answer is weak, incomplete, or degraded, continue searching through Axon itself.
+
+First read the recovery fields already returned by the server:
+- `operator_guidance`
+- `operator_guidance.llm_contract` when present
+- `next_action`
+- authoritative guidance fields when present:
+  - `problem_class`
+  - `likely_cause`
+  - `next_best_actions`
+  - `confidence`
+- shadow guidance if exposed in `_shadow.guidance`
+
+LLM guidance contract:
+- `help` is an LLM-only routing tool and should stay isolated from the central MCP dispatcher implementation
+- `operator_guidance.llm_contract.first` tells the client which field to execute first, normally `next_action`
+- `operator_guidance.llm_contract.bad_args` is the canonical repair rule for malformed tool arguments
+- `operator_guidance.llm_contract.partial` is the canonical rule for degraded or incomplete truth
+- `operator_guidance.llm_contract.ask_user_only_if` is the boundary for explicit user input
+- keep guidance strings compact and machine-actionable; avoid human-oriented explanations unless they add operational signal
+
+Server guidance is primary. Generic fallback ordering is secondary.
+
+Public tool contract:
+- public tools should return a usable recovery path even on weak or empty answers
+- `query` with zero exact hits should still return structured recovery guidance, not a dead-end empty answer
+- `path` and comparable graph-flow tools should still expose canonical provenance and next-step guidance when anchors are missing
+- invalid arguments should return a micro-instruction that tells the LLM how to repair the request before retry
+
+Search order for ordinary LLMs:
+1. follow `next_action` if the response already provides one
+2. follow `operator_guidance.follow_up_tools` when present
+3. if guidance says `input_not_found`, retry with the suggested symbol or widen with `query`
+4. if guidance says `input_ambiguous`, pick an exact symbol or narrow the project scope
+5. if guidance says `wrong_project_scope`, recover the canonical project with `project_status`
+6. if guidance says `degraded`, treat the result as partial and retry after runtime stabilization
+7. otherwise tighten the question and call `retrieve_context`, then `inspect`, then `query`
+8. use `impact` or `path` if the missing truth is authority, source/sink flow, or blast radius
+9. use `conception_view` or `project_status` for architecture/runtime framing
+
+Rules:
+- search Axon through MCP before searching Axon through implementation
+- do not use Axon source code as the ordinary recovery path
+- read target project files only after the MCP search path is exhausted
+- if Axon still cannot answer, report the degraded contract, the guidance fields returned by Axon, and the MCP calls already attempted
+
+## Why Contract
+Read `why` as a machine contract first, prose second.
+
+Field priority:
+1. `authority_class`
+2. `evidence_provenance`
+3. `link_mode`
+4. `evidence_states`
+5. `rationale_quality`
+
+Meaning:
+- `authority_class=governing` = canonical intent
+- `authority_class=supporting` = useful support
+- `authority_class=correlated` = weak signal
+
+Meaning:
+- `link_mode=direct` = explicit traceability
+- `link_mode=inferred` = plausible derived intent
+- `link_mode=weak_correlation` = do not treat as canonical
+
+Important:
+- `why` may recover governing intent through concept-linked `SOLL` requirements or decisions
+- under `Recovering` pressure, rationale routes may still keep a minimal `SOLL` join
+- graph-heavy expansion may still remain guarded
+
+If `why` returns:
+- `missing_governing_intent`
+- `no_direct_traceability`
+- `retrieval_degraded`
+- `support_only`
+
+Then escalate to:
+- `retrieve_context` with a tighter target or question
+- `inspect`
+- `query`
+- `impact`
+- `path`
+- `conception_view`
+- `project_status`
+
+Do not treat weak `why` output as permission to inspect Axon implementation code as primary truth.
+If Axon answer quality is weak, Axon must still tell the LLM how to proceed through MCP.
+
+Fallback order for LLMs:
+1. restate the target more narrowly and call `retrieve_context`
+2. call `inspect` on the most concrete symbol, file, or entity already known
+3. call `query` to widen recall if the anchor is still ambiguous
+4. call `impact` or `path` if source/sink flow or authority is the missing dimension
+5. call `conception_view` or `project_status` if the question is architectural
+6. if the work concerns a user/project source target, read that target source only after the MCP surface has been exhausted
+7. never use Axon implementation code as the recovery path for ordinary LLM operation; escalate through MCP, `status`, and operator guidance instead
+
+Do not over-trust the prose summary.
+
+## Async Contract
+Server truth for async lives in:
+- `status`
+- `mcp_surface_diagnostics`
+
+Canonical async follow-up fields:
+- `known_ids`
+- `next_action`
+- `result_contract`
+- `polling_guidance`
+- `recovery_hint`
+- `result_data`
+
+Canonical follow-up tool:
+- `job_status`
+
+## Identity Contract
+Canonical IDs are server-owned:
+- `TYPE-CODE-NNN`
+
+Rules:
+- `project_code` comes from server truth
+- `axon_init_project` assigns `project_code`
+- clients reuse returned IDs
+- batch plans should use `logical_key`
+
+Never fabricate:
+- `project_code`
+- preview IDs
+- revision IDs
+- SOLL entity IDs
 
 ## SOLL Model
-- `Vision`: target outcome
-- `Pillar`: strategic principle
-- `Requirement`: testable capability
-- `Decision`: technical choice
-- `Concept`: domain vocabulary
-- `Guideline`: durable engineering rule
-- `Milestone`: delivery checkpoint
-- `Validation`: proof
-- `Stakeholder`: impacted actor
+Canonical entity types:
+- `Vision`
+- `Pillar`
+- `Requirement`
+- `Decision`
+- `Concept`
+- `Guideline`
+- `Milestone`
+- `Validation`
+- `Stakeholder`
 
-## Mutation Rules
-- `soll_manager` for immediate unit mutations.
-- `soll_manager action=create` may optionally use `attach_to` and `relation_hint` for canonical graph attachment in the same operation.
-- `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
-- `soll_relation_schema` is now the canonical topology explainer for SOLL links:
-  - `allowed_targets`
-  - `forbidden_targets`
-  - `direction`
-  - `projection`
-  - `canonical_examples`
-  - `did_you_mean` when the reverse direction is canonical
-- `infer_soll_mutation` for read-only assistive capture before a higher-level SOLL mutation; it may suggest scope, entity type, and target IDs, but it does not reserve IDs or mutate the graph.
-- `entrench_nuance` is a bounded high-level workflow for wave 1:
-  - it only updates existing canonical entities
-  - it proposes first and requires `confirm=true` to write
-  - if nuance truly requires new nodes or topology changes, fall back to `soll_manager` or `soll_apply_plan`
-- `soll_generate_docs` for human-readable navigable docs derived from live SOLL.
-- treat `soll_generate_docs` output as derived reading surface only; live SOLL and `soll_export` remain canonical.
-- default derived output root is separate from canonical exports: `docs/derived/soll/<project_code>`.
-- canonical auto-sync also maintains a global derived root at `docs/derived/soll/index.html`, listing all known projects.
-- the global derived reading root is `GLO`; it is a portfolio navigation concept, not a canonical SOLL entity.
-- if the derived site does not exist yet, generate a full project site; otherwise refresh incrementally and delete obsolete derived pages from the manifest.
-- successful SOLL mutations should return machine-readable `data.derived_docs_refresh` so clients can see whether derived docs stayed fresh or became stale.
-- the derived site should now be read as a three-pane shell:
-  - left = collapsible tree navigation
-  - center = hierarchy focus graph
-  - right = structured details
-- human navigation must not depend only on clickable Mermaid nodes; tree links and surrounding HTML links are the canonical path.
-- side panes may be resized or collapsed completely; the center pane must expand accordingly.
-- derived node and subtree pages now expose operator-facing diagnostics:
-  - canonical vs derived relation boundary
-  - primary vs supporting/lateral projection role
-  - score-bearing vs non-score-bearing relation class
-  - subtree inclusion reasons
-- `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
-- `soll_attach_evidence` should be read as an operational proof tool, not a blind append:
-  - it accepts `artifact_ref`, `path`, `file_path`, or `uri`
-  - file artifacts are normalized against the canonical project root when possible
-  - it returns per-artifact diagnostics, accepted artifact schema, and fallback guidance on rejection
-- `soll_verify_requirements` now returns richer requirement-level proof diagnostics:
-  - `missing_dimensions`
-  - `missing_dimensions_detailed`
-  - `suggested_next_actions`
-  - `next_actions_detailed`
-  - `validation_count`
-  - `broken_file_evidence_count`
-  - `coverage_reason`
-  - `completion_model`
-- successful bounded SOLL mutations should return machine-readable `mutation_feedback`:
-  - `changed_entities`
-  - `topology_delta`
-  - `newly_unblocked`
-  - `remaining_blockers`
-  - `next_best_actions`
-  - `completeness_before`
-  - `completeness_after`
-- prefer this feedback to improvise follow-up steps after `soll_manager` or `entrench_nuance`.
-- canonical completeness model for greenfield work:
-  - `concept_completeness` = structural intentional baseline
-  - `implementation_completeness` = evidence/proof readiness
-  - `heuristic anomalies` must not silently override the first two
-- `soll_apply_plan` for transactional batch mutations.
-- `soll_apply_plan` now returns a stronger machine contract:
-  - dry-run `result_contract`
-  - commit-time `created`
-  - `updated`
-  - `linked`
-  - `skipped`
-  - `errors`
-  - `identity_mapping`
-- `soll_query_context` should now be read as both a lightweight browse surface and an active reconstruction digest:
-  - `visions`
-  - `requirements`
-  - `decisions`
-  - `revisions`
-  - `operational_digest`
-- for rationale-heavy SOLL work, prefer retrieval surfaces that now follow:
-  1. linked evidence first
-  2. canonical project docs second
-  3. broader workspace material last
-- `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
-- `soll_rollback_revision` to revert a revision.
-- Re-run is expected to be idempotent.
+Read surfaces:
+- `soll_query_context`
+- `soll_work_plan`
+- `soll_validate`
+- `soll_verify_requirements`
+- `soll_export`
 
-## Mandatory Delivery Flow
-1. Run `status`.
-2. Read code truth with `query`, `inspect`, or `retrieve_context`.
-3. Use `impact`, `why`, `path`, `anomalies`, `change_safety` only as needed.
-4. Update SOLL in the same wave when intention changes.
-5. Keep derived docs aligned:
-   - automatic refresh should happen after successful SOLL mutations
-   - `soll_generate_docs` remains the explicit operator tool for manual rebuilds or repairs
-6. Run `axon_pre_flight_check`.
-7. Use `axon_commit_work`.
+Mutation surfaces:
+- `soll_manager`
+- `infer_soll_mutation`
+- `entrench_nuance`
+- `soll_apply_plan`
+- `soll_commit_revision`
+- `soll_rollback_revision`
+- `soll_attach_evidence`
+
+Use:
+- `infer_soll_mutation` = read-only assistive scope check
+- `entrench_nuance` = bounded update to existing canonical entities
+- `soll_manager` = exact create/update/link
+- `soll_apply_plan` = transactional batch
+
+Before using an unfamiliar SOLL tool:
+- call `help` with `tool=<tool_name>`
+- read `data.input_schema.required`
+- prefer the returned `usage_examples`
+- follow `next_action` before exploring broadly
+
+For `soll_apply_plan`:
+- provide `project_code`
+- start with `dry_run=true`
+- include `author`
+- use stable `logical_key` for idempotent creates/updates
+- put batch entities under `plan.<type>s`
+- put edges in top-level `relations`
+- poll `job_status` when the response returns `job_id`
+
+For `soll_work_plan`:
+- use `format=brief`, `limit`, and `top` first
+- keep `include_validation_details=false` unless requirement-level detail is explicitly needed
+- expand with `soll_verify_requirements` or `include_validation_details=true` only after the compact answer identifies the gap
+
+Before retrying a bad link:
+- use `soll_relation_schema`
+
+CLI bridge:
+- use `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` for large JSON payloads
+- use `--args-file -` when streaming JSON from stdin
+- avoid fragile inline shell JSON for large plans
+
+## SOLL Evidence
+Treat `soll_attach_evidence` as proof, not blind append.
+
+It accepts:
+- `artifact_ref`
+- `path`
+- `file_path`
+- `uri`
+
+Typical evidence kinds:
+- `document`
+- `file`
+- `symbol`
+- `test`
+- `metric`
+- `validation`
+- `rationale`
+- `diff`
+
+Requirement verification truth lives in:
+- `missing_dimensions`
+- `missing_dimensions_detailed`
+- `suggested_next_actions`
+- `coverage_reason`
+- `completion_model`
+
+## Delivery Flow
+Use this default flow:
+1. `status`
+2. `query` / `inspect` / `retrieve_context`
+3. `impact` / `why` / `path` / `anomalies` only if needed
+4. update `SOLL` in the same wave if intent changed
+5. `axon_pre_flight_check`
+6. `axon_commit_work`
+
+Do not use shell `git commit` for delivery in this repo.
+
+## Release Flow
+Canonical path for `live`:
+1. `./scripts/axon promote-live-safe --project AXO`
+
+Manual recovery only if necessary:
+- `./scripts/axon release-preflight`
+- `./scripts/axon create-release-manifest --state qualified`
+- `./scripts/axon promote-live --manifest <manifest> --restart-live`
+
+Promotion truth:
+- MCP `status`
+- runtime version in manifest/current release state
+
+`promote-live-safe` must prove:
+- canonical rebuild
+- release preflight
+- manifest creation
+- live restart
+- MCP runtime identity match
+- final `qualify-mcp`
+- final `status-live.sh`
+
+Fail closed if `HEAD` changes during the one-shot release sequence.
+
+## Qualification
+Prefer:
+- `./scripts/axon qualify-mcp`
+- `./scripts/axon qualify ...`
+
+Treat older entrypoints such as:
+- `quality-mcp`
+- `validate-mcp`
+- `measure-mcp`
+- `compare-mcp`
+- `robustness-mcp`
+- `qualify-guidance`
+
+as internal or compatibility flows.
+
+Use `./scripts/axon --instance live qualify ...` only when you intentionally assess promoted `live`.
+
+## Derived Docs
+Derived docs are reading surfaces, not canonical truth.
+
+Canonical:
+- live `SOLL`
+- `soll_export`
+
+Derived:
+- `soll_generate_docs`
+- `docs/derived/soll/...`
+
+Do not treat derived docs as restorable source of truth.
 
 ## Commit Hygiene
-- `axon_commit_work` no longer auto-stages the whole `docs/vision/` tree.
-- archival `SOLL_EXPORT_*.md` snapshots must not pollute routine delivery commits by default.
-- derived site outputs should be committed intentionally, not by broad `git add docs/vision/`.
+- `axon_commit_work` does not mean “stage everything”
+- archival `SOLL_EXPORT_*.md` should not pollute routine delivery commits
+- derived outputs should be committed intentionally
 
-## Context Efficiency Rules
-- Prefer `project_status` over composing many tools for a first pass.
-- Prefer `retrieve_context` when an LLM needs a compact packet, not raw recall.
-- Prefer `mode=brief` by default; only expand when the first answer is insufficient.
-- Keep expert tools out of first-choice routing unless the task is truly diagnostic.
-- prefer the contract families above over re-deriving follow-up logic from prose:
-  - `operator_guidance`
-  - `next_action`
-  - `job_status` terminal fields
-- When `anomalies`, `soll_validate`, `soll_verify_requirements`, and `soll_work_plan` differ on a greenfield project, prefer the canonical completeness axes exposed by SOLL surfaces and treat anomaly-only intent gaps as heuristic until proven canonical.
-
-## Maintenance Rule
-Update this skill immediately when:
-- tool names or visibility change
-- public/expert routing changes
-- identity rules change
-- SOLL workflow or schema changes
-- release/promotion protocol changes
+## Maintenance
+Update this skill when:
+- tool names change
+- surface visibility changes
+- runtime authority changes
+- SOLL workflow/schema changes
+- qualification or release protocol changes

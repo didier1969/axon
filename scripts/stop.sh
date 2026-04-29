@@ -13,18 +13,17 @@ source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
-axon_apply_runtime_role_layout "$PROJECT_ROOT" "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-legacy_monolith}}"
+STOP_ROLE="$(axon_runtime_shadow_role)"
+axon_apply_runtime_role_layout "$PROJECT_ROOT" "$STOP_ROLE"
 if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$AXON_RUNTIME_STATE_FILE"
 fi
 
 AXON_TCP_PORTS=("$PHX_PORT" "$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
-case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
-    indexer|indexer_shadow)
-        AXON_TCP_PORTS=()
-        ;;
-esac
+if axon_role_is_indexer "$STOP_ROLE"; then
+    AXON_TCP_PORTS=()
+fi
 
 HARD_MODE=0
 VERIFY_ONLY=0
@@ -72,18 +71,14 @@ EOF
 done
 
 selected_writer_guards() {
-    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-legacy_monolith}}" in
-        brain|brain_shadow)
-            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
-            ;;
-        indexer|indexer_shadow)
-            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
-            ;;
-        *)
-            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
-            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
-            ;;
-    esac
+    if axon_role_is_brain "$STOP_ROLE"; then
+        printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+    elif axon_role_is_indexer "$STOP_ROLE"; then
+        printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+    else
+        printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+        printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+    fi
 }
 
 pid_exists() {
@@ -159,18 +154,11 @@ pid_matches_instance() {
     local pid="$1"
     local cmdline=""
     local listener_pid=""
-    local runtime_binary_name="axon-core"
+    local runtime_binary_name
+    runtime_binary_name="$(axon_runtime_binary_name "$STOP_ROLE")"
 
     [[ -n "$pid" && -e "/proc/$pid" ]] || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
-        brain|brain_shadow)
-            runtime_binary_name="axon-brain"
-            ;;
-        indexer|indexer_shadow)
-            runtime_binary_name="axon-indexer"
-            ;;
-    esac
     [[ "$cmdline" == *"$runtime_binary_name"* || "$cmdline" == *"axon-core"* ]] || return 1
 
     if [[ "$runtime_binary_name" == "axon-indexer" ]]; then
@@ -203,15 +191,8 @@ collect_process_pids() {
 
 is_axon_process_cmd() {
     local cmd="$1"
-    local runtime_binary_name="axon-core"
-    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
-        brain|brain_shadow)
-            runtime_binary_name="axon-brain"
-            ;;
-        indexer|indexer_shadow)
-            runtime_binary_name="axon-indexer"
-            ;;
-    esac
+    local runtime_binary_name
+    runtime_binary_name="$(axon_runtime_binary_name "$STOP_ROLE")"
 
     # Ignore the tmux/devenv launcher shell that merely waits on the real
     # runtime child. It can survive briefly around shutdown and should not be
@@ -415,7 +396,10 @@ verify_only_exit_if_needed() {
         local guard_failed=0
         while read -r guard_label guard_path; do
             [[ -n "${guard_label:-}" ]] || continue
-            verify_writer_guard_release "$guard_label" "$guard_path" 1 || guard_failed=1
+            # After a clean shutdown, the runtime may leave no lockfile behind.
+            # Verification should accept both "released existing guard" and
+            # "guard file absent because nothing still owns it".
+            verify_writer_guard_release "$guard_label" "$guard_path" 0 || guard_failed=1
         done < <(selected_writer_guards)
         if [ "$guard_failed" -eq 1 ]; then
             return 1
@@ -443,7 +427,7 @@ verify_only_exit_if_needed() {
 echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
 echo "Shutdown order: RPC -> TMUX -> tracked processes -> listener cleanup -> writer-guard verification"
 if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
-    echo "Split rollback note: stop must fully release SOLL/IST writer ownership before monolith reactivation."
+    echo "Split stop note: stop must fully release SOLL/IST writer ownership before any role restart."
 fi
 
 # 1. Axon process signatures for checks and teardown.

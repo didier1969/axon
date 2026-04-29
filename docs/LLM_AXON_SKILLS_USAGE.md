@@ -57,15 +57,15 @@ Expected:
 - `conception_view` and `change_safety` are derived read surfaces; they help an agent reason before editing but must not be treated as canonical intention data.
 
 ## Public MCP Surface
-- Public `tools/list` is intentionally reduced to the canonical operator surface.
-- Hidden-by-default expert/internal tools remain callable when explicitly named, but they are no longer part of the normal client/LLM discovery path.
+- Public `tools/list` exposes the full public MCP information surface.
+- The public surface stays available in `brain_only`; when fresh indexed projections are missing, responses must degrade explicitly instead of hiding information tools.
 - Preferred public families:
   - Operator truth: `status`, `project_status`, `why`, `path`, `anomalies`
   - Structural memory and guidance: `snapshot_history`, `snapshot_diff`, `conception_view`, `change_safety`
   - DX/SOLL commit discipline: `axon_pre_flight_check`, `axon_commit_work`, `fs_read`
   - SOLL read: `soll_validate`, `soll_query_context`, `soll_verify_requirements`, `soll_work_plan`, `soll_export`, `restore_soll`
   - SOLL write: `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `soll_attach_evidence`
-  - DX expert/internal: `retrieve_context`, `impact`, `health`, `audit`, `query`, `inspect`
+  - Public information retrieval and diagnostics: `retrieve_context`, `impact`, `health`, `audit`, `query`, `inspect`, `architectural_drift`
 
 ## SOLL Identity and Scope
 - Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`, `PRV-FSC-001`, `REV-FSC-002`.

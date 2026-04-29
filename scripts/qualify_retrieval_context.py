@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT_ROOT = Path("/home/dstadel/projects/axon")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_URL = "http://127.0.0.1:44129/mcp"
 DEFAULT_CORPUS = PROJECT_ROOT / "scripts" / "retrieval_context_cases.json"
 
@@ -94,6 +94,13 @@ def file_hit(payload_text: str, expected_paths: list[str]) -> bool:
     return any(path in payload_text for path in lowered_paths)
 
 
+def resolve_project_path(value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str(PROJECT_ROOT / path)
+
+
 def expected_soll_hit(packet: dict[str, Any], expected_ids: list[str]) -> bool:
     if not expected_ids:
         return True
@@ -138,6 +145,9 @@ def evaluate_direct_anchor_hit(packet: dict[str, Any], expected_terms: list[str]
 
 def run_case(url: str, timeout: int, case: dict[str, Any], default_project: str) -> dict[str, Any]:
     project = case.get("project") or default_project
+    question = case["question"]
+    if isinstance(question, str) and case.get("question_is_project_path"):
+        question = resolve_project_path(question)
     payload = {
         "jsonrpc": "2.0",
         "id": case["id"],
@@ -145,7 +155,7 @@ def run_case(url: str, timeout: int, case: dict[str, Any], default_project: str)
         "params": {
             "name": "retrieve_context",
             "arguments": {
-                "question": case["question"],
+                "question": question,
                 "project": project,
                 "token_budget": int(case.get("token_budget", 1200)),
             },
@@ -194,7 +204,9 @@ def run_case(url: str, timeout: int, case: dict[str, Any], default_project: str)
         term for term in case.get("expected_anchor_terms", []) if isinstance(term, str) and term
     ]
     expected_paths = [
-        path for path in case.get("expected_file_paths", []) if isinstance(path, str) and path
+        resolve_project_path(path)
+        for path in case.get("expected_file_paths", [])
+        if isinstance(path, str) and path
     ]
     expected_soll_ids = [
         soll_id for soll_id in case.get("expected_soll_ids", []) if isinstance(soll_id, str) and soll_id

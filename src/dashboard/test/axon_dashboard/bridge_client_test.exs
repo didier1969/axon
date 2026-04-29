@@ -68,6 +68,10 @@ defmodule AxonDashboard.BridgeClientTest do
       {:tcp, nil,
        Jason.encode!(%{
          "RuntimeTelemetry" => %{
+           "telemetry_source" => "local_runtime",
+           "telemetry_process_role" => "brain",
+           "telemetry_freshness_state" => "fresh",
+           "telemetry_observed_age_ms" => 55,
            "budget_bytes" => 4_096,
            "reserved_bytes" => 2_048,
            "exhaustion_ratio" => 0.5,
@@ -89,18 +93,71 @@ defmodule AxonDashboard.BridgeClientTest do
            "db_wal_bytes" => 512,
            "db_total_bytes" => 4_608,
            "duckdb_memory_bytes" => 2_048,
-           "duckdb_temporary_bytes" => 256
+           "duckdb_temporary_bytes" => 256,
+           "vector_chunks_embedded_total" => 96,
+           "chunk_embeddings_per_second" => 32.0,
+           "chunk_embeddings_rate_window_ms" => 5_000,
+           "prepare_inflight_chunks_current" => 7,
+           "ready_queue_chunks_current" => 19,
+           "ready_queue_chunks_small" => 4,
+           "ready_queue_chunks_medium" => 6,
+           "ready_queue_chunks_large" => 9,
+           "ready_batches_small" => 1,
+           "ready_batches_medium" => 2,
+           "ready_batches_large" => 3,
+           "mixed_fallback_batches_total" => 2,
+           "homogeneous_batches_total" => 12,
+           "last_consumed_batch_lane" => "large",
+           "active_small_max_tokens" => 80,
+           "active_medium_max_tokens" => 160,
+           "graph_workers_started_total" => 2,
+           "graph_workers_active_current" => 2,
+           "projected_indexer_runtime" => %{
+             "available" => true,
+             "telemetry_source" => "indexer_peer_heartbeat",
+             "process_role" => "indexer",
+             "freshness_state" => "fresh",
+             "observed_age_ms" => 42,
+             "telemetry" => %{
+               "ingress_buffered_entries" => 88,
+               "graph_projection_queue" => %{"total" => 13},
+               "chunk_embeddings_per_second" => 40.0
+             }
+           }
          }
        }) <> "\n"}
     )
 
     assert_receive {:bridge_event, %{"RuntimeTelemetry" => %{"budget_bytes" => 4_096}}}, 1000
     stats = Axon.Watcher.Telemetry.get_stats()
+    assert stats[:telemetry_source] == "local_runtime"
+    assert stats[:telemetry_process_role] == "brain"
+    assert stats[:telemetry_freshness_state] == "fresh"
+    assert stats[:telemetry_observed_age_ms] == 55
     assert stats[:budget_bytes] == 4_096
     assert stats[:host_state] == "healthy"
     assert stats[:host_guidance_slots] == 6
     assert stats[:rss_anon_bytes] == 5_120
     assert stats[:db_total_bytes] == 4_608
     assert stats[:duckdb_memory_bytes] == 2_048
+    assert stats[:vector_chunks_embedded_total] == 96
+    assert stats[:chunk_embeddings_per_second] == 32.0
+    assert stats[:prepare_inflight_chunks_current] == 7
+    assert stats[:ready_queue_chunks_current] == 19
+    assert stats[:ready_queue_chunks_small] == 4
+    assert stats[:ready_queue_chunks_medium] == 6
+    assert stats[:ready_queue_chunks_large] == 9
+    assert stats[:ready_batches_small] == 1
+    assert stats[:ready_batches_medium] == 2
+    assert stats[:ready_batches_large] == 3
+    assert stats[:mixed_fallback_batches_total] == 2
+    assert stats[:homogeneous_batches_total] == 12
+    assert stats[:last_consumed_batch_lane] == "large"
+    assert stats[:active_small_max_tokens] == 80
+    assert stats[:active_medium_max_tokens] == 160
+    assert stats[:graph_workers_active_current] == 2
+    assert get_in(stats, [:projected_indexer_runtime, "telemetry_source"]) == "indexer_peer_heartbeat"
+    assert get_in(stats, [:projected_indexer_runtime, "telemetry", "ingress_buffered_entries"]) == 88
+    assert get_in(stats, [:projected_indexer_runtime, "telemetry", "chunk_embeddings_per_second"]) == 40.0
   end
 end

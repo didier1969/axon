@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 if ! command -v devenv >/dev/null 2>&1; then
@@ -50,7 +50,7 @@ for tool in "${required_tools[@]}"; do
   fi
 
   case "$path" in
-    /nix/store/*|/home/dstadel/projects/axon/.devenv/*)
+    /nix/store/*|"$PROJECT_ROOT"/.devenv/*)
       origin="devenv"
       ;;
     *)

@@ -117,6 +117,63 @@ impl TypeScriptParser {
         }
         None
     }
+
+    fn declaration_node_for_capture<'a>(&self, node: Node<'a>, kind: &str) -> Node<'a> {
+        match kind {
+            "function.name" | "method.name" => node.parent().unwrap_or(node),
+            "arrow.name" => node.parent().unwrap_or(node),
+            "class.name" | "interface.name" | "type_alias.name" => node.parent().unwrap_or(node),
+            _ => node,
+        }
+    }
+
+    fn body_node_for_declaration<'a>(&self, declaration: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        match kind {
+            "function.name" | "method.name" => declaration.child_by_field_name("body"),
+            "arrow.name" => declaration
+                .child_by_field_name("value")
+                .and_then(|value| value.child_by_field_name("body")),
+            _ => None,
+        }
+    }
+
+    fn structural_properties_for_declaration<'a>(
+        &self,
+        declaration: Node<'a>,
+        kind: &str,
+    ) -> HashMap<String, String> {
+        let mut properties = HashMap::new();
+        if let Some(body) = self.body_node_for_declaration(declaration, kind) {
+            properties.insert(
+                "header_end_line".to_string(),
+                body.start_position().row.saturating_add(1).to_string(),
+            );
+            properties.insert(
+                "body_start_line".to_string(),
+                body.start_position().row.saturating_add(1).to_string(),
+            );
+            properties.insert(
+                "body_end_line".to_string(),
+                body.end_position().row.saturating_add(1).to_string(),
+            );
+            let mut cursor = body.walk();
+            let split_lines = body
+                .named_children(&mut cursor)
+                .map(|child| child.start_position().row + 1)
+                .collect::<Vec<_>>();
+            if split_lines.len() > 1 {
+                properties.insert(
+                    "body_split_lines".to_string(),
+                    split_lines
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+        }
+        properties
+    }
 }
 
 impl Parser for TypeScriptParser {
@@ -206,14 +263,17 @@ impl Parser for TypeScriptParser {
                 }
 
                 let text = node.utf8_text(source).unwrap_or("").to_string();
+                let declaration = self.declaration_node_for_capture(node, kind);
+                let declaration_start_line = declaration.start_position().row + 1;
+                let declaration_end_line = declaration.end_position().row + 1;
 
                 match kind {
                     "class.name" => {
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "class".to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
+                            start_line: declaration_start_line,
+                            end_line: declaration_end_line,
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
@@ -264,8 +324,8 @@ impl Parser for TypeScriptParser {
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "interface".to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
+                            start_line: declaration_start_line,
+                            end_line: declaration_end_line,
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
@@ -301,8 +361,8 @@ impl Parser for TypeScriptParser {
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "type_alias".to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
+                            start_line: declaration_start_line,
+                            end_line: declaration_end_line,
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
@@ -321,30 +381,34 @@ impl Parser for TypeScriptParser {
                                 .any(|&k| lower_name.contains(k));
 
                         let mut is_unsafe = false;
-                        if let Some(parent) = node.parent() {
-                            let body = parent.utf8_text(source).unwrap_or("");
-                            if body.contains("eval(") || body.contains("innerHTML") {
-                                is_unsafe = true;
-                            }
+                        let properties =
+                            self.structural_properties_for_declaration(declaration, kind);
+                        let body_text_node = self
+                            .body_node_for_declaration(declaration, kind)
+                            .unwrap_or(declaration);
+                        let body = body_text_node.utf8_text(source).unwrap_or("");
+                        if body.contains("eval(") || body.contains("innerHTML") {
+                            is_unsafe = true;
                         }
 
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "function".to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
+                            start_line: declaration_start_line,
+                            end_line: declaration_end_line,
                             docstring: None,
                             is_entry_point: is_entry,
                             is_public: exports.contains(&text),
                             tested: lower_name.contains("test") || lower_name.contains("spec"),
                             is_nif: false,
                             is_unsafe,
-                            properties: HashMap::new(),
+                            properties,
                             embedding: None,
                         });
                     }
                     "method.name" => {
-                        let mut props = HashMap::new();
+                        let mut props =
+                            self.structural_properties_for_declaration(declaration, kind);
                         if let Some(class_name) = self.find_class_name(node, source) {
                             props.insert("class_name".to_string(), class_name);
                         }
@@ -352,8 +416,8 @@ impl Parser for TypeScriptParser {
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "method".to_string(),
-                            start_line: node.start_position().row + 1,
-                            end_line: node.end_position().row + 1,
+                            start_line: declaration_start_line,
+                            end_line: declaration_end_line,
                             docstring: None,
                             is_entry_point: false,
                             is_public: true, // TS methods are public by default unless private keyword
@@ -390,5 +454,75 @@ impl Parser for TypeScriptParser {
             symbols,
             relations,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeScriptParser;
+    use crate::parser::Parser;
+
+    #[test]
+    fn parser_emits_structural_body_bounds_for_typescript_symbols() {
+        let parser = TypeScriptParser::new();
+        let result = parser.parse(
+            r#"
+export function routeHandler(
+  request: Request,
+) {
+  const body = request.json();
+  return body;
+}
+
+export const computeAnswer = (
+  input: number,
+) => {
+  return input + 1;
+};
+
+class Batcher {
+  shape(items: string[]) {
+    return items.map((item) => item.trim());
+  }
+}
+"#,
+        );
+
+        let function_symbol = result
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "routeHandler")
+            .expect("routeHandler symbol");
+        assert_eq!(function_symbol.start_line, 2);
+        assert!(function_symbol.end_line >= 7);
+        assert_eq!(
+            function_symbol.properties.get("body_start_line"),
+            Some(&"4".to_string())
+        );
+
+        let arrow_symbol = result
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "computeAnswer")
+            .expect("computeAnswer symbol");
+        assert!(arrow_symbol.end_line >= 12);
+        assert_eq!(
+            arrow_symbol.properties.get("body_start_line"),
+            Some(&"11".to_string())
+        );
+
+        let method_symbol = result
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "shape")
+            .expect("shape method symbol");
+        assert_eq!(
+            method_symbol.properties.get("class_name"),
+            Some(&"Batcher".to_string())
+        );
+        assert_eq!(
+            method_symbol.properties.get("body_start_line"),
+            Some(&"16".to_string())
+        );
     }
 }

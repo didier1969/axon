@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, path::PathBuf};
 
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
@@ -9,6 +10,7 @@ use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
 use axon_core::runtime_mode::AxonRuntimeMode;
+use axon_core::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 use axon_core::scanner;
 use axon_core::service_guard;
 use crossbeam_channel::Sender;
@@ -16,6 +18,82 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
+
+fn freshness_state_for_feed(runtime_truth_feed: &axon_core::bridge::RuntimeTruthFeed) -> String {
+    if runtime_truth_feed.stale {
+        "stale".to_string()
+    } else if runtime_truth_feed.degraded_reason.is_some() {
+        "degraded".to_string()
+    } else {
+        "fresh".to_string()
+    }
+}
+
+fn split_run_root(project_root: &str, instance_kind: &str, role_slug: &str) -> PathBuf {
+    let mut path = PathBuf::from(project_root);
+    if instance_kind == "dev" {
+        path.push(".axon-dev");
+    } else {
+        path.push(".axon");
+    }
+    path.push(format!("run-{role_slug}"));
+    path
+}
+
+fn split_runtime_heartbeat_path(
+    project_root: &str,
+    instance_kind: &str,
+    role_slug: &str,
+) -> PathBuf {
+    split_run_root(project_root, instance_kind, role_slug).join("runtime-heartbeat.json")
+}
+
+fn projected_indexer_runtime_from_heartbeat() -> Option<serde_json::Value> {
+    if !matches!(current_runtime_process_role(), AxonProcessRole::Brain) {
+        return None;
+    }
+
+    let instance_kind = std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "dev".to_string());
+    let project_root = std::env::var("AXON_PROJECT_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+    let heartbeat_path = split_runtime_heartbeat_path(&project_root, &instance_kind, "indexer");
+    let payload = fs::read_to_string(&heartbeat_path).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&payload).ok()?;
+    let runtime_truth_feed: axon_core::bridge::RuntimeTruthFeed = payload
+        .get("runtime_truth_feed")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())?;
+    let telemetry = payload
+        .get("runtime_telemetry")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Some(serde_json::json!({
+        "available": !telemetry.is_null(),
+        "telemetry_source": "indexer_peer_heartbeat",
+        "process_role": payload
+            .get("process_role")
+            .and_then(|value| value.as_str())
+            .unwrap_or("indexer"),
+        "runtime_mode": payload
+            .get("runtime_mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+        "runtime_identity": payload
+            .get("runtime_identity")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown-runtime"),
+        "freshness_state": freshness_state_for_feed(&runtime_truth_feed),
+        "observed_age_ms": runtime_truth_feed.observed_age_ms,
+        "degraded_reason": runtime_truth_feed.degraded_reason,
+        "telemetry": telemetry,
+    }))
+}
 
 fn write_runtime_heartbeat_export(
     runtime_mode: AxonRuntimeMode,
@@ -33,10 +111,7 @@ fn write_runtime_heartbeat_export(
         std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
     let install_generation =
         std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
-    let process_role = std::env::var("AXON_RUNTIME_SHADOW_ROLE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "legacy_monolith".to_string());
+    let process_role = current_runtime_process_role().as_str();
     let runtime_identity = std::env::var("AXON_RUNTIME_IDENTITY")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -68,6 +143,11 @@ fn write_runtime_heartbeat_export(
             "ingress_flush_count": runtime_snapshot.ingress_flush_count,
             "ingress_last_flush_duration_ms": runtime_snapshot.ingress_last_flush_duration_ms,
             "ingress_last_promoted_count": runtime_snapshot.ingress_last_promoted_count,
+            "ingress_promoted_total": runtime_snapshot.ingress_promoted_total,
+            "ingress_last_durably_persisted_count": runtime_snapshot.ingress_last_durably_persisted_count,
+            "ingress_durably_persisted_total": runtime_snapshot.ingress_durably_persisted_total,
+            "ingress_last_excluded_from_pending_count": runtime_snapshot.ingress_last_excluded_from_pending_count,
+            "ingress_excluded_from_pending_total": runtime_snapshot.ingress_excluded_from_pending_total,
             "graph_projection_queue": {
                 "queued": runtime_snapshot.graph_projection_queue_queued,
                 "inflight": runtime_snapshot.graph_projection_queue_inflight,
@@ -78,6 +158,27 @@ fn write_runtime_heartbeat_export(
                 "inflight": runtime_snapshot.file_vectorization_queue_inflight,
                 "total": runtime_snapshot.file_vectorization_queue_depth,
             },
+            "vector_chunks_embedded_total": runtime_snapshot.vector_chunks_embedded_total,
+            "chunk_embeddings_per_second": runtime_snapshot.chunk_embeddings_per_second,
+            "chunk_embeddings_rate_window_ms": runtime_snapshot.chunk_embeddings_rate_window_ms,
+            "prepare_inflight_chunks_current": runtime_snapshot.prepare_inflight_chunks_current,
+            "ready_queue_chunks_current": runtime_snapshot.ready_queue_chunks_current,
+            "ready_queue_chunks_small": runtime_snapshot.ready_queue_chunks_small,
+            "ready_queue_chunks_medium": runtime_snapshot.ready_queue_chunks_medium,
+            "ready_queue_chunks_large": runtime_snapshot.ready_queue_chunks_large,
+            "ready_batches_small": runtime_snapshot.ready_batches_small,
+            "ready_batches_medium": runtime_snapshot.ready_batches_medium,
+            "ready_batches_large": runtime_snapshot.ready_batches_large,
+            "mixed_fallback_batches_total": runtime_snapshot.mixed_fallback_batches_total,
+            "homogeneous_batches_total": runtime_snapshot.homogeneous_batches_total,
+            "last_consumed_batch_lane": runtime_snapshot.last_consumed_batch_lane,
+            "active_small_max_tokens": runtime_snapshot.active_small_max_tokens,
+            "active_medium_max_tokens": runtime_snapshot.active_medium_max_tokens,
+            "ready_replenishment_deficit_current": runtime_snapshot.ready_replenishment_deficit_current,
+            "oldest_ready_batch_age_ms_current": runtime_snapshot.oldest_ready_batch_age_ms_current,
+            "graph_workers_started_total": runtime_snapshot.graph_workers_started_total,
+            "graph_workers_active_current": runtime_snapshot.graph_workers_active_current,
+            "graph_worker_heartbeat_at_ms": runtime_snapshot.graph_worker_heartbeat_at_ms,
             "claim_mode": runtime_snapshot.claim_mode,
             "service_pressure": runtime_snapshot.service_pressure,
             "utility_first_scheduler_state": runtime_snapshot.utility_first_scheduler_state,
@@ -135,7 +236,18 @@ pub(crate) fn spawn_runtime_telemetry(
                 service_guard::current_runtime_truth_feed()
             };
             write_runtime_heartbeat_export(runtime_mode, &runtime_truth_feed, &snapshot);
+            let telemetry_source = "local_runtime".to_string();
+            let telemetry_process_role = current_runtime_process_role().as_str().to_string();
+            let telemetry_freshness_state = freshness_state_for_feed(&runtime_truth_feed);
+            let telemetry_observed_age_ms = runtime_truth_feed.observed_age_ms;
+            let telemetry_degraded_reason = runtime_truth_feed.degraded_reason.clone();
+            let projected_indexer_runtime = projected_indexer_runtime_from_heartbeat();
             let event = BridgeEvent::RuntimeTelemetry {
+                telemetry_source,
+                telemetry_process_role,
+                telemetry_freshness_state,
+                telemetry_observed_age_ms,
+                telemetry_degraded_reason,
                 budget_bytes: snapshot.budget_bytes,
                 reserved_bytes: snapshot.reserved_bytes,
                 exhaustion_ratio: snapshot.exhaustion_ratio,
@@ -184,6 +296,12 @@ pub(crate) fn spawn_runtime_telemetry(
                 ingress_flush_count: snapshot.ingress_flush_count,
                 ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
                 ingress_last_promoted_count: snapshot.ingress_last_promoted_count,
+                ingress_promoted_total: snapshot.ingress_promoted_total,
+                ingress_last_durably_persisted_count: snapshot.ingress_last_durably_persisted_count,
+                ingress_durably_persisted_total: snapshot.ingress_durably_persisted_total,
+                ingress_last_excluded_from_pending_count: snapshot
+                    .ingress_last_excluded_from_pending_count,
+                ingress_excluded_from_pending_total: snapshot.ingress_excluded_from_pending_total,
                 memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
                 memory_trim_successes_total: snapshot.memory_trim_successes_total,
                 cpu_load: snapshot.cpu_load,
@@ -206,7 +324,33 @@ pub(crate) fn spawn_runtime_telemetry(
                 file_vectorization_queue_queued: snapshot.file_vectorization_queue_queued,
                 file_vectorization_queue_inflight: snapshot.file_vectorization_queue_inflight,
                 file_vectorization_queue_depth: snapshot.file_vectorization_queue_depth,
+                vector_chunks_embedded_total: snapshot.vector_chunks_embedded_total,
+                chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
+                chunk_embeddings_rate_window_ms: snapshot.chunk_embeddings_rate_window_ms,
+                prepare_inflight_chunks_current: snapshot.prepare_inflight_chunks_current,
+                ready_queue_chunks_current: snapshot.ready_queue_chunks_current,
+                ready_queue_chunks_small: snapshot.ready_queue_chunks_small,
+                ready_queue_chunks_medium: snapshot.ready_queue_chunks_medium,
+                ready_queue_chunks_large: snapshot.ready_queue_chunks_large,
+                ready_batches_small: snapshot.ready_batches_small,
+                ready_batches_medium: snapshot.ready_batches_medium,
+                ready_batches_large: snapshot.ready_batches_large,
+                mixed_fallback_batches_total: snapshot.mixed_fallback_batches_total,
+                homogeneous_batches_total: snapshot.homogeneous_batches_total,
+                last_consumed_batch_lane: snapshot.last_consumed_batch_lane,
+                active_small_max_tokens: snapshot.active_small_max_tokens,
+                active_medium_max_tokens: snapshot.active_medium_max_tokens,
+                last_embed_attempt_wall_ms: snapshot.last_embed_attempt_wall_ms,
+                avg_embed_attempt_wall_ms: snapshot.avg_embed_attempt_wall_ms,
+                max_embed_attempt_wall_ms: snapshot.max_embed_attempt_wall_ms,
+                last_embed_gap_ms: snapshot.last_embed_gap_ms,
+                avg_embed_gap_ms: snapshot.avg_embed_gap_ms,
+                max_embed_gap_ms: snapshot.max_embed_gap_ms,
+                graph_workers_started_total: snapshot.graph_workers_started_total,
+                graph_workers_active_current: snapshot.graph_workers_active_current,
+                graph_worker_heartbeat_at_ms: snapshot.graph_worker_heartbeat_at_ms,
                 runtime_truth_feed: runtime_truth_feed.clone(),
+                projected_indexer_runtime,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

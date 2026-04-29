@@ -27,9 +27,7 @@ defmodule Axon.Watcher.CockpitLive do
       |> stream_configure(:reasons, dom_id: &"reason-#{stable_dom_id(&1.reason)}")
       |> assign(
         repo_code: repo_code,
-        monitoring_active: true,
         expanded_projects: MapSet.new(),
-        last_mcp_probe_ms: 0,
         sql_source: SqlGateway.source_info(),
         workspace: default_workspace(),
         runtime: default_runtime(),
@@ -391,6 +389,18 @@ defmodule Axon.Watcher.CockpitLive do
             </div>
 
             <div class="detail-grid">
+              <.signal_stat
+                label="Runtime Source"
+                value={String.upcase(@runtime.telemetry_source)}
+              />
+              <.signal_stat
+                label="Runtime Role"
+                value={String.upcase(@runtime.telemetry_process_role)}
+              />
+              <.signal_stat
+                label="Runtime Freshness"
+                value={runtime_freshness_label(@runtime)}
+              />
               <.signal_stat label="Queue Depth" value={Integer.to_string(@runtime.queue_depth)} />
               <.signal_stat
                 label="Graph Projection Queued"
@@ -403,6 +413,62 @@ defmodule Axon.Watcher.CockpitLive do
               <.signal_stat
                 label="Graph Projection Pending"
                 value={Integer.to_string(@runtime.graph_projection_queue_depth)}
+              />
+              <.signal_stat
+                label="Chunk Embed Rate"
+                value={
+                  chunk_embedding_rate_label(
+                    @runtime.chunk_embeddings_per_second,
+                    @runtime.chunk_embeddings_rate_window_ms
+                  )
+                }
+              />
+              <.signal_stat
+                label="Chunks Embedded"
+                value={Integer.to_string(@runtime.vector_chunks_embedded_total)}
+              />
+              <.signal_stat
+                label="Ready Chunks"
+                value={Integer.to_string(@runtime.ready_queue_chunks_current)}
+              />
+              <.signal_stat
+                label="Prepare Chunks"
+                value={Integer.to_string(@runtime.prepare_inflight_chunks_current)}
+              />
+              <.signal_stat
+                label="Ready Lanes"
+                value={
+                  "S #{@runtime.ready_queue_chunks_small} / M #{@runtime.ready_queue_chunks_medium} / L #{@runtime.ready_queue_chunks_large}"
+                }
+              />
+              <.signal_stat
+                label="Ready Batches"
+                value={
+                  "S #{@runtime.ready_batches_small} / M #{@runtime.ready_batches_medium} / L #{@runtime.ready_batches_large}"
+                }
+              />
+              <.signal_stat
+                label="Batch Shape"
+                value={
+                  "H #{@runtime.homogeneous_batches_total} / Mixed #{@runtime.mixed_fallback_batches_total}"
+                }
+              />
+              <.signal_stat
+                label="Last GPU Lane"
+                value={String.upcase(@runtime.last_consumed_batch_lane)}
+              />
+              <.signal_stat
+                label="Lane Thresholds"
+                value={
+                  lane_thresholds_label(
+                    @runtime.active_small_max_tokens,
+                    @runtime.active_medium_max_tokens
+                  )
+                }
+              />
+              <.signal_stat
+                label="Graph Workers"
+                value={"#{@runtime.graph_workers_active_current} active / #{@runtime.graph_workers_started_total} started"}
               />
               <.signal_stat
                 label="File Vector Queued"
@@ -477,6 +543,181 @@ defmodule Axon.Watcher.CockpitLive do
               <.latency_panel label="MCP Latency" summary={@runtime.mcp_latency} />
               <.latency_panel label="SQL Truth Latency" summary={@runtime.sql_latency} />
               <.latency_panel label="Dashboard Latency" summary={@runtime.dashboard_latency} />
+            </div>
+          </section>
+
+          <section
+            :if={Map.get(@runtime.projected_indexer_runtime, "available", false)}
+            class="cockpit-band"
+          >
+            <div class="band-title-row">
+              <div>
+                <p class="eyebrow">Indexer Runtime</p>
+                <h2>Authoritative peer projection</h2>
+              </div>
+              <span class="band-kicker">
+                {String.upcase(Map.get(@runtime.projected_indexer_runtime, "process_role", "indexer"))}
+              </span>
+            </div>
+
+            <div class="detail-grid">
+              <.signal_stat
+                label="Telemetry Source"
+                value={
+                  String.upcase(
+                    Map.get(@runtime.projected_indexer_runtime, "telemetry_source", "unknown")
+                  )
+                }
+              />
+              <.signal_stat
+                label="Freshness"
+                value={projected_indexer_freshness_label(@runtime.projected_indexer_runtime)}
+              />
+              <.signal_stat
+                label="Buffered Entries"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ingress_buffered_entries"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Graph Pending"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "graph_projection_queue",
+                      "total"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Chunk Embed Rate"
+                value={
+                  chunk_embedding_rate_label(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "chunk_embeddings_per_second"
+                    ]) || 0.0,
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "chunk_embeddings_rate_window_ms"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Chunks Embedded"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "vector_chunks_embedded_total"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Ready Chunks"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ready_queue_chunks_current"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Ready Lanes"
+                value={
+                  projected_lane_chunks_label(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ready_queue_chunks_small"
+                    ]) || 0,
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ready_queue_chunks_medium"
+                    ]) || 0,
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ready_queue_chunks_large"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Batch Shape"
+                value={
+                  projected_batch_shape_label(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "homogeneous_batches_total"
+                    ]) || 0,
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "mixed_fallback_batches_total"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Last GPU Lane"
+                value={
+                  String.upcase(
+                    to_string(
+                      get_in(@runtime.projected_indexer_runtime, [
+                        "telemetry",
+                        "last_consumed_batch_lane"
+                      ]) || "unknown"
+                    )
+                  )
+                }
+              />
+              <.signal_stat
+                label="Graph Workers"
+                value={
+                  graph_workers_label(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "graph_workers_active_current"
+                    ]) || 0,
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "graph_workers_started_total"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="File Vector Pending"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "file_vectorization_queue",
+                      "total"
+                    ]) || 0
+                  )
+                }
+              />
+              <.signal_stat
+                label="Last Promoted"
+                value={
+                  Integer.to_string(
+                    get_in(@runtime.projected_indexer_runtime, [
+                      "telemetry",
+                      "ingress_last_promoted_count"
+                    ]) || 0
+                  )
+                }
+              />
             </div>
           </section>
 
@@ -789,13 +1030,8 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   defp apply_snapshot(socket, snapshot) do
-    snapshot =
-      snapshot
-      |> preserve_workspace(socket.assigns.workspace)
-      |> preserve_projects(socket.assigns.project_count, socket.assigns.projects)
-      |> preserve_reasons(socket.assigns.reason_count, socket.assigns.reasons)
-
-    assign_snapshot(socket, snapshot)
+    socket
+    |> assign_snapshot(preserve_snapshot(snapshot, socket.assigns))
   end
 
   defp request_snapshot_refresh(socket) do
@@ -838,36 +1074,36 @@ defmodule Axon.Watcher.CockpitLive do
     }
   end
 
-  defp preserve_workspace(%{workspace: workspace} = snapshot, previous_workspace) do
-    if preserve_previous_snapshot?(snapshot) and zero_workspace?(workspace) and
-         not zero_workspace?(previous_workspace) do
+  defp preserve_snapshot(snapshot, assigns) do
+    if preserve_previous_snapshot?(snapshot) do
+      snapshot
+      |> preserve_workspace_snapshot(assigns.workspace)
+      |> preserve_collection_snapshot(:projects, assigns.project_count, assigns.projects)
+      |> preserve_collection_snapshot(:reasons, assigns.reason_count, assigns.reasons)
+    else
+      snapshot
+    end
+  end
+
+  defp preserve_workspace_snapshot(%{workspace: workspace} = snapshot, previous_workspace) do
+    if zero_workspace?(workspace) and not zero_workspace?(previous_workspace) do
       %{snapshot | workspace: previous_workspace}
     else
       snapshot
     end
   end
 
-  defp preserve_projects(%{projects: []} = snapshot, previous_count, previous_projects)
+  defp preserve_collection_snapshot(snapshot, key, previous_count, previous_values)
        when previous_count > 0 do
-    if preserve_previous_snapshot?(snapshot) do
-      %{snapshot | projects: previous_projects}
+    if Map.get(snapshot, key) == [] do
+      Map.put(snapshot, key, previous_values)
     else
       snapshot
     end
   end
 
-  defp preserve_projects(snapshot, _previous_count, _previous_projects), do: snapshot
-
-  defp preserve_reasons(%{reasons: []} = snapshot, previous_count, previous_reasons)
-       when previous_count > 0 do
-    if preserve_previous_snapshot?(snapshot) do
-      %{snapshot | reasons: previous_reasons}
-    else
-      snapshot
-    end
-  end
-
-  defp preserve_reasons(snapshot, _previous_count, _previous_reasons), do: snapshot
+  defp preserve_collection_snapshot(snapshot, _key, _previous_count, _previous_values),
+    do: snapshot
 
   defp preserve_previous_snapshot?(%{runtime: runtime}) when is_map(runtime) do
     Map.get(runtime, :sql_snapshot_status, :unknown) != :ok
@@ -996,6 +1232,12 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp structify_runtime(stats) do
     %{
+      telemetry_source: Map.get(stats, :telemetry_source, "local_runtime") || "local_runtime",
+      telemetry_process_role: Map.get(stats, :telemetry_process_role, "unknown") || "unknown",
+      telemetry_freshness_state:
+        Map.get(stats, :telemetry_freshness_state, "unknown") || "unknown",
+      telemetry_observed_age_ms: Map.get(stats, :telemetry_observed_age_ms, nil),
+      telemetry_degraded_reason: Map.get(stats, :telemetry_degraded_reason, nil),
       budget_bytes: Map.get(stats, :budget_bytes, 0) || 0,
       reserved_bytes: Map.get(stats, :reserved_bytes, 0) || 0,
       exhaustion_ratio: Map.get(stats, :exhaustion_ratio, 0.0) || 0.0,
@@ -1029,6 +1271,25 @@ defmodule Axon.Watcher.CockpitLive do
       file_vectorization_queue_inflight:
         Map.get(stats, :file_vectorization_queue_inflight, 0) || 0,
       file_vectorization_queue_depth: Map.get(stats, :file_vectorization_queue_depth, 0) || 0,
+      vector_chunks_embedded_total: Map.get(stats, :vector_chunks_embedded_total, 0) || 0,
+      chunk_embeddings_per_second: Map.get(stats, :chunk_embeddings_per_second, 0.0) || 0.0,
+      chunk_embeddings_rate_window_ms: Map.get(stats, :chunk_embeddings_rate_window_ms, 0) || 0,
+      prepare_inflight_chunks_current: Map.get(stats, :prepare_inflight_chunks_current, 0) || 0,
+      ready_queue_chunks_current: Map.get(stats, :ready_queue_chunks_current, 0) || 0,
+      ready_queue_chunks_small: Map.get(stats, :ready_queue_chunks_small, 0) || 0,
+      ready_queue_chunks_medium: Map.get(stats, :ready_queue_chunks_medium, 0) || 0,
+      ready_queue_chunks_large: Map.get(stats, :ready_queue_chunks_large, 0) || 0,
+      ready_batches_small: Map.get(stats, :ready_batches_small, 0) || 0,
+      ready_batches_medium: Map.get(stats, :ready_batches_medium, 0) || 0,
+      ready_batches_large: Map.get(stats, :ready_batches_large, 0) || 0,
+      mixed_fallback_batches_total: Map.get(stats, :mixed_fallback_batches_total, 0) || 0,
+      homogeneous_batches_total: Map.get(stats, :homogeneous_batches_total, 0) || 0,
+      last_consumed_batch_lane: Map.get(stats, :last_consumed_batch_lane, "unknown") || "unknown",
+      active_small_max_tokens: Map.get(stats, :active_small_max_tokens, 0) || 0,
+      active_medium_max_tokens: Map.get(stats, :active_medium_max_tokens, 0) || 0,
+      graph_workers_started_total: Map.get(stats, :graph_workers_started_total, 0) || 0,
+      graph_workers_active_current: Map.get(stats, :graph_workers_active_current, 0) || 0,
+      graph_worker_heartbeat_at_ms: Map.get(stats, :graph_worker_heartbeat_at_ms, 0) || 0,
       ingress_enabled: Map.get(stats, :ingress_enabled, false) || false,
       ingress_buffered_entries: Map.get(stats, :ingress_buffered_entries, 0) || 0,
       ingress_subtree_hints: Map.get(stats, :ingress_subtree_hints, 0) || 0,
@@ -1077,6 +1338,16 @@ defmodule Axon.Watcher.CockpitLive do
           p95_ms: 0,
           p99_ms: 0,
           series: []
+        }),
+      projected_indexer_runtime:
+        Map.get(stats, :projected_indexer_runtime, %{
+          "available" => false,
+          "telemetry_source" => "unavailable",
+          "process_role" => "indexer",
+          "freshness_state" => "missing",
+          "observed_age_ms" => nil,
+          "degraded_reason" => nil,
+          "telemetry" => %{}
         })
     }
   end
@@ -1120,6 +1391,55 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp sql_source_value(%{endpoint: endpoint}) when is_binary(endpoint), do: endpoint
   defp sql_source_value(_), do: "unknown"
+
+  defp runtime_freshness_label(runtime) do
+    state = runtime.telemetry_freshness_state || "unknown"
+    age = runtime.telemetry_observed_age_ms
+
+    case age do
+      value when is_integer(value) -> "#{String.upcase(state)} (#{value} ms)"
+      _ -> String.upcase(state)
+    end
+  end
+
+  defp projected_indexer_freshness_label(projected) when is_map(projected) do
+    state = Map.get(projected, "freshness_state", "unknown")
+    age = Map.get(projected, "observed_age_ms")
+
+    case age do
+      value when is_integer(value) -> "#{String.upcase(state)} (#{value} ms)"
+      _ -> String.upcase(state)
+    end
+  end
+
+  defp projected_indexer_freshness_label(_), do: "UNKNOWN"
+
+  defp chunk_embedding_rate_label(rate, window_ms) do
+    rounded = format_float(rate)
+
+    case window_ms do
+      value when is_integer(value) and value > 0 -> "#{rounded} chunks/s (#{value} ms)"
+      _ -> "#{rounded} chunks/s"
+    end
+  end
+
+  defp graph_workers_label(active, started) do
+    "#{active || 0} active / #{started || 0} started"
+  end
+
+  defp lane_thresholds_label(0, 0), do: "bootstrap"
+
+  defp lane_thresholds_label(small_max, medium_max) do
+    "small<=#{small_max} / medium<=#{medium_max} / large>#{medium_max}"
+  end
+
+  defp projected_lane_chunks_label(small, medium, large) do
+    "S #{small || 0} / M #{medium || 0} / L #{large || 0}"
+  end
+
+  defp projected_batch_shape_label(homogeneous, mixed) do
+    "H #{homogeneous || 0} / Mixed #{mixed || 0}"
+  end
 
   defp readiness_tone("ready"), do: :ok
   defp readiness_tone("partial"), do: :info
@@ -1218,8 +1538,6 @@ defmodule Axon.Watcher.CockpitLive do
   defp spark_height(_value, _max_value), do: 10
 
   defp maybe_probe_mcp(socket) do
-    now = System.monotonic_time(:millisecond)
-
     case SqlGateway.mcp_ping() do
       {:ok, duration_ms} ->
         Telemetry.mark_mcp_probe_success(duration_ms)
@@ -1228,7 +1546,7 @@ defmodule Axon.Watcher.CockpitLive do
         Telemetry.mark_mcp_probe_error(reason, duration_ms)
     end
 
-    assign(socket, :last_mcp_probe_ms, now)
+    socket
   end
 
   defp schedule_event_refresh(socket, event) do

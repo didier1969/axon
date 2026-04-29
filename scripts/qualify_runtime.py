@@ -17,8 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime_contracts import (
+    SUPPORTED_MODES,
+    mode_contract,
+    runtime_authority_contract,
+)
 
-PROJECT_ROOT = Path("/home/dstadel/projects/axon")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = PROJECT_ROOT / ".axon" / "qualification-suite-runs"
 NVIDIA_SMI = "/usr/lib/wsl/lib/nvidia-smi"
 MIN_RUNTIME_OBSERVATION_SEC = 8
@@ -49,9 +54,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "graph_only", "read_only", "mcp_only", "brain_shadow", "indexer_shadow"],
-        default="graph_only",
-        help="Primary runtime mode when --compare is not used. Default: graph_only",
+        choices=sorted(SUPPORTED_MODES),
+        default="indexer_graph",
+        help="Primary runtime mode when --compare is not used. Default: indexer_graph",
     )
     parser.add_argument(
         "--compare",
@@ -143,7 +148,7 @@ def normalize_modes(mode: str, compare: str) -> list[str]:
         modes = [mode]
     seen: list[str] = []
     for item in modes:
-        if item not in {"full", "graph_only", "read_only", "mcp_only", "brain_shadow", "indexer_shadow"}:
+        if item not in SUPPORTED_MODES:
             raise SystemExit(f"Unsupported mode: {item}")
         if item not in seen:
             seen.append(item)
@@ -165,6 +170,24 @@ def exit_code_for_verdict(verdict: str) -> int:
     if verdict == "warn":
         return 1
     return 2
+
+
+def runtime_authority_contract_matches(runtime_truth_summary: dict[str, Any]) -> bool:
+    contract = runtime_authority_contract(runtime_truth_summary.get("process_role"))
+    return all(runtime_truth_summary.get(key) == value for key, value in contract.items())
+
+
+def runtime_authority_restored(
+    runtime_truth_summary: dict[str, Any], canonical_truth_restored: bool
+) -> bool:
+    if not canonical_truth_restored:
+        return False
+    contract = runtime_authority_contract(runtime_truth_summary.get("process_role"))
+    return (
+        runtime_truth_summary.get("public_mcp_authority") == contract["public_mcp_authority"]
+        and runtime_truth_summary.get("soll_writer_authority") == contract["soll_writer_authority"]
+        and runtime_truth_summary.get("ist_writer_authority") == contract["ist_writer_authority"]
+    )
 
 
 def build_mode_comparison(mode_reports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -245,11 +268,12 @@ def command_env(
     mode: str, instance: str, mcp_url: str, gpu_qualified_runtime: bool = False
 ) -> dict[str, str]:
     env = os.environ.copy()
+    contract = mode_contract(mode)
     env["AXON_INSTANCE_KIND"] = instance
     env["AXON_MCP_URL"] = mcp_url
-    env["AXON_RUNTIME_SHADOW_ROLE"] = shadow_role_for_mode(mode)
-    env["AXON_SPLIT_SHADOW_ONLY"] = "1" if mode in {"brain_shadow", "indexer_shadow"} else "0"
-    if mode == "full":
+    env["AXON_RUNTIME_SHADOW_ROLE"] = contract["shadow_role"]
+    env["AXON_SPLIT_SHADOW_ONLY"] = "1" if contract["shadow_only"] else "0"
+    if mode == "indexer_full":
         env["AXON_ENABLE_AUTONOMOUS_INGESTOR"] = "true"
         env["AXON_RUNTIME_PROFILE"] = "full_autonomous"
     if gpu_qualified_runtime:
@@ -435,13 +459,13 @@ def summarize_runtime_truth(status_data: dict[str, Any]) -> dict[str, Any]:
     runtime_authority = status_data.get("runtime_authority", {})
     if not isinstance(runtime_authority, dict):
         return {"available": False, "reason": "missing_runtime_authority"}
-    topology = runtime_authority.get("runtime_topology", {})
-    if not isinstance(topology, dict):
-        return {"available": False, "reason": "missing_runtime_topology"}
-    indexer_feed = topology.get("indexer_feed", {})
+    runtime_state = runtime_authority.get("runtime_state", {})
+    if not isinstance(runtime_state, dict):
+        return {"available": False, "reason": "missing_runtime_state"}
+    indexer_feed = runtime_state.get("indexer_feed", {})
     if not isinstance(indexer_feed, dict):
         indexer_feed = {}
-    ist_snapshot = topology.get("ist_snapshot", {})
+    ist_snapshot = runtime_state.get("ist_snapshot", {})
     if not isinstance(ist_snapshot, dict):
         ist_snapshot = {}
     summary = {
@@ -456,13 +480,13 @@ def summarize_runtime_truth(status_data: dict[str, Any]) -> dict[str, Any]:
         "runtime_install_generation": status_data.get("runtime_version", {}).get("install_generation")
         if isinstance(status_data.get("runtime_version"), dict)
         else None,
-        "process_role": topology.get("process_role"),
-        "public_mcp_authority": topology.get("public_mcp_authority"),
-        "soll_writer_authority": topology.get("soll_writer_authority"),
-        "ist_writer_authority": topology.get("ist_writer_authority"),
-        "brain_ready": topology.get("brain_ready"),
-        "indexer_ready": topology.get("indexer_ready"),
-        "system_converged": topology.get("system_converged"),
+        "process_role": runtime_state.get("process_role"),
+        "public_mcp_authority": runtime_state.get("public_mcp_authority"),
+        "soll_writer_authority": runtime_state.get("soll_writer_authority"),
+        "ist_writer_authority": runtime_state.get("ist_writer_authority"),
+        "brain_ready": runtime_state.get("brain_ready"),
+        "indexer_ready": runtime_state.get("indexer_ready"),
+        "system_converged": runtime_state.get("system_converged"),
         "indexer_feed_state": indexer_feed.get("state"),
         "indexer_feed_stale": indexer_feed.get("stale"),
         "indexer_feed_degraded_reason": indexer_feed.get("degraded_reason"),
@@ -530,7 +554,7 @@ def expected_runtime_version_for_instance(instance: str) -> dict[str, Any]:
 
 
 def summarize_runtime_guardrails(mode: str, instance: str, runtime_truth_summary: dict[str, Any]) -> dict[str, Any]:
-    shadow_mode = mode in {"brain_shadow", "indexer_shadow"}
+    shadow_mode = bool(mode_contract(mode)["shadow_only"])
     expected_runtime_version = expected_runtime_version_for_instance(instance)
     version_identity_verified = False
     if expected_runtime_version.get("available"):
@@ -543,7 +567,6 @@ def summarize_runtime_guardrails(mode: str, instance: str, runtime_truth_summary
     available = isinstance(runtime_truth_summary, dict) and runtime_truth_summary.get("available") is not False
     canonical_truth_restored = bool(available)
     if canonical_truth_restored:
-        split_topology = runtime_truth_summary.get("topology") == "brain_indexer_split"
         canonical_truth_restored = (
             runtime_truth_summary.get("truth_status") == "canonical"
             and runtime_truth_summary.get("brain_ready") is True
@@ -557,36 +580,11 @@ def summarize_runtime_guardrails(mode: str, instance: str, runtime_truth_summary
             and runtime_truth_summary.get("ist_snapshot_unsafe_read") is False
             and runtime_truth_summary.get("ist_snapshot_degraded_reason") is None
             and version_identity_verified
-            and (
-                (
-                    split_topology
-                    and runtime_truth_summary.get("process_role") == "brain"
-                    and runtime_truth_summary.get("public_mcp_authority") == "brain"
-                    and runtime_truth_summary.get("soll_writer_authority") == "brain"
-                    and runtime_truth_summary.get("ist_writer_authority") == "indexer"
-                )
-                or (
-                    not split_topology
-                    and runtime_truth_summary.get("process_role") == "legacy_monolith"
-                    and runtime_truth_summary.get("public_mcp_authority") == "legacy_monolith"
-                    and runtime_truth_summary.get("soll_writer_authority") == "legacy_monolith"
-                    and runtime_truth_summary.get("ist_writer_authority") == "legacy_monolith"
-                )
-            )
+            and runtime_authority_contract_matches(runtime_truth_summary)
         )
-    split_topology = runtime_truth_summary.get("topology") == "brain_indexer_split"
-    if split_topology:
-        canonical_authority_restored = canonical_truth_restored and runtime_truth_summary.get(
-            "public_mcp_authority"
-        ) == "brain" and runtime_truth_summary.get("soll_writer_authority") == "brain"
-        if canonical_authority_restored:
-            canonical_authority_restored = runtime_truth_summary.get("ist_writer_authority") == "indexer"
-    else:
-        canonical_authority_restored = canonical_truth_restored and runtime_truth_summary.get(
-            "public_mcp_authority"
-        ) == "legacy_monolith" and runtime_truth_summary.get("soll_writer_authority") == "legacy_monolith"
-        if canonical_authority_restored:
-            canonical_authority_restored = runtime_truth_summary.get("ist_writer_authority") == "legacy_monolith"
+    canonical_authority_restored = runtime_authority_restored(
+        runtime_truth_summary, canonical_truth_restored
+    )
     promotion_allowed = canonical_authority_restored and not shadow_mode
     rollback_path_state = "green" if promotion_allowed else "red"
     return {
@@ -764,31 +762,26 @@ def quiescent_step_status(quiescent_summary: dict[str, Any]) -> str:
 
 def mode_flag(mode: str) -> str:
     return {
-        "full": "--full",
-        "graph_only": "--graph-only",
-        "read_only": "--read-only",
-        "mcp_only": "--mcp-only",
+        "brain_only": "--brain-only",
+        "indexer_graph": "--indexer-graph",
+        "indexer_vector": "--indexer-vector",
+        "indexer_full": "--indexer-full",
     }[mode]
 
 
 def shadow_role_for_mode(mode: str) -> str:
-    if mode == "brain_shadow":
-        return "brain"
-    if mode == "indexer_shadow":
-        return "indexer"
-    return "legacy_monolith"
+    return mode_contract(mode)["shadow_role"]
 
 
 def start_command_for_mode(mode: str) -> list[str]:
-    if mode == "brain_shadow":
-        return ["bash", "scripts/start-brain.sh"]
-    if mode == "indexer_shadow":
-        return ["bash", "scripts/start-indexer.sh"]
+    contract = mode_contract(mode)
+    if contract["start_script"]:
+        return ["bash", contract["start_script"]]
     return ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"]
 
 
 def mcp_robustness_supported_mode(mode: str) -> str | None:
-    if mode in {"full", "graph_only", "read_only", "mcp_only"}:
+    if not mode_contract(mode)["shadow_only"]:
         return mode
     return None
 
@@ -1082,8 +1075,19 @@ def diagnose_resource_balance(summary: dict[str, Any]) -> dict[str, Any]:
         summary.get("gpu_mem_free_mb", {}).get("min") or 0.0
     )
     pipeline = summary.get("pipeline_buffer", {})
-    ready_avg = float(pipeline.get("ready_queue_depth_current", {}).get("avg") or 0.0)
-    prepare_avg = float(pipeline.get("prepare_inflight_current", {}).get("avg") or 0.0)
+    ready_avg = float(
+        pipeline.get("ready_queue_chunks_current", {}).get("avg")
+        or pipeline.get("ready_queue_depth_current", {}).get("avg")
+        or 0.0
+    )
+    prepare_avg = float(
+        pipeline.get("prepare_inflight_chunks_current", {}).get("avg")
+        or pipeline.get("prepare_inflight_current", {}).get("avg")
+        or 0.0
+    )
+    ready_gap_avg = float(
+        pipeline.get("ready_replenishment_deficit_current", {}).get("avg") or 0.0
+    )
     target_chunks_p50 = float(pipeline.get("target_embed_batch_chunks", {}).get("p50") or 0.0)
     actual_chunks_avg = float(pipeline.get("avg_chunks_per_embed_call", {}).get("avg") or 0.0)
     sawtooth = summary.get("gpu_util_sawtooth", {})
@@ -1102,6 +1106,10 @@ def diagnose_resource_balance(summary: dict[str, Any]) -> dict[str, Any]:
         verdict = "vram_limited"
         reason = "gpu_memory_runs_close_to_capacity"
         signals.extend(["high_vram_p95", "prefer_single_gpu_worker_or_smaller_batches"])
+    elif ready_gap_avg > 0:
+        verdict = "vector_underfed"
+        reason = "front_chunk_gap_persists_during_observation_window"
+        signals.extend(["ready_gap_persisted", "increase_front_chunk_supply"])
     elif (
         gpu_avg < 35.0
         and cpu_avg < 50.0
@@ -1224,8 +1232,17 @@ def summarize_resource_samples(samples: list[dict[str, Any]], interval_ms: int) 
             "ready_queue_depth_current": summarize_numeric_series(
                 pipeline_samples, "ready_queue_depth_current"
             ),
+            "ready_queue_chunks_current": summarize_numeric_series(
+                pipeline_samples, "ready_queue_chunks_current"
+            ),
             "prepare_inflight_current": summarize_numeric_series(
                 pipeline_samples, "prepare_inflight_current"
+            ),
+            "prepare_inflight_chunks_current": summarize_numeric_series(
+                pipeline_samples, "prepare_inflight_chunks_current"
+            ),
+            "ready_replenishment_deficit_current": summarize_numeric_series(
+                pipeline_samples, "ready_replenishment_deficit_current"
             ),
             "prepare_claimed_current": summarize_numeric_series(
                 pipeline_samples, "prepare_claimed_current"
@@ -1463,7 +1480,14 @@ class ResourceSampler:
             "vector_queue_current": stage_count("file_vectorization_queue_owned"),
             "vector_ready_current": stage_count("vector_ready"),
             "ready_queue_depth_current": vector_runtime.get("ready_queue_depth_current"),
+            "ready_queue_chunks_current": vector_runtime.get("ready_queue_chunks_current"),
             "prepare_inflight_current": vector_runtime.get("prepare_inflight_current"),
+            "prepare_inflight_chunks_current": vector_runtime.get(
+                "prepare_inflight_chunks_current"
+            ),
+            "ready_replenishment_deficit_current": vector_runtime.get(
+                "ready_replenishment_deficit_current"
+            ),
             "prepare_claimed_current": vector_runtime.get("prepare_claimed_current"),
             "active_claimed_current": vector_runtime.get("active_claimed_current"),
             "oldest_ready_batch_age_ms_current": vector_runtime.get("oldest_ready_batch_age_ms_current"),
@@ -1904,12 +1928,12 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path, insta
 
 
 def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path, instance: str, url: str) -> dict[str, Any]:
-    if mode != "full":
+    if mode != "indexer_full":
         return step_result(
             "retrieval_qualify",
             "warn",
             0,
-            f"skipped because retrieve_context is only available in full autonomous mode (mode={mode})",
+            f"skipped because retrieve_context is only available in indexer_full autonomous mode (mode={mode})",
         )
     t0 = time.time()
     json_out = run_dir / "retrieval_qualify.json"

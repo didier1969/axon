@@ -36,13 +36,16 @@ defmodule Axon.Watcher.ProgressTest do
   end
 
   test "oversized_for_current_budget is reported as oversized in workspace status" do
-    with_sql_gateway_rows([["indexed", 2], ["oversized_for_current_budget", 3], ["pending", 1]], fn ->
-      status = Progress.get_status("progress-test")
+    with_sql_gateway_rows(
+      [["indexed", 2], ["oversized_for_current_budget", 3], ["pending", 1]],
+      fn ->
+        status = Progress.get_status("progress-test")
 
-      assert status["oversized"] == 3
-      assert status["total"] == 6
-      assert status["completed"] == 5
-    end)
+        assert status["oversized"] == 3
+        assert status["total"] == 6
+        assert status["completed"] == 5
+      end
+    )
   end
 
   test "oversized_for_current_budget is reported in project aggregates" do
@@ -279,12 +282,13 @@ defmodule Axon.Watcher.ProgressTest do
          String.contains?(normalized_query, "indexed_degraded_vector_missing") do
       Jason.encode!([[2, 0, 1, 0, 2, 0, 0, 1]])
     else
-
       routes
       |> Enum.reject(fn {needle, _rows} -> needle == :default end)
       |> Enum.find_value(fn
         {needle, rows} when is_binary(needle) ->
-          if String.contains?(normalized_query, normalize_sql(needle)), do: Jason.encode!(rows), else: nil
+          if String.contains?(normalized_query, normalize_sql(needle)),
+            do: Jason.encode!(rows),
+            else: nil
       end)
       |> Kernel.||(default_route_body(routes))
     end

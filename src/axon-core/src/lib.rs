@@ -2,10 +2,13 @@
 
 extern crate self as axon_core;
 
+pub mod benchmark_store;
 pub mod bridge;
+pub mod code_chunker;
 pub mod config;
 pub mod embedder;
 pub mod embedding_contract;
+pub mod embedding_profile;
 pub mod file_ingress_guard;
 pub mod fs_watcher;
 pub mod graph;

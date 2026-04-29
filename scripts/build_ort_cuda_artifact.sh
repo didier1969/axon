@@ -3,15 +3,15 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck source=scripts/lib/axon-ort-artifact.sh
+source "$PROJECT_ROOT/scripts/lib/axon-ort-artifact.sh"
 
 CudaPackageSet="${AXON_CUDA_PACKAGE_SET:-cudaPackages}"
 CUDA_PACKAGE_LABEL="${CudaPackageSet//_/-}"
 ARTIFACT_DIR="${AXON_ORT_ARTIFACT_DIR:-$PROJECT_ROOT/.axon/ort-artifacts/onnxruntime-${CUDA_PACKAGE_LABEL}}"
 MANIFEST_PATH="${AXON_ORT_ARTIFACT_MANIFEST:-$ARTIFACT_DIR/current.json}"
-LOG_DIR="$ARTIFACT_DIR/logs"
-mkdir -p "$LOG_DIR"
-
-BUILD_LOG="$(mktemp "$LOG_DIR/build-XXXXXX.log")"
+axon_ort_artifact_prepare "$ARTIFACT_DIR"
+BUILD_LOG="$(axon_ort_artifact_new_build_log "$AXON_ORT_ARTIFACT_LOG_DIR")"
 TARGET_EXPR="let
   pkgs = import (builtins.getFlake \"nixpkgs\").outPath {
     system = builtins.currentSystem;
@@ -50,8 +50,7 @@ if [[ ! -f "$CUDA_PROVIDER_LIB" ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$MANIFEST_PATH")"
-cat > "$MANIFEST_PATH" <<EOF
+axon_ort_artifact_write_manifest "$MANIFEST_PATH" <<EOF
 {
   "artifact_kind": "onnxruntime_cuda_system",
   "built_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
@@ -64,7 +63,6 @@ cat > "$MANIFEST_PATH" <<EOF
   "log_path": "$BUILD_LOG"
 }
 EOF
-
 echo "✅ External ORT CUDA artifact ready"
 echo "   out_path          : $OUT_PATH"
 echo "   core lib          : $CORE_LIB"

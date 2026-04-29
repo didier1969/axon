@@ -54,6 +54,9 @@ Classify active links between `brain` and `indexer` after the split so the runti
 
 - split status reconstruction from heartbeat/runtime env files
 - local scripts that read split state files directly instead of going through MCP
+- Elixir/Phoenix dashboard as a read-only projection shell
+  - acceptable only while treated as transitional
+  - must not regain runtime authority, control, or mutation responsibilities
 
 ### Active legacy to remove
 
@@ -116,6 +119,24 @@ Classify active links between `brain` and `indexer` after the split so the runti
    - tooling/operator path
    - latent legacy runtime path
    - test-only path
+
+## Elixir / Dashboard Note
+
+The dashboard stack now sits outside the core `brain <-> indexer` runtime split:
+
+- it is no longer a control plane
+- it is no longer a queueing/orchestration authority
+- it is no longer a mutation surface
+
+Its current role is:
+- web operator shell
+- bridge consumer
+- read-only SQL/runtime projection
+
+This means:
+- it is not the next runtime authority problem to solve
+- but it is a real maintenance and dependency cost
+- and it should be treated as a bounded transitional layer unless a stronger future product reason emerges
 
 ## Exit Criteria
 

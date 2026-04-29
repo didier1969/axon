@@ -516,20 +516,20 @@ impl McpServer {
                         "blocking_factors": [{
                             "factor": "no_impact_resolved_at_requested_depth",
                             "severity": "medium",
-                            "recommended_action": "increase depth or inspect local topology before assuming there is no impact"
+                            "recommended_action": "increase depth or inspect local dependency flow before assuming there is no impact"
                         }],
                         "remediation_actions": [
-                            "increase depth or inspect local topology before assuming there is no impact"
+                            "increase depth or inspect local dependency flow before assuming there is no impact"
                         ],
                         "follow_up_tools": ["path", "inspect"],
                         "next_action": {
-                            "kind": "inspect_local_topology",
+                            "kind": "inspect_local_dependency_flow",
                             "tool": "path",
                             "when": "now"
                         }
                     },
                     "next_action": {
-                        "kind": "inspect_local_topology",
+                        "kind": "inspect_local_dependency_flow",
                         "tool": "path",
                         "when": "now"
                     }

@@ -12,33 +12,46 @@ const DEFAULT_IST_SNAPSHOT_STALE_AFTER_MS: u64 = 30_000;
 pub enum AxonProcessRole {
     Brain,
     Indexer,
-    LegacyMonolith,
 }
 
 impl AxonProcessRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Brain => "brain",
+            Self::Indexer => "indexer",
+        }
+    }
+
     pub fn serves_public_mcp(self) -> bool {
-        matches!(self, Self::Brain | Self::LegacyMonolith)
+        matches!(self, Self::Brain)
+    }
+
+    pub fn runtime_binary_name(self) -> &'static str {
+        match self {
+            Self::Brain => "axon-brain",
+            Self::Indexer => "axon-indexer",
+        }
     }
 
     pub fn owns_soll_writes(self) -> bool {
-        matches!(self, Self::Brain | Self::LegacyMonolith)
+        matches!(self, Self::Brain)
     }
 
     pub fn owns_ist_writes(self) -> bool {
-        matches!(self, Self::Indexer | Self::LegacyMonolith)
+        matches!(self, Self::Indexer)
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeTopologyKind {
-    BrainIndexerSplit,
-    LegacyMonolithCompatibility,
+    pub fn from_runtime_shadow_role(role: &str) -> Option<Self> {
+        match role.trim() {
+            "brain" => Some(Self::Brain),
+            "indexer" => Some(Self::Indexer),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTopologyStatus {
-    pub topology: RuntimeTopologyKind,
     pub process_role: AxonProcessRole,
     pub public_mcp_authority: AxonProcessRole,
     pub soll_writer_authority: AxonProcessRole,
@@ -53,112 +66,99 @@ pub struct RuntimeTopologyStatus {
 }
 
 impl RuntimeTopologyStatus {
-    pub fn degraded_brain_only() -> Self {
-        Self {
-            topology: RuntimeTopologyKind::BrainIndexerSplit,
-            process_role: AxonProcessRole::Brain,
-            public_mcp_authority: AxonProcessRole::Brain,
-            soll_writer_authority: AxonProcessRole::Brain,
-            ist_writer_authority: AxonProcessRole::Indexer,
-            brain_ready: true,
-            indexer_ready: false,
-            system_converged: false,
-            indexer_feed: RuntimeFreshnessContract::stale(
-                DEFAULT_RUNTIME_FEED_STALE_AFTER_MS * 2,
+    pub fn from_runtime_mode(mode: AxonRuntimeMode) -> Self {
+        let process_role = mode.declared_process_role();
+        let indexer_feed = match process_role {
+            AxonProcessRole::Brain => RuntimeFreshnessContract::degraded(
+                None,
                 DEFAULT_RUNTIME_FEED_STALE_AFTER_MS,
                 "indexer_feed_unavailable",
             ),
-            ist_snapshot: RuntimeFreshnessContract::unknown(
+            AxonProcessRole::Indexer => {
+                RuntimeFreshnessContract::fresh(DEFAULT_RUNTIME_FEED_STALE_AFTER_MS)
+            }
+        };
+
+        let ist_snapshot = match process_role {
+            AxonProcessRole::Brain => {
+                RuntimeFreshnessContract::fresh(DEFAULT_IST_SNAPSHOT_STALE_AFTER_MS)
+            }
+            AxonProcessRole::Indexer => RuntimeFreshnessContract::unknown(
                 DEFAULT_IST_SNAPSHOT_STALE_AFTER_MS,
-                "ist_snapshot_requires_indexer_refresh_contract",
+                "ist_snapshot_requires_brain_surface",
             ),
+        };
+
+        Self {
+            process_role,
+            public_mcp_authority: AxonProcessRole::Brain,
+            soll_writer_authority: AxonProcessRole::Brain,
+            ist_writer_authority: AxonProcessRole::Indexer,
+            brain_ready: matches!(process_role, AxonProcessRole::Brain),
+            indexer_ready: matches!(process_role, AxonProcessRole::Indexer),
+            system_converged: false,
+            indexer_feed,
+            ist_snapshot,
             compatibility_shim: false,
             compatibility_reason: None,
         }
     }
 
-    pub fn legacy_compatibility_shim(mode: AxonRuntimeMode) -> Self {
-        let brain_ready = mode.control_plane_enabled();
-        let indexer_ready = mode.ingestion_enabled();
-        let system_converged = matches!(mode, AxonRuntimeMode::Full);
-        let ist_snapshot = if brain_ready {
-            RuntimeFreshnessContract::fresh(DEFAULT_IST_SNAPSHOT_STALE_AFTER_MS)
-        } else {
-            RuntimeFreshnessContract::degraded(
-                None,
-                DEFAULT_IST_SNAPSHOT_STALE_AFTER_MS,
-                "control_plane_not_serving_snapshot_reads",
-            )
-        };
-        let indexer_feed = if system_converged {
-            RuntimeFreshnessContract::fresh(DEFAULT_RUNTIME_FEED_STALE_AFTER_MS)
-        } else if brain_ready && indexer_ready {
-            RuntimeFreshnessContract::degraded(
-                Some(DEFAULT_RUNTIME_FEED_STALE_AFTER_MS),
-                DEFAULT_RUNTIME_FEED_STALE_AFTER_MS,
-                "legacy_mode_is_not_target_split_topology",
-            )
-        } else if brain_ready {
-            RuntimeFreshnessContract::degraded(
-                None,
-                DEFAULT_RUNTIME_FEED_STALE_AFTER_MS,
-                "legacy_monolith_has_no_split_indexer_feed",
-            )
-        } else {
-            RuntimeFreshnessContract::unknown(
-                DEFAULT_RUNTIME_FEED_STALE_AFTER_MS,
-                "legacy_mode_does_not_expose_brain_readiness",
-            )
-        };
-
-        Self {
-            topology: RuntimeTopologyKind::LegacyMonolithCompatibility,
-            process_role: AxonProcessRole::LegacyMonolith,
-            public_mcp_authority: AxonProcessRole::LegacyMonolith,
-            soll_writer_authority: AxonProcessRole::LegacyMonolith,
-            ist_writer_authority: AxonProcessRole::LegacyMonolith,
-            brain_ready,
-            indexer_ready,
-            system_converged,
-            indexer_feed,
-            ist_snapshot,
-            compatibility_shim: true,
-            compatibility_reason: Some(format!(
-                "runtime_mode '{}' is a legacy monolith compatibility shim, not the target brain/indexer topology",
-                mode.as_str()
-            )),
+    pub fn apply_process_role(&mut self, process_role: AxonProcessRole) {
+        self.process_role = process_role;
+        self.public_mcp_authority = AxonProcessRole::Brain;
+        self.soll_writer_authority = AxonProcessRole::Brain;
+        self.ist_writer_authority = AxonProcessRole::Indexer;
+        match process_role {
+            AxonProcessRole::Brain => self.brain_ready = true,
+            AxonProcessRole::Indexer => self.indexer_ready = true,
         }
     }
 
-    pub fn fallback_legacy_compatibility_shim(mode: AxonRuntimeMode) -> Value {
-        let status = Self::legacy_compatibility_shim(mode);
+    pub fn as_json(&self) -> Value {
         json!({
-            "topology": "legacy_monolith_compatibility",
-            "process_role": "legacy_monolith",
-            "public_mcp_authority": "legacy_monolith",
-            "soll_writer_authority": "legacy_monolith",
-            "ist_writer_authority": "legacy_monolith",
-            "brain_ready": status.brain_ready,
-            "indexer_ready": status.indexer_ready,
-            "system_converged": status.system_converged,
+            "process_role": self.process_role.as_str(),
+            "public_mcp_authority": self.public_mcp_authority.as_str(),
+            "soll_writer_authority": self.soll_writer_authority.as_str(),
+            "ist_writer_authority": self.ist_writer_authority.as_str(),
+            "brain_ready": self.brain_ready,
+            "indexer_ready": self.indexer_ready,
+            "system_converged": self.system_converged,
             "indexer_feed": {
-                "state": status.indexer_feed.state,
-                "stale": status.indexer_feed.stale,
-                "observed_age_ms": status.indexer_feed.observed_age_ms,
-                "stale_after_ms": status.indexer_feed.stale_after_ms,
-                "degraded_reason": status.indexer_feed.degraded_reason,
+                "state": self.indexer_feed.state,
+                "stale": self.indexer_feed.stale,
+                "observed_age_ms": self.indexer_feed.observed_age_ms,
+                "stale_after_ms": self.indexer_feed.stale_after_ms,
+                "degraded_reason": self.indexer_feed.degraded_reason,
             },
             "ist_snapshot": {
-                "state": status.ist_snapshot.state,
-                "stale": status.ist_snapshot.stale,
-                "observed_age_ms": status.ist_snapshot.observed_age_ms,
-                "stale_after_ms": status.ist_snapshot.stale_after_ms,
-                "degraded_reason": status.ist_snapshot.degraded_reason,
+                "state": self.ist_snapshot.state,
+                "stale": self.ist_snapshot.stale,
+                "observed_age_ms": self.ist_snapshot.observed_age_ms,
+                "stale_after_ms": self.ist_snapshot.stale_after_ms,
+                "degraded_reason": self.ist_snapshot.degraded_reason,
             },
-            "compatibility_shim": true,
-            "compatibility_reason": status.compatibility_reason,
+            "compatibility_shim": false,
+            "compatibility_reason": Value::Null,
         })
     }
+}
+
+pub fn current_runtime_shadow_role() -> String {
+    std::env::var("AXON_RUNTIME_SHADOW_ROLE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            AxonRuntimeMode::from_env()
+                .declared_process_role()
+                .as_str()
+                .to_string()
+        })
+}
+
+pub fn current_runtime_process_role() -> AxonProcessRole {
+    AxonProcessRole::from_runtime_shadow_role(&current_runtime_shadow_role())
+        .unwrap_or_else(|| AxonRuntimeMode::from_env().declared_process_role())
 }
 
 #[cfg(test)]
@@ -168,7 +168,7 @@ mod tests {
     use crate::runtime_truth_contract::RuntimeFreshnessState;
 
     #[test]
-    fn topology_roles_encode_brain_and_indexer_authority() {
+    fn process_roles_encode_brain_and_indexer_authority() {
         assert!(AxonProcessRole::Brain.serves_public_mcp());
         assert!(AxonProcessRole::Brain.owns_soll_writes());
         assert!(!AxonProcessRole::Brain.owns_ist_writes());
@@ -177,47 +177,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_topology_requires_system_converged_for_full_green() {
-        let topo = RuntimeTopologyStatus::degraded_brain_only();
-        assert!(topo.brain_ready);
-        assert!(!topo.system_converged);
+    fn runtime_authority_requires_peer_runtime_for_full_green() {
+        let status = RuntimeTopologyStatus::from_runtime_mode(AxonRuntimeMode::BrainOnly);
+        assert!(status.brain_ready);
+        assert!(!status.system_converged);
+        assert_eq!(status.process_role, AxonProcessRole::Brain);
     }
 
     #[test]
-    fn legacy_compatibility_shim_mode_matrix_preserves_expected_readiness() {
-        let full = RuntimeTopologyStatus::legacy_compatibility_shim(AxonRuntimeMode::Full);
-        assert!(full.brain_ready);
-        assert!(full.indexer_ready);
-        assert!(full.system_converged);
-        assert_eq!(full.indexer_feed.state, RuntimeFreshnessState::Fresh);
-        assert_eq!(full.ist_snapshot.state, RuntimeFreshnessState::Fresh);
+    fn explicit_runtime_modes_map_to_process_roles() {
+        let brain = RuntimeTopologyStatus::from_runtime_mode(AxonRuntimeMode::BrainOnly);
+        assert_eq!(brain.process_role, AxonProcessRole::Brain);
+        assert_eq!(brain.indexer_feed.state, RuntimeFreshnessState::Degraded);
 
-        let read_only = RuntimeTopologyStatus::legacy_compatibility_shim(AxonRuntimeMode::ReadOnly);
-        assert!(read_only.brain_ready);
-        assert!(!read_only.indexer_ready);
-        assert!(!read_only.system_converged);
-        assert_eq!(
-            read_only.indexer_feed.state,
-            RuntimeFreshnessState::Degraded
-        );
-        assert_eq!(read_only.ist_snapshot.state, RuntimeFreshnessState::Fresh);
-
-        let mcp_only = RuntimeTopologyStatus::legacy_compatibility_shim(AxonRuntimeMode::McpOnly);
-        assert!(mcp_only.brain_ready);
-        assert!(!mcp_only.indexer_ready);
-        assert!(!mcp_only.system_converged);
-        assert_eq!(mcp_only.indexer_feed.state, RuntimeFreshnessState::Degraded);
-        assert_eq!(mcp_only.ist_snapshot.state, RuntimeFreshnessState::Fresh);
-
-        let graph_only =
-            RuntimeTopologyStatus::legacy_compatibility_shim(AxonRuntimeMode::GraphOnly);
-        assert!(graph_only.brain_ready);
-        assert!(graph_only.indexer_ready);
-        assert!(!graph_only.system_converged);
-        assert_eq!(
-            graph_only.indexer_feed.state,
-            RuntimeFreshnessState::Degraded
-        );
-        assert_eq!(graph_only.ist_snapshot.state, RuntimeFreshnessState::Fresh);
+        let indexer = RuntimeTopologyStatus::from_runtime_mode(AxonRuntimeMode::IndexerGraph);
+        assert_eq!(indexer.process_role, AxonProcessRole::Indexer);
+        assert_eq!(indexer.indexer_feed.state, RuntimeFreshnessState::Fresh);
     }
 }

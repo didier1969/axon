@@ -1,5 +1,7 @@
 use crate::bridge::BridgeEvent;
-use crate::embedder::{embedding_lane_config_from_env, SemanticWorkerPool};
+use crate::embedder::{
+    current_gpu_memory_snapshot, embedding_lane_config_from_env, SemanticWorkerPool,
+};
 use crate::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use crate::graph::GraphStore;
 use crate::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
@@ -7,6 +9,8 @@ use crate::main_background;
 use crate::main_services;
 use crate::main_telemetry;
 use crate::queue::QueueStore;
+use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
+use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_profile::{
     recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
@@ -44,18 +48,11 @@ fn telemetry_socket_required() -> bool {
         .unwrap_or(true)
 }
 
-fn canonical_embedding_provider_request(gpu_present: bool) -> String {
-    std::env::var("AXON_EMBEDDING_PROVIDER")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            if gpu_present {
-                "cuda".to_string()
-            } else {
-                "cpu".to_string()
-            }
-        })
+fn canonical_embedding_provider_request(
+    runtime_mode: AxonRuntimeMode,
+    gpu_present: bool,
+) -> String {
+    canonical_embedding_provider_request_for_mode(runtime_mode, gpu_present)
 }
 
 fn canonical_effective_embedding_lane_config() -> crate::embedder::EmbeddingLaneConfig {
@@ -132,16 +129,6 @@ fn apply_canonical_ort_runtime_env(gpu_execution_requested: bool) {
     }
 }
 
-fn split_brain_reader_only_mode() -> bool {
-    matches!(
-        std::env::var("AXON_SPLIT_BRAIN_IST_READER_ONLY")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    ) && matches!(AxonRuntimeMode::from_env(), AxonRuntimeMode::McpOnly)
-}
-
 fn apply_canonical_watcher_runtime_env() {
     if std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").is_err() {
         unsafe {
@@ -209,12 +196,131 @@ fn apply_canonical_embedding_lane_sizing_defaults(lane_sizing: &EmbeddingLaneSiz
     }
 }
 
+fn graph_first_indexer_lane_sizing(
+    profile: RuntimeBootProfile,
+    runtime_profile: &RuntimeProfile,
+    lane_sizing: EmbeddingLaneSizing,
+) -> EmbeddingLaneSizing {
+    if profile.role != RuntimeBootRole::Indexer
+        || !runtime_profile.gpu_present
+        || !graph_embeddings_enabled()
+    {
+        return lane_sizing;
+    }
+
+    let query_workers = 0usize;
+    let available_background_workers = runtime_profile
+        .recommended_workers
+        .saturating_sub(query_workers);
+    if available_background_workers <= 1 {
+        return lane_sizing;
+    }
+
+    let vector_workers = 1usize;
+    let graph_workers = available_background_workers
+        .saturating_sub(vector_workers)
+        .max(1);
+
+    EmbeddingLaneSizing {
+        query_workers,
+        vector_workers,
+        graph_workers,
+        chunk_batch_size: lane_sizing.chunk_batch_size.clamp(32, 64),
+        file_vectorization_batch_size: lane_sizing.file_vectorization_batch_size.max(48),
+        graph_batch_size: lane_sizing.graph_batch_size.max(64),
+    }
+}
+
+fn apply_graph_first_indexer_memory_defaults(
+    profile: RuntimeBootProfile,
+    runtime_profile: &RuntimeProfile,
+) {
+    if profile.role != RuntimeBootRole::Indexer || !runtime_profile.gpu_present {
+        return;
+    }
+
+    if std::env::var("AXON_GPU_TELEMETRY_BACKEND").is_err() {
+        unsafe {
+            std::env::set_var("AXON_GPU_TELEMETRY_BACKEND", "nvml");
+        }
+    }
+    if std::env::var("AXON_GPU_TELEMETRY_CACHE_TTL_MS").is_err() {
+        unsafe {
+            std::env::set_var("AXON_GPU_TELEMETRY_CACHE_TTL_MS", "250");
+        }
+    }
+
+    let total_vram_mb = current_gpu_memory_snapshot()
+        .map(|snapshot| snapshot.total_mb)
+        .or_else(|| {
+            std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|value| *value >= 4_096)
+        })
+        .unwrap_or(8_192);
+
+    let soft_limit_mb = if total_vram_mb <= 8_192 {
+        total_vram_mb.saturating_sub(128).max(6_144)
+    } else if total_vram_mb <= 12_288 {
+        total_vram_mb.saturating_sub(256).max(8_192)
+    } else {
+        total_vram_mb.saturating_sub((total_vram_mb / 12).max(512))
+    };
+    let cuda_limit_mb = soft_limit_mb.saturating_sub(128).max(4_096);
+
+    for (env_name, value) in [
+        ("AXON_CUDA_MEMORY_SOFT_LIMIT_MB", soft_limit_mb.to_string()),
+        ("AXON_CUDA_MEMORY_LIMIT_MB", cuda_limit_mb.to_string()),
+        ("AXON_OPT_MAX_VRAM_USED_MB", soft_limit_mb.to_string()),
+        (
+            "AXON_GPU_PRIMARY_WORKER_MAX_USED_MB",
+            soft_limit_mb.to_string(),
+        ),
+        ("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED", "false".to_string()),
+        ("AXON_VECTOR_READY_QUEUE_DEPTH", "48".to_string()),
+        ("AXON_VECTOR_TARGET_READY_CHUNKS", (48 * 16).to_string()),
+        ("AXON_VECTOR_PREPARE_PIPELINE_DEPTH", "6".to_string()),
+        ("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR", "4".to_string()),
+        (
+            "AXON_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS",
+            "50".to_string(),
+        ),
+        ("AXON_MAX_EMBED_BATCH_BYTES", (512 * 1024).to_string()),
+        ("AXON_EMBED_MICRO_BATCH_MAX_ITEMS", "16".to_string()),
+        (
+            "AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS",
+            "2048".to_string(),
+        ),
+        ("AXON_EMBED_BATCH_MAX_TOTAL_TOKENS", "4096".to_string()),
+        ("AXON_SEMANTIC_SLEEP_SCALE_PCT", "10".to_string()),
+        ("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT", "10".to_string()),
+        ("AXON_GPU_MULTIWORKER_MIN_FREE_MB", "1536".to_string()),
+        ("AXON_GPU_TELEMETRY_BACKEND", "nvml".to_string()),
+        ("AXON_GPU_TELEMETRY_CACHE_TTL_MS", "250".to_string()),
+        ("AXON_GPU_EMBED_SERVICE_ENABLED", "1".to_string()),
+        (
+            "AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH",
+            "0".to_string(),
+        ),
+        ("AXON_GPU_EMBED_SERVICE_TENSORRT", "1".to_string()),
+        ("AXON_GPU_STUCK_RECOVERY_ENABLED", "true".to_string()),
+        ("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "2500".to_string()),
+        ("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS", "5000".to_string()),
+    ] {
+        if std::env::var(env_name).is_err() {
+            unsafe {
+                std::env::set_var(env_name, value);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeBootRole {
-    Monolith,
-    BrainShadow,
-    IndexerShadow,
+    Brain,
+    Indexer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,10 +345,21 @@ pub struct RuntimeBootStatus {
 }
 
 impl RuntimeBootProfile {
-    pub const fn monolith() -> Self {
+    pub const fn brain() -> Self {
         Self {
-            role: RuntimeBootRole::Monolith,
+            role: RuntimeBootRole::Brain,
             start_mcp_http: true,
+            start_ingestion_workers: false,
+            promotable: true,
+            operator_default: true,
+            runtime_mode_override: None,
+        }
+    }
+
+    pub const fn indexer() -> Self {
+        Self {
+            role: RuntimeBootRole::Indexer,
+            start_mcp_http: false,
             start_ingestion_workers: true,
             promotable: true,
             operator_default: true,
@@ -250,31 +367,19 @@ impl RuntimeBootProfile {
         }
     }
 
-    pub const fn brain_shadow() -> Self {
-        Self {
-            role: RuntimeBootRole::BrainShadow,
-            start_mcp_http: true,
-            start_ingestion_workers: false,
-            promotable: false,
-            operator_default: false,
-            runtime_mode_override: Some(AxonRuntimeMode::McpOnly),
-        }
-    }
-
-    pub const fn indexer_shadow() -> Self {
-        Self {
-            role: RuntimeBootRole::IndexerShadow,
-            start_mcp_http: false,
-            start_ingestion_workers: true,
-            promotable: false,
-            operator_default: false,
-            runtime_mode_override: Some(AxonRuntimeMode::Full),
-        }
-    }
-
     pub fn runtime_mode(self) -> AxonRuntimeMode {
-        self.runtime_mode_override
-            .unwrap_or_else(AxonRuntimeMode::from_env)
+        if let Some(runtime_mode) = self.runtime_mode_override {
+            return runtime_mode;
+        }
+
+        std::env::var("AXON_RUNTIME_MODE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| AxonRuntimeMode::from_str(&value))
+            .unwrap_or_else(|| match self.role {
+                RuntimeBootRole::Brain => AxonRuntimeMode::BrainOnly,
+                RuntimeBootRole::Indexer => AxonRuntimeMode::IndexerFull,
+            })
     }
 
     pub fn split_status(self) -> RuntimeBootStatus {
@@ -292,23 +397,18 @@ impl RuntimeBootProfile {
     fn writer_targets(self) -> &'static [crate::runtime_writer_guard::WriterTarget] {
         use crate::runtime_writer_guard::WriterTarget;
         match self.role {
-            RuntimeBootRole::Monolith => &[WriterTarget::Soll, WriterTarget::Ist],
-            RuntimeBootRole::BrainShadow => &[WriterTarget::Soll],
-            RuntimeBootRole::IndexerShadow => &[WriterTarget::Ist],
+            RuntimeBootRole::Brain => &[WriterTarget::Soll],
+            RuntimeBootRole::Indexer => &[WriterTarget::Ist],
         }
     }
 }
 
-pub fn run_monolith() -> anyhow::Result<()> {
-    run(RuntimeBootProfile::monolith())
+pub fn run_brain() -> anyhow::Result<()> {
+    run(RuntimeBootProfile::brain())
 }
 
-pub fn run_brain_shadow() -> anyhow::Result<()> {
-    run(RuntimeBootProfile::brain_shadow())
-}
-
-pub fn run_indexer_shadow() -> anyhow::Result<()> {
-    run(RuntimeBootProfile::indexer_shadow())
+pub fn run_indexer() -> anyhow::Result<()> {
+    run(RuntimeBootProfile::indexer())
 }
 
 fn run(profile: RuntimeBootProfile) -> anyhow::Result<()> {
@@ -332,6 +432,8 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             std::env::set_var("AXON_RUNTIME_MODE", runtime_mode.as_str());
         }
     }
+
+    apply_graph_first_indexer_memory_defaults(profile, &runtime_profile);
 
     let projects_root_env = std::env::var("AXON_PROJECTS_ROOT")
         .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
@@ -381,7 +483,8 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     if !profile.promotable {
         info!("Split runtime is shadow-only and explicitly non-promotable before Task 6 gates.");
     }
-    let provider_requested = canonical_embedding_provider_request(runtime_profile.gpu_present);
+    let provider_requested =
+        canonical_embedding_provider_request(runtime_mode, runtime_profile.gpu_present);
     let gpu_execution_requested =
         runtime_profile.gpu_present && provider_requested.eq_ignore_ascii_case("cuda");
     unsafe {
@@ -420,7 +523,11 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
     let mut lane_profile = runtime_profile.clone();
     lane_profile.gpu_present = gpu_execution_requested;
-    let lane_sizing = recommend_embedding_lane_sizing(&lane_profile);
+    let lane_sizing = graph_first_indexer_lane_sizing(
+        profile,
+        &lane_profile,
+        recommend_embedding_lane_sizing(&lane_profile),
+    );
     apply_canonical_embedding_lane_sizing_defaults(&lane_sizing);
     let effective_lane_sizing = canonical_effective_embedding_lane_config();
     info!(
@@ -455,9 +562,8 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     );
 
     let graph_store_result = match profile.role {
-        RuntimeBootRole::BrainShadow => GraphStore::new_brain_reader_soll_writer(db_root),
-        RuntimeBootRole::IndexerShadow => GraphStore::new_indexer_ist_writer_without_soll(db_root),
-        RuntimeBootRole::Monolith => GraphStore::new(db_root),
+        RuntimeBootRole::Brain => GraphStore::new_brain_reader_soll_writer(db_root),
+        RuntimeBootRole::Indexer => GraphStore::new_indexer_ist_writer_without_soll(db_root),
     };
     let graph_store = match graph_store_result {
         Ok(store) => Arc::new(store),
@@ -543,11 +649,12 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
     let db_sender = if profile.start_mcp_http {
         let options = match runtime_mode {
-            AxonRuntimeMode::Full => main_services::RuntimeServiceOptions::full(),
-            AxonRuntimeMode::GraphOnly => main_services::RuntimeServiceOptions::graph_only(),
-            AxonRuntimeMode::ReadOnly | AxonRuntimeMode::McpOnly => {
-                main_services::RuntimeServiceOptions::read_only()
+            AxonRuntimeMode::BrainOnly => main_services::RuntimeServiceOptions::brain_only(),
+            AxonRuntimeMode::IndexerGraph => main_services::RuntimeServiceOptions::indexer_graph(),
+            AxonRuntimeMode::IndexerVector => {
+                main_services::RuntimeServiceOptions::indexer_vector()
             }
+            AxonRuntimeMode::IndexerFull => main_services::RuntimeServiceOptions::indexer_full(),
         };
         main_services::start_runtime_services(
             graph_store.clone(),
@@ -588,11 +695,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     } else {
         info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
     }
-    if matches!(profile.role, RuntimeBootRole::BrainShadow) {
-        info!("Reader snapshot refresher disabled for split brain reader-only mode.");
-    } else {
-        main_background::spawn_reader_snapshot_refresher(graph_store.clone());
-    }
+    main_background::spawn_reader_snapshot_refresher(graph_store.clone());
     main_background::spawn_shadow_optimizer(graph_store.clone());
     main_background::spawn_runtime_trace_logger(
         graph_store.clone(),
@@ -638,29 +741,591 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeBootProfile, RuntimeBootRole};
+    use super::{
+        apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
+        apply_canonical_ort_thread_defaults_from_openmp, apply_canonical_watcher_runtime_env,
+        apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
+        canonical_embedding_provider_request, graph_first_indexer_lane_sizing, RuntimeBootProfile,
+        RuntimeBootRole,
+    };
     use crate::runtime_mode::AxonRuntimeMode;
+    use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn canonical_embedding_provider_request_defaults_to_cuda_when_gpu_present() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        }
+
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::IndexerFull, true),
+            "cuda"
+        );
+    }
+
+    #[test]
+    fn canonical_embedding_provider_request_defaults_to_cpu_without_gpu() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        }
+
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::IndexerFull, false),
+            "cpu"
+        );
+    }
+
+    #[test]
+    fn canonical_embedding_provider_request_respects_explicit_cpu_override_even_when_gpu_present() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cpu");
+        }
+
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::IndexerFull, true),
+            "cpu"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn canonical_embedding_provider_request_forces_cpu_when_runtime_mode_disables_semantic_workers()
+    {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        }
+
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::IndexerGraph, true),
+            "cpu"
+        );
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::BrainOnly, true),
+            "cpu"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn canonical_effective_embedding_lane_config_caps_gpu_vector_workers_in_env() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+            std::env::set_var("AXON_VECTOR_WORKERS", "2");
+            std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        }
+
+        let config = canonical_effective_embedding_lane_config();
+        assert_eq!(config.vector_workers, 2);
+        assert_eq!(
+            std::env::var("AXON_VECTOR_WORKERS").unwrap(),
+            "2",
+            "L'environnement doit exposer le sizing effectif et non le sizing recommande"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+            std::env::remove_var("AXON_VECTOR_WORKERS");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_embedding_lane_sizing_defaults_marks_autoconfigured_values() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("AXON_QUERY_EMBED_WORKERS");
+            std::env::remove_var("AXON_VECTOR_WORKERS");
+            std::env::remove_var("AXON_GRAPH_WORKERS");
+            std::env::remove_var("AXON_CHUNK_BATCH_SIZE");
+            std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE");
+            std::env::remove_var("AXON_GRAPH_BATCH_SIZE");
+            std::env::remove_var("AXON_QUERY_EMBED_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_BATCH_SIZE_AUTOCONFIGURED");
+        }
+
+        apply_canonical_embedding_lane_sizing_defaults(&EmbeddingLaneSizing {
+            query_workers: 1,
+            vector_workers: 1,
+            graph_workers: 0,
+            chunk_batch_size: 64,
+            file_vectorization_batch_size: 24,
+            graph_batch_size: 8,
+        });
+
+        assert_eq!(
+            std::env::var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            std::env::var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            std::env::var("AXON_GRAPH_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_QUERY_EMBED_WORKERS");
+            std::env::remove_var("AXON_VECTOR_WORKERS");
+            std::env::remove_var("AXON_GRAPH_WORKERS");
+            std::env::remove_var("AXON_CHUNK_BATCH_SIZE");
+            std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE");
+            std::env::remove_var("AXON_GRAPH_BATCH_SIZE");
+            std::env::remove_var("AXON_QUERY_EMBED_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_BATCH_SIZE_AUTOCONFIGURED");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_ort_runtime_env_sets_gpu_safe_openmp_defaults() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("OMP_WAIT_POLICY");
+            std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+            std::env::remove_var("LD_LIBRARY_PATH");
+        }
+
+        apply_canonical_ort_runtime_env(true);
+
+        assert_eq!(std::env::var("OMP_NUM_THREADS").unwrap(), "1");
+        assert_eq!(std::env::var("OMP_WAIT_POLICY").unwrap(), "PASSIVE");
+        assert_eq!(std::env::var("AXON_ORT_INTRA_THREADS").unwrap(), "1");
+        assert_eq!(
+            std::env::var("AXON_ORT_OMP_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            std::env::var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+        if std::path::Path::new("/usr/lib/wsl/lib").exists() {
+            assert!(std::env::var("LD_LIBRARY_PATH")
+                .unwrap_or_default()
+                .split(':')
+                .any(|segment| segment == "/usr/lib/wsl/lib"));
+        }
+
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("OMP_WAIT_POLICY");
+            std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+            std::env::remove_var("LD_LIBRARY_PATH");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_ort_runtime_env_preserves_explicit_openmp_configuration() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("OMP_NUM_THREADS", "4");
+            std::env::set_var("OMP_WAIT_POLICY", "ACTIVE");
+            std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
+            std::env::set_var("AXON_ORT_INTRA_THREADS", "3");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+            std::env::set_var("LD_LIBRARY_PATH", "/tmp/custom-lib");
+        }
+
+        apply_canonical_ort_runtime_env(true);
+
+        assert_eq!(std::env::var("OMP_NUM_THREADS").unwrap(), "4");
+        assert_eq!(std::env::var("OMP_WAIT_POLICY").unwrap(), "ACTIVE");
+        assert_eq!(std::env::var("AXON_ORT_INTRA_THREADS").unwrap(), "3");
+        assert!(std::env::var("AXON_ORT_OMP_AUTOCONFIGURED").is_err());
+        assert!(std::env::var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED").is_err());
+        let ld_library_path = std::env::var("LD_LIBRARY_PATH").unwrap();
+        assert!(ld_library_path.contains("/tmp/custom-lib"));
+        if std::path::Path::new("/usr/lib/wsl/lib").exists() {
+            assert!(ld_library_path
+                .split(':')
+                .any(|segment| segment == "/usr/lib/wsl/lib"));
+        }
+
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("OMP_WAIT_POLICY");
+            std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+            std::env::remove_var("LD_LIBRARY_PATH");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_ort_runtime_env_leaves_cpu_hosts_unchanged() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("OMP_WAIT_POLICY");
+            std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+            std::env::remove_var("LD_LIBRARY_PATH");
+        }
+
+        apply_canonical_ort_runtime_env(false);
+
+        assert!(
+            std::env::var("OMP_NUM_THREADS").is_err(),
+            "CPU hosts should not receive GPU-specific OpenMP overrides by default"
+        );
+        assert!(
+            std::env::var("OMP_WAIT_POLICY").is_err(),
+            "CPU hosts should not receive GPU-specific OpenMP overrides by default"
+        );
+        assert!(std::env::var("AXON_ORT_OMP_AUTOCONFIGURED").is_err());
+        assert!(std::env::var("AXON_ORT_INTRA_THREADS").is_err());
+        assert!(std::env::var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED").is_err());
+        assert!(
+            std::env::var("LD_LIBRARY_PATH").is_err(),
+            "CPU hosts should not receive GPU-specific loader overrides by default"
+        );
+    }
+
+    #[test]
+    fn apply_canonical_ort_thread_defaults_from_openmp_sets_missing_ort_threads() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("OMP_NUM_THREADS", "4");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+        }
+
+        apply_canonical_ort_thread_defaults_from_openmp();
+
+        assert_eq!(std::env::var("AXON_ORT_INTRA_THREADS").unwrap(), "4");
+        assert_eq!(
+            std::env::var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
+
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_ort_thread_defaults_from_openmp_preserves_explicit_ort_threads() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("OMP_NUM_THREADS", "4");
+            std::env::set_var("AXON_ORT_INTRA_THREADS", "3");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED");
+        }
+
+        apply_canonical_ort_thread_defaults_from_openmp();
+
+        assert_eq!(std::env::var("AXON_ORT_INTRA_THREADS").unwrap(), "3");
+        assert!(std::env::var("AXON_ORT_INTRA_THREADS_AUTOCONFIGURED").is_err());
+
+        unsafe {
+            std::env::remove_var("OMP_NUM_THREADS");
+            std::env::remove_var("AXON_ORT_INTRA_THREADS");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_watcher_runtime_env_sets_default_budget() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        }
+
+        apply_canonical_watcher_runtime_env();
+
+        assert_eq!(
+            std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").unwrap(),
+            "128"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        }
+    }
+
+    #[test]
+    fn apply_canonical_watcher_runtime_env_preserves_explicit_budget() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "32");
+        }
+
+        apply_canonical_watcher_runtime_env();
+
+        assert_eq!(
+            std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").unwrap(),
+            "32"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        }
+    }
 
     #[test]
     fn split_boot_roles_claim_only_owned_writer_targets() {
-        let brain = RuntimeBootProfile::brain_shadow();
-        assert_eq!(brain.role, RuntimeBootRole::BrainShadow);
+        let brain = RuntimeBootProfile::brain();
+        assert_eq!(brain.role, RuntimeBootRole::Brain);
         assert_eq!(brain.writer_targets(), &[WriterTarget::Soll]);
-        assert_eq!(brain.runtime_mode(), AxonRuntimeMode::McpOnly);
+        assert_eq!(brain.runtime_mode(), AxonRuntimeMode::BrainOnly);
 
-        let indexer = RuntimeBootProfile::indexer_shadow();
-        assert_eq!(indexer.role, RuntimeBootRole::IndexerShadow);
+        let indexer = RuntimeBootProfile::indexer();
+        assert_eq!(indexer.role, RuntimeBootRole::Indexer);
         assert_eq!(indexer.writer_targets(), &[WriterTarget::Ist]);
-        assert_eq!(indexer.runtime_mode(), AxonRuntimeMode::Full);
+        assert_eq!(indexer.runtime_mode(), AxonRuntimeMode::IndexerFull);
 
-        let monolith = RuntimeBootProfile::monolith();
-        assert_eq!(monolith.role, RuntimeBootRole::Monolith);
+        let duplicate_indexer = RuntimeBootProfile::indexer();
+        assert_eq!(duplicate_indexer.role, RuntimeBootRole::Indexer);
+        assert_eq!(duplicate_indexer.writer_targets(), &[WriterTarget::Ist]);
         assert_eq!(
-            monolith.writer_targets(),
-            &[WriterTarget::Soll, WriterTarget::Ist]
+            duplicate_indexer.runtime_mode(),
+            AxonRuntimeMode::IndexerFull
         );
-        assert_eq!(monolith.runtime_mode(), AxonRuntimeMode::Full);
+    }
+
+    #[test]
+    fn indexer_shadow_gpu_boot_prefers_graph_first_lane_sizing() {
+        let runtime_profile = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 5,
+            max_blocking_threads: 8,
+            queue_capacity: 100_000,
+        };
+        let base = EmbeddingLaneSizing {
+            query_workers: 1,
+            vector_workers: 2,
+            graph_workers: 2,
+            chunk_batch_size: 96,
+            file_vectorization_batch_size: 24,
+            graph_batch_size: 8,
+        };
+
+        let adjusted =
+            graph_first_indexer_lane_sizing(RuntimeBootProfile::indexer(), &runtime_profile, base);
+
+        assert_eq!(adjusted.query_workers, 0);
+        assert_eq!(adjusted.vector_workers, 1);
+        assert_eq!(adjusted.graph_workers, 4);
+        assert_eq!(adjusted.chunk_batch_size, 64);
+        assert_eq!(adjusted.file_vectorization_batch_size, 48);
+        assert_eq!(adjusted.graph_batch_size, 64);
+    }
+
+    #[test]
+    fn non_indexer_boot_preserves_base_lane_sizing() {
+        let runtime_profile = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 5,
+            max_blocking_threads: 8,
+            queue_capacity: 100_000,
+        };
+        let base = EmbeddingLaneSizing {
+            query_workers: 1,
+            vector_workers: 2,
+            graph_workers: 2,
+            chunk_batch_size: 96,
+            file_vectorization_batch_size: 24,
+            graph_batch_size: 8,
+        };
+
+        let adjusted =
+            graph_first_indexer_lane_sizing(RuntimeBootProfile::brain(), &runtime_profile, base);
+
+        assert_eq!(adjusted, base);
+    }
+
+    #[test]
+    fn indexer_shadow_gpu_boot_applies_conservative_memory_defaults_for_8gb_gpu() {
+        let runtime_profile = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 5,
+            max_blocking_threads: 8,
+            queue_capacity: 100_000,
+        };
+
+        unsafe {
+            std::env::set_var("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
+            std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
+            std::env::remove_var("AXON_CUDA_MEMORY_LIMIT_MB");
+            std::env::remove_var("AXON_OPT_MAX_VRAM_USED_MB");
+            std::env::remove_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB");
+            std::env::remove_var("AXON_MAX_EMBED_BATCH_BYTES");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS");
+            std::env::remove_var("AXON_EMBED_BATCH_MAX_TOTAL_TOKENS");
+            std::env::remove_var("AXON_GPU_MULTIWORKER_MIN_FREE_MB");
+            std::env::remove_var("AXON_GPU_TELEMETRY_BACKEND");
+            std::env::remove_var("AXON_GPU_TELEMETRY_CACHE_TTL_MS");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_ENABLED");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
+            std::env::remove_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT");
+            std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
+            std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
+            std::env::remove_var("AXON_GPU_RECYCLE_REQUIRED_BATCHES");
+        }
+
+        apply_graph_first_indexer_memory_defaults(RuntimeBootProfile::indexer(), &runtime_profile);
+
+        assert_eq!(
+            std::env::var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB").unwrap(),
+            "8064"
+        );
+        assert_eq!(std::env::var("AXON_CUDA_MEMORY_LIMIT_MB").unwrap(), "7936");
+        assert_eq!(std::env::var("AXON_OPT_MAX_VRAM_USED_MB").unwrap(), "8064");
+        assert_eq!(
+            std::env::var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB").unwrap(),
+            "8064"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_READY_QUEUE_DEPTH").unwrap(),
+            "48"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_PREPARE_PIPELINE_DEPTH").unwrap(),
+            "6"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR").unwrap(),
+            "4"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS").unwrap(),
+            "50"
+        );
+        assert_eq!(
+            std::env::var("AXON_MAX_EMBED_BATCH_BYTES").unwrap(),
+            "524288"
+        );
+        assert_eq!(
+            std::env::var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS").unwrap(),
+            "16"
+        );
+        assert_eq!(
+            std::env::var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS").unwrap(),
+            "2048"
+        );
+        assert_eq!(
+            std::env::var("AXON_EMBED_BATCH_MAX_TOTAL_TOKENS").unwrap(),
+            "4096"
+        );
+        assert_eq!(std::env::var("AXON_GPU_TELEMETRY_BACKEND").unwrap(), "nvml");
+        assert_eq!(
+            std::env::var("AXON_GPU_TELEMETRY_CACHE_TTL_MS").unwrap(),
+            "250"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_EMBED_SERVICE_ENABLED").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH").unwrap(),
+            "0"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_STUCK_RECOVERY_ENABLED").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS").unwrap(),
+            "2500"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS").unwrap(),
+            "5000"
+        );
+        assert_eq!(
+            std::env::var("AXON_SEMANTIC_SLEEP_SCALE_PCT").unwrap(),
+            "10"
+        );
+        assert_eq!(
+            std::env::var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT").unwrap(),
+            "10"
+        );
+        assert_eq!(
+            std::env::var("AXON_GPU_MULTIWORKER_MIN_FREE_MB").unwrap(),
+            "1536"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_GPU_TOTAL_VRAM_MB_HINT");
+            std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
+            std::env::remove_var("AXON_CUDA_MEMORY_LIMIT_MB");
+            std::env::remove_var("AXON_OPT_MAX_VRAM_USED_MB");
+            std::env::remove_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB");
+            std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH");
+            std::env::remove_var("AXON_VECTOR_PREPARE_PIPELINE_DEPTH");
+            std::env::remove_var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR");
+            std::env::remove_var("AXON_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS");
+            std::env::remove_var("AXON_MAX_EMBED_BATCH_BYTES");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS");
+            std::env::remove_var("AXON_EMBED_BATCH_MAX_TOTAL_TOKENS");
+            std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT");
+            std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT");
+            std::env::remove_var("AXON_GPU_MULTIWORKER_MIN_FREE_MB");
+            std::env::remove_var("AXON_GPU_TELEMETRY_BACKEND");
+            std::env::remove_var("AXON_GPU_TELEMETRY_CACHE_TTL_MS");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_ENABLED");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH");
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
+            std::env::remove_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT");
+            std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
+            std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
+            std::env::remove_var("AXON_GPU_RECYCLE_REQUIRED_BATCHES");
+        }
     }
 }
 
@@ -708,6 +1373,15 @@ fn start_indexer_only_services(
     }
 
     if runtime_mode.semantic_workers_enabled() {
+        let lane_config = embedding_lane_config_from_env();
+        info!(
+            "Runtime services: semantic workers enabled (mode={}, graph_embeddings_enabled={}, query_workers={}, vector_workers={}, graph_workers={}).",
+            runtime_mode.as_str(),
+            graph_embeddings_enabled(),
+            lane_config.query_workers,
+            lane_config.vector_workers,
+            lane_config.graph_workers
+        );
         let semantic_store = graph_store.clone();
         let semantic_queue = queue_store.clone();
         tokio::task::spawn_blocking(move || {

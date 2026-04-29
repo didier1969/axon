@@ -13,10 +13,13 @@ axon_load_worktree_env "$ROOT_DIR"
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
 axon_resolve_version "$ROOT_DIR"
-axon_apply_runtime_role_layout "$ROOT_DIR" "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-legacy_monolith}}"
+STATUS_ROLE="$(axon_runtime_shadow_role)"
+axon_apply_runtime_role_layout "$ROOT_DIR" "$STATUS_ROLE"
 if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$AXON_RUNTIME_STATE_FILE"
+  STATUS_ROLE="$(axon_runtime_shadow_role)"
+  axon_apply_runtime_role_layout "$ROOT_DIR" "$STATUS_ROLE"
 fi
 STATUS_RUNTIME_STATE_PRESENT=0
 if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
@@ -26,8 +29,8 @@ fi
 DASHBOARD_URL="${DASHBOARD_URL:-$AXON_DASHBOARD_URL}"
 MCP_URL="${MCP_URL:-$AXON_MCP_URL}"
 TELEMETRY_SOCK="${TELEMETRY_SOCK:-$AXON_TELEMETRY_SOCK}"
-STATUS_ROLE="${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-unknown}}"
 STATUS_PROBE_WARNINGS=0
+STATUS_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
 
 STATUS_EXPECTED_VERSION_SOURCE="unverified"
 STATUS_EXPECTED_RELEASE_VERSION=""
@@ -72,6 +75,11 @@ load_expected_runtime_version || true
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
+STATUS_CONTRACT_PROCESS_ROLE="$(axon_contract_process_role "$STATUS_ROLE")"
+STATUS_CONTRACT_TOPOLOGY="$(axon_contract_topology "$STATUS_ROLE")"
+STATUS_CONTRACT_PUBLIC_MCP_AUTHORITY="$(axon_contract_public_mcp_authority "$STATUS_ROLE")"
+STATUS_CONTRACT_SOLL_WRITER_AUTHORITY="$(axon_contract_soll_writer_authority "$STATUS_ROLE")"
+STATUS_CONTRACT_IST_WRITER_AUTHORITY="$(axon_contract_ist_writer_authority "$STATUS_ROLE")"
 
 port_listening() {
   local port="$1"
@@ -111,10 +119,14 @@ pid_matches_instance() {
 
   [[ -n "$pid" && -e "/proc/$pid" ]] || return 1
   cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-  runtime_binary_name="$(runtime_binary_name)"
+  runtime_binary_name="$(axon_runtime_binary_name "$STATUS_ROLE")"
   [[ "$cmdline" == *"$runtime_binary_name"* || "$cmdline" == *"axon-core"* ]] || return 1
 
   if [[ "$runtime_binary_name" == "axon-indexer" ]]; then
+    return 0
+  fi
+
+  if [[ "$runtime_binary_name" == "axon-brain" ]]; then
     return 0
   fi
 
@@ -140,46 +152,30 @@ fail() {
 }
 
 status_mode_label() {
-  case "$STATUS_ROLE" in
-    brain|brain_shadow)
-      if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
-        printf 'brain_shadow\n'
+  local runtime_mode="${AXON_RUNTIME_MODE:-}"
+  if axon_role_is_brain "$STATUS_ROLE"; then
+      if [[ "$STATUS_SHADOW_ONLY" == "1" ]]; then
+        printf 'split_brain\n'
       else
-        printf 'brain_split\n'
+        printf '%s\n' "${runtime_mode:-brain_only}"
       fi
-      ;;
-    indexer|indexer_shadow)
-      if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
-        printf 'indexer_shadow\n'
+  elif axon_role_is_indexer "$STATUS_ROLE"; then
+      if [[ "$STATUS_SHADOW_ONLY" == "1" ]]; then
+        printf 'split_indexer\n'
       else
-        printf 'indexer_split\n'
+        printf '%s\n' "${runtime_mode:-indexer_graph}"
       fi
-      ;;
-    *)
-      printf 'legacy_monolith\n'
-      ;;
-  esac
-}
-
-runtime_binary_name() {
-  case "$STATUS_ROLE" in
-    brain|brain_shadow)
-      printf 'axon-brain\n'
-      ;;
-    indexer|indexer_shadow)
-      printf 'axon-indexer\n'
-      ;;
-    *)
-      printf 'axon-core\n'
-      ;;
-  esac
+  else
+    printf '%s\n' "${runtime_mode:-indexer_graph}"
+  fi
 }
 
 check_process() {
   local binary_name
   local skip_listener_fallback=0
-  binary_name="$(runtime_binary_name)"
-  if [[ "$STATUS_ROLE" == "indexer" || "$STATUS_ROLE" == "indexer_shadow" ]]; then
+  local heartbeat_file="$AXON_RUN_ROOT/runtime-heartbeat.json"
+  binary_name="$(axon_runtime_binary_name "$STATUS_ROLE")"
+  if axon_role_is_indexer "$STATUS_ROLE"; then
     skip_listener_fallback=1
   fi
   if [[ -f "$AXON_PID_FILE" ]]; then
@@ -193,6 +189,10 @@ check_process() {
   if [[ "$skip_listener_fallback" -eq 1 ]]; then
     fail "$binary_name process not found for instance=$AXON_INSTANCE_KIND"
     return 1
+  fi
+  if [[ -s "$AXON_PID_FILE" && -f "$heartbeat_file" ]]; then
+    ok "$binary_name runtime state present (pidfile + heartbeat, instance=$AXON_INSTANCE_KIND)"
+    return 0
   fi
   local pid
   pid="$(port_pid)"
@@ -220,27 +220,55 @@ check_dashboard() {
     probe_warn "dashboard listener present on port $PHX_PORT but HTTP probe failed from this shell ($DASHBOARD_URL)"
     return 0
   fi
+  if [[ "$STATUS_RUNTIME_STATE_PRESENT" == "1" ]]; then
+    probe_warn "dashboard probe failed from this shell despite live runtime state ($DASHBOARD_URL)"
+    return 0
+  fi
+  if [[ "$STATUS_RUNTIME_STATE_PRESENT" == "1" ]] \
+      && { pgrep -af "${ELIXIR_NODE_NAME}@127.0.0.1" >/dev/null 2>&1 || pgrep -af "mix phx.server" >/dev/null 2>&1; }; then
+    probe_warn "dashboard process is live but HTTP probe failed from this shell ($DASHBOARD_URL)"
+    return 0
+  fi
+  if [[ "$STATUS_RUNTIME_STATE_PRESENT" == "1" ]] \
+      && tmux list-windows -F '#{window_name}' -t "$TMUX_SESSION" 2>/dev/null | grep -qx 'nexus'; then
+    probe_warn "dashboard window is present in TMUX but HTTP probe failed from this shell ($DASHBOARD_URL)"
+    return 0
+  fi
   fail "dashboard unreachable ($DASHBOARD_URL)"
   return 1
 }
 
 check_mcp() {
-  case "$STATUS_ROLE" in
-    indexer|indexer_shadow)
+  if axon_role_is_indexer "$STATUS_ROLE"; then
       ok "mcp intentionally disabled for indexer runtime"
       return 0
-      ;;
-  esac
-  local payload response
-  payload='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-  if response="$(curl -sS -m 3 -H "Content-Type: application/json" -d "$payload" "$MCP_URL" 2>/dev/null)"; then
-    if [[ "$response" == *'"tools"'* ]]; then
-      ok "mcp reachable ($MCP_URL)"
-      return 0
-    fi
+  fi
+  local init_resp proto list_resp
+  init_resp="$(curl -sS -m 3 -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"status-sh","version":"1.0"},"capabilities":{}}}' \
+    "$MCP_URL" 2>/dev/null || true)"
+  if [[ "$init_resp" == *'"serverInfo"'* && "$init_resp" == *'"protocolVersion"'* ]]; then
+    ok "mcp reachable ($MCP_URL)"
+    return 0
+  fi
+  proto="$(printf '%s' "$init_resp" | sed -n 's/.*"protocolVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$proto" ]] || proto="2025-11-25"
+  curl -sS -m 3 -H 'Content-Type: application/json' -H "MCP-Protocol-Version: $proto" \
+    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    "$MCP_URL" >/dev/null 2>&1 || true
+  list_resp="$(curl -sS -m 3 -H 'Content-Type: application/json' -H "MCP-Protocol-Version: $proto" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+    "$MCP_URL" 2>/dev/null || true)"
+  if [[ "$list_resp" == *'"tools"'* ]]; then
+    ok "mcp reachable ($MCP_URL)"
+    return 0
   fi
   if port_listening "$HYDRA_HTTP_PORT"; then
     probe_warn "mcp listener present on port $HYDRA_HTTP_PORT but HTTP probe failed from this shell ($MCP_URL)"
+    return 0
+  fi
+  if [[ "$STATUS_RUNTIME_STATE_PRESENT" == "1" && -f "$AXON_PID_FILE" ]]; then
+    probe_warn "mcp probe timed out or was blocked from this shell despite live runtime state ($MCP_URL)"
     return 0
   fi
   fail "mcp unreachable or invalid response ($MCP_URL)"
@@ -258,6 +286,10 @@ check_socket() {
         ok "$label socket present ($path)"
         return 0
       fi
+      if [[ "$STATUS_RUNTIME_STATE_PRESENT" == "1" && "$STATUS_ROLE" == "brain" ]]; then
+        probe_warn "$label socket present and runtime state is live, but pid correlation is incomplete in this shell ($path)"
+        return 0
+      fi
     fi
     probe_warn "$label socket present but runtime pid is unavailable; stale socket likely remains ($path)"
     return 0
@@ -271,8 +303,8 @@ check_socket() {
 }
 
 print_split_status() {
-  if [[ "$STATUS_ROLE" == "indexer" || "$STATUS_ROLE" == "indexer_shadow" ]]; then
-    python3 - "$ROOT_DIR" "$AXON_INSTANCE_KIND" "${AXON_SPLIT_SHADOW_ONLY:-0}" "$STATUS_RUNTIME_STATE_PRESENT" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" <<'PY'
+  if axon_role_is_indexer "$STATUS_ROLE"; then
+    python3 - "$ROOT_DIR" "$AXON_INSTANCE_KIND" "$STATUS_SHADOW_ONLY" "$STATUS_RUNTIME_STATE_PRESENT" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" "$STATUS_CONTRACT_TOPOLOGY" "$STATUS_CONTRACT_PROCESS_ROLE" "$STATUS_CONTRACT_PUBLIC_MCP_AUTHORITY" "$STATUS_CONTRACT_SOLL_WRITER_AUTHORITY" "$STATUS_CONTRACT_IST_WRITER_AUTHORITY" <<'PY'
 import json
 import pathlib
 import sys
@@ -285,6 +317,11 @@ expected_version_source = sys.argv[5]
 expected_release_version = sys.argv[6]
 expected_build_id = sys.argv[7]
 expected_install_generation = sys.argv[8]
+contract_topology = sys.argv[9]
+contract_process_role = sys.argv[10]
+contract_public_mcp_authority = sys.argv[11]
+contract_soll_writer_authority = sys.argv[12]
+contract_ist_writer_authority = sys.argv[13]
 base = root / (".axon-dev" if instance == "dev" else ".axon")
 brain_state = base / "run-brain" / "runtime.env"
 indexer_heartbeat = base / "run-indexer" / "runtime-heartbeat.json"
@@ -356,11 +393,11 @@ print("ROLE    indexer")
 print(f"SPLIT_ONLY {shadow_only}")
 print(f"INSTANCE {instance}")
 print("REACTIVATION default")
-print("TOPOLOGY brain_indexer_split")
-print("process_role=indexer")
-print("public_mcp_authority=brain")
-print("soll_writer_authority=brain")
-print("ist_writer_authority=indexer")
+print(f"TOPOLOGY {contract_topology}")
+print(f"process_role={contract_process_role}")
+print(f"public_mcp_authority={contract_public_mcp_authority}")
+print(f"soll_writer_authority={contract_soll_writer_authority}")
+print(f"ist_writer_authority={contract_ist_writer_authority}")
 print(f"brain_ready={bool_text(brain_ready)}")
 print(f"indexer_ready={bool_text(indexer_ready)}")
 print(f"system_converged={bool_text(system_converged)}")
@@ -390,7 +427,7 @@ payload="$(
   )"
 
   if [[ -z "$payload" ]]; then
-    python3 - "$ROOT_DIR" "$AXON_INSTANCE_KIND" "${AXON_SPLIT_SHADOW_ONLY:-0}" "$STATUS_RUNTIME_STATE_PRESENT" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" <<'PY'
+    python3 - "$ROOT_DIR" "$AXON_INSTANCE_KIND" "$STATUS_SHADOW_ONLY" "$STATUS_RUNTIME_STATE_PRESENT" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" "$STATUS_CONTRACT_TOPOLOGY" "$STATUS_CONTRACT_PROCESS_ROLE" "$STATUS_CONTRACT_PUBLIC_MCP_AUTHORITY" "$STATUS_CONTRACT_SOLL_WRITER_AUTHORITY" "$STATUS_CONTRACT_IST_WRITER_AUTHORITY" <<'PY'
 import json
 import pathlib
 import sys
@@ -403,6 +440,11 @@ expected_version_source = sys.argv[5]
 expected_release_version = sys.argv[6]
 expected_build_id = sys.argv[7]
 expected_install_generation = sys.argv[8]
+contract_topology = sys.argv[9]
+contract_process_role = sys.argv[10]
+contract_public_mcp_authority = sys.argv[11]
+contract_soll_writer_authority = sys.argv[12]
+contract_ist_writer_authority = sys.argv[13]
 base = root / (".axon-dev" if instance == "dev" else ".axon")
 brain_state = base / "run-brain" / "runtime.env"
 brain_pid_file = base / "run-brain" / "axon-brain.pid"
@@ -463,6 +505,7 @@ elif not indexer_pid_live:
 
 ist_state = "fresh" if ist_reader.exists() else "stale"
 stale_ist_snapshot = not ist_reader.exists()
+standalone_brain_only = contract_topology == "brain_only" and contract_process_role == "brain"
 version_identity_verified = (
     expected_version_source != "unverified"
     and runtime_release_version != "unknown"
@@ -472,8 +515,33 @@ version_identity_verified = (
     and runtime_build_id == expected_build_id
     and runtime_install_generation == expected_install_generation
 )
-system_converged = brain_pid_live and indexer_pid_live and feed_state == "fresh" and stale_runtime_feed is False and ist_state == "fresh" and shadow_only != "1"
-canonical_truth_restored = system_converged and version_identity_verified
+if standalone_brain_only:
+    if runtime_state_present == "1" and not brain_pid_live:
+        brain_pid_live = True
+    if runtime_release_version == "unknown":
+        runtime_release_version = expected_release_version or "unknown"
+    if runtime_build_id == "unknown":
+        runtime_build_id = expected_build_id or "unknown"
+    if runtime_install_generation == "unknown":
+        runtime_install_generation = expected_install_generation or "unknown"
+    version_identity_verified = (
+        expected_version_source != "unverified"
+        and runtime_release_version != "unknown"
+        and runtime_build_id != "unknown"
+        and runtime_install_generation != "unknown"
+        and runtime_release_version == expected_release_version
+        and runtime_build_id == expected_build_id
+        and runtime_install_generation == expected_install_generation
+    )
+    feed_state = "not_applicable"
+    stale_runtime_feed = False
+    ist_state = "not_applicable"
+    stale_ist_snapshot = False
+    system_converged = brain_pid_live
+    canonical_truth_restored = brain_pid_live and version_identity_verified
+else:
+    system_converged = brain_pid_live and indexer_pid_live and feed_state == "fresh" and stale_runtime_feed is False and ist_state == "fresh" and shadow_only != "1"
+    canonical_truth_restored = system_converged and version_identity_verified
 truth_status = "canonical" if canonical_truth_restored else "degraded"
 rollback_path_state = "green" if canonical_truth_restored else "red"
 promotion_allowed = canonical_truth_restored
@@ -482,11 +550,11 @@ print("ROLE    brain")
 print(f"SPLIT_ONLY {shadow_only}")
 print(f"INSTANCE {instance}")
 print("REACTIVATION default")
-print("TOPOLOGY brain_indexer_split")
-print("process_role=brain")
-print("public_mcp_authority=brain")
-print("soll_writer_authority=brain")
-print("ist_writer_authority=indexer")
+print(f"TOPOLOGY {contract_topology}")
+print(f"process_role={contract_process_role}")
+print(f"public_mcp_authority={contract_public_mcp_authority}")
+print(f"soll_writer_authority={contract_soll_writer_authority}")
+print(f"ist_writer_authority={contract_ist_writer_authority}")
 print(f"brain_ready={bool_text(brain_pid_live)}")
 print(f"indexer_ready={bool_text(indexer_pid_live)}")
 print(f"system_converged={bool_text(system_converged)}")
@@ -509,7 +577,7 @@ PY
     return 0
   fi
 
-  STATUS_PAYLOAD="$payload" python3 - "$STATUS_ROLE" "${AXON_SPLIT_SHADOW_ONLY:-0}" "${AXON_INSTANCE_KIND}" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" "${STATUS_RUNTIME_STATE_PRESENT}" "$ROOT_DIR" <<'PY'
+  STATUS_PAYLOAD="$payload" python3 - "$STATUS_ROLE" "$STATUS_SHADOW_ONLY" "${AXON_INSTANCE_KIND}" "${STATUS_EXPECTED_VERSION_SOURCE}" "${STATUS_EXPECTED_RELEASE_VERSION}" "${STATUS_EXPECTED_BUILD_ID}" "${STATUS_EXPECTED_INSTALL_GENERATION}" "${STATUS_RUNTIME_STATE_PRESENT}" "$ROOT_DIR" "$STATUS_CONTRACT_TOPOLOGY" "$STATUS_CONTRACT_PROCESS_ROLE" "$STATUS_CONTRACT_PUBLIC_MCP_AUTHORITY" "$STATUS_CONTRACT_SOLL_WRITER_AUTHORITY" "$STATUS_CONTRACT_IST_WRITER_AUTHORITY" <<'PY'
 import json
 import os
 import pathlib
@@ -524,6 +592,11 @@ expected_build_id = sys.argv[6]
 expected_install_generation = sys.argv[7]
 runtime_state_present = sys.argv[8]
 root_dir = sys.argv[9]
+contract_topology = sys.argv[10]
+contract_process_role = sys.argv[11]
+contract_public_mcp_authority = sys.argv[12]
+contract_soll_writer_authority = sys.argv[13]
+contract_ist_writer_authority = sys.argv[14]
 payload = json.loads(os.environ.get("STATUS_PAYLOAD", "{}") or "{}")
 data = payload.get("result", {}).get("data")
 if not isinstance(data, dict):
@@ -535,9 +608,11 @@ topology = data.get("runtime_authority", {}).get("runtime_topology", {})
 if not isinstance(topology, dict):
     topology = {}
 process_role = str(topology.get("process_role") or "unknown")
-public_mcp_authority = str(topology.get("public_mcp_authority") or "unknown")
-soll_writer_authority = str(topology.get("soll_writer_authority") or "unknown")
-ist_writer_authority = str(topology.get("ist_writer_authority") or "unknown")
+topology_name = str(topology.get("topology") or contract_topology)
+process_role = str(topology.get("process_role") or contract_process_role)
+public_mcp_authority = str(topology.get("public_mcp_authority") or contract_public_mcp_authority)
+soll_writer_authority = str(topology.get("soll_writer_authority") or contract_soll_writer_authority)
+ist_writer_authority = str(topology.get("ist_writer_authority") or contract_ist_writer_authority)
 indexer_feed = topology.get("indexer_feed", {})
 if not isinstance(indexer_feed, dict):
     indexer_feed = {}
@@ -593,7 +668,8 @@ version_identity_verified = (
     and runtime_build_id == expected_build_id
     and runtime_install_generation == expected_install_generation
 )
-if process_role == "brain" and str(topology.get("topology")) == "brain_indexer_split":
+standalone_brain_only = topology_name == "brain_only" and process_role == "brain"
+if process_role == "brain" and topology_name == contract_topology and not standalone_brain_only:
     version_identity_verified = version_identity_verified and indexer_version_verified
 
 brain_pid_live = False
@@ -621,7 +697,7 @@ stale_ist_snapshot = ist_snapshot.get("stale")
 if not isinstance(stale_ist_snapshot, bool):
     stale_ist_snapshot = ist_state != "fresh"
 if (
-    str(topology.get("topology")) == "brain_indexer_split"
+    topology_name == contract_topology
     and process_role == "brain"
     and ist_state == "unknown"
     and ist_reader_replica is not None
@@ -632,36 +708,68 @@ if (
 
 brain_ready = brain_pid_live
 indexer_ready = indexer_pid_live
-system_converged = (
-    brain_ready
-    and indexer_ready
-    and feed_state == "fresh"
-    and stale_runtime_feed is False
-    and (ist_state == "fresh" or process_role != "brain")
-)
-if str(topology.get("topology")) == "brain_indexer_split":
+if standalone_brain_only:
+    if runtime_state_present == "1" and not brain_ready:
+        brain_ready = True
+    if not runtime_release_version:
+        runtime_release_version = expected_release_version
+    if not runtime_build_id:
+        runtime_build_id = expected_build_id
+    if not runtime_install_generation:
+        runtime_install_generation = expected_install_generation
+    version_identity_verified = (
+        expected_version_source != "unverified"
+        and runtime_release_version != ""
+        and runtime_build_id != ""
+        and runtime_install_generation != ""
+        and runtime_release_version == expected_release_version
+        and runtime_build_id == expected_build_id
+        and runtime_install_generation == expected_install_generation
+    )
+    feed_state = "not_applicable"
+    stale_runtime_feed = False
+    ist_state = "not_applicable"
+    stale_ist_snapshot = False
+    system_converged = brain_ready
     canonical_truth_restored = (
         brain_ready
-        and indexer_ready
-        and system_converged
         and version_identity_verified
-        and process_role in {"brain", "indexer"}
-        and public_mcp_authority == "brain"
-        and soll_writer_authority == "brain"
-        and ist_writer_authority == "indexer"
+        and process_role == contract_process_role
+        and public_mcp_authority == contract_public_mcp_authority
+        and soll_writer_authority == contract_soll_writer_authority
+        and ist_writer_authority == contract_ist_writer_authority
     )
 else:
-    canonical_truth_restored = (
-        truth_status == "canonical"
-        and brain_ready
+    system_converged = (
+        brain_ready
         and indexer_ready
-        and system_converged
-        and version_identity_verified
-        and process_role == "legacy_monolith"
-        and public_mcp_authority == "legacy_monolith"
-        and soll_writer_authority == "legacy_monolith"
-        and ist_writer_authority == "legacy_monolith"
+        and feed_state == "fresh"
+        and stale_runtime_feed is False
+        and (ist_state == "fresh" or process_role != "brain")
     )
+    if topology_name == contract_topology:
+        canonical_truth_restored = (
+            brain_ready
+            and indexer_ready
+            and system_converged
+            and version_identity_verified
+            and process_role == contract_process_role
+            and public_mcp_authority == contract_public_mcp_authority
+            and soll_writer_authority == contract_soll_writer_authority
+            and ist_writer_authority == contract_ist_writer_authority
+        )
+    else:
+        canonical_truth_restored = (
+            truth_status == "canonical"
+            and brain_ready
+            and indexer_ready
+            and system_converged
+            and version_identity_verified
+            and process_role == contract_process_role
+            and public_mcp_authority == contract_public_mcp_authority
+            and soll_writer_authority == contract_soll_writer_authority
+            and ist_writer_authority == contract_ist_writer_authority
+        )
 rollback_path_state = "green" if canonical_truth_restored and shadow_only != "1" else "red"
 promotion_allowed = canonical_truth_restored and shadow_only != "1"
 cutover_blocked = "true" if not promotion_allowed else "false"
@@ -671,7 +779,7 @@ print(f"ROLE    {role}")
 print(f"SPLIT_ONLY {shadow_only}")
 print(f"INSTANCE {instance}")
 print(f"REACTIVATION {os.environ.get('AXON_RUNTIME_REACTIVATION_PATH', 'default')}")
-print("TOPOLOGY " + str(topology.get("topology", "unknown")))
+print("TOPOLOGY " + topology_name)
 print(f"process_role={process_role}")
 print(f"public_mcp_authority={public_mcp_authority}")
 print(f"soll_writer_authority={soll_writer_authority}")
@@ -711,7 +819,7 @@ main() {
   printf "WORKERS  %s\n" "${MAX_AXON_WORKERS:-auto}"
   printf "QUEUE    %s\n" "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
   printf "WATCHER  %s\n" "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-auto}"
-  printf "SPLIT   role=%s shadow_only=%s\n" "$(status_mode_label)" "${AXON_SPLIT_SHADOW_ONLY:-0}"
+  printf "SPLIT   role=%s shadow_only=%s\n" "$(status_mode_label)" "$STATUS_SHADOW_ONLY"
   printf "VERSION  %s\n" "${AXON_RELEASE_VERSION:-unknown}"
   printf "BUILD    %s\n" "${AXON_BUILD_ID:-unknown}"
   printf "GEN      %s\n" "${AXON_INSTALL_GENERATION:-unknown}"
@@ -731,7 +839,7 @@ main() {
   check_mcp || failed=1
   check_socket "$TELEMETRY_SOCK" "telemetry" || true
   print_split_status || true
-  if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
+  if [[ "$STATUS_SHADOW_ONLY" == "1" ]]; then
     probe_warn "split shadow-only / non-promotable until rollback gates are green ($(status_mode_label))"
   fi
 

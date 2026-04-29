@@ -7,6 +7,14 @@ pub struct PythonParser {
 }
 
 impl PythonParser {
+    fn block_split_lines<'a>(&self, block: Node<'a>) -> Vec<usize> {
+        let mut cursor = block.walk();
+        block
+            .named_children(&mut cursor)
+            .map(|child| child.start_position().row + 1)
+            .collect()
+    }
+
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -137,6 +145,32 @@ impl PythonParser {
                         }
                     }
                 }
+            }
+        }
+
+        if let Some(body) = self.find_child_by_type(node, "block") {
+            props.insert(
+                "header_end_line".to_string(),
+                body.start_position().row.to_string(),
+            );
+            props.insert(
+                "body_start_line".to_string(),
+                body.start_position().row.saturating_add(1).to_string(),
+            );
+            props.insert(
+                "body_end_line".to_string(),
+                body.end_position().row.saturating_add(1).to_string(),
+            );
+            let split_lines = self.block_split_lines(body);
+            if split_lines.len() > 1 {
+                props.insert(
+                    "body_split_lines".to_string(),
+                    split_lines
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
             }
         }
 

@@ -1,184 +1,29 @@
 use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
-use crate::service_guard::{self, ServicePressure};
+use crate::service_guard::ServicePressure;
 use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+#[cfg(not(test))]
+use std::sync::Mutex;
 use std::time::Instant;
 
 use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
+mod retrieval_model;
+use retrieval_model::{
+    ChunkCandidate, EntryCandidate, RetrievalDiagnostics, RetrievalRoute, RetrievalRuntimeState,
+    RetrievalTimings,
+};
+#[cfg(not(test))]
+use retrieval_model::{
+    RetrieveContextCache, RETRIEVE_CONTEXT_CACHE, RETRIEVE_CONTEXT_CACHE_TTL_MS,
+};
+
 const DEFAULT_TOKEN_BUDGET: usize = 1400;
 const DEFAULT_TOP_K: usize = 8;
-const VECTOR_QUEUE_BACKLOG_WARN: usize = 128;
-const VECTOR_QUEUE_BACKLOG_HARD_STOP: usize = 512;
-#[allow(dead_code)]
-const RETRIEVE_CONTEXT_CACHE_TTL_MS: i64 = 60_000;
-
-#[allow(dead_code)]
-type RetrieveContextCache = HashMap<String, (i64, Value)>;
-
-#[allow(dead_code)]
-static RETRIEVE_CONTEXT_CACHE: OnceLock<Mutex<RetrieveContextCache>> = OnceLock::new();
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RetrievalRoute {
-    ExactLookup,
-    Wiring,
-    Impact,
-    SollHybrid,
-    Hybrid,
-}
-
-impl RetrievalRoute {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactLookup => "exact_lookup",
-            Self::Wiring => "wiring",
-            Self::Impact => "impact",
-            Self::SollHybrid => "soll_hybrid",
-            Self::Hybrid => "hybrid",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct EntryCandidate {
-    id: String,
-    name: String,
-    kind: String,
-    project_code: String,
-    uri: String,
-    lexical_hits: usize,
-    exact_match: bool,
-    score: f64,
-    reasons: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ChunkCandidate {
-    chunk_id: String,
-    source_id: String,
-    project_code: String,
-    uri: String,
-    content: String,
-    match_reason: String,
-    lexical_hits: usize,
-    semantic_distance: Option<f64>,
-    anchored_to_entry: bool,
-    same_file_as_entry: bool,
-    score: f64,
-    reasons: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RetrievalDiagnostics {
-    symbol_candidates_considered: usize,
-    file_candidates_considered: usize,
-    chunk_candidates_considered: usize,
-    anchored_chunks_selected: usize,
-    unanchored_chunks_selected: usize,
-    graph_neighbors_selected: usize,
-    soll_entities_selected: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RetrievalTimings {
-    planner_ms: u64,
-    entry_lookup_ms: u64,
-    runtime_guard_ms: u64,
-    chunk_lookup_ms: u64,
-    chunk_selection_ms: u64,
-    graph_expansion_ms: u64,
-    soll_join_ms: u64,
-    packet_assembly_ms: u64,
-    total_ms: u64,
-}
-
-#[derive(Clone, Debug)]
-struct RetrievalRuntimeState {
-    pressure: ServicePressure,
-    graph_projection_queue_depth: usize,
-    file_vectorization_queue_depth: usize,
-    semantic_search_used: bool,
-    degraded_reason: Option<String>,
-}
-
-impl RetrievalRuntimeState {
-    fn new(server: &McpServer) -> Self {
-        let pressure = service_guard::current_pressure();
-        let (graph_projection_queue_queued, graph_projection_queue_inflight) = server
-            .graph_store
-            .fetch_graph_projection_queue_counts()
-            .unwrap_or((0, 0));
-        let graph_projection_queue_depth =
-            graph_projection_queue_queued + graph_projection_queue_inflight;
-        let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = server
-            .graph_store
-            .fetch_file_vectorization_queue_counts()
-            .unwrap_or((0, 0));
-        let file_vectorization_queue_depth =
-            file_vectorization_queue_queued + file_vectorization_queue_inflight;
-
-        Self {
-            pressure,
-            graph_projection_queue_depth,
-            file_vectorization_queue_depth,
-            semantic_search_used: false,
-            degraded_reason: None,
-        }
-    }
-
-    fn allow_semantic_search(&mut self, has_strong_anchor: bool) -> bool {
-        match self.pressure {
-            ServicePressure::Critical => {
-                self.degraded_reason =
-                    Some("semantic_chunk_search_skipped_due_to_pressure_critical".to_string());
-                false
-            }
-            ServicePressure::Degraded => {
-                self.degraded_reason =
-                    Some("semantic_chunk_search_skipped_due_to_pressure_degraded".to_string());
-                false
-            }
-            ServicePressure::Recovering => {
-                if !has_strong_anchor {
-                    self.degraded_reason = Some(
-                        "semantic_chunk_search_skipped_while_recovering_without_strong_anchor"
-                            .to_string(),
-                    );
-                    return false;
-                }
-                if self.file_vectorization_queue_depth > VECTOR_QUEUE_BACKLOG_WARN {
-                    self.degraded_reason = Some(
-                        "semantic_chunk_search_skipped_while_recovering_vector_backlog".to_string(),
-                    );
-                    return false;
-                }
-                true
-            }
-            ServicePressure::Healthy => {
-                if self.file_vectorization_queue_depth > VECTOR_QUEUE_BACKLOG_HARD_STOP {
-                    self.degraded_reason =
-                        Some("semantic_chunk_search_skipped_due_to_vector_backlog".to_string());
-                    return false;
-                }
-                true
-            }
-        }
-    }
-
-    fn should_skip_graph_expansion(&self) -> bool {
-        self.pressure != ServicePressure::Healthy
-    }
-
-    fn should_skip_soll_join(&self) -> bool {
-        self.pressure != ServicePressure::Healthy
-    }
-}
 
 impl McpServer {
     #[cfg(not(test))]
@@ -448,12 +293,14 @@ impl McpServer {
                     && (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested))
         });
         let stage_started_at = Instant::now();
-        let relevant_soll_entities = if should_join_soll && !runtime.should_skip_soll_join() {
+        let relevant_soll_entities = if should_join_soll
+            && !runtime.should_skip_soll_join(route, rationale_requested)
+        {
             let entities =
                 self.collect_soll_entities(&entry_candidates, project, &terms_for_reasoning, top_k);
             diagnostics.soll_entities_selected = entities.len();
             entities
-        } else if should_join_soll && runtime.should_skip_soll_join() {
+        } else if should_join_soll && runtime.should_skip_soll_join(route, rationale_requested) {
             excluded_because.push("soll_join_skipped_due_to_pressure_guarded".to_string());
             Vec::new()
         } else {
@@ -464,14 +311,23 @@ impl McpServer {
 
         let stage_started_at = Instant::now();
         let direct_evidence = self.build_direct_evidence(&entry_candidates);
-        let answer_sketch = self.build_answer_sketch(
-            question,
-            route,
-            &entry_candidates,
-            &supporting_chunks,
-            &structural_neighbors,
+        let governing_requirements = Self::classify_governing_entities(
             &relevant_soll_entities,
+            "Requirement",
+            "soll_requirement",
         );
+        let governing_decisions =
+            Self::classify_governing_entities(&relevant_soll_entities, "Decision", "soll_decision");
+        let supporting_guidelines = Self::classify_governing_entities(
+            &relevant_soll_entities,
+            "Guideline",
+            "soll_guideline",
+        );
+        let direct_code_evidence = Self::classify_direct_code_evidence(&direct_evidence);
+        let supporting_docs =
+            Self::classify_supporting_chunks_by_provenance(&supporting_chunks, "doc", "supporting");
+        let supporting_code_context =
+            Self::classify_supporting_code_context(&supporting_chunks, &structural_neighbors);
         let why_these_items = self.build_why_these_items(
             route,
             &entry_candidates,
@@ -489,6 +345,35 @@ impl McpServer {
             runtime.semantic_search_used,
             runtime.degraded_reason.as_deref(),
         );
+        let evidence_states = Self::build_evidence_states(
+            route,
+            rationale_requested,
+            has_direct_soll_traceability,
+            runtime.degraded_reason.as_deref(),
+            &governing_requirements,
+            &governing_decisions,
+            &supporting_guidelines,
+            &direct_code_evidence,
+            &supporting_docs,
+            &supporting_code_context,
+        );
+        let rationale_quality = Self::build_rationale_quality(
+            &evidence_states,
+            &governing_requirements,
+            &governing_decisions,
+            &supporting_guidelines,
+        );
+        let answer_sketch = self.build_answer_sketch(
+            question,
+            route,
+            &entry_candidates,
+            &supporting_chunks,
+            &structural_neighbors,
+            &governing_requirements,
+            &governing_decisions,
+            &supporting_guidelines,
+            &evidence_states,
+        );
         let confidence = self.compute_confidence(
             route,
             &entry_candidates,
@@ -505,6 +390,14 @@ impl McpServer {
             "supporting_chunks": supporting_chunks,
             "structural_neighbors": structural_neighbors,
             "relevant_soll_entities": relevant_soll_entities,
+            "governing_requirements": governing_requirements,
+            "governing_decisions": governing_decisions,
+            "supporting_guidelines": supporting_guidelines,
+            "supporting_docs": supporting_docs,
+            "direct_code_evidence": direct_code_evidence,
+            "supporting_code_context": supporting_code_context,
+            "evidence_states": evidence_states,
+            "rationale_quality": rationale_quality,
             "confidence": confidence,
             "missing_evidence": missing_evidence,
             "why_these_items": why_these_items,
@@ -532,6 +425,8 @@ impl McpServer {
                 "chunk_candidates_considered": diagnostics.chunk_candidates_considered,
                 "anchored_chunks_selected": diagnostics.anchored_chunks_selected,
                 "unanchored_chunks_selected": diagnostics.unanchored_chunks_selected,
+                "multipart_chunks_selected": diagnostics.multipart_chunks_selected,
+                "multipart_symbol_groups_selected": diagnostics.multipart_symbol_groups_selected,
                 "graph_neighbors_selected": diagnostics.graph_neighbors_selected,
                 "soll_entities_selected": diagnostics.soll_entities_selected,
             },
@@ -1185,6 +1080,9 @@ impl McpServer {
                 match_reason: "repo_literal".to_string(),
                 lexical_hits: matched_terms.len(),
                 semantic_distance: None,
+                chunk_part_index: 1,
+                chunk_part_count: 1,
+                chunk_path: "1/1".to_string(),
                 anchored_to_entry: true,
                 same_file_as_entry: true,
                 score: 4.0 + f64::from(base_rank.max(0)),
@@ -1596,6 +1494,7 @@ impl McpServer {
             };
             let anchored_query = format!(
                 "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), c.content, \
+                        COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                  CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
                             ELSE 'same_file' \
@@ -1619,7 +1518,10 @@ impl McpServer {
                     let source_id = row.get(1)?.as_str()?.to_string();
                     let project_code = row.get(2)?.as_str()?.to_string();
                     let content = row.get(3)?.as_str()?.to_string();
-                    let match_reason = row.get(4)?.as_str()?.to_string();
+                    let chunk_part_index = Self::parse_usize_value(row.get(4)?).unwrap_or(1).max(1);
+                    let chunk_part_count = Self::parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
+                    let chunk_path = row.get(6)?.as_str().unwrap_or("1/1").to_string();
+                    let match_reason = row.get(7)?.as_str()?.to_string();
                     let uri = source_to_uri
                         .get(&source_id)
                         .cloned()
@@ -1649,6 +1551,9 @@ impl McpServer {
                         match_reason,
                         lexical_hits,
                         semantic_distance: None,
+                        chunk_part_index,
+                        chunk_part_count,
+                        chunk_path,
                         anchored_to_entry,
                         same_file_as_entry,
                         score: 0.0,
@@ -1665,12 +1570,13 @@ impl McpServer {
             let vector = format!("{embedding:?}");
             format!(
                 "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                        COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
                             WHEN ({entry_uri_match}) THEN 'same_file' \
                             WHEN ({path_match}) THEN 'file_path' \
                             WHEN ({lexical_predicate}) THEN 'lexical+semantic' \
-                            ELSE 'semantic' \
+                        ELSE 'semantic' \
                         END, \
                         array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}])) \
                  FROM Chunk c \
@@ -1686,6 +1592,7 @@ impl McpServer {
         } else {
             format!(
                 "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                        COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
                             WHEN ({entry_uri_match}) THEN 'same_file' \
@@ -1742,8 +1649,11 @@ impl McpServer {
                 let project_code = row.get(2)?.as_str()?.to_string();
                 let uri = row.get(3)?.as_str().unwrap_or_default().to_string();
                 let content = row.get(4)?.as_str()?.to_string();
-                let match_reason = row.get(5)?.as_str()?.to_string();
-                let semantic_distance = row.get(6).and_then(|value| value.as_f64());
+                let chunk_part_index = Self::parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
+                let chunk_part_count = Self::parse_usize_value(row.get(6)?).unwrap_or(1).max(1);
+                let chunk_path = row.get(7)?.as_str().unwrap_or("1/1").to_string();
+                let match_reason = row.get(8)?.as_str()?.to_string();
+                let semantic_distance = row.get(9).and_then(|value| value.as_f64());
                 let lexical_hits = terms
                     .iter()
                     .filter(|term| {
@@ -1762,6 +1672,9 @@ impl McpServer {
                     match_reason,
                     lexical_hits,
                     semantic_distance,
+                    chunk_part_index,
+                    chunk_part_count,
+                    chunk_path,
                     anchored_to_entry,
                     same_file_as_entry,
                     score: 0.0,
@@ -1806,6 +1719,24 @@ impl McpServer {
             if let Some(distance) = candidate.semantic_distance {
                 score += (1.0 - distance).max(0.0) * 3.0;
                 candidate.reasons.push("semantic_chunk_match".to_string());
+            }
+            if candidate.chunk_part_count > 1 {
+                score += 0.25;
+                candidate.reasons.push("multipart_symbol_chunk".to_string());
+                if candidate.chunk_part_index == 1 {
+                    score += 0.6;
+                    candidate.reasons.push("multipart_lead_chunk".to_string());
+                } else if candidate.chunk_part_index == 2 {
+                    score += 0.3;
+                    candidate
+                        .reasons
+                        .push("multipart_adjacent_continuation_bonus".to_string());
+                } else {
+                    score -= 0.35;
+                    candidate
+                        .reasons
+                        .push("multipart_late_chunk_penalty".to_string());
+                }
             }
             if scope_lc.contains(&candidate.project_code.to_ascii_lowercase()) {
                 score += 1.0;
@@ -1898,6 +1829,7 @@ impl McpServer {
         let mut selected = Vec::new();
         let mut selected_ids = HashSet::new();
         let mut seen_uris = HashSet::new();
+        let mut selected_source_parts: HashMap<String, Vec<usize>> = HashMap::new();
         let mut consumed_tokens = 0usize;
         let chunk_cap = top_k.min(4);
         let has_anchor = entry_candidates.iter().any(Self::is_strong_anchor);
@@ -1925,6 +1857,7 @@ impl McpServer {
                       selected: &mut Vec<Value>,
                       selected_ids: &mut HashSet<String>,
                       seen_uris: &mut HashSet<String>,
+                      selected_source_parts: &mut HashMap<String, Vec<usize>>,
                       consumed_tokens: &mut usize,
                       diagnostics: &mut RetrievalDiagnostics| {
             if selected.len() >= chunk_cap {
@@ -1933,7 +1866,7 @@ impl McpServer {
             if !selected_ids.insert(candidate.chunk_id.clone()) {
                 return;
             }
-            if !candidate.anchored_to_entry && seen_uris.contains(&candidate.uri) {
+            if !Self::can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) {
                 return;
             }
             let snippet = Self::truncate(&candidate.content, 220);
@@ -1943,10 +1876,17 @@ impl McpServer {
             }
             *consumed_tokens += estimated;
             seen_uris.insert(candidate.uri.clone());
+            selected_source_parts
+                .entry(candidate.source_id.clone())
+                .or_default()
+                .push(candidate.chunk_part_index);
             if candidate.anchored_to_entry || candidate.same_file_as_entry {
                 diagnostics.anchored_chunks_selected += 1;
             } else {
                 diagnostics.unanchored_chunks_selected += 1;
+            }
+            if candidate.chunk_part_count > 1 {
+                diagnostics.multipart_chunks_selected += 1;
             }
             selected.push(json!({
                 "chunk_id": candidate.chunk_id,
@@ -1955,6 +1895,9 @@ impl McpServer {
                 "uri": candidate.uri,
                 "match_reason": candidate.match_reason,
                 "evidence_class": "derived_chunk",
+                "chunk_path": candidate.chunk_path,
+                "chunk_part_index": candidate.chunk_part_index,
+                "chunk_part_count": candidate.chunk_part_count,
                 "anchored_to_entry": candidate.anchored_to_entry,
                 "same_file_as_entry": candidate.same_file_as_entry,
                 "snippet": snippet,
@@ -1969,6 +1912,7 @@ impl McpServer {
                 &mut selected,
                 &mut selected_ids,
                 &mut seen_uris,
+                &mut selected_source_parts,
                 &mut consumed_tokens,
                 diagnostics,
             );
@@ -1979,6 +1923,7 @@ impl McpServer {
                 &mut selected,
                 &mut selected_ids,
                 &mut seen_uris,
+                &mut selected_source_parts,
                 &mut consumed_tokens,
                 diagnostics,
             );
@@ -2023,6 +1968,7 @@ impl McpServer {
                 &mut selected,
                 &mut selected_ids,
                 &mut seen_uris,
+                &mut selected_source_parts,
                 &mut consumed_tokens,
                 diagnostics,
             );
@@ -2036,6 +1982,11 @@ impl McpServer {
         {
             excluded_because.push("same_file_preferred".to_string());
         }
+
+        diagnostics.multipart_symbol_groups_selected = selected_source_parts
+            .values()
+            .filter(|parts| parts.len() > 1)
+            .count();
 
         selected
     }
@@ -2263,6 +2214,7 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
+        self.expand_concept_governing_entities(&mut selected, project, top_k);
         if !selected.is_empty() {
             return selected;
         }
@@ -2339,7 +2291,122 @@ impl McpServer {
                 "evidence_class": "soll_lexical_fallback",
             }))
         }));
+        self.expand_concept_governing_entities(&mut selected, project, top_k);
         selected
+    }
+
+    fn expand_concept_governing_entities(
+        &self,
+        selected: &mut Vec<Value>,
+        project: Option<&str>,
+        top_k: usize,
+    ) {
+        let concept_ids = selected
+            .iter()
+            .filter(|row| row.get("type").and_then(|value| value.as_str()) == Some("Concept"))
+            .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if concept_ids.is_empty() {
+            return;
+        }
+
+        let mut seen_ids = selected
+            .iter()
+            .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(n.project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let concept_ids_sql = concept_ids
+            .iter()
+            .map(|id| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let requirement_query = format!(
+            "SELECT DISTINCT n.id, n.type, COALESCE(n.title, ''), COALESCE(e.relation_type, ''), \
+                    c.id AS source_symbol, '' AS artifact_type, \
+                    'concept_requirement_bridge' AS ranking_reason, \
+                    88 AS ranking_score \
+             FROM soll.Node c \
+             JOIN soll.Edge e ON e.source_id = c.id \
+             JOIN soll.Node n ON n.id = e.target_id \
+             WHERE c.id IN ({concept_ids_sql}) AND n.type = 'Requirement'{project_filter} \
+             ORDER BY ranking_score DESC, n.id ASC \
+             LIMIT {limit}",
+            limit = top_k.min(4),
+        );
+        let decision_project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(d.project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let decision_query = format!(
+            "SELECT DISTINCT d.id, d.type, COALESCE(d.title, ''), COALESCE(de.relation_type, ''), \
+                    c.id AS source_symbol, '' AS artifact_type, \
+                    'concept_decision_bridge' AS ranking_reason, \
+                    84 AS ranking_score \
+             FROM soll.Node c \
+             JOIN soll.Edge ce ON ce.source_id = c.id \
+             JOIN soll.Node r ON r.id = ce.target_id AND r.type = 'Requirement' \
+             JOIN soll.Edge de ON de.target_id = r.id \
+             JOIN soll.Node d ON d.id = de.source_id \
+             WHERE c.id IN ({concept_ids_sql}) AND d.type = 'Decision'{decision_project_filter} \
+             ORDER BY ranking_score DESC, d.id ASC \
+             LIMIT {limit}",
+            limit = top_k.min(4),
+        );
+
+        for query in [requirement_query, decision_query] {
+            let raw = self
+                .graph_store
+                .query_json(&query)
+                .unwrap_or_else(|_| "[]".to_string());
+            let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                let Some(id) = row.first().and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                if !seen_ids.insert(id.to_string()) {
+                    continue;
+                }
+                selected.push(json!({
+                    "id": id.to_string(),
+                    "type": row.get(1).and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                    "title": row.get(2).and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                    "relation_type": row.get(3).and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                    "source_symbol": row.get(4).and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                    "artifact_type": row.get(5).and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                    "ranking_reasons": [row.get(6).and_then(|value| value.as_str()).unwrap_or_default().to_string()],
+                    "ranking_score": row.get(7).and_then(|value| value.as_i64()).unwrap_or_default(),
+                    "evidence_class": "soll_concept_bridge",
+                }));
+            }
+        }
     }
 
     fn build_answer_sketch(
@@ -2349,7 +2416,10 @@ impl McpServer {
         entry_candidates: &[EntryCandidate],
         supporting_chunks: &[Value],
         structural_neighbors: &[Value],
-        relevant_soll_entities: &[Value],
+        governing_requirements: &[Value],
+        governing_decisions: &[Value],
+        supporting_guidelines: &[Value],
+        evidence_states: &[Value],
     ) -> String {
         let mut lines = Vec::new();
         lines.push(format!(
@@ -2378,40 +2448,59 @@ impl McpServer {
                 supporting_chunks.len()
             ));
         }
-        if !relevant_soll_entities.is_empty() {
-            let ids = relevant_soll_entities
+        if !governing_requirements.is_empty() {
+            let ids = governing_requirements
                 .iter()
                 .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
                 .take(2)
                 .collect::<Vec<_>>()
                 .join(", ");
-            lines.push(format!("Relevant SOLL intent joined: {}.", ids));
-            let requirement_ids = relevant_soll_entities
+            let label = if governing_requirements
                 .iter()
-                .filter(|row| {
-                    row.get("type").and_then(|value| value.as_str()) == Some("Requirement")
-                })
+                .all(|row| row.get("link_mode").and_then(|value| value.as_str()) == Some("direct"))
+            {
+                "Direct governing requirement(s)"
+            } else {
+                "Governing requirement(s) inferred from supporting intent"
+            };
+            lines.push(format!("{label}: {}.", ids));
+        }
+        if !governing_decisions.is_empty() {
+            let ids = governing_decisions
+                .iter()
                 .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
                 .take(2)
-                .collect::<Vec<_>>();
-            let decision_ids = relevant_soll_entities
+                .collect::<Vec<_>>()
+                .join(", ");
+            let label = if governing_decisions
                 .iter()
-                .filter(|row| row.get("type").and_then(|value| value.as_str()) == Some("Decision"))
+                .all(|row| row.get("link_mode").and_then(|value| value.as_str()) == Some("direct"))
+            {
+                "Direct governing decision(s)"
+            } else {
+                "Governing decision(s) inferred from supporting intent"
+            };
+            lines.push(format!("{label}: {}.", ids));
+        }
+        if !supporting_guidelines.is_empty() {
+            let ids = supporting_guidelines
+                .iter()
                 .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
                 .take(2)
-                .collect::<Vec<_>>();
-            if !requirement_ids.is_empty() {
-                lines.push(format!(
-                    "Likely governing requirement(s): {}.",
-                    requirement_ids.join(", ")
-                ));
-            }
-            if !decision_ids.is_empty() {
-                lines.push(format!(
-                    "Likely governing decision(s): {}.",
-                    decision_ids.join(", ")
-                ));
-            }
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("Supporting guideline(s): {}.", ids));
+        }
+        if evidence_states.iter().any(|row| {
+            row.get("state").and_then(|value| value.as_str()) == Some("missing_governing_intent")
+        }) {
+            lines.push("No direct governing intent was found for this symbol.".to_string());
+        }
+        if evidence_states
+            .iter()
+            .any(|row| row.get("state").and_then(|value| value.as_str()) == Some("support_only"))
+        {
+            lines.push("Current rationale is supported by local evidence only and should not be treated as canonical intent.".to_string());
         }
         lines.join(" ")
     }
@@ -2513,6 +2602,395 @@ impl McpServer {
         missing
     }
 
+    fn classify_governing_entities(
+        entities: &[Value],
+        expected_type: &str,
+        provenance: &str,
+    ) -> Vec<Value> {
+        entities
+            .iter()
+            .filter(|row| row.get("type").and_then(|value| value.as_str()) == Some(expected_type))
+            .map(|row| {
+                let evidence_class = row
+                    .get("evidence_class")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let ranking_reason = row
+                    .get("ranking_reasons")
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| items.first())
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let link_mode = if evidence_class == "soll_traceability"
+                    && (ranking_reason.starts_with("direct_")
+                        || ranking_reason.starts_with("requirement_"))
+                {
+                    "direct"
+                } else if evidence_class == "soll_traceability"
+                    || evidence_class == "soll_concept_bridge"
+                {
+                    "inferred"
+                } else {
+                    "weak_correlation"
+                };
+                let authority_class = if link_mode == "weak_correlation" {
+                    "correlated"
+                } else if expected_type == "Guideline" {
+                    "supporting"
+                } else {
+                    "governing"
+                };
+                let mut enriched = row.clone();
+                if let Some(object) = enriched.as_object_mut() {
+                    object.insert(
+                        "authority_class".to_string(),
+                        Value::String(authority_class.to_string()),
+                    );
+                    object.insert(
+                        "evidence_provenance".to_string(),
+                        Value::String(provenance.to_string()),
+                    );
+                    object.insert(
+                        "link_mode".to_string(),
+                        Value::String(link_mode.to_string()),
+                    );
+                    object.insert(
+                        "inclusion_reason".to_string(),
+                        Value::String(ranking_reason.to_string()),
+                    );
+                }
+                enriched
+            })
+            .collect()
+    }
+
+    fn evidence_provenance_for_uri(uri: &str) -> &'static str {
+        let lower = uri.to_ascii_lowercase();
+        if lower.contains("benchmark") {
+            "benchmark"
+        } else if matches!(Self::uri_penalty_reason(uri), Some("test_file_penalty")) {
+            "test"
+        } else if lower.contains("/scripts/") || lower.starts_with("scripts/") {
+            "script"
+        } else if matches!(Self::uri_penalty_reason(uri), Some("docs_file_penalty")) {
+            "doc"
+        } else {
+            "code_chunk"
+        }
+    }
+
+    fn classify_direct_code_evidence(direct_evidence: &[Value]) -> Vec<Value> {
+        direct_evidence
+            .iter()
+            .map(|row| {
+                let mut enriched = row.clone();
+                let kind = row
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let uri = row
+                    .get("uri")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let evidence_class = row
+                    .get("evidence_class")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let uri_provenance = Self::evidence_provenance_for_uri(uri);
+                let provenance = if evidence_class == "repo_literal_file" {
+                    uri_provenance
+                } else if matches!(uri_provenance, "benchmark" | "test" | "script" | "doc") {
+                    uri_provenance
+                } else if kind == "file" {
+                    "code_file"
+                } else {
+                    "code_symbol"
+                };
+                let authority_class = match provenance {
+                    "benchmark" | "test" | "script" | "doc" => "correlated",
+                    _ => "supporting",
+                };
+                let link_mode = if evidence_class == "repo_literal_file" {
+                    "weak_correlation"
+                } else {
+                    "direct"
+                };
+                if let Some(object) = enriched.as_object_mut() {
+                    object.insert(
+                        "authority_class".to_string(),
+                        Value::String(authority_class.to_string()),
+                    );
+                    object.insert(
+                        "evidence_provenance".to_string(),
+                        Value::String(provenance.to_string()),
+                    );
+                    object.insert(
+                        "link_mode".to_string(),
+                        Value::String(link_mode.to_string()),
+                    );
+                    object.insert(
+                        "inclusion_reason".to_string(),
+                        Value::String(
+                            row.get("evidence_class")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("direct_evidence")
+                                .to_string(),
+                        ),
+                    );
+                }
+                enriched
+            })
+            .collect()
+    }
+
+    fn classify_supporting_chunks_by_provenance(
+        chunks: &[Value],
+        provenance: &str,
+        authority_class: &str,
+    ) -> Vec<Value> {
+        chunks
+            .iter()
+            .filter_map(|row| {
+                let uri = row
+                    .get("uri")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let row_provenance = Self::evidence_provenance_for_uri(uri);
+                (row_provenance == provenance).then(|| {
+                    let mut enriched = row.clone();
+                    let link_mode = match row
+                        .get("anchored_to_entry")
+                        .and_then(|value| value.as_bool())
+                    {
+                        Some(true) => "direct",
+                        _ => "inferred",
+                    };
+                    if let Some(object) = enriched.as_object_mut() {
+                        object.insert(
+                            "authority_class".to_string(),
+                            Value::String(authority_class.to_string()),
+                        );
+                        object.insert(
+                            "evidence_provenance".to_string(),
+                            Value::String(provenance.to_string()),
+                        );
+                        object.insert(
+                            "link_mode".to_string(),
+                            Value::String(link_mode.to_string()),
+                        );
+                        object.insert(
+                            "inclusion_reason".to_string(),
+                            Value::String(
+                                row.get("match_reason")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("supporting_chunk")
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    enriched
+                })
+            })
+            .collect()
+    }
+
+    fn classify_supporting_code_context(chunks: &[Value], neighbors: &[Value]) -> Vec<Value> {
+        let mut items = chunks
+            .iter()
+            .filter_map(|row| {
+                let uri = row
+                    .get("uri")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let provenance = Self::evidence_provenance_for_uri(uri);
+                (provenance != "doc").then(|| {
+                    let mut enriched = row.clone();
+                    let link_mode = if matches!(provenance, "benchmark" | "test" | "script") {
+                        "weak_correlation"
+                    } else if row
+                        .get("anchored_to_entry")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+                    {
+                        "direct"
+                    } else {
+                        "inferred"
+                    };
+                    let authority_class = if link_mode == "weak_correlation" {
+                        "correlated"
+                    } else {
+                        "supporting"
+                    };
+                    if let Some(object) = enriched.as_object_mut() {
+                        object.insert(
+                            "authority_class".to_string(),
+                            Value::String(authority_class.to_string()),
+                        );
+                        object.insert(
+                            "evidence_provenance".to_string(),
+                            Value::String(provenance.to_string()),
+                        );
+                        object.insert(
+                            "link_mode".to_string(),
+                            Value::String(link_mode.to_string()),
+                        );
+                        object.insert(
+                            "inclusion_reason".to_string(),
+                            Value::String(
+                                row.get("match_reason")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("supporting_chunk")
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    enriched
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for neighbor in neighbors {
+            let mut enriched = neighbor.clone();
+            if let Some(object) = enriched.as_object_mut() {
+                object.insert(
+                    "authority_class".to_string(),
+                    Value::String("supporting".to_string()),
+                );
+                object.insert(
+                    "evidence_provenance".to_string(),
+                    Value::String("code_chunk".to_string()),
+                );
+                object.insert(
+                    "link_mode".to_string(),
+                    Value::String("inferred".to_string()),
+                );
+                object.insert(
+                    "inclusion_reason".to_string(),
+                    Value::String(
+                        neighbor
+                            .get("edge_kind")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("structural_neighbor")
+                            .to_string(),
+                    ),
+                );
+            }
+            items.push(enriched);
+        }
+
+        items
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_evidence_states(
+        route: RetrievalRoute,
+        rationale_requested: bool,
+        has_direct_traceability: bool,
+        degraded_reason: Option<&str>,
+        governing_requirements: &[Value],
+        governing_decisions: &[Value],
+        supporting_guidelines: &[Value],
+        direct_code_evidence: &[Value],
+        supporting_docs: &[Value],
+        supporting_code_context: &[Value],
+    ) -> Vec<Value> {
+        let mut states = Vec::new();
+        let has_governing = !governing_requirements.is_empty() || !governing_decisions.is_empty();
+        let has_support = !supporting_guidelines.is_empty()
+            || !direct_code_evidence.is_empty()
+            || !supporting_docs.is_empty()
+            || !supporting_code_context.is_empty();
+        if (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested) && !has_governing {
+            states.push(json!({
+                "state": "missing_governing_intent",
+                "severity": "medium",
+                "detail": "No direct governing requirement or decision was found for this rationale request"
+            }));
+        }
+        if !has_direct_traceability
+            && (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested)
+        {
+            states.push(json!({
+                "state": "no_direct_traceability",
+                "severity": "medium",
+                "detail": "No direct Symbol/File traceability was found for the current anchor"
+            }));
+        }
+        if degraded_reason.is_some() {
+            states.push(json!({
+                "state": "retrieval_degraded",
+                "severity": "low",
+                "detail": degraded_reason
+                    .map(|value| format!("Retrieval ran under degraded conditions: {value}"))
+                    .unwrap_or_else(|| "Retrieval ran under degraded conditions".to_string())
+            }));
+        }
+        if !has_governing && has_support {
+            let only_correlated = direct_code_evidence
+                .iter()
+                .chain(supporting_docs.iter())
+                .chain(supporting_code_context.iter())
+                .chain(supporting_guidelines.iter())
+                .all(|row| {
+                    row.get("authority_class").and_then(|value| value.as_str())
+                        == Some("correlated")
+                });
+            states.push(json!({
+                "state": if only_correlated { "correlation_only" } else { "support_only" },
+                "severity": "medium",
+                "detail": if only_correlated {
+                    "Only correlated support artifacts were available for this rationale packet"
+                } else {
+                    "Only supporting local evidence was available for this rationale packet"
+                }
+            }));
+        }
+        states
+    }
+
+    fn build_rationale_quality(
+        evidence_states: &[Value],
+        governing_requirements: &[Value],
+        governing_decisions: &[Value],
+        supporting_guidelines: &[Value],
+    ) -> Value {
+        let has_governing = !governing_requirements.is_empty() || !governing_decisions.is_empty();
+        let has_missing_governing = evidence_states.iter().any(|row| {
+            row.get("state").and_then(|value| value.as_str()) == Some("missing_governing_intent")
+        });
+        let has_no_direct_traceability = evidence_states.iter().any(|row| {
+            row.get("state").and_then(|value| value.as_str()) == Some("no_direct_traceability")
+        });
+        let has_correlation_only = evidence_states.iter().any(|row| {
+            row.get("state").and_then(|value| value.as_str()) == Some("correlation_only")
+        });
+        let level = if has_governing && evidence_states.is_empty() {
+            "strong"
+        } else if has_missing_governing || has_no_direct_traceability || has_correlation_only {
+            "weak"
+        } else if has_governing || !supporting_guidelines.is_empty() {
+            "mixed"
+        } else {
+            "weak"
+        };
+        let confidence_reason = if has_missing_governing {
+            "governing intent is missing, so the packet should be read as non-canonical rationale"
+        } else if has_no_direct_traceability {
+            "supporting evidence exists, but no direct traceability was found for the current anchor"
+        } else if has_governing {
+            "governing intent is present, but downstream support may still be partial"
+        } else if has_correlation_only {
+            "only correlated support artifacts were found"
+        } else {
+            "no governing intent was found; only local support evidence is available"
+        };
+        json!({
+            "level": level,
+            "confidence_reason": confidence_reason,
+            "automation_contract": "informational_only"
+        })
+    }
+
     fn compute_confidence(
         &self,
         route: RetrievalRoute,
@@ -2563,18 +3041,8 @@ impl McpServer {
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let chunks = packet
-            .get("supporting_chunks")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
         let neighbors = packet
             .get("structural_neighbors")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let soll = packet
-            .get("relevant_soll_entities")
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
@@ -2583,6 +3051,40 @@ impl McpServer {
             .and_then(|value| value.get("label"))
             .and_then(|value| value.as_str())
             .unwrap_or("low");
+        let evidence_states = packet
+            .get("evidence_states")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let governing_requirements = packet
+            .get("governing_requirements")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let governing_decisions = packet
+            .get("governing_decisions")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let supporting_guidelines = packet
+            .get("supporting_guidelines")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let supporting_docs = packet
+            .get("supporting_docs")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let supporting_code_context = packet
+            .get("supporting_code_context")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let rationale_quality = packet
+            .get("rationale_quality")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         let mut rendered = format!(
             "**Planner route:** `{}`\n**Evidence confidence:** `{}`\n\n### Answer sketch\n{}\n",
@@ -2590,6 +3092,72 @@ impl McpServer {
             confidence,
             answer_sketch
         );
+
+        if !evidence_states.is_empty() {
+            rendered.push_str("\n### Evidence states\n");
+            for row in evidence_states.iter().take(4) {
+                rendered.push_str(&format!(
+                    "- `{}`: {}\n",
+                    row.get("state")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("detail")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                ));
+            }
+        }
+
+        if !governing_requirements.is_empty() {
+            rendered.push_str("\n### Governing requirements\n");
+            for row in governing_requirements.iter().take(2) {
+                rendered.push_str(&format!(
+                    "- `{}` [{} / {}]\n",
+                    row.get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("link_mode")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("evidence_provenance")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                ));
+            }
+        }
+
+        if !governing_decisions.is_empty() {
+            rendered.push_str("\n### Governing decisions\n");
+            for row in governing_decisions.iter().take(2) {
+                rendered.push_str(&format!(
+                    "- `{}` [{} / {}]\n",
+                    row.get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("link_mode")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("evidence_provenance")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                ));
+            }
+        }
+
+        if !supporting_guidelines.is_empty() {
+            rendered.push_str("\n### Supporting guidelines\n");
+            for row in supporting_guidelines.iter().take(2) {
+                rendered.push_str(&format!(
+                    "- `{}` [{}]\n",
+                    row.get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("link_mode")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                ));
+            }
+        }
 
         if !direct.is_empty() {
             rendered.push_str("\n### Direct evidence\n");
@@ -2612,18 +3180,44 @@ impl McpServer {
             }
         }
 
-        if !chunks.is_empty() {
-            rendered.push_str("\n### Supporting chunks\n");
-            for row in chunks.iter().take(4) {
+        if !supporting_docs.is_empty() {
+            rendered.push_str("\n### Supporting docs\n");
+            for row in supporting_docs.iter().take(2) {
                 rendered.push_str(&format!(
-                    "- `{}` [{}]: {}\n",
+                    "- `{}` [{} / {}]: {}\n",
                     row.get("uri")
                         .and_then(|value| value.as_str())
                         .unwrap_or(""),
-                    row.get("match_reason")
+                    row.get("link_mode")
                         .and_then(|value| value.as_str())
-                        .unwrap_or("match"),
+                        .unwrap_or("unknown"),
+                    row.get("evidence_provenance")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
                     row.get("snippet")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                ));
+            }
+        }
+
+        if !supporting_code_context.is_empty() {
+            rendered.push_str("\n### Supporting code context\n");
+            for row in supporting_code_context.iter().take(4) {
+                rendered.push_str(&format!(
+                    "- `{}` [{} / {}]: {}\n",
+                    row.get("uri")
+                        .or_else(|| row.get("label"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(""),
+                    row.get("link_mode")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("evidence_provenance")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    row.get("snippet")
+                        .or_else(|| row.get("label"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("")
                 ));
@@ -2648,37 +3242,78 @@ impl McpServer {
             }
         }
 
-        if !soll.is_empty() {
-            rendered.push_str("\n### Relevant SOLL entities\n");
-            for row in soll.iter().take(2) {
-                rendered.push_str(&format!(
-                    "- `{}` ({}) {}\n",
-                    row.get("id")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown"),
-                    row.get("type")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown"),
-                    row.get("title")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                ));
-            }
+        if rationale_quality.get("level").is_some() {
+            rendered.push_str("\n### Rationale quality\n");
+            rendered.push_str(&format!(
+                "- level: `{}`\n- reason: {}\n- contract: `{}`\n",
+                rationale_quality
+                    .get("level")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown"),
+                rationale_quality
+                    .get("confidence_reason")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+                rationale_quality
+                    .get("automation_contract")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown"),
+            ));
         }
 
         if let Some(diag) = packet.get("retrieval_diagnostics") {
             rendered.push_str("\n### Retrieval diagnostics\n");
             rendered.push_str(&format!(
-                "- symbol candidates: {}\n- file candidates: {}\n- chunk candidates: {}\n- anchored chunks selected: {}\n- unanchored chunks selected: {}\n",
+                "- symbol candidates: {}\n- file candidates: {}\n- chunk candidates: {}\n- anchored chunks selected: {}\n- unanchored chunks selected: {}\n- multipart chunks selected: {}\n- multipart symbol groups selected: {}\n",
                 diag.get("symbol_candidates_considered").and_then(|value| value.as_u64()).unwrap_or(0),
                 diag.get("file_candidates_considered").and_then(|value| value.as_u64()).unwrap_or(0),
                 diag.get("chunk_candidates_considered").and_then(|value| value.as_u64()).unwrap_or(0),
                 diag.get("anchored_chunks_selected").and_then(|value| value.as_u64()).unwrap_or(0),
                 diag.get("unanchored_chunks_selected").and_then(|value| value.as_u64()).unwrap_or(0),
+                diag.get("multipart_chunks_selected").and_then(|value| value.as_u64()).unwrap_or(0),
+                diag.get("multipart_symbol_groups_selected").and_then(|value| value.as_u64()).unwrap_or(0),
             ));
         }
 
         rendered
+    }
+
+    fn parse_usize_value(value: &Value) -> Option<usize> {
+        value
+            .as_u64()
+            .and_then(|raw| usize::try_from(raw).ok())
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .and_then(|raw| usize::try_from(raw.max(0)).ok())
+            })
+            .or_else(|| value.as_str().and_then(|raw| raw.parse::<usize>().ok()))
+    }
+
+    fn can_reuse_uri_for_multipart(
+        candidate: &ChunkCandidate,
+        seen_uris: &HashSet<String>,
+        selected_source_parts: &HashMap<String, Vec<usize>>,
+    ) -> bool {
+        if !seen_uris.contains(&candidate.uri) {
+            return true;
+        }
+        if !candidate.anchored_to_entry && !candidate.same_file_as_entry {
+            return false;
+        }
+        if candidate.chunk_part_count <= 1 {
+            return false;
+        }
+        let Some(existing_parts) = selected_source_parts.get(&candidate.source_id) else {
+            return false;
+        };
+        if existing_parts.len() >= 2 {
+            return false;
+        }
+        !existing_parts.contains(&candidate.chunk_part_index)
+            && existing_parts
+                .iter()
+                .any(|existing| existing.abs_diff(candidate.chunk_part_index) <= 1)
     }
 
     fn truncate(value: &str, max_chars: usize) -> String {
@@ -2701,5 +3336,266 @@ impl McpServer {
 
     fn escape_sql(value: &str) -> String {
         value.replace('\'', "''")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChunkCandidate;
+    use super::McpServer;
+    use crate::parser::{ExtractionResult, Symbol};
+    use crate::queue::ProcessingMode;
+    use crate::worker::DbWriteTask;
+    use serde_json::json;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    fn candidate(
+        source_id: &str,
+        uri: &str,
+        part_index: usize,
+        part_count: usize,
+        anchored_to_entry: bool,
+        same_file_as_entry: bool,
+    ) -> ChunkCandidate {
+        ChunkCandidate {
+            chunk_id: format!("{source_id}::{part_index}"),
+            source_id: source_id.to_string(),
+            project_code: "PRJ".to_string(),
+            uri: uri.to_string(),
+            content: "snippet".to_string(),
+            match_reason: "entry_anchor".to_string(),
+            lexical_hits: 1,
+            semantic_distance: None,
+            chunk_part_index: part_index,
+            chunk_part_count: part_count,
+            chunk_path: format!("{part_index}/{part_count}"),
+            anchored_to_entry,
+            same_file_as_entry,
+            score: 0.0,
+            reasons: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn multipart_uri_reuse_allows_one_adjacent_anchor_chunk() {
+        let first = candidate("PRJ::sym", "/repo/file.rs", 1, 3, true, true);
+        let second = candidate("PRJ::sym", "/repo/file.rs", 2, 3, true, true);
+        let third = candidate("PRJ::sym", "/repo/file.rs", 3, 3, true, true);
+        let other = candidate("PRJ::other", "/repo/file.rs", 1, 1, false, false);
+
+        let mut seen_uris = HashSet::new();
+        seen_uris.insert(first.uri.clone());
+        let mut selected_source_parts = HashMap::new();
+        selected_source_parts.insert(first.source_id.clone(), vec![1]);
+
+        assert!(McpServer::can_reuse_uri_for_multipart(
+            &second,
+            &seen_uris,
+            &selected_source_parts
+        ));
+        assert!(!McpServer::can_reuse_uri_for_multipart(
+            &third,
+            &seen_uris,
+            &selected_source_parts
+        ));
+        assert!(!McpServer::can_reuse_uri_for_multipart(
+            &other,
+            &seen_uris,
+            &selected_source_parts
+        ));
+
+        selected_source_parts.insert(first.source_id.clone(), vec![1, 2]);
+        assert!(!McpServer::can_reuse_uri_for_multipart(
+            &third,
+            &seen_uris,
+            &selected_source_parts
+        ));
+    }
+
+    #[test]
+    fn retrieve_context_retains_adjacent_chunks_for_split_symbol() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store.clone());
+        let path = "/tmp/multipart_lookup_probe.rs".to_string();
+
+        unsafe {
+            std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "64");
+            std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "32");
+            std::env::set_var("AXON_GRAY_ZONE_CHAR_THRESHOLD", "64");
+        }
+
+        store
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
+            .unwrap();
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-multipart-lookup".to_string(),
+                path: path.clone(),
+                content: Some(
+                    [
+                        "fn multipart_lookup_probe() {",
+                        "    let alpha = very_long_identifier_name_for_a_large_symbol_payload();",
+                        "",
+                        "    let beta = very_long_identifier_name_for_a_large_symbol_payload();",
+                        "",
+                        "    let gamma = very_long_identifier_name_for_a_large_symbol_payload();",
+                        "",
+                        "    let delta = very_long_identifier_name_for_a_large_symbol_payload();",
+                        "}",
+                    ]
+                    .join("\n"),
+                ),
+                extraction: ExtractionResult {
+                    project_code: Some("PRJ".to_string()),
+                    symbols: vec![Symbol {
+                        name: "multipart_lookup_probe".to_string(),
+                        kind: "function".to_string(),
+                        start_line: 1,
+                        end_line: 9,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: Default::default(),
+                        embedding: None,
+                    }],
+                    relations: vec![],
+                },
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-multipart-lookup".to_string(),
+                observed_cost_bytes: 1,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let response = server
+            .axon_retrieve_context(&json!({
+                "question": "multipart_lookup_probe",
+                "project": "PRJ",
+                "top_k": 4,
+                "token_budget": 1200,
+                "include_graph": false,
+                "include_soll": false,
+            }))
+            .expect("retrieve_context response");
+
+        let supporting_chunks = response["data"]["packet"]["supporting_chunks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(supporting_chunks.len(), 2);
+        assert!(supporting_chunks.iter().all(|chunk| {
+            chunk["source_id"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("::multipart_lookup_probe")
+        }));
+        assert_eq!(
+            supporting_chunks[0]["chunk_path"]
+                .as_str()
+                .unwrap_or_default(),
+            "1/4"
+        );
+        assert_eq!(
+            supporting_chunks[1]["chunk_path"]
+                .as_str()
+                .unwrap_or_default(),
+            "2/4"
+        );
+
+        let diagnostics = &response["data"]["packet"]["retrieval_diagnostics"];
+        assert_eq!(
+            diagnostics["multipart_chunks_selected"]
+                .as_u64()
+                .unwrap_or_default(),
+            2
+        );
+        assert_eq!(
+            diagnostics["multipart_symbol_groups_selected"]
+                .as_u64()
+                .unwrap_or_default(),
+            1
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_TARGET_CHUNK_TOKENS");
+            std::env::remove_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH");
+            std::env::remove_var("AXON_GRAY_ZONE_CHAR_THRESHOLD");
+        }
+    }
+
+    #[test]
+    fn rerank_prefers_head_and_adjacent_multipart_chunks() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+        let entry_candidates = vec![super::EntryCandidate {
+            id: "PRJ::file.rs::multipart_lookup_probe".to_string(),
+            name: "multipart_lookup_probe".to_string(),
+            kind: "function".to_string(),
+            project_code: "PRJ".to_string(),
+            uri: "/repo/file.rs".to_string(),
+            lexical_hits: 1,
+            exact_match: true,
+            score: 1.0,
+            reasons: vec!["exact".to_string()],
+        }];
+        let mut candidates = vec![
+            candidate(
+                "PRJ::file.rs::multipart_lookup_probe",
+                "/repo/file.rs",
+                4,
+                4,
+                true,
+                true,
+            ),
+            candidate(
+                "PRJ::file.rs::multipart_lookup_probe",
+                "/repo/file.rs",
+                2,
+                4,
+                true,
+                true,
+            ),
+            candidate(
+                "PRJ::file.rs::multipart_lookup_probe",
+                "/repo/file.rs",
+                1,
+                4,
+                true,
+                true,
+            ),
+        ];
+
+        server.rerank_chunk_candidates(
+            &mut candidates,
+            super::RetrievalRoute::ExactLookup,
+            &["multipart_lookup_probe".to_string()],
+            &entry_candidates,
+            &["PRJ".to_string()],
+            false,
+            false,
+        );
+
+        assert_eq!(candidates[0].chunk_part_index, 1);
+        assert_eq!(candidates[1].chunk_part_index, 2);
+        assert_eq!(candidates[2].chunk_part_index, 4);
+        assert!(candidates[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "multipart_lead_chunk"));
+        assert!(candidates[1]
+            .reasons
+            .iter()
+            .any(|reason| reason == "multipart_adjacent_continuation_bonus"));
+        assert!(candidates[2]
+            .reasons
+            .iter()
+            .any(|reason| reason == "multipart_late_chunk_penalty"));
     }
 }

@@ -91,6 +91,11 @@ pub enum BridgeEvent {
         t4: i64,
     },
     RuntimeTelemetry {
+        telemetry_source: String,
+        telemetry_process_role: String,
+        telemetry_freshness_state: String,
+        telemetry_observed_age_ms: Option<u64>,
+        telemetry_degraded_reason: Option<String>,
         budget_bytes: u64,
         reserved_bytes: u64,
         exhaustion_ratio: f64,
@@ -131,6 +136,11 @@ pub enum BridgeEvent {
         ingress_flush_count: u64,
         ingress_last_flush_duration_ms: u64,
         ingress_last_promoted_count: u64,
+        ingress_promoted_total: u64,
+        ingress_last_durably_persisted_count: u64,
+        ingress_durably_persisted_total: u64,
+        ingress_last_excluded_from_pending_count: u64,
+        ingress_excluded_from_pending_total: u64,
         memory_trim_attempts_total: u64,
         memory_trim_successes_total: u64,
         cpu_load: f64,
@@ -153,7 +163,34 @@ pub enum BridgeEvent {
         file_vectorization_queue_queued: usize,
         file_vectorization_queue_inflight: usize,
         file_vectorization_queue_depth: usize,
+        vector_chunks_embedded_total: u64,
+        chunk_embeddings_per_second: f64,
+        chunk_embeddings_rate_window_ms: u64,
+        prepare_inflight_chunks_current: u64,
+        ready_queue_chunks_current: u64,
+        ready_queue_chunks_small: u64,
+        ready_queue_chunks_medium: u64,
+        ready_queue_chunks_large: u64,
+        ready_batches_small: u64,
+        ready_batches_medium: u64,
+        ready_batches_large: u64,
+        mixed_fallback_batches_total: u64,
+        homogeneous_batches_total: u64,
+        last_consumed_batch_lane: String,
+        active_small_max_tokens: u64,
+        active_medium_max_tokens: u64,
+        last_embed_attempt_wall_ms: u64,
+        avg_embed_attempt_wall_ms: f64,
+        max_embed_attempt_wall_ms: u64,
+        last_embed_gap_ms: u64,
+        avg_embed_gap_ms: f64,
+        max_embed_gap_ms: u64,
+        graph_workers_started_total: u64,
+        graph_workers_active_current: u64,
+        graph_worker_heartbeat_at_ms: u64,
         runtime_truth_feed: RuntimeTruthFeed,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        projected_indexer_runtime: Option<serde_json::Value>,
     },
     ScanComplete {
         total_files: usize,
@@ -175,6 +212,11 @@ mod tests {
     #[test]
     fn runtime_telemetry_bridge_event_serializes_with_expected_shape() {
         let payload = BridgeEvent::RuntimeTelemetry {
+            telemetry_source: "local_runtime".to_string(),
+            telemetry_process_role: "indexer".to_string(),
+            telemetry_freshness_state: "degraded".to_string(),
+            telemetry_observed_age_ms: Some(500),
+            telemetry_degraded_reason: Some("indexer_feed_degraded".to_string()),
             budget_bytes: 1_024,
             reserved_bytes: 256,
             exhaustion_ratio: 0.25,
@@ -215,6 +257,11 @@ mod tests {
             ingress_flush_count: 5,
             ingress_last_flush_duration_ms: 44,
             ingress_last_promoted_count: 8,
+            ingress_promoted_total: 64,
+            ingress_last_durably_persisted_count: 3,
+            ingress_durably_persisted_total: 58,
+            ingress_last_excluded_from_pending_count: 1,
+            ingress_excluded_from_pending_total: 7,
             memory_trim_attempts_total: 11,
             memory_trim_successes_total: 5,
             cpu_load: 61.5,
@@ -237,6 +284,31 @@ mod tests {
             file_vectorization_queue_queued: 7,
             file_vectorization_queue_inflight: 2,
             file_vectorization_queue_depth: 9,
+            vector_chunks_embedded_total: 96,
+            chunk_embeddings_per_second: 32.0,
+            chunk_embeddings_rate_window_ms: 5_000,
+            prepare_inflight_chunks_current: 24,
+            ready_queue_chunks_current: 72,
+            ready_queue_chunks_small: 8,
+            ready_queue_chunks_medium: 24,
+            ready_queue_chunks_large: 40,
+            ready_batches_small: 1,
+            ready_batches_medium: 2,
+            ready_batches_large: 3,
+            mixed_fallback_batches_total: 2,
+            homogeneous_batches_total: 14,
+            last_consumed_batch_lane: "large".to_string(),
+            active_small_max_tokens: 96,
+            active_medium_max_tokens: 224,
+            last_embed_attempt_wall_ms: 84,
+            avg_embed_attempt_wall_ms: 52.5,
+            max_embed_attempt_wall_ms: 120,
+            last_embed_gap_ms: 640,
+            avg_embed_gap_ms: 410.0,
+            max_embed_gap_ms: 1_250,
+            graph_workers_started_total: 2,
+            graph_workers_active_current: 2,
+            graph_worker_heartbeat_at_ms: 9_750,
             runtime_truth_feed: RuntimeTruthFeed::from_observed_times(
                 10_000,
                 Some(9_500),
@@ -244,11 +316,29 @@ mod tests {
                 RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS,
                 Some("indexer_feed_degraded"),
             ),
+            projected_indexer_runtime: Some(serde_json::json!({
+                "available": true,
+                "telemetry_source": "indexer_peer_heartbeat",
+                "process_role": "indexer",
+                "freshness_state": "fresh",
+                "observed_age_ms": 125,
+                "telemetry": {
+                    "ingress_buffered_entries": 33,
+                    "graph_projection_queue": {
+                        "total": 15
+                    }
+                }
+            })),
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
 
         assert!(json.contains("\"RuntimeTelemetry\""));
+        assert!(json.contains("\"telemetry_source\":\"local_runtime\""));
+        assert!(json.contains("\"telemetry_process_role\":\"indexer\""));
+        assert!(json.contains("\"telemetry_freshness_state\":\"degraded\""));
+        assert!(json.contains("\"telemetry_observed_age_ms\":500"));
+        assert!(json.contains("\"telemetry_degraded_reason\":\"indexer_feed_degraded\""));
         assert!(json.contains("\"budget_bytes\":1024"));
         assert!(json.contains("\"reserved_bytes\":256"));
         assert!(json.contains("\"exhaustion_ratio\":0.25"));
@@ -289,6 +379,11 @@ mod tests {
         assert!(json.contains("\"ingress_flush_count\":5"));
         assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
         assert!(json.contains("\"ingress_last_promoted_count\":8"));
+        assert!(json.contains("\"ingress_promoted_total\":64"));
+        assert!(json.contains("\"ingress_last_durably_persisted_count\":3"));
+        assert!(json.contains("\"ingress_durably_persisted_total\":58"));
+        assert!(json.contains("\"ingress_last_excluded_from_pending_count\":1"));
+        assert!(json.contains("\"ingress_excluded_from_pending_total\":7"));
         assert!(json.contains("\"memory_trim_attempts_total\":11"));
         assert!(json.contains("\"memory_trim_successes_total\":5"));
         assert!(json.contains("\"cpu_load\":61.5"));
@@ -311,7 +406,18 @@ mod tests {
         assert!(json.contains("\"file_vectorization_queue_queued\":7"));
         assert!(json.contains("\"file_vectorization_queue_inflight\":2"));
         assert!(json.contains("\"file_vectorization_queue_depth\":9"));
+        assert!(json.contains("\"vector_chunks_embedded_total\":96"));
+        assert!(json.contains("\"chunk_embeddings_per_second\":32.0"));
+        assert!(json.contains("\"chunk_embeddings_rate_window_ms\":5000"));
+        assert!(json.contains("\"ready_queue_chunks_small\":8"));
+        assert!(json.contains("\"ready_batches_large\":3"));
+        assert!(json.contains("\"mixed_fallback_batches_total\":2"));
+        assert!(json.contains("\"last_consumed_batch_lane\":\"large\""));
+        assert!(json.contains("\"graph_workers_started_total\":2"));
+        assert!(json.contains("\"graph_workers_active_current\":2"));
         assert!(json.contains("\"runtime_truth_feed\""));
         assert!(json.contains("\"last_good_payload_at_ms\":9400"));
+        assert!(json.contains("\"projected_indexer_runtime\""));
+        assert!(json.contains("\"telemetry_source\":\"indexer_peer_heartbeat\""));
     }
 }

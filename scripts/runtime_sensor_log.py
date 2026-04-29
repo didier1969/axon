@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT_ROOT = Path("/home/dstadel/projects/axon")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / ".axon" / "runtime-sensor-runs"
 DEFAULT_MCP_URL = os.environ.get("AXON_MCP_URL", "http://127.0.0.1:44129/mcp")
 DEFAULT_GPU_QUERY = (

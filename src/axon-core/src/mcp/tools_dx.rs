@@ -930,9 +930,16 @@ impl McpServer {
                         diagnostic,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
-                        "Aucun résultat trouvé."
+                        "Aucun match structurel exact n'a ete resolu dans le graphe courant. Utilisez la guidance ci-dessous pour poursuivre sans relancer une recherche aveugle."
                     )
-                }]
+                }],
+                "data": {
+                    "query": query_text,
+                    "project": if project == "*" { Value::Null } else { Value::String(project.to_string()) },
+                    "result_count": 0,
+                    "query_state": "structure_only_empty",
+                    "diagnostic_route": "graph_symbol_index_no_exact_match"
+                }
             }));
         }
 
@@ -966,9 +973,16 @@ impl McpServer {
                         diagnostic,
                         project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
-                        "Aucun résultat trouvé."
+                        "Aucun match exploitable n'a ete reconstruit depuis l'index actuel. Continuez avec la guidance de recuperation plutot que de relancer la meme requete telle quelle."
                     )
-                }]
+                }],
+                "data": {
+                    "query": query_text,
+                    "project": if project == "*" { Value::Null } else { Value::String(project.to_string()) },
+                    "result_count": 0,
+                    "query_state": "structure_only_empty",
+                    "diagnostic_route": "degraded_structure_without_anchor"
+                }
             }))
         } else {
             let rows = Self::rerank_symbol_rows(fallback_rows, query_text, query_intent);
@@ -1226,7 +1240,7 @@ impl McpServer {
                         &evidence,
                         &[
                             "run `impact` for dependency blast radius",
-                            "run `bidi_trace` for topology"
+                            "run `bidi_trace` for dependency flow"
                         ],
                         "high",
                     )

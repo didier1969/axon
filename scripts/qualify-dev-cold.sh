@@ -62,7 +62,7 @@ bash "$SCRIPT_DIR/reset-dev-baseline.sh"
 echo "[qualify-dev-cold] running cold qualification"
 exec python3 "$SCRIPT_DIR/qualify_ingestion_run.py" \
     --reuse-runtime \
-    --mode brain_shadow \
+    --mode brain_only \
     --duration "$duration" \
     --interval "$interval" \
     --label "$label" \

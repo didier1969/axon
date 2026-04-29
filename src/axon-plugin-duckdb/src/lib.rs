@@ -1,4 +1,4 @@
-use duckdb::{Connection, AccessMode, Config};
+use duckdb::{AccessMode, Config, Connection};
 use std::ffi::{c_char, CStr, CString};
 
 pub struct PluginContext {
@@ -20,11 +20,16 @@ fn duckpgq_load_enabled() -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn duckdb_init_db(path: *const c_char, read_only: bool) -> *mut PluginContext {
+pub unsafe extern "C" fn duckdb_init_db(
+    path: *const c_char,
+    read_only: bool,
+) -> *mut PluginContext {
     if plugin_trace_enabled() {
         eprintln!("[duckdb_init_db] enter read_only={read_only} path_ptr={path:p}");
     }
-    if path.is_null() { return std::ptr::null_mut(); }
+    if path.is_null() {
+        return std::ptr::null_mut();
+    }
     let path_str = match CStr::from_ptr(path).to_str() {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
@@ -36,7 +41,9 @@ pub unsafe extern "C" fn duckdb_init_db(path: *const c_char, read_only: bool) ->
     if path_str != ":memory:" {
         let p = std::path::Path::new(path_str);
         if !read_only && !p.exists() {
-            if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
         }
     }
     if plugin_trace_enabled() {
@@ -96,34 +103,65 @@ pub unsafe extern "C" fn duckdb_init_db(path: *const c_char, read_only: bool) ->
 
 #[no_mangle]
 pub unsafe extern "C" fn duckdb_execute(ctx: *mut PluginContext, query: *const c_char) -> bool {
-    if ctx.is_null() || query.is_null() { return false; }
-    let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return false };
+    if ctx.is_null() || query.is_null() {
+        return false;
+    }
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
     if plugin_trace_enabled() {
         eprintln!("[duckdb_execute] {}", query_str);
     }
     let ctx_ref = &*ctx;
     match ctx_ref.conn.execute_batch(query_str) {
         Ok(_) => true,
-        Err(e) => { eprintln!("Error executing query: {} | {}", e, query_str); false }
+        Err(e) => {
+            eprintln!("Error executing query: {} | {}", e, query_str);
+            false
+        }
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn duckdb_execute_param(ctx: *mut PluginContext, query: *const c_char, params_json: *const c_char) -> bool {
-    if ctx.is_null() || query.is_null() || params_json.is_null() { return false; }
-    let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return false };
-    let params_str = match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return false };
+pub unsafe extern "C" fn duckdb_execute_param(
+    ctx: *mut PluginContext,
+    query: *const c_char,
+    params_json: *const c_char,
+) -> bool {
+    if ctx.is_null() || query.is_null() || params_json.is_null() {
+        return false;
+    }
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let params_str = match CStr::from_ptr(params_json).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
     if plugin_trace_enabled() {
         eprintln!("[duckdb_execute_param] {} | {}", query_str, params_str);
     }
     let ctx_ref = &*ctx;
 
-    let params: serde_json::Value = serde_json::from_str(params_str).unwrap_or(serde_json::Value::Null);
+    let params: serde_json::Value =
+        serde_json::from_str(params_str).unwrap_or(serde_json::Value::Null);
     let res = if let serde_json::Value::Array(arr) = params {
-        let duck_params: Vec<String> = arr.iter().map(|v| {
-            if let Some(s) = v.as_str() { s.to_string() } else { v.to_string().replace("\"", "") }
-        }).collect();
-        let param_refs: Vec<&dyn duckdb::ToSql> = duck_params.iter().map(|s| s as &dyn duckdb::ToSql).collect();
+        let duck_params: Vec<String> = arr
+            .iter()
+            .map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string().replace("\"", "")
+                }
+            })
+            .collect();
+        let param_refs: Vec<&dyn duckdb::ToSql> = duck_params
+            .iter()
+            .map(|s| s as &dyn duckdb::ToSql)
+            .collect();
         ctx_ref.conn.execute(query_str, param_refs.as_slice())
     } else {
         ctx_ref.conn.execute(query_str, [])
@@ -131,39 +169,61 @@ pub unsafe extern "C" fn duckdb_execute_param(ctx: *mut PluginContext, query: *c
 
     match res {
         Ok(_) => true,
-        Err(e) => { eprintln!("Param Execute Error: {} | {}", e, query_str); false }
+        Err(e) => {
+            eprintln!("Param Execute Error: {} | {}", e, query_str);
+            false
+        }
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn duckdb_query_count(ctx: *mut PluginContext, query: *const c_char) -> i64 {
-    if ctx.is_null() || query.is_null() { return -1; }
-    let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return -1 };
+    if ctx.is_null() || query.is_null() {
+        return -1;
+    }
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
     if plugin_trace_enabled() {
         eprintln!("[duckdb_query_count] {}", query_str);
     }
     let ctx_ref = &*ctx;
-    match ctx_ref.conn.query_row(query_str, [], |row| row.get::<_, i64>(0)) {
+    match ctx_ref
+        .conn
+        .query_row(query_str, [], |row| row.get::<_, i64>(0))
+    {
         Ok(v) => v,
-        Err(e) => { eprintln!("Count Error: {} | Query: {}", e, query_str); -1 },
+        Err(e) => {
+            eprintln!("Count Error: {} | Query: {}", e, query_str);
+            -1
+        }
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn duckdb_query_json(ctx: *mut PluginContext, query: *const c_char) -> *mut c_char {
-    if ctx.is_null() || query.is_null() { return CString::new("[]").unwrap().into_raw(); }
-    let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return CString::new("[]").unwrap().into_raw() };
+pub unsafe extern "C" fn duckdb_query_json(
+    ctx: *mut PluginContext,
+    query: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || query.is_null() {
+        return CString::new("[]").unwrap().into_raw();
+    }
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return CString::new("[]").unwrap().into_raw(),
+    };
     if plugin_trace_enabled() {
         eprintln!("[duckdb_query_json] {}", query_str);
     }
     let ctx_ref = &*ctx;
-    
-    let is_select = query_str.trim().to_lowercase().starts_with("select") ||
-                    query_str.trim().to_lowercase().starts_with("with") ||
-                    query_str.trim().to_lowercase().starts_with("show") ||
-                    query_str.trim().to_lowercase().starts_with("-from") ||
-                    query_str.trim().to_lowercase().starts_with("-match") ||
-                    query_str.to_lowercase().contains("returning");    
+
+    let is_select = query_str.trim().to_lowercase().starts_with("select")
+        || query_str.trim().to_lowercase().starts_with("with")
+        || query_str.trim().to_lowercase().starts_with("show")
+        || query_str.trim().to_lowercase().starts_with("-from")
+        || query_str.trim().to_lowercase().starts_with("-match")
+        || query_str.to_lowercase().contains("returning");
     if !is_select {
         match ctx_ref.conn.execute(query_str, []) {
             Ok(_) => return CString::new("[]").unwrap().into_raw(),
@@ -197,19 +257,23 @@ pub unsafe extern "C" fn duckdb_query_json(ctx: *mut PluginContext, query: *cons
             let results: Vec<Vec<String>> = mapped_rows.filter_map(|r| r.ok()).collect();
             let json = serde_json::to_string(&results).unwrap_or("[]".to_string());
             CString::new(json).unwrap().into_raw()
-        },
-        Err(_) => CString::new("[]").unwrap().into_raw()
+        }
+        Err(_) => CString::new("[]").unwrap().into_raw(),
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn duckdb_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() { let _ = CString::from_raw(ptr); }
+    if !ptr.is_null() {
+        let _ = CString::from_raw(ptr);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn duckdb_close_db(ctx: *mut PluginContext) {
-    if !ctx.is_null() { let _ = Box::from_raw(ctx); }
+    if !ctx.is_null() {
+        let _ = Box::from_raw(ctx);
+    }
 }
 
 fn format_duckdb_value(v: &duckdb::types::Value) -> String {
@@ -233,21 +297,25 @@ fn format_duckdb_value(v: &duckdb::types::Value) -> String {
         duckdb::types::Value::Date32(d) => d.to_string(),
         duckdb::types::Value::Time64(_, t) => t.to_string(),
         duckdb::types::Value::Timestamp(_, ts) => ts.to_string(),
-        duckdb::types::Value::Interval { months, days, nanos } => {
+        duckdb::types::Value::Interval {
+            months,
+            days,
+            nanos,
+        } => {
             format!("{{\"months\":{months},\"days\":{days},\"nanos\":{nanos}}}")
         }
         duckdb::types::Value::Enum(s) => s.clone(),
         duckdb::types::Value::List(items) | duckdb::types::Value::Array(items) => {
-            let rendered = items
-                .iter()
-                .map(format_duckdb_value)
-                .collect::<Vec<_>>();
+            let rendered = items.iter().map(format_duckdb_value).collect::<Vec<_>>();
             serde_json::to_string(&rendered).unwrap_or_else(|_| "[]".to_string())
         }
         duckdb::types::Value::Struct(entries) => {
             let mut rendered = serde_json::Map::new();
             for (key, value) in entries.iter() {
-                rendered.insert(key.clone(), serde_json::Value::String(format_duckdb_value(value)));
+                rendered.insert(
+                    key.clone(),
+                    serde_json::Value::String(format_duckdb_value(value)),
+                );
             }
             serde_json::Value::Object(rendered).to_string()
         }

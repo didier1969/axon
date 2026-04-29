@@ -8,15 +8,16 @@
       "question": "axon_retrieve_context",
       "expected_route": "exact_lookup",
       "expected_anchor_terms": ["axon_retrieve_context"],
-      "expected_file_paths": ["/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs"],
+      "expected_file_paths": ["src/axon-core/src/mcp/tools_context.rs"],
       "require_supporting_chunks": false
     },
     {
       "id": "exact_file_lookup",
       "project": "AXO",
-      "question": "/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs",
+      "question": "src/axon-core/src/mcp/tools_context.rs",
+      "question_is_project_path": true,
       "expected_route": "exact_lookup",
-      "expected_file_paths": ["/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs"],
+      "expected_file_paths": ["src/axon-core/src/mcp/tools_context.rs"],
       "require_supporting_chunks": false
     },
     {

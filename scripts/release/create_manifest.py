@@ -53,31 +53,20 @@ def load_build_info(path: pathlib.Path) -> dict[str, str]:
     return data
 
 
-def topology_primary_artifact(
-    repo: pathlib.Path, topology: str, artifact_arg: str | None, build_info_arg: str | None
+def runtime_primary_artifact(
+    repo: pathlib.Path, artifact_arg: str | None, build_info_arg: str | None
 ) -> tuple[str, pathlib.Path, pathlib.Path]:
-    if topology == "split":
-        artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-brain")
-        build_info = (
-            pathlib.Path(build_info_arg).resolve()
-            if build_info_arg
-            else (repo / "bin" / "axon-brain.build-info")
-        )
-        return "axon-brain", artifact, build_info
-
-    artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-core")
+    artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-brain")
     build_info = (
         pathlib.Path(build_info_arg).resolve()
         if build_info_arg
-        else (repo / "bin" / "axon-core.build-info")
+        else (repo / "bin" / "axon-brain.build-info")
     )
-    return "axon-core", artifact, build_info
+    return "axon-brain", artifact, build_info
 
 
-def topology_artifact_names(topology: str) -> tuple[str, ...]:
-    if topology == "split":
-        return ("axon-brain", "axon-indexer")
-    return ("axon-core",)
+def runtime_artifact_names() -> tuple[str, ...]:
+    return ("axon-brain", "axon-indexer")
 
 
 def main() -> int:
@@ -85,25 +74,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Create a canonical Axon release manifest.")
     parser.add_argument("--artifact")
     parser.add_argument("--build-info")
-    parser.add_argument("--topology", choices=["monolith", "split"], default="monolith")
     parser.add_argument("--state", choices=["pushed", "qualified"], default="qualified")
     parser.add_argument("--release-version")
     parser.add_argument("--install-generation")
     parser.add_argument("--evidence", action="append", default=[])
     parser.add_argument("--output")
     args = parser.parse_args()
-
-    primary_bin_name, artifact, build_info_path = topology_primary_artifact(
-        repo, args.topology, args.artifact, args.build_info
+    primary_bin_name, artifact, build_info_path = runtime_primary_artifact(
+        repo, args.artifact, args.build_info
     )
     if not artifact.exists():
         print(f"Artifact not found: {artifact}", file=sys.stderr)
         return 2
 
     preflight = repo / "scripts" / "release" / "preflight.sh"
-    preflight_cmd = ["bash", str(preflight), "--topology", args.topology]
-    if args.topology != "split":
-        preflight_cmd.extend(["--artifact", str(artifact), "--build-info", str(build_info_path)])
+    preflight_cmd = ["bash", str(preflight)]
     subprocess.run(preflight_cmd, check=True)
     build_info = load_build_info(build_info_path)
 
@@ -151,7 +136,7 @@ def main() -> int:
         "schema_version": 1,
         "created_at": created_at,
         "state": args.state,
-        "topology": args.topology,
+        "runtime_contract": "brain_mcp_indexer_ist",
         "source": {
             "repo_root": str(repo),
             "git_commit": git_commit or None,
@@ -179,7 +164,7 @@ def main() -> int:
         },
     }
 
-    for bin_name in topology_artifact_names(args.topology):
+    for bin_name in runtime_artifact_names():
         bin_path = repo / "bin" / bin_name
         build_info = repo / "bin" / f"{bin_name}.build-info"
         if not bin_path.exists():

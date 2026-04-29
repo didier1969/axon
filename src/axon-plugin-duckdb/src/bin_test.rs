@@ -1,4 +1,4 @@
-use duckdb::{Connection, Config};
+use duckdb::{Config, Connection};
 fn main() {
     println!("Testing DuckDB connection...");
 }

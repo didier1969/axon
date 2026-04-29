@@ -91,7 +91,9 @@ pub(crate) fn project_authoritative_phase1_guidance(outcome: GuidanceOutcome) ->
     };
 
     match problem_class {
-        "input_not_found"
+        "invalid_arguments"
+        | "unknown_tool_name"
+        | "input_not_found"
         | "input_ambiguous"
         | "wrong_project_scope"
         | "tool_unavailable"
@@ -117,6 +119,32 @@ pub(crate) fn classify_guidance(facts: &[GuidanceFact]) -> GuidanceOutcome {
             next_best_actions: vec![
                 "switch_to_supported_runtime_profile".to_string(),
                 "retry_tool_after_runtime_change".to_string(),
+            ],
+            confidence: Some("high".to_string()),
+            soll: None,
+        };
+    }
+
+    if has_signal("invalid_arguments") {
+        return GuidanceOutcome {
+            problem_class: Some("invalid_arguments".to_string()),
+            likely_cause: Some("request_shape_does_not_match_tool_contract".to_string()),
+            next_best_actions: vec![
+                "retry_with_required_arguments".to_string(),
+                "inspect_tool_input_contract".to_string(),
+            ],
+            confidence: Some("high".to_string()),
+            soll: None,
+        };
+    }
+
+    if has_signal("unknown_tool_name") {
+        return GuidanceOutcome {
+            problem_class: Some("unknown_tool_name".to_string()),
+            likely_cause: Some("requested_tool_is_not_in_public_surface".to_string()),
+            next_best_actions: vec![
+                "retry_with_public_tool_name".to_string(),
+                "inspect_mcp_surface".to_string(),
             ],
             confidence: Some("high".to_string()),
             soll: None,

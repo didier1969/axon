@@ -13,6 +13,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from mcp_probe_common import call_tool, initialize_session, response_data  # noqa: E402
+from runtime_contracts import runtime_authority_contract  # noqa: E402
 
 
 def load_manifest(path: pathlib.Path) -> dict:
@@ -52,8 +53,6 @@ def main() -> int:
         "install_generation": args.install_generation
         or require_str(runtime_version, "install_generation"),
     }
-    topology = manifest.get("topology", "monolith")
-
     initialize_session(args.url, args.timeout, "release-runtime-check")
     _, response = call_tool(args.url, args.timeout, "status", {"mode": "brief"})
     data = response_data(response)
@@ -79,36 +78,41 @@ def main() -> int:
     if mismatches:
         raise SystemExit("runtime_version mismatch: " + "; ".join(mismatches))
 
-    if topology == "split":
-        runtime_authority = data.get("runtime_authority")
-        if not isinstance(runtime_authority, dict):
-            raise SystemExit("status missing data.runtime_authority")
-        topology_data = runtime_authority.get("runtime_topology")
-        if not isinstance(topology_data, dict):
-            raise SystemExit("status missing data.runtime_authority.runtime_topology")
-        split_expectations = {
-            "public_mcp_authority": "brain",
-            "soll_writer_authority": "brain",
-            "ist_writer_authority": "indexer",
-        }
-        split_mismatches: list[str] = []
-        for key, expected_value in split_expectations.items():
-            actual_value = topology_data.get(key)
-            if actual_value != expected_value:
-                split_mismatches.append(f"{key}: expected {expected_value}, got {actual_value}")
-        if topology_data.get("system_converged") is not True:
-            split_mismatches.append(
-                f"system_converged: expected true, got {topology_data.get('system_converged')}"
-            )
-        if split_mismatches:
-            raise SystemExit("split topology mismatch: " + "; ".join(split_mismatches))
+    runtime_authority = data.get("runtime_authority")
+    if not isinstance(runtime_authority, dict):
+        raise SystemExit("status missing data.runtime_authority")
+    authority_data = runtime_authority.get("runtime_state")
+    if not isinstance(authority_data, dict):
+        raise SystemExit("status missing data.runtime_authority.runtime_state")
+    authority_expectations = runtime_authority_contract("brain")
+    authority_mismatches: list[str] = []
+    if authority_data.get("process_role") != authority_expectations["process_role"]:
+        authority_mismatches.append(
+            f"process_role: expected {authority_expectations['process_role']}, got {authority_data.get('process_role')}"
+        )
+    for key in ("public_mcp_authority", "soll_writer_authority", "ist_writer_authority"):
+        expected_value = authority_expectations[key]
+        actual_value = authority_data.get(key)
+        if actual_value != expected_value:
+            authority_mismatches.append(f"{key}: expected {expected_value}, got {actual_value}")
+    if authority_data.get("brain_ready") is not True:
+        authority_mismatches.append(
+            f"brain_ready: expected true, got {authority_data.get('brain_ready')}"
+        )
+    if authority_data.get("indexer_ready") is not True:
+        authority_mismatches.append(
+            f"indexer_ready: expected true, got {authority_data.get('indexer_ready')}"
+        )
+    if authority_data.get("topology") is not None:
+        authority_mismatches.append("runtime authority must not expose a topology field")
+    if authority_mismatches:
+        raise SystemExit("runtime authority mismatch: " + "; ".join(authority_mismatches))
 
     print(
         json.dumps(
             {
                 "status": "ok",
                 "instance_kind": actual_instance,
-                "topology": topology,
                 "runtime_version": {
                     key: live_runtime.get(key) for key in expected.keys()
                 },

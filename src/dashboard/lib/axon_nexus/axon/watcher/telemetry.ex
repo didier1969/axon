@@ -34,6 +34,11 @@ defmodule Axon.Watcher.Telemetry do
 
   def update_runtime_telemetry(payload) when is_map(payload) do
     runtime_snapshot = %{
+      telemetry_source: Map.get(payload, "telemetry_source", "local_runtime"),
+      telemetry_process_role: Map.get(payload, "telemetry_process_role", "unknown"),
+      telemetry_freshness_state: Map.get(payload, "telemetry_freshness_state", "unknown"),
+      telemetry_observed_age_ms: Map.get(payload, "telemetry_observed_age_ms", nil),
+      telemetry_degraded_reason: Map.get(payload, "telemetry_degraded_reason", nil),
       budget_bytes: Map.get(payload, "budget_bytes", 0),
       reserved_bytes: Map.get(payload, "reserved_bytes", 0),
       exhaustion_ratio: Map.get(payload, "exhaustion_ratio", 0.0),
@@ -71,6 +76,26 @@ defmodule Axon.Watcher.Telemetry do
         Map.get(payload, "file_vectorization_queue_inflight", 0),
       file_vectorization_queue_depth:
         Map.get(payload, "file_vectorization_queue_depth", 0),
+      vector_chunks_embedded_total: Map.get(payload, "vector_chunks_embedded_total", 0),
+      chunk_embeddings_per_second: Map.get(payload, "chunk_embeddings_per_second", 0.0),
+      chunk_embeddings_rate_window_ms: Map.get(payload, "chunk_embeddings_rate_window_ms", 0),
+      prepare_inflight_chunks_current:
+        Map.get(payload, "prepare_inflight_chunks_current", 0),
+      ready_queue_chunks_current: Map.get(payload, "ready_queue_chunks_current", 0),
+      ready_queue_chunks_small: Map.get(payload, "ready_queue_chunks_small", 0),
+      ready_queue_chunks_medium: Map.get(payload, "ready_queue_chunks_medium", 0),
+      ready_queue_chunks_large: Map.get(payload, "ready_queue_chunks_large", 0),
+      ready_batches_small: Map.get(payload, "ready_batches_small", 0),
+      ready_batches_medium: Map.get(payload, "ready_batches_medium", 0),
+      ready_batches_large: Map.get(payload, "ready_batches_large", 0),
+      mixed_fallback_batches_total: Map.get(payload, "mixed_fallback_batches_total", 0),
+      homogeneous_batches_total: Map.get(payload, "homogeneous_batches_total", 0),
+      last_consumed_batch_lane: Map.get(payload, "last_consumed_batch_lane", "unknown"),
+      active_small_max_tokens: Map.get(payload, "active_small_max_tokens", 0),
+      active_medium_max_tokens: Map.get(payload, "active_medium_max_tokens", 0),
+      graph_workers_started_total: Map.get(payload, "graph_workers_started_total", 0),
+      graph_workers_active_current: Map.get(payload, "graph_workers_active_current", 0),
+      graph_worker_heartbeat_at_ms: Map.get(payload, "graph_worker_heartbeat_at_ms", 0),
       ingress_enabled: Map.get(payload, "ingress_enabled", false),
       ingress_buffered_entries: Map.get(payload, "ingress_buffered_entries", 0),
       ingress_subtree_hints: Map.get(payload, "ingress_subtree_hints", 0),
@@ -85,7 +110,17 @@ defmodule Axon.Watcher.Telemetry do
       ingress_collapsed_total: Map.get(payload, "ingress_collapsed_total", 0),
       ingress_flush_count: Map.get(payload, "ingress_flush_count", 0),
       ingress_last_flush_duration_ms: Map.get(payload, "ingress_last_flush_duration_ms", 0),
-      ingress_last_promoted_count: Map.get(payload, "ingress_last_promoted_count", 0)
+      ingress_last_promoted_count: Map.get(payload, "ingress_last_promoted_count", 0),
+      projected_indexer_runtime:
+        Map.get(payload, "projected_indexer_runtime", %{
+          "available" => false,
+          "telemetry_source" => "unavailable",
+          "process_role" => "indexer",
+          "freshness_state" => "missing",
+          "observed_age_ms" => nil,
+          "degraded_reason" => nil,
+          "telemetry" => %{}
+        })
     }
 
     :ets.insert(:axon_telemetry, {:runtime_snapshot, runtime_snapshot})
@@ -232,6 +267,11 @@ defmodule Axon.Watcher.Telemetry do
       sql_latency: Map.put(sql_latency, :error_rate, error_rate(:sql_snapshot_ok_total, :sql_snapshot_error_total)),
       dashboard_latency: dashboard_latency,
       budget_bytes: Map.get(runtime, :budget_bytes, 0),
+      telemetry_source: Map.get(runtime, :telemetry_source, "local_runtime"),
+      telemetry_process_role: Map.get(runtime, :telemetry_process_role, "unknown"),
+      telemetry_freshness_state: Map.get(runtime, :telemetry_freshness_state, "unknown"),
+      telemetry_observed_age_ms: Map.get(runtime, :telemetry_observed_age_ms, nil),
+      telemetry_degraded_reason: Map.get(runtime, :telemetry_degraded_reason, nil),
       reserved_bytes: Map.get(runtime, :reserved_bytes, 0),
       exhaustion_ratio: Map.get(runtime, :exhaustion_ratio, 0.0),
       reserved_task_count: Map.get(runtime, :reserved_task_count, 0),
@@ -266,6 +306,28 @@ defmodule Axon.Watcher.Telemetry do
       file_vectorization_queue_inflight:
         Map.get(runtime, :file_vectorization_queue_inflight, 0),
       file_vectorization_queue_depth: Map.get(runtime, :file_vectorization_queue_depth, 0),
+      vector_chunks_embedded_total: Map.get(runtime, :vector_chunks_embedded_total, 0),
+      chunk_embeddings_per_second: Map.get(runtime, :chunk_embeddings_per_second, 0.0),
+      chunk_embeddings_rate_window_ms: Map.get(runtime, :chunk_embeddings_rate_window_ms, 0),
+      prepare_inflight_chunks_current:
+        Map.get(runtime, :prepare_inflight_chunks_current, 0),
+      ready_queue_chunks_current: Map.get(runtime, :ready_queue_chunks_current, 0),
+      ready_queue_chunks_small: Map.get(runtime, :ready_queue_chunks_small, 0),
+      ready_queue_chunks_medium: Map.get(runtime, :ready_queue_chunks_medium, 0),
+      ready_queue_chunks_large: Map.get(runtime, :ready_queue_chunks_large, 0),
+      ready_batches_small: Map.get(runtime, :ready_batches_small, 0),
+      ready_batches_medium: Map.get(runtime, :ready_batches_medium, 0),
+      ready_batches_large: Map.get(runtime, :ready_batches_large, 0),
+      mixed_fallback_batches_total:
+        Map.get(runtime, :mixed_fallback_batches_total, 0),
+      homogeneous_batches_total: Map.get(runtime, :homogeneous_batches_total, 0),
+      last_consumed_batch_lane:
+        Map.get(runtime, :last_consumed_batch_lane, "unknown"),
+      active_small_max_tokens: Map.get(runtime, :active_small_max_tokens, 0),
+      active_medium_max_tokens: Map.get(runtime, :active_medium_max_tokens, 0),
+      graph_workers_started_total: Map.get(runtime, :graph_workers_started_total, 0),
+      graph_workers_active_current: Map.get(runtime, :graph_workers_active_current, 0),
+      graph_worker_heartbeat_at_ms: Map.get(runtime, :graph_worker_heartbeat_at_ms, 0),
       ingress_enabled: Map.get(runtime, :ingress_enabled, false),
       ingress_buffered_entries: Map.get(runtime, :ingress_buffered_entries, 0),
       ingress_subtree_hints: Map.get(runtime, :ingress_subtree_hints, 0),
@@ -280,7 +342,17 @@ defmodule Axon.Watcher.Telemetry do
       ingress_collapsed_total: Map.get(runtime, :ingress_collapsed_total, 0),
       ingress_flush_count: Map.get(runtime, :ingress_flush_count, 0),
       ingress_last_flush_duration_ms: Map.get(runtime, :ingress_last_flush_duration_ms, 0),
-      ingress_last_promoted_count: Map.get(runtime, :ingress_last_promoted_count, 0)
+      ingress_last_promoted_count: Map.get(runtime, :ingress_last_promoted_count, 0),
+      projected_indexer_runtime:
+        Map.get(runtime, :projected_indexer_runtime, %{
+          "available" => false,
+          "telemetry_source" => "unavailable",
+          "process_role" => "indexer",
+          "freshness_state" => "missing",
+          "observed_age_ms" => nil,
+          "degraded_reason" => nil,
+          "telemetry" => %{}
+        })
     }
   end
 
@@ -318,6 +390,11 @@ defmodule Axon.Watcher.Telemetry do
       :axon_telemetry,
       {:runtime_snapshot,
        %{
+         telemetry_source: "local_runtime",
+         telemetry_process_role: "unknown",
+         telemetry_freshness_state: "unknown",
+         telemetry_observed_age_ms: nil,
+         telemetry_degraded_reason: nil,
          budget_bytes: 0,
          reserved_bytes: 0,
          exhaustion_ratio: 0.0,
@@ -350,6 +427,25 @@ defmodule Axon.Watcher.Telemetry do
          file_vectorization_queue_queued: 0,
          file_vectorization_queue_inflight: 0,
          file_vectorization_queue_depth: 0,
+         vector_chunks_embedded_total: 0,
+         chunk_embeddings_per_second: 0.0,
+         chunk_embeddings_rate_window_ms: 0,
+         prepare_inflight_chunks_current: 0,
+         ready_queue_chunks_current: 0,
+         ready_queue_chunks_small: 0,
+         ready_queue_chunks_medium: 0,
+         ready_queue_chunks_large: 0,
+         ready_batches_small: 0,
+         ready_batches_medium: 0,
+         ready_batches_large: 0,
+         mixed_fallback_batches_total: 0,
+         homogeneous_batches_total: 0,
+         last_consumed_batch_lane: "unknown",
+         active_small_max_tokens: 0,
+         active_medium_max_tokens: 0,
+         graph_workers_started_total: 0,
+         graph_workers_active_current: 0,
+         graph_worker_heartbeat_at_ms: 0,
          ingress_enabled: false,
          ingress_buffered_entries: 0,
          ingress_subtree_hints: 0,
@@ -360,7 +456,16 @@ defmodule Axon.Watcher.Telemetry do
          ingress_collapsed_total: 0,
          ingress_flush_count: 0,
          ingress_last_flush_duration_ms: 0,
-         ingress_last_promoted_count: 0
+         ingress_last_promoted_count: 0,
+         projected_indexer_runtime: %{
+           "available" => false,
+           "telemetry_source" => "unavailable",
+           "process_role" => "indexer",
+           "freshness_state" => "missing",
+           "observed_age_ms" => nil,
+           "degraded_reason" => nil,
+           "telemetry" => %{}
+         }
        }}
     )
   end

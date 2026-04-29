@@ -13,6 +13,13 @@ impl Default for RubyParser {
 }
 
 impl RubyParser {
+    fn body_split_lines<'a>(body: Node<'a>) -> Vec<usize> {
+        let mut cursor = body.walk();
+        body.named_children(&mut cursor)
+            .map(|child| child.start_position().row + 1)
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             wasm_bytes: include_bytes!("../../parsers/tree-sitter-ruby.wasm"),
@@ -38,7 +45,31 @@ impl RubyParser {
             let end_line = node.end_position().row + 1;
 
             let mut is_nif = false;
+            let mut properties = HashMap::new();
             if let Some(body) = Self::find_child_by_type(node, "body_statement") {
+                properties.insert(
+                    "header_end_line".to_string(),
+                    body.start_position().row.saturating_add(1).to_string(),
+                );
+                properties.insert(
+                    "body_start_line".to_string(),
+                    body.start_position().row.saturating_add(1).to_string(),
+                );
+                properties.insert(
+                    "body_end_line".to_string(),
+                    body.end_position().row.saturating_add(1).to_string(),
+                );
+                let split_lines = Self::body_split_lines(body);
+                if split_lines.len() > 1 {
+                    properties.insert(
+                        "body_split_lines".to_string(),
+                        split_lines
+                            .into_iter()
+                            .map(|line| line.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
                 let node_content = body.utf8_text(source_bytes).unwrap_or("");
                 if node_content.contains("attach_function") || node_content.contains("FFI::") {
                     is_nif = true;
@@ -57,7 +88,7 @@ impl RubyParser {
                 tested: false,
                 is_nif,
                 is_unsafe: false,
-                properties: HashMap::new(),
+                properties,
                 embedding: None,
             });
         }

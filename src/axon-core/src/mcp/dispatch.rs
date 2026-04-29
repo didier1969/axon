@@ -4,6 +4,7 @@ use super::catalog::requires_indexed_runtime;
 use super::McpServer;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
+use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
 impl McpServer {
     pub(crate) fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
@@ -22,22 +23,44 @@ impl McpServer {
                 .ok()
                 .as_deref(),
         );
+        let split_brain_public_authority =
+            matches!(current_runtime_process_role(), AxonProcessRole::Brain)
+                && matches!(
+                    std::env::var("AXON_SPLIT_SHADOW_ONLY")
+                        .ok()
+                        .as_deref()
+                        .map(str::trim),
+                    Some("1") | Some("true") | Some("yes") | Some("on")
+                );
 
-        if requires_indexed_runtime(normalized_name)
+        let resume_vectorization_unavailable = normalized_name == "resume_vectorization"
+            && matches!(runtime_mode, AxonRuntimeMode::BrainOnly);
+        if (requires_indexed_runtime(normalized_name) || resume_vectorization_unavailable)
+            && !split_brain_public_authority
             && !matches!(
                 runtime_profile,
-                AxonRuntimeOperationalProfile::FullAutonomous
+                AxonRuntimeOperationalProfile::IndexerFullAutonomous
             )
         {
+            let response_text = if normalized_name == "resume_vectorization" {
+                format!(
+                    "Indexing operation '{}' is unavailable from the public brain authority while runtime mode is '{}' with profile '{}'. Run it on the active indexer authority, or start Axon in `indexer_full` mode with autonomous ingestion.",
+                    normalized_name,
+                    runtime_mode.as_str(),
+                    runtime_profile.as_str()
+                )
+            } else {
+                format!(
+                    "Indexed operation '{}' is unavailable in runtime mode '{}' with profile '{}'. Start Axon in `indexer_full` mode with autonomous ingestion, or route the request through the split brain authority.",
+                    normalized_name,
+                    runtime_mode.as_str(),
+                    runtime_profile.as_str()
+                )
+            };
             let response = json!({
                 "content": [{
                     "type": "text",
-                    "text": format!(
-                        "Tool '{}' is unavailable in runtime mode '{}' with profile '{}'. Start Axon in `full_autonomous` mode for indexed graph diagnostics.",
-                        normalized_name,
-                        runtime_mode.as_str(),
-                        runtime_profile.as_str()
-                    )
+                    "text": response_text
                 }],
                 "isError": true
             });
@@ -68,14 +91,18 @@ impl McpServer {
                 })
         };
 
-        Some(response.unwrap_or_else(|| {
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Invalid arguments for tool: {}", normalized_name)
-                }],
-                "isError": true
-            })
-        }))
+        Some(self.attach_default_tool_guidance(
+            normalized_name,
+            arguments,
+            response.unwrap_or_else(|| {
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Invalid arguments for tool: {}", normalized_name)
+                    }],
+                    "isError": true
+                })
+            }),
+        ))
     }
 }

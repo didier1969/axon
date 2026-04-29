@@ -13,24 +13,31 @@ pub(crate) struct RuntimeServiceOptions {
 }
 
 impl RuntimeServiceOptions {
-    pub(crate) fn full() -> Self {
+    pub(crate) fn brain_only() -> Self {
+        Self {
+            spawn_indexing_workers: false,
+            spawn_semantic_workers: false,
+        }
+    }
+
+    pub(crate) fn indexer_graph() -> Self {
         Self {
             spawn_indexing_workers: true,
+            spawn_semantic_workers: false,
+        }
+    }
+
+    pub(crate) fn indexer_vector() -> Self {
+        Self {
+            spawn_indexing_workers: false,
             spawn_semantic_workers: true,
         }
     }
 
-    pub(crate) fn graph_only() -> Self {
+    pub(crate) fn indexer_full() -> Self {
         Self {
             spawn_indexing_workers: true,
-            spawn_semantic_workers: false,
-        }
-    }
-
-    pub(crate) fn read_only() -> Self {
-        Self {
-            spawn_indexing_workers: false,
-            spawn_semantic_workers: false,
+            spawn_semantic_workers: true,
         }
     }
 }

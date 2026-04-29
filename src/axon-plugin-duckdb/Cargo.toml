@@ -13,4 +13,8 @@ serde_json = "1.0"
 
 [[bin]]
 name = "bin_test_pgq"
-path = "src/bin_test_pgq.rs"
+path = "src/bin_test.rs"
+
+[[bin]]
+name = "ist-query"
+path = "src/bin_ist_query.rs"

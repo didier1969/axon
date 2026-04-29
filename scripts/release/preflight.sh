@@ -10,7 +10,6 @@ ARTIFACT_PATH="$ROOT_DIR/bin/axon-core"
 BUILD_INFO_PATH="$ROOT_DIR/bin/axon-core.build-info"
 CHECK_PENDING=0
 SKIP_BUILD_MATCH=0
-TOPOLOGY="monolith"
 
 usage() {
   cat <<'EOF'
@@ -22,7 +21,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact) ARTIFACT_PATH="${2:-}"; shift 2 ;;
     --build-info) BUILD_INFO_PATH="${2:-}"; shift 2 ;;
-    --topology) TOPOLOGY="${2:-}"; shift 2 ;;
     --check-pending) CHECK_PENDING=1; shift ;;
     --skip-build-match) SKIP_BUILD_MATCH=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -93,34 +91,30 @@ if [[ "$CHECK_PENDING" -eq 1 && -f "$ROOT_DIR/.axon/live-release/pending.json" ]
   exit 1
 fi
 
-if [[ "$TOPOLOGY" == "split" ]]; then
-  declare -A split_build_ids=()
-  declare -A split_release_versions=()
-  declare -A split_package_versions=()
-  for bin_name in axon-brain axon-indexer; do
-    build_info_path="$(axon_build_info_path_for "$ROOT_DIR" "$bin_name")"
-    artifact_path="$ROOT_DIR/bin/$bin_name"
-    verify_one_artifact "$artifact_path" "$build_info_path" "$bin_name"
-    # shellcheck disable=SC1090
-    source "$build_info_path"
-    split_build_ids["$bin_name"]="${AXON_BUILD_ID:-}"
-    split_release_versions["$bin_name"]="${AXON_RELEASE_VERSION:-}"
-    split_package_versions["$bin_name"]="${AXON_PACKAGE_VERSION:-}"
-  done
-  if [[ "${split_build_ids[axon-brain]}" != "${split_build_ids[axon-indexer]}" ]]; then
-    echo "Split build mismatch: brain=${split_build_ids[axon-brain]} indexer=${split_build_ids[axon-indexer]}" >&2
-    exit 1
-  fi
-  if [[ "${split_release_versions[axon-brain]}" != "${split_release_versions[axon-indexer]}" ]]; then
-    echo "Split release version mismatch: brain=${split_release_versions[axon-brain]} indexer=${split_release_versions[axon-indexer]}" >&2
-    exit 1
-  fi
-  if [[ "${split_package_versions[axon-brain]}" != "${split_package_versions[axon-indexer]}" ]]; then
-    echo "Split package version mismatch: brain=${split_package_versions[axon-brain]} indexer=${split_package_versions[axon-indexer]}" >&2
-    exit 1
-  fi
-else
-  verify_one_artifact "$ARTIFACT_PATH" "$BUILD_INFO_PATH" "axon-core"
+declare -A split_build_ids=()
+declare -A split_release_versions=()
+declare -A split_package_versions=()
+for bin_name in axon-brain axon-indexer; do
+  build_info_path="$(axon_build_info_path_for "$ROOT_DIR" "$bin_name")"
+  artifact_path="$ROOT_DIR/bin/$bin_name"
+  verify_one_artifact "$artifact_path" "$build_info_path" "$bin_name"
+  # shellcheck disable=SC1090
+  source "$build_info_path"
+  split_build_ids["$bin_name"]="${AXON_BUILD_ID:-}"
+  split_release_versions["$bin_name"]="${AXON_RELEASE_VERSION:-}"
+  split_package_versions["$bin_name"]="${AXON_PACKAGE_VERSION:-}"
+done
+if [[ "${split_build_ids[axon-brain]}" != "${split_build_ids[axon-indexer]}" ]]; then
+  echo "Split build mismatch: brain=${split_build_ids[axon-brain]} indexer=${split_build_ids[axon-indexer]}" >&2
+  exit 1
+fi
+if [[ "${split_release_versions[axon-brain]}" != "${split_release_versions[axon-indexer]}" ]]; then
+  echo "Split release version mismatch: brain=${split_release_versions[axon-brain]} indexer=${split_release_versions[axon-indexer]}" >&2
+  exit 1
+fi
+if [[ "${split_package_versions[axon-brain]}" != "${split_package_versions[axon-indexer]}" ]]; then
+  echo "Split package version mismatch: brain=${split_package_versions[axon-brain]} indexer=${split_package_versions[axon-indexer]}" >&2
+  exit 1
 fi
 
 echo "release preflight ok"

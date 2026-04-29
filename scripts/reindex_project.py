@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -11,6 +12,8 @@ from typing import Any
 
 
 DEFAULT_SQL_URL = "http://127.0.0.1:44129/sql"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROJECTS_ROOT = Path(os.environ.get("AXON_PROJECTS_ROOT", PROJECT_ROOT.parent))
 NOISE_PREDICATE = (
     "path LIKE '%/.worktrees/%' OR "
     "path LIKE '%/.devbox/%' OR "
@@ -213,7 +216,7 @@ def main(argv: list[str]) -> int:
     project = args.project
     sql_url = args.sql_url
     p = esc(project)
-    project_root = str(Path("/home/dstadel/projects") / project)
+    project_root = str(DEFAULT_PROJECTS_ROOT / project)
 
     before = metrics(sql_url, project)
     print_metrics("Before:", before)

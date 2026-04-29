@@ -4,19 +4,30 @@ set -euo pipefail
 # Axon v2 - Bootstrap Script
 # Use this script for first-time setup or after significant dependency changes.
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 # shellcheck source=scripts/lib/axon-version.sh
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 
 ARTIFACT_ONLY=0
+WITH_TENSORRT=0
+TENSORRT_QUALIFY=0
+TENSORRT_ARGS=()
 
 usage() {
     cat <<'EOF'
-Usage: bash scripts/setup.sh [--artifact-only]
+Usage: bash scripts/setup.sh [--artifact-only] [--with-tensorrt] [--tensorrt-qualify]
 
 Options:
   --artifact-only  Build only the canonical Rust release artifact and build-info, then exit.
+  --with-tensorrt  Also build and validate the local TensorRT ORT artifact.
+  --tensorrt-qualify
+                   With --with-tensorrt, run bounded cold TensorRT qualification.
+  --tensorrt-arg ARG
+                   Forward one argument to scripts/setup-tensorrt.sh.
+
+TensorRT requires the NVIDIA-approved local tarball:
+  .axon/downloads/TensorRT-10.14.1.48.Linux.x86_64-gnu.cuda-12.9.tar.gz
 EOF
 }
 
@@ -24,6 +35,23 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --artifact-only)
             ARTIFACT_ONLY=1
+            shift
+            ;;
+        --with-tensorrt)
+            WITH_TENSORRT=1
+            shift
+            ;;
+        --tensorrt-qualify)
+            WITH_TENSORRT=1
+            TENSORRT_QUALIFY=1
+            shift
+            ;;
+        --tensorrt-arg)
+            TENSORRT_ARGS+=("$2")
+            shift 2
+            ;;
+        --tensorrt-arg=*)
+            TENSORRT_ARGS+=("${1#*=}")
             shift
             ;;
         --help|-h)
@@ -90,6 +118,14 @@ install_release_bin "axon-brain"
 install_release_bin "axon-indexer"
 
 if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
+    if [[ "$WITH_TENSORRT" -eq 1 ]]; then
+        echo "🧩 Building requested TensorRT artifact..."
+        if [[ "$TENSORRT_QUALIFY" -eq 1 ]]; then
+            bash "$PROJECT_ROOT/scripts/setup-tensorrt.sh" --qualify "${TENSORRT_ARGS[@]}"
+        else
+            bash "$PROJECT_ROOT/scripts/setup-tensorrt.sh" "${TENSORRT_ARGS[@]}"
+        fi
+    fi
     echo "🏁 Artifact-only bootstrap complete."
     exit 0
 fi
@@ -108,6 +144,15 @@ devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo test"
 
 echo "--- Elixir Dashboard Tests ---"
 devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix test"
+
+if [[ "$WITH_TENSORRT" -eq 1 ]]; then
+    echo "🧩 Building requested TensorRT artifact..."
+    if [[ "$TENSORRT_QUALIFY" -eq 1 ]]; then
+        bash "$PROJECT_ROOT/scripts/setup-tensorrt.sh" --qualify "${TENSORRT_ARGS[@]}"
+    else
+        bash "$PROJECT_ROOT/scripts/setup-tensorrt.sh" "${TENSORRT_ARGS[@]}"
+    fi
+fi
 
 echo "🏁 Bootstrap complete."
 echo "Next step: ./scripts/start.sh"

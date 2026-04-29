@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/dstadel/projects"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 APPLY=0
 
 usage() {
@@ -108,4 +110,3 @@ for axon_file in "${AXONIGNORE_FILES[@]}"; do
   fi
   echo ""
 done
-

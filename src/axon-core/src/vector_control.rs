@@ -21,14 +21,89 @@ pub const SEMANTIC_REFILL_BACKLOG_THRESHOLD: usize = 16;
 pub const SEMANTIC_REFILL_READY_LOW_WATERMARK: u64 = 1;
 pub const SEMANTIC_REFILL_PREPARE_LOW_WATERMARK: u64 = 1;
 pub const UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS: u64 = 2_000;
+pub const GPU_CADENCE_IDLE_GAP_UNDERFEED_MS: u64 = 250;
+pub const GPU_CADENCE_READY_STALE_UNDERFEED_MS: u64 = 1_000;
 const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 64;
 const DEFAULT_GPU_WARMUP_FILES_PER_CYCLE: usize = 16;
-const READY_RESERVE_FLOOR: usize = 16;
-const READY_RESERVE_HEAVY_BACKLOG: usize = 24;
-const READY_RESERVE_EXTREME_BACKLOG: usize = 32;
 const GPU_IDLE_WAIT_ESCALATION_MS: u64 = 100;
+const DEFAULT_GPU_READY_LOW_WATERMARK_BATCHES: usize = 16;
+const DEFAULT_GPU_READY_HIGH_WATERMARK_BATCHES: usize = 32;
+
+fn target_ready_chunk_reserve(target_ready_depth: usize, batch_chunk_capacity: usize) -> usize {
+    target_ready_depth.saturating_mul(batch_chunk_capacity.max(1))
+}
+
+fn default_stock_chunk_unit() -> usize {
+    current_runtime_tuning_state().chunk_batch_size.max(1)
+}
+
+pub fn configured_target_ready_chunks() -> usize {
+    let tuning = current_runtime_tuning_state();
+    let legacy_depth_chunks = target_ready_chunk_reserve(
+        tuning.vector_ready_queue_depth.max(1),
+        default_stock_chunk_unit(),
+    );
+    std::env::var("AXON_VECTOR_TARGET_READY_CHUNKS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(legacy_depth_chunks)
+        .max(default_stock_chunk_unit())
+}
+
+pub fn configured_gpu_ready_low_watermark_chunks() -> usize {
+    let default_chunks = target_ready_chunk_reserve(
+        DEFAULT_GPU_READY_LOW_WATERMARK_BATCHES,
+        default_stock_chunk_unit(),
+    );
+    let low = std::env::var("AXON_GPU_READY_LOW_WATERMARK_CHUNKS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            std::env::var("AXON_GPU_READY_LOW_WATERMARK")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .map(|legacy_batches| {
+                    target_ready_chunk_reserve(legacy_batches, default_stock_chunk_unit())
+                })
+        })
+        .unwrap_or(default_chunks);
+    low.clamp(
+        default_stock_chunk_unit(),
+        configured_target_ready_chunks().max(default_stock_chunk_unit()),
+    )
+}
+
+pub fn configured_gpu_ready_high_watermark_chunks() -> usize {
+    let default_chunks = target_ready_chunk_reserve(
+        DEFAULT_GPU_READY_HIGH_WATERMARK_BATCHES,
+        default_stock_chunk_unit(),
+    );
+    let low = configured_gpu_ready_low_watermark_chunks();
+    std::env::var("AXON_GPU_READY_HIGH_WATERMARK_CHUNKS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            std::env::var("AXON_GPU_READY_HIGH_WATERMARK")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .map(|legacy_batches| {
+                    target_ready_chunk_reserve(legacy_batches, default_stock_chunk_unit())
+                })
+        })
+        .unwrap_or(default_chunks)
+        .max(low.saturating_add(default_stock_chunk_unit()))
+        .clamp(
+            low.saturating_add(default_stock_chunk_unit()),
+            configured_target_ready_chunks().max(low.saturating_add(default_stock_chunk_unit())),
+        )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorBatchControllerState {
@@ -60,8 +135,6 @@ pub enum VectorDrainState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UtilityFirstSchedulerState {
-    GraphPriority,
-    SemanticRefillProtection,
     BalancedDrain,
     RecoveryOverride,
 }
@@ -69,8 +142,6 @@ pub enum UtilityFirstSchedulerState {
 impl UtilityFirstSchedulerState {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::GraphPriority => "graph_priority",
-            Self::SemanticRefillProtection => "semantic_refill_protection",
             Self::BalancedDrain => "balanced_drain",
             Self::RecoveryOverride => "recovery_override",
         }
@@ -97,6 +168,8 @@ pub struct VectorBatchControllerDiagnostics {
     pub last_adjustment_ms: u64,
     pub target_embed_batch_chunks: usize,
     pub target_files_per_cycle: usize,
+    pub gpu_ready_low_watermark_chunks: usize,
+    pub gpu_ready_high_watermark_chunks: usize,
     pub window_embed_calls: u64,
     pub window_chunks: u64,
     pub window_files_touched: u64,
@@ -111,12 +184,33 @@ pub struct UtilityFirstSchedulerDiagnostics {
     pub reason: &'static str,
     pub semantic_underfeed: bool,
     pub ready_reserve_target: usize,
+    pub target_ready_chunks: usize,
     pub hold_window_ms: u64,
+}
+
+fn cadence_underfed(
+    metrics: service_guard::VectorRuntimeMetrics,
+    target_ready_chunks: usize,
+) -> bool {
+    let ready_chunks = metrics.ready_queue_chunks_current as usize;
+    let front_chunk_supply =
+        ready_chunks.saturating_add(metrics.prepare_inflight_chunks_current as usize);
+    let has_backlog = metrics.canonical_backlog_depth_current > 0 || ready_chunks > 0;
+    let gap_threshold_ms = GPU_CADENCE_IDLE_GAP_UNDERFEED_MS
+        .max(metrics.avg_embed_attempt_wall_ms.round() as u64)
+        .max(metrics.last_embed_attempt_wall_ms);
+    let stalled_gap = metrics.last_embed_gap_ms >= gap_threshold_ms && gap_threshold_ms > 0;
+    let stale_ready = ready_chunks > 0
+        && metrics.oldest_ready_batch_age_ms_current >= GPU_CADENCE_READY_STALE_UNDERFEED_MS;
+    has_backlog
+        && (front_chunk_supply < target_ready_chunks || stalled_gap || stale_ready)
+        && metrics.persist_queue_depth_current == 0
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct VectorBatchControllerObservation {
-    pub queue_pending: usize,
+    pub upstream_file_pressure: usize,
+    pub front_chunk_supply: usize,
     pub interactive_active: bool,
     pub gpu_memory_pressure: bool,
     pub metrics: service_guard::VectorRuntimeMetrics,
@@ -374,6 +468,8 @@ impl VectorBatchController {
             last_adjustment_ms: self.last_adjustment_ms,
             target_embed_batch_chunks: self.target_embed_batch_chunks,
             target_files_per_cycle: self.target_files_per_cycle,
+            gpu_ready_low_watermark_chunks: configured_gpu_ready_low_watermark_chunks(),
+            gpu_ready_high_watermark_chunks: configured_gpu_ready_high_watermark_chunks(),
             window_embed_calls: self.last_window.embed_calls,
             window_chunks: self.last_window.chunks,
             window_files_touched: self.last_window.files_touched,
@@ -411,7 +507,7 @@ impl VectorBatchController {
             || now_ms.saturating_sub(self.last_adjustment_ms)
                 >= VECTOR_BATCH_CONTROLLER_COOLDOWN_MS;
         let backlog_meaningful =
-            observation.queue_pending >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD;
+            observation.upstream_file_pressure >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD;
 
         if observation.gpu_memory_pressure {
             self.state = VectorBatchControllerState::GpuMemoryGuarded;
@@ -515,19 +611,18 @@ impl VectorBatchController {
         } else {
             0.0
         };
-        let target_ready_reserve = vector_ready_reserve_target(
-            READY_RESERVE_FLOOR,
-            observation.queue_pending,
+        let target_ready_chunks = vector_ready_chunk_reserve_target(
+            configured_target_ready_chunks(),
+            observation.upstream_file_pressure,
             self.target_files_per_cycle,
             self.target_embed_batch_chunks,
-            observation.metrics.ready_queue_depth_current as usize,
-            observation.metrics.prepare_inflight_current as usize,
+            observation.metrics.ready_queue_chunks_current as usize,
+            observation.metrics.prepare_inflight_chunks_current as usize,
             avg_chunks_per_embed_call,
             observation.metrics.oldest_ready_batch_age_ms_current,
         );
-        let ready_queue_starved = observation.metrics.ready_queue_depth_current == 0;
-        let ready_queue_under_floor =
-            (observation.metrics.ready_queue_depth_current as usize) < target_ready_reserve;
+        let ready_queue_starved = observation.metrics.ready_queue_chunks_current == 0;
+        let ready_queue_under_floor = observation.front_chunk_supply < target_ready_chunks;
         let persist_congested = observation.metrics.persist_queue_depth_current > 0;
         let gpu_idle_wait_delta = observation
             .metrics
@@ -742,7 +837,7 @@ fn gpu_single_worker_cruise_mode(observation: VectorBatchControllerObservation) 
 
     let tuning = current_runtime_tuning_state();
     tuning.vector_workers <= 1
-        && observation.queue_pending >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD * 8
+        && observation.upstream_file_pressure >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD * 8
 }
 
 fn vector_batch_controller_slot(
@@ -839,9 +934,6 @@ pub fn vector_claim_target(
         return 0;
     }
     let min_claim_target = target_files_per_cycle.clamp(4, 24);
-    let max_claim_target = target_files_per_cycle
-        .saturating_mul(target_ready_depth.max(2))
-        .clamp(min_claim_target, 256);
     let avg_chunks_per_file = if avg_chunks_per_embed_call.is_finite()
         && avg_chunks_per_embed_call > 0.0
         && avg_files_per_embed_call.is_finite()
@@ -857,6 +949,13 @@ pub fn vector_claim_target(
     };
     let desired_files_for_chunks =
         ((target_embed_batch_chunks.max(1) as f64) / avg_chunks_per_file).ceil() as usize;
+    let max_claim_target = target_files_per_cycle
+        .saturating_mul(target_ready_depth.max(2))
+        .max(desired_files_for_chunks.saturating_mul(target_ready_depth.max(2)))
+        .clamp(
+            min_claim_target,
+            queue_pending.max(min_claim_target).min(4_096),
+        );
     let reserve_deficit = target_ready_depth
         .saturating_sub(current_ready_depth)
         .max(1);
@@ -886,47 +985,25 @@ pub fn vector_ready_reserve_target(
     avg_chunks_per_embed_call: f64,
     oldest_ready_batch_age_ms: u64,
 ) -> usize {
-    let mut reserve = configured_ready_depth.max(READY_RESERVE_FLOOR);
-    if queue_pending >= 4_096 {
-        reserve = reserve.max(READY_RESERVE_EXTREME_BACKLOG);
-    } else if queue_pending >= 512 {
-        reserve = reserve.max(READY_RESERVE_HEAVY_BACKLOG);
-    }
-    reserve = reserve.max(((target_embed_batch_chunks + 15) / 16).saturating_add(4));
-    reserve = reserve.max((target_files_per_cycle / 2).clamp(4, READY_RESERVE_EXTREME_BACKLOG));
-    if current_ready_depth == 0 && queue_pending >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        reserve = reserve.max(READY_RESERVE_HEAVY_BACKLOG);
-    }
-    if queue_pending > 0 {
-        let mut safety_stock = 0usize;
-        let effective_density_ratio = if target_embed_batch_chunks > 0
-            && avg_chunks_per_embed_call.is_finite()
-            && avg_chunks_per_embed_call > 0.0
-        {
-            (avg_chunks_per_embed_call / target_embed_batch_chunks as f64).clamp(0.0, 2.0)
-        } else {
-            1.0
-        };
-        let supply_in_flight = current_ready_depth.saturating_add(prepare_inflight_depth);
-        if supply_in_flight < reserve {
-            safety_stock = safety_stock.saturating_add((reserve - supply_in_flight).min(4));
-        }
-        if prepare_inflight_depth == 0 {
-            safety_stock = safety_stock.saturating_add(2);
-        } else if prepare_inflight_depth == 1 && current_ready_depth <= configured_ready_depth / 2 {
-            safety_stock = safety_stock.saturating_add(1);
-        }
-        if effective_density_ratio < 0.60 {
-            safety_stock = safety_stock.saturating_add(4);
-        } else if effective_density_ratio < 0.80 {
-            safety_stock = safety_stock.saturating_add(2);
-        }
-        if oldest_ready_batch_age_ms >= 1_500 && supply_in_flight <= configured_ready_depth / 2 {
-            safety_stock = safety_stock.saturating_add(2);
-        }
-        reserve = reserve.saturating_add(safety_stock);
-    }
-    reserve.clamp(1, READY_RESERVE_EXTREME_BACKLOG)
+    let configured_ready_chunks = target_ready_chunk_reserve(
+        configured_ready_depth.max(1),
+        target_embed_batch_chunks.max(1),
+    );
+    let current_ready_chunks =
+        target_ready_chunk_reserve(current_ready_depth, target_embed_batch_chunks.max(1));
+    let prepare_inflight_chunks =
+        target_ready_chunk_reserve(prepare_inflight_depth, target_embed_batch_chunks.max(1));
+    vector_ready_chunk_reserve_target(
+        configured_ready_chunks,
+        queue_pending,
+        target_files_per_cycle,
+        target_embed_batch_chunks,
+        current_ready_chunks,
+        prepare_inflight_chunks,
+        avg_chunks_per_embed_call,
+        oldest_ready_batch_age_ms,
+    )
+    .div_ceil(target_embed_batch_chunks.max(1))
 }
 
 pub fn current_vector_drain_state(
@@ -936,6 +1013,14 @@ pub fn current_vector_drain_state(
     provider_requested: &str,
     provider_effective: &str,
 ) -> VectorDrainState {
+    let provider_effective_is_gpu = provider_effective
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("cuda")
+        || provider_effective
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("tensorrt");
     if file_backlog_depth == 0 {
         return VectorDrainState::QuietCruise;
     }
@@ -945,9 +1030,7 @@ pub fn current_vector_drain_state(
     if matches!(service_pressure, ServicePressure::Critical) {
         return VectorDrainState::Recovery;
     }
-    if provider_requested.eq_ignore_ascii_case("cuda")
-        && !provider_effective.eq_ignore_ascii_case("cuda")
-    {
+    if provider_requested.eq_ignore_ascii_case("cuda") && !provider_effective_is_gpu {
         return VectorDrainState::GpuScalingBlocked;
     }
     VectorDrainState::AggressiveDrain
@@ -959,29 +1042,41 @@ pub fn current_utility_first_scheduler_diagnostics(
     service_pressure: ServicePressure,
 ) -> UtilityFirstSchedulerDiagnostics {
     let metrics = service_guard::vector_runtime_metrics();
+    let tuning = current_runtime_tuning_state();
+    let lane_config = EmbeddingLaneConfig {
+        query_workers: 1,
+        vector_workers: tuning.vector_workers.max(1),
+        graph_workers: tuning.graph_workers,
+        chunk_batch_size: tuning.chunk_batch_size.max(1),
+        file_vectorization_batch_size: tuning.file_vectorization_batch_size.max(1),
+        graph_batch_size: 1,
+        max_chunks_per_file: MAX_CHUNKS_PER_FILE,
+        max_embed_batch_bytes: MAX_EMBED_BATCH_BYTES,
+    };
+    let controller = current_vector_batch_controller_diagnostics(&lane_config);
     let interactive_active = service_guard::interactive_priority_active()
         || service_guard::interactive_requests_in_flight() > 0;
-    let ready_reserve_target = vector_ready_reserve_target(
-        READY_RESERVE_FLOOR,
+    let target_ready_chunks = vector_ready_chunk_reserve_target(
+        configured_target_ready_chunks(),
         file_backlog_depth,
-        (metrics.prepare_claimed_current as usize).max(READY_RESERVE_FLOOR / 2),
-        (metrics.ready_claimed_current as usize).max(READY_RESERVE_FLOOR),
-        metrics.ready_queue_depth_current as usize,
-        metrics.prepare_inflight_current as usize,
-        0.0,
+        controller.target_files_per_cycle,
+        controller.target_embed_batch_chunks,
+        metrics.ready_queue_chunks_current as usize,
+        metrics.prepare_inflight_chunks_current as usize,
+        controller.avg_chunks_per_embed_call,
         metrics.oldest_ready_batch_age_ms_current,
     );
-    let semantic_underfeed = file_backlog_depth >= SEMANTIC_REFILL_BACKLOG_THRESHOLD
-        && metrics.ready_queue_depth_current <= SEMANTIC_REFILL_READY_LOW_WATERMARK
-        && metrics.prepare_inflight_current <= SEMANTIC_REFILL_PREPARE_LOW_WATERMARK;
+    let front_chunk_supply = (metrics.ready_queue_chunks_current as usize)
+        .saturating_add(metrics.prepare_inflight_chunks_current as usize);
+    let stock_underfeed = file_backlog_depth >= SEMANTIC_REFILL_BACKLOG_THRESHOLD
+        && (front_chunk_supply < target_ready_chunks
+            || metrics.ready_replenishment_deficit_current > 0);
+    let cadence_underfeed = cadence_underfed(metrics, target_ready_chunks);
+    let semantic_underfeed = stock_underfeed || cadence_underfeed;
     let persist_congested = metrics.persist_queue_depth_current > 0;
     let desired_state =
         if interactive_active || matches!(service_pressure, ServicePressure::Critical) {
             UtilityFirstSchedulerState::RecoveryOverride
-        } else if graph_queue_depth > 0 {
-            UtilityFirstSchedulerState::GraphPriority
-        } else if semantic_underfeed && !persist_congested {
-            UtilityFirstSchedulerState::SemanticRefillProtection
         } else {
             UtilityFirstSchedulerState::BalancedDrain
         };
@@ -989,12 +1084,14 @@ pub fn current_utility_first_scheduler_diagnostics(
         "interactive_priority"
     } else if matches!(service_pressure, ServicePressure::Critical) {
         "service_pressure_critical"
-    } else if graph_queue_depth > 0 {
-        "graph_backlog_present"
+    } else if cadence_underfeed && !persist_congested {
+        "gpu_cadence_underfed"
     } else if semantic_underfeed && !persist_congested {
         "semantic_underfed"
     } else if persist_congested {
         "persist_congested"
+    } else if graph_queue_depth > 0 {
+        "graph_backlog_observed"
     } else {
         "steady_balanced"
     };
@@ -1016,9 +1113,90 @@ pub fn current_utility_first_scheduler_diagnostics(
         state: guard.state,
         reason,
         semantic_underfeed,
-        ready_reserve_target,
+        ready_reserve_target: target_ready_chunks,
+        target_ready_chunks,
         hold_window_ms: UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS,
     }
+}
+
+pub fn vector_ready_chunk_reserve_target(
+    configured_ready_chunks: usize,
+    upstream_file_pressure: usize,
+    target_files_per_cycle: usize,
+    target_embed_batch_chunks: usize,
+    current_ready_chunks: usize,
+    prepare_inflight_chunks: usize,
+    avg_chunks_per_embed_call: f64,
+    oldest_ready_batch_age_ms: u64,
+) -> usize {
+    let batch_chunk_capacity = target_embed_batch_chunks.max(1);
+    let avg_chunks_per_file = std::env::var("AXON_VECTOR_DEFAULT_CHUNKS_PER_FILE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4);
+    let per_cycle_chunks = target_embed_batch_chunks.max(
+        target_files_per_cycle
+            .max(1)
+            .saturating_mul(avg_chunks_per_file),
+    );
+    let reserve_floor = configured_ready_chunks
+        .max(per_cycle_chunks)
+        .max(batch_chunk_capacity);
+    let backlog_bonus = if upstream_file_pressure >= 4_096 {
+        per_cycle_chunks
+    } else if upstream_file_pressure >= 512 {
+        per_cycle_chunks / 2
+    } else {
+        0
+    };
+    let mut reserve = reserve_floor.saturating_add(backlog_bonus);
+    let supply_in_flight = current_ready_chunks.saturating_add(prepare_inflight_chunks);
+    if current_ready_chunks == 0
+        && upstream_file_pressure >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD
+    {
+        reserve = reserve.max(reserve_floor.saturating_add(per_cycle_chunks / 2));
+    }
+    if upstream_file_pressure > 0 {
+        let mut safety_stock = 0usize;
+        let reorder_gap = reserve.saturating_sub(supply_in_flight);
+        if reorder_gap > 0 {
+            safety_stock = safety_stock
+                .saturating_add(reorder_gap.min(configured_ready_chunks.max(per_cycle_chunks / 2)));
+        }
+        if prepare_inflight_chunks == 0 {
+            safety_stock =
+                safety_stock.saturating_add((per_cycle_chunks / 2).max(batch_chunk_capacity));
+        } else if prepare_inflight_chunks < (per_cycle_chunks / 2) {
+            safety_stock =
+                safety_stock.saturating_add((per_cycle_chunks / 4).max(batch_chunk_capacity / 2));
+        }
+        let effective_density_ratio = if target_embed_batch_chunks > 0
+            && avg_chunks_per_embed_call.is_finite()
+            && avg_chunks_per_embed_call > 0.0
+        {
+            (avg_chunks_per_embed_call / target_embed_batch_chunks as f64).clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        if effective_density_ratio < 0.60 {
+            safety_stock =
+                safety_stock.saturating_add((per_cycle_chunks / 2).max(batch_chunk_capacity));
+        } else if effective_density_ratio < 0.80 {
+            safety_stock =
+                safety_stock.saturating_add((per_cycle_chunks / 4).max(batch_chunk_capacity / 2));
+        }
+        if oldest_ready_batch_age_ms >= 1_500 && supply_in_flight <= configured_ready_chunks / 2 {
+            safety_stock =
+                safety_stock.saturating_add((per_cycle_chunks / 4).max(batch_chunk_capacity / 2));
+        }
+        reserve = reserve.saturating_add(safety_stock);
+    }
+    let reserve_ceiling = configured_ready_chunks
+        .saturating_mul(4)
+        .max(per_cycle_chunks.saturating_mul(4))
+        .max(batch_chunk_capacity);
+    reserve.clamp(batch_chunk_capacity, reserve_ceiling)
 }
 
 pub fn allowed_gpu_vector_workers(
@@ -1038,36 +1216,82 @@ pub fn allowed_gpu_vector_workers(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorWorkerAdmissionDecision {
+    pub admitted: bool,
+    pub reason: &'static str,
+    pub allowed_gpu_workers: usize,
+}
+
+pub fn vector_worker_admission_decision(
+    worker_idx: usize,
+    service_pressure: ServicePressure,
+    gpu_available: bool,
+    file_backlog_depth: usize,
+) -> VectorWorkerAdmissionDecision {
+    let interactive_in_flight = service_guard::interactive_requests_in_flight();
+    if interactive_in_flight > 0 {
+        let allowed_interactive_workers = if gpu_available { 1 } else { 0 };
+        if worker_idx >= allowed_interactive_workers {
+            service_guard::record_vectorization_suppressed();
+            return VectorWorkerAdmissionDecision {
+                admitted: false,
+                reason: "interactive_requests_in_flight",
+                allowed_gpu_workers: allowed_interactive_workers,
+            };
+        }
+    } else if service_guard::interactive_priority_active() {
+        service_guard::record_vectorization_suppressed();
+        return VectorWorkerAdmissionDecision {
+            admitted: false,
+            reason: "interactive_priority_active",
+            allowed_gpu_workers: 0,
+        };
+    }
+    if !gpu_available {
+        return VectorWorkerAdmissionDecision {
+            admitted: true,
+            reason: "gpu_not_required",
+            allowed_gpu_workers: 0,
+        };
+    }
+    if !try_claim_gpu_vector_lease() {
+        service_guard::record_vectorization_suppressed();
+        return VectorWorkerAdmissionDecision {
+            admitted: false,
+            reason: "gpu_vector_lease_unavailable",
+            allowed_gpu_workers: 0,
+        };
+    }
+    let allowed_gpu_workers = allowed_gpu_vector_workers(file_backlog_depth, service_pressure);
+    if worker_idx >= allowed_gpu_workers {
+        service_guard::record_vectorization_suppressed();
+        return VectorWorkerAdmissionDecision {
+            admitted: false,
+            reason: "allowed_gpu_worker_cap",
+            allowed_gpu_workers,
+        };
+    }
+    VectorWorkerAdmissionDecision {
+        admitted: true,
+        reason: "admitted",
+        allowed_gpu_workers,
+    }
+}
+
 pub fn vector_worker_admitted(
     worker_idx: usize,
     service_pressure: ServicePressure,
     gpu_available: bool,
     file_backlog_depth: usize,
 ) -> bool {
-    let interactive_in_flight = service_guard::interactive_requests_in_flight();
-    if interactive_in_flight > 0 {
-        let allowed_interactive_workers = if gpu_available { 1 } else { 0 };
-        if worker_idx >= allowed_interactive_workers {
-            service_guard::record_vectorization_suppressed();
-            return false;
-        }
-    } else if service_guard::interactive_priority_active() {
-        service_guard::record_vectorization_suppressed();
-        return false;
-    }
-    if !gpu_available {
-        return true;
-    }
-    if !try_claim_gpu_vector_lease() {
-        service_guard::record_vectorization_suppressed();
-        return false;
-    }
-    let allowed_gpu_workers = allowed_gpu_vector_workers(file_backlog_depth, service_pressure);
-    if worker_idx >= allowed_gpu_workers {
-        service_guard::record_vectorization_suppressed();
-        return false;
-    }
-    true
+    vector_worker_admission_decision(
+        worker_idx,
+        service_pressure,
+        gpu_available,
+        file_backlog_depth,
+    )
+    .admitted
 }
 
 pub fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
@@ -1094,32 +1318,32 @@ pub fn target_semantic_policy_with_graph(
         return semantic_policy_profile("interactive_guarded", false, 750, 1_500);
     }
     if queue_len == 0 {
-        return semantic_policy_profile("quiescent_idle", false, 250, 20_000);
+        return semantic_policy_profile("quiescent_idle", false, 50, 2_000);
     }
     if service_pressure == ServicePressure::Critical {
         return semantic_policy_profile("critical_pause", true, 2_000, 2_000);
     }
     let scheduler =
         current_utility_first_scheduler_diagnostics(graph_queue_depth, queue_len, service_pressure);
-    if scheduler.state == UtilityFirstSchedulerState::GraphPriority {
-        return semantic_policy_profile("graph_priority", false, 400, 1_000);
+    if scheduler.reason == "gpu_cadence_underfed" {
+        return semantic_policy_profile("gpu_cadence_refill", false, 1, 5);
     }
-    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
-        return semantic_policy_profile("semantic_refill_protection", false, 100, 250);
+    if scheduler.semantic_underfeed {
+        return semantic_policy_profile("semantic_refill", false, 5, 20);
     }
     if service_guard::interactive_requests_in_flight() > 0 {
         return semantic_policy_profile("interactive_soft_guard", false, 500, 1_000);
     }
     if queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        return semantic_policy_profile("aggressive_drain", false, 100, 250);
+        return semantic_policy_profile("aggressive_drain", false, 10, 40);
     }
     if matches!(
         service_pressure,
         ServicePressure::Degraded | ServicePressure::Recovering
     ) {
-        return semantic_policy_profile("recovery_guarded", false, 350, 750);
+        return semantic_policy_profile("recovery_guarded", false, 50, 150);
     }
-    semantic_policy_profile("balanced_drain", false, 250, 750)
+    semantic_policy_profile("balanced_drain", false, 25, 75)
 }
 
 fn scale_duration(duration: Duration, scale_pct: usize, min_ms: u64, max_ms: u64) -> Duration {
@@ -1135,11 +1359,11 @@ pub fn apply_semantic_policy_runtime_tuning(target: SemanticPolicy) -> SemanticP
     SemanticPolicy {
         profile: target.profile,
         pause: target.pause,
-        sleep: scale_duration(target.sleep, tuning.semantic_sleep_scale_pct, 50, 10_000),
+        sleep: scale_duration(target.sleep, tuning.semantic_sleep_scale_pct, 1, 10_000),
         idle_sleep: scale_duration(
             target.idle_sleep,
             tuning.semantic_idle_sleep_scale_pct,
-            100,
+            10,
             60_000,
         ),
     }
@@ -1161,6 +1385,18 @@ pub fn symbol_embedding_allowed(
     file_backlog_depth: usize,
     service_pressure: ServicePressure,
 ) -> bool {
+    let enabled = std::env::var("AXON_VECTOR_ENABLE_SYMBOL_EMBEDDING")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
     if service_guard::interactive_priority_active() {
         return false;
     }
@@ -1177,10 +1413,10 @@ pub fn symbol_embedding_allowed(
 }
 
 pub fn graph_projection_allowed(
-    queue_len: usize,
+    _queue_len: usize,
     service_pressure: ServicePressure,
-    vector_backlog_depth: usize,
-    gpu_available: bool,
+    _vector_backlog_depth: usize,
+    _gpu_available: bool,
 ) -> bool {
     if service_guard::interactive_priority_active() {
         service_guard::record_projection_suppressed();
@@ -1193,19 +1429,6 @@ pub fn graph_projection_allowed(
     if service_pressure != ServicePressure::Healthy {
         service_guard::record_projection_suppressed();
         return false;
-    }
-    let scheduler = current_utility_first_scheduler_diagnostics(
-        queue_len,
-        vector_backlog_depth,
-        service_pressure,
-    );
-    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
-        service_guard::record_projection_suppressed();
-        return if gpu_available {
-            vector_backlog_depth < GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD
-        } else {
-            vector_backlog_depth < CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD
-        };
     }
     true
 }

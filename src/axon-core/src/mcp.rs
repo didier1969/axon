@@ -10,16 +10,35 @@ mod dispatch;
 mod format;
 mod guidance;
 mod protocol;
+mod runtime_topology_support;
 mod soll;
 #[cfg(test)]
 mod tests;
 mod tools_context;
 mod tools_dx;
 mod tools_framework;
+mod tools_framework_anomalies;
+mod tools_framework_anomaly_heuristics;
+mod tools_framework_change_safety;
+mod tools_framework_conception;
+mod tools_framework_path;
+mod tools_framework_rationale;
+mod tools_framework_runtime;
+mod tools_framework_runtime_contracts;
+mod tools_framework_runtime_quiescence;
+mod tools_framework_runtime_status;
+mod tools_framework_runtime_topology;
+mod tools_framework_snapshot;
+mod tools_framework_status_guidance;
+mod tools_framework_support;
+mod tools_framework_surface;
+mod tools_framework_validation;
 mod tools_governance;
+mod tools_help;
 mod tools_risk;
 mod tools_soll;
 mod tools_system;
+mod tools_system_debug;
 
 use self::catalog::tools_catalog;
 #[allow(unused_imports)]
@@ -31,6 +50,7 @@ pub(crate) use self::guidance::{
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use self::soll::canonical_soll_site_dir;
 use crate::runtime_command_proxy::{RuntimeCommandProxy, RuntimeCommandProxyDecision};
+use crate::runtime_topology::current_runtime_process_role;
 
 pub struct McpServer {
     graph_store: Arc<GraphStore>,
@@ -40,15 +60,7 @@ const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 fn mcp_server_identity_name() -> &'static str {
-    match std::env::var("AXON_RUNTIME_SHADOW_ROLE")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("brain") | Some("brain_shadow") => "axon-brain",
-        Some("indexer") | Some("indexer_shadow") => "axon-indexer",
-        _ => "axon-core",
-    }
+    current_runtime_process_role().runtime_binary_name()
 }
 
 impl McpServer {
@@ -75,6 +87,558 @@ impl McpServer {
             return normalized_name.to_string();
         }
         requested_name.to_string()
+    }
+
+    fn default_follow_up_tools_for(normalized_name: &str) -> &'static [&'static str] {
+        match normalized_name {
+            "help" => &["status", "project_status"],
+            "status" => &["project_status", "mcp_surface_diagnostics"],
+            "mcp_surface_diagnostics" => &["status", "project_status"],
+            "project_status" => &["anomalies", "why", "path"],
+            "project_registry_lookup" => &["project_status", "soll_query_context"],
+            "query" => &["inspect", "retrieve_context", "impact"],
+            "inspect" => &["impact", "path", "why"],
+            "retrieve_context" => &["inspect", "why", "path"],
+            "why" => &["inspect", "path", "project_status"],
+            "path" => &["impact", "why", "inspect"],
+            "anomalies" => &["change_safety", "conception_view", "project_status"],
+            "conception_view" => &["anomalies", "path", "why"],
+            "change_safety" => &["impact", "path", "inspect"],
+            "impact" => &["simulate_mutation", "path", "why"],
+            "audit" => &["health", "anomalies", "change_safety"],
+            "health" => &["status", "audit", "project_status"],
+            "architectural_drift" => &["conception_view", "anomalies", "why"],
+            "snapshot_history" => &["snapshot_diff", "project_status"],
+            "snapshot_diff" => &["project_status", "anomalies"],
+            "soll_query_context" => &["soll_work_plan", "soll_verify_requirements"],
+            "soll_work_plan" => &["soll_query_context", "soll_verify_requirements"],
+            "soll_validate" => &["soll_verify_requirements", "soll_relation_schema"],
+            "soll_verify_requirements" => &["soll_attach_evidence", "soll_manager"],
+            "soll_relation_schema" => &["soll_manager", "infer_soll_mutation"],
+            "infer_soll_mutation" => &["entrench_nuance", "soll_manager"],
+            "entrench_nuance" => &["soll_query_context", "soll_validate"],
+            "soll_manager" => &["soll_validate", "soll_query_context"],
+            "soll_apply_plan" | "restore_soll" | "resume_vectorization" => &["job_status"],
+            "soll_commit_revision" => &["soll_query_context", "soll_export"],
+            "soll_rollback_revision" => &["soll_query_context", "soll_validate"],
+            "soll_attach_evidence" => &["soll_verify_requirements", "soll_query_context"],
+            "init_project" | "apply_guidelines" => &["project_status", "soll_query_context"],
+            "commit_work" => &["pre_flight_check", "project_status"],
+            "pre_flight_check" => &["commit_work", "project_status"],
+            "soll_export" => &["soll_query_context", "soll_validate"],
+            "soll_generate_docs" => &["soll_export", "project_status"],
+            "diagnose_indexing" => &["health", "status", "query"],
+            "semantic_clones" => &["inspect", "impact", "query"],
+            "bidi_trace" => &["impact", "inspect", "why"],
+            "api_break_check" => &["impact", "inspect", "change_safety"],
+            "simulate_mutation" => &["impact", "change_safety", "path"],
+            "batch" => &["status", "mcp_surface_diagnostics"],
+            "cypher" => &["schema_overview", "query_examples"],
+            "schema_overview" => &["query_examples", "list_labels_tables"],
+            "list_labels_tables" => &["schema_overview", "query_examples"],
+            "query_examples" => &["query", "schema_overview"],
+            "truth_check" => &["status", "project_status"],
+            "refine_lattice" => &["health", "query"],
+            "fs_read" => &["inspect", "query"],
+            "debug" => &["status", "mcp_surface_diagnostics"],
+            _ => &["status", "mcp_surface_diagnostics"],
+        }
+    }
+
+    fn default_next_action_for(
+        normalized_name: &str,
+        arguments: &Value,
+        response: &Value,
+    ) -> Value {
+        let response_text = response
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|value| value.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let follow_up_tools = Self::default_follow_up_tools_for(normalized_name);
+
+        if response_text.contains("Invalid arguments for tool") {
+            return json!({
+                "kind": "retry_with_valid_arguments",
+                "tool": normalized_name,
+                "when": "after_fixing_arguments",
+                "arguments": arguments
+            });
+        }
+
+        if response_text.contains("Tool not found") {
+            return json!({
+                "kind": "inspect_public_surface_then_retry",
+                "tool": "mcp_surface_diagnostics",
+                "when": "now"
+            });
+        }
+
+        let tool = follow_up_tools.first().copied().unwrap_or("status");
+        json!({
+            "kind": if response.get("isError").and_then(Value::as_bool) == Some(true) {
+                "recover_with_follow_up_tool"
+            } else {
+                "continue_with_follow_up_tool"
+            },
+            "tool": tool,
+            "when": "now"
+        })
+    }
+
+    fn workflow_stage_for(normalized_name: &str) -> &'static str {
+        match normalized_name {
+            "help" => "tool_routing",
+            "status" | "mcp_surface_diagnostics" | "health" | "diagnose_indexing" => {
+                "runtime_truth"
+            }
+            "project_status" | "project_registry_lookup" => "project_truth",
+            "query" | "inspect" | "retrieve_context" | "fs_read" => "target_discovery",
+            "impact" | "path" | "bidi_trace" | "simulate_mutation" | "api_break_check" => {
+                "change_analysis"
+            }
+            "why"
+            | "anomalies"
+            | "conception_view"
+            | "architectural_drift"
+            | "audit"
+            | "change_safety"
+            | "snapshot_history"
+            | "snapshot_diff" => "structural_reasoning",
+            "soll_query_context"
+            | "soll_work_plan"
+            | "soll_validate"
+            | "soll_verify_requirements"
+            | "soll_relation_schema"
+            | "infer_soll_mutation"
+            | "entrench_nuance"
+            | "soll_manager"
+            | "soll_attach_evidence"
+            | "soll_commit_revision"
+            | "soll_rollback_revision"
+            | "soll_apply_plan"
+            | "restore_soll"
+            | "soll_export"
+            | "soll_generate_docs"
+            | "init_project"
+            | "apply_guidelines" => "intent_governance",
+            "commit_work" | "pre_flight_check" => "delivery",
+            _ => "general_mcp_operation",
+        }
+    }
+
+    fn primary_goal_for(normalized_name: &str) -> &'static str {
+        match normalized_name {
+            "help" => "choose the smallest useful Axon MCP tool sequence",
+            "status" => "establish runtime truth before trusting deeper conclusions",
+            "mcp_surface_diagnostics" => {
+                "verify the MCP surface and client/server contract freshness"
+            }
+            "project_status" => "compress project truth into one high-signal packet",
+            "project_registry_lookup" => "recover canonical project identity before scoped work",
+            "query" => "discover plausible targets with broad recall",
+            "inspect" => "validate one exact target before acting",
+            "retrieve_context" => "deliver a compact packet that saves downstream LLM tokens",
+            "why" => "recover governing intent and rationale",
+            "path" | "bidi_trace" => "understand source/sink or dependency flow between anchors",
+            "impact" => "estimate blast radius before mutation",
+            "anomalies" => "surface structural risks worth explicit follow-up",
+            "conception_view" => "read the derived architecture map",
+            "change_safety" => "decide whether a mutation is safe enough to proceed",
+            "audit" => "summarize governance and operational risk",
+            "health" => "establish operational health before deeper diagnosis",
+            "architectural_drift" => {
+                "detect deviation between current structure and intended shape"
+            }
+            "soll_query_context" => "recover compact canonical intent",
+            "soll_work_plan" => "turn intent into executable work ordering",
+            "soll_validate" => "find graph consistency and completeness gaps",
+            "soll_verify_requirements" => "measure requirement proof coverage",
+            "soll_relation_schema" => "discover allowed SOLL link patterns before mutating",
+            "infer_soll_mutation" => "scope a safe SOLL mutation before writing",
+            "entrench_nuance" => "apply a bounded intent clarification",
+            "soll_manager" => "perform an exact SOLL create/update/link operation",
+            "soll_attach_evidence" => "attach proof to canonical intent",
+            "soll_apply_plan" => "apply a larger SOLL batch transaction safely",
+            "restore_soll" => "restore canonical intent from an export",
+            "commit_work" => "commit work only after SOLL-aware validation",
+            "pre_flight_check" => "validate the delivery wave before commit",
+            _ => "move to the next highest-signal MCP step",
+        }
+    }
+
+    fn token_efficiency_hint_for(normalized_name: &str) -> &'static str {
+        match normalized_name {
+            "help" => "Call `help` once when routing is unclear; then follow the smallest tool chain it recommends.",
+            "retrieve_context" | "project_status" | "soll_query_context" => {
+                "Prefer this compact packet over reconstructing the same truth from multiple lower-level calls."
+            }
+            "query" => "Use `query` to widen recall only when the target anchor is still ambiguous; switch to `inspect` quickly once a candidate exists.",
+            "inspect" => "Use `inspect` to collapse ambiguity before asking broader architectural questions.",
+            "why" => "If `why` is weak, consume its guidance fields first instead of launching many speculative calls.",
+            "impact" | "path" | "bidi_trace" => "Use graph-flow tools only after the target is stable; otherwise you spend tokens on the wrong graph slice.",
+            "status" | "mcp_surface_diagnostics" => "Use runtime truth first so the client does not waste tokens reasoning over stale or degraded surfaces.",
+            _ => "Follow the server-provided next step before composing additional exploratory calls."
+        }
+    }
+
+    fn follow_up_reason_for(tool: &str) -> &'static str {
+        match tool {
+            "status" => "use when runtime truth may be stale, degraded, or operationally unclear",
+            "mcp_surface_diagnostics" => {
+                "use when the client/server MCP contract may be stale or mismatched"
+            }
+            "project_status" => {
+                "use when you need compact project truth instead of stitching multiple probes"
+            }
+            "query" => "use when recall is too narrow and you need broader candidate discovery",
+            "inspect" => "use when you already have a likely target and need exact validation",
+            "retrieve_context" => {
+                "use when you need a compact evidence packet that minimizes downstream LLM tokens"
+            }
+            "impact" => "use when you need blast radius before editing or mutating",
+            "path" => "use when the missing truth is connectivity or source-to-sink flow",
+            "why" => "use when the missing truth is rationale or governing intent",
+            "anomalies" => "use when you need prioritized structural findings",
+            "conception_view" => "use when you need the derived architecture map",
+            "change_safety" => "use when you need an explicit safety signal before mutation",
+            "soll_query_context" => "use when you need compact canonical intent",
+            "soll_validate" => "use when you need graph consistency and repair guidance",
+            "soll_verify_requirements" => "use when you need proof coverage and missing dimensions",
+            "soll_manager" => "use when the next step is an exact canonical mutation",
+            "infer_soll_mutation" => "use when you need mutation scope help before writing to SOLL",
+            "job_status" => {
+                "use when the current operation is asynchronous and you need terminal truth"
+            }
+            _ => "use when it is the next highest-signal MCP move",
+        }
+    }
+
+    fn alternative_strategies_for(normalized_name: &str) -> Vec<Value> {
+        Self::default_follow_up_tools_for(normalized_name)
+            .iter()
+            .map(|tool| {
+                json!({
+                    "tool": tool,
+                    "use_when": Self::follow_up_reason_for(tool),
+                    "value": Self::primary_goal_for(tool)
+                })
+            })
+            .collect()
+    }
+
+    fn tool_input_contract_for(normalized_name: &str) -> Option<Value> {
+        let catalog = tools_catalog(true);
+        let tools = catalog.get("tools")?.as_array()?;
+        let entry = tools.iter().find(|tool| {
+            let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                return false;
+            };
+            name == normalized_name || name.strip_prefix("axon_") == Some(normalized_name)
+        })?;
+        let schema = entry.get("inputSchema")?;
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let accepted_fields = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|props| props.keys().cloned().map(Value::String).collect::<Vec<_>>())
+            .unwrap_or_default();
+        Some(json!({
+            "required_fields": required,
+            "accepted_fields": accepted_fields
+        }))
+    }
+
+    fn parameter_repair_guidance_for(normalized_name: &str, arguments: &Value) -> Option<Value> {
+        let contract = Self::tool_input_contract_for(normalized_name)?;
+        let required = contract
+            .get("required_fields")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let accepted = contract
+            .get("accepted_fields")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let provided_object = arguments.as_object().cloned().unwrap_or_default();
+        let provided_fields = provided_object
+            .keys()
+            .cloned()
+            .map(Value::String)
+            .collect::<Vec<_>>();
+        let missing_required_fields = required
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|field| !provided_object.contains_key(*field))
+            .map(|field| Value::String(field.to_string()))
+            .collect::<Vec<_>>();
+        let unknown_fields = provided_object
+            .keys()
+            .filter(|field| {
+                !accepted
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|accepted_field| accepted_field == field.as_str())
+            })
+            .map(|field| Value::String(field.to_string()))
+            .collect::<Vec<_>>();
+
+        Some(json!({
+            "required_fields": required,
+            "accepted_fields": accepted,
+            "provided_fields": provided_fields,
+            "missing_required_fields": missing_required_fields,
+            "unknown_fields": unknown_fields,
+            "micro_instruction": format!("Fix `{normalized_name}` args: add missing required fields, remove unknown fields, retry once."),
+            "retry_rule": format!("Retry `{normalized_name}` after the argument object matches the contract.")
+        }))
+    }
+
+    fn infer_dispatch_guidance_outcome(response: &Value) -> GuidanceOutcome {
+        let response_text = response
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|value| value.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if response_text.contains("Invalid arguments for tool") {
+            return classify_guidance(&[GuidanceFact::problem_signal("invalid_arguments")]);
+        }
+
+        if response_text.contains("Tool not found") {
+            return classify_guidance(&[GuidanceFact::problem_signal("unknown_tool_name")]);
+        }
+
+        GuidanceOutcome::none()
+    }
+
+    fn attach_default_tool_guidance(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        mut response: Value,
+    ) -> Value {
+        let response_text = response
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|value| value.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let is_error = response.get("isError").and_then(Value::as_bool) == Some(true);
+        let default_next_action =
+            Self::default_next_action_for(normalized_name, arguments, &response);
+        let dispatch_guidance = Self::infer_dispatch_guidance_outcome(&response);
+        if dispatch_guidance != GuidanceOutcome::none() {
+            if Self::mcp_guidance_authoritative_enabled() {
+                response = attach_guidance_authoritative(response, dispatch_guidance.clone());
+            } else if Self::mcp_guidance_shadow_enabled() {
+                response =
+                    attach_guidance_shadow(response, guidance_outcome_to_value(&dispatch_guidance));
+            }
+        }
+
+        let Some(object) = response.as_object_mut() else {
+            return response;
+        };
+
+        let data = object
+            .entry("data".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !data.is_object() {
+            *data = json!({ "value": data.clone() });
+        }
+        let Some(data_object) = data.as_object_mut() else {
+            return response;
+        };
+
+        let next_action = data_object
+            .get("next_action")
+            .cloned()
+            .or_else(|| {
+                data_object
+                    .get("operator_guidance")
+                    .and_then(|value| value.get("next_action"))
+                    .cloned()
+            })
+            .unwrap_or(default_next_action);
+
+        if !data_object.contains_key("next_action") {
+            data_object.insert("next_action".to_string(), next_action.clone());
+        }
+        data_object
+            .entry("canonical_sources".to_string())
+            .or_insert_with(Self::canonical_sources_snapshot);
+
+        let follow_up_tools = Self::default_follow_up_tools_for(normalized_name)
+            .iter()
+            .map(|tool| Value::String((*tool).to_string()))
+            .collect::<Vec<_>>();
+        let status = data_object
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let is_partial = status.starts_with("warn_")
+            || status.contains("degraded")
+            || data_object.get("problem_class").and_then(Value::as_str) == Some("degraded");
+        let recommended_action = next_action
+            .get("tool")
+            .and_then(Value::as_str)
+            .map(|tool| {
+                if is_error {
+                    format!("follow `{tool}` or retry `{normalized_name}` with corrected inputs")
+                } else if is_partial {
+                    format!("treat this as partial truth and continue with `{tool}`")
+                } else {
+                    format!("continue the workflow with `{tool}`")
+                }
+            })
+            .unwrap_or_else(|| "continue with the next guided MCP step".to_string());
+        let default_blocking_factors = if is_error || is_partial {
+            vec![json!({
+                "factor": if is_error { "response_requires_recovery" } else { "partial_truth_requires_follow_up" },
+                "severity": if is_error { "high" } else { "medium" },
+                "recommended_action": recommended_action
+            })]
+        } else {
+            Vec::new()
+        };
+        let default_remediation_actions = default_blocking_factors
+            .iter()
+            .filter_map(|factor| {
+                factor
+                    .get("recommended_action")
+                    .and_then(Value::as_str)
+                    .map(|value| Value::String(value.to_string()))
+            })
+            .collect::<Vec<_>>();
+
+        let operator_guidance = data_object
+            .entry("operator_guidance".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !operator_guidance.is_object() {
+            *operator_guidance = Value::Object(serde_json::Map::new());
+        }
+        let Some(operator_guidance_object) = operator_guidance.as_object_mut() else {
+            return response;
+        };
+
+        operator_guidance_object
+            .entry("actionable_now".to_string())
+            .or_insert(Value::Bool(!is_error && !is_partial));
+        operator_guidance_object
+            .entry("blocking_factors".to_string())
+            .or_insert(Value::Array(default_blocking_factors));
+        operator_guidance_object
+            .entry("remediation_actions".to_string())
+            .or_insert(Value::Array(default_remediation_actions));
+        operator_guidance_object
+            .entry("follow_up_tools".to_string())
+            .or_insert(Value::Array(follow_up_tools));
+        operator_guidance_object
+            .entry("next_action".to_string())
+            .or_insert(next_action);
+        operator_guidance_object
+            .entry("workflow_stage".to_string())
+            .or_insert(Value::String(
+                Self::workflow_stage_for(normalized_name).to_string(),
+            ));
+        operator_guidance_object
+            .entry("primary_goal".to_string())
+            .or_insert(Value::String(
+                Self::primary_goal_for(normalized_name).to_string(),
+            ));
+        operator_guidance_object
+            .entry("token_efficiency_hint".to_string())
+            .or_insert(Value::String(
+                Self::token_efficiency_hint_for(normalized_name).to_string(),
+            ));
+        operator_guidance_object
+            .entry("alternative_strategies".to_string())
+            .or_insert(Value::Array(Self::alternative_strategies_for(
+                normalized_name,
+            )));
+        operator_guidance_object
+            .entry("llm_usage_instruction".to_string())
+            .or_insert(Value::String(
+                "Use `next_action` first. Bad args: fix via `parameter_repair`, retry same tool once. Partial: label partial, use `follow_up_tools`. Do not ask the client to choose MCP tools; ask only for irreversible mutation, missing intent, or unrecoverable blocker.".to_string(),
+            ));
+        operator_guidance_object
+            .entry("llm_contract".to_string())
+            .or_insert(json!({
+                "first": "next_action",
+                "bad_args": "use parameter_repair, retry same tool once",
+                "partial": "label partial, keep evidence, use follow_up_tools[0]",
+                "no_answer": "switch once to the follow-up tool matching the missing dimension",
+                "ask_user_only_if": [
+                    "irreversible_mutation",
+                    "missing_business_intent",
+                    "unrecoverable_high_severity_blocker"
+                ],
+                "token_rule": "prefer brief mode; escalate only after a named missing dimension"
+            }));
+        operator_guidance_object
+            .entry("fallback_strategy".to_string())
+            .or_insert(json!([
+                {
+                    "if": "invalid_arguments",
+                    "do": "fix args from `parameter_repair`; retry same tool"
+                },
+                {
+                    "if": "unknown_or_wrong_target",
+                    "do": "use candidates or broaden with `query`"
+                },
+                {
+                    "if": "partial_or_degraded_truth",
+                    "do": "state the gap; use first relevant follow-up tool"
+                },
+                {
+                    "if": "no_structural_answer",
+                    "do": "switch once to the follow-up tool matching the missing dimension"
+                }
+            ]));
+        operator_guidance_object
+            .entry("explicit_input_rule".to_string())
+            .or_insert(Value::String(
+                "Do not ask the client to choose MCP tools. Ask only for irreversible mutation, missing intent, or unrecoverable high-severity blocker.".to_string(),
+            ));
+        operator_guidance_object
+            .entry("why_this_next_step".to_string())
+            .or_insert(Value::String(
+                if response_text.contains("Invalid arguments for tool") {
+                    "Repair args from `parameter_repair`; do not widen search first.".to_string()
+                } else if response_text.contains("Tool not found") {
+                    "Inspect public MCP surface, then retry with a listed tool.".to_string()
+                } else if is_error {
+                    "Recover with the guided next step before blind retries.".to_string()
+                } else if is_partial {
+                    "Keep partial evidence; close the missing dimension next.".to_string()
+                } else {
+                    "Highest-signal follow-up for this tool family.".to_string()
+                },
+            ));
+        if response_text.contains("Invalid arguments for tool") {
+            operator_guidance_object
+                .entry("parameter_repair".to_string())
+                .or_insert_with(|| {
+                    Self::parameter_repair_guidance_for(normalized_name, arguments)
+                        .unwrap_or_else(|| json!({
+                            "retry_rule": format!("Retry `{normalized_name}` with a schema-conformant argument object.")
+                        }))
+                });
+        }
+
+        response
     }
 
     fn async_known_ids_for(&self, normalized_name: &str, reserved_ids: &Value) -> Value {
@@ -575,6 +1139,7 @@ impl McpServer {
         arguments: &Value,
     ) -> Option<Value> {
         match normalized_name {
+            "help" => self.axon_help(arguments),
             "refine_lattice" => self.axon_refine_lattice(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),

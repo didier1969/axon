@@ -263,15 +263,16 @@ pub fn current_runtime_priority_contract_state(
     ingress_buffered_entries: usize,
     structural_graph_backlog_depth: usize,
 ) -> RuntimePriorityContractState {
-    let processing_disabled = matches!(runtime_mode, "read_only" | "mcp_only");
+    let mode = crate::runtime_mode::AxonRuntimeMode::from_str(runtime_mode);
+    let processing_disabled = !mode.ingestion_enabled();
     let graph_backlog_present = structural_graph_backlog_depth > 0;
 
     RuntimePriorityContractState {
         watcher_identification_backlog_gated: processing_disabled,
         graphing_after_enqueue_backlog_gated: !processing_disabled && ingress_buffered_entries > 0,
         vectorization_after_graph_ready_backlog_gated: !processing_disabled
-            && (ingress_buffered_entries > 0 || graph_backlog_present),
-        vectorization_allowed_ahead_of_graph_backlog: false,
+            && ingress_buffered_entries > 0,
+        vectorization_allowed_ahead_of_graph_backlog: !processing_disabled,
         graph_backlog_present,
         enforcement_state: if processing_disabled {
             "runtime_processing_disabled"
@@ -368,7 +369,7 @@ pub fn current_graph_production_state(
 
 pub fn current_vector_downstream_state(
     graph_ready: usize,
-    structural_graph_backlog_depth: usize,
+    _structural_graph_backlog_depth: usize,
     semantic_runtime_enabled: bool,
     critical_pressure: bool,
 ) -> VectorDownstreamState {
@@ -378,15 +379,13 @@ pub fn current_vector_downstream_state(
         "no_graph_ready_stock"
     } else if critical_pressure {
         "service_pressure_critical"
-    } else if structural_graph_backlog_depth > 0 {
-        "vector_floor_reserved"
     } else {
         "none"
     };
 
     VectorDownstreamState {
         blocking_authority,
-        vector_open: semantic_runtime_enabled,
+        vector_open: blocking_authority == "none",
     }
 }
 
@@ -583,11 +582,11 @@ mod tests {
 
     #[test]
     fn test_current_runtime_priority_contract_state_defaults_to_no_graph_overtake() {
-        let state = current_runtime_priority_contract_state("full", 0, 1);
+        let state = current_runtime_priority_contract_state("indexer_full", 0, 1);
         assert!(!state.watcher_identification_backlog_gated);
         assert!(!state.graphing_after_enqueue_backlog_gated);
-        assert!(state.vectorization_after_graph_ready_backlog_gated);
-        assert!(!state.vectorization_allowed_ahead_of_graph_backlog);
+        assert!(!state.vectorization_after_graph_ready_backlog_gated);
+        assert!(state.vectorization_allowed_ahead_of_graph_backlog);
         assert!(state.graph_backlog_present);
     }
 
@@ -742,13 +741,13 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_downstream_state_reports_floor_reservation() {
+    fn test_vector_downstream_state_stays_open_without_runtime_pressure() {
         let disabled = current_vector_downstream_state(32, 0, false, false);
         assert_eq!(disabled.blocking_authority, "semantic_runtime_disabled");
         assert!(!disabled.vector_open);
 
         let reserved = current_vector_downstream_state(32, 12, true, false);
-        assert_eq!(reserved.blocking_authority, "vector_floor_reserved");
+        assert_eq!(reserved.blocking_authority, "none");
         assert!(reserved.vector_open);
 
         let open = current_vector_downstream_state(32, 0, true, false);

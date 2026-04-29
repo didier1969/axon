@@ -30,16 +30,16 @@ fn runtime_tuning_snapshot_slot() -> &'static Mutex<Option<RuntimeTuningSnapshot
 pub fn normalize_runtime_tuning_state(mut state: RuntimeTuningState) -> RuntimeTuningState {
     state.vector_workers = state.vector_workers.max(1);
     state.graph_workers = state.graph_workers.clamp(0, 64);
-    state.chunk_batch_size = state.chunk_batch_size.clamp(16, 256);
-    state.file_vectorization_batch_size = state.file_vectorization_batch_size.clamp(4, 64);
-    state.vector_ready_queue_depth = state.vector_ready_queue_depth.clamp(1, 32);
-    state.vector_persist_queue_bound = state.vector_persist_queue_bound.clamp(1, 12);
+    state.chunk_batch_size = state.chunk_batch_size.max(16);
+    state.file_vectorization_batch_size = state.file_vectorization_batch_size.max(4);
+    state.vector_ready_queue_depth = state.vector_ready_queue_depth.max(1);
+    state.vector_persist_queue_bound = state.vector_persist_queue_bound.max(1);
     state.vector_max_inflight_persists = state
         .vector_max_inflight_persists
-        .clamp(1, state.vector_persist_queue_bound);
-    state.embed_micro_batch_max_items = state.embed_micro_batch_max_items.clamp(8, 256);
-    state.embed_micro_batch_max_total_tokens =
-        state.embed_micro_batch_max_total_tokens.clamp(512, 65_536);
+        .max(1)
+        .min(state.vector_persist_queue_bound);
+    state.embed_micro_batch_max_items = state.embed_micro_batch_max_items.max(8);
+    state.embed_micro_batch_max_total_tokens = state.embed_micro_batch_max_total_tokens.max(512);
     state.semantic_sleep_scale_pct = state.semantic_sleep_scale_pct.clamp(25, 400);
     state.semantic_idle_sleep_scale_pct = state.semantic_idle_sleep_scale_pct.clamp(25, 400);
     state

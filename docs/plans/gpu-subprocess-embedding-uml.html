@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GPU Subprocess Embedding Sketch</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --panel: #fffdf8;
+      --ink: #1e1b16;
+      --muted: #6b6257;
+      --line: #d7cdbd;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --shadow: 0 18px 50px rgba(40, 28, 14, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(180, 83, 9, 0.08), transparent 28%),
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 24%),
+        var(--bg);
+      color: var(--ink);
+      font: 16px/1.6 "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+    }
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+    .hero {
+      margin-bottom: 28px;
+      padding: 28px 30px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(255,248,235,0.96));
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+    h1, h2, h3 {
+      margin: 0 0 12px;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+    h1 { font-size: 40px; }
+    h2 {
+      margin-top: 34px;
+      font-size: 26px;
+      color: var(--accent);
+    }
+    h3 {
+      margin-top: 20px;
+      font-size: 20px;
+      color: var(--accent-2);
+    }
+    p, li { color: var(--ink); }
+    .muted { color: var(--muted); }
+    .card {
+      margin-top: 18px;
+      padding: 20px 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    code {
+      padding: 0.15em 0.35em;
+      background: rgba(30, 27, 22, 0.06);
+      border-radius: 6px;
+      font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+      font-size: 0.92em;
+    }
+    ul {
+      margin: 8px 0 0 0;
+      padding-left: 22px;
+    }
+    .diagram {
+      overflow-x: auto;
+      padding: 10px 0 0;
+    }
+    .pill {
+      display: inline-block;
+      margin-right: 8px;
+      margin-top: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(15, 118, 110, 0.08);
+      color: var(--accent);
+      font-size: 14px;
+    }
+    .footer {
+      margin-top: 40px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>GPU Subprocess Embedding Sketch</h1>
+      <p class="muted">
+        Visualisation du design en cours: garder le pipeline CPU principal dans <code>axon-indexer</code>,
+        sortir uniquement l’exécution embedding ORT/CUDA dans un sous-processus dédié, puis pouvoir recycler
+        ce sous-processus pour remettre à zéro l’état VRAM / ORT / CUDA.
+      </p>
+      <div>
+        <span class="pill">CPU scheduler intact</span>
+        <span class="pill">GPU isolated process</span>
+        <span class="pill">VRAM reset by child restart</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Intent</h2>
+      <p>
+        Ce design teste un vrai <code>process boundary</code>, parce que:
+      </p>
+      <ul>
+        <li>détruire une <code>Session</code> ORT dans le même process n’a pas suffi</li>
+        <li>recréer la session après chaque batch n’a pas suffi</li>
+        <li>la mémoire semble rester accrochée plus haut, au niveau process/runtime ORT/CUDA</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Vue Macro</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart LR
+    A[File graph_ready] --> B[Prepare workers CPU]
+    B --> C[Ready queue]
+    C --> D[Vector worker in axon-indexer]
+    D --> E[GPU embed subprocess]
+    E --> F[Embeddings returned]
+    F --> G[Persist workers]
+    G --> H[Finalize file]
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Répartition des responsabilités</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+classDiagram
+    class AxonIndexer {
+      +claim vector work
+      +prepare batches
+      +schedule GPU launches
+      +persist embeddings
+      +finalize files
+    }
+
+    class VectorWorker {
+      +pop_best()
+      +send batch to subprocess
+      +receive embeddings
+      +trigger subprocess recycle
+    }
+
+    class GpuEmbedSubprocess {
+      +load ORT/CUDA model
+      +receive texts on stdin
+      +run embedding
+      +return embeddings on stdout
+    }
+
+    class GraphStore {
+      +persist chunk embeddings
+      +mark file vectorized
+    }
+
+    AxonIndexer --> VectorWorker
+    VectorWorker --> GpuEmbedSubprocess
+    VectorWorker --> GraphStore
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Séquence nominale</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    participant CPU as axon-indexer / VectorWorker
+    participant GPU as GPU embed subprocess
+    participant DB as GraphStore
+
+    CPU->>CPU: pop_best() from ready queue
+    CPU->>GPU: JSON request { texts[] }
+    GPU->>GPU: tokenize + ORT/CUDA inference
+    GPU-->>CPU: JSON response { embeddings[] }
+    CPU->>DB: persist envelope
+    DB-->>CPU: persist ok
+    CPU->>DB: finalize completed works
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Séquence de recovery VRAM</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    participant CPU as axon-indexer / VectorWorker
+    participant GPU as GPU embed subprocess
+    participant VRAM as CUDA/ORT state
+
+    CPU->>GPU: batch request
+    GPU->>VRAM: allocate / run / cache
+    Note over VRAM: VRAM may stay high even after batch
+
+    CPU->>CPU: detect threshold / stuck condition
+    CPU-xGPU: kill subprocess
+    Note over GPU,VRAM: process exit should release process-owned CUDA/ORT state
+    CPU->>GPU: spawn fresh subprocess
+    GPU->>VRAM: load fresh model/session
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Différence avec les tentatives précédentes</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+    A[Attempt 1: recycle heuristics] --> A1[Same process]
+    B[Attempt 2: recreate ORT session] --> B1[Same process]
+    C[Attempt 3: recreate session every batch] --> C1[Still same process]
+    D[Current direction: subprocess GPU] --> D1[Different process boundary]
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>MVP d’implémentation</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TD
+    A[VectorWorker] --> B[GpuEmbedSubprocess.spawn()]
+    B --> C[Handshake init OK]
+    C --> D[embed_texts(texts)]
+    D --> E[JSON over stdin/stdout]
+    E --> F[Embeddings back to parent]
+    F --> G[Persist as today]
+    G --> H[Optional kill/restart subprocess]
+        </pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Ce que ce design teste</h2>
+      <h3>Si ça marche</h3>
+      <ul>
+        <li>la VRAM doit retomber beaucoup plus franchement quand on tue le sous-processus</li>
+        <li>on aura prouvé que le bon levier est bien <code>process boundary</code></li>
+      </ul>
+      <h3>Si ça ne marche pas</h3>
+      <ul>
+        <li>alors le problème est encore plus bas niveau</li>
+        <li>par exemple driver/runtime CUDA global à la machine</li>
+        <li>ou mauvaise lecture de la VRAM observée</li>
+      </ul>
+    </section>
+
+    <p class="footer">
+      Fichier généré depuis le document Markdown de travail. Les diagrammes Mermaid sont rendus côté navigateur.
+    </p>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        primaryColor: '#fff8eb',
+        primaryTextColor: '#1e1b16',
+        primaryBorderColor: '#b45309',
+        lineColor: '#0f766e',
+        secondaryColor: '#f5f1e8',
+        tertiaryColor: '#fffdf8',
+        fontFamily: 'Palatino, Georgia, serif'
+      }
+    });
+  </script>
+</body>
+</html>

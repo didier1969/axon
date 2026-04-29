@@ -47,6 +47,53 @@ Ce script:
 
 ## 3. Démarrer Axon
 
+## 3a. Installer TensorRT localement
+
+TensorRT n’est pas téléchargé implicitement par Axon. Pour une installation client reproductible,
+le tarball NVIDIA approuvé doit être fourni localement, puis Axon valide le nom, la version et le
+checksum avant de construire l’artefact ONNX Runtime TensorRT.
+
+Chemin attendu par défaut:
+
+```bash
+.axon/downloads/TensorRT-10.14.1.48.Linux.x86_64-gnu.cuda-12.9.tar.gz
+```
+
+Prévalidation rapide:
+
+```bash
+./scripts/axon setup-tensorrt --precheck-only
+```
+
+Installation de l’artefact TensorRT:
+
+```bash
+./scripts/axon setup-tensorrt --build-only
+```
+
+Installation + qualification VRAM bornée:
+
+```bash
+./scripts/axon setup-tensorrt --qualify \
+  --max-vram-used-mb 6144 \
+  --tensorrt-workspace-mb 5632
+```
+
+Le bootstrap global peut aussi déclencher TensorRT:
+
+```bash
+./scripts/setup.sh --with-tensorrt
+./scripts/setup.sh --with-tensorrt --tensorrt-qualify
+```
+
+Contrat:
+- `setup-tensorrt` est la procédure reproductible pour installer l’artefact ORT TensorRT Axon
+- le profil par défaut `axon_embedding` évite les kernels ORT non utiles à la vectorisation Axon
+- le manifest généré devient la source de vérité runtime pour `libonnxruntime` et les providers CUDA/TensorRT
+- aucune installation client ne doit dépendre d’une commande tapée à la main hors scripts
+
+## 3b. Démarrer Axon
+
 Entrypoints canoniques:
 
 ```bash
@@ -166,8 +213,8 @@ Le mode `--allow-live-running` existe, mais reste un flux best-effort avec copie
 ## 8. Arrêter Axon
 
 ```bash
-./scripts/stop-live.sh
-./scripts/stop-dev.sh
+./scripts/axon --instance live stop
+./scripts/axon --instance dev stop
 ```
 
 Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL locaux.
@@ -177,7 +224,11 @@ Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL
 - `IST` est la vérité technique reconstructible
 - `SOLL` est la vérité conceptuelle protégée
 - `SOLL` contient des données de production: ne jamais la purger ni la réinitialiser
-- le chemin live des exports `SOLL` est `docs/vision/`
+- l’autorité publique MCP/SOLL reste portée par le `brain`; le `indexer` ne doit pas redevenir une autorité `SOLL`
+- en runtime split, `indexer` traite `IST`/ingestion et le `brain` porte la surface MCP, la lecture `SOLL` et l’écriture `SOLL`
+- le chemin canonique des exports `SOLL` est `docs/vision/`
 - les snapshots historiques déplacés vivent dans `docs/archive/soll-exports/`
+- la documentation HTML sous `docs/derived/soll/` est dérivée et non canonique: elle sert à la lecture, pas au restore
+- pour une lecture compacte de l’intention canonique, préférer `soll_query_context`, `soll_work_plan` et `soll_validate`
 - Python reste présent surtout pour les bridges Datalog/TypeQL
 - le vieux flux CLI `pip install axoniq` n’est **pas** le workflow source checkout canonique actuel

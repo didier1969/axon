@@ -126,6 +126,20 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 - `split_topology`
 - `store/bootstrap`
 
+### Additional Pending Tranche
+
+- Model-agnostic recursive code chunker:
+  - [2026-04-22-model-agnostic-recursive-code-chunker-plan.md](/home/dstadel/projects/axon/docs/plans/2026-04-22-model-agnostic-recursive-code-chunker-plan.md)
+- Documentation-aware chunker:
+  - future tranche after code chunker stabilization
+  - scope:
+    - `Markdown` section/title-aware chunking with heading-path metadata
+    - `text` / flat docs chunking better than one-symbol-per-file fallback
+    - doc element preservation for tables, fenced blocks, and structural sections
+  - constraint:
+    - separate `doc_chunker` contract from `code_chunker`
+    - do not mix document heuristics into the code ingestion path
+
 ---
 
 ## Tranche 1: Remove Runtime-Active `indexer -> SOLL` Coupling
@@ -248,7 +262,71 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 3: Make Indexer Telemetry Authoritative And Dashboard-Visible
+## Tranche 3: Audit Elixir / Dashboard Value And Decide Rust-First Direction
+
+**Purpose:** Decide explicitly whether Elixir/Phoenix/LiveView still justifies its operational and maintenance cost now that it is no longer an ingestion or control-plane authority.
+
+**Files:**
+- Modify: `docs/plans/2026-04-22-ist-indexer-reset-and-refactor-implementation-plan.md`
+- Add: `docs/plans/2026-04-22-elixir-dashboard-value-audit-and-rust-first-decision-plan.md`
+- Update if needed: `docs/plans/2026-04-22-brain-indexer-cross-dependency-audit.md`
+- Read / audit:
+  - `src/dashboard/README.md`
+  - `src/dashboard/mix.exs`
+  - `src/dashboard/lib/axon_dashboard/application.ex`
+  - `src/dashboard/lib/axon_dashboard/bridge_client.ex`
+  - `src/dashboard/lib/axon_nexus/axon/watcher/telemetry.ex`
+  - `src/dashboard/lib/axon_nexus/axon/watcher/cockpit_live.ex`
+  - `src/dashboard/lib/axon_nexus/axon/watcher/progress.ex`
+  - `src/axon-core/src/bridge.rs`
+  - `src/axon-core/src/main_telemetry.rs`
+  - `src/axon-core/src/mcp/tools_framework.rs`
+
+**Entry criteria:**
+- Split runtime is stable on `dev`.
+- `indexer` is already the runtime authority for ingestion/IST.
+- `brain` is already the public MCP/SOLL authority.
+
+**Implementation steps:**
+
+1. Audit the current Elixir/Phoenix/LiveView role by responsibility:
+   - runtime-critical
+   - operator-facing only
+   - duplicate projection
+   - future-looking but currently dormant
+2. Quantify the actual operational cost of keeping the dashboard stack:
+   - extra process/runtime
+   - dependency surface
+   - telemetry duplication
+   - maintenance/test burden
+   - release/operator burden
+3. Compare three architecture outcomes:
+   - keep Elixir as the long-lived operator web surface
+   - keep Elixir temporarily but move toward Rust-served dashboard
+   - migrate fully to Rust-served dashboard and retire Elixir
+4. Make the decision criteria explicit:
+   - runtime coherence
+   - delivery speed
+   - maintenance cost
+   - extensibility for future operator/product features
+   - observability fidelity
+5. Record a decision-ready recommendation:
+   - what stays
+   - what can be frozen
+   - what should migrate
+   - what the next tranche becomes if Rust-first is chosen
+
+**Validation:**
+- Plan/audit docs are updated coherently.
+- The recommendation is grounded in current code and runtime reality, not history alone.
+
+**Exit criteria:**
+- We have an explicit architecture decision path for Elixir/Phoenix/LiveView.
+- The next dashboard/telemetry tranche is conditioned on that decision instead of assumed.
+
+---
+
+## Tranche 4: Make Indexer Telemetry Authoritative And Dashboard-Visible
 
 **Purpose:** Establish one canonical `indexer` telemetry model, use it for role-only qualification, and project it into the `brain` dashboard without making `brain` authoritative for `indexer`.
 
@@ -293,7 +371,7 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 4: Finish Push Ramp Visibility And Throughput Truth
+## Tranche 5: Finish Push Ramp Visibility And Throughput Truth
 
 **Purpose:** Certify where the real upstream bottleneck remains once cold qualification is valid.
 
@@ -336,7 +414,7 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 5: Stabilize Split Release / Tooling Chain
+## Tranche 6: Stabilize Split Release / Tooling Chain
 
 **Purpose:** Remove remaining monolith-first assumptions from release/outillage before larger refactors.
 
@@ -371,7 +449,7 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 6: Consolidate Jobs, Scripts, And MCP Operator Surfaces
+## Tranche 7: Consolidate Jobs, Scripts, And MCP Operator Surfaces
 
 **Purpose:** Remove or isolate legacy operator logic that still mixes split and monolith assumptions, and use MCP/operator surfaces as audit inputs to classify dead, tolerated, and harmful active paths.
 
@@ -420,7 +498,37 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 7: Refactor IST / Indexer File-By-File
+## Tranche 8: Graph-First Simplification
+
+**Purpose:** Simplify Axon around the two canonical lanes `to_graph` then `to_vector`, while preserving the complexity that still provides real value for authority, queue correctness, recovery, and operator clarity.
+
+**Plan reference:**
+- `docs/plans/2026-04-22-graph-first-simplification-plan.md`
+
+**Entry criteria:**
+- role-only qualification is stable
+- split authority is stable
+- the maintain vs simplify audit is complete
+
+**Core rule:**
+- `to_graph` is always higher priority than `to_vector`
+- any mechanism that can slow `to_graph` in favor of `to_vector` is suspect by default
+
+**Scope summary:**
+1. freeze the canonical keep/freeze/remove contract
+2. reduce overlapping pipeline governance to one readable graph-first contract
+3. reduce status/qualification to one machine truth by default
+4. bound the dashboard to read-only Rust projection
+
+**Exit criteria:**
+- the graph-first invariant is explicit in code/docs
+- overlapping governors are reduced
+- qualification defaults to machine-readable role truth
+- the dashboard remains useful without remaining a second truth engine
+
+---
+
+## Tranche 9: Refactor IST / Indexer File-By-File
 
 **Purpose:** Replace oversized mixed modules with a maintainable structure once the split contract is stable.
 
@@ -469,7 +577,7 @@ The `IST/indexer` domain must be split by responsibility instead of remaining in
 
 ---
 
-## Tranche 8: Final Runtime And Documentation Closure
+## Tranche 10: Final Runtime And Documentation Closure
 
 **Purpose:** Close the operational loop with runtime proof and final architecture explanation.
 

@@ -14,7 +14,7 @@ from typing import Any
 
 from mcp_probe_common import default_sql_url, sql_query
 
-PROJECT_ROOT = Path("/home/dstadel/projects/axon")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 RUNS_ROOT = PROJECT_ROOT / ".axon" / "mcp-measure-runs"
 DEFAULT_URL = "http://127.0.0.1:44129/mcp"

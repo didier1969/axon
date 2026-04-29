@@ -62,7 +62,7 @@ bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh"
 echo "[qualify-dev-indexer-cold] running indexer-only cold qualification"
 exec python3 "$SCRIPT_DIR/qualify_ingestion_run.py" \
     --reuse-runtime \
-    --mode indexer_shadow \
+    --mode indexer_full \
     --duration "$duration" \
     --interval "$interval" \
     --label "$label" \

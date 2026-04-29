@@ -13,6 +13,14 @@ impl Default for RustParser {
 }
 
 impl RustParser {
+    fn top_level_block_split_lines<'a>(&self, block: Node<'a>) -> Vec<usize> {
+        let mut cursor = block.walk();
+        block
+            .named_children(&mut cursor)
+            .map(|child| child.start_position().row + 1)
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             wasm_bytes: include_bytes!("../../parsers/tree-sitter-rust.wasm"),
@@ -167,6 +175,32 @@ impl RustParser {
                 break;
             }
             prev_node = sibling.prev_sibling();
+        }
+
+        if let Some(block) = self.find_child_by_type(node, "block") {
+            props.insert(
+                "header_end_line".to_string(),
+                block.start_position().row.saturating_add(1).to_string(),
+            );
+            props.insert(
+                "body_start_line".to_string(),
+                block.start_position().row.saturating_add(1).to_string(),
+            );
+            props.insert(
+                "body_end_line".to_string(),
+                block.end_position().row.saturating_add(1).to_string(),
+            );
+            let split_lines = self.top_level_block_split_lines(block);
+            if split_lines.len() > 1 {
+                props.insert(
+                    "body_split_lines".to_string(),
+                    split_lines
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
         }
 
         result.symbols.push(Symbol {

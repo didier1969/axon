@@ -14,7 +14,6 @@ MANIFEST_PATH=""
 RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
-TOPOLOGY="monolith"
 
 assert_live_stopped() {
   if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
@@ -89,25 +88,12 @@ PY
 export MANIFEST_FIELD="runtime_version.release_version"; release_version="$(read_manifest_field)"
 export MANIFEST_FIELD="runtime_version.package_version"; package_version="$(read_manifest_field)"
 export MANIFEST_FIELD="runtime_version.build_id"; build_id="$(read_manifest_field)"
-export MANIFEST_FIELD="topology"; topology_field="$(read_manifest_field 2>/dev/null || true)"
 export MANIFEST_FIELD="artifact.path"; artifact_path="$(read_manifest_field)"
 export MANIFEST_FIELD="artifact.sha256"; artifact_digest="$(read_manifest_field)"
-if [[ -n "$topology_field" ]]; then
-  TOPOLOGY="$topology_field"
-fi
 export ROOT_DIR RELEASE_VERSION="$release_version" PACKAGE_VERSION="$package_version" BUILD_ID="$build_id"
 
-if [[ "$TOPOLOGY" == "split" ]]; then
-  bash "$ROOT_DIR/scripts/release/preflight.sh" \
-    --topology "$TOPOLOGY" \
-    --check-pending
-else
-  bash "$ROOT_DIR/scripts/release/preflight.sh" \
-    --artifact "$ROOT_DIR/bin/axon-core" \
-    --build-info "$ROOT_DIR/bin/axon-core.build-info" \
-    --topology "$TOPOLOGY" \
-    --check-pending
-fi
+bash "$ROOT_DIR/scripts/release/preflight.sh" \
+  --check-pending
 
 install_generation="live-$(date -u +%Y%m%dT%H%M%SZ)"
 release_root="$ROOT_DIR/.axon/live-release"
@@ -122,7 +108,7 @@ export PENDING_MANIFEST="$pending_manifest"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would promote manifest $MANIFEST_PATH"
-  echo "DRY RUN: topology=$TOPOLOGY release_version=$release_version build_id=$build_id install_generation=$install_generation"
+  echo "DRY RUN: topology=split release_version=$release_version build_id=$build_id install_generation=$install_generation"
   echo "DRY RUN: artifact=$artifact_path sha256=$artifact_digest"
   exit 0
 fi
@@ -177,50 +163,26 @@ PY
     restart_failed=1
   elif ! assert_live_stopped; then
     restart_failed=1
-  elif [[ "$TOPOLOGY" == "split" ]]; then
+  else
     if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-indexer.sh"; then
       restart_failed=1
     elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-brain.sh"; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-      if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
-        --manifest "$MANIFEST_PATH" \
-        --url "$AXON_MCP_URL" \
-        --install-generation "$install_generation" \
-        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-indexer.sh" >/dev/null \
-        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-brain.sh" >/dev/null; then
-        verified=1
-      else
-        postcheck_failed=1
-      fi
-    fi
-  else
-    runtime_state="$ROOT_DIR/.axon/live-run/runtime.env"
-    start_args=()
-    if [[ -f "$runtime_state" ]]; then
-      # shellcheck disable=SC1090
-      source "$runtime_state"
-      case "${AXON_RUNTIME_MODE:-full}" in
-        graph_only) start_args+=(--graph-only) ;;
-        read_only) start_args+=(--read-only) ;;
-        mcp_only) start_args+=(--mcp-only) ;;
-        *) start_args+=(--full) ;;
-      esac
-      if [[ "${AXON_DASHBOARD_ENABLED:-1}" != "1" && "${AXON_RUNTIME_MODE:-}" != "mcp_only" ]]; then
-        start_args+=(--no-dashboard)
-      fi
-    else
-      start_args+=(--full)
-    fi
-    if ! AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 "$ROOT_DIR/scripts/axon" --instance live start "${start_args[@]}"; then
-      restart_failed=1
-    elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-      if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
-        --manifest "$MANIFEST_PATH" \
-        --url "$AXON_MCP_URL" \
-        --install-generation "$install_generation"; then
-        verified=1
-      else
+      for attempt in {1..12}; do
+        if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+          --manifest "$MANIFEST_PATH" \
+          --url "$AXON_MCP_URL" \
+          --install-generation "$install_generation" \
+          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-indexer.sh" >/dev/null \
+          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-brain.sh" >/dev/null; then
+          verified=1
+          break
+        fi
+        echo "Live MCP runtime post-check not ready yet (attempt $attempt/12); retrying..." >&2
+        sleep 5
+      done
+      if [[ "$verified" -ne 1 ]]; then
         postcheck_failed=1
       fi
     fi

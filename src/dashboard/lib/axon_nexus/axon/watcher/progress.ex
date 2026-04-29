@@ -10,7 +10,13 @@ defmodule Axon.Watcher.Progress do
 
   require Logger
 
-  @terminal_statuses ["indexed", "indexed_degraded", "skipped", "deleted", "oversized_for_current_budget"]
+  @terminal_statuses [
+    "indexed",
+    "indexed_degraded",
+    "skipped",
+    "deleted",
+    "oversized_for_current_budget"
+  ]
   @oversized_status "oversized_for_current_budget"
   @default_chunk_model_id "chunk-bge-large-en-v1.5-1024"
 
@@ -31,61 +37,25 @@ defmodule Axon.Watcher.Progress do
 
     workspace_counts = rows |> section_rows("workspace_status") |> normalize_counts()
     stage_counts = rows |> section_rows("workspace_stage") |> normalize_counts()
-    {graph_ready, vector_ready} = rows |> section_rows("workspace_ready") |> decode_snapshot_ready_pair()
+
+    {graph_ready, vector_ready} =
+      rows |> section_rows("workspace_ready") |> decode_snapshot_ready_pair()
 
     readiness_by_project =
       rows
       |> section_rows("project_ready")
-      |> Enum.reduce(%{}, fn
-        [_section, project_code, _key, graph_ready, vector_ready], acc ->
-          Map.put(acc, project_code, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
-
-        _row, acc ->
-          acc
-      end)
+      |> decode_project_readiness()
 
     projects =
       rows
       |> section_rows("project_status")
-      |> Enum.group_by(&Enum.at(&1, 1))
-      |> Enum.map(fn {project_code, project_rows} ->
-        counts =
-          Enum.into(project_rows, %{}, fn [_section, _project_code, status, count, _secondary_count] ->
-            {status, decode_integer(count)}
-          end)
-
-        total = Enum.sum(Map.values(counts))
-        completed = completed_total(counts)
-        readiness = Map.get(readiness_by_project, project_code, %{graph_ready: 0, vector_ready: 0})
-        project_nodes_count = Map.get(project_nodes, project_code, 0)
-        project_graph_vectors_count = Map.get(project_graph_vectors, project_code, 0)
-
-        %{
-          project_code: project_code,
-          project_name: Map.get(project_names, project_code, project_code),
-          display_name: display_project_name(Map.get(project_names, project_code, project_code), project_code),
-          known: total,
-          total: total,
-          completed: completed,
-          pending: Map.get(counts, "pending", 0),
-          indexing: Map.get(counts, "indexing", 0),
-          degraded: Map.get(counts, "indexed_degraded", 0),
-          oversized: oversized_total(counts),
-          skipped: Map.get(counts, "skipped", 0),
-          graph_ready: readiness.graph_ready,
-          graph_ready_pct: percentage(readiness.graph_ready, total),
-          vector_ready: readiness.vector_ready,
-          vector_ready_file: readiness.vector_ready,
-          vector_ready_file_pct: percentage(readiness.vector_ready, total),
-          vector_ready_graph: project_graph_vectors_count,
-          vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
-          nodes_count: project_nodes_count,
-          links_count: Map.get(project_links, project_code, 0),
-          progress: percentage(completed, total),
-          readiness: readiness_label(counts, total)
-        }
-      end)
-      |> Enum.sort_by(fn project -> {-project.known, project.project_code} end, :asc)
+      |> build_projects(
+        readiness_by_project,
+        project_names,
+        project_nodes,
+        project_links,
+        project_graph_vectors
+      )
 
     reasons =
       rows
@@ -96,67 +66,26 @@ defmodule Axon.Watcher.Progress do
       |> Enum.sort_by(&{-&1.count, &1.reason}, :asc)
       |> Enum.take(8)
 
-    total = Enum.sum(Map.values(workspace_counts))
-    indexed = Map.get(workspace_counts, "indexed", 0)
-    degraded = Map.get(workspace_counts, "indexed_degraded", 0)
-    skipped = Map.get(workspace_counts, "skipped", 0)
-    oversized = oversized_total(workspace_counts)
-    terminal = completed_total(workspace_counts)
-    progress = percentage(terminal, total)
-
-    workspace = %{
-      "status" => workspace_state(workspace_counts, total),
-      "progress" => progress,
-      "global_indexation_pct" => progress,
-      "synced" => indexed + degraded,
-      "total" => total,
-      "indexed" => indexed,
-      "indexed_degraded" => degraded,
-      "pending" => Map.get(workspace_counts, "pending", 0),
-      "indexing" => Map.get(workspace_counts, "indexing", 0),
-      "oversized" => oversized,
-      "skipped" => skipped,
-      "deleted" => Map.get(workspace_counts, "deleted", 0),
-      "completed_indexed" => indexed,
-      "completed_indexed_degraded" => degraded,
-      "completed_skipped" => skipped,
-      "completed_deleted" => Map.get(workspace_counts, "deleted", 0),
-      "completed_oversized" => oversized,
-      "graph_ready" => graph_ready,
-      "graph_ready_pct" => percentage(graph_ready, total),
-      "vector_ready" => vector_ready,
-      "vector_ready_file" => vector_ready,
-      "semantic_coverage" => vector_ready,
-      "semantic_coverage_pct" => percentage(vector_ready, total),
-      "vector_ready_file_pct" => percentage(vector_ready, total),
-      "vector_ready_file_raw" => decode_single_count(global_file_vector_flags),
-      "vector_ready_graph" => decode_single_count(global_graph_vectors),
-      "graph_embeddings_count" => decode_single_count(global_graph_vectors),
-      "chunk_embeddings_count" => decode_single_count(global_chunk_embeddings),
-      "nodes_count" => decode_single_count(global_nodes),
-      "vector_ready_graph_pct" =>
-        percentage(decode_single_count(global_graph_vectors), decode_single_count(global_nodes)),
-      "links_count" => decode_single_count(global_links),
-      "stage_promoted" => Map.get(stage_counts, "promoted", 0),
-      "stage_claimed" => Map.get(stage_counts, "claimed", 0),
-      "stage_writer_pending_commit" => Map.get(stage_counts, "writer_pending_commit", 0),
-      "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
-      "known" => total,
-      "completed" => terminal,
-      "indexed_graph_ready" => Map.get(flow_breakdown, "indexed_graph_ready", 0),
-      "indexed_graph_missing" => Map.get(flow_breakdown, "indexed_graph_missing", 0),
-      "indexed_degraded_graph_ready" => Map.get(flow_breakdown, "indexed_degraded_graph_ready", 0),
-      "indexed_degraded_graph_missing" => Map.get(flow_breakdown, "indexed_degraded_graph_missing", 0),
-      "indexed_vector_ready" => Map.get(flow_breakdown, "indexed_vector_ready", 0),
-      "indexed_vector_missing" => Map.get(flow_breakdown, "indexed_vector_missing", 0),
-      "indexed_degraded_vector_ready" => Map.get(flow_breakdown, "indexed_degraded_vector_ready", 0),
-      "indexed_degraded_vector_missing" => Map.get(flow_breakdown, "indexed_degraded_vector_missing", 0),
-      "soll_done" => decode_soll_metric(soll_coverage, 1),
-      "soll_partial" => decode_soll_metric(soll_coverage, 2),
-      "soll_missing" => decode_soll_metric(soll_coverage, 3),
-      "soll_last_revision" => decode_soll_revision(soll_revision),
-      "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
-    }
+    workspace =
+      build_workspace(
+        workspace_counts,
+        stage_counts,
+        {graph_ready, vector_ready},
+        flow_breakdown,
+        %{
+          vector_ready_file_raw: decode_single_count(global_file_vector_flags),
+          graph_embeddings_count: decode_single_count(global_graph_vectors),
+          chunk_embeddings_count: decode_single_count(global_chunk_embeddings),
+          nodes_count: decode_single_count(global_nodes),
+          links_count: decode_single_count(global_links)
+        },
+        %{
+          soll_done: decode_soll_metric(soll_coverage, 1),
+          soll_partial: decode_soll_metric(soll_coverage, 2),
+          soll_missing: decode_soll_metric(soll_coverage, 3),
+          soll_last_revision: decode_soll_revision(soll_revision)
+        }
+      )
 
     %{workspace: workspace, projects: projects, reasons: reasons}
   end
@@ -179,70 +108,25 @@ defmodule Axon.Watcher.Progress do
       |> query_rows()
       |> decode_ready_pair()
 
-    total = Enum.sum(Map.values(counts))
-    indexed = Map.get(counts, "indexed", 0)
-    degraded = Map.get(counts, "indexed_degraded", 0)
-    skipped = Map.get(counts, "skipped", 0)
-    oversized = oversized_total(counts)
-    terminal = completed_total(counts)
-    progress = percentage(terminal, total)
-
-    %{
-      "status" => workspace_state(counts, total),
-      "progress" => progress,
-      "global_indexation_pct" => progress,
-      "synced" => indexed + degraded,
-      "total" => total,
-      "indexed" => indexed,
-      "indexed_degraded" => degraded,
-      "pending" => Map.get(counts, "pending", 0),
-      "indexing" => Map.get(counts, "indexing", 0),
-      "oversized" => oversized,
-      "skipped" => skipped,
-      "deleted" => Map.get(counts, "deleted", 0),
-      "completed_indexed" => indexed,
-      "completed_indexed_degraded" => degraded,
-      "completed_skipped" => skipped,
-      "completed_deleted" => Map.get(counts, "deleted", 0),
-      "completed_oversized" => oversized,
-      "graph_ready" => graph_ready,
-      "graph_ready_pct" => percentage(graph_ready, total),
-      "vector_ready" => vector_ready,
-      "vector_ready_file" => vector_ready,
-      "semantic_coverage" => vector_ready,
-      "semantic_coverage_pct" => percentage(vector_ready, total),
-      "vector_ready_file_pct" => percentage(vector_ready, total),
-      "vector_ready_file_raw" => decode_single_count(query_rows(global_file_vector_flag_query())),
-      "vector_ready_graph" => decode_single_count(query_rows(global_graph_vector_query())),
-      "graph_embeddings_count" => decode_single_count(query_rows(global_graph_vector_query())),
-      "chunk_embeddings_count" => decode_single_count(query_rows(global_chunk_embedding_query())),
-      "vector_ready_graph_pct" =>
-        percentage(
-          decode_single_count(query_rows(global_graph_vector_query())),
-          decode_single_count(query_rows(global_nodes_query()))
-        ),
-      "nodes_count" => decode_single_count(query_rows(global_nodes_query())),
-      "links_count" => decode_single_count(query_rows(global_links_query())),
-      "stage_promoted" => Map.get(stage_counts, "promoted", 0),
-      "stage_claimed" => Map.get(stage_counts, "claimed", 0),
-      "stage_writer_pending_commit" => Map.get(stage_counts, "writer_pending_commit", 0),
-      "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
-      "known" => total,
-      "completed" => terminal,
-      "indexed_graph_ready" => Map.get(flow_breakdown, "indexed_graph_ready", 0),
-      "indexed_graph_missing" => Map.get(flow_breakdown, "indexed_graph_missing", 0),
-      "indexed_degraded_graph_ready" => Map.get(flow_breakdown, "indexed_degraded_graph_ready", 0),
-      "indexed_degraded_graph_missing" => Map.get(flow_breakdown, "indexed_degraded_graph_missing", 0),
-      "indexed_vector_ready" => Map.get(flow_breakdown, "indexed_vector_ready", 0),
-      "indexed_vector_missing" => Map.get(flow_breakdown, "indexed_vector_missing", 0),
-      "indexed_degraded_vector_ready" => Map.get(flow_breakdown, "indexed_degraded_vector_ready", 0),
-      "indexed_degraded_vector_missing" => Map.get(flow_breakdown, "indexed_degraded_vector_missing", 0),
-      "soll_done" => 0,
-      "soll_partial" => 0,
-      "soll_missing" => 0,
-      "soll_last_revision" => nil,
-      "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
-    }
+    build_workspace(
+      counts,
+      stage_counts,
+      {graph_ready, vector_ready},
+      flow_breakdown,
+      %{
+        vector_ready_file_raw: decode_single_count(query_rows(global_file_vector_flag_query())),
+        graph_embeddings_count: decode_single_count(query_rows(global_graph_vector_query())),
+        chunk_embeddings_count: decode_single_count(query_rows(global_chunk_embedding_query())),
+        nodes_count: decode_single_count(query_rows(global_nodes_query())),
+        links_count: decode_single_count(query_rows(global_links_query()))
+      },
+      %{
+        soll_done: 0,
+        soll_partial: 0,
+        soll_missing: 0,
+        soll_last_revision: nil
+      }
+    )
   end
 
   def get_directory_stats(repo_code) do
@@ -267,59 +151,16 @@ defmodule Axon.Watcher.Progress do
     readiness_by_project =
       project_ready_query()
       |> query_rows()
-      |> Enum.reduce(%{}, fn
-        [project_code, graph_ready, vector_ready], acc ->
-          Map.put(acc, project_code, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
-
-        _row, acc ->
-          acc
-      end)
+      |> decode_project_readiness()
 
     "SELECT COALESCE(project_code, '(unscoped)'), COALESCE(status, 'unknown'), count(*) FROM File GROUP BY 1, 2;"
     |> query_rows()
-    |> Enum.group_by(&Enum.at(&1, 0))
-    |> Enum.map(fn {project_code, rows} ->
-      counts =
-        Enum.into(rows, %{}, fn [_project_code, status, count] ->
-          {status, decode_integer(count)}
-        end)
-
-      total = Enum.sum(Map.values(counts))
-      completed = completed_total(counts)
-      readiness = Map.get(readiness_by_project, project_code, %{graph_ready: 0, vector_ready: 0})
-      project_nodes_count = Map.get(project_nodes, project_code, 0)
-      project_graph_vectors_count = Map.get(project_graph_vectors, project_code, 0)
-
-      %{
-        project_code: project_code,
-        project_name: Map.get(project_names, project_code, project_code),
-        display_name: display_project_name(Map.get(project_names, project_code, project_code), project_code),
-        known: total,
-        total: total,
-        completed: completed,
-        pending: Map.get(counts, "pending", 0),
-        indexing: Map.get(counts, "indexing", 0),
-        degraded: Map.get(counts, "indexed_degraded", 0),
-        oversized: oversized_total(counts),
-        skipped: Map.get(counts, "skipped", 0),
-        graph_ready: readiness.graph_ready,
-        graph_ready_pct: percentage(readiness.graph_ready, total),
-        vector_ready: readiness.vector_ready,
-        vector_ready_file: readiness.vector_ready,
-        vector_ready_file_pct: percentage(readiness.vector_ready, total),
-        vector_ready_graph: project_graph_vectors_count,
-        vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
-        nodes_count: project_nodes_count,
-        links_count: 0,
-        progress: percentage(completed, total),
-        readiness: readiness_label(counts, total)
-      }
-    end)
-    |> Enum.sort_by(
-      fn project ->
-        {-project.known, project.project_code}
-      end,
-      :asc
+    |> build_projects(
+      readiness_by_project,
+      project_names,
+      project_nodes,
+      %{},
+      project_graph_vectors
     )
   end
 
@@ -346,14 +187,20 @@ defmodule Axon.Watcher.Progress do
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - started_at
         Telemetry.mark_sql_snapshot_error(reason, duration_ms)
-        Logger.warning("[cockpit] SQL snapshot query failed after #{duration_ms}ms: #{inspect(reason)}")
+
+        Logger.warning(
+          "[cockpit] SQL snapshot query failed after #{duration_ms}ms: #{inspect(reason)}"
+        )
+
         []
     end
   end
 
   defp decode_rows(payload) when is_binary(payload) do
     case Jason.decode(payload) do
-      {:ok, decoded} -> decode_rows(decoded)
+      {:ok, decoded} ->
+        decode_rows(decoded)
+
       {:error, reason} ->
         Logger.warning("[cockpit] SQL gateway payload invalid JSON: #{inspect(reason)}")
         []
@@ -520,6 +367,178 @@ defmodule Axon.Watcher.Progress do
     end)
   end
 
+  defp build_projects(
+         rows,
+         readiness_by_project,
+         project_names,
+         project_nodes,
+         project_links,
+         project_graph_vectors
+       ) do
+    rows
+    |> Enum.group_by(&project_group_key/1)
+    |> Enum.map(fn {project_code, project_rows} ->
+      counts =
+        Enum.into(project_rows, %{}, fn
+          [_section, _project_code, status, count, _secondary_count] ->
+            {status, decode_integer(count)}
+
+          [_project_code, status, count] ->
+            {status, decode_integer(count)}
+        end)
+
+      build_project_summary(
+        project_code,
+        counts,
+        Map.get(readiness_by_project, project_code, %{graph_ready: 0, vector_ready: 0}),
+        Map.get(project_names, project_code, project_code),
+        Map.get(project_nodes, project_code, 0),
+        Map.get(project_links, project_code, 0),
+        Map.get(project_graph_vectors, project_code, 0)
+      )
+    end)
+    |> Enum.sort_by(fn project -> {-project.known, project.project_code} end, :asc)
+  end
+
+  defp project_group_key([_section, project_code, _status, _count, _secondary_count]),
+    do: project_code
+
+  defp project_group_key([project_code, _status, _count]), do: project_code
+  defp project_group_key(_row), do: "(unscoped)"
+
+  defp build_project_summary(
+         project_code,
+         counts,
+         readiness,
+         project_name,
+         project_nodes_count,
+         project_links_count,
+         project_graph_vectors_count
+       ) do
+    total = Enum.sum(Map.values(counts))
+    completed = completed_total(counts)
+
+    %{
+      project_code: project_code,
+      project_name: project_name,
+      display_name: display_project_name(project_name, project_code),
+      known: total,
+      total: total,
+      completed: completed,
+      pending: Map.get(counts, "pending", 0),
+      indexing: Map.get(counts, "indexing", 0),
+      degraded: Map.get(counts, "indexed_degraded", 0),
+      oversized: oversized_total(counts),
+      skipped: Map.get(counts, "skipped", 0),
+      graph_ready: readiness.graph_ready,
+      graph_ready_pct: percentage(readiness.graph_ready, total),
+      vector_ready: readiness.vector_ready,
+      vector_ready_file: readiness.vector_ready,
+      vector_ready_file_pct: percentage(readiness.vector_ready, total),
+      vector_ready_graph: project_graph_vectors_count,
+      vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
+      nodes_count: project_nodes_count,
+      links_count: project_links_count,
+      progress: percentage(completed, total),
+      readiness: readiness_label(counts, total)
+    }
+  end
+
+  defp build_workspace(
+         counts,
+         stage_counts,
+         {graph_ready, vector_ready},
+         flow_breakdown,
+         metrics,
+         soll_metrics
+       ) do
+    total = Enum.sum(Map.values(counts))
+    indexed = Map.get(counts, "indexed", 0)
+    degraded = Map.get(counts, "indexed_degraded", 0)
+    skipped = Map.get(counts, "skipped", 0)
+    oversized = oversized_total(counts)
+    terminal = completed_total(counts)
+    nodes_count = Map.get(metrics, :nodes_count, 0)
+    graph_embeddings_count = Map.get(metrics, :graph_embeddings_count, 0)
+    progress = percentage(terminal, total)
+
+    %{
+      "status" => workspace_state(counts, total),
+      "progress" => progress,
+      "global_indexation_pct" => progress,
+      "synced" => indexed + degraded,
+      "total" => total,
+      "indexed" => indexed,
+      "indexed_degraded" => degraded,
+      "pending" => Map.get(counts, "pending", 0),
+      "indexing" => Map.get(counts, "indexing", 0),
+      "oversized" => oversized,
+      "skipped" => skipped,
+      "deleted" => Map.get(counts, "deleted", 0),
+      "completed_indexed" => indexed,
+      "completed_indexed_degraded" => degraded,
+      "completed_skipped" => skipped,
+      "completed_deleted" => Map.get(counts, "deleted", 0),
+      "completed_oversized" => oversized,
+      "graph_ready" => graph_ready,
+      "graph_ready_pct" => percentage(graph_ready, total),
+      "vector_ready" => vector_ready,
+      "vector_ready_file" => vector_ready,
+      "semantic_coverage" => vector_ready,
+      "semantic_coverage_pct" => percentage(vector_ready, total),
+      "vector_ready_file_pct" => percentage(vector_ready, total),
+      "vector_ready_file_raw" => Map.get(metrics, :vector_ready_file_raw, 0),
+      "vector_ready_graph" => graph_embeddings_count,
+      "graph_embeddings_count" => graph_embeddings_count,
+      "chunk_embeddings_count" => Map.get(metrics, :chunk_embeddings_count, 0),
+      "nodes_count" => nodes_count,
+      "vector_ready_graph_pct" => percentage(graph_embeddings_count, nodes_count),
+      "links_count" => Map.get(metrics, :links_count, 0),
+      "stage_promoted" => Map.get(stage_counts, "promoted", 0),
+      "stage_claimed" => Map.get(stage_counts, "claimed", 0),
+      "stage_writer_pending_commit" => Map.get(stage_counts, "writer_pending_commit", 0),
+      "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
+      "known" => total,
+      "completed" => terminal,
+      "indexed_graph_ready" => Map.get(flow_breakdown, "indexed_graph_ready", 0),
+      "indexed_graph_missing" => Map.get(flow_breakdown, "indexed_graph_missing", 0),
+      "indexed_degraded_graph_ready" =>
+        Map.get(flow_breakdown, "indexed_degraded_graph_ready", 0),
+      "indexed_degraded_graph_missing" =>
+        Map.get(flow_breakdown, "indexed_degraded_graph_missing", 0),
+      "indexed_vector_ready" => Map.get(flow_breakdown, "indexed_vector_ready", 0),
+      "indexed_vector_missing" => Map.get(flow_breakdown, "indexed_vector_missing", 0),
+      "indexed_degraded_vector_ready" =>
+        Map.get(flow_breakdown, "indexed_degraded_vector_ready", 0),
+      "indexed_degraded_vector_missing" =>
+        Map.get(flow_breakdown, "indexed_degraded_vector_missing", 0),
+      "soll_done" => Map.get(soll_metrics, :soll_done, 0),
+      "soll_partial" => Map.get(soll_metrics, :soll_partial, 0),
+      "soll_missing" => Map.get(soll_metrics, :soll_missing, 0),
+      "soll_last_revision" => Map.get(soll_metrics, :soll_last_revision),
+      "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+  end
+
+  defp decode_project_readiness(rows) do
+    Enum.reduce(rows, %{}, fn
+      [_section, project_code, _key, graph_ready, vector_ready], acc ->
+        Map.put(acc, project_code, %{
+          graph_ready: decode_integer(graph_ready),
+          vector_ready: decode_integer(vector_ready)
+        })
+
+      [project_code, graph_ready, vector_ready], acc ->
+        Map.put(acc, project_code, %{
+          graph_ready: decode_integer(graph_ready),
+          vector_ready: decode_integer(vector_ready)
+        })
+
+      _row, acc ->
+        acc
+    end)
+  end
+
   defp normalize_counts(rows) do
     Enum.into(rows, %{}, fn
       [status, count] ->
@@ -592,7 +611,9 @@ defmodule Axon.Watcher.Progress do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
-  defp decode_ready_pair([%{"graph_ready" => graph_ready, "vector_ready" => vector_ready} | _rest]) do
+  defp decode_ready_pair([
+         %{"graph_ready" => graph_ready, "vector_ready" => vector_ready} | _rest
+       ]) do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
@@ -606,11 +627,15 @@ defmodule Axon.Watcher.Progress do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
-  defp decode_snapshot_ready_pair([%{"primary_count" => graph_ready, "secondary_count" => vector_ready} | _rest]) do
+  defp decode_snapshot_ready_pair([
+         %{"primary_count" => graph_ready, "secondary_count" => vector_ready} | _rest
+       ]) do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
-  defp decode_snapshot_ready_pair([%{primary_count: graph_ready, secondary_count: vector_ready} | _rest]) do
+  defp decode_snapshot_ready_pair([
+         %{primary_count: graph_ready, secondary_count: vector_ready} | _rest
+       ]) do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
@@ -765,7 +790,9 @@ defmodule Axon.Watcher.Progress do
   defp active_chunk_model_id do
     System.get_env("AXON_CHUNK_MODEL_ID")
     |> case do
-      nil -> @default_chunk_model_id
+      nil ->
+        @default_chunk_model_id
+
       value ->
         normalized = String.trim(value)
         if normalized == "", do: @default_chunk_model_id, else: normalized
@@ -864,21 +891,19 @@ defmodule Axon.Watcher.Progress do
     }
   end
 
-  defp decode_flow_breakdown(
-         [
-           %{
-             "indexed_graph_ready" => a,
-             "indexed_graph_missing" => b,
-             "indexed_degraded_graph_ready" => c,
-             "indexed_degraded_graph_missing" => d,
-             "indexed_vector_ready" => e,
-             "indexed_vector_missing" => f,
-             "indexed_degraded_vector_ready" => g,
-             "indexed_degraded_vector_missing" => h
-           }
-           | _rest
-         ]
-       ) do
+  defp decode_flow_breakdown([
+         %{
+           "indexed_graph_ready" => a,
+           "indexed_graph_missing" => b,
+           "indexed_degraded_graph_ready" => c,
+           "indexed_degraded_graph_missing" => d,
+           "indexed_vector_ready" => e,
+           "indexed_vector_missing" => f,
+           "indexed_degraded_vector_ready" => g,
+           "indexed_degraded_vector_missing" => h
+         }
+         | _rest
+       ]) do
     %{
       "indexed_graph_ready" => decode_integer(a),
       "indexed_graph_missing" => decode_integer(b),

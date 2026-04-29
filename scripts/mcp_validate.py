@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Exhaustive MCP validation runner with explicit public/expert surface checks."""
+"""Exhaustive MCP validation runner with explicit public/internal surface checks."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -16,6 +17,8 @@ from typing import Any
 
 
 DEFAULT_URL = "http://127.0.0.1:44129/mcp"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROJECTS_ROOT = Path(os.environ.get("AXON_PROJECTS_ROOT", PROJECT_ROOT.parent))
 WRITE_CAPABLE_TOOLS = {
     "refine_lattice",
     "soll_manager",
@@ -251,7 +254,7 @@ def build_args(
         },
         "project_registry_lookup": {"project_code": project},
         "axon_init_project": {
-            "project_path": "/home/dstadel/projects/BookingSystem",
+            "project_path": str(DEFAULT_PROJECTS_ROOT / "BookingSystem"),
             "concept_document_url_or_text": "Synthetic validation concept."
         },
         "axon_apply_guidelines": {
@@ -1174,7 +1177,7 @@ def run(args: argparse.Namespace) -> int:
             for tool in public_tools
             if isinstance(tool, dict) and str(tool.get("name", "")).strip() in SOLL_PUBLIC_TOOL_NAMES
         ]
-    expert_tools = [
+    internal_only_tools = [
         tool
         for tool in internal_tools
         if isinstance(tool, dict)
@@ -1183,7 +1186,7 @@ def run(args: argparse.Namespace) -> int:
         and str(tool.get("name", "")).strip() not in CORE_TOOL_NAMES
     ]
     if args.surface != "all":
-        expert_tools = []
+        internal_only_tools = []
 
     symbol_probe = args.symbol.strip() if isinstance(args.symbol, str) else ""
     if not symbol_probe:
@@ -1248,7 +1251,7 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
-    for i, tool in enumerate(expert_tools, start=500):
+    for i, tool in enumerate(internal_only_tools, start=500):
         name = str(tool.get("name", "")).strip()
         schema = tool.get("inputSchema", {}) if isinstance(tool, dict) else {}
         if not name:
@@ -1256,10 +1259,10 @@ def run(args: argparse.Namespace) -> int:
         if (not args.allow_mutations) and name in WRITE_CAPABLE_TOOLS:
             tool_results.append(
                 ToolResult(
-                    name=f"expert.{name}",
+                    name=f"internal.{name}",
                     status="skip",
                     duration_ms=0,
-                    note="skipped write-capable expert tool (enable --allow-mutations to execute)",
+                    note="skipped write-capable internal tool (enable --allow-mutations to execute)",
                     request_args={},
                     response_excerpt="",
                     response_size=0,
@@ -1294,7 +1297,7 @@ def run(args: argparse.Namespace) -> int:
         dt = int((time.time() - t0) * 1000)
         tool_results.append(
             ToolResult(
-                name=f"expert.{name}",
+                name=f"internal.{name}",
                 status=status,
                 duration_ms=dt,
                 note=note,
@@ -1340,7 +1343,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"Symbol Probe: {symbol_probe}")
     print(
         f"Tools total: {len(tool_results)} | public={len(public_tools)} "
-        f"expert={len(expert_tools)} | ok={ok} warn={warn} fail={fail} skip={skip}"
+        f"internal={len(internal_only_tools)} | ok={ok} warn={warn} fail={fail} skip={skip}"
     )
     transport_health = "pass" if fail == 0 else "degraded"
     semantic_quality = "pass" if (fail == 0 and warn == 0) else ("warn" if fail == 0 else "degraded")

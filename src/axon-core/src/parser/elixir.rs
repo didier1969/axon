@@ -24,6 +24,14 @@ impl Default for ElixirParser {
 }
 
 impl ElixirParser {
+    fn do_block_split_lines<'a>(do_block: Node<'a>) -> Vec<usize> {
+        let mut cursor = do_block.walk();
+        do_block
+            .named_children(&mut cursor)
+            .map(|child| child.start_position().row + 1)
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             wasm_bytes: include_bytes!("../../parsers/tree-sitter-elixir.wasm"),
@@ -189,6 +197,32 @@ impl ElixirParser {
         };
 
         let mut properties = HashMap::new();
+
+        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+            properties.insert(
+                "header_end_line".to_string(),
+                do_block.start_position().row.saturating_add(1).to_string(),
+            );
+            properties.insert(
+                "body_start_line".to_string(),
+                do_block.start_position().row.saturating_add(1).to_string(),
+            );
+            properties.insert(
+                "body_end_line".to_string(),
+                do_block.end_position().row.saturating_add(1).to_string(),
+            );
+            let split_lines = Self::do_block_split_lines(do_block);
+            if split_lines.len() > 1 {
+                properties.insert(
+                    "body_split_lines".to_string(),
+                    split_lines
+                        .into_iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+        }
 
         let node_content = node.utf8_text(source_bytes).unwrap_or("");
         let is_nif =
@@ -578,5 +612,35 @@ mod tests {
             .any(|rel| rel.from == "Axon.Sample.trigger_scan"
                 && rel.to == "Axon.Sample.parse_batch"
                 && rel.rel_type == "CALLS"));
+    }
+
+    #[test]
+    fn test_elixir_parser_emits_body_split_lines_for_functions() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def trigger_scan do
+            prepare()
+            flush_ready_queue()
+            persist()
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        let symbol = result
+            .symbols
+            .iter()
+            .find(|sym| sym.name == "Axon.Sample.trigger_scan")
+            .expect("trigger_scan symbol");
+
+        assert_eq!(
+            symbol.properties.get("body_start_line"),
+            Some(&"3".to_string())
+        );
+        assert_eq!(
+            symbol.properties.get("body_split_lines"),
+            Some(&"4,5,6".to_string())
+        );
     }
 }

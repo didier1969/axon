@@ -120,6 +120,10 @@ defmodule AxonDashboardWeb.StatusLiveTest do
       {:bridge_event,
        %{
          "RuntimeTelemetry" => %{
+           "telemetry_source" => "local_runtime",
+           "telemetry_process_role" => "brain",
+           "telemetry_freshness_state" => "fresh",
+           "telemetry_observed_age_ms" => 120,
            "budget_bytes" => 1_073_741_824,
            "reserved_bytes" => 268_435_456,
            "exhaustion_ratio" => 0.25,
@@ -135,11 +139,54 @@ defmodule AxonDashboardWeb.StatusLiveTest do
            "db_wal_bytes" => 134_217_728,
            "db_total_bytes" => 939_524_096,
            "duckdb_memory_bytes" => 402_653_184,
+           "vector_chunks_embedded_total" => 512,
+           "chunk_embeddings_per_second" => 64.4,
+           "chunk_embeddings_rate_window_ms" => 5_000,
+           "prepare_inflight_chunks_current" => 11,
+           "ready_queue_chunks_current" => 27,
+           "ready_queue_chunks_small" => 5,
+           "ready_queue_chunks_medium" => 9,
+           "ready_queue_chunks_large" => 13,
+           "ready_batches_small" => 1,
+           "ready_batches_medium" => 2,
+           "ready_batches_large" => 3,
+           "mixed_fallback_batches_total" => 4,
+           "homogeneous_batches_total" => 22,
+           "last_consumed_batch_lane" => "large",
+           "active_small_max_tokens" => 96,
+           "active_medium_max_tokens" => 192,
+           "graph_workers_started_total" => 2,
+           "graph_workers_active_current" => 2,
            "ingress_enabled" => true,
            "ingress_buffered_entries" => 42,
            "ingress_subtree_hints" => 3,
            "ingress_flush_count" => 9,
-           "ingress_last_promoted_count" => 18
+           "ingress_last_promoted_count" => 18,
+           "projected_indexer_runtime" => %{
+             "available" => true,
+             "telemetry_source" => "indexer_peer_heartbeat",
+             "process_role" => "indexer",
+             "freshness_state" => "fresh",
+             "observed_age_ms" => 45,
+             "telemetry" => %{
+               "ingress_buffered_entries" => 73,
+               "ingress_last_promoted_count" => 29,
+               "graph_projection_queue" => %{"total" => 144},
+               "file_vectorization_queue" => %{"total" => 81},
+               "vector_chunks_embedded_total" => 640,
+               "ready_queue_chunks_current" => 21,
+               "ready_queue_chunks_small" => 3,
+               "ready_queue_chunks_medium" => 7,
+               "ready_queue_chunks_large" => 11,
+               "mixed_fallback_batches_total" => 1,
+               "homogeneous_batches_total" => 15,
+               "last_consumed_batch_lane" => "medium",
+               "chunk_embeddings_per_second" => 80.0,
+               "chunk_embeddings_rate_window_ms" => 5_000,
+               "graph_workers_started_total" => 3,
+               "graph_workers_active_current" => 2
+             }
+           }
          }
        }}
     )
@@ -152,6 +199,29 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "12"
     assert html =~ "Claim Mode"
     assert html =~ "BALANCED"
+    assert html =~ "Runtime Source"
+    assert html =~ "LOCAL_RUNTIME"
+    assert html =~ "Runtime Role"
+    assert html =~ "BRAIN"
+    assert html =~ "Runtime Freshness"
+    assert html =~ "FRESH (120 ms)"
+    assert html =~ "64.4 chunks/s (5000 ms)"
+    assert html =~ "512"
+    assert html =~ "Ready Chunks"
+    assert html =~ "27"
+    assert html =~ "Prepare Chunks"
+    assert html =~ "11"
+    assert html =~ "Ready Lanes"
+    assert html =~ "S 5 / M 9 / L 13"
+    assert html =~ "Ready Batches"
+    assert html =~ "S 1 / M 2 / L 3"
+    assert html =~ "Batch Shape"
+    assert html =~ "H 22 / Mixed 4"
+    assert html =~ "Last GPU Lane"
+    assert html =~ "LARGE"
+    assert html =~ "Lane Thresholds"
+    assert html =~ "small&lt;=96 / medium&lt;=192 / large&gt;192"
+    assert html =~ "2 active / 2 started"
     assert html =~ "Oversized"
     assert html =~ "5"
     assert html =~ "Degraded"
@@ -162,6 +232,17 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "384 MB"
     assert html =~ "Buffered Entries"
     assert html =~ "42"
+    assert html =~ "Indexer Runtime"
+    assert html =~ "INDEXER_PEER_HEARTBEAT"
+    assert html =~ "FRESH (45 ms)"
+    assert html =~ "144"
+    assert html =~ "81"
+    assert html =~ "80.0 chunks/s (5000 ms)"
+    assert html =~ "640"
+    assert html =~ "S 3 / M 7 / L 11"
+    assert html =~ "H 15 / Mixed 1"
+    assert html =~ "MEDIUM"
+    assert html =~ "2 active / 3 started"
   end
 
   test "renders host pressure telemetry from runtime telemetry only", %{conn: conn} do

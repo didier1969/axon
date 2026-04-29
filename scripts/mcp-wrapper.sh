@@ -5,7 +5,7 @@ set -euo pipefail
 # It does NOT attempt to auto-boot the server to avoid MCP handshake timeouts.
 # The underlying Rust tunnel handles offline states gracefully via JSON-RPC errors.
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TUNNEL_BIN="$PROJECT_ROOT/bin/axon-mcp-tunnel"
 
 # 1. Verification of tunnel binary
