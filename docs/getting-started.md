@@ -89,6 +89,8 @@ Le bootstrap global peut aussi déclencher TensorRT:
 Contrat:
 - `setup-tensorrt` est la procédure reproductible pour installer l’artefact ORT TensorRT Axon
 - le profil par défaut `axon_embedding` évite les kernels ORT non utiles à la vectorisation Axon
+- le build ORT force le parser TensorRT intégré; il ne doit pas télécharger ni compiler `onnx-tensorrt`
+- la prévalidation doit vérifier `NvInfer.h`, `NvOnnxParser.h`, `libnvinfer.so`, `libnvonnxparser.so` et `libnvinfer_plugin.so` avant le build long
 - le manifest généré devient la source de vérité runtime pour `libonnxruntime` et les providers CUDA/TensorRT
 - aucune installation client ne doit dépendre d’une commande tapée à la main hors scripts
 

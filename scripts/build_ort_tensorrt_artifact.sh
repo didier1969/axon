@@ -213,6 +213,7 @@ COMMON_PKG_BINDINGS="let
     \"-Donnxruntime_USE_NCCL\"
     \"-Donnxruntime_USE_CUDA_NHWC_OPS\"
     \"-Donnxruntime_DISABLE_ML_OPS\"
+    \"-Donnxruntime_USE_TENSORRT_BUILTIN_PARSER\"
   ];
   keepOldCmakeFlag = flag:
     !(lib.any (prefix: lib.hasPrefix prefix flag) overriddenCmakeFlagPrefixes);
@@ -227,6 +228,7 @@ COMMON_PKG_BINDINGS="let
       (lib.cmakeFeature \"CMAKE_CUDA_ARCHITECTURES\" \"${CUDA_ARCHITECTURES}\")
       (lib.cmakeBool \"onnxruntime_USE_TENSORRT\" true)
       (lib.cmakeFeature \"onnxruntime_TENSORRT_HOME\" \"\${tensorrtPkg}\")
+      (lib.cmakeBool \"onnxruntime_USE_TENSORRT_BUILTIN_PARSER\" true)
 ${ORT_TENSORRT_EXTRA_CMAKE_FLAGS}
     ];
   });
@@ -296,8 +298,28 @@ if [[ ! -f "$TENSORRT_OUT_PATH/include/NvInferVersion.h" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$TENSORRT_OUT_PATH/include/NvInfer.h" ]]; then
+  echo "❌ TensorRT package layout invalid: missing $TENSORRT_OUT_PATH/include/NvInfer.h"
+  exit 1
+fi
+
+if [[ ! -f "$TENSORRT_OUT_PATH/include/NvOnnxParser.h" ]]; then
+  echo "❌ TensorRT package layout invalid: missing $TENSORRT_OUT_PATH/include/NvOnnxParser.h"
+  exit 1
+fi
+
 if [[ ! -f "$TENSORRT_OUT_PATH/lib/libnvinfer.so" ]]; then
   echo "❌ TensorRT package layout invalid: missing $TENSORRT_OUT_PATH/lib/libnvinfer.so"
+  exit 1
+fi
+
+if [[ ! -f "$TENSORRT_OUT_PATH/lib/libnvonnxparser.so" ]]; then
+  echo "❌ TensorRT package layout invalid: missing $TENSORRT_OUT_PATH/lib/libnvonnxparser.so"
+  exit 1
+fi
+
+if [[ ! -f "$TENSORRT_OUT_PATH/lib/libnvinfer_plugin.so" ]]; then
+  echo "❌ TensorRT package layout invalid: missing $TENSORRT_OUT_PATH/lib/libnvinfer_plugin.so"
   exit 1
 fi
 

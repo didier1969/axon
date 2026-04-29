@@ -17,6 +17,12 @@
 - `hardware-aware-scaling`: hardware/profile-driven GPU, VRAM, fallback and batch-size behavior.
 - `writing-plans`: small delivery slices, exact files, test gates and frequent commits.
 
+## External Build References
+
+- ONNX Runtime build documentation requires TensorRT to be supplied as `--tensorrt_home` and states that ORT uses the TensorRT built-in parser from that home by default in build-script mode.
+- NVIDIA TensorRT 10.14.1 tarball documentation defines the expected extracted layout: `bin`, `include`, `lib`, `python`, `targets`.
+- ONNX Runtime TensorRT EP documentation recommends timing/engine caches because first TensorRT engine creation can take minutes; Axon qualification must enable and observe those caches before promotion.
+
 ## Two-Lane Purity Contract
 
 Axon has one ingestion/control substrate and two production lanes:
@@ -100,6 +106,7 @@ graph TD
 
 - **Provider authority is not clean enough.** Query, vector and GPU service paths publish overlapping provider state through environment-backed global state. This can blur whether CUDA, TensorRT service, CPU fallback or unavailable state is authoritative.
 - **TensorRT is not central yet.** TensorRT is only preferred inside the GPU service provider list; the in-process vector path remains CUDA/CPU.
+- **TensorRT artifact build must use the built-in parser.** ONNX Runtime 1.24.4 defaults `onnxruntime_USE_TENSORRT_BUILTIN_PARSER` to `OFF`; leaving it unset triggers `onnx-tensorrt` FetchContent and can fail late under Nix with `FETCHCONTENT_FULLY_DISCONNECTED` or `TENSORRT_LIBRARY_INFER-NOTFOUND`. Axon must force the built-in parser and validate `NvInfer`/`NvOnnxParser` headers and libs before the long ORT build.
 - **Fallback mutates global sizing.** CPU fallback can rewrite worker and batch sizing environment variables after runtime startup, which is not a reliable lane reconfiguration boundary.
 - **Orchestration remains monolithic.** `embedder.rs` still owns pool construction, refill, vector execution, prepare, persist, finalize, provider construction, fallback, restart and tests.
 - **Observability is rich but not contract-shaped.** Metrics exist, but TensorRT qualification needs a stable stage report: prepare, ready wait, TensorRT build/cache, inference, extraction, persist, finalize, recycle, fallback.
