@@ -192,6 +192,10 @@ impl McpServer {
             .iter()
             .map(|entry| (entry.id.clone(), entry.clone()))
             .collect::<HashMap<_, _>>();
+        let decision_evidence_counts =
+            self.load_work_plan_evidence_counts(&project_code, "DEC", "decision");
+        let milestone_evidence_counts =
+            self.load_work_plan_evidence_counts(&project_code, "MIL", "milestone");
         let req_query = format!(
             "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}')
              FROM soll.Node r
@@ -254,6 +258,7 @@ impl McpServer {
                     continue;
                 }
                 let id = row[0].clone();
+                let evidence_count = decision_evidence_counts.get(&id).copied().unwrap_or(0);
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -263,7 +268,7 @@ impl McpServer {
                         status: row[2].clone(),
                         priority: String::new(),
                         requirement_state: None,
-                        evidence_count: 0,
+                        evidence_count,
                         descendants: 0,
                         ist_degraded_links: 0,
                         backlog_visible: false,
@@ -287,6 +292,7 @@ impl McpServer {
                     continue;
                 }
                 let id = row[0].clone();
+                let evidence_count = milestone_evidence_counts.get(&id).copied().unwrap_or(0);
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -296,7 +302,7 @@ impl McpServer {
                         status: row[2].clone(),
                         priority: String::new(),
                         requirement_state: None,
-                        evidence_count: 0,
+                        evidence_count,
                         descendants: 0,
                         ist_degraded_links: 0,
                         backlog_visible: false,
@@ -310,6 +316,36 @@ impl McpServer {
         }
 
         nodes
+    }
+
+    fn load_work_plan_evidence_counts(
+        &self,
+        project_code: &str,
+        id_prefix: &str,
+        entity_type: &str,
+    ) -> HashMap<String, usize> {
+        let query = format!(
+            "SELECT soll_entity_id, COUNT(*) FROM soll.Traceability
+             WHERE soll_entity_id LIKE '{}-{}-%'
+               AND LOWER(COALESCE(soll_entity_type, '')) = '{}'
+             GROUP BY soll_entity_id",
+            escape_sql(id_prefix),
+            escape_sql(project_code),
+            escape_sql(entity_type)
+        );
+        let Ok(raw) = self.graph_store.query_json(&query) else {
+            return HashMap::new();
+        };
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                if row.len() < 2 {
+                    return None;
+                }
+                let count = row[1].parse::<usize>().ok()?;
+                Some((row[0].clone(), count))
+            })
+            .collect()
     }
 
     fn load_work_plan_edges(&self, project_code: &str) -> Vec<(String, String)> {

@@ -1344,6 +1344,62 @@ fn test_soll_work_plan_returns_top_recommendations() {
 }
 
 #[test]
+fn test_soll_work_plan_counts_decision_evidence() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'current', '{\"acceptance_criteria\":\"Runtime truth is visible\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES ('TRC-DEC-AXO-001', 'decision', 'DEC-AXO-001', 'File', 'src/main.rs', 0.9, '{}', 1)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json", "top": 1 }
+        })),
+        id: Some(json!(507)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let top = data["top_recommendations"]
+        .as_array()
+        .expect("top recommendations");
+    let gates = top[0]["validation_gates"]
+        .as_array()
+        .expect("validation_gates");
+
+    assert_eq!(top[0]["id"].as_str(), Some("DEC-AXO-001"));
+    assert_ne!(
+        top[0]["reason"].as_str(),
+        Some("aucune evidence rattachee"),
+        "{:?}",
+        top[0]
+    );
+    assert!(
+        gates
+            .iter()
+            .all(|gate| gate.as_str() != Some("attach evidence")),
+        "{:?}",
+        top[0]
+    );
+}
+
+#[test]
 fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     let _guard = env_lock();
     std::env::remove_var("AXON_ENABLE_GRAPH_VECTORIZATION");
