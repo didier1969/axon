@@ -1209,6 +1209,18 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .get("truth_status")
         .and_then(|value| value.as_str())
         .is_some());
+    assert!(data["truth_cockpit"].as_object().is_some());
+    assert!(data["truth_cockpit"]["next_best_action"]["tool"]
+        .as_str()
+        .is_some());
+    assert!(data["truth_cockpit"]["freshness"]["state"]
+        .as_str()
+        .is_some());
+    assert!(data["truth_cockpit"]["proof_gaps"].is_array());
+    assert_eq!(
+        data["next_action"],
+        data["truth_cockpit"]["next_best_action"]
+    );
     assert_runtime_authority_roles(
         &data["runtime_authority"]["runtime_state"],
         AxonProcessRole::Indexer,

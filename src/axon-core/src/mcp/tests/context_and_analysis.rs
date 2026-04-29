@@ -355,8 +355,20 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     assert!(data["operator_guidance"]["actionable_now"].is_boolean());
     assert!(data["operator_guidance"]["blocking_factors"].is_array());
     assert!(data["operator_guidance"]["remediation_actions"].is_array());
+    assert!(data["truth_cockpit"].as_object().is_some());
+    assert!(data["truth_cockpit"]["next_best_action"]["tool"]
+        .as_str()
+        .is_some());
+    assert!(data["truth_cockpit"]["freshness"]["state"]
+        .as_str()
+        .is_some());
+    assert!(data["truth_cockpit"]["proof_gaps"].is_array());
     assert!(data["next_action"]["kind"].as_str().is_some());
     assert!(data["next_action"]["tool"].as_str().is_some());
+    assert_eq!(
+        data["next_action"],
+        data["truth_cockpit"]["next_best_action"]
+    );
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");

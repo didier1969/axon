@@ -104,6 +104,45 @@ impl McpServer {
         };
         let operator_guidance =
             project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision);
+        let next_best_action = operator_guidance
+            .get("next_action")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut proof_gaps = Vec::<Value>::new();
+        if anomaly_summary.get("validation_coverage_score").is_none() {
+            proof_gaps.push(json!("validation_coverage_unknown"));
+        }
+        if vision
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unavailable")
+            == "unavailable"
+        {
+            proof_gaps.push(json!("canonical_vision_unavailable"));
+        }
+        if snapshot_storage
+            .get("persisted")
+            .and_then(|value| value.as_bool())
+            == Some(false)
+        {
+            proof_gaps.push(json!("snapshot_storage_not_persisted"));
+        }
+        let truth_cockpit = json!({
+            "current_blocker": degraded_notes
+                .first()
+                .cloned()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            "next_best_action": next_best_action,
+            "confidence": "high",
+            "freshness": {
+                "state": if degraded_notes.is_empty() { "fresh" } else { "degraded" },
+                "degraded_notes": degraded_notes,
+                "runtime_truth_status": status_data.get("truth_status").cloned().unwrap_or(Value::Null)
+            },
+            "proof_gaps": proof_gaps,
+            "llm_instruction": "Use `next_best_action` first; if freshness is degraded, label project-wide conclusions partial and follow the named MCP tool."
+        });
         let public_tools = status_data
             .get("public_tools")
             .and_then(|value| value.as_array())
@@ -219,6 +258,7 @@ impl McpServer {
                 "vision": vision,
                 "conception": conception,
                 "runtime": runtime_data,
+                "truth_cockpit": truth_cockpit,
                 "anomalies": {
                     "summary": anomaly_summary,
                     "findings": anomalies_data.get("findings").cloned().unwrap_or_else(|| json!([])),

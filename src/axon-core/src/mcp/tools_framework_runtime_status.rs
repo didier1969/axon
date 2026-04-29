@@ -431,6 +431,20 @@ impl McpServer {
         } else {
             "degraded"
         };
+        let status_next_action = if degraded_notes.is_empty() {
+            json!({
+                "kind": "read_project_truth",
+                "tool": "project_status",
+                "when": "now"
+            })
+        } else {
+            json!({
+                "kind": "inspect_runtime_status",
+                "tool": "status",
+                "arguments": { "mode": "full" },
+                "when": "now"
+            })
+        };
         let evidence = format!(
             "**Runtime mode:** `{}`\n\
 **Runtime profile:** `{}`\n\
@@ -795,10 +809,32 @@ impl McpServer {
                 "dominant": dominant_blocking_authority
             }
         });
+        let truth_cockpit = json!({
+            "current_blocker": if degraded_notes.is_empty() {
+                Value::Null
+            } else {
+                json!(degraded_notes.first().cloned().unwrap_or_else(|| "runtime_truth_degraded".to_string()))
+            },
+            "next_best_action": status_next_action,
+            "confidence": "high",
+            "freshness": {
+                "state": if truth_status == "canonical" { "fresh" } else { "degraded" },
+                "truth_status": truth_status,
+                "degraded_notes": degraded_notes
+            },
+            "proof_gaps": if degraded_notes.is_empty() {
+                json!([])
+            } else {
+                json!(["fresh_indexed_projection"])
+            },
+            "llm_instruction": "Use `next_best_action` first; treat degraded freshness as partial truth until status(mode=\"full\") explains the blocker."
+        });
         let mut response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
                 "truth_status": truth_status,
+                "truth_cockpit": truth_cockpit,
+                "next_action": status_next_action,
                 "machine_status": machine_status,
                 "runtime_mode": runtime_mode.as_str(),
                 "runtime_profile": runtime_profile.as_str(),

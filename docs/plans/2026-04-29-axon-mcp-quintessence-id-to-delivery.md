@@ -46,7 +46,7 @@ Why: an LLM should not stitch low-level probes before acting.
 
 How: enrich `status` and `project_status` with current blocker, next best action, confidence, freshness, proof gaps and compact recovery fields.
 
-Progress: planned.
+Progress: first slice implemented and verified. `status` now exposes `truth_cockpit` with blocker, next action, freshness, proof gaps and an LLM instruction.
 
 Acceptance criteria:
 
@@ -62,7 +62,7 @@ Why: client LLMs should recover through Axon instead of wasting tokens or readin
 
 How: make every public MCP tool return compact `next_action` and `operator_guidance` for invalid arguments, empty results, degraded truth and ambiguous targets.
 
-Progress: planned.
+Progress: first slice reinforced and verified. The generic dispatcher already provides recovery guidance; `status` and `project_status` now also expose a compact cockpit-level recovery path.
 
 Acceptance criteria:
 
@@ -157,6 +157,12 @@ Acceptance criteria:
 - IST freshness is currently degraded/stale, so project-wide structural conclusions must remain labelled partial until the indexer refresh contract is healthy.
 - TensorRT artifact build is still running separately and is not yet a completed proof for vector throughput.
 
+## Implemented Slice - 2026-04-29
+
+- Added `truth_cockpit` to `status` and `project_status`.
+- Verified with targeted library tests for runtime status and project status.
+- Attached code and test evidence to `REQ-AXO-042` and `REQ-AXO-043` in SOLL.
+
 ## Next Delivery Slice
 
-The first implementation slice should be `REQ-AXO-042` plus `REQ-AXO-043`: truth cockpit and guidance engine. These two changes create the highest immediate leverage because they improve every subsequent LLM interaction with Axon.
+The next implementation slice should continue `REQ-AXO-043` across high-value public read tools, then move to `REQ-AXO-044` evidence grading. The highest observed gap is scoped retrieval quality: `retrieve_context(project_code="AXO")` can still return correlated evidence from another project, so scope adherence must become explicit in guidance and evidence states.
