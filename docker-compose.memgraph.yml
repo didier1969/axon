@@ -22,6 +22,27 @@ services:
       QUICK_CONNECT_MG_HOST: memgraph
       QUICK_CONNECT_MG_PORT: "7687"
 
+  memgraph-query-pack-loader:
+    image: "${AXON_MEMGRAPH_IMAGE:-memgraph/memgraph:3.9.0-relwithdebinfo-malloc}"
+    container_name: axon-memgraph-query-pack-loader
+    depends_on:
+      - memgraph
+    volumes:
+      - ./queries/memgraph/bootstrap/axon_query_pack.cypherl:/axon_query_pack.cypherl:ro
+    entrypoint:
+      - /bin/bash
+      - -lc
+    command:
+      - |
+        for attempt in $$(seq 1 60); do
+          if mgconsole --host memgraph --port 7687 --use-ssl=false < /axon_query_pack.cypherl; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "failed to install Axon Memgraph prepared query pack" >&2
+        exit 1
+
 volumes:
   axon_memgraph_data:
   axon_memgraph_log:

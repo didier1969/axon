@@ -13,9 +13,11 @@ Commands:
   start                         Start Memgraph + Lab with Docker Compose
   stop                          Stop Memgraph + Lab
   status                        Show Docker Compose status
+  build-query-pack [--out FILE]  Build the standalone Lab-visible PreparedQuery bootstrap file
   build-import --publication-dir DIR [--out FILE] [--batch-size N]
   validate --publication-dir DIR [--require-import-file]
   load --publication-dir DIR     Load generated memgraph_import.cypherl through mgconsole container
+  query-pack-status              Show installed PreparedQuery pack count from active Memgraph
   smoke-queries [--query-dir DIR] [--mode explain|execute]
                                 Validate the prepared human query pack; default is compact EXPLAIN
 
@@ -36,6 +38,8 @@ shift || true
 case "$cmd" in
   start)
     need_docker
+    python3 "$SCRIPT_DIR/memgraph_build_query_pack.py" \
+      --out "$ROOT_DIR/queries/memgraph/bootstrap/axon_query_pack.cypherl" >/dev/null
     exec docker compose -f "$COMPOSE_FILE" up -d
     ;;
   stop)
@@ -51,6 +55,9 @@ case "$cmd" in
     ;;
   validate)
     exec python3 "$SCRIPT_DIR/memgraph_validate_publication.py" "$@"
+    ;;
+  build-query-pack)
+    exec python3 "$SCRIPT_DIR/memgraph_build_query_pack.py" "$@"
     ;;
   load)
     need_docker
@@ -98,6 +105,14 @@ case "$cmd" in
       cat "$load_out" >&2
       exit 1
     done
+    ;;
+  query-pack-status)
+    need_docker
+    docker run --rm -i --network container:axon-memgraph "${AXON_MGCONSOLE_IMAGE:-memgraph/mgconsole:1.5.0}" <<'CYPHER'
+MATCH (p:PreparedQueryPack)
+OPTIONAL MATCH (p)-[:HAS_PREPARED_QUERY]->(q:PreparedQuery)
+RETURN p.id AS pack_id, p.publication_id AS publication_id, count(q) AS installed_prepared_queries;
+CYPHER
     ;;
   smoke-queries)
     need_docker

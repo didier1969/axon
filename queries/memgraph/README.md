@@ -28,6 +28,11 @@ Validate the prepared query pack against the active Memgraph runtime with:
 ./scripts/axon memgraph smoke-queries
 ```
 
+`./scripts/axon memgraph start` also builds `queries/memgraph/bootstrap/axon_query_pack.cypherl`
+and starts a one-shot `memgraph-query-pack-loader` service. This installs the `PreparedQueryPack`
+and all `PreparedQuery` nodes at container launch, so Memgraph Lab can discover the prepared
+catalog immediately by running `prepared_queries.cypher`.
+
 The default smoke mode runs compact `EXPLAIN` checks for every top-level and `catalog/` query. Use `--mode execute` only when full result execution is intentionally needed.
 
 The generated import drops indexes before replacing graph data, then recreates navigation indexes for common human lookup paths. This keeps repeated publication loads idempotent and avoids paying index-maintenance cost during the bulk delete:

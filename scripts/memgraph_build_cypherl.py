@@ -182,10 +182,15 @@ def direct_all_projects_cypher(cypher: str) -> str:
 def query_usage(cypher: str) -> str:
     if "$project_code" in cypher:
         target_note = " Set target when required." if "$target" in cypher else ""
+        target_fallback = (
+            " If target is required and parameters are unavailable, replace $target manually."
+            if "$target" in cypher
+            else ""
+        )
         return (
             "Memgraph Lab: set parameter project_code to a project code, or empty/null for all projects. "
             "If Lab parameters are unavailable, run cypher_all_projects directly or replace $project_code manually."
-            f"{target_note} If target is required and parameters are unavailable, replace $target manually."
+            f"{target_note}{target_fallback}"
         )
     if "$target" in cypher:
         return "Memgraph Lab: set target to an id, path, title, name, or symbol fragment before running."
@@ -200,6 +205,7 @@ def prepared_query_rows(query_dir: Path, publication_id: str) -> list[dict[str, 
     for rank, path in enumerate(query_files, start=1):
         name = path.stem
         cypher = path.read_text(encoding="utf-8").strip()
+        source_path = path.relative_to(query_dir).as_posix()
         rows.append(
             {
                 "id": f"prepared_query:{name}",
@@ -210,7 +216,7 @@ def prepared_query_rows(query_dir: Path, publication_id: str) -> list[dict[str, 
                 "cypher_all_projects": direct_all_projects_cypher(cypher),
                 "parameters": query_parameters(cypher),
                 "usage": query_usage(cypher),
-                "path": str(path),
+                "path": source_path,
                 "rank": rank,
                 "publication_id": publication_id,
                 "human_only": True,
@@ -330,6 +336,40 @@ def build_import(
         "relations": relations,
     }
     return summary
+
+
+def build_query_pack(query_dir: Path, out_path: Path, publication_id: str = "standalone") -> dict[str, Any]:
+    query_rows = prepared_query_rows(query_dir, publication_id)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as out:
+        out.write("// Copyright (c) Didier Stadelmann. All rights reserved.\n")
+        out.write("// Generated Axon Memgraph human query pack. Do not edit by hand.\n")
+        out.write("MATCH (q:PreparedQuery) DETACH DELETE q;\n\n")
+        out.write("MATCH (p:PreparedQueryPack) DETACH DELETE p;\n\n")
+        out.write(
+            "CREATE (:PreparedQueryPack {id: 'axon_memgraph_query_pack', name: 'Axon Memgraph Query Pack', "
+            f"publication_id: {cypher_string(publication_id)}, human_only: true, "
+            "llm_contract: 'use_axon_mcp_not_memgraph'});\n\n"
+        )
+        if query_rows:
+            write_batch(
+                out,
+                "UNWIND ",
+                query_rows,
+                "AS row CREATE (q:PreparedQuery) SET q += row;",
+            )
+            out.write(
+                "MATCH (p:PreparedQueryPack {id: 'axon_memgraph_query_pack'}), (q:PreparedQuery) "
+                "CREATE (p)-[:HAS_PREPARED_QUERY]->(q);\n\n"
+            )
+        out.write("MATCH (q:PreparedQuery) RETURN count(q) AS installed_prepared_queries;\n")
+
+    return {
+        "output": str(out_path),
+        "prepared_queries": len(query_rows),
+        "query_dir": str(query_dir),
+        "publication_id": publication_id,
+    }
 
 
 def main() -> int:
