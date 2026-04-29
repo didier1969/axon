@@ -16,7 +16,7 @@ Commands:
   build-import --publication-dir DIR [--out FILE] [--batch-size N]
   validate --publication-dir DIR [--require-import-file]
   load --publication-dir DIR     Load generated memgraph_import.cypherl through mgconsole container
-  smoke-queries [--query-dir DIR] Execute the prepared human query pack
+  smoke-queries [--query-dir DIR] Validate the prepared human query pack with compact EXPLAIN checks
 
 This is a human-only visualization path. LLM clients must use Axon MCP.
 USAGE
@@ -84,6 +84,7 @@ case "$cmd" in
   smoke-queries)
     need_docker
     query_dir="$ROOT_DIR/queries/memgraph"
+    smoke_mode="explain"
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --query-dir)
@@ -92,6 +93,14 @@ case "$cmd" in
           ;;
         --query-dir=*)
           query_dir="${1#*=}"
+          shift
+          ;;
+        --mode)
+          smoke_mode="${2:-}"
+          shift 2
+          ;;
+        --mode=*)
+          smoke_mode="${1#*=}"
           shift
           ;;
         *)
@@ -105,18 +114,47 @@ case "$cmd" in
       echo "query directory does not exist: $query_dir" >&2
       exit 1
     fi
+    if [[ "$smoke_mode" != "explain" && "$smoke_mode" != "execute" ]]; then
+      echo "smoke-queries --mode must be explain or execute" >&2
+      exit 1
+    fi
     shopt -s nullglob
-    query_files=("$query_dir"/*.cypher)
+    query_files=("$query_dir"/*.cypher "$query_dir"/catalog/*.cypher)
     if [[ ${#query_files[@]} -eq 0 ]]; then
       echo "no .cypher query files found in $query_dir" >&2
       exit 1
     fi
+    tmp_query="$(mktemp /tmp/axon_memgraph_query_smoke.XXXXXX.cypher)"
+    tmp_out="$(mktemp /tmp/axon_memgraph_query_smoke.XXXXXX.out)"
+    trap 'rm -f "$tmp_query" "$tmp_out"' EXIT
     for query_file in "${query_files[@]}"; do
-      echo "running $(basename "$query_file")"
-      docker run --rm -i --network container:axon-memgraph "${AXON_MGCONSOLE_IMAGE:-memgraph/mgconsole:1.5.0}" < "$query_file" >/tmp/axon_memgraph_query_smoke.out
-      tail -n 3 /tmp/axon_memgraph_query_smoke.out
+      rel_path="${query_file#$query_dir/}"
+      python3 - "$query_file" "$tmp_query" "$smoke_mode" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+mode = sys.argv[3]
+query = "\n".join(
+    line for line in source.read_text(encoding="utf-8").splitlines()
+    if not line.lstrip().startswith("//")
+).strip()
+query = (
+    query
+    .replace("$project_code", '""')
+    .replace("$target", '"Axon"')
+    .replace("$min_degree", "25")
+    .replace("$limit", "100")
+)
+if mode == "explain":
+    query = "EXPLAIN " + query
+target.write_text(query + "\n", encoding="utf-8")
+PY
+      docker run --rm -i --network container:axon-memgraph "${AXON_MGCONSOLE_IMAGE:-memgraph/mgconsole:1.5.0}" < "$tmp_query" >"$tmp_out"
+      echo "ok $rel_path"
     done
-    echo "memgraph query pack smoke passed (${#query_files[@]} queries)"
+    echo "memgraph query pack smoke passed (${#query_files[@]} queries, mode=$smoke_mode)"
     ;;
   -h|--help|help|"")
     usage

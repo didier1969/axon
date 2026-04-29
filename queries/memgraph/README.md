@@ -28,6 +28,14 @@ Validate the prepared query pack against the active Memgraph runtime with:
 ./scripts/axon memgraph smoke-queries
 ```
 
+The default smoke mode runs compact `EXPLAIN` checks for every top-level and `catalog/` query. Use `--mode execute` only when full result execution is intentionally needed.
+
+The generated import drops and recreates navigation indexes for common human lookup paths, so repeated publication loads do not accumulate duplicate index entries:
+
+- `AxonNode`: `id`, `project_code`, `path`, `title`, `name`, `symbol`, `kind`, `status`.
+- Common labels: `File`, `Symbol`, `Requirement`, `Decision`, `Validation`, `Evidence`, `UnresolvedEndpoint`.
+- Query catalog: `PreparedQuery.name` and `PreparedQuery.rank`.
+
 ## Queries
 
 Start inside Memgraph Lab with `prepared_queries.cypher`. It lists every installed query, including parameterized catalog queries.

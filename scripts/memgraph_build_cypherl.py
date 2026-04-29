@@ -104,7 +104,7 @@ QUERY_DESCRIPTIONS = {
     "orphan_soll_nodes": "SOLL requirements, decisions, and validations that are isolated from the intent graph.",
     "overview": "Node label and relationship inventory for the active projection.",
     "prepared_queries": "List the installed Axon prepared query catalog.",
-    "project_code_inventory": "Available project codes with node and relationship counts.",
+    "project_code_inventory": "Available project codes with label-scoped node counts.",
     "project_dashboard": "Per-project node inventory across IST and SOLL labels.",
     "project_entry_points": "Files with many symbols and graph connections, useful as human entry points.",
     "project_health_scoreboard": "Project-level graph health scoreboard for files, symbols, intent, evidence, and unresolved endpoints.",
@@ -119,6 +119,43 @@ QUERY_DESCRIPTIONS = {
     "unresolved_endpoints": "Referenced graph endpoints that were not materialized as canonical nodes.",
     "why_unresolved_endpoint": "Explain unresolved endpoints through connected source nodes and relation types.",
 }
+
+
+MEMGRAPH_INDEXES = [
+    ("AxonNode", "id"),
+    ("AxonNode", "project_code"),
+    ("AxonNode", "path"),
+    ("AxonNode", "title"),
+    ("AxonNode", "name"),
+    ("AxonNode", "symbol"),
+    ("AxonNode", "kind"),
+    ("AxonNode", "status"),
+    ("File", "project_code"),
+    ("File", "path"),
+    ("File", "status"),
+    ("Symbol", "project_code"),
+    ("Symbol", "title"),
+    ("Symbol", "kind"),
+    ("Requirement", "project_code"),
+    ("Decision", "project_code"),
+    ("Validation", "project_code"),
+    ("Evidence", "project_code"),
+    ("UnresolvedEndpoint", "project_code"),
+    ("PreparedQuery", "name"),
+    ("PreparedQuery", "rank"),
+]
+
+
+def write_indexes(out) -> None:
+    for label, property_name in MEMGRAPH_INDEXES:
+        out.write(f"CREATE INDEX ON :{label}({property_name});\n")
+    out.write("\n")
+
+
+def write_drop_indexes(out) -> None:
+    for label, property_name in MEMGRAPH_INDEXES:
+        out.write(f"DROP INDEX ON :{label}({property_name});\n")
+    out.write("\n")
 
 
 def query_parameters(cypher: str) -> str:
@@ -204,7 +241,8 @@ def build_import(
     with out_path.open("w", encoding="utf-8") as out:
         if not keep_existing:
             out.write("MATCH (n) DETACH DELETE n;\n\n")
-        out.write("CREATE INDEX ON :AxonNode(id);\n\n")
+        write_drop_indexes(out)
+        write_indexes(out)
 
         node_batches: dict[str, list[dict[str, Any]]] = {}
         for row in iter_rows(nodes_path):

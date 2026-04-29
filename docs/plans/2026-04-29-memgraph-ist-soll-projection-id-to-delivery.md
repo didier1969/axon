@@ -73,9 +73,12 @@ Smoke validation on 2026-04-29:
 - manifest: `/tmp/axon-memgraph-publications/smoke-20260429-all-projects-v4/manifest.json`
 - validation status: `ok`
 - runtime import status: Memgraph loaded successfully with `489471` nodes and `380013` edges
-- query pack status: `./scripts/axon memgraph smoke-queries` passed for all prepared queries
+- query pack status: `./scripts/axon memgraph smoke-queries` passed for all `27` prepared queries in compact `EXPLAIN` mode
+- query execution status: `./scripts/axon memgraph smoke-queries --mode execute` passed for all `27` prepared queries after index installation and query-shape cleanup
 - query catalog status: `27` prepared queries are installed as `PreparedQuery` nodes inside Memgraph Lab
 - query catalog compatibility: full catalog `EXPLAIN` validation passed against Memgraph 3.9.0
+- index status: the generated import drops and recreates lookup indexes for `AxonNode` ids, project scope, common file/symbol/title fields, common IST/SOLL labels, and the `PreparedQuery` catalog so repeated publication loads remain idempotent
+- performance correction: the project inventory and health scoreboard queries avoid large `collect(n)` materialization and avoid per-project full edge rescans; relationship inventory remains available through `project_relationships`
 
 Important correction:
 - Memgraph is a global human visualization surface for all project graphs.
@@ -106,6 +109,7 @@ Status: implemented as Parquet-to-Cypher adapter.
 Delivered:
 - `scripts/memgraph_build_cypherl.py` reads `nodes.parquet` and `edges.parquet`
 - generates batch `UNWIND` Cypher
+- creates Memgraph indexes for human navigation and prepared-query lookup
 - preserves dynamic labels and relationship types with safe identifier normalization
 - marks all imported entities `human_only=true` and carries `publication_id`
 - keeps all projects by default so humans can inspect the full IST/SOLL graph estate
@@ -158,6 +162,9 @@ Delivered:
 - `./scripts/axon memgraph smoke-queries`
 - query catalog materialized in Memgraph through `PreparedQuery` nodes
 - catalog coverage includes project inventory, project dashboard, relationship inventory, health scoreboard, readiness/drift signals, hot files, hot symbols, high-degree nodes, unresolved endpoint analysis, SOLL coverage/risk, traceability gaps, target context, evidence inventory, and cross-project links
+- default smoke behavior validates top-level and `catalog/` Cypher with parameter substitution and compact output to avoid LLM-context flooding
+- execution smoke exposed expensive all-project query shapes; project inventory and health scoreboard were rewritten to stream aggregates instead of collecting full project node sets
+- execution smoke exposed a Memgraph ordering incompatibility on list-valued `labels(n)`; `traceability_gaps` now projects a scalar intent label before sorting
 
 Exit criteria:
 - every prepared query executes against the active projection
