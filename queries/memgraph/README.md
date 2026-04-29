@@ -30,8 +30,30 @@ Validate the prepared query pack against the active Memgraph runtime with:
 
 ## Queries
 
+Start inside Memgraph Lab with `prepared_queries.cypher`. It lists every installed query, including parameterized catalog queries.
+
+Each installed `PreparedQuery` carries:
+
+- `cypher`: parameterized template, for example with `project_code`.
+- `parameters`: compact parameter contract.
+- `usage`: how to run it in Memgraph Lab.
+- `cypher_all_projects`: direct all-projects variant when Lab parameters are inconvenient.
+
 - `overview.cypher`: compact node/edge inventory.
+- `prepared_queries.cypher`: list the installed query catalog inside Memgraph Lab.
 - `soll_decisions.cypher`: current SOLL decision map.
 - `requirement_coverage.cypher`: requirement to decision/validation/evidence coverage.
 - `ist_soll_traceability.cypher`: SOLL intent to supporting evidence paths.
 - `hot_files.cypher`: graph-ready/vector-ready file overview for human inspection.
+
+Additional parameterized query templates live under `queries/memgraph/catalog/` and are installed into Memgraph as `PreparedQuery` nodes.
+Most catalog templates accept `project_code`; use an empty string for all projects.
+
+Recommended Lab flow:
+
+1. Run `prepared_queries.cypher`.
+2. Run `project_code_inventory` to see available projects.
+3. Copy the `cypher` field for a focused query and set `project_code`, or copy `cypher_all_projects` for the full estate.
+4. Use `trace_target_context` for a known id/path/title/symbol fragment.
+
+The query pack is intentionally human-only. LLM clients must continue to use Axon MCP, which carries compact guidance, degraded-state semantics, and canonical recovery paths.

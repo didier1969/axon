@@ -74,6 +74,8 @@ Smoke validation on 2026-04-29:
 - validation status: `ok`
 - runtime import status: Memgraph loaded successfully with `489471` nodes and `380013` edges
 - query pack status: `./scripts/axon memgraph smoke-queries` passed for all prepared queries
+- query catalog status: `27` prepared queries are installed as `PreparedQuery` nodes inside Memgraph Lab
+- query catalog compatibility: full catalog `EXPLAIN` validation passed against Memgraph 3.9.0
 
 Important correction:
 - Memgraph is a global human visualization surface for all project graphs.
@@ -109,6 +111,8 @@ Delivered:
 - keeps all projects by default so humans can inspect the full IST/SOLL graph estate
 - materializes `UnresolvedEndpoint` nodes for edge endpoints that are referenced but not present as canonical source nodes
 - deduplicates nodes by `id` before export so edge imports do not multiply through duplicate node matches
+- installs the prepared query pack as `PreparedQuery` nodes, linked from `PreparedQueryPack`, so humans can access query text directly in Memgraph Lab
+- each `PreparedQuery` carries `parameters`, `usage`, `cypher`, and `cypher_all_projects` so Lab users can either bind parameters or run an all-projects variant directly
 
 Exit criteria:
 - generated import file validates structurally
@@ -152,6 +156,8 @@ Deliver:
 
 Delivered:
 - `./scripts/axon memgraph smoke-queries`
+- query catalog materialized in Memgraph through `PreparedQuery` nodes
+- catalog coverage includes project inventory, project dashboard, relationship inventory, health scoreboard, readiness/drift signals, hot files, hot symbols, high-degree nodes, unresolved endpoint analysis, SOLL coverage/risk, traceability gaps, target context, evidence inventory, and cross-project links
 
 Exit criteria:
 - every prepared query executes against the active projection
