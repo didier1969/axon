@@ -30,7 +30,7 @@ Validate the prepared query pack against the active Memgraph runtime with:
 
 The default smoke mode runs compact `EXPLAIN` checks for every top-level and `catalog/` query. Use `--mode execute` only when full result execution is intentionally needed.
 
-The generated import drops and recreates navigation indexes for common human lookup paths, so repeated publication loads do not accumulate duplicate index entries:
+The generated import drops indexes before replacing graph data, then recreates navigation indexes for common human lookup paths. This keeps repeated publication loads idempotent and avoids paying index-maintenance cost during the bulk delete:
 
 - `AxonNode`: `id`, `project_code`, `path`, `title`, `name`, `symbol`, `kind`, `status`.
 - Common labels: `File`, `Symbol`, `Requirement`, `Decision`, `Validation`, `Evidence`, `UnresolvedEndpoint`.

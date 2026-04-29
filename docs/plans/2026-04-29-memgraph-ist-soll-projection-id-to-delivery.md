@@ -77,7 +77,8 @@ Smoke validation on 2026-04-29:
 - query execution status: `./scripts/axon memgraph smoke-queries --mode execute` passed for all `27` prepared queries after index installation and query-shape cleanup
 - query catalog status: `27` prepared queries are installed as `PreparedQuery` nodes inside Memgraph Lab
 - query catalog compatibility: full catalog `EXPLAIN` validation passed against Memgraph 3.9.0
-- index status: the generated import drops and recreates lookup indexes for `AxonNode` ids, project scope, common file/symbol/title fields, common IST/SOLL labels, and the `PreparedQuery` catalog so repeated publication loads remain idempotent
+- index status: the generated import drops lookup indexes before replacing graph data, then recreates indexes for `AxonNode` ids, project scope, common file/symbol/title fields, common IST/SOLL labels, and the `PreparedQuery` catalog so repeated publication loads remain idempotent and bulk delete cost stays bounded
+- loader hardening: `./scripts/axon memgraph load` retries transient Memgraph `storage.access_timeout` failures during index operations before failing the publication load
 - performance correction: the project inventory and health scoreboard queries avoid large `collect(n)` materialization and avoid per-project full edge rescans; relationship inventory remains available through `project_relationships`
 
 Important correction:

@@ -16,7 +16,8 @@ Commands:
   build-import --publication-dir DIR [--out FILE] [--batch-size N]
   validate --publication-dir DIR [--require-import-file]
   load --publication-dir DIR     Load generated memgraph_import.cypherl through mgconsole container
-  smoke-queries [--query-dir DIR] Validate the prepared human query pack with compact EXPLAIN checks
+  smoke-queries [--query-dir DIR] [--mode explain|execute]
+                                Validate the prepared human query pack; default is compact EXPLAIN
 
 This is a human-only visualization path. LLM clients must use Axon MCP.
 USAGE
@@ -79,7 +80,24 @@ case "$cmd" in
     if [[ ! -f "$import_file" ]]; then
       python3 "$SCRIPT_DIR/memgraph_build_cypherl.py" --publication-dir "$publication_dir" --out "$import_file"
     fi
-    docker run --rm -i --network container:axon-memgraph "${AXON_MGCONSOLE_IMAGE:-memgraph/mgconsole:1.5.0}" < "$import_file"
+    load_out="$(mktemp /tmp/axon_memgraph_load.XXXXXX.out)"
+    trap 'rm -f "$load_out"' EXIT
+    max_attempts="${AXON_MEMGRAPH_LOAD_ATTEMPTS:-3}"
+    attempt=1
+    while true; do
+      if docker run --rm -i --network container:axon-memgraph "${AXON_MGCONSOLE_IMAGE:-memgraph/mgconsole:1.5.0}" < "$import_file" >"$load_out" 2>&1; then
+        cat "$load_out"
+        break
+      fi
+      if grep -q "storage.access_timeout" "$load_out" && [[ "$attempt" -lt "$max_attempts" ]]; then
+        echo "Memgraph storage access timeout during load; retrying ($attempt/$max_attempts)..." >&2
+        sleep 5
+        attempt=$((attempt + 1))
+        continue
+      fi
+      cat "$load_out" >&2
+      exit 1
+    done
     ;;
   smoke-queries)
     need_docker

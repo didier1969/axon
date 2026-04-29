@@ -239,9 +239,9 @@ def build_import(
     query_rows = prepared_query_rows(query_dir, manifest["publication_id"])
 
     with out_path.open("w", encoding="utf-8") as out:
+        write_drop_indexes(out)
         if not keep_existing:
             out.write("MATCH (n) DETACH DELETE n;\n\n")
-        write_drop_indexes(out)
         write_indexes(out)
 
         node_batches: dict[str, list[dict[str, Any]]] = {}
