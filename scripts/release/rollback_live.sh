@@ -108,7 +108,7 @@ export PENDING_MANIFEST="$pending_manifest"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would roll back live using manifest $MANIFEST_PATH"
-  echo "DRY RUN: topology=split release_version=$release_version build_id=$build_id install_generation=$install_generation"
+  echo "DRY RUN: runtime_contract=brain_mcp_indexer_ist release_version=$release_version build_id=$build_id install_generation=$install_generation"
   exit 0
 fi
 

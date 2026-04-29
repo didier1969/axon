@@ -43,8 +43,8 @@ while [[ $# -gt 0 ]]; do
 Usage: bash scripts/qualify-dev-cold.sh [--duration N] [--interval N] [--label NAME] [extra qualify args...]
 
 Runs a cold dev qualification:
-- reset the dev split baseline
-- attach qualification to the converged split runtime through brain shadow
+- reset the dev brain+indexer baseline
+- attach qualification to the converged runtime authority contract through brain MCP
 - archive the run under .axon/qualification-runs
 EOF
             exit 0

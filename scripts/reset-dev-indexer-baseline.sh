@@ -11,7 +11,7 @@ Usage: bash scripts/reset-dev-indexer-baseline.sh
 
 Reset the dev runtime into an indexer-only stable, measurable baseline:
 - stop brain/indexer
-- clean IST dev artifacts and split run roots
+- clean IST dev artifacts and runtime role run roots
 - start indexer only
 - wait for an indexer-only stable measurement window:
   - indexer healthy and canonical
@@ -26,10 +26,10 @@ fi
 
 dev_baseline_require_dev_instance
 
-echo "[reset-dev-indexer-baseline] stopping split runtimes"
+echo "[reset-dev-indexer-baseline] stopping dev runtime roles"
 dev_baseline_stop_split
 
-echo "[reset-dev-indexer-baseline] cleaning dev IST and split run roots"
+echo "[reset-dev-indexer-baseline] cleaning dev IST and runtime role run roots"
 dev_baseline_clean_state
 
 echo "[reset-dev-indexer-baseline] starting indexer"

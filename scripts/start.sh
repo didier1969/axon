@@ -316,11 +316,6 @@ while [[ $# -gt 0 ]]; do
             RUNTIME_MODE="indexer_full"
             RUNTIME_SHADOW_ROLE="indexer"
             ;;
-        --split)
-            echo "❌ Split orchestration is not started through scripts/start.sh."
-            echo "   Use scripts/start-brain.sh and scripts/start-indexer.sh or the higher-level split orchestration command."
-            exit 1
-            ;;
         --no-dashboard)
             START_DASHBOARD=0
             ;;
@@ -472,13 +467,13 @@ if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/s
     -type f \( -name '*.rs' -o -name 'Cargo.toml' \) \
     -newer "$SELECTED_DEBUG_RUNTIME_BIN" -print -quit | grep -q .; then
     echo "⚠️ Detected newer axon-core sources than $SELECTED_DEBUG_RUNTIME_BIN"
-    echo "   Rebuilding selected split runtime binary..."
+    echo "   Rebuilding selected runtime role binary..."
     if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-core' && cargo build --bin $RUNTIME_EXECUTABLE_NAME --release"; then
         echo "❌ Failed to rebuild $RUNTIME_EXECUTABLE_NAME"
         exit 1
     fi
     if [[ "$AXON_INSTANCE_KIND" == "live" && -n "$SELECTED_RELEASE_RUNTIME_BIN" && -f "$SELECTED_RELEASE_RUNTIME_BIN" ]]; then
-        echo "🔄 Updating live $RUNTIME_EXECUTABLE from rebuilt split runtime artifact..."
+        echo "🔄 Updating live $RUNTIME_EXECUTABLE from rebuilt runtime role artifact..."
         mkdir -p "$(dirname "$RUNTIME_EXECUTABLE")"
         install -m 755 "$SELECTED_RELEASE_RUNTIME_BIN" "$RUNTIME_EXECUTABLE"
     fi

@@ -9,9 +9,9 @@ usage() {
     cat <<'EOF'
 Usage: bash scripts/reset-dev-baseline.sh
 
-Reset the dev split runtime into a stable, measurable baseline:
+Reset dev brain+indexer into a stable, measurable baseline:
 - stop brain/indexer
-- clean IST dev artifacts and split run roots
+- clean IST dev artifacts and runtime role run roots
 - restart brain/indexer
 - wait for a stable measurement window:
   - brain healthy and attached to indexer feed
@@ -26,10 +26,10 @@ fi
 
 dev_baseline_require_dev_instance
 
-echo "[reset-dev-baseline] stopping split runtimes"
+echo "[reset-dev-baseline] stopping dev runtime roles"
 dev_baseline_stop_split
 
-echo "[reset-dev-baseline] cleaning dev IST and split run roots"
+echo "[reset-dev-baseline] cleaning dev IST and runtime role run roots"
 dev_baseline_clean_state
 
 echo "[reset-dev-baseline] starting brain"

@@ -390,10 +390,8 @@ def bool_text(value):
     return "unknown"
 
 print("ROLE    indexer")
-print(f"SPLIT_ONLY {shadow_only}")
 print(f"INSTANCE {instance}")
 print("REACTIVATION default")
-print(f"TOPOLOGY {contract_topology}")
 print(f"process_role={contract_process_role}")
 print(f"public_mcp_authority={contract_public_mcp_authority}")
 print(f"soll_writer_authority={contract_soll_writer_authority}")
@@ -547,10 +545,10 @@ rollback_path_state = "green" if canonical_truth_restored else "red"
 promotion_allowed = canonical_truth_restored
 
 print("ROLE    brain")
-print(f"SPLIT_ONLY {shadow_only}")
+print(f"runtime_shadow_only={shadow_only}")
 print(f"INSTANCE {instance}")
 print("REACTIVATION default")
-print(f"TOPOLOGY {contract_topology}")
+print(f"runtime_contract={contract_process_role}_role_authority")
 print(f"process_role={contract_process_role}")
 print(f"public_mcp_authority={contract_public_mcp_authority}")
 print(f"soll_writer_authority={contract_soll_writer_authority}")
@@ -776,10 +774,10 @@ cutover_blocked = "true" if not promotion_allowed else "false"
 truth_status = "canonical" if canonical_truth_restored else "degraded"
 
 print(f"ROLE    {role}")
-print(f"SPLIT_ONLY {shadow_only}")
+print(f"runtime_shadow_only={shadow_only}")
 print(f"INSTANCE {instance}")
 print(f"REACTIVATION {os.environ.get('AXON_RUNTIME_REACTIVATION_PATH', 'default')}")
-print("TOPOLOGY " + topology_name)
+print(f"runtime_contract={process_role}_role_authority")
 print(f"process_role={process_role}")
 print(f"public_mcp_authority={public_mcp_authority}")
 print(f"soll_writer_authority={soll_writer_authority}")
@@ -819,7 +817,7 @@ main() {
   printf "WORKERS  %s\n" "${MAX_AXON_WORKERS:-auto}"
   printf "QUEUE    %s\n" "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
   printf "WATCHER  %s\n" "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-auto}"
-  printf "SPLIT   role=%s shadow_only=%s\n" "$(status_mode_label)" "$STATUS_SHADOW_ONLY"
+  printf "ROLE     %s\n" "$(status_mode_label)"
   printf "VERSION  %s\n" "${AXON_RELEASE_VERSION:-unknown}"
   printf "BUILD    %s\n" "${AXON_BUILD_ID:-unknown}"
   printf "GEN      %s\n" "${AXON_INSTALL_GENERATION:-unknown}"

@@ -24,7 +24,7 @@ One-shot promotion flow:
   4. Promote live with restart and MCP runtime post-check
   5. Run core MCP qualification and final live status
 
-Live promotion always builds the standard brain MCP + indexer topology.
+Live promotion always builds the brain MCP + indexer authority contract.
 EOF
 }
 
@@ -61,7 +61,7 @@ run_step() {
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would promote current HEAD via safe one-shot flow"
-  echo "DRY RUN: project=$PROJECT_CODE topology=split head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY"
+  echo "DRY RUN: project=$PROJECT_CODE runtime_contract=brain_mcp_indexer_ist head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY"
   exit 0
 fi
 

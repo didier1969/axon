@@ -16,16 +16,15 @@ START_DASHBOARD=1
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/upgrade-topology.sh [--brain-only|--indexer-graph|--indexer-vector|--indexer-full|--split] [--no-dashboard]
+Usage: ./scripts/upgrade-topology.sh [--brain-only|--indexer-graph|--indexer-vector|--indexer-full] [--no-dashboard]
 
 Behavior:
-  Starts only the missing complement/runtime needed to reach the requested target.
+  Legacy alias: starts only the missing runtime role needed for the requested mode.
   It does not stop a running brain or indexer.
 
 Examples:
   ./scripts/upgrade-topology.sh --indexer-full
   ./scripts/upgrade-topology.sh --brain-only
-  ./scripts/upgrade-topology.sh --split
 EOF
 }
 
@@ -42,9 +41,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --indexer-full|--indexerfull)
       TARGET_MODE="indexer_full"
-      ;;
-    --split)
-      TARGET_MODE="split"
       ;;
     --no-dashboard)
       START_DASHBOARD=0
@@ -63,7 +59,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET_MODE" ]]; then
-  echo "❌ Missing target topology/mode." >&2
+  echo "❌ Missing target runtime mode." >&2
   usage >&2
   exit 1
 fi

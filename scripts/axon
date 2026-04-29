@@ -14,13 +14,13 @@ Commands:
   setup                    Bootstrap environment and build artifacts
   setup-tensorrt           Build/validate the local TensorRT ORT artifact, optionally qualify it
   start [mode options]     Start runtime (supports --brain-only|--indexer-graph|--indexer-vector|--indexer-full|--no-dashboard)
-  upgrade-topology [opts]  Start only the missing complement/runtime needed to reach a target topology
+  upgrade-topology [opts]  Legacy alias: start missing runtime role(s) for the authority contract
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
-  reset-dev-baseline       Reset the dev split runtime into a stable measurable baseline
+  reset-dev-baseline       Reset dev brain+indexer into a stable measurable baseline
   reset-dev-indexer-baseline Reset the dev runtime into an indexer-only measurable baseline
-  qualify-dev-cold [args...] Reset dev and run a cold split qualification
+  qualify-dev-cold [args...] Reset dev and run a cold brain+indexer qualification
   qualify-dev-indexer-cold [args...] Reset dev and run a cold indexer-only qualification
   qualify-dev-indexer-tensorrt-cold [args...] Reset dev and run a cold indexer-only TensorRT-service qualification
   build-and-qualify-tensorrt-cold [args...] Build TensorRT ORT from local tarball, validate it, then run cold TensorRT qualification
@@ -62,7 +62,6 @@ Examples:
   ./scripts/axon start --brain-only
   ./scripts/axon start --indexer-graph
   ./scripts/axon upgrade-topology --indexer-full
-  ./scripts/axon upgrade-topology --split
   ./scripts/axon stop --hard
   ./scripts/axon restart --brain-only
   ./scripts/axon status
