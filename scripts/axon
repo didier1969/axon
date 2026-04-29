@@ -48,6 +48,8 @@ Commands:
   resume-vectorization [args...] Requeue missing chunk vectorization from graph-ready files
   migrate-ignore [args...] Migrate .axonignore patterns to .gitignore (dry-run by default)
   reindex-project [args...] Reindex one project with before/after noise evaluation
+  publish-memgraph [args...] Publish human-only IST/SOLL graph projection as versioned Parquet
+  memgraph [args...]         Manage human-only Memgraph projection runtime/import
 
 Examples:
   ./scripts/axon-live status
@@ -104,6 +106,9 @@ Examples:
   ./scripts/axon resume-vectorization
   ./scripts/axon migrate-ignore --root "$(cd .. && pwd)" --apply
   ./scripts/axon reindex-project --project BookingSystem --wait-seconds 180
+  ./scripts/axon publish-memgraph
+  ./scripts/axon memgraph build-import --publication-dir .axon/memgraph/publications/pub-...
+  ./scripts/axon memgraph smoke-queries
 USAGE
 }
 
@@ -326,6 +331,12 @@ EOF
     ;;
   reindex-project)
     exec python3 "$SCRIPT_DIR/reindex_project.py" "$@"
+    ;;
+  publish-memgraph)
+    exec bash "$SCRIPT_DIR/publish-memgraph.sh" "$@"
+    ;;
+  memgraph)
+    exec bash "$SCRIPT_DIR/memgraph-projection.sh" "$@"
     ;;
   -h|--help|help)
     usage

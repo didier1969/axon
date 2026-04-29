@@ -1,0 +1,27 @@
+services:
+  memgraph:
+    image: "${AXON_MEMGRAPH_IMAGE:-memgraph/memgraph:3.9.0-relwithdebinfo-malloc}"
+    container_name: axon-memgraph
+    command:
+      - "--log-level=WARNING"
+      - "--query-execution-timeout-sec=600"
+    ports:
+      - "${AXON_MEMGRAPH_BOLT_PORT:-7687}:7687"
+    volumes:
+      - axon_memgraph_data:/var/lib/memgraph
+      - axon_memgraph_log:/var/log/memgraph
+
+  memgraph-lab:
+    image: "${AXON_MEMGRAPH_LAB_IMAGE:-memgraph/lab:3.9.0}"
+    container_name: axon-memgraph-lab
+    depends_on:
+      - memgraph
+    ports:
+      - "${AXON_MEMGRAPH_LAB_PORT:-3000}:3000"
+    environment:
+      QUICK_CONNECT_MG_HOST: memgraph
+      QUICK_CONNECT_MG_PORT: "7687"
+
+volumes:
+  axon_memgraph_data:
+  axon_memgraph_log:

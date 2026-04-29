@@ -18,3 +18,7 @@ path = "src/bin_test.rs"
 [[bin]]
 name = "ist-query"
 path = "src/bin_ist_query.rs"
+
+[[bin]]
+name = "memgraph-publication"
+path = "src/bin_memgraph_publication.rs"

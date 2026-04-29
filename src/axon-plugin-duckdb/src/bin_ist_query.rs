@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use duckdb::types::Value as DuckValue;
 use duckdb::{AccessMode, Config, Connection, Result as DuckResult, Row};
 use serde_json::{json, Map, Value as JsonValue};
@@ -266,17 +268,26 @@ fn run(args: Args) -> Result<(), String> {
     let mut stmt = connection
         .prepare(&args.sql)
         .map_err(|err| format!("failed to prepare query: {err}"))?;
-    let columns = stmt
-        .column_names()
-        .into_iter()
-        .map(|name| name.to_string())
-        .collect::<Vec<_>>();
-    let mapped = stmt
-        .query_map([], |row| row_to_json(row, &columns))
+    let mut mapped = stmt
+        .query([])
         .map_err(|err| format!("failed to execute query: {err}"))?;
+    let statement = mapped
+        .as_ref()
+        .ok_or_else(|| "query did not return statement metadata".to_string())?;
+    let columns = (0..statement.column_count())
+        .map(|idx| {
+            statement
+                .column_name(idx)
+                .map(|name| name.to_string())
+                .map_err(|err| format!("failed to read column {idx} name: {err}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut rows = Vec::new();
-    for row in mapped {
-        rows.push(row.map_err(|err| format!("failed to read row: {err}"))?);
+    while let Some(row) = mapped
+        .next()
+        .map_err(|err| format!("failed to read row: {err}"))?
+    {
+        rows.push(row_to_json(row, &columns).map_err(|err| format!("failed to read row: {err}"))?);
     }
 
     match args.format {
