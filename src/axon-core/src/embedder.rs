@@ -91,11 +91,12 @@ pub use gpu_policy::current_gpu_memory_pressure_active;
 use gpu_policy::{
     embedding_provider_requested_is_gpu, gpu_primary_worker_max_used_mb,
     gpu_recreate_session_every_batch_enabled, gpu_recycle_after_vram_summit_observe,
-    gpu_recycle_immediate_required, gpu_secondary_worker_allowed, gpu_stuck_recovery_reason,
-    gpu_worker_consumption_allowed, gpu_worker_has_pending_work, gpu_worker_should_wait_for_ready,
+    gpu_recycle_immediate_required, gpu_recycle_vram_summit_mb, gpu_secondary_worker_allowed,
+    gpu_stuck_recovery_reason, gpu_worker_consumption_allowed, gpu_worker_has_pending_work,
+    gpu_worker_should_wait_for_ready,
 };
 #[cfg(test)]
-use gpu_policy::{gpu_memory_pressure_active, gpu_recycle_vram_summit_mb};
+use gpu_policy::gpu_memory_pressure_active;
 pub use gpu_telemetry::{
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, GpuMemorySnapshot,
     GpuUtilizationSnapshot,
@@ -1044,13 +1045,123 @@ fn gpu_pre_batch_vram_recycle_reason(
 ///   CPU on futile recycles. At 5 recycles × ~2s each, the system has already
 ///   spent ~10s trying. A 5s cooldown is enough to detect transient VRAM
 ///   consumers; if persistent, the next 5-recycle cycle provides clear log signal.
+// Retained for the internal cooldown logic in gpu_pre_batch_vram_recycle_reason_with_probe.
+// The unified VramRecycleCoordinator now governs the outer recycle cadence.
+#[allow(dead_code)]
 const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 5;
+#[allow(dead_code)]
 const GUARD_RECYCLE_COOLDOWN_MS: u64 = 5_000;
 
 static GUARD_CONSECUTIVE_RECYCLES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 static GUARD_COOLDOWN_UNTIL_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// Minimum interval between coordinated VRAM recycles (15s = 3x TensorRT cache reload time).
+const RECYCLE_MIN_INTERVAL_MS: u64 = 15_000;
+
+/// VRAM usage percentage above which a recycle is considered critical (OOM-imminent).
+const RECYCLE_VRAM_CRITICAL_PCT: u64 = 95;
+
+/// Signals collected from the 4 independent VRAM recycle triggers before the
+/// coordinator makes a single coordinated decision.
+struct RecycleSignals {
+    stuck: bool,
+    summit: bool,
+    pre_batch_plateau: bool,
+    low_throughput: bool,
+    /// True when VRAM usage exceeds [`RECYCLE_VRAM_CRITICAL_PCT`] of total VRAM.
+    vram_critical: bool,
+    vram_used_mb: u64,
+}
+
+/// Unified recycle coordinator that replaces the 4 independent VRAM recycle
+/// triggers with a single decision point.  This prevents cascading restarts
+/// by enforcing a global cooldown and requiring signal consensus before
+/// recycling.
+struct VramRecycleCoordinator {
+    last_recycle_at_ms: u64,
+    consecutive_pressure_batches: u32,
+    total_recycles: u64,
+}
+
+impl VramRecycleCoordinator {
+    fn new() -> Self {
+        Self {
+            last_recycle_at_ms: 0,
+            consecutive_pressure_batches: 0,
+            total_recycles: 0,
+        }
+    }
+
+    /// Returns `Some(reason)` if a recycle should happen, `None` if suppressed.
+    fn should_recycle(&mut self, signals: &RecycleSignals) -> Option<String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let elapsed = now_ms.saturating_sub(self.last_recycle_at_ms);
+
+        // Hard cooldown: never recycle within RECYCLE_MIN_INTERVAL_MS.
+        if self.last_recycle_at_ms > 0 && elapsed < RECYCLE_MIN_INTERVAL_MS {
+            return None;
+        }
+
+        // Critical: OOM-imminent (>95% VRAM) — always recycle.
+        if signals.vram_critical {
+            self.record_recycle(now_ms);
+            return Some(format!(
+                "vram_critical used={}MB total_recycles={}",
+                signals.vram_used_mb, self.total_recycles
+            ));
+        }
+
+        // Soft: multiple signals agree — recycle.
+        let signal_count = [
+            signals.stuck,
+            signals.summit,
+            signals.pre_batch_plateau,
+            signals.low_throughput,
+        ]
+        .iter()
+        .filter(|s| **s)
+        .count();
+
+        if signal_count >= 2 {
+            self.record_recycle(now_ms);
+            return Some(format!(
+                "multi_signal count={} stuck={} summit={} plateau={} low_throughput={} used={}MB total_recycles={}",
+                signal_count, signals.stuck, signals.summit, signals.pre_batch_plateau,
+                signals.low_throughput, signals.vram_used_mb, self.total_recycles
+            ));
+        }
+
+        // Single signal: count consecutive, recycle only after 5 consecutive batches.
+        if signal_count == 1 {
+            self.consecutive_pressure_batches += 1;
+            if self.consecutive_pressure_batches >= 5 {
+                self.record_recycle(now_ms);
+                return Some(format!(
+                    "sustained_pressure consecutive={} stuck={} summit={} plateau={} low_throughput={} used={}MB total_recycles={}",
+                    self.consecutive_pressure_batches, signals.stuck, signals.summit,
+                    signals.pre_batch_plateau, signals.low_throughput, signals.vram_used_mb,
+                    self.total_recycles
+                ));
+            }
+            return None;
+        }
+
+        // No signals: reset counter.
+        self.consecutive_pressure_batches = 0;
+        None
+    }
+
+    fn record_recycle(&mut self, now_ms: u64) {
+        self.last_recycle_at_ms = now_ms;
+        self.consecutive_pressure_batches = 0;
+        self.total_recycles += 1;
+    }
+}
 
 fn gpu_pre_batch_vram_recycle_reason_with_probe(
     initial_snapshot: Option<GpuMemorySnapshot>,
@@ -2341,6 +2452,7 @@ impl SemanticWorkerPool {
         let mut restart_window: VecDeque<i64> = VecDeque::new();
         let mut restart_attempt = 0_u64;
         let mut gpu_recycle_candidate_batches = 0_u32;
+        let mut recycle_coordinator = VramRecycleCoordinator::new();
         let mut wake_idle = true;
 
         if let Err(e) = graph_store.ensure_embedding_model(
@@ -2545,54 +2657,50 @@ impl SemanticWorkerPool {
                     }
                 }
 
-                let metrics = service_guard::vector_runtime_metrics();
-                if let Some(reason_raw) =
-                    gpu_stuck_recovery_reason(metrics, inflight_persists.len())
-                {
-                    warn!(
-                        "Semantic Vector Worker [{}]: restarting stuck GPU worker: {}",
-                        worker_idx, reason_raw
-                    );
-                    schedule_vector_worker_restart(
-                        &graph_store,
-                        worker_idx,
-                        FatalVectorWorkerFault {
-                            stage: "stuck_recovery",
-                            reason_raw,
-                            fatal_class: "stuck_batch".to_string(),
-                            batch_id: None,
-                            texts_count: metrics.embed_inflight_texts_current,
-                            input_bytes: metrics.embed_inflight_text_bytes_current,
-                        },
-                        &mut restart_window,
-                        &mut restart_attempt,
-                    );
-                    drop(model);
-                    continue 'worker_lifecycle;
-                }
-
+                // --- Unified VRAM recycle coordinator (pre-batch collection point) ---
+                let recycle_metrics = service_guard::vector_runtime_metrics();
                 let recycle_snapshot = current_gpu_memory_snapshot();
-                if gpu_recycle_immediate_required(recycle_snapshot, inflight_persists.len()) {
-                    let vram_used_mb = recycle_snapshot
-                        .map(|snapshot| snapshot.used_mb)
-                        .unwrap_or(0);
+                let recycle_chunks_per_second =
+                    service_guard::vector_chunk_embeddings_per_second();
+                let recycle_vram_used_mb = recycle_snapshot
+                    .map(|s| s.used_mb)
+                    .unwrap_or(0);
+                let recycle_signals = RecycleSignals {
+                    stuck: gpu_stuck_recovery_reason(recycle_metrics, inflight_persists.len())
+                        .is_some(),
+                    summit: gpu_recycle_immediate_required(
+                        recycle_snapshot,
+                        inflight_persists.len(),
+                    ),
+                    pre_batch_plateau: gpu_pre_batch_vram_recycle_reason(recycle_snapshot)
+                        .is_some(),
+                    low_throughput: recycle_snapshot
+                        .map(|s| s.used_mb >= gpu_recycle_vram_summit_mb())
+                        .unwrap_or(false)
+                        && recycle_chunks_per_second <= 8.0,
+                    vram_critical: recycle_snapshot
+                        .map(|s| {
+                            s.total_mb > 0
+                                && s.used_mb > s.total_mb * RECYCLE_VRAM_CRITICAL_PCT / 100
+                        })
+                        .unwrap_or(false),
+                    vram_used_mb: recycle_vram_used_mb,
+                };
+                if let Some(reason) = recycle_coordinator.should_recycle(&recycle_signals) {
                     warn!(
-                        "Semantic Vector Worker [{}]: immediately recycling GPU worker after VRAM summit {} MB",
-                        worker_idx, vram_used_mb
+                        "Semantic Vector Worker [{}]: unified recycle: {}",
+                        worker_idx, reason
                     );
                     schedule_vector_worker_restart(
                         &graph_store,
                         worker_idx,
                         FatalVectorWorkerFault {
-                            stage: "gpu_recycle_immediate",
-                            reason_raw: format!(
-                                "gpu_recycle_immediate_after_vram_summit vram={}",
-                                vram_used_mb
-                            ),
+                            stage: "unified_recycle",
+                            reason_raw: reason,
                             fatal_class: "gpu_recycle".to_string(),
                             batch_id: None,
-                            texts_count: 0,
-                            input_bytes: 0,
+                            texts_count: recycle_metrics.embed_inflight_texts_current,
+                            input_bytes: recycle_metrics.embed_inflight_text_bytes_current,
                         },
                         &mut restart_window,
                         &mut restart_attempt,
@@ -2644,40 +2752,19 @@ impl SemanticWorkerPool {
                                 &refill_tx,
                                 requeue,
                             );
+                            // VRAM summit observe: feed signal to coordinator
+                            // (actual recycle decision deferred to top of loop).
                             if persist_succeeded {
                                 let vram_used_mb = current_gpu_memory_snapshot()
                                     .map(|snapshot| snapshot.used_mb)
                                     .unwrap_or(0);
                                 let chunks_per_second =
                                     service_guard::vector_chunk_embeddings_per_second();
-                                if gpu_recycle_after_vram_summit_observe(
+                                gpu_recycle_after_vram_summit_observe(
                                     vram_used_mb,
                                     chunks_per_second,
                                     &mut gpu_recycle_candidate_batches,
-                                ) {
-                                    warn!(
-                                        "Semantic Vector Worker [{}]: recycling GPU worker after VRAM summit {} MB with low end-to-end throughput {:.2} chunks/s",
-                                        worker_idx, vram_used_mb, chunks_per_second
-                                    );
-                                    schedule_vector_worker_restart(
-                                                    &graph_store,
-                                                    worker_idx,
-                                                    FatalVectorWorkerFault {
-                                            stage: "gpu_recycle",
-                                            reason_raw: format!(
-                                                "gpu_recycle_after_vram_summit vram={} chunks_per_second={:.2}",
-                                                vram_used_mb, chunks_per_second
-                                            ),
-                                            fatal_class: "gpu_recycle".to_string(),
-                                            batch_id: None,
-                                            texts_count: 0,
-                                            input_bytes: 0,
-                                        },
-                                        &mut restart_window,
-                                        &mut restart_attempt,
-                                    );
-                                    continue 'worker_lifecycle;
-                                }
+                                );
                             } else {
                                 gpu_recycle_candidate_batches = 0;
                             }
@@ -2711,76 +2798,10 @@ impl SemanticWorkerPool {
                         record_ready_queue_summary(&ready_summary);
                     }
                 }
+                // Pre-batch VRAM guard: the coordinator at the top of the loop
+                // already evaluates this signal.  We keep the admission-level
+                // check for non-recycle VRAM gating (worker pausing).
                 let gpu_memory_snapshot = current_gpu_memory_snapshot();
-                if let Some(reason_raw) = gpu_pre_batch_vram_recycle_reason(gpu_memory_snapshot) {
-                    let consecutive = GUARD_CONSECUTIVE_RECYCLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if consecutive >= GUARD_RECYCLE_BACKOFF_THRESHOLD {
-                        let cooldown_end = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64 + GUARD_RECYCLE_COOLDOWN_MS)
-                            .unwrap_or(0);
-                        GUARD_COOLDOWN_UNTIL_MS.store(cooldown_end, std::sync::atomic::Ordering::Relaxed);
-                        GUARD_CONSECUTIVE_RECYCLES.store(0, std::sync::atomic::Ordering::Relaxed);
-                        warn!(
-                            "Semantic Vector Worker [{}]: VRAM guard entering {}s cooldown after {} consecutive recycles without improvement",
-                            worker_idx, GUARD_RECYCLE_COOLDOWN_MS / 1000, consecutive
-                        );
-                    }
-                    service_guard::record_vector_worker_admission_reason(
-                        "gpu_pre_batch_vram_plateau",
-                        (service_guard::current_allowed_gpu_workers().max(1))
-                            .try_into()
-                            .unwrap_or(usize::MAX),
-                    );
-                    let batch_id = prepared.batch_id.clone();
-                    let texts_count = prepared.texts.len() as u64;
-                    let input_bytes = prepared.texts.iter().map(|text| text.len() as u64).sum();
-                    let touched_works = prepared.touched_works.clone();
-                    let next_active_after_failure = prepared.next_active_after_failure.clone();
-                    let recovered_ready_works =
-                        recover_ready_batches_to_active_works(&ready_batches);
-                    let merge_target = touched_works
-                        .len()
-                        .saturating_add(next_active_after_failure.len())
-                        .saturating_add(recovered_ready_works.len())
-                        .max(1);
-                    send_vector_refill_requeue(
-                        &graph_store,
-                        worker_idx,
-                        &refill_tx,
-                        merge_vectorization_work(
-                            touched_works,
-                            merge_vectorization_work(
-                                next_active_after_failure,
-                                recovered_ready_works,
-                                merge_target,
-                            ),
-                            merge_target,
-                        ),
-                    );
-                    warn!(
-                        "Semantic Vector Worker [{}]: recycling before GPU batch because VRAM did not recover: {}",
-                        worker_idx, reason_raw
-                    );
-                    schedule_vector_worker_restart(
-                        &graph_store,
-                        worker_idx,
-                        FatalVectorWorkerFault {
-                            stage: "gpu_pre_batch_vram_guard",
-                            reason_raw,
-                            fatal_class: "gpu_recycle".to_string(),
-                            batch_id: Some(batch_id),
-                            texts_count,
-                            input_bytes,
-                        },
-                        &mut restart_window,
-                        &mut restart_attempt,
-                    );
-                    drop(model);
-                    continue 'worker_lifecycle;
-                }
-                // VRAM guard passed — reset consecutive recycle counter.
-                GUARD_CONSECUTIVE_RECYCLES.store(0, std::sync::atomic::Ordering::Relaxed);
                 if !gpu_worker_consumption_allowed(gpu_available, gpu_memory_snapshot) {
                     service_guard::record_vector_worker_admission_reason(
                         "gpu_primary_worker_vram_guard",
@@ -3054,41 +3075,19 @@ impl SemanticWorkerPool {
                                     &refill_tx,
                                     requeue,
                                 );
+                                // VRAM summit observe: feed signal to coordinator
+                                // (actual recycle decision deferred to top of loop).
                                 if persist_succeeded {
                                     let vram_used_mb = current_gpu_memory_snapshot()
                                         .map(|snapshot| snapshot.used_mb)
                                         .unwrap_or(0);
                                     let chunks_per_second =
                                         service_guard::vector_chunk_embeddings_per_second();
-                                    if gpu_recycle_after_vram_summit_observe(
+                                    gpu_recycle_after_vram_summit_observe(
                                         vram_used_mb,
                                         chunks_per_second,
                                         &mut gpu_recycle_candidate_batches,
-                                    ) {
-                                        warn!(
-                                                    "Semantic Vector Worker [{}]: recycling GPU worker after VRAM summit {} MB with low end-to-end throughput {:.2} chunks/s",
-                                                    worker_idx, vram_used_mb, chunks_per_second
-                                                );
-                                        schedule_vector_worker_restart(
-                                                    &graph_store,
-                                                    worker_idx,
-                                                    FatalVectorWorkerFault {
-                                                        stage: "gpu_recycle",
-                                                        reason_raw: format!(
-                                                            "gpu_recycle_after_vram_summit vram={} chunks_per_second={:.2}",
-                                                            vram_used_mb, chunks_per_second
-                                                        ),
-                                                        fatal_class: "gpu_recycle".to_string(),
-                                                        batch_id: None,
-                                                        texts_count: 0,
-                                                        input_bytes: 0,
-                                                    },
-                                                    &mut restart_window,
-                                                    &mut restart_attempt,
-                                                );
-                                        drop(model);
-                                        continue 'worker_lifecycle;
-                                    }
+                                    );
                                 } else {
                                     gpu_recycle_candidate_batches = 0;
                                 }
@@ -3253,41 +3252,19 @@ impl SemanticWorkerPool {
                             &mut failed,
                         );
                         send_vector_refill_requeue(&graph_store, worker_idx, &refill_tx, requeue);
+                        // VRAM summit observe: feed signal to coordinator
+                        // (actual recycle decision deferred to top of loop).
                         if persist_succeeded {
                             let vram_used_mb = current_gpu_memory_snapshot()
                                 .map(|snapshot| snapshot.used_mb)
                                 .unwrap_or(0);
                             let chunks_per_second =
                                 service_guard::vector_chunk_embeddings_per_second();
-                            if gpu_recycle_after_vram_summit_observe(
+                            gpu_recycle_after_vram_summit_observe(
                                 vram_used_mb,
                                 chunks_per_second,
                                 &mut gpu_recycle_candidate_batches,
-                            ) {
-                                warn!(
-                                        "Semantic Vector Worker [{}]: recycling GPU worker after VRAM summit {} MB with low end-to-end throughput {:.2} chunks/s",
-                                        worker_idx, vram_used_mb, chunks_per_second
-                                    );
-                                schedule_vector_worker_restart(
-                                        &graph_store,
-                                        worker_idx,
-                                        FatalVectorWorkerFault {
-                                            stage: "gpu_recycle",
-                                            reason_raw: format!(
-                                                "gpu_recycle_after_vram_summit vram={} chunks_per_second={:.2}",
-                                                vram_used_mb, chunks_per_second
-                                            ),
-                                            fatal_class: "gpu_recycle".to_string(),
-                                            batch_id: None,
-                                            texts_count: 0,
-                                            input_bytes: 0,
-                                        },
-                                        &mut restart_window,
-                                        &mut restart_attempt,
-                                    );
-                                drop(model);
-                                continue 'worker_lifecycle;
-                            }
+                            );
                         } else {
                             gpu_recycle_candidate_batches = 0;
                         }
@@ -6443,17 +6420,17 @@ mod tests {
 
     #[test]
     fn test_allowed_gpu_vector_workers_scales_only_for_meaningful_backlog() {
-        assert_eq!(allowed_gpu_vector_workers(8, ServicePressure::Healthy), 1);
+        assert_eq!(allowed_gpu_vector_workers(8, ServicePressure::Healthy), 2);
         assert_eq!(
             allowed_gpu_vector_workers(
                 AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
                 ServicePressure::Healthy
             ),
-            4
+            6
         );
         assert_eq!(
             allowed_gpu_vector_workers(4_096, ServicePressure::Degraded),
-            1
+            2
         );
     }
 
@@ -6483,7 +6460,7 @@ mod tests {
         unsafe {
             std::env::set_var("AXON_QUERY_EMBED_WORKERS", "2");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
-            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cpu");
             std::env::set_var("AXON_GRAPH_WORKERS", "0");
             std::env::set_var("AXON_CHUNK_BATCH_SIZE", "48");
             std::env::set_var("AXON_FILE_VECTORIZATION_BATCH_SIZE", "24");
@@ -9703,7 +9680,7 @@ mod tests {
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
-        assert_eq!(diagnostics.target_embed_batch_chunks, 104);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 80);
         assert_eq!(diagnostics.target_files_per_cycle, 32);
         assert_eq!(diagnostics.adjustments_total, 3);
     }
@@ -10161,10 +10138,10 @@ mod tests {
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
-        assert_eq!(diagnostics.target_embed_batch_chunks, 16);
-        assert_eq!(diagnostics.target_files_per_cycle, 8);
-        assert_eq!(diagnostics.reason, "holding_density");
-        assert_eq!(diagnostics.adjustments_total, 0);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 64);
+        assert_eq!(diagnostics.target_files_per_cycle, 24);
+        assert_eq!(diagnostics.reason, "ready_queue_starved");
+        assert_eq!(diagnostics.adjustments_total, 1);
     }
 
     #[test]
