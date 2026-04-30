@@ -55,7 +55,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
         "tools": [
             {
                 "name": "help",
-                "description": "[LLM-only] Compact help optimized for LLM clients: Axon tool routing, explicit input rules, and `axon-engineering-protocol` skill reference.",
+                "description": "[LLM-only] Return tool routing, input schemas, usage examples. Use help(tool=X) for any tool's contract. Call first.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -88,7 +88,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "fs_read",
-                "description": "[DX] DX Agent L2 (Detail): Reads the full physical content of a source file. Use only after identifying a precise URI (path) via axon_query or axon_inspect.",
+                "description": "[DX] Read file content by path. Use after query/inspect identifies the target URI.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -101,7 +101,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Command center for the intentional graph. Manages creation (with auto IDs), updates, and hierarchical links. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Create/update/link intent entities. Server assigns canonical IDs. Requires: action, entity, data.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -256,7 +256,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Returns compact intentional context for a project (visions, requirements, decisions, revisions), ready for LLM consumption and operator steering. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -297,7 +297,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_verify_requirements",
-                "description": "[SOLL] Verifies requirement coverage (done/partial/missing) based on criteria and attached evidence. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Verify requirement coverage: done/partial/missing with top gaps and next-to-close.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -376,7 +376,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "status",
-                "description": "[SYSTEM] Unified operator view: runtime state, active profile, advanced surface availability, and truth/degradation signals.",
+                "description": "[SYSTEM] Return runtime mode, profile, public tools, pressure signals, auto-detected project. Call second after help().",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -398,7 +398,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "project_status",
-                "description": "[SYSTEM/SOLL] Live project status: SOLL source vision, runtime state, operator surface, structural diagnostics, and recent SOLL context.",
+                "description": "[SYSTEM/SOLL] Return project vision, SOLL coverage, runtime state, diagnostics. Use for project-scoped truth.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -488,7 +488,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "why",
-                "description": "[DX/SOLL] Explains why a symbol, file, or topic exists via code links, traceability, and SOLL rationale.",
+                "description": "[DX/SOLL] Return governing rationale for a symbol/file. Links code evidence to SOLL intent.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -502,7 +502,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "path",
-                "description": "[DX] Explains an execution or dependency path between two points, or falls back to topological trace if only one anchor point is provided.",
+                "description": "[DX] Trace execution/dependency path between two symbols. Single anchor: topological neighborhood.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -517,7 +517,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "anomalies",
-                "description": "[GOVERNANCE] Aggregates priority structural anomalies: cycles, god objects, wrappers, and orphans, with severity, confidence, and recommended action.",
+                "description": "[GOVERNANCE] Return structural anomalies: cycles, god objects, wrappers, orphans. Ranked by severity.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -529,7 +529,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "retrieve_context",
-                "description": "[DX] Planner-driven retrieval that assembles an evidence packet for LLM answerability from canonical truth, chunks, bounded graph context, and relevant SOLL rationale.",
+                "description": "[DX] Assemble bounded evidence packet for a question. Returns: answer sketch, direct evidence, SOLL rationale.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -546,7 +546,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "query",
-                "description": "[DX] Developer-focused symbol search. Uses structural search immediately, and adds semantic similarity only if real-time embedding is available.",
+                "description": "[DX] Search symbols by name/kind/path. Returns ranked matches. Use first for code discovery.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -559,7 +559,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "inspect",
-                "description": "[DX] 360-degree view of a symbol (source code, callers/callees, statistics).",
+                "description": "[DX] Inspect symbol detail: source, callers, callees, stats. Use after query identifies target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
