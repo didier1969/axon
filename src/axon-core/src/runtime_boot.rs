@@ -277,15 +277,24 @@ fn apply_graph_first_indexer_memory_defaults(
         ),
         ("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED", "true".to_string()),
         ("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true".to_string()),
-        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "6".to_string()),
-        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS", "500".to_string()),
+        // 4 samples x 300ms = 1.2s max probe window. CUDA deallocation is
+        // near-instant; ORT BFC arena releases on process kill. 1.2s is
+        // sufficient to observe full memory release via NVML.
+        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "4".to_string()),
+        // 300ms > 250ms NVML cache TTL, guaranteeing one fresh driver query
+        // per sample without wasting CPU on stale cache reads.
+        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS", "300".to_string()),
         (
+            // ORT BFC arena uses power-of-two chunks; smallest meaningful
+            // session release is ~128MB. 64MB was within driver noise.
             "AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB",
-            "64".to_string(),
+            "128".to_string(),
         ),
         (
+            // Without telemetry, blind embedding risks unified memory spill
+            // (40x throughput loss). Conservative default: recycle.
             "AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE",
-            "false".to_string(),
+            "true".to_string(),
         ),
         ("AXON_VECTOR_READY_QUEUE_DEPTH", "48".to_string()),
         ("AXON_VECTOR_TARGET_READY_CHUNKS", (48 * 16).to_string()),

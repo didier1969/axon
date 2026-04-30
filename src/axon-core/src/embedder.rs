@@ -927,6 +927,12 @@ fn sleep_with_vector_worker_heartbeat(timeout: Duration) {
     }
 }
 
+/// Whether the pre-batch VRAM guard is active.
+///
+/// Default: **true**. On 8GB GPUs, VRAM exhaustion causes unified memory
+/// spill to system RAM over PCIe, degrading throughput 2-100x (measured by
+/// NVIDIA: on-demand streaming ~5.4 GB/s vs local VRAM ~300+ GB/s). The
+/// guard MUST be on by default for GPU indexers to prevent this.
 fn gpu_pre_batch_vram_guard_enabled() -> bool {
     std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED")
         .ok()
@@ -936,32 +942,70 @@ fn gpu_pre_batch_vram_guard_enabled() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
+/// Number of NVML telemetry samples to collect while waiting for VRAM to
+/// drop below the admission threshold.
+///
+/// Default: **4**. CUDA deallocation is near-instant; when a subprocess is
+/// killed, the driver reclaims VRAM within one NVML polling cycle. ORT's
+/// BFC arena releases all CUDA memory on session/process destruction. Four
+/// samples at 300ms intervals (1.2s total) is sufficient to observe the
+/// full memory release. The old value of 6 samples added latency without
+/// benefit. Too few (1-2) risks missing a release still in-flight; too
+/// many (>6) delays batch dispatch unnecessarily.
 fn gpu_pre_batch_vram_guard_samples() -> usize {
     std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(6)
+        .unwrap_or(4)
 }
 
+/// Milliseconds to wait between NVML telemetry samples.
+///
+/// Default: **300ms**. The NVML telemetry cache TTL in Axon is 250ms
+/// (configured via AXON_GPU_TELEMETRY_CACHE_TTL_MS). A 300ms interval
+/// guarantees at least one fresh NVML read per sample (cache expires at
+/// 250ms, so 300ms ensures a new driver query). NVML itself has no
+/// significant reporting lag -- `nvmlDeviceGetMemoryInfo` is a synchronous
+/// driver ioctl. Too short (<250ms) wastes CPU re-reading cached values;
+/// too long (>500ms) delays the guard decision and stalls the batch
+/// pipeline for up to samples * wait_ms.
 fn gpu_pre_batch_vram_guard_wait_ms() -> u64 {
     std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value >= 50)
-        .unwrap_or(500)
+        .unwrap_or(300)
 }
 
+/// Minimum VRAM drop (in MB) required to consider recovery in progress.
+///
+/// Default: **128MB**. ORT's BFC arena allocates GPU memory in
+/// power-of-two chunks (kNextPowerOfTwo strategy). The smallest meaningful
+/// release from an embedding model session is ~128MB (model weights +
+/// TensorRT workspace for a small transformer). The old 64MB threshold
+/// could be triggered by driver bookkeeping fluctuations (~10-50MB) or
+/// NVML rounding artifacts (reports in whole MB). Too low (<64MB) causes
+/// false "recovery detected" signals from noise; too high (>256MB) misses
+/// genuine partial releases.
 fn gpu_pre_batch_vram_guard_min_drop_mb() -> u64 {
     std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(64)
+        .unwrap_or(128)
 }
 
+/// Whether to trigger a recycle when NVML telemetry is unavailable.
+///
+/// Default: **true**. Without telemetry, the guard cannot distinguish
+/// safe VRAM headroom from imminent OOM. On an 8GB GPU, blind embedding
+/// risks unified memory spill to system RAM, which destroys throughput
+/// by 40x or more. The conservative choice is to recycle the subprocess
+/// (which probes VRAM on restart via cudaMalloc). The cost is one 2-4s
+/// restart; the risk of not recycling is catastrophic throughput collapse.
 fn gpu_pre_batch_vram_guard_unknown_recycle() -> bool {
     std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE")
         .ok()
@@ -971,7 +1015,7 @@ fn gpu_pre_batch_vram_guard_unknown_recycle() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn gpu_pre_batch_vram_recycle_reason(
@@ -982,8 +1026,24 @@ fn gpu_pre_batch_vram_recycle_reason(
 
 /// After this many consecutive guard-triggered recycles without VRAM improvement,
 /// the guard enters a cooldown period to prevent infinite recycle cascades.
-const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 3;
-const GUARD_RECYCLE_COOLDOWN_MS: u64 = 60_000;
+///
+/// **Research basis (NVIDIA CUDA / ORT / TensorRT on 8GB RTX, WSL2):**
+///
+/// - **BACKOFF_THRESHOLD = 5**: Each subprocess recycle takes 2-4s (CUDA context
+///   init ~250ms + ORT/TensorRT session load from engine cache ~1-2s). Five
+///   recycles therefore spans 10-20s of probing, enough to confirm that VRAM
+///   pressure is persistent (e.g. another process holds allocations) rather than
+///   transient. Setting this too low (e.g. 2-3) causes premature cooldown when
+///   the subprocess simply needs one more restart to release a stale BFC arena.
+///   Setting it too high wastes throughput on futile recycles.
+///
+/// - **COOLDOWN_MS = 30_000**: External VRAM consumers (display server, WSL2
+///   compositor, other CUDA processes) typically stabilize within 15-30s.
+///   A 30s pause lets transient pressure subside without sacrificing 60s of
+///   embedding throughput. Too short (<15s) risks re-entering the recycle
+///   cascade immediately; too long (>60s) stalls the pipeline unnecessarily.
+const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 5;
+const GUARD_RECYCLE_COOLDOWN_MS: u64 = 30_000;
 
 static GUARD_CONSECUTIVE_RECYCLES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
@@ -9116,7 +9176,8 @@ mod tests {
     #[test]
     fn gpu_pre_batch_vram_guard_allows_batch_when_disabled() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
-        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+        // Explicitly disable -- default is now true (to prevent unified memory spill).
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "false");
 
         assert!(
             super::gpu_pre_batch_vram_recycle_reason(Some(GpuMemorySnapshot {
@@ -9126,6 +9187,8 @@ mod tests {
             }))
             .is_none()
         );
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
     }
 
     #[test]
@@ -9148,17 +9211,117 @@ mod tests {
     }
 
     #[test]
-    fn gpu_pre_batch_vram_guard_can_recycle_when_telemetry_is_unknown() {
+    fn gpu_pre_batch_vram_guard_recycles_on_unknown_telemetry_by_default() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
-        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE", "true");
+        // Do NOT set UNKNOWN_RECYCLE -- default is now true (conservative:
+        // without telemetry, blind embedding risks 40x throughput loss from
+        // unified memory spill on 8GB GPUs).
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE");
 
         let reason = super::gpu_pre_batch_vram_recycle_reason_with_probe(None, || None)
-            .expect("unknown telemetry should request recycling when configured");
+            .expect("unknown telemetry should request recycling by default");
         assert!(reason.contains("gpu_pre_batch_vram_unknown"));
 
         std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_skips_unknown_telemetry_when_disabled() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE", "false");
+
+        assert!(
+            super::gpu_pre_batch_vram_recycle_reason_with_probe(None, || None).is_none(),
+            "unknown telemetry should NOT request recycling when explicitly disabled"
+        );
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
         std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE");
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_detects_plateau_with_probe() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
+        std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "2");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS", "50");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB", "128");
+
+        // Simulate VRAM stuck at 7000 MB with no meaningful drop (< 128 MB).
+        let call_count = std::sync::atomic::AtomicU32::new(0);
+        let reason = super::gpu_pre_batch_vram_recycle_reason_with_probe(
+            Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 7_000,
+                free_mb: 1_192,
+            }),
+            || {
+                let n = call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Simulate minor fluctuation (50 MB) that stays below min_drop threshold.
+                Some(GpuMemorySnapshot {
+                    total_mb: 8_192,
+                    used_mb: if n == 0 { 6_960 } else { 6_950 },
+                    free_mb: if n == 0 { 1_232 } else { 1_242 },
+                })
+            },
+        );
+        assert!(
+            reason.is_some(),
+            "guard should detect plateau when drop < min_drop_mb"
+        );
+        let reason_str = reason.unwrap();
+        assert!(
+            reason_str.contains("gpu_pre_batch_vram_plateau"),
+            "reason should indicate plateau: {}",
+            reason_str
+        );
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+        std::env::remove_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB");
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_passes_when_vram_recovers_during_probe() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
+        std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "3");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS", "50");
+
+        // Simulate VRAM dropping below admission during probe.
+        let call_count = std::sync::atomic::AtomicU32::new(0);
+        let reason = super::gpu_pre_batch_vram_recycle_reason_with_probe(
+            Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 7_000,
+                free_mb: 1_192,
+            }),
+            || {
+                let n = call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Second probe shows VRAM recovered below admission (5500 < 6000).
+                let used = if n == 0 { 6_800 } else { 5_500 };
+                Some(GpuMemorySnapshot {
+                    total_mb: 8_192,
+                    used_mb: used,
+                    free_mb: 8_192 - used,
+                })
+            },
+        );
+        assert!(
+            reason.is_none(),
+            "guard should pass when VRAM recovers below admission during probe"
+        );
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+        std::env::remove_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS");
     }
 
     #[test]
