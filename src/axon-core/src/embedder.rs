@@ -1040,10 +1040,12 @@ fn gpu_pre_batch_vram_recycle_reason(
 /// - **COOLDOWN_MS = 30_000**: External VRAM consumers (display server, WSL2
 ///   compositor, other CUDA processes) typically stabilize within 15-30s.
 ///   A 30s pause lets transient pressure subside without sacrificing 60s of
-///   embedding throughput. Too short (<15s) risks re-entering the recycle
-///   cascade immediately; too long (>60s) stalls the pipeline unnecessarily.
+///   embedding throughput. Too long stalls the pipeline; too short wastes
+///   CPU on futile recycles. At 5 recycles × ~2s each, the system has already
+///   spent ~10s trying. A 5s cooldown is enough to detect transient VRAM
+///   consumers; if persistent, the next 5-recycle cycle provides clear log signal.
 const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 5;
-const GUARD_RECYCLE_COOLDOWN_MS: u64 = 30_000;
+const GUARD_RECYCLE_COOLDOWN_MS: u64 = 5_000;
 
 static GUARD_CONSECUTIVE_RECYCLES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
