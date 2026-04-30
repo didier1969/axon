@@ -58,7 +58,7 @@ Examples:
   ./scripts/axon --instance dev start --indexer-full
   ./scripts/axon setup
   ./scripts/axon setup-tensorrt --precheck-only
-  ./scripts/axon setup-tensorrt --qualify --max-vram-used-mb 6144 --tensorrt-workspace-mb 5632
+  ./scripts/axon setup-tensorrt --qualify --max-vram-used-mb 2048 --tensorrt-workspace-mb 1024
   ./scripts/axon start --brain-only
   ./scripts/axon start --indexer-graph
   ./scripts/axon upgrade-topology --indexer-full
@@ -69,6 +69,7 @@ Examples:
   ./scripts/axon reset-dev-indexer-baseline
   ./scripts/axon qualify-dev-cold --duration 20 --interval 5 --label first-cold
   ./scripts/axon qualify-dev-indexer-cold --duration 20 --interval 5 --label first-indexer-cold
+  ./scripts/axon --instance dev start --indexer-full --tensorrt
   ./scripts/axon qualify-dev-indexer-tensorrt-cold --duration 120 --interval 5 --label tensorrt-hard-cut
   ./scripts/axon build-and-qualify-tensorrt-cold --duration 120 --interval 5 --label tensorrt-hard-cut
   ./scripts/axon benchmark-vector-token-matrix --tokens 4096,8192,16384 --duration 20 --interval 5
@@ -215,6 +216,7 @@ Start mode options:
   --indexer-graph
   --indexer-vector
   --indexer-full
+  --tensorrt
   --no-dashboard
   --skip-mcp-tests
   --skip-elixir-prewarm

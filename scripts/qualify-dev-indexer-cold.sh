@@ -57,7 +57,7 @@ EOF
 done
 
 echo "[qualify-dev-indexer-cold] resetting dev indexer baseline"
-bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh"
+AXON_RUNTIME_MODE=indexer_full bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh"
 
 echo "[qualify-dev-indexer-cold] running indexer-only cold qualification"
 exec python3 "$SCRIPT_DIR/qualify_ingestion_run.py" \

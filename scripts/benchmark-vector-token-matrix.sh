@@ -10,7 +10,7 @@ label_prefix="vector-token-matrix"
 tokens_csv="4096,8192,16384,32768"
 max_items="128"
 max_batch_bytes="$((8 * 1024 * 1024))"
-max_vram_used_mb="6144"
+max_vram_used_mb="2048"
 gpu_primary_worker_max_used_mb=""
 graph_workers="2"
 run_mode="cold"
@@ -38,7 +38,7 @@ Options:
   --max-items N          AXON_EMBED_MICRO_BATCH_MAX_ITEMS override (default: 128)
   --max-batch-bytes N    AXON_MAX_EMBED_BATCH_BYTES override (default: 8388608)
   --graph-workers N      AXON_GRAPH_WORKERS override (default: 2)
-  --max-vram-used-mb N   VRAM operator budget in MB (default: 6144)
+  --max-vram-used-mb N   VRAM operator budget in MB (default: 2048)
   --gpu-admission-vram-used-mb N  Max VRAM already used before launching a GPU batch
   --mode MODE            Benchmark mode: cold|warm (default: cold)
   --warmup-timeout N     Warm-mode timeout in seconds waiting for vector activity (default: 120)
@@ -206,14 +206,18 @@ run_step() {
         export AXON_INSTANCE_KIND=dev
         export AXON_BENCHMARK_ACTIVE=1
         export AXON_GPU_EMBED_SERVICE_ENABLED=1
+        export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
+        export AXON_NVML_LIBRARY_PATH="${AXON_NVML_LIBRARY_PATH:-/usr/lib/wsl/lib/libnvidia-ml.so.1}"
         export AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS="$tokens"
         export AXON_EMBED_MICRO_BATCH_MAX_ITEMS="$max_items"
         export AXON_MAX_EMBED_BATCH_BYTES="$max_batch_bytes"
         export AXON_OPT_MAX_VRAM_USED_MB="$max_vram_used_mb"
         export AXON_CUDA_MEMORY_SOFT_LIMIT_MB="$max_vram_used_mb"
-        export AXON_CUDA_MEMORY_LIMIT_MB="$(( max_vram_used_mb > 256 ? max_vram_used_mb - 256 : max_vram_used_mb ))"
+        export AXON_CUDA_MEMORY_LIMIT_MB="$(( max_vram_used_mb > 1024 ? max_vram_used_mb - 1024 : max_vram_used_mb ))"
         export AXON_GPU_PRIMARY_WORKER_MAX_USED_MB="$gpu_primary_worker_max_used_mb"
         export AXON_GPU_TELEMETRY_CACHE_TTL_MS="250"
+        export AXON_TENSORRT_OVERSHOOT_MB="${AXON_TENSORRT_OVERSHOOT_MB:-7900}"
+        export AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT="${AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT:-1}"
         export AXON_GRAPH_WORKERS="$graph_workers"
         if [[ "$gpu_backend" == "tensorrt" ]]; then
             export AXON_GPU_EMBED_SERVICE_TENSORRT=1

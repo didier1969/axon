@@ -117,6 +117,7 @@ SELECTED_RELEASE_RUNTIME_BIN=""
 START_DASHBOARD=1
 RUN_MCP_TESTS=1
 SKIP_ELIXIR_PREWARM="${AXON_SKIP_ELIXIR_PREWARM:-0}"
+REQUEST_TENSORRT=0
 
 detect_accessible_gpu() {
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
@@ -325,9 +326,12 @@ while [[ $# -gt 0 ]]; do
         --skip-elixir-prewarm)
             SKIP_ELIXIR_PREWARM=1
             ;;
+        --tensorrt)
+            REQUEST_TENSORRT=1
+            ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start.sh [--brain-only|--indexer-graph|--indexer-vector|--indexer-full] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
+Usage: ./scripts/start.sh [--brain-only|--indexer-graph|--indexer-vector|--indexer-full] [--tensorrt] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
 
 Modes:
   --brain-only      MCP + dashboard authority only, without graph or vector workers
@@ -336,6 +340,7 @@ Modes:
   --indexer-full    Indexer with graph + semantic/vector workloads
 
 Options:
+  --tensorrt      Enable the TensorRT GPU embedding service for indexer vector/full modes
   --no-dashboard   Disable Elixir LiveView dashboard
   --skip-mcp-tests Skip automatic MCP quality gate validation after startup
   --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
@@ -350,6 +355,27 @@ EOF
     esac
     shift
 done
+
+if [[ "$REQUEST_TENSORRT" == "1" ]]; then
+    if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
+        echo "❌ --tensorrt requires --indexer-vector or --indexer-full."
+        echo "   The current mode is $RUNTIME_MODE, which does not run the vector lane."
+        exit 1
+    fi
+    export AXON_EMBEDDING_PROVIDER="cuda"
+    export AXON_GPU_EMBED_SERVICE_ENABLED="${AXON_GPU_EMBED_SERVICE_ENABLED:-1}"
+    export AXON_GPU_EMBED_SERVICE_TENSORRT=1
+    export AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH="${AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH:-0}"
+    export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
+    export AXON_NVML_LIBRARY_PATH="${AXON_NVML_LIBRARY_PATH:-/usr/lib/wsl/lib/libnvidia-ml.so.1}"
+    export AXON_OPT_MAX_VRAM_USED_MB="${AXON_OPT_MAX_VRAM_USED_MB:-2048}"
+    export AXON_CUDA_MEMORY_SOFT_LIMIT_MB="${AXON_CUDA_MEMORY_SOFT_LIMIT_MB:-$AXON_OPT_MAX_VRAM_USED_MB}"
+    export AXON_CUDA_MEMORY_LIMIT_MB="${AXON_CUDA_MEMORY_LIMIT_MB:-1024}"
+    export AXON_GPU_PRIMARY_WORKER_MAX_USED_MB="${AXON_GPU_PRIMARY_WORKER_MAX_USED_MB:-1536}"
+    export AXON_GPU_TELEMETRY_CACHE_TTL_MS="${AXON_GPU_TELEMETRY_CACHE_TTL_MS:-250}"
+    export AXON_TENSORRT_OVERSHOOT_MB="${AXON_TENSORRT_OVERSHOOT_MB:-7900}"
+    export AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT="${AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT:-1}"
+fi
 
 RUNTIME_REACTIVATION_PATH="default"
 RUNTIME_EXECUTABLE_NAME="$(axon_runtime_binary_name "$RUNTIME_SHADOW_ROLE")"
@@ -773,7 +799,16 @@ for pass_through_var in \
     AXON_GPU_EMBED_SERVICE_ENABLED \
     AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH \
     AXON_GPU_EMBED_SERVICE_TENSORRT \
+    AXON_GPU_TELEMETRY_BACKEND \
+    AXON_NVML_LIBRARY_PATH \
     AXON_ORT_ARTIFACT_MANIFEST \
+    AXON_OPT_MAX_VRAM_USED_MB \
+    AXON_CUDA_MEMORY_SOFT_LIMIT_MB \
+    AXON_CUDA_MEMORY_LIMIT_MB \
+    AXON_GPU_PRIMARY_WORKER_MAX_USED_MB \
+    AXON_GPU_TELEMETRY_CACHE_TTL_MS \
+    AXON_TENSORRT_OVERSHOOT_MB \
+    AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT \
     AXON_RELEASE_VERSION \
     AXON_BUILD_ID \
     AXON_PACKAGE_VERSION \

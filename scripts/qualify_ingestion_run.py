@@ -11,6 +11,8 @@ This tool exists to make runtime qualification repeatable:
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import json
 import os
 import re
@@ -210,8 +212,13 @@ def status_data_from_local_indexer_runtime() -> dict[str, Any]:
     )
 
     authority_contract = runtime_authority_contract("indexer")
+    runtime_mode = str(
+        heartbeat.get("runtime_mode")
+        or os.environ.get("AXON_RUNTIME_MODE")
+        or "indexer_graph"
+    )
     data = {
-        "runtime_mode": "indexer_graph",
+        "runtime_mode": runtime_mode,
         "truth_status": "canonical" if has_live_stage_stock else "degraded",
         "runtime_authority": {
             "runtime_state": {
@@ -419,6 +426,21 @@ def wait_for_runtime_contract(mode: str, timeout_s: int = 180) -> tuple[int | No
         if last_pid is None:
             time.sleep(1)
             continue
+        gpu = gpu_status()
+        gpu_memory_envelope = gpu_memory_envelope_from_env()
+        overshoot_fail_mb = gpu_memory_envelope.get("overshoot_fail_mb")
+        gpu_used_mb = gpu.get("memory_used_mb")
+        if (
+            isinstance(overshoot_fail_mb, int)
+            and isinstance(gpu_used_mb, int)
+            and gpu_used_mb >= overshoot_fail_mb
+        ):
+            if gpu_memory_envelope.get("stop_on_vram_overshoot"):
+                run_script("scripts/stop.sh", check=False)
+            raise RuntimeError(
+                "VRAM overshoot detected while waiting for runtime readiness: "
+                f"used={gpu_used_mb} threshold={overshoot_fail_mb}"
+            )
         status_data = status_data_for_mode(mode)
         if not status_data:
             last_reason = "missing_status_data"
@@ -926,6 +948,18 @@ def runtime_mcp_ready() -> bool:
 
 
 def detect_axon_pid() -> int | None:
+    pid_files = [
+        current_run_root("indexer") / "axon-indexer.pid",
+        current_run_root("brain") / "axon-brain.pid",
+    ]
+    for pid_file in pid_files:
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if (Path("/proc") / str(pid)).exists():
+            return pid
+
     try:
         proc = shell(["pgrep", "-af", "axon-core|axon-indexer|axon-brain"], capture=True)
     except subprocess.CalledProcessError:
@@ -938,8 +972,10 @@ def detect_axon_pid() -> int | None:
         cmdline = parts[1]
         if (
             "bin/axon-core" in cmdline
-            or "axon-indexer" in cmdline
-            or "axon-brain" in cmdline
+            or "/axon-indexer" in cmdline
+            or "/axon-brain" in cmdline
+            or ".axon/cargo-target/debug/axon-indexer" in cmdline
+            or ".axon/cargo-target/debug/axon-brain" in cmdline
         ):
             try:
                 return int(parts[0])
@@ -1474,6 +1510,170 @@ def env_int(name: str) -> int | None:
         return None
 
 
+def env_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def nvidia_smi_binary() -> str | None:
+    candidates = ["nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi"]
+    for candidate in candidates:
+        try:
+            subprocess.run(
+                [candidate, "-L"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            return candidate
+        except (OSError, subprocess.CalledProcessError):
+            continue
+    return None
+
+
+class NvmlMemoryInfo(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+
+class NvmlUtilizationInfo(ctypes.Structure):
+    _fields_ = [
+        ("gpu", ctypes.c_uint),
+        ("memory", ctypes.c_uint),
+    ]
+
+
+def nvml_library_candidates() -> list[str]:
+    configured = os.environ.get("AXON_NVML_LIBRARY_PATH", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    discovered = ctypes.util.find_library("nvidia-ml")
+    if discovered:
+        candidates.append(discovered)
+    candidates.extend(
+        [
+            "/usr/lib/wsl/lib/libnvidia-ml.so.1",
+            "libnvidia-ml.so.1",
+        ]
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def gpu_status_via_nvml() -> dict[str, Any]:
+    last_error = ""
+    for candidate in nvml_library_candidates():
+        try:
+            library = ctypes.CDLL(candidate)
+            nvml_init = library.nvmlInit_v2
+            nvml_init.restype = ctypes.c_int
+            nvml_shutdown = library.nvmlShutdown
+            nvml_shutdown.restype = ctypes.c_int
+            get_handle = library.nvmlDeviceGetHandleByIndex_v2
+            get_handle.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            get_handle.restype = ctypes.c_int
+            get_memory = library.nvmlDeviceGetMemoryInfo
+            get_memory.argtypes = [ctypes.c_void_p, ctypes.POINTER(NvmlMemoryInfo)]
+            get_memory.restype = ctypes.c_int
+            get_utilization = library.nvmlDeviceGetUtilizationRates
+            get_utilization.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(NvmlUtilizationInfo),
+            ]
+            get_utilization.restype = ctypes.c_int
+
+            if nvml_init() != 0:
+                last_error = "nvml_init_failed"
+                continue
+            try:
+                device = ctypes.c_void_p()
+                device_index = env_int("AXON_GPU_TELEMETRY_DEVICE_INDEX") or 0
+                if get_handle(device_index, ctypes.byref(device)) != 0:
+                    last_error = "nvml_device_handle_failed"
+                    continue
+                memory = NvmlMemoryInfo()
+                if get_memory(device, ctypes.byref(memory)) != 0:
+                    last_error = "nvml_memory_info_failed"
+                    continue
+                utilization = NvmlUtilizationInfo()
+                util_available = get_utilization(device, ctypes.byref(utilization)) == 0
+                return {
+                    "available": True,
+                    "source": "nvml",
+                    "library": candidate,
+                    "memory_total_mb": int(memory.total // (1024 * 1024)),
+                    "memory_used_mb": int(memory.used // (1024 * 1024)),
+                    "memory_free_mb": int(memory.free // (1024 * 1024)),
+                    "utilization_gpu_percent": int(utilization.gpu) if util_available else None,
+                    "utilization_memory_percent": int(utilization.memory)
+                    if util_available
+                    else None,
+                }
+            finally:
+                nvml_shutdown()
+        except Exception as exc:
+            last_error = type(exc).__name__
+    return {"available": False, "source": "nvml", "error": last_error or "nvml_unavailable"}
+
+
+def gpu_status_via_nvidia_smi() -> dict[str, Any]:
+    binary = nvidia_smi_binary()
+    if binary is None:
+        return {"available": False, "source": "nvidia-smi"}
+    try:
+        proc = shell(
+            [
+                binary,
+                "--query-gpu=memory.total,memory.used,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        return {
+            "available": False,
+            "source": "nvidia-smi",
+            "error": f"nvidia_smi_failed:{exc.returncode}",
+        }
+
+    line = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) != 4:
+        return {
+            "available": False,
+            "source": "nvidia-smi",
+            "error": "nvidia_smi_unexpected_output",
+        }
+    try:
+        total_mb, used_mb, free_mb, util_percent = (int(part) for part in parts)
+    except ValueError:
+        return {
+            "available": False,
+            "source": "nvidia-smi",
+            "error": "nvidia_smi_non_numeric_output",
+            "raw": line,
+        }
+    return {
+        "available": True,
+        "source": "nvidia-smi",
+        "memory_total_mb": total_mb,
+        "memory_used_mb": used_mb,
+        "memory_free_mb": free_mb,
+        "utilization_gpu_percent": util_percent,
+    }
+
+
+def gpu_status() -> dict[str, Any]:
+    nvml_status = gpu_status_via_nvml()
+    if nvml_status.get("available"):
+        return nvml_status
+    fallback = gpu_status_via_nvidia_smi()
+    fallback["primary_error"] = nvml_status.get("error", "nvml_unavailable")
+    return fallback
+
+
 def gpu_memory_envelope_from_env() -> dict[str, Any]:
     tensorrt_requested = os.environ.get("AXON_GPU_EMBED_SERVICE_TENSORRT", "").strip()
     gpu_service_enabled = os.environ.get("AXON_GPU_EMBED_SERVICE_ENABLED", "").strip()
@@ -1486,6 +1686,11 @@ def gpu_memory_envelope_from_env() -> dict[str, Any]:
         "tensorrt_workspace_mb": env_int("AXON_CUDA_MEMORY_LIMIT_MB"),
         "cuda_memory_soft_limit_mb": env_int("AXON_CUDA_MEMORY_SOFT_LIMIT_MB"),
         "gpu_telemetry_cache_ttl_ms": env_int("AXON_GPU_TELEMETRY_CACHE_TTL_MS"),
+        "gpu_telemetry_backend": os.environ.get("AXON_GPU_TELEMETRY_BACKEND", ""),
+        "nvml_library_path": os.environ.get("AXON_NVML_LIBRARY_PATH", ""),
+        "measurement_contract": "nvml_primary_nvidia_smi_fallback",
+        "overshoot_fail_mb": env_int("AXON_TENSORRT_OVERSHOOT_MB"),
+        "stop_on_vram_overshoot": env_bool("AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT"),
         "gpu_service_recycle_every_batch": os.environ.get(
             "AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH", ""
         )
@@ -1634,6 +1839,7 @@ def main() -> int:
                 }
 
             sample["db"] = db_sizes()
+            sample["gpu"] = gpu_status()
 
             try:
                 sample["sql"] = sql_overview()
@@ -1664,6 +1870,7 @@ def main() -> int:
             graph_projection_queue = sample.get("cockpit", {}).get("graph_projection_queue", {})
             sql_gpq = sample.get("sql", {}).get("graph_projection_queue", {})
             proc = sample.get("proc", {})
+            gpu = sample.get("gpu", {})
             print(
                 "[sample] "
                 f"t={sample['elapsed_seconds']:>4}s "
@@ -1696,9 +1903,60 @@ def main() -> int:
                 f"ready_gap={cockpit.get('ready_replenishment_deficit_current', '')} "
                 f"graph_workers={cockpit.get('graph_workers_active_current', '')} "
                 f"bulk_fill={cockpit.get('bulk_fill_preferred', '')} "
-                f"rss_anon_mb={int(proc.get('rss_anon_bytes', 0) / (1024 * 1024))}"
+                f"rss_anon_mb={int(proc.get('rss_anon_bytes', 0) / (1024 * 1024))} "
+                f"gpu_used_mb={gpu.get('memory_used_mb', '')} "
+                f"gpu_source={gpu.get('source', '')}"
             )
             sys.stdout.flush()
+
+            gpu_memory_envelope = gpu_memory_envelope_from_env()
+            overshoot_fail_mb = gpu_memory_envelope.get("overshoot_fail_mb")
+            gpu_used_mb = gpu.get("memory_used_mb")
+            if (
+                isinstance(overshoot_fail_mb, int)
+                and isinstance(gpu_used_mb, int)
+                and gpu_used_mb >= overshoot_fail_mb
+            ):
+                failure = {
+                    "created_at": utc_now_iso(),
+                    "run_dir": str(run_dir),
+                    "mode": args.mode,
+                    "status": "failed",
+                    "reason": "vram_overshoot",
+                    "gpu_used_mb": gpu_used_mb,
+                    "vram_overshoot_fail_mb": overshoot_fail_mb,
+                    "sample_count": len(samples),
+                    "gpu_memory_envelope": gpu_memory_envelope,
+                    "final_sample": sample,
+                }
+                write_json(summary_path, failure)
+                notes_path.write_text(
+                    "\n".join(
+                        [
+                            f"Run directory: {run_dir}",
+                            f"Mode: {args.mode}",
+                            "Status: failed",
+                            "Reason: vram_overshoot",
+                            f"GPU used MB: {gpu_used_mb}",
+                            f"VRAM overshoot fail MB: {overshoot_fail_mb}",
+                        ]
+                    )
+                    + "\n"
+                )
+                if gpu_memory_envelope.get("stop_on_vram_overshoot"):
+                    stop_after_code, stop_after_output = run_script(
+                        "scripts/stop.sh", check=False
+                    )
+                    stop_log_path.write_text(
+                        stop_log_path.read_text()
+                        + "\n\n[vram-overshoot-stop]\n"
+                        + f"exit_code={stop_after_code}\n"
+                        + stop_after_output
+                    )
+                raise RuntimeError(
+                    "VRAM overshoot detected: "
+                    f"used={gpu_used_mb} threshold={overshoot_fail_mb}"
+                )
             time.sleep(args.interval)
 
     tail = capture_tmux_tail()
@@ -1707,6 +1965,9 @@ def main() -> int:
 
     max_rss_anon = max(
         int(sample.get("proc", {}).get("rss_anon_bytes", 0)) for sample in samples
+    ) if samples else 0
+    max_gpu_used_mb = max(
+        int(sample.get("gpu", {}).get("memory_used_mb", 0)) for sample in samples
     ) if samples else 0
     max_buffered = max(
         int(sample.get("cockpit", {}).get("buffered_entries", 0)) for sample in samples
@@ -1888,6 +2149,8 @@ def main() -> int:
         "max_graph_projection_queue_runtime_queued": max_graph_projection_queue_runtime_queued,
         "max_graph_projection_queue_runtime_inflight": max_graph_projection_queue_runtime_inflight,
         "max_rss_anon_bytes": max_rss_anon,
+        "max_gpu_used_mb": max_gpu_used_mb,
+        "vram_overshoot_fail_mb": gpu_memory_envelope.get("overshoot_fail_mb"),
         "max_buffered_entries": max_buffered,
         "max_scan_buffered_entries": max_scan_buffered,
         "max_watcher_buffered_entries": max_watcher_buffered,
@@ -1921,8 +2184,22 @@ def main() -> int:
     summary["truth_drift_detected"] = None
     truth_drift_detected = False
     if args.include_rich_mcp_diagnostics:
-        mcp_truth_check = mcp_call("truth_check", {})
-        mcp_indexing_diagnosis = mcp_call("diagnose_indexing", {"project": QUALIFY_PROJECT})
+        try:
+            mcp_truth_check = mcp_call("truth_check", {})
+        except Exception as exc:
+            mcp_truth_check = {
+                "error": "mcp_truth_check_unavailable",
+                "degraded": True,
+                "reason": type(exc).__name__,
+            }
+        try:
+            mcp_indexing_diagnosis = mcp_call("diagnose_indexing", {"project": QUALIFY_PROJECT})
+        except Exception as exc:
+            mcp_indexing_diagnosis = {
+                "error": "mcp_diagnose_indexing_unavailable",
+                "degraded": True,
+                "reason": type(exc).__name__,
+            }
         summary["mcp_truth_check"] = mcp_truth_check
         summary["mcp_diagnose_indexing"] = mcp_indexing_diagnosis
 
@@ -1948,6 +2225,7 @@ def main() -> int:
         f"Runtime activity detected: {runtime_activity_detected}",
         f"Dominant bottleneck: {bottleneck['dominant_bottleneck']}",
         f"Max RssAnon MB: {int(max_rss_anon / (1024 * 1024))}",
+        f"Max GPU used MB: {max_gpu_used_mb}",
         f"Max Buffered Entries: {max_buffered}",
         f"Max Scan Buffered Entries: {max_scan_buffered}",
         f"Max Watcher Buffered Entries: {max_watcher_buffered}",
@@ -1980,6 +2258,7 @@ def main() -> int:
         f"Operator VRAM budget MB: {gpu_memory_envelope['operator_vram_budget_mb']}",
         f"GPU admission max used MB: {gpu_memory_envelope['gpu_admission_max_used_mb']}",
         f"TensorRT workspace MB: {gpu_memory_envelope['tensorrt_workspace_mb']}",
+        f"VRAM overshoot fail MB: {gpu_memory_envelope['overshoot_fail_mb']}",
         f"MCP truth drift detected: {truth_drift_detected}",
         f"FileIndexed events parsed from runtime log: {file_indexed_stats['parsed_file_indexed_events']}",
         f"Max FileIndexed queue_wait_us: {file_indexed_stats['max_queue_wait_us']}",

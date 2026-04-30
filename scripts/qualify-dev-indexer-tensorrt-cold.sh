@@ -10,9 +10,10 @@ label="dev-indexer-tensorrt-cold"
 cuda_package_set="${AXON_CUDA_PACKAGE_SET:-cudaPackages}"
 cuda_package_label="${cuda_package_set//_/-}"
 manifest_path="${AXON_ORT_ARTIFACT_MANIFEST:-$PROJECT_ROOT/.axon/ort-artifacts/onnxruntime-tensorrt-${cuda_package_label}/current.json}"
-max_vram_used_mb="${AXON_TENSORRT_QUALIFY_MAX_VRAM_USED_MB:-6144}"
+max_vram_used_mb="${AXON_TENSORRT_QUALIFY_MAX_VRAM_USED_MB:-2048}"
 gpu_admission_vram_used_mb="${AXON_TENSORRT_QUALIFY_GPU_ADMISSION_VRAM_USED_MB:-}"
 tensorrt_workspace_mb="${AXON_TENSORRT_QUALIFY_WORKSPACE_MB:-}"
+overshoot_fail_mb="${AXON_TENSORRT_OVERSHOOT_MB:-7900}"
 extra_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -89,13 +90,13 @@ Options:
   --label NAME        Qualification label (default: dev-indexer-tensorrt-cold)
   --manifest PATH     Explicit TensorRT artifact manifest path
   --max-vram-used-mb N
-                     Operator VRAM budget in MB (default: 6144)
+                     Operator VRAM budget in MB (default: 2048)
   --gpu-admission-vram-used-mb N
                      Maximum already-used VRAM before GPU batch admission
                      (default: budget minus max(10%, 512 MiB))
   --tensorrt-workspace-mb N
                      TensorRT workspace/memory-pool cap in MB
-                     (default: budget minus 512 MiB)
+                     (default: budget minus 1024 MiB)
 EOF
             exit 0
             ;;
@@ -138,7 +139,7 @@ if (( gpu_admission_vram_used_mb >= max_vram_used_mb )); then
 fi
 
 if [[ -z "$tensorrt_workspace_mb" ]]; then
-    tensorrt_workspace_mb=$(( max_vram_used_mb > 512 ? max_vram_used_mb - 512 : max_vram_used_mb ))
+    tensorrt_workspace_mb=$(( max_vram_used_mb > 1024 ? max_vram_used_mb - 1024 : max_vram_used_mb ))
 fi
 case "$tensorrt_workspace_mb" in
     ''|*[!0-9]*)
@@ -178,16 +179,22 @@ export AXON_ORT_ARTIFACT_MANIFEST="$manifest_path"
 export AXON_GPU_EMBED_SERVICE_ENABLED=1
 export AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH=0
 export AXON_GPU_EMBED_SERVICE_TENSORRT=1
+export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
+export AXON_NVML_LIBRARY_PATH="${AXON_NVML_LIBRARY_PATH:-/usr/lib/wsl/lib/libnvidia-ml.so.1}"
 export AXON_OPT_MAX_VRAM_USED_MB="$max_vram_used_mb"
 export AXON_CUDA_MEMORY_SOFT_LIMIT_MB="$max_vram_used_mb"
 export AXON_CUDA_MEMORY_LIMIT_MB="$tensorrt_workspace_mb"
 export AXON_GPU_PRIMARY_WORKER_MAX_USED_MB="$gpu_admission_vram_used_mb"
 export AXON_GPU_TELEMETRY_CACHE_TTL_MS="${AXON_GPU_TELEMETRY_CACHE_TTL_MS:-250}"
+export AXON_TENSORRT_OVERSHOOT_MB="$overshoot_fail_mb"
+export AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT="${AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT:-1}"
 
 echo "🔒 TensorRT VRAM envelope"
 echo "   max_vram_used_mb          : $AXON_OPT_MAX_VRAM_USED_MB"
 echo "   gpu_admission_vram_used_mb: $AXON_GPU_PRIMARY_WORKER_MAX_USED_MB"
 echo "   tensorrt_workspace_mb     : $AXON_CUDA_MEMORY_LIMIT_MB"
+echo "   overshoot_fail_mb         : $AXON_TENSORRT_OVERSHOOT_MB"
+echo "   gpu_telemetry_backend     : $AXON_GPU_TELEMETRY_BACKEND"
 
 exec bash "$SCRIPT_DIR/qualify-dev-indexer-cold.sh" \
     --duration "$duration" \

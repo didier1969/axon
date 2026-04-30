@@ -75,9 +75,19 @@ Installation + qualification VRAM bornée:
 
 ```bash
 ./scripts/axon setup-tensorrt --qualify \
-  --max-vram-used-mb 6144 \
-  --tensorrt-workspace-mb 5632
+  --max-vram-used-mb 2048 \
+  --tensorrt-workspace-mb 1024
 ```
+
+Démarrage explicite d'un indexer vectoriel/full avec TensorRT:
+
+```bash
+./scripts/axon --instance dev start --indexer-full --tensorrt
+./scripts/axon --instance live start --indexer-full --tensorrt
+```
+
+`--tensorrt` refuse les modes non vectoriels (`brain_only`, `indexer_graph`) afin d'éviter une configuration affichée comme accélérée alors que la lane vectorielle ne tourne pas.
+Sur les cartes 8 GB, la qualification considère `7900 MiB` utilisés comme un overshoot dur et arrête le run.
 
 Le bootstrap global peut aussi déclencher TensorRT:
 
