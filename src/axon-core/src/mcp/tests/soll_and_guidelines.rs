@@ -21,7 +21,7 @@ fn test_axon_query_global_default() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("Resultats de recherche"));
+    assert!(content.contains("Search results"));
     assert!(content.contains("Mode:"));
 }
 
@@ -1162,11 +1162,11 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Titres dupliqués"), "{content}");
+    assert!(content.contains("Duplicate titles"), "{content}");
     assert!(content.contains("Duplicate req"), "{content}");
     assert!(content.contains("Duplicate dec"), "{content}");
     assert!(
-        content.contains("Requirements sans critères/preuves"),
+        content.contains("Requirements without criteria/evidence"),
         "{content}"
     );
     assert!(content.contains("REQ-AXO-010"), "{content}");
@@ -1225,8 +1225,10 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("0 violation"));
-    assert!(content.contains("cohérence minimale"));
+    // REQ-AXO-001 has no acceptance_criteria in metadata, so validation
+    // now flags it as uncovered even though it has a VERIFIES link.
+    assert!(content.contains("1 minimal coherence violation(s)"), "{content}");
+    assert!(content.contains("Requirements without criteria/evidence"), "{content}");
 }
 
 #[test]
@@ -1289,7 +1291,7 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("Projet canonique"), "{content}");
+    assert!(content.contains("Canonical project"), "{content}");
     assert!(content.contains("FSC"), "{content}");
 }
 
@@ -1335,7 +1337,7 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Relations invalides"), "{content}");
+    assert!(content.contains("Invalid relations"), "{content}");
     assert!(content.contains("VERIFIES"), "{content}");
     assert!(content.contains("DEC-AXO-404"), "{content}");
 }
@@ -1878,7 +1880,7 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
         .unwrap();
 
     assert!(
-        content.contains("degrade structurel sans ancrage fichier"),
+        content.contains("degraded structural without file anchor"),
         "{content}"
     );
     assert!(content.contains("trigger_scan"), "{content}");
@@ -1908,7 +1910,7 @@ fn test_axon_query_empty_fallback_returns_structured_recovery_without_empty_resu
         .unwrap();
 
     assert!(
-        content.contains("degrade structurel sans ancrage fichier"),
+        content.contains("degraded structural without file anchor"),
         "{content}"
     );
     assert!(!content.contains("Aucun résultat trouvé."), "{content}");
@@ -2034,7 +2036,7 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
         .as_str()
         .unwrap();
 
-    assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
+    assert!(impact_text.contains("call graph is not yet available"));
     assert!(impact_text.contains("parse_batch"));
     let data = impact_result.get("data").unwrap();
     assert_eq!(data["impact_available"].as_bool(), Some(false));
@@ -2168,7 +2170,7 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("partial truth"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
     assert_eq!(result["problem_class"], "index_incomplete");
     assert_eq!(result["next_best_actions"][0], "treat_result_as_partial");
@@ -2335,8 +2337,8 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Inspection du Symbole"), "{}", content);
-    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("Symbol Inspection"), "{}", content);
+    assert!(content.contains("partial truth"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
     let data = result.get("data").unwrap();
     assert_eq!(data["symbol_found"].as_bool(), Some(true));
@@ -2405,7 +2407,7 @@ fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("partial truth"), "{}", content);
     assert!(content.contains("structure_only"), "{}", content);
 }
 
@@ -2444,7 +2446,7 @@ fn test_axon_health_warns_when_project_contains_degraded_files() {
         .unwrap();
 
     assert!(content.contains("Health Report: PJA"), "{}", content);
-    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("partial truth"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
 }
 

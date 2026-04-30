@@ -68,8 +68,8 @@ impl McpServer {
                     if !search_path.is_empty() {
                         let cwd_escaped = escape_sql(&search_path);
                         if let Ok(cwd_matches) = self.query_single_column(&format!(
-                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
-                            cwd_escaped
+                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+                            cwd_escaped, cwd_escaped
                         )) {
                             let cwd_matches: Vec<String> = cwd_matches
                                 .into_iter()

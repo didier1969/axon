@@ -998,8 +998,8 @@ impl McpServer {
             return Value::Null;
         }
         if let Ok(json_str) = self.graph_store.query_json(&format!(
-            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
-            search_path
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+            search_path, search_path
         )) {
             if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
                 let codes: Vec<&str> = rows
