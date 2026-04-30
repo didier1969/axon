@@ -162,9 +162,10 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("## Entités : ") {
+        if trimmed.starts_with("## Entities: ") || trimmed.starts_with("## Entités : ") {
             current_type = trimmed
-                .strip_prefix("## Entités : ")
+                .strip_prefix("## Entities: ")
+                .or_else(|| trimmed.strip_prefix("## Entités : "))
                 .unwrap_or("")
                 .trim()
                 .to_string();

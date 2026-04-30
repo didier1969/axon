@@ -55,23 +55,23 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
         "tools": [
             {
                 "name": "help",
-                "description": "[LLM-only] Aide compacte optimisée pour clients LLM: routage des outils Axon, règles d'entrée explicite, et rappel du skill `axon-engineering-protocol`.",
+                "description": "[LLM-only] Return tool routing, input schemas, usage examples. Use help(tool=X) for any tool's contract. Call first.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "topic": {
                             "type": "string",
                             "enum": ["overview", "routing", "soll", "delivery", "runtime"],
-                            "description": "Sujet optionnel. Par défaut: overview compact."
+                            "description": "Optional topic. Default: compact overview."
                         },
                         "intent": {
                             "type": "string",
                             "enum": ["understand_symbol", "prepare_edit", "commit_work", "stabilize_soll", "runtime_check"],
-                            "description": "Intention LLM optionnelle. Retourne un protocole minimal machine-actionnable."
+                            "description": "Optional LLM intent. Returns a minimal machine-actionable protocol."
                         },
                         "tool": {
                             "type": "string",
-                            "description": "Nom d'un outil MCP. Retourne son contrat d'entrée, ses exemples compacts et son prochain geste recommandé."
+                            "description": "MCP tool name. Returns its input contract, compact examples, and recommended next action."
                         }
                     },
                     "required": []
@@ -79,7 +79,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "refine_lattice",
-                "description": "[SYSTEM] Raffinement avancé du graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif) et approfondir l'analyse structurelle.",
+                "description": "[SYSTEM] Advanced post-ingestion graph refinement to link cross-language boundaries (e.g. Elixir NIF -> native Rust) and deepen structural analysis.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -88,28 +88,28 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "fs_read",
-                "description": "[DX] Agent DX L2 (Detail) : Lit le contenu physique complet d'un fichier source. À n'utiliser qu'après avoir identifié une URI (chemin) précise via axon_query ou axon_inspect.",
+                "description": "[DX] Read file content by path. Use after query/inspect identifies the target URI.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "uri": { "type": "string", "description": "Le chemin complet vers le fichier (ex: 'src/main.rs')" },
-                        "start_line": { "type": "integer", "description": "Ligne de début optionnelle" },
-                        "end_line": { "type": "integer", "description": "Ligne de fin optionnelle" }
+                        "uri": { "type": "string", "description": "Full path to the file (e.g. 'src/main.rs')" },
+                        "start_line": { "type": "integer", "description": "Optional start line" },
+                        "end_line": { "type": "integer", "description": "Optional end line" }
                     },
                     "required": ["uri"]
                 }
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Create/update/link intent entities. Server assigns canonical IDs. Requires: action, entity, data.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["create", "update", "link"], "description": "L'opération à effectuer." },
-                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "Le type d'objet concerné." },
+                        "action": { "type": "string", "enum": ["create", "update", "link"], "description": "The operation to perform." },
+                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "The target entity type." },
                         "data": {
                             "type": "object",
-                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_code`; le serveur attribue l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
+                            "description": "JSON data. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) with `project_code`; server assigns canonical ID `TYPE-CODE-NNN`.\n- update (canonical id required, status/desc/etc).\n- link (canonical source_id, target_id)."
                         }
                     },
                     "required": ["action", "entity", "data"]
@@ -117,59 +117,59 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "infer_soll_mutation",
-                "description": "[SOLL] Analyse assistive en lecture seule. Propose le type d'entité, les IDs canoniques impactés, l'opération suggérée, le niveau de confiance et les ambiguïtés avant mutation.",
+                "description": "[SOLL] Read-only assistive analysis. Proposes entity type, impacted canonical IDs, suggested operation, confidence level, and ambiguities before mutation.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique." },
-                        "statement": { "type": "string", "description": "Nuance, contrainte ou clarification à stabiliser." }
+                        "project_code": { "type": "string", "description": "Canonical project code." },
+                        "statement": { "type": "string", "description": "Nuance, constraint, or clarification to stabilize." }
                     },
                     "required": ["project_code", "statement"]
                 }
             },
             {
                 "name": "entrench_nuance",
-                "description": "[SOLL] Workflow haut niveau borné pour stabiliser une nuance sur des entités canoniques existantes. Par défaut propose seulement; nécessite `confirm=true` pour écrire.",
+                "description": "[SOLL] Bounded high-level workflow to stabilize a nuance on existing canonical entities. Proposes only by default; requires `confirm=true` to write.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique." },
-                        "statement": { "type": "string", "description": "Nuance ou contrainte à entériner." },
+                        "project_code": { "type": "string", "description": "Canonical project code." },
+                        "statement": { "type": "string", "description": "Nuance or constraint to entrench." },
                         "target_ids": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "IDs canoniques ciblés. Si omis, le serveur réutilise les candidats inférés."
+                            "description": "Target canonical IDs. If omitted, the server reuses inferred candidates."
                         },
-                        "confirm": { "type": "boolean", "description": "Doit être `true` pour appliquer les mises à jour en wave 1." }
+                        "confirm": { "type": "boolean", "description": "Must be `true` to apply updates in wave 1." }
                     },
                     "required": ["project_code", "statement"]
                 }
             },
             {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et retourne immédiatement `project_code`, `project_name` et `project_path` dans la même réponse.",
+                "description": "[DX/SOLL] Initializes a new Axon project. The server assigns the canonical `project_code` and immediately returns `project_code`, `project_name`, and `project_path` in the same response.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_name": { "type": "string", "description": "Optionnel. Le nom affiché sera dérivé de la dernière partie de `project_path`." },
-                        "project_code": { "type": "string", "description": "Optionnel, réservé à compatibilité interne. En usage normal, omettez-le: le serveur attribue le code canonique et le renvoie." },
-                        "project_path": { "type": "string", "description": "Le chemin absolu canonique du projet (ex: /home/dstadel/projects/BookingSystem)." },
-                        "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
+                        "project_name": { "type": "string", "description": "Optional. Display name will be derived from the last segment of `project_path`." },
+                        "project_code": { "type": "string", "description": "Optional, reserved for internal compatibility. In normal usage, omit it: the server assigns and returns the canonical code." },
+                        "project_path": { "type": "string", "description": "Canonical absolute path of the project (e.g. /home/dstadel/projects/BookingSystem)." },
+                        "concept_document_url_or_text": { "type": "string", "description": "Optional: text or link to the project vision." }
                     },
                     "required": ["project_path"]
                 }
             },
             {
                 "name": "axon_apply_guidelines",
-                "description": "[DX/SOLL] Instancie les règles globales sélectionnées pour un projet spécifique.",
+                "description": "[DX/SOLL] Instantiates selected global rules for a specific project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Le code canonique en 3 caractères du projet cible." },
+                        "project_code": { "type": "string", "description": "3-character canonical code of the target project." },
                         "accepted_global_rule_ids": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Liste des IDs canoniques des règles globales à appliquer (ex: GUI-PRO-001)."
+                            "description": "List of canonical global rule IDs to apply (e.g. GUI-PRO-001)."
                         }
                     },
                     "required": ["project_code", "accepted_global_rule_ids"]
@@ -177,49 +177,49 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_commit_work",
-                "description": "[DX/SOLL] Outil OBLIGATOIRE pour valider et commiter le travail. Évalue les fichiers modifiés contre les Guidelines SOLL. Ne JAMAIS utiliser git commit via shell.",
+                "description": "[DX/SOLL] MANDATORY tool to validate and commit work. Evaluates modified files against SOLL Guidelines. NEVER use git commit via shell.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "diff_paths": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Liste des chemins de fichiers modifiés."
+                            "description": "List of modified file paths."
                         },
-                        "message": { "type": "string", "description": "Message de commit (Conventional Commits)." },
-                        "dry_run": { "type": "boolean", "description": "Si true, valide uniquement sans commiter." }
+                        "message": { "type": "string", "description": "Commit message (Conventional Commits)." },
+                        "dry_run": { "type": "boolean", "description": "If true, validates only without committing." }
                     },
                     "required": ["diff_paths", "message"]
                 }
             },
             {
                 "name": "axon_pre_flight_check",
-                "description": "[DX/SOLL] Validation dry-run obligatoire avant commit. Vérifie les fichiers modifiés contre les Guidelines SOLL sans créer de commit.",
+                "description": "[DX/SOLL] Mandatory dry-run validation before commit. Checks modified files against SOLL Guidelines without creating a commit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "diff_paths": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Liste des chemins de fichiers modifiés."
+                            "description": "List of modified file paths."
                         },
-                        "message": { "type": "string", "description": "Message optionnel pour journaliser la validation. Par défaut: 'pre-flight-check'." }
+                        "message": { "type": "string", "description": "Optional message to log the validation. Default: 'pre-flight-check'." }
                     },
                     "required": ["diff_paths"]
                 }
             },
             {
                 "name": "soll_apply_plan",
-                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones, visions, concepts) avec dry-run, relations canoniques et rapport created/updated/skipped/errors. Mutation async: lire `job_status` jusqu'à terminal. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Idempotent high-level wrapper to apply a SOLL plan (pillars, requirements, decisions, milestones, visions, concepts) with dry-run, canonical relations, and created/updated/skipped/errors report. Async mutation: poll `job_status` until terminal. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique existant (ex: AXO). Le serveur attribue ensuite `preview_id` et les IDs canoniques créés." },
-                        "author": { "type": "string", "description": "Auteur de la preview/révision. Recommandé pour audit." },
-                        "dry_run": { "type": "boolean", "description": "Si true, ne modifie rien et produit seulement le plan d'action." },
+                        "project_code": { "type": "string", "description": "Existing canonical project code (e.g. AXO). The server then assigns `preview_id` and created canonical IDs." },
+                        "author": { "type": "string", "description": "Author of the preview/revision. Recommended for audit." },
+                        "dry_run": { "type": "boolean", "description": "If true, makes no changes and only produces the action plan." },
                         "plan": {
                             "type": "object",
-                            "description": "Collections optionnelles par type. Chaque item accepte `logical_key`, `title`, `description`, `status`, `metadata` et champs métier du type. `logical_key` rend l'opération idempotente.",
+                            "description": "Optional collections by type. Each item accepts `logical_key`, `title`, `description`, `status`, `metadata`, and type-specific business fields. `logical_key` makes the operation idempotent.",
                             "properties": {
                                 "pillars": { "type": "array", "items": { "type": "object" } },
                                 "requirements": { "type": "array", "items": { "type": "object" } },
@@ -232,11 +232,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "relations": {
                             "type": "array",
                             "items": { "type": "object" },
-                            "description": "Liens à créer: `{source_id,target_id,relation_type}`. `source_id`/`target_id` peuvent référencer un `logical_key` créé dans le même plan."
+                            "description": "Links to create: `{source_id,target_id,relation_type}`. `source_id`/`target_id` can reference a `logical_key` created in the same plan."
                         },
                         "reserved_preview_id": {
                             "type": "string",
-                            "description": "Optionnel interne/tests. En usage normal, omettre: le serveur attribue `preview_id`."
+                            "description": "Optional internal/tests. In normal usage, omit: the server assigns `preview_id`."
                         }
                     },
                     "required": ["project_code", "plan"]
@@ -244,7 +244,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_commit_revision",
-                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Le client fournit `preview_id`; le serveur attribue `revision_id`. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Atomic commit of a SOLL preview into a journaled revision. Client provides `preview_id`; server assigns `revision_id`. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -256,7 +256,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Retourne le contexte intentionnel compact d'un projet (visions, requirements, decisions, revisions), prêt pour consommation LLM et steering opérateur. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -268,7 +268,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_work_plan",
-                "description": "[SOLL] Produit un plan de travail read-only à partir du graphe intentionnel canonique, avec waves parallèles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Produces a read-only work plan from the canonical intentional graph, with parallel waves, blockers, cycles, and validation gates. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -276,7 +276,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "limit": { "type": "integer" },
                         "top": { "type": "integer" },
                         "include_ist": { "type": "boolean" },
-                        "include_validation_details": { "type": "boolean", "description": "Par défaut false pour préserver le contexte LLM. Mettre true seulement si les détails complets de `soll_verify_requirements` sont nécessaires." },
+                        "include_validation_details": { "type": "boolean", "description": "Default false to preserve LLM context. Set true only if full `soll_verify_requirements` details are needed." },
                         "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
                     },
                     "required": ["project_code"]
@@ -284,7 +284,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_attach_evidence",
-                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Attaches evidence (file/test/metric/dashboard) to a SOLL entity. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -297,7 +297,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_verify_requirements",
-                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Verify requirement coverage: done/partial/missing with top gaps and next-to-close.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -308,7 +308,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_rollback_revision",
-                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Best-effort rollback of a SOLL revision via the RevisionChange journal. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -319,64 +319,64 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_export",
-                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel canonique dans un document Markdown horodaté. Les exports canoniques vivent sous `docs/vision/`; les snapshots historiques relus seulement vivent sous `docs/archive/soll-exports/`. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Exports the entire canonical intentional graph into a timestamped Markdown document. Canonical exports live under `docs/vision/`; read-only historical snapshots live under `docs/archive/soll-exports/`. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Filtre l'export au projet demandé." }
+                        "project_code": { "type": "string", "description": "Filters export to the requested project." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "soll_generate_docs",
-                "description": "[SOLL] Génère une documentation humaine navigable dérivée de SOLL sous forme de site statique HTML+Mermaid. Maintient la lecture dérivée sous `docs/derived/soll/`, y compris le root global multi-projets. Cette sortie est explicitement non canonique: lecture oui, restore non. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Generates navigable human documentation derived from SOLL as a static HTML+Mermaid site. Maintains derived output under `docs/derived/soll/`, including the global multi-project root. This output is explicitly non-canonical: read yes, restore no. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Projet canonique à documenter." },
-                        "output_dir": { "type": "string", "description": "Répertoire racine projet optionnel. Si fourni seul, génère uniquement le site projet ciblé." },
-                        "site_root_dir": { "type": "string", "description": "Racine de site optionnelle. Génère <site_root_dir>/index.html et <site_root_dir>/<project_code>/..." }
+                        "project_code": { "type": "string", "description": "Canonical project to document." },
+                        "output_dir": { "type": "string", "description": "Optional project root directory. If provided alone, generates only the targeted project site." },
+                        "site_root_dir": { "type": "string", "description": "Optional site root. Generates <site_root_dir>/index.html and <site_root_dir>/<project_code>/..." }
                     },
                     "required": ["project_code"]
                 }
             },
             {
                 "name": "restore_soll",
-                "description": "[SOLL] Restaure les entités conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite, et doit être réservé aux flux de restauration explicites. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Restores conceptual entities from an official SOLL Markdown export. Operates in merge mode without implicit destructive purge; reserved for explicit restoration flows. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Chemin optionnel vers un export SOLL. Par defaut: dernier fichier docs/vision/SOLL_EXPORT_*.md." }
+                        "path": { "type": "string", "description": "Optional path to a SOLL export. Default: latest docs/vision/SOLL_EXPORT_*.md file." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "soll_validate",
-                "description": "[SOLL] Validation en lecture seule du graphe intentionnel: cohérence structurelle, completeness et repair_guidance, sans modifier SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Read-only validation of the intentional graph: structural coherence, completeness, and repair_guidance, without modifying SOLL. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Filtre la validation au projet demandé." }
+                        "project_code": { "type": "string", "description": "Filters validation to the requested project." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "job_status",
-                "description": "[SYSTEM] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé. Suivi canonique des mutations asynchrones: lire `data.state`, `data.result`, `data.error_text`.",
+                "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "job_id": { "type": "string", "description": "Identifiant du job (ex: JOB-1712851200000)." }
+                        "job_id": { "type": "string", "description": "Job identifier (e.g. JOB-1712851200000)." }
                     },
                     "required": ["job_id"]
                 }
             },
             {
                 "name": "status",
-                "description": "[SYSTEM] Vue opérateur unifiée: état runtime, profil actif, disponibilité des surfaces avancées et signaux de vérité/dégradation.",
+                "description": "[SYSTEM] Return runtime mode, profile, public tools, pressure signals, auto-detected project. Call second after help().",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -387,7 +387,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_surface_diagnostics",
-                "description": "[SYSTEM] Diagnostic public de surface MCP: vérité serveur sur les tools exposés, outils critiques, contrat async canonique et guidance explicite si un client semble utiliser un binding stale ou incomplet.",
+                "description": "[SYSTEM] Public MCP surface diagnostic: server truth on exposed tools, critical tools, canonical async contract, and explicit guidance if a client appears to use a stale or incomplete binding.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -398,11 +398,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "project_status",
-                "description": "[SYSTEM/SOLL] Etat de situation vivant du projet: vision source SOLL, état runtime, surface opérateur, diagnostics structuraux et contexte SOLL récent.",
+                "description": "[SYSTEM/SOLL] Return project vision, SOLL coverage, runtime state, diagnostics. Use for project-scoped truth.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": []
@@ -410,63 +410,63 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "project_registry_lookup",
-                "description": "[SYSTEM/SOLL] Résout un projet canonique depuis `project_code`, `project_name` ou `project_path`. Retourne l'identité projet stable sans passer par la recherche indirecte.",
+                "description": "[SYSTEM/SOLL] Resolves a canonical project from `project_code`, `project_name`, or `project_path`. Returns stable project identity without indirect lookup.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique si connu." },
-                        "project_name": { "type": "string", "description": "Nom projet attendu, généralement la dernière partie du chemin." },
-                        "project_path": { "type": "string", "description": "Chemin absolu canonique du projet." }
+                        "project_code": { "type": "string", "description": "Canonical project code if known." },
+                        "project_name": { "type": "string", "description": "Expected project name, typically the last path segment." },
+                        "project_path": { "type": "string", "description": "Canonical absolute path of the project." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "soll_relation_schema",
-                "description": "[SOLL] Expose la politique canonique des relations SOLL pour un couple source/cible ou depuis un type/id source. Sert à découvrir les liaisons valides sans essai-erreur.",
+                "description": "[SOLL] Exposes the canonical SOLL relation policy for a source/target pair or from a source type/id. Discovers valid links without trial and error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "source_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC." },
-                        "target_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC, ART." },
-                        "source_id": { "type": "string", "description": "ID canonique source optionnel." },
-                        "target_id": { "type": "string", "description": "ID canonique cible optionnel." }
+                        "source_type": { "type": "string", "description": "Short canonical type e.g. VIS, PIL, REQ, DEC." },
+                        "target_type": { "type": "string", "description": "Short canonical type e.g. VIS, PIL, REQ, DEC, ART." },
+                        "source_id": { "type": "string", "description": "Optional source canonical ID." },
+                        "target_id": { "type": "string", "description": "Optional target canonical ID." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "snapshot_history",
-                "description": "[SYSTEM] Historique dérivé non canonique des snapshots structurels exportés par `project_status` pour un projet.",
+                "description": "[SYSTEM] Non-canonical derived history of structural snapshots exported by `project_status` for a project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
-                        "limit": { "type": "integer", "description": "Nombre maximum de snapshots retournés (défaut 10)." }
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "limit": { "type": "integer", "description": "Maximum number of snapshots returned (default 10)." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "snapshot_diff",
-                "description": "[SYSTEM] Diff dérivé entre deux snapshots structurels non canoniques d'un projet.",
+                "description": "[SYSTEM] Derived diff between two non-canonical structural snapshots of a project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
-                        "from_snapshot_id": { "type": "string", "description": "Snapshot source optionnel; défaut: précédent." },
-                        "to_snapshot_id": { "type": "string", "description": "Snapshot cible optionnel; défaut: dernier." }
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "from_snapshot_id": { "type": "string", "description": "Optional source snapshot; default: previous." },
+                        "to_snapshot_id": { "type": "string", "description": "Optional target snapshot; default: latest." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "conception_view",
-                "description": "[SYSTEM/DX] Vue de conception dérivée et lecture seule: modules, interfaces, contrats, flux et violations de frontières suspectées.",
+                "description": "[SYSTEM/DX] Read-only derived conception view: modules, interfaces, contracts, flows, and suspected boundary violations.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
                         "mode": { "type": "string", "enum": ["brief", "full"] }
                     },
                     "required": []
@@ -474,12 +474,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "change_safety",
-                "description": "[SYSTEM/DX/SOLL] Résume la sûreté de changement d'une cible via tests, traceability et validation dérivée.",
+                "description": "[SYSTEM/DX/SOLL] Summarizes change safety of a target via tests, traceability, and derived validation.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
-                        "target": { "type": "string", "description": "Symbole, fichier ou entité cible." },
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "target": { "type": "string", "description": "Target symbol, file, or entity." },
                         "target_type": { "type": "string", "enum": ["symbol", "file", "intent"] },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
@@ -488,12 +488,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "why",
-                "description": "[DX/SOLL] Explique pourquoi un symbole, fichier ou sujet existe via liaisons code, traceability et rationale SOLL.",
+                "description": "[DX/SOLL] Return governing rationale for a symbol/file. Links code evidence to SOLL intent.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Symbole ou entité cible." },
-                        "question": { "type": "string", "description": "Question libre si le symbole seul ne suffit pas." },
+                        "symbol": { "type": "string", "description": "Target symbol or entity." },
+                        "question": { "type": "string", "description": "Free-form question if the symbol alone is not enough." },
                         "project": { "type": "string" },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
@@ -502,14 +502,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "path",
-                "description": "[DX] Explique un chemin d'exécution ou de dépendance entre deux points, ou bascule en trace topologique si seul un point d'ancrage est fourni.",
+                "description": "[DX] Trace execution/dependency path between two symbols. Single anchor: topological neighborhood.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "source": { "type": "string", "description": "Symbole source ou ancre de départ." },
-                        "sink": { "type": "string", "description": "Symbole cible optionnel." },
+                        "source": { "type": "string", "description": "Source symbol or starting anchor." },
+                        "sink": { "type": "string", "description": "Optional target symbol." },
                         "project": { "type": "string" },
-                        "depth": { "type": "integer", "description": "Profondeur maximale (défaut 6)." },
+                        "depth": { "type": "integer", "description": "Maximum depth (default 6)." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["source"]
@@ -517,7 +517,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "anomalies",
-                "description": "[GOVERNANCE] Agrège les anomalies structurelles prioritaires: cycles, god objects, wrappers et orphelins, avec sévérité, confiance et action recommandée.",
+                "description": "[GOVERNANCE] Return structural anomalies: cycles, god objects, wrappers, orphans. Ranked by severity.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -529,7 +529,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "retrieve_context",
-                "description": "[DX] Planner-driven retrieval that assembles an evidence packet for LLM answerability from canonical truth, chunks, bounded graph context, and relevant SOLL rationale.",
+                "description": "[DX] Assemble bounded evidence packet for a question. Returns: answer sketch, direct evidence, SOLL rationale.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -546,7 +546,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "query",
-                "description": "[DX] Recherche de symboles à forte valeur développeur. Utilise la recherche structurelle immédiatement, et ajoute la similarité sémantique seulement si l'embedding temps réel est disponible.",
+                "description": "[DX] Search symbols by name/kind/path. Returns ranked matches. Use first for code discovery.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -559,7 +559,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "inspect",
-                "description": "[DX] Vue 360° d'un symbole (code source, appelants/appelés, statistiques).",
+                "description": "[DX] Inspect symbol detail: source, callers, callees, stats. Use after query identifies target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -572,18 +572,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "diagnose_indexing",
-                "description": "[SYSTEM] Diagnostic Day-1 d'indexation par projet: causes probables, raisons dominantes, erreurs parser/runtime et remédiations.",
+                "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": { "type": "string", "description": "Slug projet ou '*' pour global." }
+                        "project": { "type": "string", "description": "Project slug or '*' for global." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "audit",
-                "description": "[GOVERNANCE] Vérification de conformité approfondie (sécurité, qualité, anti-patterns, dette technique).",
+                "description": "[GOVERNANCE] In-depth compliance check (security, quality, anti-patterns, technical debt).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -595,7 +595,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "impact",
-                "description": "[RISK] Analyse prédictive (Rayon d'impact et chemins critiques).",
+                "description": "[RISK] Predictive analysis (blast radius and critical paths).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -609,7 +609,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "health",
-                "description": "[GOVERNANCE] Rapport de santé agrégé (code mort, lacunes de tests, points d'entrée).",
+                "description": "[GOVERNANCE] Aggregated health report (dead code, test gaps, entry points).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -621,12 +621,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "diff",
-                "description": "[RISK] Analyse sémantique des changements (Git Diff -> Symboles touchés).",
+                "description": "[RISK] Semantic analysis of changes (Git Diff -> affected symbols).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "diff_content": { "type": "string" },
-                        "limit": { "type": "integer", "description": "Maximum symboles par fichier (default 120, borné 10..500)" },
+                        "limit": { "type": "integer", "description": "Max symbols per file (default 120, clamped 10..500)" },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["diff_content"]
@@ -634,7 +634,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "batch",
-                "description": "[SYSTEM] Orchestration d'appels multiples pour optimiser la performance ou piloter plusieurs outils.",
+                "description": "[SYSTEM] Multi-call orchestration to optimize performance or drive multiple tools.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -655,42 +655,42 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "semantic_clones",
-                "description": "[GOVERNANCE] Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
+                "description": "[GOVERNANCE] Finds semantically similar functions (logic clones) in the project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Nom du symbole source" }
+                        "symbol": { "type": "string", "description": "Source symbol name" }
                     },
                     "required": ["symbol"]
                 }
             },
             {
                 "name": "architectural_drift",
-                "description": "[GOVERNANCE] Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
+                "description": "[GOVERNANCE] Checks architecture violations between two layers (e.g. 'ui' directly calling 'db').",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "source_layer": { "type": "string", "description": "Couche source (ex: 'ui', 'frontend')" },
-                        "target_layer": { "type": "string", "description": "Couche interdite (ex: 'db', 'repository')" }
+                        "source_layer": { "type": "string", "description": "Source layer (e.g. 'ui', 'frontend')" },
+                        "target_layer": { "type": "string", "description": "Forbidden layer (e.g. 'db', 'repository')" }
                     },
                     "required": ["source_layer", "target_layer"]
                 }
             },
             {
                 "name": "bidi_trace",
-                "description": "[DX] Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
+                "description": "[DX] Bidirectional trace: climbs to Entry Points (up) and lists deep calls (down).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Symbole de départ" },
-                        "depth": { "type": "integer", "description": "Profondeur maximale (défaut: sans limite pour être exhaustif, mais cappé par le moteur)" }
+                        "symbol": { "type": "string", "description": "Starting symbol" },
+                        "depth": { "type": "integer", "description": "Maximum depth (default: unlimited for exhaustiveness, but capped by the engine)" }
                     },
                     "required": ["symbol"]
                 }
             },
             {
                 "name": "api_break_check",
-                "description": "[RISK] Vérifie si la modification d'un symbole public impacte des composants externes.",
+                "description": "[RISK] Checks whether modifying a public symbol impacts external components.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -701,20 +701,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "simulate_mutation",
-                "description": "[RISK] Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
+                "description": "[RISK] Dry-run: computes the impact volume of a modification before coding.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project": { "type": "string" },
                         "symbol": { "type": "string" },
-                        "depth": { "type": "integer", "description": "Profondeur d'impact (optionnel)" }
+                        "depth": { "type": "integer", "description": "Impact depth (optional)" }
                     },
                     "required": ["symbol"]
                 }
             },
             {
                 "name": "schema_overview",
-                "description": "[LLM/ADVANCED] Vue d'ensemble du schéma SQL Axon pour exploration structurée quand les outils produit (`query`, `inspect`, `retrieve_context`, `soll_*`) ne suffisent pas. Lecture seulement.",
+                "description": "[LLM/ADVANCED] Axon SQL schema overview for structured exploration when product tools (`query`, `inspect`, `retrieve_context`, `soll_*`) are insufficient. Read-only.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -723,7 +723,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "list_labels_tables",
-                "description": "[LLM/ADVANCED] Inventaire compact des tables/labels et colonnes clés. À utiliser avant `cypher`/SQL brut pour éviter les requêtes inventées.",
+                "description": "[LLM/ADVANCED] Compact inventory of tables/labels and key columns. Use before raw `cypher`/SQL to avoid fabricated queries.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -732,7 +732,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "query_examples",
-                "description": "[LLM/ADVANCED] Exemples de requêtes prêtes à l'emploi pour exploration structurée, backlog, erreurs et bridges inter-langages. Sert de garde-fou avant requête brute.",
+                "description": "[LLM/ADVANCED] Ready-to-use query examples for structured exploration, backlog, errors, and cross-language bridges. Acts as a guardrail before raw queries.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -741,7 +741,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "cypher",
-                "description": "[LLM/ADVANCED] Interface de requête graphe brute en lecture. À utiliser seulement après `schema_overview`, `list_labels_tables` ou `query_examples`, lorsque la surface produit ne répond pas assez finement.",
+                "description": "[LLM/ADVANCED] Raw read-only graph query interface. Use only after `schema_overview`, `list_labels_tables`, or `query_examples`, when the product surface does not answer precisely enough.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -752,7 +752,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             json!({
                 "name": "debug",
-                "description": "[SYSTEM] Diagnostic système avancé : état du moteur Axon V2 (RAM, DB, architecture, indexation) pour compréhension profonde du runtime.",
+                "description": "[SYSTEM] Advanced system diagnostic: Axon V2 engine state (RAM, DB, architecture, indexing) for deep runtime understanding.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -763,7 +763,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             }),
             json!({
                 "name": "truth_check",
-                "description": "[SYSTEM] Contrôle de cohérence reader-path vs canonical writer sur les compteurs critiques (File/Symbol/CALLS...).",
+                "description": "[SYSTEM] Reader-path vs canonical writer coherence check on critical counters (File/Symbol/CALLS...).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -772,7 +772,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             }),
             json!({
                 "name": "resume_vectorization",
-                "description": "[SYSTEM] Recrée explicitement la queue de vectorisation manquante à partir des fichiers déjà graph_indexed.",
+                "description": "[SYSTEM] Explicitly recreates the missing vectorization queue from already graph_indexed files.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},

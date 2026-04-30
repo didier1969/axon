@@ -663,6 +663,7 @@ impl McpServer {
             .or_else(|| std::env::var("ORT_TENSORRT_ENGINE_CACHE_PATH").ok());
         let vector_runtime_machine = json!({
             "chunks_embedded_total": vector_chunks_embedded_total,
+            "chunks_inferred_total": local_vector_runtime_metrics.embed_input_texts_total,
             "chunk_embeddings_per_second": chunk_embeddings_per_second,
             "chunk_embeddings_rate_window_ms": chunk_embeddings_rate_window_ms,
             "graph_workers_started_total": graph_workers_started_total,
@@ -683,7 +684,23 @@ impl McpServer {
             "mixed_fallback_batches_total": local_vector_runtime_metrics.mixed_fallback_batches_total,
             "last_consumed_batch_lane": local_vector_runtime_metrics.last_consumed_batch_lane.as_str(),
             "active_small_max_tokens": local_vector_runtime_metrics.active_small_max_tokens,
-            "active_medium_max_tokens": local_vector_runtime_metrics.active_medium_max_tokens
+            "active_medium_max_tokens": local_vector_runtime_metrics.active_medium_max_tokens,
+            "embed_attempts_total": local_vector_runtime_metrics.embed_attempts_total,
+            "embed_inflight_started_at_ms": local_vector_runtime_metrics.embed_inflight_started_at_ms,
+            "embed_inflight_texts_current": local_vector_runtime_metrics.embed_inflight_texts_current,
+            "embed_inflight_text_bytes_current": local_vector_runtime_metrics.embed_inflight_text_bytes_current,
+            "last_embed_attempt_wall_ms": local_vector_runtime_metrics.last_embed_attempt_wall_ms,
+            "avg_embed_attempt_wall_ms": local_vector_runtime_metrics.avg_embed_attempt_wall_ms,
+            "max_embed_attempt_wall_ms": local_vector_runtime_metrics.max_embed_attempt_wall_ms,
+            "last_embed_gap_ms": local_vector_runtime_metrics.last_embed_gap_ms,
+            "avg_embed_gap_ms": local_vector_runtime_metrics.avg_embed_gap_ms,
+            "max_embed_gap_ms": local_vector_runtime_metrics.max_embed_gap_ms,
+            "vector_workers_started_total": local_vector_runtime_metrics.vector_workers_started_total,
+            "vector_workers_stopped_total": local_vector_runtime_metrics.vector_workers_stopped_total,
+            "vector_workers_active_current": local_vector_runtime_metrics.vector_workers_active_current,
+            "vector_worker_heartbeat_at_ms": local_vector_runtime_metrics.vector_worker_heartbeat_at_ms,
+            "vector_worker_restarts_total": local_vector_runtime_metrics.vector_worker_restarts_total,
+            "vector_lane_state": local_vector_runtime_metrics.vector_lane_state.as_str()
         });
         let vector_pipeline_telemetry = json!({
             "contract": "tensorrt_ready_vector_pipeline_v1",
@@ -847,6 +864,7 @@ impl McpServer {
                 "instance_identity": {
                     "instance_kind": instance_kind,
                     "runtime_identity": runtime_identity,
+                    "auto_detected_project": self.auto_detect_project_code_from_cwd(),
                     "data_root": data_root,
                     "run_root": run_root,
                     "project_root": project_root,
@@ -966,5 +984,33 @@ impl McpServer {
         }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
+    }
+
+    /// Auto-detect project_code from cwd by matching against ProjectCodeRegistry.
+    /// Returns the code if exactly one project matches, null otherwise.
+    /// Uses AXON_PROJECT_ROOT (set by runtime scripts) first, then falls back to cwd.
+    fn auto_detect_project_code_from_cwd(&self) -> Value {
+        let search_path = std::env::var("AXON_PROJECT_ROOT")
+            .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
+            .unwrap_or_default()
+            .replace('\'', "''");
+        if search_path.is_empty() {
+            return Value::Null;
+        }
+        if let Ok(json_str) = self.graph_store.query_json(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+            search_path, search_path
+        )) {
+            if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
+                let codes: Vec<&str> = rows
+                    .iter()
+                    .filter_map(|row| row.get("project_code").and_then(Value::as_str))
+                    .collect();
+                if codes.len() == 1 {
+                    return json!(codes[0]);
+                }
+            }
+        }
+        Value::Null
     }
 }

@@ -23,12 +23,12 @@ impl McpServer {
                 .filter(|value| !value.trim().is_empty())
                 .collect();
             if codes.is_empty() {
-                "aucun code connu".to_string()
+                "no known code".to_string()
             } else {
                 codes.join(", ")
             }
         })
-        .unwrap_or_else(|_| "aucun code connu".to_string())
+        .unwrap_or_else(|_| "no known code".to_string())
     }
 
     pub(super) fn ensure_soll_registry_row(&self, project_code: &str) -> anyhow::Result<()> {
@@ -48,15 +48,54 @@ impl McpServer {
     ) -> anyhow::Result<String> {
         let raw = project_code.unwrap_or("").trim();
         if raw.is_empty() {
+            // Auto-detect from registry: single project or cwd match.
+            let _ = self.sync_project_code_registry_from_meta();
+            if let Ok(codes) = self.query_single_column(
+                "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code ASC",
+            ) {
+                let codes: Vec<String> = codes
+                    .into_iter()
+                    .filter(|v| !v.trim().is_empty())
+                    .collect();
+                if codes.len() == 1 {
+                    return Ok(codes.into_iter().next().unwrap());
+                }
+                if codes.len() > 1 {
+                    // Try matching AXON_PROJECT_ROOT or cwd against registered project paths.
+                    let search_path = std::env::var("AXON_PROJECT_ROOT")
+                        .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
+                        .unwrap_or_default();
+                    if !search_path.is_empty() {
+                        let cwd_escaped = escape_sql(&search_path);
+                        if let Ok(cwd_matches) = self.query_single_column(&format!(
+                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+                            cwd_escaped, cwd_escaped
+                        )) {
+                            let cwd_matches: Vec<String> = cwd_matches
+                                .into_iter()
+                                .filter(|v| !v.trim().is_empty())
+                                .collect();
+                            if cwd_matches.len() == 1 {
+                                return Ok(cwd_matches.into_iter().next().unwrap());
+                            }
+                        }
+                    }
+                    return Err(anyhow!(
+                        "`project_code` is required for {} when multiple projects exist. Known: {}. Provide the canonical code (e.g. `AXO`).",
+                        action_label,
+                        codes.join(", ")
+                    ));
+                }
+            }
             return Err(anyhow!(
-                "`project_code` est obligatoire pour {}. Utilisez un code canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`.",
+                "`project_code` is required for {}. Use a canonical 3-character uppercase code, e.g. `AXO`. Call `status` to discover your project.",
                 action_label
             ));
         }
 
         if !is_valid_project_code(raw) || raw != raw.to_ascii_uppercase() {
             return Err(anyhow!(
-                "Identifiant projet non canonique `{}` pour {}. Les mutations SOLL acceptent uniquement `project_code` au format canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`. Codes connus: {}",
+                "Non-canonical project_code `{}` for {}. SOLL mutations require 3-char uppercase canonical codes (e.g. `AXO`). Known: {}",
                 raw,
                 action_label,
                 self.known_project_codes_hint()
@@ -97,7 +136,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Code projet canonique `{}` introuvable dans soll.ProjectCodeRegistry ou `.axon/meta.json`. Codes connus: {}",
+            "Canonical project_code `{}` not found in ProjectCodeRegistry or .axon/meta.json. Known: {}",
             canonical_code,
             self.known_project_codes_hint()
         ))
@@ -113,7 +152,7 @@ impl McpServer {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 anyhow!(
-                    "Impossible de dériver le nom projet depuis le chemin `{}`",
+                    "Cannot derive project name from path `{}`",
                     project_path
                 )
             })
@@ -272,7 +311,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Impossible d'attribuer un `project_code` canonique unique pour `{}` depuis `{}`. Codes connus: {}",
+            "Cannot assign a unique canonical `project_code` for `{}` from `{}`. Known codes: {}",
             project_name,
             project_path,
             self.known_project_codes_hint()
@@ -284,7 +323,7 @@ impl McpServer {
         project_code: &str,
     ) -> anyhow::Result<(String, String)> {
         let canonical_code = self
-            .require_registered_mutation_project_code(Some(project_code), "cette mutation SOLL")?;
+            .require_registered_mutation_project_code(Some(project_code), "this SOLL mutation")?;
         Ok((canonical_code.clone(), canonical_code))
     }
 
@@ -322,7 +361,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
+            "Canonical project `{}` not found in .axon/meta.json or ProjectCodeRegistry",
             project_code
         ))
     }
@@ -398,7 +437,7 @@ impl McpServer {
         let found = !matches.is_empty();
         let content = if found {
             format!(
-                "Projet canonique trouvé: {} ({})",
+                "Canonical project found: {} ({})",
                 first
                     .get("project_name")
                     .and_then(|value| value.as_str())
@@ -409,7 +448,7 @@ impl McpServer {
                     .unwrap_or("")
             )
         } else {
-            "Aucun projet canonique trouvé dans ProjectCodeRegistry pour les critères fournis."
+            "No canonical project found in ProjectCodeRegistry for the given criteria."
                 .to_string()
         };
 

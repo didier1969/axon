@@ -559,6 +559,18 @@ pub(super) fn gpu_embedding_service_client() -> AnyhowResult<Arc<Mutex<GpuEmbedd
     }
 }
 
+/// Recycle the existing GPU embedding service subprocess to free CUDA memory.
+pub(super) fn recycle_existing_gpu_embedding_service() -> AnyhowResult<bool> {
+    let Some(client) = GPU_EMBED_SERVICE_CLIENT.get() else {
+        return Ok(false);
+    };
+    let mut guard = client
+        .lock()
+        .map_err(|e| anyhow!("GPU service mutex poisoned: {}", e))?;
+    guard.recycle()?;
+    Ok(true)
+}
+
 impl Drop for GpuEmbedSubprocess {
     fn drop(&mut self) {
         let _ = self.stdin.flush();

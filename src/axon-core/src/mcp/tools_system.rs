@@ -87,12 +87,12 @@ impl McpServer {
                 let count = parsed.len();
                 let report = if count > 0 {
                     format!(
-                        "✨ **Lattice Refiner exécuté avec succès.**\n\nJ'ai découvert et lié **{} ponts FFI (Rustler NIFs)** entre Elixir et Rust.\n\n{}",
+                        "**Lattice Refiner executed successfully.**\n\nDiscovered and linked **{} FFI bridges (Rustler NIFs)** between Elixir and Rust.\n\n{}",
                         count,
-                        format_table_from_json(&res, &["Nom NIF", "Fichier Elixir", "Fichier Rust"])
+                        format_table_from_json(&res, &["NIF Name", "Elixir File", "Rust File"])
                     )
                 } else {
-                    "✅ **Lattice Refiner exécuté.**\nAucun nouveau pont FFI (Rustler NIF) non-lié n'a été détecté dans le graphe.".to_string()
+                    "**Lattice Refiner executed.**\nNo new unlinked FFI bridge (Rustler NIF) detected in the graph.".to_string()
                 };
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
@@ -330,7 +330,7 @@ impl McpServer {
                         .query_count("SELECT count(*) FROM CALLS")
                         .unwrap_or(0);
                     let note = format!(
-                        "[]\n\nStatus: warn_empty_result\nHint: requête de style Cypher détectée. Le backend accepte d'abord SQL; pour multi-hop CALLS, utiliser `MATCH ... [:CALLS*1..3] ... RETURN count(*)` ou les exemples `query_examples`.\nCALLS_count={}",
+                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use `MATCH ... [:CALLS*1..3] ... RETURN count(*)` or `query_examples`.\nCALLS_count={}",
                         calls_count
                     );
                     Some(json!({ "content": [{ "type": "text", "text": note }] }))

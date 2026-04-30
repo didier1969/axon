@@ -13,7 +13,7 @@ impl McpServer {
                 escape_sql(id)
             ))?;
             if exists == 0 {
-                return Err(anyhow!("ID `{}` introuvable", id));
+                return Err(anyhow!("ID `{}` not found", id));
             }
             let canonical_prefix = match prefix {
                 "VIS" => "VIS",
@@ -25,7 +25,7 @@ impl McpServer {
                 "VAL" => "VAL",
                 "STK" => "STK",
                 "GUI" => "GUI",
-                _ => return Err(anyhow!("Préfixe SOLL `{}` non géré", prefix)),
+                _ => return Err(anyhow!("Unsupported SOLL prefix `{}`", prefix)),
             };
             return Ok(LinkEndpointKind::Soll(canonical_prefix));
         }
@@ -43,7 +43,7 @@ impl McpServer {
             }
         }
 
-        Err(anyhow!("ID `{}` introuvable", id))
+        Err(anyhow!("ID `{}` not found", id))
     }
 
     pub(crate) fn select_relation_type_for_link(
@@ -76,12 +76,12 @@ impl McpServer {
             let normalized = relation_type.to_uppercase();
             if !policy.allowed.iter().any(|allowed| *allowed == normalized) {
                 return Err(anyhow!(
-                    "Relation `{}` interdite pour {} -> {}. Relations autorisées: {}. Défaut: {}",
+                    "Relation `{}` forbidden for {} -> {}. Allowed: {}. Default: {}",
                     normalized,
                     source_kind.label(),
                     target_kind.label(),
                     policy.allowed.join(", "),
-                    policy.default.unwrap_or("aucun")
+                    policy.default.unwrap_or("none")
                 ));
             }
             normalized
@@ -89,7 +89,7 @@ impl McpServer {
             default_relation.to_string()
         } else {
             return Err(anyhow!(
-                "Relation explicite requise pour {} -> {}. Relations autorisées: {}",
+                "Explicit relation required for {} -> {}. Allowed: {}",
                 source_kind.label(),
                 target_kind.label(),
                 policy.allowed.join(", ")
@@ -103,7 +103,7 @@ impl McpServer {
             .copied()
             .ok_or_else(|| {
                 anyhow!(
-                    "Relation `{}` introuvable dans la politique canonique",
+                    "Relation `{}` not found in canonical policy",
                     selected
                 )
             })?;
@@ -241,7 +241,7 @@ impl McpServer {
                 ))?;
                 if count > 0 {
                     return Err(anyhow::anyhow!(
-                        "Conflit de cardinalité: `{}` existe déjà pour `{}` -> `{}`; `{}` est exclusif sur cette paire",
+                        "Cardinality conflict: `{}` already exists for `{}` -> `{}`; `{}` is exclusive on this pair",
                         other_relation,
                         source_id,
                         target_id,
@@ -307,7 +307,7 @@ impl McpServer {
             let Some(policy) = relation_policy_for_pair(source_kind.label(), target_kind.label())
             else {
                 violations.push(format!(
-                    "{}: {} -> {} (paire {} -> {} interdite)",
+                    "{}: {} -> {} (pair {} -> {} forbidden)",
                     relation_type,
                     source_id,
                     target_id,
@@ -323,7 +323,7 @@ impl McpServer {
                 .any(|allowed| *allowed == relation_type)
             {
                 violations.push(format!(
-                    "{}: {} -> {} (non autorisée pour {} -> {}; autorisées: {})",
+                    "{}: {} -> {} (not allowed for {} -> {}; allowed: {})",
                     relation_type,
                     source_id,
                     target_id,
@@ -347,7 +347,7 @@ impl McpServer {
                 let mut rels = relation_types.into_iter().collect::<Vec<_>>();
                 rels.sort();
                 violations.push(format!(
-                    "{} -> {} (relations exclusives en conflit: {})",
+                    "{} -> {} (conflicting exclusive relations: {})",
                     source_id,
                     target_id,
                     rels.join(", ")
@@ -404,7 +404,7 @@ impl McpServer {
                 Ok(kind) => Some(kind.label().to_string()),
                 Err(error) => {
                     return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `source_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "content": [{ "type": "text", "text": format!("Cannot resolve `source_id`. Discovery remains available via guidance fields: {}", error) }],
                         "data": {
                             "resolved": false,
                             "lookup_stage": "source_id",
@@ -426,7 +426,7 @@ impl McpServer {
                 Ok(kind) => Some(kind.label().to_string()),
                 Err(error) => {
                     return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `target_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "content": [{ "type": "text", "text": format!("Cannot resolve `target_id`. Discovery remains available via guidance fields: {}", error) }],
                         "data": {
                             "resolved": false,
                             "lookup_stage": "target_id",

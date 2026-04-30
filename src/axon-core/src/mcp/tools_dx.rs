@@ -224,11 +224,11 @@ impl McpServer {
                 .map(|(reason, count)| format!("`{reason}`: {count}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(" Causes backlog dominantes: {}.", reasons)
+            format!(" Top backlog causes: {}.", reasons)
         };
 
         Some(format!(
-            "**Completude du scope `{}`:** {}/{} fichiers termines; backlog visible {} (`pending`: {}, `indexing`: {}).{}\
+            "**Scope completeness `{}`:** {}/{} files completed; visible backlog {} (`pending`: {}, `indexing`: {}).{}\
 \n",
             project,
             summary.completed_files,
@@ -292,7 +292,7 @@ impl McpServer {
         }
 
         Some(format!(
-            "**Etat:** verite partielle; {} fichier(s) du scope demande sont en `indexed_degraded` (`structure_only`). Les chunks, embeddings et aretes `CALLS` peuvent manquer.\n",
+            "**State:** partial truth; {} file(s) in requested scope are `indexed_degraded` (`structure_only`). Chunks, embeddings, and `CALLS` edges may be missing.\n",
             degraded_files
         ))
     }
@@ -404,11 +404,11 @@ impl McpServer {
 
     fn result_category_for_path(path: &str) -> &'static str {
         if Self::is_operational_file_path(path) {
-            "source operatoire"
+            "operational source"
         } else if Self::is_documentary_file_path(path) {
-            "documentaire"
+            "documentary"
         } else {
-            "code general"
+            "general code"
         }
     }
 
@@ -419,10 +419,10 @@ impl McpServer {
         semantic_fallback_reason: Option<&str>,
     ) -> String {
         let fallback = semantic_fallback_reason
-            .map(|reason| format!("**Fallback semantique:** {}\n", reason))
+            .map(|reason| format!("**Semantic fallback:** {}\n", reason))
             .unwrap_or_default();
         format!(
-            "**Type de resultat:** {}\n**Diagnostic:** query_intent={} ; query_path={}\n{}\n",
+            "**Result type:** {}\n**Diagnostic:** query_intent={} ; query_path={}\n{}\n",
             result_category,
             Self::query_intent_label(intent),
             query_path,
@@ -526,7 +526,7 @@ impl McpServer {
         let file_path = std::path::Path::new(uri);
         if !file_path.exists() || !file_path.is_file() {
             return Some(
-                json!({ "content": [{ "type": "text", "text": format!("Erreur: Le fichier '{}' n'existe pas ou n'est pas lisible.", uri) }], "isError": true }),
+                json!({ "content": [{ "type": "text", "text": format!("Error: file '{}' does not exist or is not readable.", uri) }], "isError": true }),
             );
         }
 
@@ -540,7 +540,7 @@ impl McpServer {
                 let end = end.min(total_lines).max(start);
                 let sliced_content = lines[start..end].join("\n");
                 let report = format!(
-                    "📄 L2 Detail : {}\n(Lignes {} à {} sur {})\n\n```\n{}\n```",
+                    "L2 Detail: {}\n(Lines {} to {} of {})\n\n```\n{}\n```",
                     uri,
                     start + 1,
                     end,
@@ -550,7 +550,7 @@ impl McpServer {
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
             Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Erreur de lecture: {}", e) }], "isError": true }),
+                json!({ "content": [{ "type": "text", "text": format!("Read error: {}", e) }], "isError": true }),
             ),
         }
     }
@@ -628,9 +628,9 @@ impl McpServer {
         };
 
         let mode_label = if sql.contains("score") {
-            "hybride (structure + similarite semantique)"
+            "hybrid (structure + semantic similarity)"
         } else {
-            "structurel (embedding temps reel indisponible)"
+            "structural (real-time embedding unavailable)"
         };
 
         match self.graph_store.query_json_param(&sql, &params) {
@@ -650,9 +650,9 @@ impl McpServer {
                     );
                 }
                 let headers = if sql.contains("score") {
-                    vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
+                    vec!["Name", "Type", "URI (Path)", "Semantic Distance"]
                 } else {
-                    vec!["Nom", "Type", "URI (Chemin)"]
+                    vec!["Name", "Type", "URI (Path)"]
                 };
                 let table_json = serde_json::to_string(&rows).unwrap_or(res);
                 let table = format_table_from_json(&table_json, &headers);
@@ -690,7 +690,7 @@ impl McpServer {
                     .and_then(|row| row.get(2))
                     .and_then(Value::as_str)
                     .map(Self::result_category_for_path)
-                    .unwrap_or("inconnu");
+                    .unwrap_or("unknown");
                 let diagnostic = Self::query_diagnostic_block(
                     query_intent,
                     if sql.contains("score") {
@@ -711,7 +711,7 @@ impl McpServer {
                 );
                 let evidence = evidence_by_mode(&evidence, mode);
                 let report = format!(
-                    "### 🔎 Resultats de recherche : '{}'\n\n{}",
+                    "### Search results: '{}'\n\n{}",
                     query_text,
                     format_standard_contract(
                         "ok",
@@ -863,7 +863,7 @@ impl McpServer {
                     .and_then(|row| row.get(2))
                     .and_then(Value::as_str)
                     .map(Self::result_category_for_path)
-                    .unwrap_or("inconnu");
+                    .unwrap_or("unknown");
                 let diagnostic = Self::query_diagnostic_block(
                     query_intent,
                     "chunk_fallback",
@@ -875,12 +875,12 @@ impl McpServer {
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n{}\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}{}{}",
+                            "### Search results: '{}'\n\n**Mode:** lexical fallback on derived chunks\n{}\n**Provenance:** each result specifies its match source (`docstring`, `chunk body`, `chunk metadata`, `file path`) and is anchored to a structural file.\n\n{}{}{}",
                             query_text,
                             diagnostic,
                             project_note.unwrap_or_default(),
                             degraded_note.unwrap_or_default(),
-                            format_table_from_json(&table_json, &["Nom", "Type", "URI (Chemin)", "Why it matched", "Evidence"])
+                            format_table_from_json(&table_json, &["Name", "Type", "URI (Path)", "Why it matched", "Evidence"])
                         )
                     }]
                 }))
@@ -918,19 +918,19 @@ impl McpServer {
             let diagnostic = Self::query_diagnostic_block(
                 query_intent,
                 "structure_only_empty",
-                "aucun",
+                "none",
                 semantic_fallback_reason,
             );
             return Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n{}\n{}{}{}\n",
+                        "### Search results: '{}'\n\n**Mode:** structural\n{}\n{}{}{}\n",
                         query_text,
                         diagnostic,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
-                        "Aucun match structurel exact n'a ete resolu dans le graphe courant. Utilisez la guidance ci-dessous pour poursuivre sans relancer une recherche aveugle."
+                        "No exact structural match resolved in current graph. Use the guidance below to proceed without re-running a blind search."
                     )
                 }],
                 "data": {
@@ -961,19 +961,19 @@ impl McpServer {
             let diagnostic = Self::query_diagnostic_block(
                 query_intent,
                 "structure_only_empty",
-                "aucun",
+                "none",
                 semantic_fallback_reason,
             );
             Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n{}\n{}{}{}\n",
+                        "### Search results: '{}'\n\n**Mode:** degraded structural without file anchor\n{}\n{}{}{}\n",
                         query_text,
                         diagnostic,
                         project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
-                        "Aucun match exploitable n'a ete reconstruit depuis l'index actuel. Continuez avec la guidance de recuperation plutot que de relancer la meme requete telle quelle."
+                        "No usable match reconstructed from current index. Use recovery guidance instead of re-running the same query."
                     )
                 }],
                 "data": {
@@ -991,7 +991,7 @@ impl McpServer {
                 .and_then(|row| row.get(2))
                 .and_then(Value::as_str)
                 .map(Self::result_category_for_path)
-                .unwrap_or("inconnu");
+                .unwrap_or("unknown");
             let diagnostic = Self::query_diagnostic_block(
                 query_intent,
                 "structure_only_unanchored",
@@ -999,23 +999,23 @@ impl McpServer {
                 semantic_fallback_reason,
             );
             let project_note = if project == "*" {
-                "portee projet non contrainte"
+                "unconstrained project scope"
             } else {
-                "contrainte projet non fiable tant que CONTAINS est vide"
+                "project constraint unreliable while CONTAINS is empty"
             };
             let table_json = serde_json::to_string(&rows).unwrap_or(fallback_res);
             Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n{}\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n{}{}\n{}",
+                        "### Search results: '{}'\n\n**Mode:** degraded structural without file anchor\n{}\n**State:** containment graph not yet available; symbols below remain usable but without verified URI ({})\n{}{}\n{}",
                         query_text,
                         diagnostic,
                         project_note,
                         self.project_scope_truth_note((project != "*").then_some(project))
                             .unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
-                        format_table_from_json(&table_json, &["Nom", "Type", "Projet"])
+                        format_table_from_json(&table_json, &["Name", "Type", "Project"])
                     )
                 }]
             }))
@@ -1062,10 +1062,10 @@ impl McpServer {
             let evidence = format!(
                 "{}{}",
                 self.project_scope_truth_note(project).unwrap_or_default(),
-                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"])
+                format_table_from_json(&suggestions, &["Suggested symbol", "Type", "Project"])
             );
             let report = format!(
-                "### 🔍 Inspection du Symbole : {}\n\n{}",
+                "### 🔍 Symbol Inspection : {}\n\n{}",
                 symbol,
                 format_standard_contract(
                     "warn_input_not_found",
@@ -1155,7 +1155,7 @@ impl McpServer {
                     }));
                 }
                 let table =
-                    format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
+                    format_table_from_json(&res, &["Name", "Type", "Tested", "Callers", "Callees"]);
                 let scope = project
                     .map(|p| format!("project:{}", p))
                     .unwrap_or_else(|| "workspace:*".to_string());
@@ -1231,7 +1231,7 @@ impl McpServer {
                     })
                     .collect::<Vec<_>>();
                 let report = format!(
-                    "### 🔍 Inspection du Symbole : {}\n\n{}",
+                    "### 🔍 Symbol Inspection : {}\n\n{}",
                     symbol,
                     format_standard_contract(
                         "ok",
@@ -1321,10 +1321,10 @@ impl McpServer {
             let evidence = format!(
                 "{}{}",
                 self.project_scope_truth_note(project).unwrap_or_default(),
-                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"])
+                format_table_from_json(&suggestions, &["Suggested symbol", "Type", "Project"])
             );
             let report = format!(
-                "## ↕️ Trace Bidirectionnelle : {}\n\n{}",
+                "## ↕️ Bidirectional Trace : {}\n\n{}",
                 symbol,
                 format_standard_contract(
                     "warn_input_not_found",
@@ -1423,16 +1423,16 @@ impl McpServer {
             evidence.push_str(&note);
             evidence.push('\n');
         }
-        evidence.push_str("### ↑ Appelants / Entry Points\n");
-        evidence.push_str(&format_table_from_json(&up_res, &["Nom", "Type", "Projet"]));
-        evidence.push_str("\n\n### ↓ Appels Profonds\n");
+        evidence.push_str("### ↑ Callers / Entry Points\n");
+        evidence.push_str(&format_table_from_json(&up_res, &["Name", "Type", "Project"]));
+        evidence.push_str("\n\n### ↓ Deep Callees\n");
         evidence.push_str(&format_table_from_json(
             &down_res,
-            &["Nom", "Type", "Projet"],
+            &["Name", "Type", "Project"],
         ));
 
         let report = format!(
-            "## ↕️ Trace Bidirectionnelle : {}\n\n{}",
+            "## ↕️ Bidirectional Trace : {}\n\n{}",
             symbol,
             format_standard_contract(
                 status,
@@ -1471,7 +1471,7 @@ impl McpServer {
             .unwrap_or_else(|| "workspace:*".to_string());
         let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let report = format!(
-                "## 🧯 Vérification rupture API : {}\n\n{}",
+                "## 🧯 API Break Check : {}\n\n{}",
                 symbol,
                 format_standard_contract(
                     "warn_input_not_found",
@@ -1531,7 +1531,7 @@ impl McpServer {
                 }
                 if rows.is_empty() {
                     let report = format!(
-                        "## 🧯 Vérification rupture API : {}\n\n{}",
+                        "## 🧯 API Break Check : {}\n\n{}",
                         symbol,
                         format_standard_contract(
                             "ok",
@@ -1545,14 +1545,14 @@ impl McpServer {
                     Some(json!({ "content": [{ "type": "text", "text": report }] }))
                 } else {
                     evidence.push_str(
-                        "Modifier ce symbole public impactera directement les consommateurs suivants:\n\n",
+                        "Changing this public symbol will directly impact the following consumers:\n\n",
                     );
                     evidence.push_str(&format_table_from_json(
                         &res,
-                        &["Consommateur", "Symbole", "Type", "Projet"],
+                        &["Consumer", "Symbol", "Type", "Project"],
                     ));
                     let report = format!(
-                        "## 🧯 Vérification rupture API : {}\n\n{}",
+                        "## 🧯 API Break Check : {}\n\n{}",
                         symbol,
                         format_standard_contract(
                             "warn_api_break_risk",
