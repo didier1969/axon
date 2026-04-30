@@ -143,7 +143,7 @@ pub fn resolve_canonical_project_identity(project_code: &str) -> Result<Canonica
         if code == requested {
             if !is_valid_project_code(&code) {
                 return Err(anyhow!(
-                    "Canonical project `{}` found in `{}` but `code` must be 3 alphanumeric characters",
+                    "Projet canonique `{}` trouvé dans `{}` mais `code` doit être alphanumérique sur 3 caractères",
                     requested,
                     meta_path.display()
                 ));
@@ -166,7 +166,7 @@ pub fn resolve_canonical_project_identity(project_code: &str) -> Result<Canonica
     }
 
     Err(anyhow!(
-        "Canonical project `{}` not found via `.axon/meta.json`",
+        "Projet canonique `{}` introuvable via `.axon/meta.json`",
         requested
     ))
 }
@@ -248,7 +248,7 @@ pub fn resolve_registered_project_identity(
     let requested = project_code.trim().to_ascii_uppercase();
     if !is_valid_project_code(&requested) {
         return Err(anyhow!(
-            "Invalid canonical project code `{}`: exactly 3 alphanumeric characters required",
+            "Code projet canonique invalide `{}`: exactement 3 caractères alphanumériques attendus",
             project_code.trim()
         ));
     }
@@ -258,7 +258,7 @@ pub fn resolve_registered_project_identity(
         .find(|identity| identity.code == requested)
         .ok_or_else(|| {
             anyhow!(
-                "Canonical project `{}` not found in soll.ProjectCodeRegistry",
+                "Projet canonique `{}` introuvable dans soll.ProjectCodeRegistry",
                 requested
             )
         })
@@ -271,7 +271,7 @@ pub fn resolve_project_identity(
     let requested = project_code.trim().to_ascii_uppercase();
     if !is_valid_project_code(&requested) {
         return Err(anyhow!(
-            "Invalid canonical project code `{}`: exactly 3 alphanumeric characters required",
+            "Code projet canonique invalide `{}`: exactement 3 caractères alphanumériques attendus",
             project_code.trim()
         ));
     }

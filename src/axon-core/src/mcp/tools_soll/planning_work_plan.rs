@@ -43,7 +43,7 @@ impl McpServer {
                 node.ist_degraded_links = self.count_degraded_links_for_node(&node.id);
                 if node.ist_degraded_links > 0 {
                     node.ist_signals.push(format!(
-                        "{} link(s) to `indexed_degraded` scope",
+                        "{} lien(s) vers un scope `indexed_degraded`",
                         node.ist_degraded_links
                     ));
                 }

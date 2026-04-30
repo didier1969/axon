@@ -588,13 +588,15 @@ fn invalid_arguments_authoritative_guidance_includes_micro_instruction_and_contr
         result["data"]["likely_cause"],
         "request_shape_does_not_match_tool_contract"
     );
-    assert_eq!(result["data"]["next_action"]["tool"], "help");
+    assert_eq!(result["data"]["next_action"]["tool"], "fs_read");
     assert_eq!(
-        result["data"]["next_action"]["arguments"]["tool"], "fs_read"
+        result["data"]["operator_guidance"]["parameter_repair"]["missing_required_fields"][0],
+        "uri"
     );
-    assert_eq!(
-        result["data"]["repair_instruction"].as_str().unwrap(),
-        "Compare your arguments against input_schema. Fix required fields and types, then retry the same tool."
+    assert!(
+        result["data"]["operator_guidance"]["parameter_repair"]["micro_instruction"]
+            .as_str()
+            .is_some_and(|text| text.contains("Fix `fs_read` args"))
     );
 
     unsafe {
@@ -667,7 +669,7 @@ fn status_response_gets_default_rich_operator_guidance() {
         .is_some_and(|text| text.contains("runtime truth")));
     assert_eq!(
         result["data"]["next_action"]["tool"].as_str(),
-        Some("status")
+        Some("project_status")
     );
     assert!(
         result["data"]["operator_guidance"]["alternative_strategies"]

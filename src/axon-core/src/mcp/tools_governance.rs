@@ -101,42 +101,42 @@ impl McpServer {
         if known == 0 {
             if project != "*" && global_known > 0 {
                 causes.push(
-                    "scope_mismatch_or_wrong_project_code: workspace contains files, but not for this project"
+                    "scope_mismatch_or_wrong_project_code: le workspace contient des fichiers, mais pas ce projet"
                         .to_string(),
                 );
             } else {
                 causes.push(
-                    "discovery_absent_or_filtered: no files discovered (watch root, ignore rules, permissions)"
+                    "discovery_absent_or_filtered: aucun fichier découvert (watch root, ignore rules, permissions)"
                         .to_string(),
                 );
             }
         }
         if known > 0 && completed == 0 && (pending + indexing) > 0 {
             causes.push(
-                "ingestion_not_completed: files in pending/indexing, pipeline possibly blocked or still running"
+                "ingestion_not_completed: fichiers en pending/indexing, pipeline possiblement bloqué ou encore en cours"
                     .to_string(),
             );
         }
         if known > 0 && symbols == 0 {
             causes.push(
-                "parser_extraction_gap: files known but 0 symbols extracted (unsupported language or parse failure)"
+                "parser_extraction_gap: fichiers connus mais 0 symbole extrait (langage non supporté ou échec parse)"
                     .to_string(),
             );
         }
         if symbols > 0 && (calls_direct + calls_nif) == 0 {
             causes.push(
-                "call_graph_gap: symbols present but call graph empty for this scope"
+                "call_graph_gap: symboles présents mais graphe d'appels vide pour ce scope"
                     .to_string(),
             );
         }
         if causes.is_empty() {
             causes.push(
-                "no_blocker_detected: no major blocker detected by this diagnostic".to_string(),
+                "no_blocker_detected: aucun blocage majeur détecté par ce diagnostic".to_string(),
             );
         }
 
         let reason_lines = if top_reasons.is_empty() {
-            "* no dominant reason".to_string()
+            "* aucune raison dominante".to_string()
         } else {
             top_reasons
                 .iter()
@@ -153,7 +153,7 @@ impl McpServer {
         };
 
         let error_lines = if top_errors.is_empty() {
-            "* no parser/commit error reported in `last_error_reason`".to_string()
+            "* aucune erreur parser/commit remontée dans `last_error_reason`".to_string()
         } else {
             top_errors
                 .iter()
@@ -236,7 +236,7 @@ impl McpServer {
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
         if !graph_embeddings_enabled() {
             return Some(
-                "\n\n### Similar Graph Neighborhoods\n\n**Status:** temporarily disabled; Axon returns only the clone symbol/chunk signal while `GraphEmbedding` remains off."
+                "\n\n### Voisinages similaires derives du graphe\n\n**Etat:** temporairement desactive; Axon retourne uniquement le signal clone symbol/chunk tant que `GraphEmbedding` reste coupe."
                     .to_string(),
             );
         }
@@ -289,8 +289,8 @@ impl McpServer {
         }
 
         Some(format!(
-            "\n\n### Similar Graph Neighborhoods\n\n**Status:** graph-derived context via `GraphEmbedding`, useful for spotting nearby neighborhoods; not a canonical architecture truth.\n\n{}",
-            format_table_from_json(&res, &["Name", "Type", "Neighborhood Distance"])
+            "\n\n### Voisinages similaires derives du graphe\n\n**Etat:** contexte derive du graphe via `GraphEmbedding`, utile pour reperer des neighborhoods proches; ce n'est pas une verite canonique d'architecture.\n\n{}",
+            format_table_from_json(&res, &["Nom", "Type", "Distance de voisinage"])
         ))
     }
 
@@ -308,7 +308,7 @@ impl McpServer {
             );
             let diagnostic = self.indexing_diagnosis_markdown(project);
             let report = format!(
-                "## 🛡️ Compliance Audit: {}\n\n{}",
+                "## 🛡️ Audit de Conformité : {}\n\n{}",
                 project,
                 format_standard_contract(
                     "warn_input_not_ready",
@@ -353,57 +353,57 @@ impl McpServer {
             evidence.push_str(&note);
             evidence.push('\n');
         }
-        evidence.push_str(&format!("### 🔒 Security: {}/100\n", sec_score));
+        evidence.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
 
         if sec_score < 100 {
-            evidence.push_str("🚨 **Potential vulnerabilities detected.**\n");
-            evidence.push_str(&format!("Critical paths found: {}\n", paths));
+            evidence.push_str("🚨 **Vulnérabilités potentielles détectées.**\n");
+            evidence.push_str(&format!("Chemins critiques trouvés : {}\n", paths));
         } else {
-            evidence.push_str("✅ No critical path to dangerous functions detected.\n");
+            evidence.push_str("✅ Aucun chemin critique vers des fonctions dangereuses détecté.\n");
         }
 
         if !tech_debt.is_empty() {
-            evidence.push_str("\n### ⚠️ Technical Debt & Panic Points\n");
-            evidence.push_str("The following points present crash risks (panic) or poor error handling:\n\n");
+            evidence.push_str("\n### ⚠️ Dette Technique & Panic Points\n");
+            evidence.push_str("Les points suivants présentent des risques de crash (panic) ou une mauvaise gestion d'erreur :\n\n");
             for (file, issue) in tech_debt.iter().take(10) {
                 evidence.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
             }
             if tech_debt.len() > 10 {
                 evidence.push_str(&format!(
-                    "*... and {} more points detected.*\n",
+                    "*... et {} autres points détectés.*\n",
                     tech_debt.len() - 10
                 ));
             }
         }
 
-        evidence.push_str(&format!("\n### 🧪 Quality & Tests: {}%\n", cov_score));
+        evidence.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
 
         evidence.push_str(&format!(
-            "\n### 🧹 Code Hygiene (Clean-As-You-Go): {}/100\n",
+            "\n### 🧹 Hygiène du Code (Clean-As-You-Go) : {}/100\n",
             hygiene_score
         ));
         if god_objects.is_empty() && dead_code == 0 {
-            evidence.push_str("✅ Healthy codebase: zero God Objects and zero dead code detected.\n");
+            evidence.push_str("✅ Codebase saine : Zéro God Object et zéro code mort détecté.\n");
         } else {
             if !god_objects.is_empty() {
                 evidence.push_str(&format!(
-                    "* 🚨 {} God Objects (monolithic files/functions) detected.\n",
+                    "* 🚨 {} God Objects (fichiers/fonctions monolithiques) détectés.\n",
                     god_objects.len()
                 ));
             }
             if dead_code > 0 {
-                evidence.push_str(&format!("* 🗑️ {} dead functions (non-public with no callers) detected. Please remove them.\n", dead_code));
+                evidence.push_str(&format!("* 🗑️ {} fonctions mortes (non publiques et sans appelant) détectées. Veuillez les supprimer.\n", dead_code));
             }
         }
 
         evidence.push_str(&format!(
-            "\n### 📡 Telemetry & Observability: {}/100\n",
+            "\n### 📡 Télémétrie & Observabilité : {}/100\n",
             telemetry_score
         ));
         if telemetry_score < 100 {
-            evidence.push_str("🚨 Raw text logging calls (`println!`, `console.log`, etc.) detected. Use structured telemetry.\n");
+            evidence.push_str("🚨 Appels à des fonctions de log textuelles brutes (`println!`, `console.log`, etc.) détectés. Utilisez la télémétrie structurée.\n");
         } else {
-            evidence.push_str("✅ Observability compliant (zero raw log calls detected).\n");
+            evidence.push_str("✅ Observabilité conforme (zéro appel de log brut détecté).\n");
         }
 
         let circular_deps = self
@@ -423,12 +423,12 @@ impl McpServer {
             .get_nif_blocking_risks(project)
             .unwrap_or_default();
 
-        evidence.push_str("\n### 🌪️ Architectural Anti-Patterns\n");
+        evidence.push_str("\n### 🌪️ Anti-Patterns Architecturaux\n");
         if circular_deps.is_empty() {
-            evidence.push_str("✅ No circular dependencies detected.\n");
+            evidence.push_str("✅ Aucune dépendance circulaire détectée.\n");
         } else {
             evidence.push_str(&format!(
-                "🚨 [{}] Circular dependencies detected:\n",
+                "🚨 [{}] Dépendances circulaires détectées :\n",
                 circular_deps.len()
             ));
             for path in circular_deps.iter().take(5) {
@@ -436,17 +436,17 @@ impl McpServer {
             }
             if circular_deps.len() > 5 {
                 evidence.push_str(&format!(
-                    "*   ... and {} more loops.\n",
+                    "*   ... et {} autres boucles.\n",
                     circular_deps.len() - 5
                 ));
             }
         }
 
         if domain_leaks.is_empty() {
-            evidence.push_str("✅ No domain leakage detected.\n");
+            evidence.push_str("✅ Aucune fuite de domaine détectée.\n");
         } else {
             evidence.push_str(&format!(
-                "🚨 [{}] Domain leaks detected:\n",
+                "🚨 [{}] Fuites de Domaine détectées :\n",
                 domain_leaks.len()
             ));
             for leak in domain_leaks.iter().take(5) {
@@ -454,17 +454,17 @@ impl McpServer {
             }
             if domain_leaks.len() > 5 {
                 evidence.push_str(&format!(
-                    "*   ... and {} more leaks.\n",
+                    "*   ... et {} autres fuites.\n",
                     domain_leaks.len() - 5
                 ));
             }
         }
 
         if unsafe_exposure.is_empty() {
-            evidence.push_str("✅ No unsafe exposure detected.\n");
+            evidence.push_str("✅ Aucune exposition unsafe détectée.\n");
         } else {
             evidence.push_str(&format!(
-                "🚨 [{}] Unsafe exposures detected:\n",
+                "🚨 [{}] Expositions Unsafe détectées :\n",
                 unsafe_exposure.len()
             ));
             for exp in unsafe_exposure.iter().take(5) {
@@ -472,17 +472,17 @@ impl McpServer {
             }
             if unsafe_exposure.len() > 5 {
                 evidence.push_str(&format!(
-                    "*   ... and {} more exposures.\n",
+                    "*   ... et {} autres expositions.\n",
                     unsafe_exposure.len() - 5
                 ));
             }
         }
 
         if nif_blocking_risks.is_empty() {
-            evidence.push_str("✅ No NIF blocking risk (Scheduler Starvation) detected.\n");
+            evidence.push_str("✅ Aucun risque de blocage NIF (Scheduler Starvation) détecté.\n");
         } else {
             evidence.push_str(&format!(
-                "🚨 [{}] NIF blocking risks detected (critical call depth):\n",
+                "🚨 [{}] Risques de Blocage NIF détectés (Profondeur d'appel critique) :\n",
                 nif_blocking_risks.len()
             ));
             for risk in nif_blocking_risks.iter().take(5) {
@@ -490,7 +490,7 @@ impl McpServer {
             }
             if nif_blocking_risks.len() > 5 {
                 evidence.push_str(&format!(
-                    "*   ... and {} more risks.\n",
+                    "*   ... et {} autres risques.\n",
                     nif_blocking_risks.len() - 5
                 ));
             }
@@ -507,7 +507,7 @@ impl McpServer {
         };
 
         let report = format!(
-            "## 🛡️ Compliance Audit: {}\n\n{}",
+            "## 🛡️ Audit de Conformité : {}\n\n{}",
             project,
             format_standard_contract(
                 "ok",
@@ -615,13 +615,13 @@ impl McpServer {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 let mut report = if !rows.is_empty() {
                     format!(
-                        "### 👯 Semantic Clones detected for '{}'\n\n{}",
+                        "### 👯 Clones Sémantiques détectés pour '{}'\n\n{}",
                         symbol,
-                        format_table_from_json(&res, &["Name", "Type", "Similarity"])
+                        format_table_from_json(&res, &["Nom", "Type", "Similitude"])
                     )
                 } else {
                     format!(
-                        "✅ No obvious semantic clone (similarity > 95%) found for '{}'.",
+                        "✅ Aucun clone sémantique évident (similitude > 95%) trouvé pour '{}'.",
                         symbol
                     )
                 };
@@ -686,14 +686,14 @@ impl McpServer {
                         .collect::<Vec<_>>()
                         .join("\n");
                     format!(
-                        "⚠️ **ARCHITECTURE VIOLATION DETECTED**\n\nLayer '{}' calls directly or indirectly '{}':\n\n{}",
+                        "⚠️ **VIOLATION D'ARCHITECTURE DÉTECTÉE**\n\nLa couche '{}' appelle directement ou indirectement '{}' :\n\n{}",
                         source_layer,
                         target_layer,
                         paths_str
                     )
                 } else {
                     format!(
-                        "✅ No architectural drift detected between '{}' and '{}'.",
+                        "✅ Aucune dérive architecturale détectée entre '{}' et '{}'.",
                         source_layer, target_layer
                     )
                 };

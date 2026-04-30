@@ -250,11 +250,14 @@ fn apply_graph_first_indexer_memory_defaults(
         }
     }
 
-    let total_vram_mb = std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value >= 4_096)
-        .or_else(|| current_gpu_memory_snapshot().map(|snapshot| snapshot.total_mb))
+    let total_vram_mb = current_gpu_memory_snapshot()
+        .map(|snapshot| snapshot.total_mb)
+        .or_else(|| {
+            std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|value| *value >= 4_096)
+        })
         .unwrap_or(8_192);
 
     let soft_limit_mb = if total_vram_mb <= 8_192 {
@@ -266,7 +269,6 @@ fn apply_graph_first_indexer_memory_defaults(
     };
     let cuda_limit_mb = soft_limit_mb.saturating_sub(128).max(4_096);
 
-    // Respect user-provided env vars: only set defaults when not already configured.
     for (env_name, value) in [
         ("AXON_CUDA_MEMORY_SOFT_LIMIT_MB", soft_limit_mb.to_string()),
         ("AXON_CUDA_MEMORY_LIMIT_MB", cuda_limit_mb.to_string()),
@@ -275,27 +277,7 @@ fn apply_graph_first_indexer_memory_defaults(
             "AXON_GPU_PRIMARY_WORKER_MAX_USED_MB",
             soft_limit_mb.to_string(),
         ),
-        ("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED", "true".to_string()),
-        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true".to_string()),
-        // 4 samples x 300ms = 1.2s max probe window. CUDA deallocation is
-        // near-instant; ORT BFC arena releases on process kill. 1.2s is
-        // sufficient to observe full memory release via NVML.
-        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "4".to_string()),
-        // 300ms > 250ms NVML cache TTL, guaranteeing one fresh driver query
-        // per sample without wasting CPU on stale cache reads.
-        ("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS", "300".to_string()),
-        (
-            // ORT BFC arena uses power-of-two chunks; smallest meaningful
-            // session release is ~128MB. 64MB was within driver noise.
-            "AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB",
-            "128".to_string(),
-        ),
-        (
-            // Without telemetry, blind embedding risks unified memory spill
-            // (40x throughput loss). Conservative default: recycle.
-            "AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE",
-            "true".to_string(),
-        ),
+        ("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED", "false".to_string()),
         ("AXON_VECTOR_READY_QUEUE_DEPTH", "48".to_string()),
         ("AXON_VECTOR_TARGET_READY_CHUNKS", (48 * 16).to_string()),
         ("AXON_VECTOR_PREPARE_PIPELINE_DEPTH", "6".to_string()),
@@ -322,12 +304,6 @@ fn apply_graph_first_indexer_memory_defaults(
             "0".to_string(),
         ),
         ("AXON_GPU_EMBED_SERVICE_TENSORRT", "1".to_string()),
-        ("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true".to_string()),
-        (
-            "AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT",
-            "true".to_string(),
-        ),
-        ("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT", "96".to_string()),
         ("AXON_GPU_STUCK_RECOVERY_ENABLED", "true".to_string()),
         ("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "2500".to_string()),
         ("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS", "5000".to_string()),
@@ -1227,12 +1203,6 @@ mod tests {
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_ENABLED");
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH");
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-            std::env::remove_var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE");
             std::env::remove_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
@@ -1257,27 +1227,7 @@ mod tests {
         );
         assert_eq!(
             std::env::var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES").unwrap(),
-            "6"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS").unwrap(),
-            "500"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB").unwrap(),
-            "64"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE").unwrap(),
-            "true"
+            "false"
         );
         assert_eq!(
             std::env::var("AXON_VECTOR_PREPARE_PIPELINE_DEPTH").unwrap(),
@@ -1329,18 +1279,6 @@ mod tests {
             "true"
         );
         assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT").unwrap(),
-            "96"
-        );
-        assert_eq!(
             std::env::var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS").unwrap(),
             "2500"
         );
@@ -1383,12 +1321,6 @@ mod tests {
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_ENABLED");
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH");
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-            std::env::remove_var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB");
-            std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE");
             std::env::remove_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");

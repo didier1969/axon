@@ -143,22 +143,18 @@ impl McpServer {
                 ],
             ),
             _ => (
-                "Axon \u{2014} Structural Intelligence MCP Server",
+                "Axon MCP help",
                 vec![
-                    "Axon gives you indexed code structure, intentional requirements (SOLL), and project memory that persist across sessions.",
-                    "It replaces grep/read for: symbol lookup, blast radius, dependency flow, architectural rationale, and delivery governance.",
-                    "1. status \u{2192} runtime truth and project context",
-                    "2. query/inspect \u{2192} find symbols, files, modules",
-                    "3. retrieve_context \u{2192} compact evidence packet for your question",
-                    "4. impact/path \u{2192} blast radius and source-sink flow",
-                    "5. soll_query_context \u{2192} why the code exists (intent layer)",
-                    "6. axon_pre_flight_check \u{2192} axon_commit_work \u{2192} delivery",
+                    "start: status -> project_status",
+                    "find code: query -> inspect -> retrieve_context",
+                    "before edits: impact -> change_safety",
+                    "intent: soll_query_context -> why",
+                    "delivery: axon_pre_flight_check -> axon_commit_work",
                 ],
                 vec![
-                    "Call status() first \u{2014} it returns your project_code and next best action.",
-                    "Use help(tool=X) to see any tool's JSON input schema and examples.",
-                    "Use mode=brief first; escalate to full only for missing diagnostics.",
                     "Skill: axon-engineering-protocol",
+                    "Skill path: docs/skills/axon-engineering-protocol/SKILL.md",
+                    "Use brief modes first; escalate to full only for missing diagnostics.",
                 ],
             ),
         };
@@ -238,33 +234,9 @@ fn tool_help_response(tool_name: &str) -> Value {
 
     let examples = usage_examples_for_tool(normalized);
     let next_action = next_action_for_tool(normalized);
-    let input_schema = tool
-        .get("inputSchema")
-        .cloned()
-        .unwrap_or_else(|| json!({"type": "object"}));
-    let schema_compact = serde_json::to_string(&input_schema).unwrap_or_default();
-    let first_example = usage_examples_for_tool(normalized)
-        .as_array()
-        .and_then(|arr| arr.first().cloned())
-        .and_then(|ex| {
-            ex.get("arguments")
-                .map(|args| serde_json::to_string_pretty(args).unwrap_or_default())
-        })
-        .unwrap_or_default();
-    let description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or("");
     let text = format!(
-        "## Axon Tool Help\n\nTool: `{}`\n\n{}\n\n### Input Schema\n```json\n{}\n```\n{}### Usage\nStart with the first example. If async, poll `job_status` until terminal.",
-        normalized,
-        description,
-        schema_compact,
-        if first_example.is_empty() {
-            String::new()
-        } else {
-            format!("\n### Example\n```json\n{}\n```\n\n", first_example)
-        },
+        "## Axon Tool Help\n\nTool: `{}`\n\nUse `input_schema` exactly. Start with the first usage example when available. If the call is async, poll `job_status` until terminal state.",
+        normalized
     );
 
     json!({

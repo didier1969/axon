@@ -704,16 +704,19 @@ fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled()
 
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
-    let is_error = result
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
         .get("isError")
         .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-
-    // project_code is now auto-resolved from canonical project identity,
-    // so omitting it no longer triggers an error.
+        .unwrap_or(false));
     assert!(
-        !is_error,
-        "soll_manager should auto-resolve project_code when omitted"
+        content.contains("`project_code` est obligatoire"),
+        "{content}"
     );
 
     unsafe {

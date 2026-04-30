@@ -76,10 +76,10 @@ impl McpServer {
         }
 
         Some(format!(
-            "\n\n### Derived Local Projection\n\n**Status:** derived neighborhood view, useful for local context; does not replace the canonical `CALLS` truth.\n\n{}",
+            "\n\n### Projection locale derivee\n\n**Etat:** vue de voisinage derivee, utile pour le contexte local; elle ne remplace pas la verite canonique de `CALLS`.\n\n{}",
             format_table_from_json(
                 &projection_res,
-                &["Target Type", "Target ID", "Link Type", "Distance", "Label", "URI"]
+                &["Type cible", "ID cible", "Type de lien", "Distance", "Label", "URI"]
             )
         ))
     }
@@ -236,13 +236,13 @@ impl McpServer {
                     serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
                 let mut table = if display_rows.len() > 15 {
                     format!(
-                        "_Report aggregated because {} symbols are impacted. Only major architectural impacts are detailed below._\n\n",
+                        "_Le rapport de code a été agrégé car {} symboles sont impactés. Seuls les impacts architecturaux majeurs sont détaillés ci-dessous._\n\n",
                         display_rows.len()
                     )
                 } else {
                     format_table_from_json(
                         &display_raw,
-                        &["File / Project", "Impacted Symbol", "Type"],
+                        &["Fichier / Projet", "Symbole Impacté", "Type"],
                     )
                 };
 
@@ -286,7 +286,7 @@ impl McpServer {
                     serde_json::from_str(&soll_raw).unwrap_or_default();
 
                 if !soll_rows.is_empty() {
-                    table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entity | Type | Title |\n| --- | --- | --- |\n");
+                    table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
                     for row in soll_rows {
                         let id = row.first().and_then(|v| v.as_str()).unwrap_or("-");
                         let t = row.get(1).and_then(|v| v.as_str()).unwrap_or("-");
@@ -316,7 +316,7 @@ impl McpServer {
                     evidence.push('\n');
                 }
                 evidence.push_str(&format!(
-                    "**Impact Radius (depth {}):** {} components affected across the Lattice.\n\n",
+                    "**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n",
                     depth, impact_radius
                 ));
                 evidence.push_str(&format!(
@@ -333,7 +333,7 @@ impl McpServer {
                     .map(|p| format!("project:{}", p))
                     .unwrap_or_else(|| "workspace:*".to_string());
                 let report = format!(
-                    "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}",
+                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}",
                     symbol,
                     format_standard_contract(
                         "ok",
@@ -433,7 +433,7 @@ impl McpServer {
         if symbol_rows.is_empty() {
             let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
             let suggestions_table =
-                format_table_from_json(&suggestions, &["Suggested Symbol", "Type", "Project"]);
+                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"]);
             let suggestions_rows: Vec<Vec<Value>> =
                 serde_json::from_str(&suggestions).unwrap_or_default();
             let suggestions = suggestions_rows
@@ -445,13 +445,13 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}",
+                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}",
                         symbol,
                         format_standard_contract(
                             "warn_input_not_found",
                             "symbol not found in current scope",
                             &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
-                            &format!("No exact matching symbol found in current scope.\n\n### Suggestions\n\n{}", suggestions_table),
+                            &format!("Aucun symbole exact correspondant n'a ete trouve dans le scope courant.\n\n### Suggestions\n\n{}", suggestions_table),
                             &["retry with one suggested symbol", "use query/inspect to validate exact name"],
                             "medium",
                         )
@@ -499,7 +499,7 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}No impact computed at depth {}.",
+                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}{}Aucun impact n'a ete calcule a la profondeur {}.",
                         symbol,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
@@ -541,11 +541,11 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}Symbol exists, but the call graph is not yet available in this live database.\n\n{}\n\n**Status:** CALLS is empty; impact radius cannot yet be reliably computed.",
+                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}{}Le symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
                     symbol,
                     project_note.unwrap_or_default(),
                     degraded_note.unwrap_or_default(),
-                    format_table_from_json(&symbol_res, &["Name", "Type", "Project"])
+                    format_table_from_json(&symbol_res, &["Nom", "Type", "Projet"])
                 )
             }],
             "data": {
@@ -656,19 +656,19 @@ impl McpServer {
             None => {
                 let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
                 let suggestions_table =
-                    format_table_from_json(&suggestions, &["Suggested Symbol", "Type", "Project"]);
+                    format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"]);
                 return Some(json!({
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "## 🔮 Dry-Run Mutation: {}\n\n{}",
+                            "## 🔮 Dry-Run Mutation : {}\n\n{}",
                             symbol,
                             format_standard_contract(
                                 "warn_input_not_found",
                                 "symbol not found in current scope",
                                 &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
                                 &evidence_by_mode(
-                                    &format!("No exact symbol found in current scope.\n\n### Suggestions\n\n{}", suggestions_table),
+                                    &format!("Aucun symbole exact n'a ete trouve dans le scope courant.\n\n### Suggestions\n\n{}", suggestions_table),
                                     mode,
                                 ),
                                 &["retry with one suggested symbol", "run inspect to validate symbol name"],
@@ -696,14 +696,14 @@ impl McpServer {
             Ok(res) => {
                 let count: i64 = res.trim().parse().unwrap_or(0);
                 let report = format!(
-                    "## 🔮 Dry-Run Mutation: {}\n\n{}",
+                    "## 🔮 Dry-Run Mutation : {}\n\n{}",
                     symbol,
                     format_standard_contract(
                         "ok",
                         "mutation blast-radius estimated",
                         &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
                         &evidence_by_mode(
-                            &format!("Modifying '{}' will cascade-impact ~{} components in the architecture.", symbol, count),
+                            &format!("Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, count),
                             mode,
                         ),
                         &["review impact output for precise affected components"],

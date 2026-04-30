@@ -27,9 +27,9 @@ impl McpServer {
         let row = rows
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("SOLL entity not found"))?;
+            .ok_or_else(|| anyhow!("Entité SOLL introuvable"))?;
         if row.len() < expected_columns {
-            return Err(anyhow!("Incomplete SOLL result for update"));
+            return Err(anyhow!("Résultat SOLL incomplet pour la mise à jour"));
         }
         Ok(row)
     }

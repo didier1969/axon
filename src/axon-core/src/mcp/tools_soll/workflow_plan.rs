@@ -9,7 +9,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
@@ -30,7 +30,7 @@ impl McpServer {
             Ok(identity) => identity,
             Err(e) => {
                 return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }

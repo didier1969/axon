@@ -2,12 +2,12 @@ use super::*;
 
 impl McpServer {
     fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
-        if error_text.contains("Explicit relation required") {
+        if error_text.contains("Relation explicite requise") {
             "needs_relation_hint"
-        } else if error_text.contains("not found") {
+        } else if error_text.contains("introuvable") {
             "invalid_target_id"
         } else if error_text.contains("\"error\":\"forbidden_relation\"")
-            || error_text.contains("No canonical relation allowed")
+            || error_text.contains("Aucune relation canonique autorisee")
         {
             "forbidden_relation"
         } else {
@@ -34,7 +34,7 @@ impl McpServer {
                     Ok(code) => code,
                     Err(e) => {
                         return Some(json!({
-                            "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                            "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                             "isError": true
                         }))
                     }
@@ -50,7 +50,7 @@ impl McpServer {
                         }
                         Err(e) => {
                             return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Registry error: {}", e) }], "isError": true }),
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
                             )
                         }
                     }
@@ -63,7 +63,7 @@ impl McpServer {
                         ),
                         Err(e) => {
                             return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Registry error: {}", e) }], "isError": true }),
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
                             )
                         }
                     }
@@ -164,7 +164,7 @@ impl McpServer {
                 match insert_res {
                     Ok(_) => {
                         let created_id = formatted_id.clone();
-                        let mut report = format!("SOLL entity created: `{}`", created_id);
+                        let mut report = format!("✅ Entité SOLL créée : `{}`", created_id);
                         let mut response_data = json!({
                             "created_id": created_id,
                             "entity_type": entity_type_cap,
@@ -202,7 +202,7 @@ impl McpServer {
                                                     "already_present"
                                                 });
                                             report.push_str(&format!(
-                                                "\nCanonical link applied: `{}` -> `{}` via `{}`",
+                                                "\n✅ Liaison canonique appliquée : `{}` -> `{}` via `{}`",
                                                 formatted_id, target_id, relation_type
                                             ));
                                         }
@@ -218,7 +218,7 @@ impl McpServer {
                                                     relation_hint,
                                                 );
                                             report.push_str(&format!(
-                                                "\nCanonical attach rejected: {}",
+                                                "\n⚠️ Attachement canonique refusé : {}",
                                                 error_text
                                             ));
                                         }
@@ -236,7 +236,7 @@ impl McpServer {
                                             relation_hint,
                                         );
                                     report.push_str(&format!(
-                                        "\nCanonical attach rejected: {}",
+                                        "\n⚠️ Attachement canonique refusé : {}",
                                         error_text
                                     ));
                                 }
@@ -269,7 +269,7 @@ impl McpServer {
                         }))
                     }
                     Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Insert error: {}", e) }], "isError": true }),
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
                     ),
                 }
             }
@@ -358,7 +358,7 @@ impl McpServer {
                 match update_res {
                     Ok(_) => {
                         let mut payload = json!({
-                            "content": [{ "type": "text", "text": format!("Update succeeded for `{}`", id) }],
+                            "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }],
                             "data": {}
                         });
                         if let (Some(code), Some(before), Ok(after)) = (
@@ -388,7 +388,7 @@ impl McpServer {
                         Some(payload)
                     }
                     Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Update error: {}", e) }], "isError": true }),
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur update: {}", e) }], "isError": true }),
                     ),
                 }
             }
@@ -408,9 +408,9 @@ impl McpServer {
                             Ok(inserted) => {
                                 let mut payload = json!({
                                     "content": [{ "type": "text", "text": if inserted {
-                                        format!("Link created: `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                        format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table)
                                     } else {
-                                        format!("Link already present: `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                        format!("ℹ️ Liaison déjà présente : `{}` -> `{}` (via {})", src, tgt, rel_table)
                                     }}],
                                     "data": {}
                                 });
@@ -448,14 +448,14 @@ impl McpServer {
                                 Some(payload)
                             }
                             Err(e) => Some(json!({
-                                "content": [{ "type": "text", "text": format!("Link error: {}", e) }],
+                                "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
                                 "isError": true,
                                 "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
                             })),
                         }
                     }
                     Err(e) => Some(json!({
-                        "content": [{ "type": "text", "text": format!("Link error: {}", e) }],
+                        "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
                         "isError": true,
                         "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
                     })),

@@ -1,43 +1,31 @@
-# Axon: Structural Intelligence MCP Server
+# Axon: Copilote Architectural
 
-## Quick Start
-`project_code` is auto-resolved from your working directory. No manual discovery needed.
+## 🧠 Vision & Usage
+Axon est un moteur d'intelligence structurelle. Utilisez Axon comme une **Boussole** (compréhension globale) et Grep comme un **Scalpel** (recherche de texte brut).
 
-1. `help()` — Axon identity, tool routing, input schemas
-2. `status()` — runtime truth, auto-detected project, next action
-3. `query("symbol_name")` — find code symbols
-4. `help(tool=X)` — any tool's JSON input schema and examples
+### 🛠️ Axon Tool Routing (MANDATORY)
+| Tâche | Outil |
+|-------|-------|
+| Trouver un symbole (fonction, classe, module) | `axon_query` |
+| Analyser un fichier ou un module (Résumé) | `axon_summarize` |
+| Comprendre les dépendances (Callers/Callees) | `axon_context` |
+| Analyser l'impact d'un changement | `axon_impact` |
+| Tracer un flux entre deux fonctions | `axon_path` |
+| Détecter des anti-patterns (Cycles, God classes) | `axon_lint` |
+| **Audit Architectural (Immune System)** | `axon audit` |
 
-## Build & Test
-- Build: `cargo build --manifest-path src/axon-core/Cargo.toml --release`
-- Test: `cargo test --manifest-path src/axon-core/Cargo.toml --lib`
-- Test bins: `cargo test --manifest-path src/axon-core/Cargo.toml --bins`
-- Binaries: `axon-brain` (MCP), `axon-indexer` (IST writer), `axonctl` (supervisor)
+**IMPORTANT:** Tous les outils Axon EXIGENT le paramètre `repo` ou `project_code` selon la surface appelée. Le code projet canonique est la source de vérité.
+- Utilisez `axon_list_repos` une fois par session pour trouver les noms.
+- Exemple: `axon_query(repo="axon", query="...")`
 
-## Architecture
-- **Runtime:** Rust (`src/axon-core/`)
-- **Database:** DuckDB (embedded, canonical IST + SOLL)
-- **GPU:** ONNX Runtime with CUDA/TensorRT EP, subprocess IPC (`src/axon-core/src/embedder/`)
-- **MCP Server:** `src/axon-core/src/mcp/` — 60 public tools
-- **Visualization:** Memgraph (human-only, non-canonical)
-- **Dashboard:** Elixir/Phoenix (observation only)
-- **Supervisor:** `src/axon-core/src/bin/axonctl.rs`
+## 🛠️ Build & Test Commands
+- Install: `uv sync --all-extras`
+- Test: `uv run pytest`
+- Lint: `ruff check .`
+- Daemon: `axon daemon start`, `axon daemon status`, `axon daemon stop`
 
-## Key Tool Routing
-| Task | Tool |
-|------|------|
-| Find symbol | `query` |
-| Inspect detail | `inspect` |
-| Evidence packet | `retrieve_context` |
-| Blast radius | `impact` |
-| Why it exists | `why` |
-| Dependency flow | `path` |
-| Structural risks | `anomalies` |
-| SOLL intent | `soll_query_context` |
-| Commit work | `axon_pre_flight_check` → `axon_commit_work` |
-
-## Runtime
-- **Operator skill:** `docs/skills/axon-engineering-protocol/SKILL.md`
-- **Start:** `./scripts/axon --instance dev start` / `./scripts/axon --instance live start`
-- **Stop:** `./scripts/axon --instance dev stop`
-- **Qualify:** `./scripts/axon qualify-mcp`
+## 🏗️ Architecture
+- **Core:** `src/axon/core` (Graph, Ingestion, Storage)
+- **Database:** KuzuDB (Graphe + Vecteur)
+- **Interface:** MCP Server (`src/axon/mcp/server.py`) et CLI.
+- **Daemon:** `src/axon/daemon/` (Cache LRU pour les backends KuzuDB)

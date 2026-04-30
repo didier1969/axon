@@ -95,41 +95,12 @@ impl McpServer {
             normalized_name,
             arguments,
             response.unwrap_or_else(|| {
-                // Build repair instruction with tool schema so the LLM can self-correct.
-                let schema = super::catalog::tools_catalog(true)
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .and_then(|tools| {
-                        tools
-                            .iter()
-                            .find(|t| t.get("name").and_then(Value::as_str) == Some(normalized_name))
-                    })
-                    .and_then(|t| t.get("inputSchema").cloned());
-                let schema_str = schema
-                    .as_ref()
-                    .map(|s| serde_json::to_string(s).unwrap_or_default())
-                    .unwrap_or_default();
-                let args_str = serde_json::to_string(arguments).unwrap_or_default();
                 json!({
                     "content": [{
                         "type": "text",
-                        "text": format!(
-                            "Invalid arguments for tool `{}`.\n\nYou sent:\n```json\n{}\n```\n\nExpected schema:\n```json\n{}\n```\n\nFix: check required fields and types, then retry.",
-                            normalized_name, args_str, schema_str
-                        )
+                        "text": format!("Invalid arguments for tool: {}", normalized_name)
                     }],
-                    "isError": true,
-                    "data": {
-                        "problem_class": "invalid_arguments",
-                        "tool": normalized_name,
-                        "received_arguments": arguments,
-                        "input_schema": schema,
-                        "repair_instruction": "Compare your arguments against input_schema. Fix required fields and types, then retry the same tool.",
-                        "next_action": {
-                            "tool": "help",
-                            "arguments": { "tool": normalized_name }
-                        }
-                    }
+                    "isError": true
                 })
             }),
         ))

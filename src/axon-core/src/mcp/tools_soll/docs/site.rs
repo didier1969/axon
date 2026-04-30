@@ -208,17 +208,17 @@ impl McpServer {
         project_output_root: &Path,
     ) -> Result<SollDerivedDocsRefreshSummary, String> {
         if let Err(error) = self.resolve_canonical_project_identity_for_mutation(project_code) {
-            return Err(format!("Invalid canonical project: {}", error));
+            return Err(format!("Projet canonique invalide: {}", error));
         }
 
         let nodes = match self.load_soll_doc_nodes(project_code) {
             Ok(items) => items,
-            Err(error) => return Err(format!("SOLL read error: {}", error)),
+            Err(error) => return Err(format!("Erreur de lecture SOLL: {}", error)),
         };
 
         let edges = self
             .load_soll_doc_edges(project_code)
-            .map_err(|error| format!("SOLL relation read error: {}", error))?;
+            .map_err(|error| format!("Erreur de lecture des relations SOLL: {}", error))?;
 
         let generated_at_ms = now_unix_ms();
         let project_manifest_path = project_output_root.join("_manifest.json");
@@ -251,7 +251,7 @@ impl McpServer {
                 Ok(true) => pages_written += 1,
                 Ok(false) => pages_unchanged += 1,
                 Err(error) => {
-                    return Err(format!("Derived docs write error: {}", error))
+                    return Err(format!("Erreur d'écriture des docs dérivées: {}", error))
                 }
             }
             manifest_pages.push(json!({
@@ -277,9 +277,9 @@ impl McpServer {
             "pages": manifest_pages,
         });
         let project_manifest_pretty = serde_json::to_string_pretty(&project_manifest)
-            .map_err(|error| format!("Manifest serialization error: {}", error))?;
+            .map_err(|error| format!("Erreur de sérialisation du manifeste: {}", error))?;
         write_if_changed(&project_manifest_path, &project_manifest_pretty)
-            .map_err(|error| format!("Manifest write error: {}", error))?;
+            .map_err(|error| format!("Erreur d'écriture du manifeste: {}", error))?;
 
         let (site_root_value, root_manifest_value, root_index_value, root_written) =
             if let Some(site_root) = site_root {
@@ -288,7 +288,7 @@ impl McpServer {
                 let root_manifest_path = site_root.join("_root_manifest.json");
                 let root_html = self.render_soll_root_page(&entries);
                 let root_written = write_if_changed(&root_index_path, &root_html)
-                    .map_err(|error| format!("Root index write error: {}", error))?;
+                    .map_err(|error| format!("Erreur d'écriture du root dérivé: {}", error))?;
                 let root_manifest = json!({
                     "generator_version": SOLL_ROOT_DOCS_GENERATOR_VERSION,
                     "refresh_mode": refresh_mode,
@@ -305,10 +305,10 @@ impl McpServer {
                 });
                 let root_manifest_pretty =
                     serde_json::to_string_pretty(&root_manifest).map_err(|error| {
-                        format!("Root manifest serialization error: {}", error)
+                        format!("Erreur de sérialisation du root manifest: {}", error)
                     })?;
                 write_if_changed(&root_manifest_path, &root_manifest_pretty)
-                    .map_err(|error| format!("Root manifest write error: {}", error))?;
+                    .map_err(|error| format!("Erreur d'écriture du root manifest: {}", error))?;
                 (
                     site_root.to_string_lossy().to_string(),
                     root_manifest_path.to_string_lossy().to_string(),
@@ -340,15 +340,12 @@ impl McpServer {
     pub(crate) fn axon_soll_generate_docs(&self, args: &Value) -> Option<Value> {
         let project_code = match args.get("project_code").and_then(|value| value.as_str()) {
             Some(value) if !value.trim().is_empty() => value.trim().to_ascii_uppercase(),
-            _ => match self.validate_explicit_canonical_project_code(None, "soll_generate_docs") {
-                Ok(code) => code,
-                Err(e) => {
-                    return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                        "isError": true
-                    }))
-                }
-            },
+            _ => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "`project_code` est obligatoire pour `soll_generate_docs`." }],
+                    "isError": true
+                }))
+            }
         };
 
         let explicit_project_root = args.get("output_dir").and_then(|value| value.as_str());
@@ -363,7 +360,7 @@ impl McpServer {
                 Some(path) => (Some(path.clone()), path.join(&project_code)),
                 None => {
                     return Some(json!({
-                        "content": [{ "type": "text", "text": "Cannot resolve canonical docs/derived/soll directory." }],
+                        "content": [{ "type": "text", "text": "Impossible de résoudre le répertoire canonique docs/derived/soll du dépôt." }],
                         "isError": true
                     }))
                 }

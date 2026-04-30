@@ -10,7 +10,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
@@ -20,10 +20,10 @@ impl McpServer {
         let now = std::time::SystemTime::now();
         let datetime: chrono::DateTime<chrono::Local> = now.into();
         let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-        markdown.push_str(&format!("*Generated on: {}*\n\n", timestamp_str));
+        markdown.push_str(&format!("*Généré le : {}*\n\n", timestamp_str));
 
         if let Some(ref code) = project_code {
-            markdown.push_str(&format!("*Scope: project `{}`*\n\n", code));
+            markdown.push_str(&format!("*Portée : projet `{}`*\n\n", code));
         }
 
         markdown.push_str("## Topologie (Mermaid)\n```mermaid\ngraph TD;\n");
@@ -55,7 +55,7 @@ impl McpServer {
                 let meta = r.get(5).cloned().unwrap_or_default();
 
                 if n_type != &current_type {
-                    markdown.push_str(&format!("## Entities: {}\n", n_type));
+                    markdown.push_str(&format!("## Entités : {}\n", n_type));
                     current_type = n_type.clone();
                 }
 
@@ -79,7 +79,7 @@ impl McpServer {
                 return Some(serde_json::json!({
                     "content": [{
                         "type": "text",
-                        "text": "Write error: cannot resolve canonical docs/vision directory"
+                        "text": "Erreur d'écriture: impossible de résoudre le répertoire canonique docs/vision du dépôt"
                     }],
                     "isError": true
                 }))
@@ -100,7 +100,7 @@ impl McpServer {
                 Some(serde_json::json!({ "content": [{ "type": "text", "text": report }] }))
             }
             Err(e) => Some(
-                serde_json::json!({ "content": [{ "type": "text", "text": format!("Write error: {}", e) }], "isError": true }),
+                serde_json::json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }),
             ),
         }
     }
@@ -111,7 +111,7 @@ impl McpServer {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
@@ -203,37 +203,37 @@ impl McpServer {
         });
 
         let mut evidence = format!(
-            "SOLL validation: {} minimal coherence violation(s) detected.\n",
+            "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
             violation_count
         );
-        evidence.push_str("Mode: read-only, no auto-repair.\n");
+        evidence.push_str("Mode: lecture seule, sans auto-réparation.\n");
 
         if !snapshot.orphan_requirements.is_empty() {
-            evidence.push_str("\n- Orphan requirements:\n");
+            evidence.push_str("\n- Requirements orphelins:\n");
             for id in &snapshot.orphan_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
         if !snapshot.validations_without_verifies.is_empty() {
-            evidence.push_str("\n- Validations without VERIFIES link:\n");
+            evidence.push_str("\n- Validations sans lien VERIFIES:\n");
             for id in &snapshot.validations_without_verifies {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
         if !snapshot.decisions_without_links.is_empty() {
-            evidence.push_str("\n- Decisions without SOLVES/IMPACTS link:\n");
+            evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
             for id in &snapshot.decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
         if !snapshot.uncovered_requirements.is_empty() {
-            evidence.push_str("\n- Requirements without criteria/evidence:\n");
+            evidence.push_str("\n- Requirements sans critères/preuves:\n");
             for id in &snapshot.uncovered_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
         if !snapshot.duplicate_title_rows.is_empty() {
-            evidence.push_str("\n- Duplicate titles (potential semantic duplicates):\n");
+            evidence.push_str("\n- Titres dupliqués (risque de doublon métier):\n");
             for row in &snapshot.duplicate_title_rows {
                 if row.len() < 3 {
                     continue;
@@ -242,7 +242,7 @@ impl McpServer {
             }
         }
         if !snapshot.relation_policy_violations.is_empty() {
-            evidence.push_str("\n- Invalid relations:\n");
+            evidence.push_str("\n- Relations invalides:\n");
             for violation in &snapshot.relation_policy_violations {
                 evidence.push_str(&format!("  - {}\n", violation));
             }
@@ -523,7 +523,7 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "### SOLL restore complete\n\nSource: `{}`\n\nRestored in merge mode:\n- Vision: {}\n- Pillars: {}\n- Concepts: {}\n- Milestones: {}\n- Requirements: {}\n- Decisions: {}\n- Validations: {}\n- Relations: {}\n\nNote: this restore path rebuilds conceptual entities from the official Markdown export format. Metadata and links present in the export are replayed in merge mode; absent fields retain historical tolerant behavior.",
+                    "### Restauration SOLL terminee\n\nSource: `{}`\n\nRestaure en mode merge:\n- Vision: {}\n- Pillars: {}\n- Concepts: {}\n- Milestones: {}\n- Requirements: {}\n- Decisions: {}\n- Validations: {}\n- Relations: {}\n\nNote: ce chemin de restauration reconstruit les entites conceptuelles depuis le format Markdown officiel d'export. Les metadonnees et liaisons presentes dans l'export sont rejouees en mode merge; les champs absents conservent le comportement historique tolerant.",
                     path,
                     restored.vision,
                     restored.pillars,

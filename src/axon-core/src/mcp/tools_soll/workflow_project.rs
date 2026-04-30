@@ -101,7 +101,7 @@ impl McpServer {
 
         if dry_run {
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Validation passed (Dry Run). No commit performed. Message '{}' is valid.", message) }]
+                "content": [{ "type": "text", "text": format!("Validation réussie (Dry Run). Aucun commit effectué. Le message '{}' est valide.", message) }]
             }));
         }
 
@@ -142,17 +142,17 @@ impl McpServer {
             Ok(output) => {
                 let status = if output.status.success() {
                     format!(
-                        "Commit succeeded.\n{}",
+                        "Commit effectué avec succès.\n{}",
                         String::from_utf8_lossy(&output.stdout)
                     )
                 } else {
                     format!(
-                        "Commit failed.\n{}",
+                        "Commit échoué.\n{}",
                         String::from_utf8_lossy(&output.stderr)
                     )
                 };
                 Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}\n\nExport Report (not auto-staged):\n{}", status, export_report) }]
+                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report (not auto-staged):\n{}", status, export_report) }]
                 }))
             }
             Err(e) => Some(serde_json::json!({
@@ -167,7 +167,7 @@ impl McpServer {
             Some(path) if !path.trim().is_empty() => path.trim(),
             _ => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": "`project_path` is required for `axon_init_project`." }],
+                    "content": [{ "type": "text", "text": "`project_path` est obligatoire pour `axon_init_project`." }],
                     "isError": true
                 }))
             }
@@ -176,7 +176,7 @@ impl McpServer {
             Ok(name) => name,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet: {}", e) }],
                     "isError": true
                 }))
             }
@@ -185,7 +185,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
@@ -197,14 +197,14 @@ impl McpServer {
                 Ok(code) => code,
                 Err(e) => {
                     return Some(serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                         "isError": true
                     }))
                 }
             };
             if requested != project_code {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: `project_code` is server-assigned. Omit it or use `{}` for this project.", project_code) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: `project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code) }],
                     "isError": true
                 }));
             }
@@ -219,13 +219,13 @@ impl McpServer {
             Some(project_path),
         ) {
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Project registration error: {}", e) }],
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
                 "isError": true
             }));
         }
         if let Err(e) = self.ensure_soll_registry_row(&project_code) {
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("SOLL initialization error for project: {}", e) }],
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'initialisation SOLL du projet: {}", e) }],
                 "isError": true
             }));
         }
@@ -243,25 +243,25 @@ impl McpServer {
         }
 
         let mut response_text = format!(
-            "Project '{}' ({}) initialized in Axon.\n\n",
+            "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
             project_name, project_code
         );
 
         if concept_text.is_some() {
             response_text.push_str(&format!(
-                "📄 A concept document was detected. Extract the Vision and Pillars, then use `soll_manager` to create them under project {}.\n\n",
+                "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
                 project_code
             ));
         }
 
         response_text.push_str(&format!(
-            "Server-assigned project code: `{}`.\n\n",
+            "Code projet attribué par le serveur: `{}`.\n\n",
             project_code
         ));
-        response_text.push_str("Available global rules. Which ones do you want to activate, ignore, or specialize for this project?\n");
+        response_text.push_str("Voici les règles globales disponibles. Lesquelles souhaitez-vous activer, ignorer ou spécialiser pour ce projet ?\n");
         response_text.push_str(&rules_text);
         response_text
-            .push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
+            .push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
 
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }],
@@ -284,7 +284,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
@@ -314,7 +314,7 @@ impl McpServer {
                     Ok(parts) => parts,
                     Err(e) => {
                         return Some(serde_json::json!({
-                            "content": [{ "type": "text", "text": format!("SOLL registry error: {}", e) }],
+                            "content": [{ "type": "text", "text": format!("Erreur registre SOLL: {}", e) }],
                             "isError": true
                         }))
                     }
@@ -337,7 +337,7 @@ impl McpServer {
         }
 
         Some(serde_json::json!({
-            "content": [{ "type": "text", "text": format!("Inheritance applied. New local rules created: {:?}", applied) }]
+            "content": [{ "type": "text", "text": format!("Héritage appliqué. Nouvelles règles locales créées: {:?}", applied) }]
         }))
     }
 }

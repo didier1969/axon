@@ -21,15 +21,10 @@ Never invent:
 
 ## First Truth
 Use these in order:
-1. `help()` — returns Axon identity, value proposition, and tool routing
-2. `status` — returns runtime truth; `project_code` is auto-detected from cwd
+1. `status`
+2. `mcp_surface_diagnostics` if client/server binding looks stale
 3. `project_status` if the task is project-scoped
-4. `mcp_surface_diagnostics` if client/server binding looks stale
-
-Note: `project_code` is auto-resolved when omitted:
-- single registered project: used automatically
-- multiple projects: matched against working directory
-- use `help(tool=X)` to see any tool's JSON input schema and examples
+4. `project_registry_lookup` if project identity is unclear
 
 Truth hierarchy:
 - MCP `status` = runtime/protocol truth
@@ -264,28 +259,6 @@ Canonical entity types:
 - `Milestone`
 - `Validation`
 - `Stakeholder`
-
-### Vision Formulation Rule
-
-A Vision is the North Star of a project. It is NOT a technical description.
-
-A Vision must answer:
-- What problem does this project solve for humans and organizations?
-- Why will people and enterprises pay for it?
-- What transformation does it enable (before → after)?
-
-Format: `[Project] transforms [trapped/lost/expensive thing] into [accessible/durable/multiplied value] for [humans/teams/enterprises].`
-
-Rules:
-- Never mention technologies, frameworks, protocols, or implementation details
-- State the human and commercial value: productivity, knowledge retention, competitive advantage
-- A new LLM reading the Vision must immediately understand this is a product people will pay for, not a technical exercise
-- Technologies belong in Decisions, not in the Vision
-- The Vision changes rarely (1-2x/year) and prevents scope drift
-
-Example (good): "Axon makes every software team's accumulated knowledge instantly accessible and actionable for both human engineers and AI agents. A new team member reaches veteran-level effectiveness in minutes, not months."
-
-Example (bad): "Axon is a Rust-first MCP server using DuckDB and ONNX Runtime for structural code analysis."
 
 Read surfaces:
 - `soll_query_context`
