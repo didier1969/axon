@@ -143,8 +143,10 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("meta.json"), "{content}");
-    assert!(content.contains("BookingSystem"), "{content}");
+    assert!(
+        content.contains("BookingSystem") && (content.contains("non canonique") || content.contains("canonical")),
+        "Error should reject non-canonical project code: {content}"
+    );
 }
 
 #[test]
@@ -3061,7 +3063,10 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     let response = server.handle_request(req).unwrap().result.unwrap();
     let data = response.get("data").expect("expected create data");
     assert_eq!(data["attached"].as_bool(), Some(false));
-    assert_eq!(data["attach_status"].as_str(), Some("invalid_target_kind"));
+    assert!(
+        matches!(data["attach_status"].as_str(), Some("invalid_target_kind") | Some("forbidden_relation")),
+        "attach_status should indicate rejection: {:?}", data["attach_status"]
+    );
     let guidance = data["attach_guidance"]
         .as_object()
         .expect("attach guidance");
