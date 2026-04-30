@@ -451,11 +451,11 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let backlog_reason_section = if backlog_reasons.is_empty() {
         if pending_count + indexing_count > 0 {
             format!(
-                "**Causes backlog dominantes :**\n*   `unknown` : {}\n\n",
+                "**Top backlog causes:**\n*   `unknown` : {}\n\n",
                 pending_count + indexing_count
             )
         } else {
-            "*   Causes backlog dominantes : aucune.\n".to_string()
+            "*   Top backlog causes: none.\n".to_string()
         }
     } else {
         let lines = backlog_reasons
@@ -463,20 +463,20 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
             .map(|(reason, count)| format!("*   `{}` : {}", reason, count))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("**Causes backlog dominantes :**\n{}\n\n", lines)
+        format!("**Top backlog causes:**\n{}\n\n", lines)
     };
     let file_stage_section = if stage_counts.is_empty() {
-        "*   Stages fichiers : aucune donnée.\n\n".to_string()
+        "*   File stages: no data.\n\n".to_string()
     } else {
         let lines = stage_counts
             .iter()
             .map(|(stage, count)| format!("*   `{}` : {}", stage, count))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("**Stages canoniques :**\n{}\n\n", lines)
+        format!("**Canonical stages:**\n{}\n\n", lines)
     };
     let vector_queue_status_section = if vector_queue_statuses.is_empty() {
-        "*   File vectorization queue statuses : aucune donnée.\n\n".to_string()
+        "*   File vectorization queue statuses: no data.\n\n".to_string()
     } else {
         let lines = vector_queue_statuses
             .iter()
@@ -487,32 +487,32 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     };
 
     let mut evidence = format!(
-        "## 🤖 Axon Core V2 (Maestria) - Diagnostic Interne\n\n\
-        **Architecture du Moteur :**\n\
-        *   **Mode :** Embarqué (C-FFI) sans réseau TCP.\n\
-        *   **Base de Graphe :** DuckDB (Local, Zero-Copy).\n\
-        *   **Parseurs Actifs :** Rust, Elixir, Python, TypeScript, etc.\n\
-        *   **Protection OOM :** Option B (Watchdog Process Cycling Actif à 14 Go).\n\n\
-        **Mémoire Runtime :**\n\
-        *   RSS total : {}\n\
-        *   RSS Anon : {}\n\
-        *   RSS Fichier : {}\n\
-        *   RSS Shmem : {}\n\n\
-        **Volume du Graphe :**\n\
-        *   Fichiers connus : {}\n\
-        *   Symboles extraits : {}\n\
-        *   Relations (Edges) : {}\n\n\
-        **État d’Indexation :**\n\
-        *   Fichiers terminés : {}\n\
-        *   Backlog restant : {}\n\
-        *   Pending : {}\n\
-        *   Indexing : {}\n\
-        *   Indexed degraded : {}\n\
-        *   Oversized : {}\n\
-        *   Skipped : {}\n\
-        *   Graph Ready : {}\n\
-        *   Vector Ready : {}\n\
-        *   Taux de complétion : {:.2} %\n\n\
+        "## Axon Core V2 (Maestria) - Internal Diagnostic\n\n\
+        **Engine Architecture:**\n\
+        *   **Mode:** Embedded (C-FFI) without TCP network.\n\
+        *   **Graph Database:** DuckDB (Local, Zero-Copy).\n\
+        *   **Active Parsers:** Rust, Elixir, Python, TypeScript, etc.\n\
+        *   **OOM Protection:** Option B (Watchdog Process Cycling Active at 14 GB).\n\n\
+        **Runtime Memory:**\n\
+        *   RSS total: {}\n\
+        *   RSS Anon: {}\n\
+        *   RSS File: {}\n\
+        *   RSS Shmem: {}\n\n\
+        **Graph Volume:**\n\
+        *   Known files: {}\n\
+        *   Extracted symbols: {}\n\
+        *   Relations (Edges): {}\n\n\
+        **Indexation State:**\n\
+        *   Completed files: {}\n\
+        *   Remaining backlog: {}\n\
+        *   Pending: {}\n\
+        *   Indexing: {}\n\
+        *   Indexed degraded: {}\n\
+        *   Oversized: {}\n\
+        *   Skipped: {}\n\
+        *   Graph Ready: {}\n\
+        *   Vector Ready: {}\n\
+        *   Completion rate: {:.2} %\n\n\
         *   Graph Projection Queue Queued : {}\n\
         *   Graph Projection Queue Inflight : {}\n\
         *   Graph Projection Queue Pending : {}\n\n\
@@ -522,29 +522,29 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         {}\
         {}\
         {}\
-        **Stockage DuckDB :**\n\
-        *   Fichier principal : {}\n\
-        *   WAL : {}\n\
-        *   Total : {}\n\n\
-        **Mémoire DuckDB :**\n\
-        *   Mémoire allouée : {}\n\
-        *   Temporaire/spill : {}\n\n\
-        **Ingress Buffer :**\n\
-        *   Activé : {}\n\
-        *   Entrées bufferisées : {}\n\
-        *   Indices de sous-arbre : {}\n\
-        *   Subtree hints en vol : {}\n\
-        *   Subtree hints acceptés : {}\n\
-        *   Subtree hints bloqués : {}\n\
-        *   Subtree hints supprimés : {}\n\
-        *   Subtree hints productifs : {}\n\
-        *   Subtree hints non productifs : {}\n\
-        *   Subtree hints abandonnés : {}\n\
-        *   Événements collapsés : {}\n\
-        *   Flushs : {}\n\
-        *   Dernier flush : {} ms\n\
-        *   Dernier lot promu : {}\n\n\
-        **Embedding Runtime :**\n\
+        **DuckDB Storage:**\n\
+        *   Main file: {}\n\
+        *   WAL: {}\n\
+        *   Total: {}\n\n\
+        **DuckDB Memory:**\n\
+        *   Allocated memory: {}\n\
+        *   Temporary/spill: {}\n\n\
+        **Ingress Buffer:**\n\
+        *   Enabled: {}\n\
+        *   Buffered entries: {}\n\
+        *   Subtree hints: {}\n\
+        *   Subtree hints in flight: {}\n\
+        *   Subtree hints accepted: {}\n\
+        *   Subtree hints blocked: {}\n\
+        *   Subtree hints suppressed: {}\n\
+        *   Subtree hints productive: {}\n\
+        *   Subtree hints unproductive: {}\n\
+        *   Subtree hints dropped: {}\n\
+        *   Collapsed events: {}\n\
+        *   Flushes: {}\n\
+        *   Last flush: {} ms\n\
+        *   Last promoted batch: {}\n\n\
+        **Embedding Runtime:**\n\
         *   GPU Present Detected : {}\n\
         *   Embedding Provider Requested : {}\n\
         *   Embedding Provider Effective : {}\n\
@@ -560,7 +560,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Graph Batch Size : {}\n\n\
         *   Max Chunks Per File : {}\n\
         *   Max Embed Batch Bytes : {}\n\n\
-        **Vector Runtime Breakdown :**\n\
+        **Vector Runtime Breakdown:**\n\
         *   Fetch ms total : {}\n\
         *   Embed ms total : {}\n\
         *   DB write ms total : {}\n\
@@ -605,12 +605,12 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Fetch ms per chunk : {:.2}\n\
         *   DB write ms per chunk : {:.2}\n\
         *   Mark done ms per completed file : {:.2}\n\n\
-        **Vector Stage Latencies (recent window) :**\n\
+        **Vector Stage Latencies (recent window):**\n\
         *   Fetch p50/p95/max ms : {}/{}/{} (samples: {})\n\
         *   Embed p50/p95/max ms : {}/{}/{} (samples: {})\n\
         *   DB write p50/p95/max ms : {}/{}/{} (samples: {})\n\
         *   Mark done p50/p95/max ms : {}/{}/{} (samples: {})\n\n\
-        **Vector Batch Controller :**\n\
+        **Vector Batch Controller:**\n\
         *   State : {}\n\
         *   Reason : {}\n\
         *   Adjustments total : {}\n\
@@ -620,7 +620,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Window embed calls : {}\n\
         *   Window chunks : {}\n\
         *   Window files touched : {}\n\n\
-        **Shadow Optimizer :**\n\
+        **Shadow Optimizer:**\n\
         *   Latest decision id : {}\n\
         *   Latest decision mode : {}\n\
         *   Latest action profile : {}\n\
@@ -630,7 +630,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Latest reward at ms : {}\n\
         *   Latest throughput chunks/hour : {:.2}\n\
         *   Latest throughput files/hour : {:.2}\n\n\
-        *Note aux Agents IA : Toute erreur 'TCP auth closed' observée dans des logs Elixir n'est pas liée à ce serveur MCP. Axon Core V2 est 100% autonome.*",
+        *Note to AI Agents: any 'TCP auth closed' error observed in Elixir logs is unrelated to this MCP server. Axon Core V2 is 100% autonomous.*",
         format_bytes_human(memory.rss_bytes),
         format_bytes_human(memory.rss_anon_bytes),
         format_bytes_human(memory.rss_file_bytes),
@@ -662,7 +662,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         format_bytes_human(storage.db_total_bytes),
         format_bytes_human(duckdb_memory.memory_usage_bytes),
         format_bytes_human(duckdb_memory.temporary_storage_bytes),
-        if ingress.enabled { "oui" } else { "non" },
+        if ingress.enabled { "yes" } else { "no" },
         ingress.buffered_entries,
         ingress.subtree_hints,
         ingress.subtree_hint_in_flight,
@@ -814,7 +814,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
             .unwrap_or(0.0),
     );
     if reader_snapshot_age_ms == u64::MAX {
-        evidence.push_str("\n**Reader Snapshot:** indisponible (mode mémoire ou non initialisé)\n");
+        evidence.push_str("\n**Reader Snapshot:** unavailable (memory mode or not initialized)\n");
     } else {
         evidence.push_str(&format!(
             "\n**Reader Snapshot:** age={} ms, commit_epoch={}, reader_epoch={}, lag={}, refresh_inflight={}, refresh_failures_total={}, reads_on_reader_total={}, reads_on_writer_total={}, refresh_coalesced_total={}\n",

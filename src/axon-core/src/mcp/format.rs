@@ -1,11 +1,11 @@
 pub(crate) fn format_table_from_json(json_res: &str, headers: &[&str]) -> String {
     let rows: Vec<Vec<serde_json::Value>> = match serde_json::from_str(json_res) {
         Ok(r) => r,
-        Err(_) => return format!("Erreur de formatage : {}", json_res),
+        Err(_) => return format!("Formatting error: {}", json_res),
     };
 
     if rows.is_empty() {
-        return "Aucun résultat trouvé.".to_string();
+        return "No results found.".to_string();
     }
 
     let mut output = String::new();
