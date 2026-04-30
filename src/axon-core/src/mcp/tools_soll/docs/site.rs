@@ -344,7 +344,7 @@ impl McpServer {
                 Ok(code) => code,
                 Err(e) => {
                     return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                        "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
                         "isError": true
                     }))
                 }

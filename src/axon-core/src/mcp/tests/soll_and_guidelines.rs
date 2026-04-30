@@ -586,7 +586,7 @@ fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Identifiant projet non canonique"),
+        content.contains("Non-canonical project_code"),
         "{content}"
     );
     assert!(content.contains("BookingSystem"), "{content}");
@@ -626,7 +626,7 @@ fn test_axon_init_project_rejects_non_canonical_project_code() {
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Identifiant projet non canonique"),
+        content.contains("Non-canonical project_code"),
         "{content}"
     );
     assert!(content.contains("booking-system"), "{content}");
@@ -664,7 +664,7 @@ fn test_axon_apply_guidelines_rejects_non_canonical_project_code() {
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Identifiant projet non canonique"),
+        content.contains("Non-canonical project_code"),
         "{content}"
     );
     assert!(content.contains("axon"), "{content}");

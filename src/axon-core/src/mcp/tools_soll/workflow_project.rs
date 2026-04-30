@@ -167,7 +167,7 @@ impl McpServer {
             Some(path) if !path.trim().is_empty() => path.trim(),
             _ => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": "`project_path` est obligatoire pour `axon_init_project`." }],
+                    "content": [{ "type": "text", "text": "`project_path` is required for `axon_init_project`." }],
                     "isError": true
                 }))
             }
@@ -185,7 +185,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
                     "isError": true
                 }))
             }
@@ -197,14 +197,14 @@ impl McpServer {
                 Ok(code) => code,
                 Err(e) => {
                     return Some(serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                        "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
                         "isError": true
                     }))
                 }
             };
             if requested != project_code {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: `project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code) }],
+                    "content": [{ "type": "text", "text": format!("Canonical project error: `project_code` is server-assigned. Omit it or use `{}` for this project.", project_code) }],
                     "isError": true
                 }));
             }
@@ -284,7 +284,7 @@ impl McpServer {
             Ok(code) => code,
             Err(e) => {
                 return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
                     "isError": true
                 }))
             }

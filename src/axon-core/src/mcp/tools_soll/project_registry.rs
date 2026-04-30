@@ -92,7 +92,7 @@ impl McpServer {
 
         if !is_valid_project_code(raw) || raw != raw.to_ascii_uppercase() {
             return Err(anyhow!(
-                "Identifiant projet non canonique `{}` pour {}. Les mutations SOLL acceptent uniquement `project_code` au format canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`. Codes connus: {}",
+                "Non-canonical project_code `{}` for {}. SOLL mutations require 3-char uppercase canonical codes (e.g. `AXO`). Known: {}",
                 raw,
                 action_label,
                 self.known_project_codes_hint()
@@ -133,7 +133,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Code projet canonique `{}` introuvable dans soll.ProjectCodeRegistry ou `.axon/meta.json`. Codes connus: {}",
+            "Canonical project_code `{}` not found in ProjectCodeRegistry or .axon/meta.json. Known: {}",
             canonical_code,
             self.known_project_codes_hint()
         ))
@@ -358,7 +358,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
+            "Canonical project `{}` not found in .axon/meta.json or ProjectCodeRegistry",
             project_code
         ))
     }
