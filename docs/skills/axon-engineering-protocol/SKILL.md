@@ -21,10 +21,15 @@ Never invent:
 
 ## First Truth
 Use these in order:
-1. `status`
-2. `mcp_surface_diagnostics` if client/server binding looks stale
+1. `help()` — returns Axon identity, value proposition, and tool routing
+2. `status` — returns runtime truth; `project_code` is auto-detected from cwd
 3. `project_status` if the task is project-scoped
-4. `project_registry_lookup` if project identity is unclear
+4. `mcp_surface_diagnostics` if client/server binding looks stale
+
+Note: `project_code` is auto-resolved when omitted:
+- single registered project: used automatically
+- multiple projects: matched against working directory
+- use `help(tool=X)` to see any tool's JSON input schema and examples
 
 Truth hierarchy:
 - MCP `status` = runtime/protocol truth

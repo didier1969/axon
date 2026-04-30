@@ -14,9 +14,10 @@ Axon est un moteur d'intelligence structurelle. Utilisez Axon comme une **Bousso
 | Détecter des anti-patterns (Cycles, God classes) | `axon_lint` |
 | **Audit Architectural (Immune System)** | `axon audit` |
 
-**IMPORTANT:** Tous les outils Axon EXIGENT le paramètre `repo` ou `project_code` selon la surface appelée. Le code projet canonique est la source de vérité.
-- Utilisez `axon_list_repos` une fois par session pour trouver les noms.
-- Exemple: `axon_query(repo="axon", query="...")`
+**IMPORTANT:** `project_code` is auto-resolved from your working directory when omitted. For single-project setups, no configuration is needed. For multi-project, the server matches your cwd against registered project paths.
+- Call `help()` first to see Axon's identity and tool routing.
+- Call `status()` to get runtime truth and your auto-detected project.
+- Use `help(tool=X)` to see any tool's JSON input schema and examples.
 
 ## 🛠️ Build & Test Commands
 - Install: `uv sync --all-extras`
