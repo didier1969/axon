@@ -663,6 +663,7 @@ impl McpServer {
             .or_else(|| std::env::var("ORT_TENSORRT_ENGINE_CACHE_PATH").ok());
         let vector_runtime_machine = json!({
             "chunks_embedded_total": vector_chunks_embedded_total,
+            "chunks_inferred_total": local_vector_runtime_metrics.chunks_inferred_total,
             "chunk_embeddings_per_second": chunk_embeddings_per_second,
             "chunk_embeddings_rate_window_ms": chunk_embeddings_rate_window_ms,
             "graph_workers_started_total": graph_workers_started_total,
@@ -683,7 +684,23 @@ impl McpServer {
             "mixed_fallback_batches_total": local_vector_runtime_metrics.mixed_fallback_batches_total,
             "last_consumed_batch_lane": local_vector_runtime_metrics.last_consumed_batch_lane.as_str(),
             "active_small_max_tokens": local_vector_runtime_metrics.active_small_max_tokens,
-            "active_medium_max_tokens": local_vector_runtime_metrics.active_medium_max_tokens
+            "active_medium_max_tokens": local_vector_runtime_metrics.active_medium_max_tokens,
+            "embed_attempts_total": local_vector_runtime_metrics.embed_attempts_total,
+            "embed_inflight_started_at_ms": local_vector_runtime_metrics.embed_inflight_started_at_ms,
+            "embed_inflight_texts_current": local_vector_runtime_metrics.embed_inflight_texts_current,
+            "embed_inflight_text_bytes_current": local_vector_runtime_metrics.embed_inflight_text_bytes_current,
+            "last_embed_attempt_wall_ms": local_vector_runtime_metrics.last_embed_attempt_wall_ms,
+            "avg_embed_attempt_wall_ms": local_vector_runtime_metrics.avg_embed_attempt_wall_ms,
+            "max_embed_attempt_wall_ms": local_vector_runtime_metrics.max_embed_attempt_wall_ms,
+            "last_embed_gap_ms": local_vector_runtime_metrics.last_embed_gap_ms,
+            "avg_embed_gap_ms": local_vector_runtime_metrics.avg_embed_gap_ms,
+            "max_embed_gap_ms": local_vector_runtime_metrics.max_embed_gap_ms,
+            "vector_workers_started_total": local_vector_runtime_metrics.vector_workers_started_total,
+            "vector_workers_stopped_total": local_vector_runtime_metrics.vector_workers_stopped_total,
+            "vector_workers_active_current": local_vector_runtime_metrics.vector_workers_active_current,
+            "vector_worker_heartbeat_at_ms": local_vector_runtime_metrics.vector_worker_heartbeat_at_ms,
+            "vector_worker_restarts_total": local_vector_runtime_metrics.vector_worker_restarts_total,
+            "vector_lane_state": local_vector_runtime_metrics.vector_lane_state.as_str()
         });
         let vector_pipeline_telemetry = json!({
             "contract": "tensorrt_ready_vector_pipeline_v1",

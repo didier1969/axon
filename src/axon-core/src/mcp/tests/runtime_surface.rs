@@ -715,8 +715,8 @@ fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled()
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("`project_code` est obligatoire"),
-        "{content}"
+        content.contains("`project_code`") && content.contains("required"),
+        "Error should mention project_code is required: {content}"
     );
 
     unsafe {

@@ -340,12 +340,15 @@ impl McpServer {
     pub(crate) fn axon_soll_generate_docs(&self, args: &Value) -> Option<Value> {
         let project_code = match args.get("project_code").and_then(|value| value.as_str()) {
             Some(value) if !value.trim().is_empty() => value.trim().to_ascii_uppercase(),
-            _ => {
-                return Some(json!({
-                    "content": [{ "type": "text", "text": "`project_code` est obligatoire pour `soll_generate_docs`." }],
-                    "isError": true
-                }))
-            }
+            _ => match self.validate_explicit_canonical_project_code(None, "soll_generate_docs") {
+                Ok(code) => code,
+                Err(e) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                        "isError": true
+                    }))
+                }
+            },
         };
 
         let explicit_project_root = args.get("output_dir").and_then(|value| value.as_str());

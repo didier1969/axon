@@ -48,8 +48,44 @@ impl McpServer {
     ) -> anyhow::Result<String> {
         let raw = project_code.unwrap_or("").trim();
         if raw.is_empty() {
+            // Auto-detect from registry: single project or cwd match.
+            let _ = self.sync_project_code_registry_from_meta();
+            if let Ok(codes) = self.query_single_column(
+                "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code ASC",
+            ) {
+                let codes: Vec<String> = codes
+                    .into_iter()
+                    .filter(|v| !v.trim().is_empty())
+                    .collect();
+                if codes.len() == 1 {
+                    return Ok(codes.into_iter().next().unwrap());
+                }
+                if codes.len() > 1 {
+                    // Try matching cwd against registered project paths.
+                    if let Ok(cwd) = std::env::current_dir() {
+                        let cwd_escaped = escape_sql(&cwd.to_string_lossy());
+                        if let Ok(cwd_matches) = self.query_single_column(&format!(
+                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
+                            cwd_escaped
+                        )) {
+                            let cwd_matches: Vec<String> = cwd_matches
+                                .into_iter()
+                                .filter(|v| !v.trim().is_empty())
+                                .collect();
+                            if cwd_matches.len() == 1 {
+                                return Ok(cwd_matches.into_iter().next().unwrap());
+                            }
+                        }
+                    }
+                    return Err(anyhow!(
+                        "`project_code` is required for {} when multiple projects exist. Known: {}. Provide the canonical code (e.g. `AXO`).",
+                        action_label,
+                        codes.join(", ")
+                    ));
+                }
+            }
             return Err(anyhow!(
-                "`project_code` est obligatoire pour {}. Utilisez un code canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`.",
+                "`project_code` is required for {}. Use a canonical 3-character uppercase code, e.g. `AXO`. Call `status` to discover your project.",
                 action_label
             ));
         }

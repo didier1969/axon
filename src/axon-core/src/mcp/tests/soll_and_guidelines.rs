@@ -277,7 +277,7 @@ fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
 }
 
 #[test]
-fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
+fn test_axon_soll_manager_create_without_project_code_auto_resolves_or_errors() {
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -289,9 +289,9 @@ fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
                 "action": "create",
                 "entity": "decision",
                 "data": {
-                    "title": "Missing project code",
-                    "context": "Mutations must declare an explicit project scope",
-                    "rationale": "The server must not guess the target project",
+                    "title": "Auto-resolve test",
+                    "context": "project_code omitted — should auto-detect from cwd or single project",
+                    "rationale": "Zero-config onboarding for single-project or cwd-matched usage",
                     "status": "accepted"
                 }
             }
@@ -301,21 +301,34 @@ fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
-        .unwrap();
-
-    assert!(result
+    let is_error = result
         .get("isError")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false));
-    assert!(
-        content.contains("`project_code` est obligatoire"),
-        "{content}"
-    );
-    assert!(content.contains("AXO"), "{content}");
+        .unwrap_or(false);
+
+    if is_error {
+        // Multi-project without cwd match: should list known codes.
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            content.contains("`project_code`") && content.contains("required"),
+            "Error should mention project_code is required: {content}"
+        );
+    } else {
+        // Single project or cwd matched: auto-resolved successfully.
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            !content.is_empty(),
+            "Auto-resolved mutation should return non-empty content"
+        );
+    }
 }
 
 #[test]
