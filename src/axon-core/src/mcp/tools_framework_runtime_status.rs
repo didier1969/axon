@@ -864,6 +864,7 @@ impl McpServer {
                 "instance_identity": {
                     "instance_kind": instance_kind,
                     "runtime_identity": runtime_identity,
+                    "auto_detected_project": self.auto_detect_project_code_from_cwd(),
                     "data_root": data_root,
                     "run_root": run_root,
                     "project_root": project_root,
@@ -983,5 +984,28 @@ impl McpServer {
         }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
+    }
+
+    /// Auto-detect project_code from cwd by matching against ProjectCodeRegistry.
+    /// Returns the code if exactly one project matches, null otherwise.
+    fn auto_detect_project_code_from_cwd(&self) -> Value {
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_str = cwd.to_string_lossy().to_string().replace('\'', "''");
+            if let Ok(json_str) = self.graph_store.query_json(&format!(
+                "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
+                cwd_str
+            )) {
+                if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
+                    let codes: Vec<&str> = rows
+                        .iter()
+                        .filter_map(|row| row.get("project_code").and_then(Value::as_str))
+                        .collect();
+                    if codes.len() == 1 {
+                        return json!(codes[0]);
+                    }
+                }
+            }
+        }
+        Value::Null
     }
 }
