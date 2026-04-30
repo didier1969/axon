@@ -265,6 +265,28 @@ Canonical entity types:
 - `Validation`
 - `Stakeholder`
 
+### Vision Formulation Rule
+
+A Vision is the North Star of a project. It is NOT a technical description.
+
+A Vision must answer:
+- What problem does this project solve for humans and organizations?
+- Why will people and enterprises pay for it?
+- What transformation does it enable (before → after)?
+
+Format: `[Project] transforms [trapped/lost/expensive thing] into [accessible/durable/multiplied value] for [humans/teams/enterprises].`
+
+Rules:
+- Never mention technologies, frameworks, protocols, or implementation details
+- State the human and commercial value: productivity, knowledge retention, competitive advantage
+- A new LLM reading the Vision must immediately understand this is a product people will pay for, not a technical exercise
+- Technologies belong in Decisions, not in the Vision
+- The Vision changes rarely (1-2x/year) and prevents scope drift
+
+Example (good): "Axon makes every software team's accumulated knowledge instantly accessible and actionable for both human engineers and AI agents. A new team member reaches veteran-level effectiveness in minutes, not months."
+
+Example (bad): "Axon is a Rust-first MCP server using DuckDB and ONNX Runtime for structural code analysis."
+
 Read surfaces:
 - `soll_query_context`
 - `soll_work_plan`
