@@ -16,6 +16,10 @@ path = "src/bin/axon-brain.rs"
 name = "axon-indexer"
 path = "src/bin/axon-indexer.rs"
 
+[[bin]]
+name = "axonctl"
+path = "src/bin/axonctl.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"

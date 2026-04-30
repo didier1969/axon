@@ -81,22 +81,21 @@ pub(crate) use batch_lanes::{
 use gpu_backend::{
     abort_gpu_embed_if_vram_summit_reached, cuda_execution_provider_dispatch,
     gpu_embed_service_enabled, gpu_embed_service_prefers_tensorrt, gpu_embedding_service_client,
-    ort_cuda_provider_library_available, ort_cuda_provider_library_path, GpuEmbedSubprocessInit,
-    GpuEmbedSubprocessRequest, GpuEmbedSubprocessResponse, OrtGpuFirstTextEmbedding,
+    ort_cuda_provider_library_available, ort_cuda_provider_library_path,
+    recycle_existing_gpu_embedding_service, GpuEmbedSubprocessInit, GpuEmbedSubprocessRequest,
+    GpuEmbedSubprocessResponse, OrtGpuFirstTextEmbedding,
 };
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
 use gpu_policy::{
-    embedding_provider_requested_is_gpu, gpu_recreate_session_every_batch_enabled,
-    gpu_recycle_after_vram_summit_observe, gpu_recycle_immediate_required,
-    gpu_secondary_worker_allowed, gpu_stuck_recovery_reason, gpu_worker_consumption_allowed,
-    gpu_worker_has_pending_work, gpu_worker_should_wait_for_ready,
+    embedding_provider_requested_is_gpu, gpu_primary_worker_max_used_mb,
+    gpu_recreate_session_every_batch_enabled, gpu_recycle_after_vram_summit_observe,
+    gpu_recycle_immediate_required, gpu_secondary_worker_allowed, gpu_stuck_recovery_reason,
+    gpu_worker_consumption_allowed, gpu_worker_has_pending_work, gpu_worker_should_wait_for_ready,
 };
 #[cfg(test)]
-use gpu_policy::{
-    gpu_memory_pressure_active, gpu_primary_worker_max_used_mb, gpu_recycle_vram_summit_mb,
-};
+use gpu_policy::{gpu_memory_pressure_active, gpu_recycle_vram_summit_mb};
 pub use gpu_telemetry::{
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, GpuMemorySnapshot,
     GpuUtilizationSnapshot,
@@ -437,15 +436,19 @@ fn runtime_embedding_snapshot_dir() -> AnyhowResult<PathBuf> {
 }
 
 fn gpu_total_vram_hint_mb() -> Option<u64> {
+    if let Some(total_mb) = std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1024)
+    {
+        return Some(total_mb);
+    }
     if !cfg!(test) {
         if let Some(total_mb) = current_gpu_memory_snapshot().map(|snapshot| snapshot.total_mb) {
             return Some(total_mb);
         }
     }
-    std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value >= 1024)
+    None
 }
 
 fn gpu_bootstrap_vector_worker_cap(
@@ -922,6 +925,132 @@ fn sleep_with_vector_worker_heartbeat(timeout: Duration) {
         let remaining = timeout.saturating_sub(started.elapsed());
         thread::sleep(remaining.min(Duration::from_millis(250)));
     }
+}
+
+fn gpu_pre_batch_vram_guard_enabled() -> bool {
+    std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn gpu_pre_batch_vram_guard_samples() -> usize {
+    std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(6)
+}
+
+fn gpu_pre_batch_vram_guard_wait_ms() -> u64 {
+    std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 50)
+        .unwrap_or(500)
+}
+
+fn gpu_pre_batch_vram_guard_min_drop_mb() -> u64 {
+    std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(64)
+}
+
+fn gpu_pre_batch_vram_guard_unknown_recycle() -> bool {
+    std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn gpu_pre_batch_vram_recycle_reason(
+    initial_snapshot: Option<GpuMemorySnapshot>,
+) -> Option<String> {
+    gpu_pre_batch_vram_recycle_reason_with_probe(initial_snapshot, current_gpu_memory_snapshot)
+}
+
+/// After this many consecutive guard-triggered recycles without VRAM improvement,
+/// the guard enters a cooldown period to prevent infinite recycle cascades.
+const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 3;
+const GUARD_RECYCLE_COOLDOWN_MS: u64 = 60_000;
+
+static GUARD_CONSECUTIVE_RECYCLES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static GUARD_COOLDOWN_UNTIL_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn gpu_pre_batch_vram_recycle_reason_with_probe(
+    initial_snapshot: Option<GpuMemorySnapshot>,
+    mut next_snapshot: impl FnMut() -> Option<GpuMemorySnapshot>,
+) -> Option<String> {
+    if !gpu_pre_batch_vram_guard_enabled() {
+        return None;
+    }
+
+    // Backoff: if we hit the cascade threshold, enter cooldown and skip guard.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cooldown_until = GUARD_COOLDOWN_UNTIL_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_ms < cooldown_until {
+        return None;
+    }
+
+    let admission_mb = gpu_primary_worker_max_used_mb();
+    let mut snapshot = initial_snapshot.or_else(&mut next_snapshot);
+    let Some(first) = snapshot else {
+        return gpu_pre_batch_vram_guard_unknown_recycle()
+            .then(|| "gpu_pre_batch_vram_unknown telemetry_unavailable_before_batch".to_string());
+    };
+    if first.used_mb < admission_mb {
+        return None;
+    }
+
+    let mut lowest_used_mb = first.used_mb;
+    let mut last_used_mb = first.used_mb;
+    let wait = Duration::from_millis(gpu_pre_batch_vram_guard_wait_ms());
+    for _ in 0..gpu_pre_batch_vram_guard_samples() {
+        sleep_with_vector_worker_heartbeat(wait);
+        snapshot = next_snapshot();
+        let Some(current) = snapshot else {
+            return gpu_pre_batch_vram_guard_unknown_recycle().then(|| {
+                format!(
+                    "gpu_pre_batch_vram_unknown_after_wait first_used_mb={} admission_mb={}",
+                    first.used_mb, admission_mb
+                )
+            });
+        };
+        lowest_used_mb = lowest_used_mb.min(current.used_mb);
+        last_used_mb = current.used_mb;
+        if current.used_mb < admission_mb {
+            return None;
+        }
+    }
+
+    let observed_drop_mb = first.used_mb.saturating_sub(lowest_used_mb);
+    if observed_drop_mb < gpu_pre_batch_vram_guard_min_drop_mb() {
+        return Some(format!(
+            "gpu_pre_batch_vram_plateau first_used_mb={} last_used_mb={} lowest_used_mb={} admission_mb={} observed_drop_mb={}",
+            first.used_mb, last_used_mb, lowest_used_mb, admission_mb, observed_drop_mb
+        ));
+    }
+
+    Some(format!(
+        "gpu_pre_batch_vram_still_above_admission first_used_mb={} last_used_mb={} lowest_used_mb={} admission_mb={} observed_drop_mb={}",
+        first.used_mb, last_used_mb, lowest_used_mb, admission_mb, observed_drop_mb
+    ))
 }
 
 fn token_count_from_encoding(encoding: &Encoding) -> usize {
@@ -2521,6 +2650,75 @@ impl SemanticWorkerPool {
                     }
                 }
                 let gpu_memory_snapshot = current_gpu_memory_snapshot();
+                if let Some(reason_raw) = gpu_pre_batch_vram_recycle_reason(gpu_memory_snapshot) {
+                    let consecutive = GUARD_CONSECUTIVE_RECYCLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if consecutive >= GUARD_RECYCLE_BACKOFF_THRESHOLD {
+                        let cooldown_end = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64 + GUARD_RECYCLE_COOLDOWN_MS)
+                            .unwrap_or(0);
+                        GUARD_COOLDOWN_UNTIL_MS.store(cooldown_end, std::sync::atomic::Ordering::Relaxed);
+                        GUARD_CONSECUTIVE_RECYCLES.store(0, std::sync::atomic::Ordering::Relaxed);
+                        warn!(
+                            "Semantic Vector Worker [{}]: VRAM guard entering {}s cooldown after {} consecutive recycles without improvement",
+                            worker_idx, GUARD_RECYCLE_COOLDOWN_MS / 1000, consecutive
+                        );
+                    }
+                    service_guard::record_vector_worker_admission_reason(
+                        "gpu_pre_batch_vram_plateau",
+                        (service_guard::current_allowed_gpu_workers().max(1))
+                            .try_into()
+                            .unwrap_or(usize::MAX),
+                    );
+                    let batch_id = prepared.batch_id.clone();
+                    let texts_count = prepared.texts.len() as u64;
+                    let input_bytes = prepared.texts.iter().map(|text| text.len() as u64).sum();
+                    let touched_works = prepared.touched_works.clone();
+                    let next_active_after_failure = prepared.next_active_after_failure.clone();
+                    let recovered_ready_works =
+                        recover_ready_batches_to_active_works(&ready_batches);
+                    let merge_target = touched_works
+                        .len()
+                        .saturating_add(next_active_after_failure.len())
+                        .saturating_add(recovered_ready_works.len())
+                        .max(1);
+                    send_vector_refill_requeue(
+                        &graph_store,
+                        worker_idx,
+                        &refill_tx,
+                        merge_vectorization_work(
+                            touched_works,
+                            merge_vectorization_work(
+                                next_active_after_failure,
+                                recovered_ready_works,
+                                merge_target,
+                            ),
+                            merge_target,
+                        ),
+                    );
+                    warn!(
+                        "Semantic Vector Worker [{}]: recycling before GPU batch because VRAM did not recover: {}",
+                        worker_idx, reason_raw
+                    );
+                    schedule_vector_worker_restart(
+                        &graph_store,
+                        worker_idx,
+                        FatalVectorWorkerFault {
+                            stage: "gpu_pre_batch_vram_guard",
+                            reason_raw,
+                            fatal_class: "gpu_recycle".to_string(),
+                            batch_id: Some(batch_id),
+                            texts_count,
+                            input_bytes,
+                        },
+                        &mut restart_window,
+                        &mut restart_attempt,
+                    );
+                    drop(model);
+                    continue 'worker_lifecycle;
+                }
+                // VRAM guard passed — reset consecutive recycle counter.
+                GUARD_CONSECUTIVE_RECYCLES.store(0, std::sync::atomic::Ordering::Relaxed);
                 if !gpu_worker_consumption_allowed(gpu_available, gpu_memory_snapshot) {
                     service_guard::record_vector_worker_admission_reason(
                         "gpu_primary_worker_vram_guard",
@@ -2659,6 +2857,7 @@ impl SemanticWorkerPool {
                         inference_ms,
                         output_extract_ms,
                     )) => {
+                        service_guard::record_vector_embed_inferred(embeddings.len() as u64);
                         service_guard::record_vector_embed_attempt_finished();
                         service_guard::record_vector_lane_success();
                         service_guard::record_vector_embed_breakdown(
@@ -4985,6 +5184,10 @@ pub fn apply_runtime_embedding_lane_adjustment(
     refresh_vector_batch_controller_from_env();
 }
 
+pub fn recycle_gpu_embedding_service_for_runtime_control() -> anyhow::Result<bool> {
+    recycle_existing_gpu_embedding_service()
+}
+
 pub fn current_runtime_tuning_state() -> RuntimeTuningState {
     runtime_tuning_state(bootstrap_runtime_tuning_state_from_env())
 }
@@ -5180,6 +5383,11 @@ fn fatal_embedding_error_class<E: std::fmt::Debug>(err: &E) -> Option<&'static s
     let rendered = format!("{:?}", err);
     if rendered.contains("GetElementType is not implemented") {
         Some("ort_missing_output_type")
+    } else if rendered.contains("GPU embed subprocess response timeout")
+        || rendered.contains("GPU embed subprocess init handshake timeout")
+        || rendered.contains("GPU embed subprocess recycle init handshake timeout")
+    {
+        Some("gpu_embed_subprocess_timeout")
     } else if rendered.contains("onnxruntime") || rendered.contains("ORT") {
         Some("onnxruntime")
     } else {
@@ -8903,6 +9111,54 @@ mod tests {
         ));
 
         std::env::remove_var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED");
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_allows_batch_when_disabled() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+
+        assert!(
+            super::gpu_pre_batch_vram_recycle_reason(Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 8_000,
+                free_mb: 192,
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_allows_batch_below_admission() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
+        std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
+
+        assert!(
+            super::gpu_pre_batch_vram_recycle_reason(Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 5_500,
+                free_mb: 2_692,
+            }))
+            .is_none()
+        );
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+        std::env::remove_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB");
+    }
+
+    #[test]
+    fn gpu_pre_batch_vram_guard_can_recycle_when_telemetry_is_unknown() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
+        std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE", "true");
+
+        let reason = super::gpu_pre_batch_vram_recycle_reason_with_probe(None, || None)
+            .expect("unknown telemetry should request recycling when configured");
+        assert!(reason.contains("gpu_pre_batch_vram_unknown"));
+
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED");
+        std::env::remove_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE");
     }
 
     #[test]
