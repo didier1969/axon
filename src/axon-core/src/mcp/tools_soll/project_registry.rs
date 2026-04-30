@@ -61,9 +61,12 @@ impl McpServer {
                     return Ok(codes.into_iter().next().unwrap());
                 }
                 if codes.len() > 1 {
-                    // Try matching cwd against registered project paths.
-                    if let Ok(cwd) = std::env::current_dir() {
-                        let cwd_escaped = escape_sql(&cwd.to_string_lossy());
+                    // Try matching AXON_PROJECT_ROOT or cwd against registered project paths.
+                    let search_path = std::env::var("AXON_PROJECT_ROOT")
+                        .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
+                        .unwrap_or_default();
+                    if !search_path.is_empty() {
+                        let cwd_escaped = escape_sql(&search_path);
                         if let Ok(cwd_matches) = self.query_single_column(&format!(
                             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
                             cwd_escaped

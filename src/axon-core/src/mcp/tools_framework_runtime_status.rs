@@ -988,21 +988,26 @@ impl McpServer {
 
     /// Auto-detect project_code from cwd by matching against ProjectCodeRegistry.
     /// Returns the code if exactly one project matches, null otherwise.
+    /// Uses AXON_PROJECT_ROOT (set by runtime scripts) first, then falls back to cwd.
     fn auto_detect_project_code_from_cwd(&self) -> Value {
-        if let Ok(cwd) = std::env::current_dir() {
-            let cwd_str = cwd.to_string_lossy().to_string().replace('\'', "''");
-            if let Ok(json_str) = self.graph_store.query_json(&format!(
-                "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
-                cwd_str
-            )) {
-                if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
-                    let codes: Vec<&str> = rows
-                        .iter()
-                        .filter_map(|row| row.get("project_code").and_then(Value::as_str))
-                        .collect();
-                    if codes.len() == 1 {
-                        return json!(codes[0]);
-                    }
+        let search_path = std::env::var("AXON_PROJECT_ROOT")
+            .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
+            .unwrap_or_default()
+            .replace('\'', "''");
+        if search_path.is_empty() {
+            return Value::Null;
+        }
+        if let Ok(json_str) = self.graph_store.query_json(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND '{}' LIKE project_path || '%'",
+            search_path
+        )) {
+            if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
+                let codes: Vec<&str> = rows
+                    .iter()
+                    .filter_map(|row| row.get("project_code").and_then(Value::as_str))
+                    .collect();
+                if codes.len() == 1 {
+                    return json!(codes[0]);
                 }
             }
         }
