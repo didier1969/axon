@@ -23,12 +23,12 @@ impl McpServer {
                 .filter(|value| !value.trim().is_empty())
                 .collect();
             if codes.is_empty() {
-                "aucun code connu".to_string()
+                "no known code".to_string()
             } else {
                 codes.join(", ")
             }
         })
-        .unwrap_or_else(|_| "aucun code connu".to_string())
+        .unwrap_or_else(|_| "no known code".to_string())
     }
 
     pub(super) fn ensure_soll_registry_row(&self, project_code: &str) -> anyhow::Result<()> {
@@ -149,7 +149,7 @@ impl McpServer {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 anyhow!(
-                    "Impossible de dériver le nom projet depuis le chemin `{}`",
+                    "Cannot derive project name from path `{}`",
                     project_path
                 )
             })
@@ -308,7 +308,7 @@ impl McpServer {
         }
 
         Err(anyhow!(
-            "Impossible d'attribuer un `project_code` canonique unique pour `{}` depuis `{}`. Codes connus: {}",
+            "Cannot assign a unique canonical `project_code` for `{}` from `{}`. Known codes: {}",
             project_name,
             project_path,
             self.known_project_codes_hint()
@@ -320,7 +320,7 @@ impl McpServer {
         project_code: &str,
     ) -> anyhow::Result<(String, String)> {
         let canonical_code = self
-            .require_registered_mutation_project_code(Some(project_code), "cette mutation SOLL")?;
+            .require_registered_mutation_project_code(Some(project_code), "this SOLL mutation")?;
         Ok((canonical_code.clone(), canonical_code))
     }
 
@@ -434,7 +434,7 @@ impl McpServer {
         let found = !matches.is_empty();
         let content = if found {
             format!(
-                "Projet canonique trouvé: {} ({})",
+                "Canonical project found: {} ({})",
                 first
                     .get("project_name")
                     .and_then(|value| value.as_str())
@@ -445,7 +445,7 @@ impl McpServer {
                     .unwrap_or("")
             )
         } else {
-            "Aucun projet canonique trouvé dans ProjectCodeRegistry pour les critères fournis."
+            "No canonical project found in ProjectCodeRegistry for the given criteria."
                 .to_string()
         };
 

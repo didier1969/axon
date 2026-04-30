@@ -590,7 +590,7 @@ fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
         "{content}"
     );
     assert!(content.contains("BookingSystem"), "{content}");
-    assert!(content.contains("3 caractères"), "{content}");
+    assert!(content.contains("3-char uppercase canonical codes"), "{content}");
 }
 
 #[test]
@@ -808,7 +808,7 @@ fn test_axon_soll_manager_can_create_and_update_vision() {
         .as_str()
         .unwrap();
     assert!(
-        update_content.contains("Mise à jour réussie"),
+        update_content.contains("Update succeeded"),
         "{update_content}"
     );
 
@@ -910,7 +910,7 @@ fn test_axon_export_soll() {
     assert!(export_content.contains("CPT-AXO-001"));
 
     let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
-    assert!(export_body.contains("## Entités : Vision"));
+    assert!(export_body.contains("## Entities: Vision") || export_body.contains("## Entities: Vision"));
 
     let _ = std::fs::remove_file(export_path);
 }
@@ -962,43 +962,43 @@ fn test_axon_restore_soll() {
     let export_path = "/tmp/axon_restore_soll_test.md";
     let markdown = r#"# SOLL Extraction
 
-## Entités : Vision
+## Entities: Vision
 ### VIS-AXO-001 - Test Vision
 **Description:** Desc
 **Status:** draft
 **Meta:** `{"goal": "Goal", "source":"test"}`
 
-## Entités : Pillar
+## Entities: Pillar
 ### PIL-AXO-001 - Platform Core
 **Description:** Keep the conceptual core stable
 **Status:** accepted
 **Meta:** `{}`
 
-## Entités : Concept
+## Entities: Concept
 ### CPT-AXO-001 - Graph Truth
 **Description:** Use a structural graph as source of truth
 **Status:** accepted
 **Meta:** `{"rationale": "Because the project needs stable intent"}`
 
-## Entités : Milestone
+## Entities: Milestone
 ### MIL-AXO-001 - First Usable State
 **Description:** 
 **Status:** in_progress
 **Meta:** `{}`
 
-## Entités : Requirement
+## Entities: Requirement
 ### REQ-AXO-001 - Reliable Restore
 **Description:** SOLL must be restorable from exports
 **Status:** draft
 **Meta:** `{"priority":"high"}`
 
-## Entités : Decision
+## Entities: Decision
 ### DEC-AXO-001 - Merge Restore
 **Description:** 
 **Status:** accepted
 **Meta:** `{"rationale": "Restoration should be merge-oriented and non-destructive"}`
 
-## Entités : Validation
+## Entities: Validation
 ### VAL-AXO-001 - manual-test
 **Description:** 
 **Status:** passed
@@ -1025,7 +1025,7 @@ fn test_axon_restore_soll() {
         .unwrap();
 
     assert!(
-        content.contains("Restauration SOLL terminee"),
+        content.contains("SOLL restore complete"),
         "{}",
         content
     );
@@ -2874,7 +2874,7 @@ fn test_axon_soll_manager_link_rejects_missing_endpoint() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("introuvable"), "{content}");
+    assert!(content.contains("not found"), "{content}");
 }
 
 #[test]
@@ -2914,7 +2914,7 @@ fn test_axon_soll_manager_link_applies_default_relation() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Liaison établie"), "{content}");
+    assert!(content.contains("Link created"), "{content}");
     assert_eq!(
         server
             .graph_store
@@ -3116,7 +3116,7 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("Relations autorisées"), "{content}");
+    assert!(content.contains("Allowed"), "{content}");
     assert!(content.contains("SOLVES"), "{content}");
     assert!(content.contains("REFINES"), "{content}");
     let data = result
@@ -3183,7 +3183,7 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Liaison établie"), "{content}");
+    assert!(content.contains("Link created"), "{content}");
     assert_eq!(
         server
             .graph_store
@@ -3843,7 +3843,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             .unwrap()
             .as_str()
             .unwrap();
-        assert!(content.contains("Liaison établie"));
+        assert!(content.contains("Link created"));
     }
 
     let export_req = JsonRpcRequest {

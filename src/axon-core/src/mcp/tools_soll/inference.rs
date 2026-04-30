@@ -237,21 +237,21 @@ pub(super) fn score_node(
     include_ist: bool,
 ) -> (i64, Vec<String>, Vec<String>) {
     let mut score = (node.descendants as i64) * 40;
-    let mut reasons = vec![format!("debloque {} descendant(s)", node.descendants)];
+    let mut reasons = vec![format!("unblocks {} descendant(s)", node.descendants)];
     let mut validation_gates = Vec::new();
 
     match node.priority.as_str() {
         "P0" => {
             score += 20;
-            reasons.push("priorite P0".to_string());
+            reasons.push("priority P0".to_string());
         }
         "P1" => {
             score += 15;
-            reasons.push("priorite P1".to_string());
+            reasons.push("priority P1".to_string());
         }
         "P2" => {
             score += 8;
-            reasons.push("priorite P2".to_string());
+            reasons.push("priority P2".to_string());
         }
         _ => {}
     }
@@ -274,25 +274,25 @@ pub(super) fn score_node(
 
     if node.evidence_count == 0 {
         score += 10;
-        reasons.push("aucune evidence rattachee".to_string());
+        reasons.push("no evidence attached".to_string());
         validation_gates.push("attach evidence".to_string());
     }
 
     if include_ist && node.ist_degraded_links > 0 {
         score += 8;
-        reasons.push("scope IST degrade".to_string());
+        reasons.push("IST scope degraded".to_string());
         validation_gates.push("reindex degraded scope".to_string());
     }
 
     if node.backlog_visible {
         score += 5;
-        reasons.push("backlog visible sur le projet".to_string());
+        reasons.push("project backlog visible".to_string());
         validation_gates.push("reduce project backlog before closure".to_string());
     }
 
     if matches!(node.entity_type, WorkPlanEntityType::Milestone) && node.descendants == 0 {
         score -= 10;
-        reasons.push("milestone isole".to_string());
+        reasons.push("isolated milestone".to_string());
     }
 
     (score, reasons, validation_gates)
@@ -449,22 +449,22 @@ pub(super) fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
 
 pub(super) fn recommendation_reason(node: &WorkPlanNode) -> String {
     if node.descendants > 0 {
-        format!("debloque {} descendant(s)", node.descendants)
+        format!("unblocks {} descendant(s)", node.descendants)
     } else if node
         .requirement_state
         .as_deref()
         .is_some_and(|state| matches!(state, "missing" | "partial"))
     {
         format!(
-            "fermer le gap de preuve ({})",
+            "close proof gap ({})",
             node.requirement_state.as_deref().unwrap_or("unknown")
         )
     } else if matches!(node.entity_type, WorkPlanEntityType::Milestone) {
-        "jalon a cadrer ou rattacher".to_string()
+        "milestone to scope or attach".to_string()
     } else {
         node.reasons
             .first()
             .cloned()
-            .unwrap_or_else(|| "action immediate".to_string())
+            .unwrap_or_else(|| "immediate action".to_string())
     }
 }
