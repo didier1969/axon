@@ -234,9 +234,33 @@ fn tool_help_response(tool_name: &str) -> Value {
 
     let examples = usage_examples_for_tool(normalized);
     let next_action = next_action_for_tool(normalized);
+    let input_schema = tool
+        .get("inputSchema")
+        .cloned()
+        .unwrap_or_else(|| json!({"type": "object"}));
+    let schema_compact = serde_json::to_string(&input_schema).unwrap_or_default();
+    let first_example = usage_examples_for_tool(normalized)
+        .as_array()
+        .and_then(|arr| arr.first().cloned())
+        .and_then(|ex| {
+            ex.get("arguments")
+                .map(|args| serde_json::to_string_pretty(args).unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let text = format!(
-        "## Axon Tool Help\n\nTool: `{}`\n\nUse `input_schema` exactly. Start with the first usage example when available. If the call is async, poll `job_status` until terminal state.",
-        normalized
+        "## Axon Tool Help\n\nTool: `{}`\n\n{}\n\n### Input Schema\n```json\n{}\n```\n{}### Usage\nStart with the first example. If async, poll `job_status` until terminal.",
+        normalized,
+        description,
+        schema_compact,
+        if first_example.is_empty() {
+            String::new()
+        } else {
+            format!("\n### Example\n```json\n{}\n```\n\n", first_example)
+        },
     );
 
     json!({
