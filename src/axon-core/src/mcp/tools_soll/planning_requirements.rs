@@ -69,8 +69,33 @@ impl McpServer {
             "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
         });
 
+        // Build compact text with top gaps for LLM actionability.
+        let top_gaps: Vec<String> = summary
+            .entries
+            .iter()
+            .filter(|e| e.state != "done")
+            .take(5)
+            .map(|e| {
+                let dims: Vec<&str> = e.missing_dimensions.iter().map(String::as_str).collect();
+                format!("  {} [{}]: missing {}", e.id, e.state, dims.join(", "))
+            })
+            .collect();
+        let next_to_close = summary
+            .entries
+            .iter()
+            .filter(|e| e.state == "partial")
+            .min_by_key(|e| e.missing_dimensions.len())
+            .map(|e| format!("\nNext to close: {} (needs: {})", e.id, e.missing_dimensions.join(", ")))
+            .unwrap_or_default();
+        let text = format!(
+            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}",
+            summary.done, summary.partial, summary.missing,
+            if top_gaps.is_empty() { "  (none)".to_string() } else { top_gaps.join("\n") },
+            next_to_close
+        );
+
         Some(json!({
-            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", summary.done, summary.partial, summary.missing)}],
+            "content": [{"type":"text","text": text}],
             "data": {
                 "project_code": project_code,
                 "done": summary.done,
