@@ -4965,6 +4965,144 @@ fn test_axon_apply_guidelines_creates_local_copies() {
     assert_eq!(edge_count, 1, "Inheritance edge should be created");
 }
 
+// REQ-AXO-043 — axon_apply_guidelines must surface a recovery contract
+// when the call cannot produce useful output (empty input or all-unknown
+// global rule IDs). The previous behaviour silently returned
+// "Inheritance applied. New local rules created: []", misleading the LLM
+// into thinking work happened.
+
+#[test]
+fn test_axon_apply_guidelines_rejects_empty_accepted_list() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_guidelines",
+            "arguments": {
+                "project_code": "AXO",
+                "accepted_global_rule_ids": []
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "empty accepted_global_rule_ids must surface isError=true; result={result:?}"
+    );
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        content.contains("at least one canonical Guideline ID"),
+        "{content}"
+    );
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("empty_input").and_then(|v| v.as_bool()), Some(true));
+    assert!(data.get("recovery_hint").is_some());
+    assert_eq!(data.get("applied").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(
+        data.get("unknown_global_rule_ids")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_axon_apply_guidelines_rejects_all_unknown_rule_ids() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_guidelines",
+            "arguments": {
+                "project_code": "AXO",
+                "accepted_global_rule_ids": ["GUI-PRO-NONEXISTENT", "GUI-NOPE-999"]
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "all-unknown IDs must surface isError=true; result={result:?}"
+    );
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(content.contains("No rules applied"), "{content}");
+    assert!(content.contains("GUI-PRO-NONEXISTENT"), "{content}");
+    let data = result.get("data").unwrap();
+    let unknowns = data
+        .get("unknown_global_rule_ids")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(unknowns.len(), 2);
+    assert!(unknowns
+        .iter()
+        .any(|v| v.as_str() == Some("GUI-PRO-NONEXISTENT")));
+    assert!(unknowns.iter().any(|v| v.as_str() == Some("GUI-NOPE-999")));
+}
+
+#[test]
+fn test_axon_apply_guidelines_partial_success_surfaces_unknown() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_guidelines",
+            "arguments": {
+                "project_code": "AXO",
+                "accepted_global_rule_ids": ["GUI-PRO-001", "GUI-PRO-NONEXISTENT"]
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    // Partial success is NOT an error — the call produced useful output
+    // for the known IDs and reported unknowns alongside.
+    assert!(
+        result.get("isError").is_none()
+            || result.get("isError").and_then(|v| v.as_bool()) == Some(false),
+        "partial success should not flag isError; result={result:?}"
+    );
+    let data = result.get("data").unwrap();
+    assert_eq!(
+        data.get("applied").unwrap().as_array().unwrap().len(),
+        1,
+        "exactly one applied"
+    );
+    let unknowns = data
+        .get("unknown_global_rule_ids")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(unknowns.len(), 1);
+    assert_eq!(unknowns[0].as_str(), Some("GUI-PRO-NONEXISTENT"));
+}
+
 #[test]
 fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
     let server = create_test_server();

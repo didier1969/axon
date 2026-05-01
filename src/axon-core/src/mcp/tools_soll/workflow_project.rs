@@ -319,9 +319,13 @@ impl McpServer {
         };
         let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
 
-        let mut applied = Vec::new();
+        let mut applied: Vec<String> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
         for id_val in accepted_ids {
-            let global_id = id_val.as_str().unwrap_or("");
+            let global_id = id_val.as_str().unwrap_or("").trim();
+            if global_id.is_empty() {
+                continue;
+            }
             let row_raw = self.graph_store.query_json(&format!(
                 "SELECT title, description, metadata FROM soll.Node WHERE id = '{}' AND type='Guideline'",
                 escape_sql(global_id)
@@ -330,6 +334,7 @@ impl McpServer {
             let rows: Vec<Vec<String>> = serde_json::from_str(&row_raw).unwrap_or_default();
             if let Some(row) = rows.first() {
                 if row.len() < 3 {
+                    unknown.push(global_id.to_string());
                     continue;
                 }
                 let title = &row[0];
@@ -350,7 +355,7 @@ impl McpServer {
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
                 let _ = self.graph_store.execute_param(
-                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
                      VALUES (?, 'Guideline', ?, ?, ?, 'active', ?)",
                     &serde_json::json!([local_id, p_code, title, desc, meta])
                 );
@@ -361,11 +366,51 @@ impl McpServer {
                 );
 
                 applied.push(local_id);
+            } else {
+                unknown.push(global_id.to_string());
             }
         }
 
-        Some(serde_json::json!({
-            "content": [{ "type": "text", "text": format!("Inheritance applied. New local rules created: {:?}", applied) }]
-        }))
+        // REQ-AXO-043 — silent-success contract gap. Previous behaviour
+        // returned "Inheritance applied. New local rules created: []" for
+        // both an empty input AND a list of all-unknown rule IDs, which
+        // misled the LLM caller into thinking work happened. Surface the
+        // unknown IDs as a recovery contract so the caller can retry with
+        // valid IDs (discoverable via `cypher SELECT id, title FROM
+        // soll.main.Node WHERE type='Guideline' AND project_code='PRO'`).
+        let empty_input = accepted_ids.is_empty();
+        let nothing_applied = applied.is_empty();
+        let recovery_hint = "discover valid IDs via cypher SELECT id, title FROM soll.main.Node WHERE type='Guideline' AND project_code='PRO'";
+        let text = if empty_input {
+            format!(
+                "axon_apply_guidelines requires at least one canonical Guideline ID in `accepted_global_rule_ids`. {recovery_hint}.")
+        } else if !applied.is_empty() && !unknown.is_empty() {
+            format!(
+                "Inheritance applied. New local rules created: {applied:?}. Unknown global rule IDs (skipped): {unknown:?}.")
+        } else if !applied.is_empty() {
+            format!("Inheritance applied. New local rules created: {applied:?}")
+        } else {
+            format!(
+                "No rules applied. All requested global rule IDs were unknown: {unknown:?}. {recovery_hint}.")
+        };
+
+        let mut data = serde_json::json!({
+            "applied": applied,
+            "unknown_global_rule_ids": unknown,
+        });
+        if empty_input {
+            data["empty_input"] = serde_json::json!(true);
+        }
+        if empty_input || nothing_applied {
+            data["recovery_hint"] = serde_json::json!(recovery_hint);
+        }
+        let mut response = serde_json::json!({
+            "content": [{ "type": "text", "text": text }],
+            "data": data,
+        });
+        if empty_input || nothing_applied {
+            response["isError"] = serde_json::json!(true);
+        }
+        Some(response)
     }
 }
