@@ -623,6 +623,55 @@ fn test_soll_manager_create_returns_mutation_feedback() {
 }
 
 #[test]
+fn test_axon_entrench_nuance_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — entrench_nuance previously returned a bare
+    // "Entrenchment failed: ..." string when project_code was unregistered.
+    // Now mirrors the wrong_project_scope contract for consistency.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "NOT_REGISTERED_RRR",
+                    "statement": "irrelevant"
+                }
+            })),
+            id: Some(json!(43104)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("NOT_REGISTERED_RRR")
+    );
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO"),
+        "must list seeded AXO: {registered_strs:?}"
+    );
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+}
+
+#[test]
 fn test_axon_soll_work_plan_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — work_plan previously returned `Status: ok` with empty
     // Evidence for a non-registered project_code. Verify the symmetric

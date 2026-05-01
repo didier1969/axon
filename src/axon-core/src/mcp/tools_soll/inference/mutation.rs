@@ -301,6 +301,58 @@ impl McpServer {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
+        // REQ-AXO-043 — pre-validate project_code so we surface the
+        // structured wrong_project_scope contract (matching
+        // soll_query_context / soll_work_plan / anomalies) instead of a
+        // bare "Entrenchment failed: <anyhow>" message.
+        if self.resolve_project_code(project_code).is_err() {
+            let registered: Vec<String> = self
+                .graph_store
+                .query_json(
+                    "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
+                )
+                .ok()
+                .and_then(|s| serde_json::from_str::<Vec<Vec<String>>>(&s).ok())
+                .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+                .unwrap_or_default();
+            let registered_values: Vec<Value> =
+                registered.iter().map(|c| Value::from(c.clone())).collect();
+            let next_action = if registered.is_empty() {
+                "no projects registered yet — use axon_init_project to register one".to_string()
+            } else {
+                format!(
+                    "use one of the registered project_codes: {}",
+                    registered.join(", ")
+                )
+            };
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Project `{}` not found in registry for entrench_nuance. {}",
+                        project_code, next_action,
+                    ),
+                }],
+                "isError": true,
+                "data": {
+                    "status": "wrong_project_scope",
+                    "rejected_project_code": project_code,
+                    "registered_project_codes": registered_values,
+                    "next_action": next_action,
+                    "operator_guidance": {
+                        "problem_class": "wrong_project_scope",
+                        "likely_cause": "project_code_not_in_registry",
+                        "next_best_actions": [
+                            "retry with a registered project_code",
+                            "or call axon_init_project to register a new project",
+                        ],
+                        "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                        "confidence": "high",
+                    },
+                }
+            }));
+        }
+
         let inference = match self.infer_soll_mutation_internal(project_code, statement) {
             Ok(inference) => inference,
             Err(error) => {
