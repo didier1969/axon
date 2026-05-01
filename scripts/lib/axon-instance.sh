@@ -14,6 +14,79 @@ axon_load_worktree_env() {
     fi
 }
 
+# REQ-AXO-109 — clear AXON_*/HYDRA_* env vars inherited from a previous
+# run in the same shell, preserving an allowlist of vars that callers
+# may legitimately set as user input. Without this, a `dev` start
+# followed by a `live` start in the same shell leaks dev's tuning vars
+# (AXON_VECTOR_WORKERS, AXON_GPU_EMBED_SERVICE_TENSORRT, AXON_DB_ROOT,
+# etc.) into the live runtime and the live BEAM dashboard, breaking the
+# Dual-Instance Operational Discipline Pillar (PIL-AXO-004).
+#
+# Lifecycle scripts (start.sh, stop.sh, status.sh) MUST call this at
+# entry, after sourcing this lib but before any other env mutation, so
+# every lifecycle invocation starts from a deterministic env shape.
+axon_clear_inherited_env() {
+    # Allowlist of vars that lifecycle scripts treat as user input — set
+    # by the user, by wrappers (axon-live / axon-dev), by the dispatcher
+    # (scripts/axon), or by callers like qualify / benchmark scripts.
+    # Anything not in this set is treated as derived and unset.
+    local -a preserve=(
+        # Instance selection
+        AXON_INSTANCE_KIND AXON_INSTANCE AXON_ENV
+        # Project / scope
+        AXON_PROJECT_ROOT AXON_PROJECT_CODE AXON_DEV_PROJECT_ROOT
+        AXON_WATCH_DIR AXON_PROJECTS_ROOT AXON_REPO_SLUG
+        # Role / mode selectors
+        AXON_RUNTIME_SHADOW_ROLE AXON_RUNTIME_BOOT_ROLE
+        AXON_RUNTIME_MODE AXON_SPLIT_SHADOW_ONLY
+        AXON_DASHBOARD_ENABLED AXON_SPLIT_BRAIN_IST_READER_ONLY
+        # GPU / embedding overrides
+        AXON_GPU_BACKEND AXON_GPU_ACCESS_POLICY AXON_EMBEDDING_PROVIDER
+        AXON_GPU_EMBED_SERVICE_ENABLED
+        AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH
+        AXON_GPU_PRIMARY_WORKER_MAX_USED_MB AXON_GPU_TELEMETRY_BACKEND
+        AXON_GPU_TELEMETRY_CACHE_TTL_MS AXON_NVML_LIBRARY_PATH
+        AXON_OPT_MAX_VRAM_USED_MB AXON_TENSORRT_OVERSHOOT_MB
+        AXON_CUDA_MEMORY_SOFT_LIMIT_MB AXON_CUDA_MEMORY_LIMIT_MB
+        AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT
+        AXON_VECTOR_WORKERS AXON_CHUNK_BATCH_SIZE
+        AXON_FILE_VECTORIZATION_BATCH_SIZE
+        # Tuning / resource policy
+        AXON_RESOURCE_PRIORITY AXON_BACKGROUND_BUDGET_CLASS
+        AXON_WATCHER_POLICY AXON_QUEUE_MEMORY_BUDGET_BYTES
+        AXON_WATCHER_SUBTREE_HINT_BUDGET MAX_AXON_WORKERS
+        AXON_DUCKDB_MEMORY_LIMIT_GB
+        # Release / promotion
+        AXON_LIVE_RELEASE_MANIFEST
+        # Stop / cleanup flags
+        AXON_DROP_WAL_ON_STOP AXON_NO_AUTO_VECTORS
+        # Networking / public exposure
+        AXON_PUBLIC_HOST AXON_ADVERTISED_HOST
+        # Benchmark
+        AXON_BENCHMARK_ACTIVE AXON_BENCHMARK_GPU_BACKEND
+        # Preflight
+        AXON_SKIP_ELIXIR_PREWARM AXON_STARTUP_TIMEOUT_S
+        # User-overridable HYDRA ports
+        HYDRA_GRPC_PORT
+    )
+    declare -A _axon_preserve_set
+    local v
+    for v in "${preserve[@]}"; do
+        _axon_preserve_set[$v]=1
+    done
+    local name
+    while IFS='=' read -r name _; do
+        case "$name" in
+            AXON_*|HYDRA_*)
+                if [[ -z "${_axon_preserve_set[$name]:-}" ]]; then
+                    unset "$name"
+                fi
+                ;;
+        esac
+    done < <(env)
+    unset _axon_preserve_set
+}
+
 axon_normalize_instance_kind() {
     local raw="${1:-}"
     case "$raw" in

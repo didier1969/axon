@@ -9,6 +9,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_PROJECTS_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+# REQ-AXO-109 — clear AXON_*/HYDRA_* leaked from a previous run in
+# this shell before any lib re-derives instance state.
+axon_clear_inherited_env
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/axon-resource-policy.sh
