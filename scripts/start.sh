@@ -652,6 +652,7 @@ if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
     if [[ "$LIVE_RELEASE_ACTIVE" -eq 1 ]]; then
         echo "🔄 Updating live split binaries from promoted artifacts..."
         mkdir -p bin
+        rm -f bin/axon-brain bin/axon-indexer
         install -m 755 "$LIVE_RELEASE_BRAIN_ARTIFACT" bin/axon-brain
         install -m 755 "$LIVE_RELEASE_INDEXER_ARTIFACT" bin/axon-indexer
         if [[ -n "$LIVE_RELEASE_BRAIN_BUILD_INFO" && -f "$LIVE_RELEASE_BRAIN_BUILD_INFO" ]]; then
@@ -662,7 +663,7 @@ if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
         fi
     elif [[ "$RUNTIME_EXECUTABLE_NAME" == "axon-core" && -f "$DEVENV_RELEASE_BIN" ]]; then
         echo "🔄 Updating bin/axon-core safely..."
-        mkdir -p bin && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
+        mkdir -p bin && rm -f bin/axon-core && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
         AXON_BUILD_ID="$(axon_workspace_build_id "$PROJECT_ROOT")"
         export AXON_BUILD_ID
         axon_write_export_file "$AXON_BUILD_INFO_FILE" \
@@ -832,7 +833,17 @@ PRELAUNCH_LD_LIBRARY_PATH_EXPORT=""
 CUDA_PACKAGE_SET="${AXON_CUDA_PACKAGE_SET:-cudaPackages}"
 axon_resolve_ort_runtime "$PROJECT_ROOT" "$EMBEDDING_PROVIDER_REQUEST" || exit 1
 if ! has_live_runtime_dataplane; then
-    tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_RUNTIME_SHADOW_ROLE=\"$RUNTIME_SHADOW_ROLE\"; export AXON_SPLIT_SHADOW_ONLY=\"$RUNTIME_SHADOW_ONLY\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting $RUNTIME_EXECUTABLE_NAME...\"; \"$RUNTIME_EXECUTABLE\" & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
+    # Resolve axonctl binary for process supervision
+    AXONCTL_BIN="$PROJECT_ROOT/bin/axonctl"
+    if [[ ! -x "$AXONCTL_BIN" ]]; then
+        AXONCTL_BIN="$PROJECT_ROOT/src/axon-core/target/release/axonctl"
+    fi
+    if [[ ! -x "$AXONCTL_BIN" ]]; then
+        echo "❌ axonctl binary not found. Build it: cargo build --manifest-path src/axon-core/Cargo.toml --release --bin axonctl"
+        exit 1
+    fi
+
+    tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_RUNTIME_SHADOW_ROLE=\"$RUNTIME_SHADOW_ROLE\"; export AXON_SPLIT_SHADOW_ONLY=\"$RUNTIME_SHADOW_ONLY\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting $RUNTIME_EXECUTABLE_NAME...\"; \"$AXONCTL_BIN\" supervise --project-root \"$PROJECT_ROOT\" --instance-kind \"$AXON_INSTANCE_KIND\" --role \"$RUNTIME_SHADOW_ROLE\" -- \"$RUNTIME_EXECUTABLE\"'" C-m
 fi
 
 if [ "$START_DASHBOARD" = "1" ] && ! has_live_dashboard_dataplane; then
