@@ -4,6 +4,18 @@
 # This layer keeps the current live runtime authoritative while making
 # `live` and `dev` explicit and reusable across scripts.
 
+# REQ-AXO-094 — Boot output hygiene: route ⚠️ warnings through a single
+# helper so they (1) emit on stderr instead of polluting the
+# informational stdout stream that operator dashboards / qualify scripts
+# capture, and (2) carry a machine-parseable `[WARN][axon-start]` prefix
+# alongside the human-readable ⚠️ marker. Lifecycle scripts (start.sh,
+# stop.sh, qualify, lib helpers) MUST use this helper instead of raw
+# `echo "⚠️ ..."` so future contract tightening (degraded-readiness
+# escalation per REQ-AXO-098) has a single capture point.
+axon_log_warn() {
+    printf '[WARN][axon-start] ⚠️ %s\n' "$*" >&2
+}
+
 axon_load_worktree_env() {
     local project_root="${1:?project root required}"
     local env_file="$project_root/.env.worktree"

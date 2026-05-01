@@ -50,10 +50,10 @@ axon_resolve_ort_runtime() {
                 echo "   Manifest: $ORT_ARTIFACT_MANIFEST"
             else
                 if [[ "$gpu_service_tensorrt_requested" == "1" ]]; then
-                    echo "⚠️ Ignoring invalid external TensorRT artifact manifest: $ORT_ARTIFACT_MANIFEST"
+                    axon_log_warn "Ignoring invalid external TensorRT artifact manifest: $ORT_ARTIFACT_MANIFEST"
                     echo "   TensorRT mode requires core, CUDA provider, and TensorRT provider libraries."
                 else
-                    echo "⚠️ Ignoring invalid external CUDA artifact manifest: $ORT_ARTIFACT_MANIFEST"
+                    axon_log_warn "Ignoring invalid external CUDA artifact manifest: $ORT_ARTIFACT_MANIFEST"
                 fi
                 echo "   Falling back to nixpkgs materialization."
                 ORT_DYLIB_PATH=""
@@ -126,7 +126,7 @@ axon_resolve_ort_runtime() {
         fi
 
         if [[ ! -f "$ORT_OUT_PATH/lib/libonnxruntime_providers_cuda.so" ]]; then
-            echo "⚠️ The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
+            axon_log_warn "The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
             echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
         fi
         if [[ "$gpu_service_tensorrt_requested" == "1" && ! -f "$ORT_OUT_PATH/lib/libonnxruntime_providers_tensorrt.so" ]]; then

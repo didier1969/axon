@@ -477,7 +477,7 @@ run_devenv_shell() {
         if (( attempt >= 2 )); then
             return 1
         fi
-        echo "⚠️ devenv shell failed; running 'devenv gc' once before retrying..."
+        axon_log_warn "devenv shell failed; running 'devenv gc' once before retrying..."
         devenv gc >/dev/null 2>&1 || true
         attempt=$((attempt + 1))
         sleep 1
@@ -508,7 +508,7 @@ fi
 if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/src" \
     -type f \( -name '*.rs' -o -name 'Cargo.toml' \) \
     -newer "$SELECTED_DEBUG_RUNTIME_BIN" -print -quit | grep -q .; then
-    echo "⚠️ Detected newer axon-core sources than $SELECTED_DEBUG_RUNTIME_BIN"
+    axon_log_warn "Detected newer axon-core sources than $SELECTED_DEBUG_RUNTIME_BIN"
     echo "   Rebuilding selected runtime role binary..."
     if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-core' && cargo build --bin $RUNTIME_EXECUTABLE_NAME --release"; then
         echo "❌ Failed to rebuild $RUNTIME_EXECUTABLE_NAME"
@@ -531,7 +531,7 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     done)
 
     if [ -n "${DELETED_EXE_PIDS:-}" ]; then
-        echo "⚠️ Found Axon processes still running on deleted executables: $DELETED_EXE_PIDS"
+        axon_log_warn "Found Axon processes still running on deleted executables: $DELETED_EXE_PIDS"
         echo "   Resetting stale $RUNTIME_SHADOW_ROLE runtime state before restart..."
         tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
         cleanup_stale_runtime_state
@@ -539,7 +539,7 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
 
     if has_live_runtime_dataplane && { axon_role_is_indexer "$RUNTIME_SHADOW_ROLE" || verify_mcp_http; }; then
         if [[ "$START_DASHBOARD" == "1" ]] && ! has_live_dashboard_dataplane; then
-            echo "⚠️ Axon core is healthy in TMUX session '$TMUX_SESSION' but dashboard is absent."
+            axon_log_warn "Axon core is healthy in TMUX session '$TMUX_SESSION' but dashboard is absent."
             echo "   Relaunching nexus window..."
             launch_dashboard_window
             REUSE_RUNNING_CORE=1
@@ -549,18 +549,18 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
             exit 0
         fi
     else
-        echo "⚠️ Found stale TMUX session '$TMUX_SESSION' without a healthy data plane. Resetting local runtime state..."
+        axon_log_warn "Found stale TMUX session '$TMUX_SESSION' without a healthy data plane. Resetting local runtime state..."
         tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
         cleanup_stale_runtime_state
     fi
 elif [[ -S "$AXON_TELEMETRY_SOCK" || -S "$AXON_MCP_SOCK" || -f "$AXON_PID_FILE" ]]; then
-    echo "⚠️ Found stale local runtime state without a TMUX session. Cleaning sockets/pid and continuing..."
+    axon_log_warn "Found stale local runtime state without a TMUX session. Cleaning sockets/pid and continuing..."
     cleanup_stale_runtime_state
 fi
 
 # 1. Verify nix-daemon is running (WSL2 specific mitigation)
 if ! nix store info >/dev/null 2>&1; then
-    echo "⚠️ Nix daemon is not responding. Attempting to start it..."
+    axon_log_warn "Nix daemon is not responding. Attempting to start it..."
     if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
         sudo systemctl start nix-daemon
     else
@@ -624,25 +624,25 @@ verify_role_ready() {
 }
 
 if [ -f "$LEGACY_RELEASE_BIN" ] && [ ! -f "$DEVENV_RELEASE_BIN" ]; then
-    echo "⚠️ Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
+    axon_log_warn "Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
     echo "   Axon starts from $DEVENV_RELEASE_BIN. Attempting automatic rebuild..."
     rebuild_core_release || exit 1
 fi
 
 if [ -f "$LEGACY_RELEASE_BIN" ] && [ "$LEGACY_RELEASE_BIN" -nt "$DEVENV_RELEASE_BIN" ]; then
-    echo "⚠️ Detected a newer release binary outside Devenv:"
+    axon_log_warn "Detected a newer release binary outside Devenv:"
     echo "   $LEGACY_RELEASE_BIN"
     echo "   Attempting to refresh the authoritative Devenv build..."
     rebuild_core_release || exit 1
 fi
 
 if [ ! -f "$DEVENV_RELEASE_BIN" ]; then
-    echo "⚠️ Missing Devenv release binary at $DEVENV_RELEASE_BIN"
+    axon_log_warn "Missing Devenv release binary at $DEVENV_RELEASE_BIN"
     rebuild_core_release || exit 1
 fi
 
 if [ ! -f "$DEVENV_TUNNEL_BIN" ]; then
-    echo "⚠️ Missing Devenv tunnel binary at $DEVENV_TUNNEL_BIN"
+    axon_log_warn "Missing Devenv tunnel binary at $DEVENV_TUNNEL_BIN"
     rebuild_tunnel_release || exit 1
 fi
 
@@ -650,7 +650,7 @@ if [ -f "$DEVENV_RELEASE_BIN" ] && find "$PROJECT_ROOT/src/axon-core/src" \
     "$PROJECT_ROOT/src/axon-core/Cargo.toml" \
     "$PROJECT_ROOT/src/axon-core/Cargo.lock" \
     -newer "$DEVENV_RELEASE_BIN" -print -quit | grep -q .; then
-    echo "⚠️ Detected newer axon-core sources than $DEVENV_RELEASE_BIN"
+    axon_log_warn "Detected newer axon-core sources than $DEVENV_RELEASE_BIN"
     echo "   Rebuilding authoritative Devenv release..."
     rebuild_core_release || exit 1
 fi
@@ -659,7 +659,7 @@ if [ -f "$DEVENV_TUNNEL_BIN" ] && find "$PROJECT_ROOT/src/axon-mcp-tunnel/src" \
     "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.toml" \
     "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.lock" \
     -newer "$DEVENV_TUNNEL_BIN" -print -quit | grep -q .; then
-    echo "⚠️ Detected newer axon-mcp-tunnel sources than $DEVENV_TUNNEL_BIN"
+    axon_log_warn "Detected newer axon-mcp-tunnel sources than $DEVENV_TUNNEL_BIN"
     echo "   Rebuilding authoritative Devenv tunnel release..."
     rebuild_tunnel_release || exit 1
 fi
@@ -760,7 +760,7 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
 # Never discard DuckDB WAL during a normal restart. WAL replay is required to recover
 # recent committed work when the main database file has not been checkpointed yet.
 if [[ "${AXON_DROP_WAL_ON_START:-0}" == "1" ]]; then
-  echo "⚠️ AXON_DROP_WAL_ON_START=1 set: deleting DuckDB WAL files before start."
+  axon_log_warn "AXON_DROP_WAL_ON_START=1 set: deleting DuckDB WAL files before start."
   rm -f "$AXON_DB_ROOT/"*.wal 2>/dev/null || true
 fi
 
@@ -904,8 +904,8 @@ for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     sleep 1
 done
 
-if [ "$CORE_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Core."; fi
-if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
+if [ "$CORE_READY" = false ]; then axon_log_warn "Timeout waiting for Axon Core."; fi
+if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then axon_log_warn "Timeout waiting for Axon Dashboard."; fi
 
 if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
     echo "❌ Axon did not reach a fully ready state within the startup budget."
@@ -919,7 +919,7 @@ if [ "$CORE_READY" = true ] && ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; th
     if ! verify_sql_gateway; then
         if axon_role_is_brain "$RUNTIME_SHADOW_ROLE" \
             && [[ "${AXON_SPLIT_BRAIN_IST_READER_ONLY:-0}" =~ ^(1|true|yes|on)$ ]]; then
-            echo "⚠️ Brain started before a materialized IST reader replica was available."
+            axon_log_warn "Brain started before a materialized IST reader replica was available."
             echo "   Continuing in degraded read mode until indexer publishes ist-reader.db."
         else
             echo "❌ Axon Core exposed its port but failed the live schema check."
@@ -950,7 +950,7 @@ if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
             echo "✅ MCP tunnel verification succeeded."
             _axon_mcp_verified=1
         else
-            echo "⚠️ MCP tunnel verification failed; falling back to HTTP probe."
+            axon_log_warn "MCP tunnel verification failed; falling back to HTTP probe."
         fi
     fi
     if [ "$_axon_mcp_verified" = "0" ]; then
