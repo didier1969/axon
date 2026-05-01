@@ -393,6 +393,21 @@ if [[ "$REQUEST_TENSORRT" == "1" ]]; then
     export AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT="${AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT:-1}"
 fi
 
+# REQ-AXO-102 — apply the brain-only resource defaults from start-brain.sh
+# directly when `--brain-only` is selected via the unified entrypoint, so
+# `./scripts/axon start --brain-only` is contractually equivalent to
+# `bash scripts/lib/start-brain.sh`. Without this block, the unified
+# path runs a brain with default GPU/IST/memory tunings that diverge
+# from the wrapper's intent (no GPU avoidance, no IST-reader-only
+# split, default DuckDB memory budget). All defaults use `:-` so any
+# explicit override (env var or wrapper) wins.
+if [[ "$RUNTIME_MODE" == "brain_only" ]]; then
+    export AXON_GPU_ACCESS_POLICY="${AXON_GPU_ACCESS_POLICY:-avoid}"
+    export AXON_SPLIT_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
+    export AXON_SPLIT_BRAIN_IST_READER_ONLY="${AXON_SPLIT_BRAIN_IST_READER_ONLY:-1}"
+    export AXON_DUCKDB_MEMORY_LIMIT_GB="${AXON_DUCKDB_MEMORY_LIMIT_GB:-2}"
+fi
+
 RUNTIME_REACTIVATION_PATH="default"
 RUNTIME_EXECUTABLE_NAME="$(axon_runtime_binary_name "$RUNTIME_SHADOW_ROLE")"
 
