@@ -2136,8 +2136,28 @@ impl SemanticWorkerPool {
         );
 
         let Some(mut model) = Self::build_text_embedding_model("query", worker_idx) else {
+            // REQ-AXO-098 — model load failed. Flip the embedder
+            // subsystem to Failed so the readiness contract reflects
+            // the broken state instead of letting it remain whatever
+            // initial value the registry held.
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::Embedder,
+                crate::runtime_readiness::SubsystemState::Failed {
+                    reason: "model_load_failed".to_string(),
+                },
+            );
             return;
         };
+
+        // REQ-AXO-098 — the model loaded; the embedder subsystem is
+        // now Ready. Subsequent failures (per-request errors, GPU
+        // pressure pauses) are transient and surfaced through
+        // batch_embed's existing error path, not through the
+        // subsystem state.
+        crate::runtime_readiness::report_subsystem_state(
+            crate::runtime_readiness::Subsystem::Embedder,
+            crate::runtime_readiness::SubsystemState::Ready,
+        );
 
         loop {
             match query_rx.recv() {

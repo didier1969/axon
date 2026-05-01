@@ -33,6 +33,7 @@ pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
 pub mod runtime_profile;
+pub mod runtime_readiness;
 pub mod runtime_topology;
 pub mod runtime_truth_contract;
 pub mod runtime_tuning;

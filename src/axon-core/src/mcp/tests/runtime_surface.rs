@@ -996,6 +996,109 @@ fn test_status_uses_ist_projection_freshness_label_and_field() {
     }
 }
 
+// REQ-AXO-098 / DEC-AXO-062 / CPT-AXO-023 — `mcp__axon__status` must
+// expose subsystem-tagged tristate readiness. `data.readiness` carries
+// the rolled-up overall (Failed dominates Degraded; Degraded dominates
+// Ready) and `data.subsystems[]` carries the per-subsystem reports
+// each with name, state kind, optional reason, last_observed_at_ms.
+#[test]
+fn test_status_exposes_subsystem_readiness_contract() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    crate::runtime_readiness::reset_for_tests();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_exposes_subsystem_readiness_contract",
+        );
+    }
+    crate::runtime_readiness::report_subsystem_state(
+        crate::runtime_readiness::Subsystem::BrainMcp,
+        crate::runtime_readiness::SubsystemState::Ready,
+    );
+    crate::runtime_readiness::report_subsystem_state(
+        crate::runtime_readiness::Subsystem::Embedder,
+        crate::runtime_readiness::SubsystemState::Degraded {
+            reason: "cpu_fallback".to_string(),
+        },
+    );
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2167)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("status data");
+    let readiness = data
+        .get("readiness")
+        .expect("readiness field must be present");
+    assert_eq!(
+        readiness.get("kind").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "any Degraded subsystem with no Failed → overall Degraded: {readiness:?}"
+    );
+    let reasons = readiness
+        .get("reasons")
+        .and_then(|v| v.as_array())
+        .expect("Degraded readiness must include reasons array");
+    assert!(
+        reasons.iter().any(|r| {
+            r.as_str()
+                .map(|s| s.starts_with("embedder:"))
+                .unwrap_or(false)
+        }),
+        "reasons must be subsystem-prefixed: {reasons:?}"
+    );
+
+    let subsystems = data
+        .get("subsystems")
+        .and_then(|v| v.as_array())
+        .expect("subsystems[] must be present");
+    assert!(
+        subsystems.iter().any(|entry| {
+            entry
+                .get("subsystem")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "brain_mcp")
+                .unwrap_or(false)
+        }),
+        "brain_mcp report must be present after explicit Ready report: {subsystems:?}"
+    );
+    assert!(
+        subsystems.iter().any(|entry| {
+            entry
+                .get("subsystem")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "embedder")
+                .unwrap_or(false)
+                && entry
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "degraded")
+                    .unwrap_or(false)
+        }),
+        "embedder must show its Degraded state with kind label: {subsystems:?}"
+    );
+
+    crate::runtime_readiness::reset_for_tests();
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
 #[test]
 fn test_mcp_tools_list_hides_indexed_runtime_tools_in_full_isolated() {
     let _guard = env_lock();

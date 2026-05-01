@@ -573,6 +573,38 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // GPU-backed worker via the canonical pipeline.
     crate::embedder::spawn_brain_query_worker_if_needed(runtime_mode);
 
+    // REQ-AXO-098 / DEC-AXO-062 — initial subsystem readiness
+    // reports. Each role declares its primary subsystem(s) Ready at
+    // boot completion; failures detected after this point flip the
+    // subsystem to Degraded or Failed via the relevant code paths
+    // (e.g. embedder model load failure flips Embedder to Failed
+    // inside query_worker_loop). The empty-registry fresh-boot state
+    // collapses to Ready per CPT-AXO-023; the explicit reports here
+    // make the readiness signal observable from the first status
+    // call onward, not just after the first request.
+    match profile.role {
+        RuntimeBootRole::Brain => {
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::BrainMcp,
+                crate::runtime_readiness::SubsystemState::Ready,
+            );
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::IstReader,
+                crate::runtime_readiness::SubsystemState::Ready,
+            );
+        }
+        RuntimeBootRole::Indexer => {
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::IstWriter,
+                crate::runtime_readiness::SubsystemState::Ready,
+            );
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::Watcher,
+                crate::runtime_readiness::SubsystemState::Ready,
+            );
+        }
+    }
+
     let mut acquired_writer_guards = Vec::new();
     for target in profile.writer_targets() {
         let result = match target {

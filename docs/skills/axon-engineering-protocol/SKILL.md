@@ -93,6 +93,14 @@ Brain semantic search capability (REQ-AXO-128 / DEC-AXO-061 / CPT-AXO-022):
 - LLM clients can call `query` with multi-token natural-language input under brain_only and receive ranked semantic results; no profile change is required.
 - the `unavailable_embedding_reason` message reached when the registered sender is None now describes either a transient indexer GPU subprocess outage OR a CPU embedder load failure (model snapshot missing / corrupt). Both are recoverable; neither is a permanent profile boundary anymore.
 
+Subsystem-tagged readiness contract (REQ-AXO-098 / DEC-AXO-062 / CPT-AXO-023):
+- `mcp__axon__status` exposes `data.readiness` (rolled-up tristate `ready | degraded { reasons[] } | failed { reasons[] }`) and `data.subsystems[]` (per-subsystem `name | state.kind | state.reason | last_observed_at_ms`).
+- Subsystems: `brain_mcp`, `ist_writer`, `ist_reader`, `dashboard`, `embedder`, `watcher`. Failed dominates Degraded; Degraded dominates Ready. Empty registry collapses conservatively to Ready.
+- Reasons are subsystem-prefixed (`embedder: model_load_failed`, `dashboard: sql_econnrefused`) so an LLM client can act on the right component without prose parsing.
+- Legacy `data.truth_status` and `data.availability.degraded_notes[]` preserved as aliases.
+- start.sh prints `Axon is Ready` when overall readiness is `ready`; `⚠️ Axon started DEGRADED: ...` or `⚠️ Axon FAILED to reach a ready state: ...` otherwise. The legacy unconditional `Axon is rising` message is kept as a fallback only when the readiness probe itself fails.
+- This contract is the prerequisite for REQ-AXO-097 (watchdog) and REQ-AXO-094 BEAM alarm classification — both project per-subsystem state changes onto this registry rather than introducing parallel signals.
+
 Internal-only tools:
 - are transport or implementation primitives
 - are not hidden product value surfaces

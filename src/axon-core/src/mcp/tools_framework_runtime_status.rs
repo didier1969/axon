@@ -870,6 +870,15 @@ impl McpServer {
             },
             "llm_instruction": "Use `next_best_action` first; treat degraded freshness as partial truth until status(mode=\"full\") explains the blocker."
         });
+        // REQ-AXO-098 / DEC-AXO-062 — snapshot subsystem-tagged
+        // tristate readiness once and pass both the rolled-up overall
+        // and the per-subsystem reports through to the response.
+        let (readiness_snapshot, subsystem_reports) =
+            crate::runtime_readiness::snapshot_runtime_readiness();
+        let readiness_json = serde_json::to_value(&readiness_snapshot)
+            .unwrap_or_else(|_| serde_json::json!({"kind": "ready"}));
+        let subsystems_json = serde_json::to_value(&subsystem_reports)
+            .unwrap_or_else(|_| serde_json::json!([]));
         let mut response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -891,6 +900,16 @@ impl McpServer {
                     "advanced_indexed_surfaces_visible": indexed_projection_fresh,
                     "degraded_notes": degraded_notes
                 },
+                // REQ-AXO-098 / DEC-AXO-062 — subsystem-tagged tristate
+                // readiness. `subsystems[]` carries one entry per
+                // subsystem that has reported state since boot;
+                // `readiness` is the rolled-up overall (Failed
+                // dominates Degraded; Degraded dominates Ready).
+                // Empty subsystems[] (cold registry) collapses to
+                // `readiness.kind=ready` per the conservative-no-signal
+                // rule documented in CPT-AXO-023.
+                "readiness": readiness_json,
+                "subsystems": subsystems_json,
                 "canonical_sources": Self::canonical_sources_snapshot(),
                 "instance_identity": {
                     "instance_kind": instance_kind,

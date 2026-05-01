@@ -1001,7 +1001,48 @@ fi
 
 # 6. Final Report
 echo ""
-echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
+
+# REQ-AXO-098 / DEC-AXO-062 — read the subsystem-tagged tristate
+# readiness from the brain and gate the rising-message wording on the
+# rolled-up overall. Brain-only paths read it directly; indexer paths
+# skip (the indexer does not bind a public MCP and has no readiness
+# surface to query). Best-effort: a failure to read readiness is
+# logged via axon_log_warn and falls back to the legacy "rising"
+# message so a transient probe failure does not block the script.
+readiness_kind="unknown"
+if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
+    readiness_payload=$(
+        AXON_MCP_URL="$AXON_MCP_URL" python3 \
+            "$PROJECT_ROOT/scripts/mcp_call.py" call status \
+            --args '{"mode":"brief"}' --format data --timeout 5 2>/dev/null || true
+    )
+    if [[ -n "$readiness_payload" ]]; then
+        readiness_kind=$(
+            python3 - "$readiness_payload" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+    print((payload.get("readiness") or {}).get("kind", "unknown"))
+except Exception:
+    print("unknown")
+PY
+        )
+    fi
+fi
+case "$readiness_kind" in
+    ready)
+        echo "🛡️ Axon is Ready in TMUX session '$TMUX_SESSION'."
+        ;;
+    degraded)
+        axon_log_warn "Axon started DEGRADED; check 'mcp__axon__status data.readiness.reasons' for the failing subsystem(s) (TMUX session '$TMUX_SESSION')."
+        ;;
+    failed)
+        axon_log_warn "Axon FAILED to reach a ready state; check 'mcp__axon__status data.readiness.reasons' for the failing subsystem(s) (TMUX session '$TMUX_SESSION')."
+        ;;
+    *)
+        echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
+        ;;
+esac
 echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
 if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
     echo "Telemetry socket: $AXON_TELEMETRY_SOCK"
