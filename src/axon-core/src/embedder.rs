@@ -73,7 +73,7 @@ mod vector_finalize;
 mod vector_orchestrator;
 
 #[cfg(test)]
-use batch_lanes::reset_token_lane_classifier_for_tests;
+pub(crate) use batch_lanes::reset_token_lane_classifier_for_tests;
 #[cfg(test)]
 pub(crate) use batch_lanes::TokenLaneThresholdSource;
 pub(crate) use batch_lanes::{
@@ -110,6 +110,8 @@ pub(crate) use gpu_telemetry::{
     gpu_telemetry_device_index, nvml_library_path, parse_nvidia_smi_memory_csv,
     parse_nvidia_smi_utilization_csv,
 };
+#[cfg(test)]
+pub(crate) use gpu_telemetry::clear_gpu_memory_snapshot_cache_for_tests;
 pub use provider_contract::{
     ProductionLane, ProviderResolution, ProviderStrategy, ProviderSupportRole,
 };

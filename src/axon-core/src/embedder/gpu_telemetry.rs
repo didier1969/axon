@@ -36,6 +36,19 @@ fn gpu_memory_snapshot_cache_slot() -> &'static Mutex<Option<CachedGpuMemorySnap
     GPU_MEMORY_SNAPSHOT_CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// REQ-AXO-099 Phase 2 — clear the TTL-cached snapshot so the next
+/// `current_gpu_memory_snapshot()` call re-evaluates the backend
+/// from current env state. Without this, a test that runs after
+/// any test that populated the cache reads the stale snapshot for
+/// up to `gpu_telemetry_cache_ttl_ms` (default 2000ms), regardless
+/// of the test's own env-var setup.
+#[cfg(test)]
+pub(crate) fn clear_gpu_memory_snapshot_cache_for_tests() {
+    let cache = gpu_memory_snapshot_cache_slot();
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    *guard = None;
+}
+
 fn gpu_telemetry_backend() -> GpuTelemetryBackend {
     match std::env::var("AXON_GPU_TELEMETRY_BACKEND")
         .ok()
