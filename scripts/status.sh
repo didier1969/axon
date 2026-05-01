@@ -86,9 +86,17 @@ proc = data.get("process", {})
 pid = proc.get("pid")
 alive = proc.get("alive", False)
 match = proc.get("cmdline_matches", False)
+# REQ-AXO-097 — when the role process is dead, print FAIL not OK so an
+# operator scanning the output (or an LLM parsing it) cannot misread the
+# `OK process pid=X dead` line as healthy. cmdline mismatch is a soft
+# warning (process alive but probably not ours) — surface as WARN.
 if pid is not None:
-    state = "running" if alive and match else ("alive (mismatch)" if alive else "dead")
-    print(f"OK      process pid={pid} {state}")
+    if alive and match:
+        print(f"OK      process pid={pid} running")
+    elif alive:
+        print(f"WARN    process pid={pid} alive (cmdline mismatch — probably reused pid)")
+    else:
+        print(f"FAIL    process pid={pid} dead (stale pid file points to a process that is not running)")
 else:
     print("FAIL    process: no pid file")
 
