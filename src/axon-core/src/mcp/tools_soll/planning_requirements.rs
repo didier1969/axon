@@ -2,11 +2,19 @@ use super::*;
 
 impl McpServer {
     pub(crate) fn axon_soll_verify_requirements(&self, args: &Value) -> Option<Value> {
-        let project_code = args
+        let project_code_input = args
             .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-        let project_code = self.resolve_project_code(project_code).ok()?;
+        // REQ-AXO-043 — wrong_project_scope contract via shared helper.
+        // Previously `.ok()?` swallowed resolve_project_code errors and the
+        // framework rendered a generic "Invalid arguments".
+        let project_code = match self.resolve_project_code(project_code_input) {
+            Ok(code) => code,
+            Err(_) => {
+                return Some(self.wrong_project_scope_response(project_code_input, "soll_verify_requirements"));
+            }
+        };
         let summary = self.requirement_coverage_summary(&project_code).ok()?;
         let snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok()?;
         let details = summary

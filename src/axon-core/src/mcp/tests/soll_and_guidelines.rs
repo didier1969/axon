@@ -694,6 +694,73 @@ fn test_wrong_project_scope_response_helper_emits_canonical_contract() {
 }
 
 #[test]
+fn test_axon_soll_verify_requirements_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — soll_verify_requirements adopts the shared helper.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "MISSING_VR_001" }
+            })),
+            id: Some(json!(43106)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["status"].as_str(),
+        Some("wrong_project_scope")
+    );
+    assert_eq!(
+        result["data"]["rejected_project_code"].as_str(),
+        Some("MISSING_VR_001")
+    );
+}
+
+#[test]
+fn test_axon_infer_soll_mutation_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — infer_soll_mutation adopts the shared helper.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "infer_soll_mutation",
+                "arguments": {
+                    "project_code": "MISSING_INF_002",
+                    "statement": "stub"
+                }
+            })),
+            id: Some(json!(43107)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["status"].as_str(),
+        Some("wrong_project_scope")
+    );
+    assert_eq!(
+        result["data"]["rejected_project_code"].as_str(),
+        Some("MISSING_INF_002")
+    );
+}
+
+#[test]
 fn test_axon_validate_soll_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — soll_validate now uses the shared
     // wrong_project_scope_response helper.

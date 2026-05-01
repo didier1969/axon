@@ -247,6 +247,10 @@ impl McpServer {
     pub(crate) fn axon_infer_soll_mutation(&self, args: &Value) -> Option<Value> {
         let project_code = args.get("project_code").and_then(|value| value.as_str())?;
         let statement = args.get("statement").and_then(|value| value.as_str())?;
+        // REQ-AXO-043 — wrong_project_scope contract via shared helper.
+        if self.resolve_project_code(project_code).is_err() {
+            return Some(self.wrong_project_scope_response(project_code, "infer_soll_mutation"));
+        }
         match self.infer_soll_mutation_internal(project_code, statement) {
             Ok(inference) => Some(json!({
                 "content": [{
