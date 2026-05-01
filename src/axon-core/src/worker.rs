@@ -625,6 +625,11 @@ mod tests {
         };
 
         let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let _ = graph.sync_project_registry_entry(
+            "TMP",
+            Some("TempFixture"),
+            Some(temp.path().to_str().unwrap()),
+        );
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
@@ -676,6 +681,11 @@ mod tests {
         };
 
         let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let _ = graph.sync_project_registry_entry(
+            "TMP",
+            Some("TempFixture"),
+            Some(temp.path().to_str().unwrap()),
+        );
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 

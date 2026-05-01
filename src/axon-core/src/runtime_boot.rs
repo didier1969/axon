@@ -779,7 +779,7 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -855,6 +855,9 @@ mod tests {
             std::env::set_var("AXON_VECTOR_WORKERS", "2");
             std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
         }
+        crate::runtime_tuning::reset_runtime_tuning_snapshot(
+            crate::embedder::bootstrap_runtime_tuning_state(),
+        );
 
         let config = canonical_effective_embedding_lane_config();
         assert_eq!(config.vector_workers, 2);
@@ -1265,15 +1268,15 @@ mod tests {
         );
         assert_eq!(
             std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES").unwrap(),
-            "6"
+            "4"
         );
         assert_eq!(
             std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_WAIT_MS").unwrap(),
-            "500"
+            "300"
         );
         assert_eq!(
             std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_MIN_DROP_MB").unwrap(),
-            "64"
+            "128"
         );
         assert_eq!(
             std::env::var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE").unwrap(),

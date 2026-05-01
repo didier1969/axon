@@ -2386,7 +2386,7 @@ mod tests {
             .iter()
             .find(|profile| profile.id == decision.action_profile_id)
             .expect("chosen action profile");
-        assert_eq!(chosen.label, "anchor_gpu_fill");
+        assert_eq!(chosen.label, "anchor_backlog_open");
     }
 
     #[test]

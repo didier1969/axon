@@ -1118,7 +1118,7 @@ mod tests {
 
     #[test]
     fn in_memory_store_reads_route_to_writer_without_reader_refresh() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
         store.execute("CREATE TABLE Demo (value INTEGER)").unwrap();
         store
             .execute("INSERT INTO Demo (value) VALUES (1)")

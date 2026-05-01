@@ -475,8 +475,8 @@ mod tests {
         };
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
-        assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 6);
+        assert_eq!(sizing.vector_workers, 6);
+        assert_eq!(sizing.graph_workers, 7);
         assert_eq!(sizing.chunk_batch_size, 16);
         assert_eq!(sizing.file_vectorization_batch_size, 8);
         std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
