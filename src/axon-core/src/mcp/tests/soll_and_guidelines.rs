@@ -3869,6 +3869,67 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
     );
 }
 
+// REQ-AXO-043 / REQ-AXO-125 — the link path sanitizes raw DuckDB writer
+// errors out of the LLM-visible `content.text` while preserving non-SQL
+// errors verbatim and keeping the existing flat `data.relation_guidance`
+// shape that callers depend on. The DEC→DEC pair is the cleanest way to
+// trigger a cardinality conflict (allow_multiple_types=false with
+// `allowed=["SUPERSEDES","REFINES"]`); that conflict is NOT a writer
+// error so its readable text must pass through, and `data` must keep
+// `pair_allowed`/`source_kind`/`canonical_examples`.
+#[test]
+fn test_axon_soll_manager_link_cardinality_conflict_preserves_text_and_data_shape() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'accepted', '{\"context\":\"c\",\"rationale\":\"r\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'D2', '', 'accepted', '{\"context\":\"c\",\"rationale\":\"r\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES ('DEC-AXO-001', 'DEC-AXO-002', 'SUPERSEDES', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "DEC-AXO-002",
+                    "relation_type": "REFINES"
+                }
+            }
+        })),
+        id: Some(json!(43001)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap();
+
+    // Non-SQL error text passes through with the readable cardinality message.
+    assert!(content.contains("Cardinality conflict"), "{content}");
+    // No raw SQL must leak even on the readable-error path.
+    assert!(
+        !content.contains("INSERT INTO") && !content.contains("Writer Error"),
+        "LLM-visible content must NOT contain raw SQL: {content}"
+    );
+    // Existing relation_guidance shape preserved (flat fields under data).
+    let data = response.get("data").expect("relation_guidance must be attached");
+    assert_eq!(data["source_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["target_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["pair_allowed"].as_bool(), Some(true));
+    assert!(data["allowed_relations"].as_array().is_some());
+    assert!(data["canonical_examples"].as_array().is_some());
+}
+
 // REQ-AXO-115 — Concept→Pillar BELONGS_TO is the canonical edge for a
 // Concept that formalizes a Pillar-level operational protocol
 // (e.g. CPT-AXO-019 → PIL-AXO-003). Before this, the pair was forbidden

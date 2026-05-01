@@ -344,6 +344,7 @@ For `soll_work_plan`:
 Before retrying a bad link:
 - use `soll_relation_schema`
 - canonical pair `CPT -BELONGS_TO-> PIL` exists for Concepts that formalize Pillar-level operational protocols (e.g. `CPT-AXO-019 -> PIL-AXO-003`); use it instead of routing the dependency through a Requirement (REQ-AXO-115)
+- when a link request fails, `content.text` is sanitized: human-readable cardinality / policy errors pass through verbatim, but DuckDB writer errors are replaced with a recovery hint (REQ-AXO-043 / REQ-AXO-125). `data` keeps the flat `relation_guidance` shape (`pair_allowed`, `allowed_relations`, `canonical_examples`).
 
 CLI bridge:
 - use `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` for large JSON payloads

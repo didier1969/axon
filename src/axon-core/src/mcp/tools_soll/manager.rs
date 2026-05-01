@@ -65,6 +65,22 @@ impl McpServer {
         })
     }
 
+    /// REQ-AXO-043 / REQ-AXO-125 — strip SQL leakage from link errors
+    /// while preserving the existing flat `data.relation_guidance` shape
+    /// that MCP callers depend on. The `link` path historically returned
+    /// `format!("Link error: {}", e)` which exposed DuckDB writer error
+    /// text including raw INSERT statements. Here we detect the writer
+    /// pattern and substitute a classified message; non-SQL errors (e.g.
+    /// `Cardinality conflict`, `Relation X not found in canonical
+    /// policy`) keep their human-readable form.
+    pub(super) fn sanitized_link_error_text(e: &anyhow::Error) -> String {
+        let raw = format!("{}", e);
+        if raw.contains("Writer Error") || raw.contains("INSERT INTO") {
+            return "Link error: duckdb writer rejected the edge insert. Verify both endpoints exist via `cypher SELECT id FROM soll.main.Node WHERE id IN ('<src>','<tgt>')` and that the relation_type is allowed for the pair via `soll_relation_schema`.".to_string();
+        }
+        format!("Link error: {}", raw)
+    }
+
     fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
         if error_text.contains("Explicit relation required") {
             "needs_relation_hint"
@@ -541,14 +557,14 @@ impl McpServer {
                                 Some(payload)
                             }
                             Err(e) => Some(json!({
-                                "content": [{ "type": "text", "text": format!("Link error: {}", e) }],
+                                "content": [{ "type": "text", "text": Self::sanitized_link_error_text(&e) }],
                                 "isError": true,
                                 "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
                             })),
                         }
                     }
                     Err(e) => Some(json!({
-                        "content": [{ "type": "text", "text": format!("Link error: {}", e) }],
+                        "content": [{ "type": "text", "text": Self::sanitized_link_error_text(&e) }],
                         "isError": true,
                         "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
                     })),
