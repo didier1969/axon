@@ -3085,6 +3085,11 @@ mod tests {
 
     static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
     static FLUSH_METRICS_GUARD: Mutex<()> = Mutex::new(());
+    /// REQ-AXO-099 Phase 2 — serializes the watcher_probe-touching
+    /// tests in this module. The probe is a process-global VecDeque;
+    /// without serialization, one test's `clear()` wipes another
+    /// test's recorded events between record and assertion.
+    static WATCHER_PROBE_GUARD: Mutex<()> = Mutex::new(());
 
     fn test_file_ingress_guard() -> Arc<Mutex<FileIngressGuard>> {
         Arc::new(Mutex::new(FileIngressGuard::default()))
@@ -3775,6 +3780,7 @@ mod tests {
     #[test]
     fn test_bootstrap_storm_still_salvages_active_project_delta() {
         let _flush_guard = FLUSH_METRICS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         let temp = tempdir().unwrap();
@@ -3887,6 +3893,7 @@ mod tests {
 
     #[test]
     fn test_handle_watcher_events_records_staged_none_reason_for_ineligible_delta() {
+        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         let temp = tempdir().unwrap();
@@ -3931,6 +3938,7 @@ mod tests {
 
     #[test]
     fn test_handle_watcher_events_records_rescan_request() {
+        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         let temp = tempdir().unwrap();
@@ -3986,6 +3994,7 @@ mod tests {
 
     #[test]
     fn test_handle_watcher_events_records_rescan_skipped_when_guard_active() {
+        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         let temp = tempdir().unwrap();
@@ -4028,6 +4037,7 @@ mod tests {
 
     #[test]
     fn test_handle_watcher_events_records_watcher_errors() {
+        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         handle_watcher_events(
