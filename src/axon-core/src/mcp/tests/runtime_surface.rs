@@ -1122,6 +1122,73 @@ fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
 }
 
 #[test]
+fn test_status_brief_omits_public_tools_list_in_text() {
+    // REQ-AXO-104 — status mode=brief (the default) must NOT inline the
+    // 60-name public_tools list in the human-readable text. The list
+    // does not change within a session and is also exposed in
+    // `data.public_tools`, so spending ~700 chars per status call on
+    // it wastes the LLM context. mode=verbose keeps the list inline.
+    let server = create_test_server();
+    let brief = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(104001)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let brief_content = brief["content"][0]["text"].as_str().unwrap();
+    // The brief surface must summarize tool count, not enumerate every
+    // tool name. The presence of "soll_manager, infer_soll_mutation"
+    // (a stable adjacent pair from the catalog) is a good signal that
+    // the list was inlined; a brief response should not contain it.
+    assert!(
+        !brief_content.contains("soll_manager, infer_soll_mutation"),
+        "brief mode must not inline the full public_tools list; got: {brief_content}"
+    );
+    assert!(
+        brief_content.contains("Public tools count:")
+            || brief_content.contains("public_tools count")
+            || brief_content.contains("count:"),
+        "brief mode must show a tool count summary or pointer; got: {brief_content}"
+    );
+    // data.public_tools must remain always-on for machine consumers.
+    let data_tools = brief["data"]["public_tools"]
+        .as_array()
+        .expect("data.public_tools must be present even in brief mode");
+    assert!(
+        data_tools.len() >= 30,
+        "data.public_tools should still enumerate the catalog; got {} entries",
+        data_tools.len()
+    );
+
+    let verbose = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "verbose" }
+            })),
+            id: Some(json!(104002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let verbose_content = verbose["content"][0]["text"].as_str().unwrap();
+    // Verbose must include the inline list.
+    assert!(
+        verbose_content.contains("**Public tools:**"),
+        "verbose mode must inline Public tools header; got: {verbose_content}"
+    );
+}
+
+#[test]
 fn test_auto_resolve_project_code_str_helper() {
     // REQ-AXO-089 (helper coverage) — auto_resolve_project_code_str is
     // the canonical helper used by retrieve_context, query, and

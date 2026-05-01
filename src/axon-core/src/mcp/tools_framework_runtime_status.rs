@@ -445,7 +445,15 @@ impl McpServer {
                 "when": "now"
             })
         };
-        let evidence = format!(
+        // REQ-AXO-104 — the public_tools list is ~60 names and ~700
+        // chars; in brief mode (the default) the LLM client gets a
+        // repetitive payload on every status call that does not change
+        // within a session and is also exposed in `data.public_tools`.
+        // Only include the human-readable line in verbose mode; brief
+        // mode points the caller to data.public_tools instead. The
+        // data field stays always-on so machine consumers are
+        // unaffected.
+        let mut evidence = format!(
             "**Runtime mode:** `{}`\n\
 **Runtime profile:** `{}`\n\
 **Instance kind:** `{}`\n\
@@ -453,8 +461,7 @@ impl McpServer {
 **Advanced indexed surfaces visible:** {}\n\
 **Vector backlog:** queued={} inflight={}\n\
 **Utility-first scheduler:** `{}` ({})\n\
-**Drain state:** `{}`\n\
-**Public tools:** {}\n",
+**Drain state:** `{}`\n",
             runtime_mode.as_str(),
             runtime_profile.as_str(),
             std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
@@ -469,8 +476,18 @@ impl McpServer {
             utility_scheduler.state.as_str(),
             utility_scheduler.reason,
             drain_state,
-            public_tool_names.join(", ")
         );
+        if matches!(mode, Some("verbose") | Some("VERBOSE")) {
+            evidence.push_str(&format!(
+                "**Public tools:** {}\n",
+                public_tool_names.join(", ")
+            ));
+        } else {
+            evidence.push_str(&format!(
+                "**Public tools count:** {} (full list available via `status mode=verbose` or in `data.public_tools`)\n",
+                public_tool_names.len()
+            ));
+        }
         let report = format!(
             "## 📌 Axon Status\n\n{}",
             format_standard_contract(
