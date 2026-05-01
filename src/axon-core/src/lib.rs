@@ -37,6 +37,7 @@ pub mod runtime_readiness;
 pub mod runtime_topology;
 pub mod runtime_truth_contract;
 pub mod runtime_tuning;
+pub mod runtime_watchdog;
 pub mod runtime_writer_guard;
 pub mod scanner;
 pub mod service_guard;

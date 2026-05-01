@@ -146,12 +146,26 @@ impl RuntimeReadiness {
 struct ReporterSlot {
     state: SubsystemState,
     last_observed_at_ms: u64,
+    /// Optional heartbeat cadence in milliseconds. When set, the
+    /// watchdog will flip the subsystem to Failed if no report has
+    /// been observed within `period_ms * staleness_multiplier` ms.
+    /// `None` means the watchdog never flips this subsystem on
+    /// staleness alone (its state is driven solely by explicit
+    /// reports from its code path).
+    heartbeat_period_ms: Option<u64>,
 }
 
 fn registry() -> &'static Mutex<HashMap<&'static str, ReporterSlot>> {
     static REGISTRY: OnceLock<Mutex<HashMap<&'static str, ReporterSlot>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// REQ-AXO-097 — staleness multiplier. A subsystem opted into
+/// heartbeating is flipped Failed only after `multiplier` consecutive
+/// missed heartbeats, so a single late tick (network jitter, GC pause)
+/// does not trip the watchdog. 3 is conservative: at a 5s cadence,
+/// the watchdog flips after 15s of silence.
+pub const HEARTBEAT_STALENESS_MULTIPLIER: u64 = 3;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -163,16 +177,79 @@ fn now_ms() -> u64 {
 /// Report a subsystem's current state. Replaces any prior state for
 /// that subsystem and bumps `last_observed_at_ms`. Calling repeatedly
 /// with the same state is allowed and acts as a heartbeat (the
-/// timestamp updates).
+/// timestamp updates). Preserves any previously-set
+/// `heartbeat_period_ms` so opting into watchdog supervision is a
+/// one-time call.
 pub fn report_subsystem_state(subsystem: Subsystem, state: SubsystemState) {
     let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let preserved_period = guard
+        .get(subsystem.as_str())
+        .and_then(|slot| slot.heartbeat_period_ms);
     guard.insert(
         subsystem.as_str(),
         ReporterSlot {
             state,
             last_observed_at_ms: now_ms(),
+            heartbeat_period_ms: preserved_period,
         },
     );
+}
+
+/// REQ-AXO-097 — opt the subsystem into watchdog staleness
+/// supervision. After this call, `tick_watchdog` will flip the
+/// subsystem to Failed if no report is observed within
+/// `period_ms * HEARTBEAT_STALENESS_MULTIPLIER` ms. Calling this
+/// without a prior `report_subsystem_state` materializes a Ready
+/// slot so the very first heartbeat tick is the one that resets the
+/// staleness clock. Repeating the call updates the period.
+pub fn require_heartbeat(subsystem: Subsystem, period_ms: u64) {
+    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let slot = guard
+        .entry(subsystem.as_str())
+        .or_insert_with(|| ReporterSlot {
+            state: SubsystemState::Ready,
+            last_observed_at_ms: now_ms(),
+            heartbeat_period_ms: None,
+        });
+    slot.heartbeat_period_ms = Some(period_ms);
+}
+
+/// REQ-AXO-097 — single watchdog tick. Scans the registry; for any
+/// subsystem opted into heartbeating whose state is currently Ready
+/// or Degraded and whose `last_observed_at_ms` is older than
+/// `period_ms * HEARTBEAT_STALENESS_MULTIPLIER` relative to `now_ms`,
+/// flips it to `Failed { reason: "no_telemetry_window_exceeded (Xs)" }`.
+/// Returns the list of `(subsystem_name, new_state)` transitions so
+/// the caller can log them. Subsystems already in Failed state are
+/// not re-flipped (idempotent).
+pub fn tick_watchdog(now_ms: u64) -> Vec<(String, SubsystemState)> {
+    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut transitions = Vec::new();
+    for (name, slot) in guard.iter_mut() {
+        let Some(period_ms) = slot.heartbeat_period_ms else {
+            continue;
+        };
+        if matches!(slot.state, SubsystemState::Failed { .. }) {
+            continue;
+        }
+        let threshold_ms = period_ms.saturating_mul(HEARTBEAT_STALENESS_MULTIPLIER);
+        let elapsed_ms = now_ms.saturating_sub(slot.last_observed_at_ms);
+        if elapsed_ms > threshold_ms {
+            let reason = format!(
+                "no_telemetry_window_exceeded ({}s since last heartbeat, threshold {}s)",
+                elapsed_ms / 1000,
+                threshold_ms / 1000
+            );
+            slot.state = SubsystemState::Failed {
+                reason: reason.clone(),
+            };
+            transitions.push((
+                (*name).to_string(),
+                SubsystemState::Failed { reason },
+            ));
+        }
+    }
+    transitions
 }
 
 /// Snapshot the registry as a sorted Vec<SubsystemReport>. Sort order
@@ -198,6 +275,26 @@ pub fn snapshot_subsystem_reports() -> Vec<SubsystemReport> {
             })
         })
         .collect()
+}
+
+/// Test-only inspection — returns the heartbeat cadence for a
+/// subsystem if it has been opted in, else `None`.
+#[cfg(test)]
+pub(crate) fn heartbeat_period_for_tests(subsystem: Subsystem) -> Option<u64> {
+    let guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    guard
+        .get(subsystem.as_str())
+        .and_then(|slot| slot.heartbeat_period_ms)
+}
+
+/// Test-only override — sets `last_observed_at_ms` for a subsystem.
+/// Used by watchdog tests to simulate staleness without a real wait.
+#[cfg(test)]
+pub(crate) fn set_last_observed_for_tests(subsystem: Subsystem, last_observed_at_ms: u64) {
+    let mut guard = registry().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(slot) = guard.get_mut(subsystem.as_str()) {
+        slot.last_observed_at_ms = last_observed_at_ms;
+    }
 }
 
 /// Convenience that snapshots the registry and rolls up overall

@@ -9,8 +9,10 @@
 use std::sync::{Mutex, OnceLock};
 
 use super::{
-    report_subsystem_state, reset_for_tests, snapshot_runtime_readiness,
-    snapshot_subsystem_reports, RuntimeReadiness, Subsystem, SubsystemReport, SubsystemState,
+    heartbeat_period_for_tests, report_subsystem_state, require_heartbeat, reset_for_tests,
+    set_last_observed_for_tests, snapshot_runtime_readiness, snapshot_subsystem_reports,
+    tick_watchdog, RuntimeReadiness, Subsystem, SubsystemReport, SubsystemState,
+    HEARTBEAT_STALENESS_MULTIPLIER,
 };
 
 fn registry_test_lock() -> &'static Mutex<()> {
@@ -189,4 +191,165 @@ fn snapshot_runtime_readiness_combines_snapshot_and_roll_up_atomically() {
     let (readiness, reports) = snapshot_runtime_readiness();
     assert_eq!(reports.len(), 2);
     assert!(matches!(readiness, RuntimeReadiness::Degraded { .. }));
+}
+
+// REQ-AXO-097 — watchdog primitive. The staleness flipper opts-in
+// per-subsystem; subsystems without a heartbeat requirement are never
+// touched by the watchdog (their state is owned solely by the code
+// path that reports them).
+
+#[test]
+fn watchdog_does_not_flip_subsystem_without_heartbeat_requirement() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    // Reported Ready ages ago, but no heartbeat opt-in — must stay Ready.
+    report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
+    set_last_observed_for_tests(Subsystem::BrainMcp, 0);
+
+    let transitions = tick_watchdog(10_000_000);
+    assert!(
+        transitions.is_empty(),
+        "subsystem without heartbeat requirement must not be flipped, got {transitions:?}"
+    );
+    let reports = snapshot_subsystem_reports();
+    let brain = reports.iter().find(|r| r.subsystem == "brain_mcp").unwrap();
+    assert!(matches!(brain.state, SubsystemState::Ready));
+}
+
+#[test]
+fn watchdog_flips_stale_subsystem_to_failed_after_threshold() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    let period_ms: u64 = 5_000;
+    require_heartbeat(Subsystem::BrainMcp, period_ms);
+    report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
+
+    // Fresh timestamp — must NOT flip even though heartbeat is required.
+    let now = 1_000_000_000;
+    set_last_observed_for_tests(Subsystem::BrainMcp, now);
+    let transitions = tick_watchdog(now + period_ms);
+    assert!(
+        transitions.is_empty(),
+        "fresh heartbeat (within period) must not flip, got {transitions:?}"
+    );
+
+    // Just below threshold — must NOT flip.
+    let threshold_ms = period_ms * HEARTBEAT_STALENESS_MULTIPLIER;
+    let transitions = tick_watchdog(now + threshold_ms);
+    assert!(
+        transitions.is_empty(),
+        "exactly at threshold must not flip yet, got {transitions:?}"
+    );
+
+    // Past threshold — must flip to Failed with the
+    // no_telemetry_window_exceeded reason.
+    let transitions = tick_watchdog(now + threshold_ms + 1);
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(transitions[0].0, "brain_mcp");
+    match &transitions[0].1 {
+        SubsystemState::Failed { reason } => {
+            assert!(
+                reason.contains("no_telemetry_window_exceeded"),
+                "reason must name the failure mode, got: {reason}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+
+    // Snapshot reflects the flip.
+    let reports = snapshot_subsystem_reports();
+    let brain = reports.iter().find(|r| r.subsystem == "brain_mcp").unwrap();
+    assert!(matches!(brain.state, SubsystemState::Failed { .. }));
+}
+
+#[test]
+fn watchdog_is_idempotent_on_already_failed_subsystem() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    require_heartbeat(Subsystem::Embedder, 1_000);
+    report_subsystem_state(
+        Subsystem::Embedder,
+        SubsystemState::Failed {
+            reason: "model_load_failed".to_string(),
+        },
+    );
+    set_last_observed_for_tests(Subsystem::Embedder, 0);
+
+    let transitions = tick_watchdog(10_000_000);
+    assert!(
+        transitions.is_empty(),
+        "already-Failed subsystem must not be re-flipped (preserves original reason), got {transitions:?}"
+    );
+
+    // Original reason preserved.
+    let reports = snapshot_subsystem_reports();
+    let embedder = reports.iter().find(|r| r.subsystem == "embedder").unwrap();
+    match &embedder.state {
+        SubsystemState::Failed { reason } => {
+            assert_eq!(
+                reason, "model_load_failed",
+                "watchdog must not overwrite an existing Failed reason"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn watchdog_flips_degraded_subsystem_too_when_stale() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    let period_ms: u64 = 2_000;
+    require_heartbeat(Subsystem::Dashboard, period_ms);
+    report_subsystem_state(
+        Subsystem::Dashboard,
+        SubsystemState::Degraded {
+            reason: "sql_econnrefused".to_string(),
+        },
+    );
+    let now = 1_000_000_000;
+    set_last_observed_for_tests(Subsystem::Dashboard, now);
+    let threshold_ms = period_ms * HEARTBEAT_STALENESS_MULTIPLIER;
+
+    // Past threshold — Degraded is escalated to Failed (silent
+    // degraded subsystem is more serious than active degraded one).
+    let transitions = tick_watchdog(now + threshold_ms + 1);
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(transitions[0].0, "dashboard");
+}
+
+#[test]
+fn report_state_preserves_heartbeat_period_across_updates() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    require_heartbeat(Subsystem::IstReader, 4_242);
+    assert_eq!(
+        heartbeat_period_for_tests(Subsystem::IstReader),
+        Some(4_242)
+    );
+    // A subsequent state report must NOT clear the heartbeat
+    // requirement (otherwise opting in would be a one-shot signal).
+    report_subsystem_state(Subsystem::IstReader, SubsystemState::Ready);
+    assert_eq!(
+        heartbeat_period_for_tests(Subsystem::IstReader),
+        Some(4_242),
+        "heartbeat period must survive a state update"
+    );
+}
+
+#[test]
+fn require_heartbeat_materializes_ready_slot_when_no_prior_report() {
+    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    reset_for_tests();
+    require_heartbeat(Subsystem::Watcher, 1_000);
+    let reports = snapshot_subsystem_reports();
+    let watcher = reports.iter().find(|r| r.subsystem == "watcher").unwrap();
+    assert!(
+        matches!(watcher.state, SubsystemState::Ready),
+        "require_heartbeat without prior report must materialize a Ready slot"
+    );
+    assert_eq!(
+        heartbeat_period_for_tests(Subsystem::Watcher),
+        Some(1_000)
+    );
 }

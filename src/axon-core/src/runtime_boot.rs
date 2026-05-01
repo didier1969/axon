@@ -592,6 +592,13 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
                 crate::runtime_readiness::Subsystem::IstReader,
                 crate::runtime_readiness::SubsystemState::Ready,
             );
+            // REQ-AXO-097 — opt brain subsystems into watchdog
+            // staleness supervision and start their heartbeat
+            // tasks. A panic in the BrainMcp tokio runtime will
+            // freeze the heartbeater, the watchdog will observe
+            // the staleness, and `mcp__axon__status` will report
+            // Failed instead of HEALTHY.
+            crate::runtime_watchdog::wire_brain_role_heartbeats();
         }
         RuntimeBootRole::Indexer => {
             crate::runtime_readiness::report_subsystem_state(
@@ -602,8 +609,14 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
                 crate::runtime_readiness::Subsystem::Watcher,
                 crate::runtime_readiness::SubsystemState::Ready,
             );
+            crate::runtime_watchdog::wire_indexer_role_heartbeats();
         }
     }
+    // REQ-AXO-097 — spawn the watchdog tick task once both roles
+    // have wired their heartbeaters. Idempotent across re-init.
+    crate::runtime_watchdog::spawn_watchdog_task(
+        crate::runtime_watchdog::DEFAULT_TICK_INTERVAL_MS,
+    );
 
     let mut acquired_writer_guards = Vec::new();
     for target in profile.writer_targets() {
