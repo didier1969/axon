@@ -1282,6 +1282,72 @@ impl GraphStore {
         Ok(chunks)
     }
 
+    /// Batch-fetch unembedded chunks for multiple files in a single query.
+    /// Returns a map from file_path to chunks (id, content, content_hash).
+    /// Uses ROW_NUMBER window function to apply per-file limits server-side.
+    pub fn fetch_unembedded_chunks_batch(
+        &self,
+        file_paths: &[&str],
+        model_id: &str,
+        per_file_limit: usize,
+    ) -> Result<std::collections::HashMap<String, Vec<(String, String, String)>>> {
+        use std::collections::HashMap;
+
+        if file_paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let escaped_model = Self::escape_sql(model_id);
+        let in_list: String = file_paths
+            .iter()
+            .map(|p| format!("'{}'", Self::escape_sql(p)))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let query = format!(
+            "SELECT file_path, id, content, content_hash FROM ( \
+                 SELECT c.file_path, c.id, c.content, c.content_hash, \
+                        ROW_NUMBER() OVER (PARTITION BY c.file_path) AS rn \
+                 FROM Chunk c \
+                 WHERE c.file_path IN ({}) \
+                 AND NOT EXISTS ( \
+                     SELECT 1 \
+                     FROM ChunkEmbedding ce \
+                     WHERE ce.chunk_id = c.id \
+                       AND ce.model_id = '{}' \
+                       AND ce.source_hash = c.content_hash \
+                 ) \
+             ) sub WHERE rn <= {}",
+            in_list, escaped_model, per_file_limit
+        );
+
+        let res = self.query_json_writer(&query)?;
+
+        let mut result: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        if res == "[]" || res.is_empty() {
+            return Ok(result);
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        for row in raw {
+            if row.len() >= 4 {
+                if let (Some(fp), Some(id), Some(content), Some(hash)) = (
+                    row[0].as_str(),
+                    row[1].as_str(),
+                    row[2].as_str(),
+                    row[3].as_str(),
+                ) {
+                    result
+                        .entry(fp.to_string())
+                        .or_default()
+                        .push((id.to_string(), content.to_string(), hash.to_string()));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     pub fn fetch_segments_for_file(
         &self,
         file_path: &str,

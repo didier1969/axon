@@ -960,7 +960,7 @@ impl GraphStore {
     fn ensure_embedding_runtime_tables(&self) -> Result<()> {
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[{DIMENSION}], source_hash VARCHAR, embedded_at_ms BIGINT, PRIMARY KEY (chunk_id, model_id))"))?;
-        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, persist_started_at_ms BIGINT DEFAULT NULL)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[{DIMENSION}], updated_at BIGINT)"))?;
@@ -1045,6 +1045,9 @@ impl GraphStore {
         )?;
         self.execute(
             "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_epoch BIGINT DEFAULT 0",
+        )?;
+        self.execute(
+            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS persist_started_at_ms BIGINT DEFAULT NULL",
         )?;
 
         let columns = self.list_file_table_columns()?;

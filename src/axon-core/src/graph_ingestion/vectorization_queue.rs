@@ -180,6 +180,31 @@ impl GraphStore {
         Ok(affected)
     }
 
+    pub fn mark_file_vectorization_persist_started(
+        &self,
+        works: &[FileVectorizationWork],
+    ) -> Result<()> {
+        if works.is_empty() {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let predicates = works
+            .iter()
+            .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        self.execute(&format!(
+            "UPDATE FileVectorizationQueue \
+             SET persist_started_at_ms = {} \
+             WHERE status = 'inflight' \
+               AND lease_owner = 'vector' \
+               AND ({})",
+            now_ms, predicates
+        ))
+    }
+
     pub fn mark_file_vectorization_work_done(&self, work: &[FileVectorizationWork]) -> Result<()> {
         if work.is_empty() {
             return Ok(());
@@ -468,8 +493,9 @@ impl GraphStore {
                AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
                AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
                AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) IS NOT NULL \
-               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {}",
-            cutoff_ms
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {} \
+               AND (fq.persist_started_at_ms IS NULL OR fq.persist_started_at_ms <= {})",
+            cutoff_ms, cutoff_ms
         ))?)
         .unwrap_or(0);
 
@@ -498,10 +524,12 @@ impl GraphStore {
                      AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
                      AND COALESCE(fq.lease_heartbeat_at_ms, fq.claimed_at_ms) IS NOT NULL \
                      AND COALESCE(fq.lease_heartbeat_at_ms, fq.claimed_at_ms) <= {} \
+                     AND (fq.persist_started_at_ms IS NULL OR fq.persist_started_at_ms <= {}) \
                ) \
                AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) IS NOT NULL \
-               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {}",
-            cutoff_ms, cutoff_ms
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {} \
+               AND (persist_started_at_ms IS NULL OR persist_started_at_ms <= {})",
+            cutoff_ms, cutoff_ms, cutoff_ms, cutoff_ms
         ))?;
         service_guard::notify_vector_backlog_activity();
 

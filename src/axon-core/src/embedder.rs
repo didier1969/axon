@@ -156,7 +156,7 @@ const VECTOR_PERSIST_QUEUE_BOUND: usize = 4;
 const VECTOR_OUTBOX_FETCH_BATCH_SIZE: usize = 128;
 const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS: u64 = 30_000;
+const DEFAULT_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS: u64 = 120_000;
 const DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS: u64 = 10_000;
 const DEFAULT_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS: u64 = 250;
 const DEFAULT_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS: u64 = 50;
@@ -3093,6 +3093,12 @@ impl SemanticWorkerPool {
                                 }
                             }
                         }
+                        if let Err(err) = graph_store.mark_file_vectorization_persist_started(&touched_works) {
+                            warn!(
+                                "Semantic Vector Worker [{}]: failed to mark persist_started_at_ms: {:?}",
+                                worker_idx, err
+                            );
+                        }
                         match dispatch_vector_persist_plan(&persist_tx, persist_envelope) {
                             Ok(reply_rx) => {
                                 inflight_persists.push_back(InflightPersistRequest {
@@ -4303,118 +4309,128 @@ fn build_vector_batch_plan(
         return plan;
     }
 
-    let mut touched_files = HashSet::new();
-    let mut planned_chunks = 0usize;
-    let mut planned_bytes = 0usize;
     let per_file_fetch_limit = per_file_fetch_limit.max(1);
     let batch_max_bytes = batch_max_bytes.max(1);
 
-    for work in active_works {
-        let remaining_chunk_budget = target_chunks.saturating_sub(planned_chunks).max(1);
-        let fetch_limit = per_file_fetch_limit.min(remaining_chunk_budget);
-        let fetch_started = Instant::now();
-        match graph_store.fetch_unembedded_chunks_for_file(
-            &work.file_path,
-            CHUNK_MODEL_ID,
-            fetch_limit.saturating_add(1),
-        ) {
-            Ok(chunks) if chunks.is_empty() => {
-                let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-                service_guard::record_vector_stage_ms(
-                    service_guard::VectorStageKind::Fetch,
-                    fetch_ms,
-                );
-                plan.fetch_ms_total = plan.fetch_ms_total.saturating_add(fetch_ms);
-                plan.immediate_completed.push(work.clone());
-            }
-            Ok(chunks) => {
-                let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-                service_guard::record_vector_stage_ms(
-                    service_guard::VectorStageKind::Fetch,
-                    fetch_ms,
-                );
-                plan.fetch_ms_total = plan.fetch_ms_total.saturating_add(fetch_ms);
-                let filtered_chunks = chunks
-                    .into_iter()
-                    .filter(|(chunk_id, _, _)| !reserved_chunk_ids.contains(chunk_id))
-                    .collect::<Vec<_>>();
-                let mut batch_chunks = Vec::new();
-                let mut fetched_bytes = 0usize;
-                let mut has_more_after_batch = false;
-                let total_filtered_chunks = filtered_chunks.len();
-                for (index, chunk) in filtered_chunks.into_iter().enumerate() {
-                    let chunk_bytes = chunk.1.len();
-                    let exceeds_chunk_budget = batch_chunks.len() >= fetch_limit;
-                    let exceeds_byte_budget = !batch_chunks.is_empty()
-                        && planned_bytes
-                            .saturating_add(fetched_bytes)
-                            .saturating_add(chunk_bytes)
-                            > batch_max_bytes;
-                    if exceeds_chunk_budget || exceeds_byte_budget {
-                        has_more_after_batch = true;
-                        break;
-                    }
-                    fetched_bytes = fetched_bytes.saturating_add(chunk_bytes);
-                    batch_chunks.push(chunk);
-                    if index + 1 >= fetch_limit {
-                        has_more_after_batch = total_filtered_chunks > fetch_limit;
-                        break;
-                    }
-                }
-                let fetched_count = batch_chunks.len();
-                let exceeds_chunk_budget =
-                    planned_chunks.saturating_add(fetched_count) > target_chunks;
-                let exceeds_byte_budget =
-                    planned_bytes.saturating_add(fetched_bytes) > batch_max_bytes;
-                if batch_chunks.is_empty() {
-                    if total_filtered_chunks > 0 && fetch_limit <= 1 {
-                        plan.oversized_works.push(work.clone());
-                    } else {
-                        plan.untouched_works.push(work.clone());
-                    }
-                    continue;
-                }
-                if fetched_count == 1
-                    && fetched_bytes > batch_max_bytes
-                    && planned_chunks == 0
-                    && planned_bytes == 0
-                {
-                    plan.oversized_works.push(work.clone());
-                    continue;
-                }
-                if exceeds_chunk_budget || exceeds_byte_budget {
-                    plan.untouched_works.push(work.clone());
-                    continue;
-                }
-                touched_files.insert(work.file_path.clone());
-                plan.touched_works.push(work.clone());
-                for (chunk_id, text, content_hash) in batch_chunks {
-                    plan.work_items.push(VectorChunkWorkItem {
-                        file_path: work.file_path.clone(),
-                        chunk_id,
-                        content_hash,
-                        text,
-                    });
-                }
-                planned_chunks = planned_chunks.saturating_add(fetched_count);
-                planned_bytes = planned_bytes.saturating_add(fetched_bytes);
-                if has_more_after_batch {
-                    plan.partial_file_cycles = plan.partial_file_cycles.saturating_add(1);
-                    plan.continuation_works.push(work.clone());
-                } else {
-                    plan.finalize_after_success.push(work.clone());
-                }
-            }
-            Err(err) => {
-                let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-                service_guard::record_vector_stage_ms(
-                    service_guard::VectorStageKind::Fetch,
-                    fetch_ms,
-                );
-                plan.fetch_ms_total = plan.fetch_ms_total.saturating_add(fetch_ms);
+    // Batch-fetch all files in a single query (eliminates N+1 roundtrips).
+    let file_paths: Vec<&str> = active_works.iter().map(|w| w.file_path.as_str()).collect();
+    let fetch_started = Instant::now();
+    let fetched_map = match graph_store.fetch_unembedded_chunks_batch(
+        &file_paths,
+        CHUNK_MODEL_ID,
+        per_file_fetch_limit.saturating_add(1),
+    ) {
+        Ok(map) => {
+            let fetch_ms = fetch_started.elapsed().as_millis() as u64;
+            service_guard::record_vector_stage_ms(
+                service_guard::VectorStageKind::Fetch,
+                fetch_ms,
+            );
+            plan.fetch_ms_total = fetch_ms;
+            map
+        }
+        Err(err) => {
+            let fetch_ms = fetch_started.elapsed().as_millis() as u64;
+            service_guard::record_vector_stage_ms(
+                service_guard::VectorStageKind::Fetch,
+                fetch_ms,
+            );
+            plan.fetch_ms_total = fetch_ms;
+            for work in active_works {
                 plan.failed_fetches
                     .push((work.clone(), format!("{:?}", err)));
             }
+            return plan;
+        }
+    };
+
+    let mut touched_files = HashSet::new();
+    let mut planned_chunks = 0usize;
+    let mut planned_bytes = 0usize;
+
+    for work in active_works {
+        let chunks = fetched_map
+            .get(&work.file_path)
+            .cloned()
+            .unwrap_or_default();
+
+        if chunks.is_empty() {
+            plan.immediate_completed.push(work.clone());
+            continue;
+        }
+
+        let remaining_chunk_budget = target_chunks.saturating_sub(planned_chunks).max(1);
+        let fetch_limit = per_file_fetch_limit.min(remaining_chunk_budget);
+
+        let filtered_chunks = chunks
+            .into_iter()
+            .filter(|(chunk_id, _, _)| !reserved_chunk_ids.contains(chunk_id))
+            .collect::<Vec<_>>();
+        let mut batch_chunks = Vec::new();
+        let mut fetched_bytes = 0usize;
+        let mut has_more_after_batch = false;
+        let total_filtered_chunks = filtered_chunks.len();
+        for (index, chunk) in filtered_chunks.into_iter().enumerate() {
+            let chunk_bytes = chunk.1.len();
+            let exceeds_chunk_budget = batch_chunks.len() >= fetch_limit;
+            let exceeds_byte_budget = !batch_chunks.is_empty()
+                && planned_bytes
+                    .saturating_add(fetched_bytes)
+                    .saturating_add(chunk_bytes)
+                    > batch_max_bytes;
+            if exceeds_chunk_budget || exceeds_byte_budget {
+                has_more_after_batch = true;
+                break;
+            }
+            fetched_bytes = fetched_bytes.saturating_add(chunk_bytes);
+            batch_chunks.push(chunk);
+            if index + 1 >= fetch_limit {
+                has_more_after_batch = total_filtered_chunks > fetch_limit;
+                break;
+            }
+        }
+        let fetched_count = batch_chunks.len();
+        let exceeds_chunk_budget =
+            planned_chunks.saturating_add(fetched_count) > target_chunks;
+        let exceeds_byte_budget =
+            planned_bytes.saturating_add(fetched_bytes) > batch_max_bytes;
+        if batch_chunks.is_empty() {
+            if total_filtered_chunks > 0 && fetch_limit <= 1 {
+                plan.oversized_works.push(work.clone());
+            } else {
+                plan.untouched_works.push(work.clone());
+            }
+            continue;
+        }
+        if fetched_count == 1
+            && fetched_bytes > batch_max_bytes
+            && planned_chunks == 0
+            && planned_bytes == 0
+        {
+            plan.oversized_works.push(work.clone());
+            continue;
+        }
+        if exceeds_chunk_budget || exceeds_byte_budget {
+            plan.untouched_works.push(work.clone());
+            continue;
+        }
+        touched_files.insert(work.file_path.clone());
+        plan.touched_works.push(work.clone());
+        for (chunk_id, text, content_hash) in batch_chunks {
+            plan.work_items.push(VectorChunkWorkItem {
+                file_path: work.file_path.clone(),
+                chunk_id,
+                content_hash,
+                text,
+            });
+        }
+        planned_chunks = planned_chunks.saturating_add(fetched_count);
+        planned_bytes = planned_bytes.saturating_add(fetched_bytes);
+        if has_more_after_batch {
+            plan.partial_file_cycles = plan.partial_file_cycles.saturating_add(1);
+            plan.continuation_works.push(work.clone());
+        } else {
+            plan.finalize_after_success.push(work.clone());
         }
     }
 
@@ -5749,6 +5765,10 @@ mod tests {
 
     static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
 
+    fn lock_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn lane_test_prepared_batch(texts: &[&str]) -> PreparedVectorEmbedBatch {
         let mut prepared = PreparedVectorEmbedBatch {
             batch_id: "lane-test".to_string(),
@@ -5798,28 +5818,32 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_runs_when_system_is_healthy() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(8);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(100, ServicePressure::Healthy);
         assert!(!policy.pause);
         assert_eq!(policy.profile, "balanced_drain");
-        assert_eq!(policy.idle_sleep, Duration::from_millis(750));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(75));
     }
 
     #[test]
     fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(8);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(2_000, ServicePressure::Healthy);
         assert!(!policy.pause);
         assert_eq!(policy.profile, "aggressive_drain");
-        assert_eq!(policy.idle_sleep, Duration::from_millis(250));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(40));
     }
 
     #[test]
@@ -5891,7 +5915,7 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_pauses_when_live_service_is_critical() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         let policy = semantic_policy(100, ServicePressure::Critical);
@@ -5901,27 +5925,31 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_throttles_without_pausing_when_service_is_degraded() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(100, ServicePressure::Degraded);
         assert!(!policy.pause);
-        assert_eq!(policy.sleep, Duration::from_millis(350));
+        assert_eq!(policy.sleep, Duration::from_millis(50));
     }
 
     #[test]
     fn test_semantic_policy_stays_throttled_while_service_recovers() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(100, ServicePressure::Recovering);
         assert!(!policy.pause);
-        assert_eq!(policy.sleep, Duration::from_millis(350));
-        assert_eq!(policy.idle_sleep, Duration::from_millis(750));
+        assert_eq!(policy.sleep, Duration::from_millis(50));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(150));
     }
 
     #[test]
@@ -5938,7 +5966,7 @@ mod tests {
 
     #[test]
     fn test_effective_embedding_provider_is_gpu_detects_cuda_variants() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "cuda");
         }
@@ -5964,7 +5992,7 @@ mod tests {
 
     #[test]
     fn test_gpu_service_provider_effective_label_tracks_tensorrt_toggle() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
         }
@@ -6014,7 +6042,7 @@ mod tests {
 
     #[test]
     fn test_apply_cpu_fallback_ort_runtime_env_restores_cpu_threads_when_autoconfigured() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_ORT_OMP_AUTOCONFIGURED", "true");
             std::env::set_var("OMP_NUM_THREADS", "1");
@@ -6055,7 +6083,7 @@ mod tests {
 
     #[test]
     fn test_apply_cpu_fallback_ort_runtime_env_preserves_explicit_openmp_configuration() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_ORT_OMP_AUTOCONFIGURED");
             std::env::set_var("OMP_NUM_THREADS", "3");
@@ -6080,7 +6108,7 @@ mod tests {
 
     #[test]
     fn test_apply_cpu_fallback_ort_runtime_env_reports_advisory_lane_sizing_when_autoconfigured() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED", "true");
@@ -6136,7 +6164,7 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_pauses_while_interactive_priority_is_active() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::mcp_request_started();
@@ -6149,7 +6177,7 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_respects_runtime_tuning_scale_pct() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         unsafe {
@@ -6159,10 +6187,12 @@ mod tests {
         super::refresh_runtime_tuning_snapshot_from_env();
         crate::service_guard::record_vector_ready_queue_depth(8);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(100, ServicePressure::Healthy);
         assert_eq!(policy.profile, "balanced_drain");
-        assert_eq!(policy.sleep, Duration::from_millis(500));
-        assert_eq!(policy.idle_sleep, Duration::from_millis(1_500));
+        assert_eq!(policy.sleep, Duration::from_millis(50));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(150));
 
         unsafe {
             std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT");
@@ -6173,7 +6203,7 @@ mod tests {
 
     #[test]
     fn test_runtime_tuning_normalizes_queue_and_persist_bounds() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         super::apply_runtime_embedding_lane_adjustment(
             None,
             None,
@@ -6205,22 +6235,24 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_prefers_drain_mode_when_mcp_is_idle() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
         crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
         let policy = semantic_policy(2_000, ServicePressure::Recovering);
         assert!(
             !policy.pause,
             "idle MCP should allow semantic drain despite recovering pressure"
         );
-        assert_eq!(policy.idle_sleep, Duration::from_millis(250));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(40));
     }
 
     #[test]
     fn test_vector_feed_backpressure_control_keeps_balanced_drain_even_with_graph_backlog() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -6240,7 +6272,7 @@ mod tests {
     #[test]
     fn test_vector_feed_backpressure_control_prefers_refill_when_underfed_even_with_graph_backlog()
     {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(0);
@@ -6259,7 +6291,7 @@ mod tests {
 
     #[test]
     fn test_vector_feed_backpressure_control_uses_full_ready_reserve_target_for_underfeed() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -6278,7 +6310,7 @@ mod tests {
 
     #[test]
     fn test_vector_feed_backpressure_control_does_not_let_graph_backlog_override_ready_supply() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -6338,7 +6370,7 @@ mod tests {
 
     #[test]
     fn test_symbol_embedding_allowed_only_as_residual_background_work() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         unsafe {
             std::env::remove_var("AXON_VECTOR_ENABLE_SYMBOL_EMBEDDING");
@@ -6362,7 +6394,7 @@ mod tests {
 
     #[test]
     fn test_vector_worker_admission_throttles_gpu_background_under_pressure() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         assert!(vector_worker_admitted(
             0,
@@ -6382,7 +6414,7 @@ mod tests {
             true,
             AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD
         ));
-        assert!(!vector_worker_admitted(
+        assert!(vector_worker_admitted(
             1,
             ServicePressure::Healthy,
             true,
@@ -6392,7 +6424,7 @@ mod tests {
 
     #[test]
     fn test_gpu_secondary_worker_allowed_requires_free_vram_headroom() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_MULTIWORKER_MIN_FREE_MB", "768");
         }
@@ -6436,7 +6468,7 @@ mod tests {
 
     #[test]
     fn test_vector_worker_admission_pauses_gpu_background_when_interactive_priority_is_active() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         crate::service_guard::reset_for_tests();
         crate::service_guard::mcp_request_started();
         assert!(vector_worker_admitted(
@@ -6456,7 +6488,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_from_env_supports_split_worker_counts() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_QUERY_EMBED_WORKERS", "2");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
@@ -6494,7 +6526,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_caps_gpu_vector_workers_without_unsafe_opt_in() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
@@ -6514,7 +6546,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_caps_gpu_vector_workers_to_one_on_8gb_vram() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
@@ -6534,7 +6566,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_disables_graph_workers_with_canonical_flag() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "false");
             std::env::set_var("AXON_GRAPH_WORKERS", "5");
@@ -6552,7 +6584,7 @@ mod tests {
     #[test]
     fn test_embedding_lane_config_disables_vector_workers_when_runtime_mode_skips_semantic_workers()
     {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_RUNTIME_MODE", "indexer_graph");
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
@@ -6609,7 +6641,7 @@ mod tests {
 
     #[test]
     fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_controller() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
             std::env::set_var("AXON_CHUNK_BATCH_SIZE", "48");
@@ -6721,7 +6753,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_allows_gpu_vector_worker_oversubscription_with_opt_in() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
@@ -6740,7 +6772,7 @@ mod tests {
 
     #[test]
     fn test_embedding_provider_diagnostics_reflects_requested_runtime() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("ORT_STRATEGY", "system");
             std::env::set_var("ORT_DYLIB_PATH", "/tmp/libonnxruntime.so");
@@ -6770,7 +6802,7 @@ mod tests {
 
     #[test]
     fn test_configured_embedding_max_length_defaults_to_model_cap() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_EMBED_MAX_LENGTH");
         }
@@ -6780,7 +6812,7 @@ mod tests {
 
     #[test]
     fn test_configured_embedding_max_length_honors_lower_override_and_caps_high_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBED_MAX_LENGTH", "384");
         }
@@ -6841,7 +6873,7 @@ mod tests {
 
     #[test]
     fn test_cuda_memory_limit_bytes_defaults_to_soft_limit_policy() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_CUDA_MEMORY_LIMIT_MB");
             std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
@@ -6855,7 +6887,7 @@ mod tests {
 
     #[test]
     fn test_cuda_memory_limit_bytes_respects_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_CUDA_MEMORY_LIMIT_MB", "2048");
         }
@@ -6867,7 +6899,7 @@ mod tests {
 
     #[test]
     fn test_cuda_memory_limit_bytes_ignores_too_small_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_CUDA_MEMORY_LIMIT_MB", "128");
             std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
@@ -6890,7 +6922,7 @@ mod tests {
 
     #[test]
     fn test_gpu_memory_pressure_active_uses_soft_limit() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB", "3000");
         }
@@ -6922,7 +6954,7 @@ mod tests {
 
     #[test]
     fn test_vector_stale_inflight_recovery_claim_age_ms_uses_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS", "45000");
         }
@@ -6936,7 +6968,7 @@ mod tests {
 
     #[test]
     fn test_vector_stale_inflight_recovery_interval_ms_uses_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS", "15000");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
@@ -6952,7 +6984,7 @@ mod tests {
 
     #[test]
     fn test_vector_stale_inflight_recovery_interval_ms_scales_in_quiescent_mode() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS", "15000");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "400");
@@ -6971,7 +7003,7 @@ mod tests {
 
     #[test]
     fn test_vector_finalize_idle_poll_interval_ms_uses_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS", "500");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
@@ -6987,7 +7019,7 @@ mod tests {
 
     #[test]
     fn test_vector_finalize_idle_poll_interval_ms_scales_in_quiescent_mode() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS", "250");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "400");
@@ -7006,7 +7038,7 @@ mod tests {
 
     #[test]
     fn test_vector_worker_non_admitted_idle_wait_ms_uses_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_NON_ADMITTED_IDLE_WAIT_MS", "30000");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
@@ -7022,7 +7054,7 @@ mod tests {
 
     #[test]
     fn test_vector_worker_non_admitted_backlog_wait_ms_uses_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_NON_ADMITTED_BACKLOG_WAIT_MS", "750");
             std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
@@ -7038,7 +7070,7 @@ mod tests {
 
     #[test]
     fn test_recover_stale_vector_inflight_now_uses_configured_claim_age() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute(
@@ -7083,7 +7115,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_backend_defaults_to_nvidia_smi() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_GPU_TELEMETRY_BACKEND");
         }
@@ -7092,7 +7124,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_backend_allows_disabling_collection() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_TELEMETRY_BACKEND", "none");
         }
@@ -7104,7 +7136,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_backend_supports_nvml() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_TELEMETRY_BACKEND", "nvml");
         }
@@ -7116,7 +7148,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_command_respects_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_TELEMETRY_COMMAND", "/tmp/custom-nvidia-smi");
         }
@@ -7128,7 +7160,7 @@ mod tests {
 
     #[test]
     fn test_nvml_library_path_defaults_to_wsl_location() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_NVML_LIBRARY_PATH");
         }
@@ -7140,7 +7172,7 @@ mod tests {
 
     #[test]
     fn test_nvml_library_path_respects_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_NVML_LIBRARY_PATH", "/tmp/libnvidia-ml.so.1");
         }
@@ -7152,7 +7184,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_device_index_defaults_to_zero() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_GPU_TELEMETRY_DEVICE_INDEX");
         }
@@ -7161,7 +7193,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_device_index_respects_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_TELEMETRY_DEVICE_INDEX", "2");
         }
@@ -7173,7 +7205,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_cache_ttl_ms_defaults_to_2000() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_GPU_TELEMETRY_CACHE_TTL_MS");
         }
@@ -7182,7 +7214,7 @@ mod tests {
 
     #[test]
     fn test_gpu_telemetry_cache_ttl_ms_respects_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_GPU_TELEMETRY_CACHE_TTL_MS", "750");
         }
@@ -7272,7 +7304,7 @@ mod tests {
     #[test]
     fn test_effective_provider_request_for_query_lane_defaults_to_cpu_when_global_cuda_is_requested(
     ) {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::remove_var("AXON_QUERY_EMBED_PROVIDER");
@@ -7291,7 +7323,7 @@ mod tests {
 
     #[test]
     fn test_effective_provider_request_for_query_lane_respects_explicit_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_QUERY_EMBED_PROVIDER", "cuda");
@@ -7309,7 +7341,7 @@ mod tests {
 
     #[test]
     fn test_effective_provider_request_for_vector_lane_keeps_global_cuda_request() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::remove_var("AXON_QUERY_EMBED_PROVIDER");
@@ -7326,7 +7358,7 @@ mod tests {
 
     #[test]
     fn test_effective_provider_request_for_graph_lane_respects_explicit_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_GRAPH_EMBED_PROVIDER", "cpu");
@@ -7383,7 +7415,7 @@ mod tests {
 
     #[test]
     fn test_cuda_tf32_enabled_defaults_to_false() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_CUDA_ALLOW_TF32");
         }
@@ -7393,7 +7425,7 @@ mod tests {
 
     #[test]
     fn test_cuda_tf32_enabled_honors_explicit_disable() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_CUDA_ALLOW_TF32", "false");
         }
@@ -7411,7 +7443,7 @@ mod tests {
 
     #[test]
     fn test_cuda_tf32_enabled_honors_explicit_enable() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_CUDA_ALLOW_TF32", "true");
         }
@@ -8838,7 +8870,7 @@ mod tests {
 
     #[test]
     fn test_split_prepared_batch_for_gpu_budget_caps_total_tokens_per_batch() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBED_BATCH_MAX_TOTAL_TOKENS", "2048");
         }
@@ -9128,7 +9160,7 @@ mod tests {
 
     #[test]
     fn gpu_worker_consumption_only_obeys_vram_admission() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRIMARY_BATCH_GUARD_ENABLED", "true");
 
         assert!(gpu_worker_consumption_allowed(false, None));
@@ -9154,7 +9186,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_allows_batch_when_disabled() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         // Explicitly disable -- default is now true (to prevent unified memory spill).
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "false");
 
@@ -9172,7 +9204,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_allows_batch_below_admission() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
         std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
 
@@ -9191,7 +9223,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_recycles_on_unknown_telemetry_by_default() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
         // Do NOT set UNKNOWN_RECYCLE -- default is now true (conservative:
         // without telemetry, blind embedding risks 40x throughput loss from
@@ -9207,7 +9239,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_skips_unknown_telemetry_when_disabled() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_UNKNOWN_RECYCLE", "false");
 
@@ -9222,7 +9254,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_detects_plateau_with_probe() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
         std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "2");
@@ -9267,7 +9299,7 @@ mod tests {
 
     #[test]
     fn gpu_pre_batch_vram_guard_passes_when_vram_recovers_during_probe() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_ENABLED", "true");
         std::env::set_var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB", "6000");
         std::env::set_var("AXON_GPU_PRE_BATCH_VRAM_GUARD_SAMPLES", "3");
@@ -9372,7 +9404,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_runtime_tuning_does_not_cap_inflight_persists_to_legacy_eight() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_PERSIST_QUEUE_BOUND", "32");
             std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS");
@@ -9451,7 +9483,7 @@ mod tests {
 
     #[test]
     fn test_gpu_memory_soft_limit_mb_falls_back_to_operator_budget() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
         std::env::set_var("AXON_OPT_MAX_VRAM_USED_MB", "6144");
         assert_eq!(gpu_memory_soft_limit_mb(), 6144);
@@ -9525,6 +9557,8 @@ mod tests {
 
     #[test]
     fn test_vector_batch_controller_grows_targets_when_idle_backlog_is_underfed() {
+        let _guard = lock_env_guard();
+        super::refresh_runtime_tuning_snapshot_from_env();
         let mut controller = VectorBatchController::new(&controller_test_config());
         let diagnostics = controller.observe(
             10_000,
@@ -9639,7 +9673,7 @@ mod tests {
 
     #[test]
     fn test_vector_batch_controller_uses_small_gpu_warmup_target_before_first_successful_embed() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_GPU_WARMUP_EMBED_BATCH_CHUNKS", "8");
         std::env::set_var("AXON_GPU_WARMUP_FILES_PER_CYCLE", "1");
@@ -9664,6 +9698,8 @@ mod tests {
 
     #[test]
     fn test_vector_batch_controller_steps_down_after_embed_efficiency_regresses() {
+        let _guard = lock_env_guard();
+        super::refresh_runtime_tuning_snapshot_from_env();
         let mut controller = VectorBatchController::new(&controller_test_config());
         controller.observe(
             10_000,
@@ -9687,27 +9723,28 @@ mod tests {
 
     #[test]
     fn test_single_gpu_worker_cruise_mode_waits_for_second_regression_before_step_down() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_VECTOR_WORKERS", "1");
+        super::refresh_runtime_tuning_snapshot_from_env();
 
         let mut controller = VectorBatchController::new(&controller_test_config());
         controller.observe(
             10_000,
-            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 32, 0),
+            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 2_048, 0),
         );
         controller.observe(
             21_000,
-            controller_observation_with_runtime(4_096, false, false, 8, 512, 16, 61_440, 32, 0),
+            controller_observation_with_runtime(4_096, false, false, 8, 512, 16, 61_440, 2_048, 0),
         );
 
         let first_regression = controller.observe(
             32_000,
-            controller_observation_with_runtime(4_096, false, false, 12, 896, 24, 138_240, 32, 0),
+            controller_observation_with_runtime(4_096, false, false, 12, 896, 24, 138_240, 2_048, 0),
         );
         let second_regression = controller.observe(
             43_000,
-            controller_observation_with_runtime(4_096, false, false, 16, 1_280, 32, 215_040, 32, 0),
+            controller_observation_with_runtime(4_096, false, false, 16, 1_280, 32, 215_040, 2_048, 0),
         );
 
         assert_ne!(first_regression.reason, "embed_efficiency_regressed");
@@ -9723,7 +9760,7 @@ mod tests {
 
     #[test]
     fn test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_ready_queue_starves() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_VECTOR_WORKERS", "1");
 
@@ -9745,7 +9782,7 @@ mod tests {
     #[test]
     fn test_single_gpu_worker_cruise_mode_reduces_chunk_target_when_ready_queue_starves_with_low_density(
     ) {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_VECTOR_WORKERS", "1");
 
@@ -9770,9 +9807,10 @@ mod tests {
 
     #[test]
     fn test_persistent_low_density_underfeed_opens_file_window_more_aggressively() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_VECTOR_WORKERS", "1");
+        super::refresh_runtime_tuning_snapshot_from_env();
 
         let lane_config = EmbeddingLaneConfig {
             chunk_batch_size: 48,
@@ -9910,7 +9948,7 @@ mod tests {
 
     #[test]
     fn test_prepare_queue_bound_tracks_twice_ready_depth() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_READY_QUEUE_DEPTH", "96");
             std::env::set_var("AXON_GPU_READY_LOW_WATERMARK", "12");
@@ -9930,7 +9968,7 @@ mod tests {
 
     #[test]
     fn test_configured_gpu_ready_watermarks_follow_env() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_VECTOR_READY_QUEUE_DEPTH", "96");
             std::env::set_var("AXON_GPU_READY_LOW_WATERMARK", "12");
@@ -9949,7 +9987,7 @@ mod tests {
 
     #[test]
     fn test_single_worker_gpu_prepare_worker_count_expands_when_gpu_is_safely_underfed() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR", "2");
 
         assert_eq!(single_worker_gpu_prepare_worker_count(true, 1, 2), 4);
@@ -9961,7 +9999,7 @@ mod tests {
 
     #[test]
     fn test_gpu_recycle_after_vram_summit_triggers_after_two_low_throughput_batches() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true");
         std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB", "7000");
         std::env::set_var("AXON_GPU_RECYCLE_MIN_CHUNKS_PER_SECOND", "8");
@@ -9989,7 +10027,7 @@ mod tests {
 
     #[test]
     fn test_gpu_recycle_after_vram_summit_resets_when_pressure_or_throughput_recovers() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true");
         std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB", "7000");
         std::env::set_var("AXON_GPU_RECYCLE_MIN_CHUNKS_PER_SECOND", "8");
@@ -10017,7 +10055,7 @@ mod tests {
 
     #[test]
     fn test_gpu_recycle_after_vram_summit_can_derive_threshold_from_percentage() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB");
         std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT", "80");
         std::env::set_var("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
@@ -10030,7 +10068,7 @@ mod tests {
 
     #[test]
     fn test_gpu_recycle_immediate_required_triggers_only_above_threshold_without_inflight() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true");
         std::env::set_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT", "true");
         std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB", "7000");
@@ -10067,7 +10105,7 @@ mod tests {
 
     #[test]
     fn test_gpu_stuck_recovery_reason_detects_inflight_stall() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_STUCK_RECOVERY_ENABLED", "true");
         std::env::set_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "1000");
 
@@ -10086,7 +10124,7 @@ mod tests {
 
     #[test]
     fn test_gpu_stuck_recovery_reason_detects_ready_stock_stall() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_GPU_STUCK_RECOVERY_ENABLED", "true");
         std::env::set_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "1000");
         std::env::set_var("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS", "2000");
@@ -10106,7 +10144,7 @@ mod tests {
 
     #[test]
     fn test_prepare_depth_and_worker_overrides_are_not_clamped() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        let _guard = lock_env_guard();
         std::env::set_var("AXON_VECTOR_PREPARE_PIPELINE_DEPTH", "12");
         std::env::set_var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR", "8");
 
