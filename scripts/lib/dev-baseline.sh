@@ -40,8 +40,8 @@ EOF
 }
 
 dev_baseline_stop_split() {
-    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/stop-indexer.sh" "$@"
-    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/stop-brain.sh" "$@"
+    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/stop-indexer.sh" "$@"
+    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/stop-brain.sh" "$@"
 }
 
 dev_baseline_remove_target() {
@@ -65,8 +65,8 @@ dev_baseline_clean_state() {
 }
 
 dev_baseline_start_split() {
-    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/start-brain.sh"
-    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/start-indexer.sh"
+    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/start-brain.sh"
+    AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/start-indexer.sh"
 }
 
 dev_baseline_wait_for_role() {
@@ -95,7 +95,7 @@ dev_baseline_wait_for_split_converged() {
     local output=""
 
     while (( SECONDS < deadline )); do
-        output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/status-brain.sh" 2>&1 || true)"
+        output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/status-brain.sh" 2>&1 || true)"
         if grep -q "STATUS  HEALTHY" <<<"$output" \
             && grep -q "system_converged=true" <<<"$output" \
             && grep -q "truth_status=canonical" <<<"$output"; then
@@ -116,8 +116,8 @@ dev_baseline_wait_for_stable_measurement_window() {
     local indexer_output=""
 
     while (( SECONDS < deadline )); do
-        brain_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/status-brain.sh" 2>&1 || true)"
-        indexer_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/status-indexer.sh" 2>&1 || true)"
+        brain_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/status-brain.sh" 2>&1 || true)"
+        indexer_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/status-indexer.sh" 2>&1 || true)"
 
         if grep -q "STATUS  HEALTHY" <<<"$brain_output" \
             && grep -q "brain_ready=true" <<<"$brain_output" \
@@ -145,7 +145,7 @@ dev_baseline_wait_for_indexer_measurement_window() {
     local indexer_output=""
 
     while (( SECONDS < deadline )); do
-        indexer_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_SCRIPT_DIR/status-indexer.sh" 2>&1 || true)"
+        indexer_output="$(AXON_INSTANCE_KIND=dev bash "$DEV_BASELINE_LIB_DIR/status-indexer.sh" 2>&1 || true)"
 
         if grep -q "STATUS  HEALTHY" <<<"$indexer_output" \
             && grep -q "brain_ready=false" <<<"$indexer_output" \

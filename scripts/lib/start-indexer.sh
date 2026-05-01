@@ -10,4 +10,4 @@ export AXON_RUNTIME_MODE="${AXON_RUNTIME_MODE:-indexer_graph}"
 
 runtime_flag="--${AXON_RUNTIME_MODE//_/-}"
 
-exec bash "$SCRIPT_DIR/start.sh" "$@" "$runtime_flag" --no-dashboard --skip-mcp-tests
+exec bash "$SCRIPT_DIR/../start.sh" "$@" "$runtime_flag" --no-dashboard --skip-mcp-tests

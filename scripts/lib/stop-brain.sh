@@ -6,4 +6,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AXON_RUNTIME_SHADOW_ROLE="brain"
 export AXON_SPLIT_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
 
-exec bash "$SCRIPT_DIR/stop.sh" "$@"
+exec bash "$SCRIPT_DIR/../stop.sh" "$@"

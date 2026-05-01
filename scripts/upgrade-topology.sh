@@ -108,12 +108,12 @@ start_brain() {
   if [[ "$START_DASHBOARD" != "1" ]]; then
     args+=(--no-dashboard)
   fi
-  AXON_RUNTIME_MODE="$brain_mode" bash "$PROJECT_ROOT/scripts/start-brain.sh" "${args[@]}"
+  AXON_RUNTIME_MODE="$brain_mode" bash "$PROJECT_ROOT/scripts/lib/start-brain.sh" "${args[@]}"
 }
 
 start_indexer() {
   local indexer_mode="$1"
-  AXON_RUNTIME_MODE="$indexer_mode" bash "$PROJECT_ROOT/scripts/start-indexer.sh"
+  AXON_RUNTIME_MODE="$indexer_mode" bash "$PROJECT_ROOT/scripts/lib/start-indexer.sh"
 }
 
 ensure_brain() {

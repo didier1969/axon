@@ -33,7 +33,7 @@ echo "[reset-dev-indexer-baseline] cleaning dev IST and runtime role run roots"
 dev_baseline_clean_state
 
 echo "[reset-dev-indexer-baseline] starting indexer"
-AXON_INSTANCE_KIND=dev bash "$SCRIPT_DIR/start-indexer.sh"
+AXON_INSTANCE_KIND=dev bash "$SCRIPT_DIR/lib/start-indexer.sh"
 
 echo "[reset-dev-indexer-baseline] waiting for stable measurement window"
 baseline_status="$(dev_baseline_wait_for_indexer_measurement_window 240)"

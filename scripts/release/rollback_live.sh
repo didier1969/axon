@@ -163,9 +163,9 @@ PY
   elif ! assert_live_stopped; then
     restart_failed=1
   else
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-indexer.sh"; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-indexer.sh"; then
       restart_failed=1
-    elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-brain.sh"; then
+    elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       for attempt in {1..12}; do
@@ -173,8 +173,8 @@ PY
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
           --install-generation "$install_generation" \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-indexer.sh" >/dev/null \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-brain.sh" >/dev/null; then
+          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null \
+          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null; then
           verified=1
           break
         fi

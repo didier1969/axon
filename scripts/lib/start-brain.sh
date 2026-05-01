@@ -12,5 +12,5 @@ export AXON_RUNTIME_MODE="${AXON_RUNTIME_MODE:-brain_only}"
 
 runtime_flag="--${AXON_RUNTIME_MODE//_/-}"
 
-exec bash "$SCRIPT_DIR/start.sh" "$@" "$runtime_flag" --skip-mcp-tests
+exec bash "$SCRIPT_DIR/../start.sh" "$@" "$runtime_flag" --skip-mcp-tests
  
