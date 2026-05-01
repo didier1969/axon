@@ -86,7 +86,7 @@ if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
 fi
 
 ensure_head_stable
-run_step "final live status" bash "$ROOT_DIR/scripts/status-live.sh"
+run_step "final live status" bash "$ROOT_DIR/scripts/axon-live" status
 
 echo "SAFE PROMOTION COMPLETE"
 echo "manifest=$manifest_path"
