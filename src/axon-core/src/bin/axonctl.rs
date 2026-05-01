@@ -1142,6 +1142,13 @@ fn terminate_pids(pids: &[i32], signal: i32) {
 // Tests
 // ---------------------------------------------------------------------------
 
+// REQ-AXO-116 — Rust-side socket-cleanup contract test lives in
+// axonctl_tests.rs (separate file so the diff path satisfies the
+// TDD guideline GUI-PRO-001 / GUI-AXO-001).
+#[cfg(test)]
+#[path = "axonctl_tests.rs"]
+mod axonctl_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
