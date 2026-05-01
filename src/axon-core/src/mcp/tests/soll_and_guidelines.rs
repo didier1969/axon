@@ -2525,6 +2525,57 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
     assert!(content.contains("config_lookup_exact"), "{content}");
 }
 
+// REQ-AXO-088 — `reserve_budget` did not match `reserve_memory_budget`
+// because `_` was missing from the wildcard separator set: the query
+// stayed as a literal token instead of becoming the LIKE pattern
+// `reserve%budget`. Adding `_` to the wildcard replacement set turns
+// underscore-separated query fragments back into fuzzy matches that hit
+// the corresponding underscore-separated symbol names.
+#[test]
+fn test_axon_query_underscore_fragment_matches_underscore_symbol() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/axon-core/src/queue.rs', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::reserve_memory_budget', 'reserve_memory_budget', 'function', false, true, false, 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/axon-core/src/queue.rs', 'axon::reserve_memory_budget', 'AXO')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "reserve_budget", "project": "AXO" }
+        })),
+        id: Some(json!(881)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        content.contains("reserve_memory_budget"),
+        "fuzzy underscore-aware match must surface the existing symbol: {content}"
+    );
+    assert!(
+        !content.contains("No exact structural match resolved"),
+        "must not give up with the empty-result phrase: {content}"
+    );
+}
+
 #[test]
 fn test_axon_query_falls_back_when_contains_is_absent() {
     let _runtime = RuntimeEnvGuard::full_autonomous();

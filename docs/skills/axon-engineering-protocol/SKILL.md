@@ -150,6 +150,9 @@ LLM guidance contract:
 
 Server guidance is primary. Generic fallback ordering is secondary.
 
+`query` underscore-aware fuzzy matching (REQ-AXO-088):
+- `_`, `-`, `:`, and ` ` are token separators in the wildcard form, so `query reserve_budget` matches `reserve_memory_budget` via the `reserve%budget` LIKE pattern; do not pre-split underscore-separated terms before issuing a query.
+
 Public tool contract:
 - public tools should return a usable recovery path even on weak or empty answers
 - `query` with zero exact hits should still return structured recovery guidance, not a dead-end empty answer

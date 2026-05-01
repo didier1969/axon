@@ -302,8 +302,17 @@ impl McpServer {
     }
 
     fn build_symbol_search_params(query_text: &str, project: &str) -> Value {
+        // REQ-AXO-088 — `_` belongs in the wildcard separator set, not
+        // just in the compact set. Without it, a query like
+        // `reserve_budget` was treated as a single literal token and
+        // never matched `reserve_memory_budget` even though the LIKE
+        // wildcard branch was supposed to handle exactly this case.
+        // Including `_` here makes the wildcard form `reserve%budget`,
+        // which matches the underscore-separated symbol via DuckDB
+        // LIKE. The compact branch already strips `_` so it stays
+        // unchanged.
         let normalized_query = query_text.to_lowercase();
-        let wildcard_query = normalized_query.replace([' ', '-', ':'], "%");
+        let wildcard_query = normalized_query.replace([' ', '-', ':', '_'], "%");
         let compact_query = normalized_query.replace([' ', '-', '_', ':'], "");
 
         if project == "*" {
