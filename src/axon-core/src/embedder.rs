@@ -1055,6 +1055,7 @@ const GUARD_RECYCLE_BACKOFF_THRESHOLD: u32 = 5;
 #[allow(dead_code)]
 const GUARD_RECYCLE_COOLDOWN_MS: u64 = 5_000;
 
+#[allow(dead_code)]
 static GUARD_CONSECUTIVE_RECYCLES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
 static GUARD_COOLDOWN_UNTIL_MS: std::sync::atomic::AtomicU64 =
