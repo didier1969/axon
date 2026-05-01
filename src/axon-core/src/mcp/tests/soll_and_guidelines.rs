@@ -623,6 +623,62 @@ fn test_soll_manager_create_returns_mutation_feedback() {
 }
 
 #[test]
+fn test_axon_soll_work_plan_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — work_plan previously returned `Status: ok` with empty
+    // Evidence for a non-registered project_code. Verify the symmetric
+    // soll_query_context contract is now applied.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_work_plan",
+                "arguments": { "project_code": "NOT_A_REAL_PROJECT_XYZ" }
+            })),
+            id: Some(json!(43102)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("NOT_A_REAL_PROJECT_XYZ")
+    );
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO"),
+        "must list registered codes: {registered_strs:?}"
+    );
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+
+    let content = result["content"][0]["text"].as_str().expect("content text");
+    assert!(
+        content.contains("NOT_A_REAL_PROJECT_XYZ"),
+        "content must echo rejected: {content}"
+    );
+    assert!(
+        content.contains("AXO"),
+        "content must list registered codes: {content}"
+    );
+}
+
+#[test]
 fn test_axon_soll_query_context_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — the previous .ok()? swallowed the resolve_project_code
     // error and the framework rendered a generic "Invalid arguments". The

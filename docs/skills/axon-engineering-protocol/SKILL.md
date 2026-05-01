@@ -151,7 +151,7 @@ Public tool contract:
 - invalid arguments should return a micro-instruction that tells the LLM how to repair the request before retry
 - recovery hints must reflect the actual response state. `inspect`, `path` (axon_bidi_trace), and `impact` with zero suggestions must NOT advise "pick / retry with one suggested symbol"; they route the LLM to `query` with a broader term or to verify spelling/scope (REQ-AXO-043). All three tools now emit `data.next_action.kind` matched to whether suggestions actually exist (`pick_canonical_symbol` / `select_valid_symbol_then_retry_impact` when they do, `broaden_search` when they do not).
 - `retrieve_context` with an empty `question` returns a structured contract: `data.status="input_invalid"`, `data.missing_field="question"`, `data.next_action` with a concrete example call, `data.operator_guidance.follow_up_tools=["inspect","query"]` (REQ-AXO-043).
-- `soll_query_context` with an unregistered `project_code` returns `data.status="wrong_project_scope"`, `data.registered_project_codes` (array of valid codes), and `data.operator_guidance.follow_up_tools=["project_registry_lookup", "axon_init_project"]` instead of the framework's generic "Invalid arguments" message (REQ-AXO-043).
+- `soll_query_context` and `soll_work_plan` with an unregistered `project_code` return `data.status="wrong_project_scope"`, `data.registered_project_codes` (array of valid codes), and `data.operator_guidance.follow_up_tools=["project_registry_lookup", "axon_init_project"]`. Previously soll_query_context returned the framework's generic "Invalid arguments"; soll_work_plan silently returned `Status: ok` with empty Evidence (REQ-AXO-043).
 
 Search order for ordinary LLMs:
 1. follow `next_action` if the response already provides one

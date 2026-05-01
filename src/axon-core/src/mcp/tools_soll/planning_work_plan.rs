@@ -3,7 +3,61 @@ use super::*;
 
 impl McpServer {
     pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
-        let project_code = args.get("project_code")?.as_str()?;
+        let project_code_input = args.get("project_code")?.as_str()?;
+        // REQ-AXO-043 — when the project_code does not resolve, the work plan
+        // previously returned `Status: ok` with empty Evidence — the LLM had
+        // no signal that the input was wrong. Mirror the soll_query_context
+        // contract: return wrong_project_scope with registered_project_codes.
+        let project_code_owned = match self.resolve_project_code(project_code_input) {
+            Ok(code) => code,
+            Err(err) => {
+                let registered = self
+                    .query_single_column(
+                        "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
+                    )
+                    .unwrap_or_default();
+                let registered_values: Vec<Value> = registered
+                    .iter()
+                    .map(|c| Value::from(c.clone()))
+                    .collect();
+                let next_action = if registered.is_empty() {
+                    "no projects registered yet — use axon_init_project to register one".to_string()
+                } else {
+                    format!(
+                        "use one of the registered project_codes: {}",
+                        registered.join(", ")
+                    )
+                };
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Project `{}` not found in registry for soll_work_plan. {}",
+                            project_code_input, next_action,
+                        ),
+                    }],
+                    "isError": true,
+                    "data": {
+                        "status": "wrong_project_scope",
+                        "rejected_project_code": project_code_input,
+                        "registered_project_codes": registered_values,
+                        "underlying_error": err.to_string(),
+                        "next_action": next_action,
+                        "operator_guidance": {
+                            "problem_class": "wrong_project_scope",
+                            "likely_cause": "project_code_not_in_registry",
+                            "next_best_actions": [
+                                "retry with a registered project_code",
+                                "or call axon_init_project to register a new project",
+                            ],
+                            "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                            "confidence": "high",
+                        },
+                    }
+                }));
+            }
+        };
+        let project_code = project_code_owned.as_str();
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
