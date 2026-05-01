@@ -453,12 +453,18 @@ impl McpServer {
         // mode points the caller to data.public_tools instead. The
         // data field stays always-on so machine consumers are
         // unaffected.
+        // REQ-AXO-106 — the prior label "Advanced indexed surfaces
+        // visible: yes/no" was opaque; LLM clients had no way to map it
+        // to a tool decision. Replace with a freshness label that names
+        // the concrete semantic (IST projection lag) and a parenthetical
+        // hint clarifying that stale state does NOT gate any tool —
+        // structural reads remain authoritative either way.
         let mut evidence = format!(
             "**Runtime mode:** `{}`\n\
 **Runtime profile:** `{}`\n\
 **Instance kind:** `{}`\n\
 **Runtime identity:** `{}`\n\
-**Advanced indexed surfaces visible:** {}\n\
+**IST projection freshness:** {} ({})\n\
 **Vector backlog:** queued={} inflight={}\n\
 **Utility-first scheduler:** `{}` ({})\n\
 **Drain state:** `{}`\n",
@@ -466,10 +472,11 @@ impl McpServer {
             runtime_profile.as_str(),
             std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
+            if indexed_projection_fresh { "fresh" } else { "stale" },
             if indexed_projection_fresh {
-                "yes"
+                "reads reflect latest indexed source"
             } else {
-                "no"
+                "reads may lag latest source; tools remain usable"
             },
             queued_files,
             inflight_files,
@@ -874,6 +881,13 @@ impl McpServer {
                 "runtime_profile": runtime_profile.as_str(),
                 "drain_state": drain_state,
                 "availability": {
+                    // REQ-AXO-106 — `ist_projection_fresh` is the
+                    // canonical name for this signal; the historical
+                    // `advanced_indexed_surfaces_visible` alias is kept
+                    // for backwards compatibility with existing MCP
+                    // consumers. New consumers MUST read
+                    // `ist_projection_fresh`.
+                    "ist_projection_fresh": indexed_projection_fresh,
                     "advanced_indexed_surfaces_visible": indexed_projection_fresh,
                     "degraded_notes": degraded_notes
                 },

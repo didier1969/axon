@@ -918,6 +918,84 @@ fn test_status_graph_only_reports_semantic_drain_not_applicable() {
     }
 }
 
+// REQ-AXO-106 — the legacy "Advanced indexed surfaces visible: yes/no"
+// label gave LLM clients no way to map the bit to a tool decision (the
+// signal does not actually gate any tool). Replace with an "IST
+// projection freshness: fresh|stale (hint)" line that names the
+// concrete semantic and clarifies tools remain usable when stale.
+// Surface a parallel `data.availability.ist_projection_fresh` field;
+// keep the legacy `advanced_indexed_surfaces_visible` for backward
+// compatibility with existing MCP consumers.
+#[test]
+fn test_status_uses_ist_projection_freshness_label_and_field() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_uses_ist_projection_freshness_label_and_field",
+        );
+    }
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2166)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let evidence = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        evidence.contains("IST projection freshness:"),
+        "human-readable label should name the IST freshness semantic: {evidence}"
+    );
+    assert!(
+        !evidence.contains("Advanced indexed surfaces"),
+        "legacy opaque label must be retired from the text surface: {evidence}"
+    );
+
+    let availability = response["data"]["availability"]
+        .as_object()
+        .expect("data.availability is an object");
+    assert!(
+        availability.get("ist_projection_fresh").is_some(),
+        "new canonical field `ist_projection_fresh` must be present"
+    );
+    assert!(
+        availability
+            .get("ist_projection_fresh")
+            .and_then(|v| v.as_bool())
+            .is_some(),
+        "ist_projection_fresh must be a boolean"
+    );
+    assert!(
+        availability
+            .get("advanced_indexed_surfaces_visible")
+            .and_then(|v| v.as_bool())
+            .is_some(),
+        "legacy `advanced_indexed_surfaces_visible` alias must remain for backward compatibility"
+    );
+    assert_eq!(
+        availability["ist_projection_fresh"],
+        availability["advanced_indexed_surfaces_visible"],
+        "the two fields must always agree until the alias is retired"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
 #[test]
 fn test_mcp_tools_list_hides_indexed_runtime_tools_in_full_isolated() {
     let _guard = env_lock();

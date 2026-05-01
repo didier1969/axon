@@ -82,6 +82,12 @@ If freshness is missing:
 - degrade payloads explicitly
 - do not hide public read tools
 
+`status` IST freshness signal (REQ-AXO-106):
+- canonical field: `data.availability.ist_projection_fresh` (bool)
+- legacy alias: `data.availability.advanced_indexed_surfaces_visible` (kept for compat — read `ist_projection_fresh` instead)
+- text label: `**IST projection freshness:** fresh|stale (hint)`
+- `stale` does NOT gate any tool — structural reads remain authoritative; only consider it as a freshness lag indicator when interpreting results
+
 Internal-only tools:
 - are transport or implementation primitives
 - are not hidden product value surfaces
