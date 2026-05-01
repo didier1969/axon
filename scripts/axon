@@ -14,24 +14,12 @@ Commands:
   setup                    Bootstrap environment and build artifacts
   setup-tensorrt           Build/validate the local TensorRT ORT artifact, optionally qualify it
   start [mode options]     Start runtime (supports --brain-only|--indexer-graph|--indexer-vector|--indexer-full|--no-dashboard)
-  upgrade-topology [opts]  Legacy alias: start missing runtime role(s) for the authority contract
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
-  reset-dev-baseline       Reset dev brain+indexer into a stable measurable baseline
-  reset-dev-indexer-baseline Reset the dev runtime into an indexer-only measurable baseline
-  qualify-dev-cold [args...] Reset dev and run a cold brain+indexer qualification
-  qualify-dev-indexer-cold [args...] Reset dev and run a cold indexer-only qualification
-  qualify-dev-indexer-tensorrt-cold [args...] Reset dev and run a cold indexer-only TensorRT-service qualification
-  build-and-qualify-tensorrt-cold [args...] Build TensorRT ORT from local tarball, validate it, then run cold TensorRT qualification
+  qualify [args...]        Unified qualification pipeline (defaults to dev). Supports --mode cold|warm, --tensorrt, --sweep
+  qualify-mcp [args...]    MCP qualification for core/SOLL surfaces
   benchmark-vector-token-matrix [args...] Run indexer-only token-cap throughput matrix (cold or warm)
-  qualify [args...]        Run unified qualification pipeline (defaults to dev instance)
-  qualify-mcp [args...]    Unified MCP qualification for core/SOLL surfaces
-  validate-mcp [args...]   Expert validator for MCP tools
-  robustness-mcp [args...] Expert MCP responsiveness and recovery probe
-  measure-mcp [args...]    Expert timestamped MCP latency/behavior probes
-  compare-mcp [args...]    Expert comparison of MCP measurement runs
-  quality-mcp [args...]    Compatibility wrapper around qualify-mcp for core projects
   mcp-call [args...]       Direct MCP HTTP caller for list/call operations against the selected instance
   release-preflight [args...] Verify tracked-clean build/manifests prerequisites before release actions
   create-release-manifest [args...] Create canonical release manifest for promotion
@@ -41,8 +29,6 @@ Commands:
   seed-dev-from-live [args...] Refresh the dev graph root from the live graph root
   sync-codex-mcp-config [args...] Print or refresh Codex MCP config with advertised Axon endpoints
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
-  qualify-guidance [args...] Expert MCP guidance golden replay
-  qualify-guidance-live    Replay live MCP guidance goldens against running server
   soll-import [args...]    SOLL import tool via MCP (md/json/ndjson/yaml)
   work-plan [args...]      SOLL read-only work plan tool
   resume-vectorization [args...] Requeue missing chunk vectorization from graph-ready files
@@ -61,17 +47,10 @@ Examples:
   ./scripts/axon setup-tensorrt --qualify --max-vram-used-mb 2048 --tensorrt-workspace-mb 1024
   ./scripts/axon start --brain-only
   ./scripts/axon start --indexer-graph
-  ./scripts/axon upgrade-topology --indexer-full
   ./scripts/axon stop --hard
   ./scripts/axon restart --brain-only
   ./scripts/axon status
-  ./scripts/axon reset-dev-baseline
-  ./scripts/axon reset-dev-indexer-baseline
-  ./scripts/axon qualify-dev-cold --duration 20 --interval 5 --label first-cold
-  ./scripts/axon qualify-dev-indexer-cold --duration 20 --interval 5 --label first-indexer-cold
   ./scripts/axon --instance dev start --indexer-full --tensorrt
-  ./scripts/axon qualify-dev-indexer-tensorrt-cold --duration 120 --interval 5 --label tensorrt-hard-cut
-  ./scripts/axon build-and-qualify-tensorrt-cold --duration 120 --interval 5 --label tensorrt-hard-cut
   ./scripts/axon benchmark-vector-token-matrix --tokens 4096,8192,16384 --duration 20 --interval 5
   ./scripts/axon benchmark-vector-token-matrix --mode warm --tokens 4096,8192,16384 --duration 20 --interval 5 --warmup-timeout 120
   ./scripts/axon qualify --profile demo --mode indexer_graph
@@ -79,11 +58,6 @@ Examples:
   ./scripts/axon qualify --profile smoke --compare brain_only,indexer_graph
   ./scripts/axon --instance live qualify --profile smoke --mode indexer_graph
   ./scripts/axon qualify-mcp --surface core --checks quality,latency --mode steady-state --project AXO
-  ./scripts/axon validate-mcp --project BookingSystem --strict
-  ./scripts/axon robustness-mcp --modes brain_only,indexer_full --duration 60 --concurrency 4
-  ./scripts/axon measure-mcp --project AXO --label baseline
-  ./scripts/axon compare-mcp
-  ./scripts/axon quality-mcp
   ./scripts/axon --instance live mcp-call list
   ./scripts/axon --instance live mcp-call call status --args '{"mode":"brief"}' --format text
   ./scripts/axon --instance live mcp-call call help --args '{"tool":"soll_apply_plan"}' --format data
@@ -97,8 +71,6 @@ Examples:
   ./scripts/axon sync-codex-mcp-config
   ./scripts/axon sync-codex-mcp-config --apply
   ./scripts/axon check-project-identity
-  ./scripts/axon qualify-guidance
-  ./scripts/axon qualify-guidance-live
   ./scripts/axon soll-import --input docs/vision/SOLL_EXPORT_2026-04-04.md --format md
   ./scripts/axon soll-import --input /tmp/soll_payload.json --project AXO --author codex --dry-run
   ./scripts/axon work-plan --project AXO
@@ -196,9 +168,6 @@ case "$cmd" in
   start)
     exec bash "$SCRIPT_DIR/start.sh" "$@"
     ;;
-  upgrade-topology)
-    exec bash "$SCRIPT_DIR/upgrade-topology.sh" "$@"
-    ;;
   stop)
     exec bash "$SCRIPT_DIR/stop.sh" "$@"
     ;;
@@ -235,24 +204,6 @@ EOF
   status)
     exec bash "$SCRIPT_DIR/status.sh" "$@"
     ;;
-  reset-dev-baseline)
-    exec bash "$SCRIPT_DIR/reset-dev-baseline.sh" "$@"
-    ;;
-  reset-dev-indexer-baseline)
-    exec bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh" "$@"
-    ;;
-  qualify-dev-cold)
-    exec bash "$SCRIPT_DIR/qualify-dev-cold.sh" "$@"
-    ;;
-  qualify-dev-indexer-cold)
-    exec bash "$SCRIPT_DIR/qualify-dev-indexer-cold.sh" "$@"
-    ;;
-  qualify-dev-indexer-tensorrt-cold)
-    exec bash "$SCRIPT_DIR/qualify-dev-indexer-tensorrt-cold.sh" "$@"
-    ;;
-  build-and-qualify-tensorrt-cold)
-    exec bash "$SCRIPT_DIR/build-and-qualify-tensorrt-cold.sh" "$@"
-    ;;
   benchmark-vector-token-matrix)
     exec bash "$SCRIPT_DIR/benchmark-vector-token-matrix.sh" "$@"
     ;;
@@ -262,24 +213,6 @@ EOF
   qualify-mcp)
     mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
     exec python3 "$SCRIPT_DIR/qualify_mcp.py" "${forwarded[@]}"
-    ;;
-  validate-mcp)
-    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
-    exec python3 "$SCRIPT_DIR/mcp_validate.py" "${forwarded[@]}"
-    ;;
-  robustness-mcp)
-    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
-    exec python3 "$SCRIPT_DIR/qualify_mcp_robustness.py" "${forwarded[@]}"
-    ;;
-  measure-mcp)
-    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
-    exec python3 "$SCRIPT_DIR/measure_mcp_suite.py" "${forwarded[@]}"
-    ;;
-  compare-mcp)
-    exec python3 "$SCRIPT_DIR/compare_mcp_runs.py" "$@"
-    ;;
-  quality-mcp)
-    exec env AXON_MCP_URL="$AXON_MCP_URL" bash "$SCRIPT_DIR/mcp_quality_gate.sh" "$@"
     ;;
   mcp-call)
     exec env AXON_MCP_URL="$AXON_MCP_URL" python3 "$SCRIPT_DIR/mcp_call.py" "$@"
@@ -307,14 +240,6 @@ EOF
     ;;
   check-project-identity)
     exec python3 "$SCRIPT_DIR/check_no_legacy_project_field.py"
-    ;;
-  qualify-guidance)
-    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
-    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" "${forwarded[@]}"
-    ;;
-  qualify-guidance-live)
-    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
-    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" --goldens "$SCRIPT_DIR/mcp_guidance_live_goldens.json" --source live "${forwarded[@]}"
     ;;
   soll-import)
     mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
