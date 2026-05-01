@@ -1854,6 +1854,11 @@ fn test_axon_validate_soll_can_scope_by_project_code() {
 
 #[test]
 fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
+    // Updated 2026-05-01 (commit 0f1ec17): soll_validate now uses the
+    // shared wrong_project_scope_response helper. The content text format
+    // changed from "Canonical project error: ..." to
+    // "Project `FSC` not found in registry for soll_validate. ...".
+    // Assertions updated to the structured wrong_project_scope contract.
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -1878,8 +1883,16 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("Canonical project"), "{content}");
-    assert!(content.contains("FSC"), "{content}");
+    assert!(content.contains("FSC"), "must echo rejected code: {content}");
+    assert!(
+        content.contains("not found in registry"),
+        "must surface the registry-miss reason: {content}"
+    );
+    assert_eq!(
+        result["data"]["status"].as_str(),
+        Some("wrong_project_scope")
+    );
+    assert_eq!(result["data"]["rejected_project_code"].as_str(), Some("FSC"));
 }
 
 #[test]
