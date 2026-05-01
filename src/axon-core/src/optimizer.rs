@@ -1705,6 +1705,7 @@ mod tests {
     };
     use crate::runtime_tuning::{reset_runtime_tuning_snapshot, RuntimeTuningState};
     use crate::service_guard::InteractivePriority;
+    use crate::test_support::{env_test_lock, EnvVarGuard};
     use crate::{embedding_contract::CHUNK_MODEL_ID, tests::test_helpers::create_test_db};
 
     fn host() -> HostSnapshot {
@@ -1805,6 +1806,28 @@ mod tests {
         }
     }
 
+    /// REQ-AXO-099 Phase 1 — every test that calls a function which
+    /// reads the process-global runtime tuning singleton (e.g.
+    /// build_admissible_action_profiles via current_runtime_tuning_state)
+    /// must reset the singleton to a known baseline first. Otherwise
+    /// the test inherits whatever vector_workers / chunk_batch_size /
+    /// etc. a prior test (in this module or any other) wrote.
+    fn reset_runtime_tuning_to_baseline() {
+        reset_runtime_tuning_snapshot(RuntimeTuningState {
+            vector_workers: 1,
+            graph_workers: 4,
+            chunk_batch_size: 64,
+            file_vectorization_batch_size: 8,
+            vector_ready_queue_depth: 6,
+            vector_persist_queue_bound: 2,
+            vector_max_inflight_persists: 2,
+            embed_micro_batch_max_items: 32,
+            embed_micro_batch_max_total_tokens: 8_192,
+            semantic_sleep_scale_pct: 100,
+            semantic_idle_sleep_scale_pct: 100,
+        });
+    }
+
     #[test]
     fn canonical_count_reads_writer_truth_when_reader_snapshot_is_stale() {
         let store = create_test_db().unwrap();
@@ -1835,17 +1858,18 @@ mod tests {
 
     #[test]
     fn collect_operator_policy_caps_vram_to_host_limit() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let mut host = host();
         host.vram_total_mb = 2048;
-        std::env::set_var("AXON_OPT_MAX_VRAM_USED_MB", "9999");
+        let _vram_guard = EnvVarGuard::set("AXON_OPT_MAX_VRAM_USED_MB", "9999");
         let policy = collect_operator_policy_snapshot(&host);
         assert_eq!(policy.max_vram_used_mb, 2048);
-        std::env::remove_var("AXON_OPT_MAX_VRAM_USED_MB");
     }
 
     #[test]
     fn collect_operator_policy_defaults_live_actuators_to_runtime_safe_batch_controls() {
-        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _actuators_guard = EnvVarGuard::unset("AXON_OPT_ALLOWED_ACTUATORS");
         let policy = collect_operator_policy_snapshot(&host());
         assert_eq!(
             policy.allowed_actuators,
@@ -1863,14 +1887,16 @@ mod tests {
 
     #[test]
     fn collect_operator_policy_defaults_to_short_live_evaluation_window() {
-        std::env::remove_var("AXON_OPT_EVALUATION_WINDOW_MS");
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _window_guard = EnvVarGuard::unset("AXON_OPT_EVALUATION_WINDOW_MS");
         let policy = collect_operator_policy_snapshot(&host());
         assert_eq!(policy.evaluation_window_ms, 15_000);
     }
 
     #[test]
     fn collect_operator_policy_accepts_configured_allowed_actuators() {
-        std::env::set_var(
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _actuators_guard = EnvVarGuard::set(
             "AXON_OPT_ALLOWED_ACTUATORS",
             "chunk_batch_size,file_vectorization_batch_size,vector_workers",
         );
@@ -1887,15 +1913,14 @@ mod tests {
             .allowed_actuators
             .iter()
             .all(|item| item != "vector_workers"));
-        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
     }
 
     #[test]
     fn collect_operator_policy_fails_closed_when_allowlist_filters_to_empty() {
-        std::env::set_var("AXON_OPT_ALLOWED_ACTUATORS", "vector_workers");
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _actuators_guard = EnvVarGuard::set("AXON_OPT_ALLOWED_ACTUATORS", "vector_workers");
         let policy = collect_operator_policy_snapshot(&host());
         assert!(policy.allowed_actuators.is_empty());
-        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
     }
 
     #[test]
@@ -1962,9 +1987,11 @@ mod tests {
 
     #[test]
     fn build_admissible_action_profiles_generates_local_neighbors() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        reset_runtime_tuning_to_baseline();
         let mut signals = signals();
         signals.file_vectorization_queue_depth = 256;
-        std::env::set_var(
+        let _actuators_guard = EnvVarGuard::set(
             "AXON_OPT_ALLOWED_ACTUATORS",
             "chunk_batch_size,file_vectorization_batch_size,vector_ready_queue_depth",
         );
@@ -1992,7 +2019,6 @@ mod tests {
                 usize::from(profile.target_ready_queue_depth != hold.target_ready_queue_depth);
             deltas == 1
         }));
-        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
     }
 
     #[test]
@@ -2468,6 +2494,8 @@ mod tests {
 
     #[test]
     fn admissible_action_profiles_do_not_mutate_vector_workers_when_not_allowed() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        reset_runtime_tuning_to_baseline();
         let mut signals = signals();
         signals.file_vectorization_queue_depth = 256;
         let mut policy = policy();

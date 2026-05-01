@@ -39,6 +39,8 @@ pub mod runtime_truth_contract;
 pub mod runtime_tuning;
 pub mod runtime_watchdog;
 pub mod runtime_writer_guard;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod scanner;
 pub mod service_guard;
 pub mod vector_control;

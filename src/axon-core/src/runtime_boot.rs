@@ -829,11 +829,17 @@ mod tests {
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
-    use std::sync::{Mutex, OnceLock};
 
+    /// REQ-AXO-099 Phase 1 — delegate to the crate-wide
+    /// `test_support::env_test_lock` so runtime_boot env-mutating
+    /// tests serialize against optimizer (and any future) env-mutating
+    /// tests, not just against each other. Without this, a leak from
+    /// e.g. apply_graph_first_indexer_memory_defaults_* contaminates
+    /// optimizer::tests::* between modules.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
