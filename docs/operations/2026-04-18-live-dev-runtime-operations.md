@@ -66,33 +66,48 @@ The standard live topology is:
 Canonical command:
 
 ```bash
-./scripts/start-split.sh
+./scripts/axon-live start
 ```
 
-This is governed by `DEC-AXO-020`.
+The split topology (brain + indexer roles, dashboard) is the only supported live shape and is what `axon-live start` brings up. This is governed by `DEC-AXO-020`. The internal helper `scripts/lib/start-split.sh` is invoked by `start.sh` and is not an operator surface.
 
-## Lifecycle Commands
+## Lifecycle Commands (4-verb canonical surface, DEC-AXO-060)
+
+Daily ops use exactly **1 entrypoint + 2 aliases + 4 verbs**:
+
+```bash
+./scripts/axon [--instance live|dev] <verb>
+./scripts/axon-live <verb>
+./scripts/axon-dev <verb>
+```
+
+Verbs: `start`, `stop`, `status`, `qualify`.
 
 Start:
 
 ```bash
-./scripts/start-live.sh --full
-./scripts/start-dev.sh --full
+./scripts/axon-live start --indexer-full     # live with vectorization
+./scripts/axon-dev start --indexer-full      # dev with vectorization
+./scripts/axon-dev start --indexer-graph     # dev graph-only (no GPU)
+./scripts/axon-dev start --brain-only        # dev MCP-only
 ```
 
 Status:
 
 ```bash
-./scripts/status-live.sh
-./scripts/status-dev.sh
+./scripts/axon-live status
+./scripts/axon-dev status
 ```
 
 Stop:
 
 ```bash
-./scripts/stop-live.sh
-./scripts/stop-dev.sh
+./scripts/axon-live stop          # graceful
+./scripts/axon-dev stop --hard    # force teardown
+./scripts/axon-dev stop --verify  # confirm release of writer guards
 ```
+
+The legacy per-instance wrappers (`start-live.sh`, `start-dev.sh`, `stop-live.sh`, `stop-dev.sh`, `status-live.sh`, `status-dev.sh`) were removed in DEC-AXO-060 Phase 2. The per-role helpers (`start-brain.sh`, `start-indexer.sh`, etc.) live in `scripts/lib/` as private implementation; do not invoke them directly.
 
 ## Qualification
 
@@ -260,18 +275,18 @@ Operator sequence:
 1. Stop the split runtime cleanly:
 
 ```bash
-./scripts/stop.sh
+./scripts/axon-live stop
 ```
 
 2. Confirm the stop released both writer guards:
 
 ```bash
-./scripts/stop.sh --verify
+./scripts/axon-live stop --verify
 ```
 
 This verification is strict: it must prove both lockfiles still exist and are unlockable after shutdown.
 
-3. Reactivate the monolith explicitly:
+3. Reactivate the monolith explicitly (legacy escape hatch — not part of the 4-verb surface):
 
 ```bash
 ./scripts/start.sh --rollback-monolith
@@ -280,7 +295,7 @@ This verification is strict: it must prove both lockfiles still exist and are un
 4. Prove canonical truth and authority:
 
 ```bash
-./scripts/status.sh
+./scripts/axon-live status
 python3 scripts/qualify_runtime.py --instance dev --profile smoke --mode full --reuse-runtime
 ```
 

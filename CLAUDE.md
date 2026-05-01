@@ -42,11 +42,20 @@
 - **Sub-agents are ONLY permitted for:** shell command execution (`cargo build/test`), document writing (no source reading), and tasks explicitly independent of codebase understanding.
 - **SOLL tools** (`soll_manager`, `soll_work_plan`, `soll_query_context`) must be used for all project planning and documentation — never create standalone markdown plans.
 
-## Runtime
-- **Operator skill:** `docs/skills/axon-engineering-protocol/SKILL.md`
-- **Start:** `./scripts/axon --instance dev start` / `./scripts/axon --instance live start`
-- **Stop:** `./scripts/axon --instance dev stop`
-- **Qualify:** `./scripts/axon qualify-mcp`
+## Runtime — 4-verb canonical surface (DEC-AXO-060)
+Daily ops use exactly **1 entrypoint + 2 aliases + 4 verbs**:
+- Entrypoint: `./scripts/axon [--instance live|dev] <verb>`
+- Aliases: `./scripts/axon-live <verb>` / `./scripts/axon-dev <verb>`
+- Verbs: `start`, `stop`, `status`, `qualify`
+
+Examples:
+- `./scripts/axon-dev start --indexer-full` — start dev with vectorization
+- `./scripts/axon-live status` — check live runtime
+- `./scripts/axon-live stop --hard` — stop live, force teardown
+- `./scripts/axon qualify --profile smoke --mode graph_only` — runtime qualification (defaults to dev)
+- `./scripts/axon qualify-mcp --surface core --checks quality,latency` — MCP-surface qualification
+
+Operator skill (full reference): `docs/skills/axon-engineering-protocol/SKILL.md`.
 
 ## Data Policy
 - **SOLL:** NEVER delete. Intentional truth (visions, requirements, decisions). Use `soll_rollback_revision` if needed.

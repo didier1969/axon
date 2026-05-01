@@ -168,8 +168,8 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
 Vérification opératoire rapide:
 
 ```bash
-./scripts/status-live.sh
-./scripts/status-dev.sh
+./scripts/axon-live status
+./scripts/axon-dev status
 ./scripts/axon qualify --profile smoke --mode graph_only
 ./scripts/axon-live qualify-mcp --surface core --checks quality --project AXO
 ./scripts/axon-dev qualify-mcp --surface core --checks quality --project AXO

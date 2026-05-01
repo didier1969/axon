@@ -34,7 +34,7 @@ Note: `project_code` is auto-resolved when omitted:
 Truth hierarchy:
 - MCP `status` = runtime/protocol truth
 - `project_status` = compact project truth
-- `scripts/status*.sh` = local lifecycle probe only
+- `./scripts/axon-live status` / `./scripts/axon-dev status` = local lifecycle probe only
 - `README` / docs = supporting context, not runtime truth
 
 ## Runtime Model
@@ -394,26 +394,25 @@ Promotion truth:
 - live restart
 - MCP runtime identity match
 - final `qualify-mcp`
-- final `status-live.sh`
+- final `axon-live status`
 
 Fail closed if `HEAD` changes during the one-shot release sequence.
 
 ## Qualification
-Prefer:
-- `./scripts/axon qualify-mcp`
-- `./scripts/axon qualify ...`
+Use:
+- `./scripts/axon qualify ...` — runtime qualification (defaults to dev)
+- `./scripts/axon qualify-mcp ...` — MCP-surface qualification (core/SOLL)
 
-Treat older entrypoints such as:
-- `quality-mcp`
-- `validate-mcp`
-- `measure-mcp`
-- `compare-mcp`
-- `robustness-mcp`
-- `qualify-guidance`
+Removed in DEC-AXO-060 Phase 3 (no longer dispatched):
+- `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`
+- `qualify-guidance`, `qualify-guidance-live`
+- `qualify-dev-cold`, `qualify-dev-indexer-cold`, `qualify-dev-indexer-tensorrt-cold`, `build-and-qualify-tensorrt-cold`
+- `reset-dev-baseline`, `reset-dev-indexer-baseline`
+- `upgrade-topology`
 
-as internal or compatibility flows.
+Their behaviour folds into `qualify --profile <smoke|core|soll|latency|robustness|compare>` plus flags such as `--mode cold|warm`, `--tensorrt`, `--sweep` (Phase 4 — REQ-AXO-113 — completes the cold/reset folding; until then, the underlying `.sh` files remain on disk but are not reachable through the operator surface).
 
-Use `./scripts/axon --instance live qualify ...` only when you intentionally assess promoted `live`.
+Use `./scripts/axon-live qualify ...` (or `--instance live`) only when you intentionally assess promoted `live`.
 
 ## Derived Docs
 Derived docs are reading surfaces, not canonical truth.
