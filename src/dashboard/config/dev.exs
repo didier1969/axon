@@ -11,7 +11,7 @@ config :axon_dashboard, AxonDashboardWeb.Endpoint,
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {0, 0, 0, 0}],
   check_origin: false,
-  code_reloader: true,
+  code_reloader: false,
   debug_errors: true,
   secret_key_base: "9goHzbAlJOE1YJBZsH2rZP6dZ8xHFxQWHyt9zRQusARsCENnMsEm0ZIlO6ZK8W7A",
   watchers: [

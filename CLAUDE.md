@@ -36,8 +36,26 @@
 | SOLL intent | `soll_query_context` |
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
 
+## Sub-Agent Policy (MANDATORY)
+- **NEVER** spawn sub-agents (Agent tool) for code exploration, symbol lookup, architecture audit, or codebase understanding. Sub-agents cannot access MCP tools — they fall back to raw file reads, consuming 100-200K tokens to reconstruct what Axon IST already knows.
+- **USE Axon MCP** from the main thread for all code intelligence: `query` → `inspect` → `retrieve_context` → `impact` → `anomalies` → `architectural_drift`.
+- **Sub-agents are ONLY permitted for:** shell command execution (`cargo build/test`), document writing (no source reading), and tasks explicitly independent of codebase understanding.
+- **SOLL tools** (`soll_manager`, `soll_work_plan`, `soll_query_context`) must be used for all project planning and documentation — never create standalone markdown plans.
+
 ## Runtime
 - **Operator skill:** `docs/skills/axon-engineering-protocol/SKILL.md`
 - **Start:** `./scripts/axon --instance dev start` / `./scripts/axon --instance live start`
 - **Stop:** `./scripts/axon --instance dev stop`
 - **Qualify:** `./scripts/axon qualify-mcp`
+
+## Data Policy
+- **SOLL:** NEVER delete. Intentional truth (visions, requirements, decisions). Use `soll_rollback_revision` if needed.
+- **IST (dev):** Delete freely. Rebuilt by indexer from source files.
+- **IST (live):** Delete ONLY on explicit user request. Serves MCP clients.
+
+## Deployment Pipeline (MANDATORY)
+- **NEVER** manually `cargo build --release` + copy binaries to `bin/`. Always use the promotion pipeline.
+- **Dev → Live promotion:** `bash scripts/release/promote_live_safe.sh --project AXO`
+- **Rollback:** `bash scripts/release/rollback_live.sh`
+- **Dev builds:** `cargo build` (debug, to `.axon/cargo-target/debug/`)
+- **Live binaries:** Installed by `promote_live.sh` to `bin/` (release builds)
