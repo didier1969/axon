@@ -197,14 +197,132 @@ impl McpServer {
             );
         }
 
+        // REQ-AXO-043 / REQ-AXO-026 — every public MCP tool must surface
+        // recovery for empty/rejected results in the LLM-visible `content`
+        // field, not buried in `data.artifact_diagnostics`. Previously the
+        // tool returned "Attached 0" with no recovery hint when all artifacts
+        // were rejected (observed 2026-05-01 by Claude Sonnet 4.7 session).
+        let total = artifacts.len();
+        let status_str = if total == 0 {
+            "no_artifacts"
+        } else if attached == total {
+            "ok"
+        } else if attached == 0 {
+            "rejected_all"
+        } else {
+            "partial"
+        };
+
+        let primary_reason = artifact_diagnostics
+            .iter()
+            .filter_map(|d| d.get("reasons").and_then(|r| r.as_array()))
+            .flatten()
+            .filter_map(|r| r.as_str())
+            .find(|r| *r != "traceability_inserted" && *r != "matched_indexed_file"
+                && *r != "normalized_relative_project_path"
+                && *r != "resolved_existing_project_file"
+                && *r != "resolved_existing_absolute_file")
+            .map(str::to_string);
+
+        let next_action = match status_str {
+            "ok" => None,
+            "no_artifacts" => Some(
+                "supply at least one artifact object in the `artifacts` array".to_string(),
+            ),
+            _ => match primary_reason.as_deref() {
+                Some("missing_artifact_ref") => Some(
+                    "each artifact needs an `artifact_ref` (or `path` / `file_path` / `uri` alias)".to_string(),
+                ),
+                Some("artifact_type_not_allowed_for_entity") => Some(format!(
+                    "use one of the accepted_artifact_schema values for {}: {:?}",
+                    normalized_entity_type, accepted_schema
+                )),
+                Some("path_not_resolvable") => Some(
+                    "artifact path does not resolve under the project root and is not absolute"
+                        .to_string(),
+                ),
+                Some("traceability_insert_failed") => Some(
+                    "graph_store insert failed; check Traceability schema and DB availability"
+                        .to_string(),
+                ),
+                Some(reason) => Some(format!(
+                    "primary rejection reason: `{}`; see artifact_diagnostics for per-artifact detail",
+                    reason
+                )),
+                None => Some(
+                    "review `artifact_diagnostics` for per-artifact rejection reasons".to_string(),
+                ),
+            },
+        };
+
+        let problem_class = match status_str {
+            "ok" => "ok",
+            "no_artifacts" => "input_empty",
+            "rejected_all" => "input_invalid",
+            "partial" => "partial_input_invalid",
+            _ => "unknown",
+        };
+
+        let next_best_actions: Vec<String> = match status_str {
+            "ok" => Vec::new(),
+            _ => match next_action.clone() {
+                Some(action) => vec![action],
+                None => Vec::new(),
+            },
+        };
+
+        let operator_guidance = json!({
+            "problem_class": problem_class,
+            "likely_cause": primary_reason.clone().unwrap_or_else(|| "all_artifacts_accepted".to_string()),
+            "next_best_actions": next_best_actions,
+            "confidence": "high",
+        });
+
+        let content_text = match status_str {
+            "ok" => format!(
+                "Attached {} evidence item(s) to {}:{}",
+                attached, entity_type, entity_id
+            ),
+            "no_artifacts" => format!(
+                "Attached 0 evidence item(s) to {}:{} — `artifacts` array was empty. {}",
+                entity_type,
+                entity_id,
+                next_action.as_deref().unwrap_or("supply at least one artifact"),
+            ),
+            "rejected_all" => format!(
+                "Attached 0 of {} evidence item(s) to {}:{} — all rejected. {}",
+                total,
+                entity_type,
+                entity_id,
+                next_action.as_deref().unwrap_or("see artifact_diagnostics"),
+            ),
+            "partial" => format!(
+                "Attached {} of {} evidence item(s) to {}:{} — {} rejected. {}",
+                attached,
+                total,
+                entity_type,
+                entity_id,
+                total - attached,
+                next_action.as_deref().unwrap_or("see artifact_diagnostics"),
+            ),
+            _ => format!(
+                "Attached {} evidence item(s) to {}:{}",
+                attached, entity_type, entity_id
+            ),
+        };
+
         Some(json!({
-            "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
+            "content": [{"type":"text","text": content_text}],
             "data": {
+                "status": status_str,
                 "attached": attached,
+                "total": total,
                 "normalized_entity_type": normalize_traceability_entity_type(entity_type),
                 "accepted_artifact_schema": accepted_schema,
                 "artifact_diagnostics": artifact_diagnostics,
-                "fallback_guidance": fallback_guidance
+                "fallback_guidance": fallback_guidance,
+                "next_action": next_action,
+                "operator_guidance": operator_guidance,
             }
         }))
     }

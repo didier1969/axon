@@ -3548,6 +3548,74 @@ fn test_soll_attach_evidence_accepts_file_path_aliases_and_reports_rejections() 
             .any(|reason| reason.as_str() == Some("path_not_resolvable")),
         "{result}"
     );
+    // REQ-AXO-043 — partial result must surface a top-level status + next_action
+    assert_eq!(data["status"].as_str(), Some("partial"));
+    assert_eq!(data["total"].as_u64(), Some(2));
+    assert!(data["next_action"].as_str().is_some());
+    let problem_class = data["operator_guidance"]["problem_class"]
+        .as_str()
+        .expect("operator_guidance.problem_class");
+    assert_eq!(problem_class, "partial_input_invalid");
+}
+
+#[test]
+fn test_soll_attach_evidence_rejected_all_returns_recovery_contract() {
+    // REQ-AXO-043 — when all artifacts are rejected, the LLM-visible content
+    // must surface the failure mode AND data must include status, next_action,
+    // and operator_guidance.problem_class so the client can recover without
+    // re-reading per-artifact diagnostics.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-212a', 'Requirement', 'AXO', 'Reject-all contract', 'All-rejected attach must surface recovery', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-212a",
+                    "artifacts": [
+                        { "artifact_type": "document", "path": "docs/plans/does-not-exist-1.md" },
+                        { "artifact_type": "document", "path": "docs/plans/does-not-exist-2.md" }
+                    ]
+                }
+            })),
+            id: Some(json!(41123)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["status"].as_str(), Some("rejected_all"));
+    assert_eq!(data["attached"].as_u64(), Some(0));
+    assert_eq!(data["total"].as_u64(), Some(2));
+    assert!(
+        data["next_action"].as_str().is_some(),
+        "next_action must be set when all rejected: {result}"
+    );
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("input_invalid")
+    );
+    let actions = data["operator_guidance"]["next_best_actions"]
+        .as_array()
+        .expect("next_best_actions array");
+    assert!(!actions.is_empty(), "next_best_actions must be non-empty when rejected_all");
+
+    // The LLM-visible content text must surface the failure (not just "Attached 0")
+    let content_text = result["content"][0]["text"]
+        .as_str()
+        .expect("content text");
+    assert!(
+        content_text.contains("0 of 2") && content_text.contains("rejected"),
+        "content must surface the rejection: {content_text}"
+    );
 }
 
 #[test]

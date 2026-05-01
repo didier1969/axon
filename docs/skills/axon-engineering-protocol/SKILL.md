@@ -356,6 +356,15 @@ Typical evidence kinds:
 - `rationale`
 - `diff`
 
+Result contract (REQ-AXO-043):
+- `data.status` ∈ `ok` | `partial` | `rejected_all` | `no_artifacts`
+- `data.attached` / `data.total` — counts
+- `data.next_action` — single-string remediation hint when `status != ok`
+- `data.operator_guidance.problem_class` — `ok` | `input_empty` | `input_invalid` | `partial_input_invalid`
+- `data.operator_guidance.next_best_actions` — array of remediation steps
+- `data.artifact_diagnostics` — per-artifact reasons (always present)
+- `content[0].text` — the LLM-visible line surfaces the failure mode (never just "Attached 0")
+
 Requirement verification truth lives in:
 - `missing_dimensions`
 - `missing_dimensions_detailed`
