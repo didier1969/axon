@@ -259,58 +259,11 @@ impl McpServer {
             .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-        // REQ-AXO-043 — when the project_code does not resolve, the previous
-        // `.ok()?` swallowed the anyhow error and the MCP framework rendered
-        // "Invalid arguments", a generic message that did not tell the LLM
-        // (a) why, (b) which project codes are valid, or (c) how to recover.
-        // Surface the structured recovery contract explicitly.
+        // REQ-AXO-043 — wrong_project_scope contract via shared helper.
         let project_code = match self.resolve_project_code(project_code_input) {
             Ok(code) => code,
-            Err(err) => {
-                let registered = self
-                    .query_single_column(
-                        "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
-                    )
-                    .unwrap_or_default();
-                let registered_values: Vec<Value> = registered
-                    .iter()
-                    .map(|c| Value::from(c.clone()))
-                    .collect();
-                let next_action = if registered.is_empty() {
-                    "no projects registered yet — use axon_init_project to register one".to_string()
-                } else {
-                    format!(
-                        "use one of the registered project_codes: {}",
-                        registered.join(", ")
-                    )
-                };
-                return Some(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!(
-                            "Project `{}` not found in registry. {}",
-                            project_code_input, next_action,
-                        ),
-                    }],
-                    "isError": true,
-                    "data": {
-                        "status": "wrong_project_scope",
-                        "rejected_project_code": project_code_input,
-                        "registered_project_codes": registered_values,
-                        "underlying_error": err.to_string(),
-                        "next_action": next_action,
-                        "operator_guidance": {
-                            "problem_class": "wrong_project_scope",
-                            "likely_cause": "project_code_not_in_registry",
-                            "next_best_actions": [
-                                "retry with a registered project_code",
-                                "or call axon_init_project to register a new project",
-                            ],
-                            "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
-                            "confidence": "high",
-                        },
-                    }
-                }));
+            Err(_) => {
+                return Some(self.wrong_project_scope_response(project_code_input, "soll_query_context"));
             }
         };
         let limit = args

@@ -20,56 +20,16 @@ impl McpServer {
         // Status: ok. The LLM had no way to know its input was wrong.
         // Mirror the wrong_project_scope contract (see soll_query_context
         // and soll_work_plan).
-        if project != "*" {
-            if self.resolve_project_code(project).is_err() {
-                let registered: Vec<String> = self
-                    .graph_store
-                    .query_json(
-                        "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
-                    )
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Vec<Vec<String>>>(&s).ok())
-                    .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
-                    .unwrap_or_default();
-                let registered_values: Vec<Value> =
-                    registered.iter().map(|c| Value::from(c.clone())).collect();
-                let next_action = if registered.is_empty() {
-                    "no projects registered yet — use axon_init_project to register one"
-                        .to_string()
-                } else {
-                    format!(
-                        "use one of the registered project_codes: {}",
-                        registered.join(", ")
-                    )
-                };
-                return Some(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!(
-                            "Project `{}` not found in registry for anomalies. {}",
-                            project, next_action,
-                        ),
-                    }],
-                    "isError": true,
-                    "data": {
-                        "status": "wrong_project_scope",
-                        "rejected_project_code": project,
-                        "registered_project_codes": registered_values,
-                        "next_action": next_action,
-                        "operator_guidance": {
-                            "problem_class": "wrong_project_scope",
-                            "likely_cause": "project_code_not_in_registry",
-                            "next_best_actions": [
-                                "retry with a registered project_code",
-                                "or call axon_init_project to register a new project",
-                                "or omit `project` to scope to workspace:*",
-                            ],
-                            "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
-                            "confidence": "high",
-                        },
-                    }
-                }));
-            }
+        // REQ-AXO-043 — wrong_project_scope contract via shared helper. The
+        // anomalies tool also accepts `project="*"` (workspace), in which
+        // case validation is skipped. The workspace fallback is exposed in
+        // next_best_actions via the extras parameter.
+        if project != "*" && self.resolve_project_code(project).is_err() {
+            return Some(self.wrong_project_scope_response_with_extras(
+                project,
+                "anomalies",
+                &["or omit `project` to scope to workspace:*"],
+            ));
         }
         let mode = args.get("mode").and_then(|value| value.as_str());
         let brief_mode = mode.unwrap_or("brief") == "brief";

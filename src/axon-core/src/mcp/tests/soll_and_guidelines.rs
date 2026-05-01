@@ -623,6 +623,77 @@ fn test_soll_manager_create_returns_mutation_feedback() {
 }
 
 #[test]
+fn test_wrong_project_scope_response_helper_emits_canonical_contract() {
+    // REQ-AXO-043 — direct unit test of the shared helper introduced
+    // when consolidating four duplicated contract sites.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("BKS", Some("Booking"), Some("/tmp/booking"))
+        .unwrap();
+
+    let payload = server.wrong_project_scope_response("BAD_CODE", "test_tool");
+    assert_eq!(payload["isError"].as_bool(), Some(true));
+
+    let content = payload["content"][0]["text"]
+        .as_str()
+        .expect("content text");
+    assert!(content.contains("BAD_CODE"));
+    assert!(content.contains("test_tool"));
+
+    let data = &payload["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(data["rejected_project_code"].as_str(), Some("BAD_CODE"));
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO") && registered_strs.contains(&"BKS"),
+        "must list seeded codes: {registered_strs:?}"
+    );
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+    let actions = data["operator_guidance"]["next_best_actions"]
+        .as_array()
+        .expect("next_best_actions");
+    assert_eq!(
+        actions.len(),
+        2,
+        "base helper emits exactly 2 next_best_actions, got {}",
+        actions.len()
+    );
+
+    // Variant with extras
+    let payload2 = server.wrong_project_scope_response_with_extras(
+        "BAD",
+        "another_tool",
+        &["custom hint A", "custom hint B"],
+    );
+    let actions2 = payload2["data"]["operator_guidance"]["next_best_actions"]
+        .as_array()
+        .expect("next_best_actions");
+    assert_eq!(
+        actions2.len(),
+        4,
+        "extras variant appends 2 additional actions to the base 2"
+    );
+    let actions_text: String = actions2
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(actions_text.contains("custom hint A"));
+    assert!(actions_text.contains("custom hint B"));
+}
+
+#[test]
 fn test_axon_entrench_nuance_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — entrench_nuance previously returned a bare
     // "Entrenchment failed: ..." string when project_code was unregistered.

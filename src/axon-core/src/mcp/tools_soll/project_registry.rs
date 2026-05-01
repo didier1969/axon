@@ -366,6 +366,88 @@ impl McpServer {
         ))
     }
 
+    /// REQ-AXO-043 — shared helper for the wrong_project_scope contract.
+    /// Used by every tool that takes a `project_code` and rejects it when
+    /// the registry has no matching entry. Returns the structured error
+    /// payload (with `isError=true`, `data.status="wrong_project_scope"`,
+    /// `data.registered_project_codes`, `data.next_action`,
+    /// `data.operator_guidance.{problem_class,likely_cause,
+    /// next_best_actions,follow_up_tools,confidence}`) for the caller to
+    /// `return Some(value)` directly.
+    pub(crate) fn wrong_project_scope_response(
+        &self,
+        rejected_project_code: &str,
+        tool_name: &str,
+    ) -> serde_json::Value {
+        self.wrong_project_scope_response_with_extras(rejected_project_code, tool_name, &[])
+    }
+
+    /// Variant of [`wrong_project_scope_response`] that lets a tool append
+    /// tool-specific recovery hints to `next_best_actions` (e.g., the
+    /// anomalies tool can advise "or omit `project` to scope to workspace:*").
+    pub(crate) fn wrong_project_scope_response_with_extras(
+        &self,
+        rejected_project_code: &str,
+        tool_name: &str,
+        extra_actions: &[&str],
+    ) -> serde_json::Value {
+        let registered: Vec<String> = self
+            .graph_store
+            .query_json(
+                "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<Vec<String>>>(&s).ok())
+            .map(|rows| {
+                rows.into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let registered_values: Vec<serde_json::Value> = registered
+            .iter()
+            .map(|c| serde_json::Value::from(c.clone()))
+            .collect();
+        let next_action = if registered.is_empty() {
+            "no projects registered yet — use axon_init_project to register one".to_string()
+        } else {
+            format!(
+                "use one of the registered project_codes: {}",
+                registered.join(", ")
+            )
+        };
+        let mut next_best_actions: Vec<serde_json::Value> = vec![
+            serde_json::Value::from("retry with a registered project_code"),
+            serde_json::Value::from("or call axon_init_project to register a new project"),
+        ];
+        for extra in extra_actions {
+            next_best_actions.push(serde_json::Value::from(*extra));
+        }
+        serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Project `{}` not found in registry for {}. {}",
+                    rejected_project_code, tool_name, next_action,
+                ),
+            }],
+            "isError": true,
+            "data": {
+                "status": "wrong_project_scope",
+                "rejected_project_code": rejected_project_code,
+                "registered_project_codes": registered_values,
+                "next_action": next_action,
+                "operator_guidance": {
+                    "problem_class": "wrong_project_scope",
+                    "likely_cause": "project_code_not_in_registry",
+                    "next_best_actions": next_best_actions,
+                    "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                    "confidence": "high",
+                },
+            }
+        })
+    }
+
     pub(crate) fn axon_project_registry_lookup(
         &self,
         args: &serde_json::Value,
