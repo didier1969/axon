@@ -107,6 +107,16 @@ impl McpServer {
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
         let project_code = args.get("project_code").and_then(|v| v.as_str());
+        // REQ-AXO-043 — when project_code is supplied but unregistered,
+        // surface the structured wrong_project_scope contract via the
+        // shared helper (matches soll_query_context / soll_work_plan /
+        // anomalies / entrench_nuance) instead of a bare
+        // "Canonical project error: <anyhow>" string.
+        if let Some(code) = project_code {
+            if self.resolve_project_code(code).is_err() {
+                return Some(self.wrong_project_scope_response(code, "soll_validate"));
+            }
+        }
         let snapshot = match self.soll_completeness_snapshot(project_code) {
             Ok(snapshot) => snapshot,
             Err(e) => {

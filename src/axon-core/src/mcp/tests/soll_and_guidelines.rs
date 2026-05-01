@@ -694,6 +694,50 @@ fn test_wrong_project_scope_response_helper_emits_canonical_contract() {
 }
 
 #[test]
+fn test_axon_validate_soll_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — soll_validate now uses the shared
+    // wrong_project_scope_response helper.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_validate",
+                "arguments": { "project_code": "NEVER_REGISTERED_VVV" }
+            })),
+            id: Some(json!(43105)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("NEVER_REGISTERED_VVV")
+    );
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO"),
+        "must list seeded AXO: {registered_strs:?}"
+    );
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+}
+
+#[test]
 fn test_axon_entrench_nuance_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — entrench_nuance previously returned a bare
     // "Entrenchment failed: ..." string when project_code was unregistered.
