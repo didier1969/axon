@@ -247,7 +247,7 @@ Canonical IDs are server-owned:
 
 Rules:
 - `project_code` comes from server truth
-- `axon_init_project` assigns `project_code`
+- `axon_init_project` assigns `project_code`. The response includes `data.path_exists_on_disk` and a `data.warnings` array; when `path_exists_on_disk=false`, the warning carries `kind="path_does_not_exist_on_disk"` and the LLM-visible content paragraph instructs `mkdir -p` or re-init with the corrected path. Registration still succeeds (REQ-AXO-118 — non-blocking warning, preserves the "register a future project" use case).
 - clients reuse returned IDs
 - batch plans should use `logical_key`
 

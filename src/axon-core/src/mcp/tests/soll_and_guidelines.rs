@@ -761,6 +761,66 @@ fn test_axon_infer_soll_mutation_unknown_project_returns_recovery_contract() {
 }
 
 #[test]
+fn test_axon_init_project_warns_when_project_path_does_not_exist_on_disk() {
+    // REQ-AXO-118 — a bogus project_path (typo or imaginary directory)
+    // previously registered silently. Now the registration succeeds (legit
+    // "register a future project" use case) but data.warnings + the
+    // LLM-visible content surface the path-doesn-t-exist condition so the
+    // typo is catchable at registration time.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let bogus_path = "/path/to/definitely/does/not/exist/xyz_abc_test";
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_init_project",
+                "arguments": { "project_path": bogus_path }
+            })),
+            id: Some(json!(43108)),
+        })
+        .unwrap();
+    let result = response.result.expect("Expected result");
+
+    // Registration still succeeds (non-blocking warning)
+    assert_ne!(result["isError"].as_bool(), Some(true), "should succeed: {result}");
+    assert!(
+        result["data"]["project_code"].as_str().is_some(),
+        "should still assign a code: {result}"
+    );
+
+    // But the warning is surfaced
+    assert_eq!(
+        result["data"]["path_exists_on_disk"].as_bool(),
+        Some(false),
+        "must report path_exists_on_disk=false: {result}"
+    );
+    let warnings = result["data"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert_eq!(warnings.len(), 1, "expected exactly one warning: {warnings:?}");
+    assert_eq!(
+        warnings[0]["kind"].as_str(),
+        Some("path_does_not_exist_on_disk")
+    );
+    assert_eq!(warnings[0]["path"].as_str(), Some(bogus_path));
+    assert!(warnings[0]["next_action"].as_str().is_some());
+
+    // Content text mentions the typo / mkdir hint so a one-shot LLM read catches it
+    let content = result["content"][0]["text"].as_str().expect("content text");
+    assert!(
+        content.contains("does not currently exist on disk"),
+        "content must surface the warning: {content}"
+    );
+    assert!(
+        content.contains("mkdir") || content.contains("typo"),
+        "content must give a recovery hint: {content}"
+    );
+}
+
+#[test]
 fn test_axon_validate_soll_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — soll_validate now uses the shared
     // wrong_project_scope_response helper.

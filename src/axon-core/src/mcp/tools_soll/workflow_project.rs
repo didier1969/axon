@@ -172,6 +172,15 @@ impl McpServer {
                 }))
             }
         };
+        // REQ-AXO-118 — flag (but do not reject) project_path values that do
+        // not resolve to a real directory on disk. Earlier sessions accidentally
+        // registered bogus paths via typos and the registry silently accepted
+        // them, leading to hard-to-diagnose failures downstream when indexer/
+        // qualify tried to use the path. Surfacing the condition in
+        // data.warnings lets the LLM client (or operator) catch the typo at
+        // registration time without breaking the legitimate "register a future
+        // project" workflow.
+        let path_exists_on_disk = std::path::Path::new(project_path).is_dir();
         let project_name = match self.derive_project_name_from_path(project_path) {
             Ok(name) => name,
             Err(e) => {
@@ -263,12 +272,31 @@ impl McpServer {
         response_text
             .push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
 
+        let warnings: Vec<serde_json::Value> = if path_exists_on_disk {
+            Vec::new()
+        } else {
+            // REQ-AXO-118 — non-blocking warning surfaced in data.warnings.
+            // Also append to the LLM-visible content so a one-shot read
+            // catches the typo at registration time.
+            response_text.push_str(&format!(
+                "\n\n⚠️  project_path `{}` does not currently exist on disk. The registry entry was created anyway; if this was a typo, run `axon_init_project` again with the corrected path or `mkdir -p` the directory.",
+                project_path
+            ));
+            vec![serde_json::json!({
+                "kind": "path_does_not_exist_on_disk",
+                "path": project_path,
+                "next_action": "verify the path or `mkdir -p` before relying on this project for indexer / qualify operations"
+            })]
+        };
+
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }],
             "data": {
                 "project_code": project_code,
                 "project_name": project_name,
-                "project_path": project_path
+                "project_path": project_path,
+                "path_exists_on_disk": path_exists_on_disk,
+                "warnings": warnings
             }
         }))
     }
