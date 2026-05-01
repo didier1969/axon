@@ -150,6 +150,7 @@ Public tool contract:
 - `path` and comparable graph-flow tools should still expose canonical provenance and next-step guidance when anchors are missing
 - invalid arguments should return a micro-instruction that tells the LLM how to repair the request before retry
 - recovery hints must reflect the actual response state. `inspect` with zero suggestions must NOT advise "pick one suggested symbol"; it routes the LLM to `query` with a broader term or to verify spelling/scope (REQ-AXO-043).
+- `soll_query_context` with an unregistered `project_code` returns `data.status="wrong_project_scope"`, `data.registered_project_codes` (array of valid codes), and `data.operator_guidance.follow_up_tools=["project_registry_lookup", "axon_init_project"]` instead of the framework's generic "Invalid arguments" message (REQ-AXO-043).
 
 Search order for ordinary LLMs:
 1. follow `next_action` if the response already provides one

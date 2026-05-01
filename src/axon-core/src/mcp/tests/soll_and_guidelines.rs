@@ -623,6 +623,80 @@ fn test_soll_manager_create_returns_mutation_feedback() {
 }
 
 #[test]
+fn test_axon_soll_query_context_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — the previous .ok()? swallowed the resolve_project_code
+    // error and the framework rendered a generic "Invalid arguments". The
+    // LLM had no way to know which project_codes are registered or how to
+    // recover. Surface the structured recovery contract explicitly.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("BKS", Some("Booking"), Some("/tmp/booking"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_query_context",
+                "arguments": { "project_code": "DEFINITELY_NOT_REGISTERED" }
+            })),
+            id: Some(json!(40432)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("DEFINITELY_NOT_REGISTERED")
+    );
+
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO") && registered_strs.contains(&"BKS"),
+        "must list registered codes: {registered_strs:?}"
+    );
+
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+    let follow_up = data["operator_guidance"]["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let follow_up_strs: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_up_strs.contains(&"project_registry_lookup")
+            || follow_up_strs.contains(&"axon_init_project"),
+        "follow_up_tools must point to registry/init: {follow_up_strs:?}"
+    );
+
+    let content = result["content"][0]["text"]
+        .as_str()
+        .expect("content text");
+    assert!(
+        content.contains("DEFINITELY_NOT_REGISTERED"),
+        "content must echo the rejected code: {content}"
+    );
+    assert!(
+        content.contains("AXO") || content.contains("BKS"),
+        "content must list registered codes: {content}"
+    );
+}
+
+#[test]
 fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
     // REQ-AXO-092 — schema enum advertises `guideline` but the create branch
     // previously rejected it as "Unknown entity", forcing LLMs toward cypher
