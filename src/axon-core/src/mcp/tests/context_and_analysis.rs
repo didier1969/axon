@@ -3852,6 +3852,69 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_inspect_unknown_symbol_with_no_suggestions_recommends_widening() {
+    // REQ-AXO-043 — when no suggestions can be produced, the next_action /
+    // remediation_actions must NOT say "pick one suggested symbol" because
+    // there is nothing to pick from. They must steer the LLM toward
+    // widening the search instead.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "inspect",
+            "arguments": {
+                "symbol": "completely_made_up_symbol_xyz_abc_123",
+            }
+        })),
+        id: Some(json!(50431)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(false));
+
+    let suggestions = data["suggestions"].as_array().expect("suggestions array");
+    assert!(suggestions.is_empty(), "preconditions: no suggestions for nonsense symbol");
+
+    let next_action_kind = data["next_action"]["kind"].as_str().unwrap_or("");
+    assert_eq!(
+        next_action_kind, "broaden_search",
+        "empty-suggestions case must route to broaden_search, not pick_canonical_symbol"
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
+
+    let remediation = data["operator_guidance"]["remediation_actions"]
+        .as_array()
+        .expect("remediation_actions array");
+    let remediation_text: String = remediation
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        !remediation_text.contains("pick one suggested"),
+        "must not advise picking a suggestion when none exist: {remediation_text}"
+    );
+    assert!(
+        remediation_text.contains("query") || remediation_text.contains("broaden") || remediation_text.contains("spelling"),
+        "must steer toward widening/spelling: {remediation_text}"
+    );
+
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        !content.contains("- pick one suggested symbol"),
+        "report must not list 'pick one suggested symbol' when none exist: {content}"
+    );
+}
+
+#[test]
 fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let _guard = env_lock();
     unsafe {

@@ -1064,6 +1064,24 @@ impl McpServer {
                 self.project_scope_truth_note(project).unwrap_or_default(),
                 format_table_from_json(&suggestions, &["Suggested symbol", "Type", "Project"])
             );
+            // REQ-AXO-043 — when the suggestions table is empty, the action
+            // "pick one suggested symbol" is unactionable because there is
+            // nothing to pick from. Tailor the recovery hints to the actual
+            // state of suggestions so the LLM does not waste a turn on a
+            // dead-end instruction.
+            let has_suggestions = !suggestion_rows.is_empty();
+            let next_actions: &[&str] = if has_suggestions {
+                &[
+                    "pick one suggested symbol",
+                    "or pass the exact canonical symbol id",
+                ]
+            } else {
+                &[
+                    "broaden the search via `query` with a less specific term",
+                    "verify spelling and project scope",
+                    "or pass the exact canonical symbol id",
+                ]
+            };
             let report = format!(
                 "### 🔍 Symbol Inspection : {}\n\n{}",
                 symbol,
@@ -1072,10 +1090,7 @@ impl McpServer {
                     "symbol not found in current scope",
                     &scope,
                     &evidence_by_mode(&evidence, mode),
-                    &[
-                        "pick one suggested symbol",
-                        "or pass the exact canonical symbol id"
-                    ],
+                    next_actions,
                     "low",
                 )
             );
@@ -1084,11 +1099,38 @@ impl McpServer {
                 .filter_map(|row| row.first().and_then(Value::as_str))
                 .map(|value| Value::from(value.to_string()))
                 .collect::<Vec<_>>();
+            let recommended_action = if has_suggestions {
+                "pick one suggested canonical symbol or retry with the exact canonical symbol id"
+            } else {
+                "broaden the search via `query` with a less specific term, or verify spelling and project scope"
+            };
             let blocking_factors = vec![json!({
                 "factor": "symbol_not_found_in_scope",
                 "severity": "high",
-                "recommended_action": "pick one suggested canonical symbol or retry with the exact canonical symbol id"
+                "recommended_action": recommended_action
             })];
+            let remediation_actions: Vec<Value> = if has_suggestions {
+                vec![Value::from(
+                    "pick one suggested canonical symbol or retry with the exact canonical symbol id",
+                )]
+            } else {
+                vec![
+                    Value::from("broaden the search via `query` with a less specific term"),
+                    Value::from("verify spelling and project scope"),
+                    Value::from("or pass the exact canonical symbol id"),
+                ]
+            };
+            let next_action_kind = if has_suggestions {
+                "pick_canonical_symbol"
+            } else {
+                "broaden_search"
+            };
+            let next_action_tool = if has_suggestions { "inspect" } else { "query" };
+            let next_action_when = if has_suggestions {
+                "after_selecting_a_suggestion"
+            } else {
+                "after_widening_or_correcting_the_search"
+            };
             let response = json!({
                 "content": [{ "type": "text", "text": report }],
                 "data": {
@@ -1099,20 +1141,18 @@ impl McpServer {
                     "operator_guidance": {
                         "actionable_now": false,
                         "blocking_factors": blocking_factors,
-                        "remediation_actions": [
-                            "pick one suggested canonical symbol or retry with the exact canonical symbol id"
-                        ],
-                        "follow_up_tools": ["query", "inspect"],
+                        "remediation_actions": remediation_actions,
+                        "follow_up_tools": if has_suggestions { vec!["inspect"] } else { vec!["query", "inspect"] },
                         "next_action": {
-                            "kind": "pick_canonical_symbol",
-                            "tool": "inspect",
-                            "when": "after_selecting_a_suggestion"
+                            "kind": next_action_kind,
+                            "tool": next_action_tool,
+                            "when": next_action_when
                         }
                     },
                     "next_action": {
-                        "kind": "pick_canonical_symbol",
-                        "tool": "inspect",
-                        "when": "after_selecting_a_suggestion"
+                        "kind": next_action_kind,
+                        "tool": next_action_tool,
+                        "when": next_action_when
                     }
                 }
             });
