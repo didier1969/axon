@@ -1,6 +1,14 @@
 use crate::graph::GraphStore;
 use anyhow::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+pub fn embedder_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

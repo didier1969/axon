@@ -12,6 +12,7 @@ mod tests {
 
     #[test]
     fn embedder_gpu_backend_public_surface_reports_missing_cuda_provider_binary() {
+        let _guard = crate::tests::test_helpers::embedder_env_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let ort_dir = tempdir.path().join("lib");
         std::fs::create_dir_all(&ort_dir).expect("create ort dir");

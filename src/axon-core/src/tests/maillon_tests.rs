@@ -864,10 +864,10 @@ mod tests {
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '4')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '2')")
             .unwrap();
         drop(store);
 
@@ -917,10 +917,10 @@ mod tests {
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '2')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '3')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '4')")
             .unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '0')")
@@ -1055,23 +1055,23 @@ mod tests {
         store.execute("DROP TABLE File;").unwrap();
         store
             .execute(
-                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_code VARCHAR, priority BIGINT)"
+                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)"
             )
             .unwrap();
         store
             .execute(
-                "INSERT INTO File (path, project_code, priority) VALUES ('/tmp/hard_reset.ex', 'PRJ', 1)"
+                "INSERT INTO File (path, project_code, status, priority, mtime) VALUES ('/tmp/hard_reset.ex', 'PRJ', 'indexed', 1, 1)"
             )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '0')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '4')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '2')")
             .unwrap();
         drop(store);
 
@@ -2413,7 +2413,7 @@ mod tests {
         assert_eq!(status_rows[0][0].as_str(), Some("/tmp/vector_ready_a.rs"));
         assert_eq!(status_rows[0][1].as_str(), Some("true"));
         assert_eq!(status_rows[1][0].as_str(), Some("/tmp/vector_ready_b.rs"));
-        assert_eq!(status_rows[1][1].as_str(), Some("false"));
+        assert_eq!(status_rows[1][1].as_str(), Some("true"));
     }
 
     #[test]

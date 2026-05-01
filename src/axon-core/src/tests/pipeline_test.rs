@@ -32,6 +32,11 @@ fn test_full_pipeline_loop() {
 
     // 4. Pre-insert file into DB as pending (simulating scanner)
     println!("[TEST] Step 4: Bulk insert file...");
+    let _ = graph.sync_project_registry_entry(
+        "PRJ",
+        Some("ProjectFixture"),
+        Some(project_root.to_str().unwrap()),
+    );
     graph
         .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 100, 12345)])
         .expect("Failed to insert file");

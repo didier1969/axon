@@ -9,6 +9,7 @@ mod tests {
 
     #[test]
     fn embedder_public_provider_diagnostics_surface_reflects_runtime_env() {
+        let _guard = crate::tests::test_helpers::embedder_env_lock();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "cuda_service");
             std::env::set_var("AXON_EMBEDDING_PROVIDER_INIT_ERROR", "none");

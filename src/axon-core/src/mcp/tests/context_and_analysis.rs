@@ -1427,6 +1427,9 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         std::env::set_var("AXON_CHUNK_BATCH_SIZE", "64");
         std::env::set_var("AXON_FILE_VECTORIZATION_BATCH_SIZE", "24");
     }
+    crate::runtime_tuning::reset_runtime_tuning_snapshot(
+        crate::embedder::bootstrap_runtime_tuning_state(),
+    );
     reset_vector_batch_controller_for_tests(&embedding_lane_config_from_env());
     service_guard::record_vector_stage_ms(service_guard::VectorStageKind::Fetch, 11);
     service_guard::record_vector_stage_ms(service_guard::VectorStageKind::Embed, 22);
@@ -1498,16 +1501,16 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
     let contract = &response["data"]["embedding_contract"];
 
-    assert!(content.contains("Fichiers connus : 6"), "{content}");
-    assert!(content.contains("Backlog restant : 2"), "{content}");
-    assert!(content.contains("Pending : 1"), "{content}");
-    assert!(content.contains("Indexing : 1"), "{content}");
-    assert!(content.contains("Indexed degraded : 1"), "{content}");
-    assert!(content.contains("Oversized : 1"), "{content}");
-    assert!(content.contains("Skipped : 1"), "{content}");
-    assert!(content.contains("Stockage DuckDB"), "{content}");
+    assert!(content.contains("Known files: 6"), "{content}");
+    assert!(content.contains("Remaining backlog: 2"), "{content}");
+    assert!(content.contains("Pending: 1"), "{content}");
+    assert!(content.contains("Indexing: 1"), "{content}");
+    assert!(content.contains("Indexed degraded: 1"), "{content}");
+    assert!(content.contains("Oversized: 1"), "{content}");
+    assert!(content.contains("Skipped: 1"), "{content}");
+    assert!(content.contains("DuckDB Storage"), "{content}");
     assert!(content.contains("RSS Anon"), "{content}");
-    assert!(content.contains("Mémoire DuckDB"), "{content}");
+    assert!(content.contains("DuckDB Memory"), "{content}");
     assert!(content.contains("Ingress Buffer"), "{content}");
     assert!(
         content.contains("Graph Projection Queue Queued : 1"),
@@ -1992,7 +1995,7 @@ fn test_axon_debug_reports_top_pending_reasons() {
     let response = server.axon_debug().expect("debug response");
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
 
-    assert!(content.contains("Causes backlog dominantes"), "{content}");
+    assert!(content.contains("Top backlog causes"), "{content}");
     assert!(
         content.contains("`metadata_changed_scan`")
             || content.contains("`manual_or_system_requeue`")
@@ -2064,7 +2067,7 @@ fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
         )
         .unwrap();
 
-    let response = server.axon_status(&json!({})).expect("status response");
+    let response = server.axon_status(&json!({"mode": "full"})).expect("status response");
     let traceability = &response["data"]["traceability"];
 
     assert!(traceability["host_snapshot"].is_object());
@@ -3789,16 +3792,12 @@ fn test_axon_fs_read() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("L2 Detail") || content.contains("Erreur"));
+    assert!(content.contains("L2 Detail") || content.contains("Error"));
 }
 
 #[test]
 fn test_send_notification() {
-    let store = Arc::new(
-        GraphStore::new(":memory:")
-            .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_notif").unwrap()),
-    );
-    let server = McpServer::new(store);
+    let server = create_test_server();
     let notif = server.send_notification("notifications/tools/list_changed", None);
     assert_eq!(notif.method, "notifications/tools/list_changed");
     assert!(notif.params.is_none());
@@ -3838,7 +3837,7 @@ fn test_axon_inspect() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("Inspection du Symbole"), "{content}");
+    assert!(content.contains("Symbol Inspection"), "{content}");
     assert!(content.contains("core_func"), "{content}");
     let data = result.get("data").unwrap();
     assert_eq!(data["symbol_found"].as_bool(), Some(true));
@@ -3910,7 +3909,7 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     }
 
     assert!(content.contains("check_token_chain"));
-    assert!(content.contains("contexte derive du graphe"), "{content}");
+    assert!(content.contains("graph-derived context"), "{content}");
 }
 
 #[test]
@@ -3970,7 +3969,7 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
         std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
     }
 
-    assert!(!content.contains("contexte derive du graphe"));
+    assert!(!content.contains("graph-derived context"));
     assert!(!content.contains("check_token_chain"));
 }
 
@@ -4032,7 +4031,7 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
     }
 
     assert!(!content.contains("derive optionnel du graphe"));
-    assert!(content.contains("temporairement desactive"), "{content}");
+    assert!(content.contains("temporarily disabled"), "{content}");
 }
 
 #[test]
@@ -4129,7 +4128,7 @@ fn test_axon_audit_technical_debt() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Dette Technique"));
+    assert!(content.contains("Technical Debt"));
     assert!(content.contains("unwrap"));
     assert!(content.contains("src/danger.rs"));
 }
@@ -4170,7 +4169,7 @@ fn test_axon_audit_technical_debt_comments() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Dette Technique"));
+    assert!(content.contains("Technical Debt"));
     assert!(content.contains("TODO"));
     assert!(content.contains("Fix this"));
 }
@@ -4209,7 +4208,7 @@ fn test_axon_audit_secrets_detection() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Dette Technique"));
+    assert!(content.contains("Technical Debt"));
     assert!(content.contains("SECRET_API_KEY"));
     assert!(content.contains("hardcoded credential"));
 }
@@ -4370,7 +4369,7 @@ fn test_axon_audit_respects_project_scope() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Sécurité : 100/100"), "{}", content);
+    assert!(content.contains("Security: 100/100"), "{}", content);
     assert!(!content.contains("beta_entry"), "{}", content);
     assert!(!content.contains("eval"), "{}", content);
 }
@@ -4501,7 +4500,7 @@ fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_nam
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Audit de Conformité : PJA"));
+    assert!(content.contains("Compliance Audit: PJA"));
     assert!(content.contains("eval"));
     assert!(!content.contains("seems unindexed"));
 }
