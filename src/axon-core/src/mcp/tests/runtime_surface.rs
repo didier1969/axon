@@ -1073,6 +1073,98 @@ fn test_brain_only_retrieve_context_does_not_return_tool_unavailable() {
 }
 
 #[test]
+fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
+    // REQ-AXO-089 — when `project` arg is omitted, retrieve_context
+    // must auto-resolve from AXON_PROJECT_ROOT (or cwd) by matching
+    // against ProjectCodeRegistry, like the global CLAUDE.md promises
+    // ("project_code is auto-resolved from your working directory").
+    // Previously the tool fell through to workspace:* whenever the
+    // caller skipped the arg, making answers from inside a project
+    // directory look workspace-wide.
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "AXO",
+            Some("axon"),
+            Some("/home/test/axon-cwd-fixture"),
+        )
+        .unwrap();
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axon-cwd-fixture");
+    }
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": { "question": "where is missing_symbol defined" }
+            })),
+            id: Some(json!(89001)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        content.contains("project:AXO") || content.contains("Scope:** `project:AXO`"),
+        "scope must be project:AXO when AXON_PROJECT_ROOT matches a registered project; got: {content}"
+    );
+    assert!(
+        !content.contains("workspace:*"),
+        "scope must NOT fall through to workspace:* once auto-resolution succeeds; got: {content}"
+    );
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+#[test]
+fn test_retrieve_context_falls_back_to_workspace_when_cwd_unmatched() {
+    // REQ-AXO-089 — when AXON_PROJECT_ROOT doesn't match any
+    // registered project, retrieve_context must fall back to
+    // workspace:* rather than fail or invent a code. This preserves
+    // the historic behaviour for callers running from outside any
+    // registered project (e.g., a fresh worktree or a temp dir).
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "AXO",
+            Some("axon"),
+            Some("/home/test/axon-cwd-fixture"),
+        )
+        .unwrap();
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/tmp/unrelated-path");
+    }
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": { "question": "anything goes here" }
+            })),
+            id: Some(json!(89002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        content.contains("workspace:*"),
+        "scope must fall back to workspace:* when cwd does not match any registered project; got: {content}"
+    );
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+#[test]
 fn test_retrieve_context_empty_question_returns_recovery_contract() {
     // REQ-AXO-043 — empty `question` previously returned a bare error
     // string with no operator_guidance, no next_action, and no example.

@@ -990,27 +990,43 @@ impl McpServer {
     /// Returns the code if exactly one project matches, null otherwise.
     /// Uses AXON_PROJECT_ROOT (set by runtime scripts) first, then falls back to cwd.
     fn auto_detect_project_code_from_cwd(&self) -> Value {
+        match self.auto_resolve_project_code_str() {
+            Some(code) => json!(code),
+            None => Value::Null,
+        }
+    }
+
+    /// REQ-AXO-089 — same logic as `auto_detect_project_code_from_cwd` but
+    /// returns `Option<String>` for callers that want a borrowable code
+    /// without unwrapping a `Value`. Used by IST/DX tools (retrieve_context,
+    /// query, inspect, ...) when the caller omits `project` so the response
+    /// scope matches the project the user is actually working in instead of
+    /// the workspace fallback. `query_json` emits array-of-arrays rows
+    /// (one inner array per row, one element per selected column) — the
+    /// surrounding code reads only the first column so that's what we
+    /// extract.
+    pub(crate) fn auto_resolve_project_code_str(&self) -> Option<String> {
         let search_path = std::env::var("AXON_PROJECT_ROOT")
             .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
             .unwrap_or_default()
             .replace('\'', "''");
         if search_path.is_empty() {
-            return Value::Null;
+            return None;
         }
-        if let Ok(json_str) = self.graph_store.query_json(&format!(
+        let json_str = self.graph_store.query_json(&format!(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
             search_path, search_path
-        )) {
-            if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json_str) {
-                let codes: Vec<&str> = rows
-                    .iter()
-                    .filter_map(|row| row.get("project_code").and_then(Value::as_str))
-                    .collect();
-                if codes.len() == 1 {
-                    return json!(codes[0]);
-                }
-            }
+        )).ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&json_str).ok()?;
+        let codes: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if codes.len() == 1 {
+            Some(codes.into_iter().next().unwrap())
+        } else {
+            None
         }
-        Value::Null
     }
 }

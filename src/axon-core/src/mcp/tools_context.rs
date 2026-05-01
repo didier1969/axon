@@ -144,7 +144,22 @@ impl McpServer {
 
         let mode = args.get("mode").and_then(|value| value.as_str());
         let prefer_project_intent = Self::prefer_project_intent(question, mode);
-        let project = args.get("project").and_then(|value| value.as_str());
+        // REQ-AXO-089 — when `project` is omitted, auto-resolve from
+        // AXON_PROJECT_ROOT or cwd by matching against the registry. The
+        // global CLAUDE.md promises "project_code is auto-resolved from
+        // your working directory" but retrieve_context previously fell
+        // through to workspace:* whenever the caller skipped the arg,
+        // which made answers from inside a project directory look
+        // workspace-wide. The auto-resolution only applies when exactly
+        // one registered project matches the cwd; ambiguous matches
+        // fall back to workspace:*.
+        let explicit_project = args.get("project").and_then(|value| value.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let project = explicit_project.or(auto_project.as_deref());
         let project_scope_variants = Self::project_scope_variants(project);
         let token_budget = args
             .get("token_budget")
