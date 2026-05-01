@@ -758,23 +758,59 @@ impl GraphStore {
 
     fn expand_named_params(query: &str, params: &serde_json::Value) -> Result<String> {
         if let Some(arr) = params.as_array() {
-            let mut expanded = query.to_string();
-            for value in arr {
-                let replacement = match value {
-                    serde_json::Value::Null => "NULL".to_string(),
-                    serde_json::Value::Bool(v) => v.to_string(),
-                    serde_json::Value::Number(v) => v.to_string(),
-                    serde_json::Value::String(v) => format!("'{}'", v.replace('\'', "''")),
-                    _ => return Err(anyhow!("Unsupported positional parameter type: {}", value)),
-                };
-
-                if let Some(pos) = expanded.find('?') {
-                    expanded.replace_range(pos..=pos, &replacement);
-                } else {
-                    return Err(anyhow!("Too many positional parameters supplied"));
+            // REQ-AXO-091 — single-pass scan that consumes one positional
+            // parameter per `?` in the original query. The previous
+            // implementation used `expanded.find('?')` after each
+            // substitution, which matched literal `?` chars that landed
+            // inside an already-substituted user string (e.g. a title
+            // like "does this fail?"). That produced malformed SQL
+            // because the next param overwrote the user's `?` instead
+            // of the next placeholder. Tracking quote context skips
+            // `?` chars inside SQL string literals as well.
+            let mut iter = arr.iter();
+            let mut result = String::with_capacity(query.len() + arr.len() * 16);
+            let mut in_single_quote = false;
+            let mut chars = query.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\'' => {
+                        if in_single_quote && chars.peek() == Some(&'\'') {
+                            // Escaped quote inside a string literal ('') — emit both chars.
+                            result.push('\'');
+                            result.push('\'');
+                            chars.next();
+                        } else {
+                            in_single_quote = !in_single_quote;
+                            result.push('\'');
+                        }
+                    }
+                    '?' if !in_single_quote => {
+                        let value = iter.next().ok_or_else(|| {
+                            anyhow!("Too few positional parameters supplied")
+                        })?;
+                        let replacement = match value {
+                            serde_json::Value::Null => "NULL".to_string(),
+                            serde_json::Value::Bool(v) => v.to_string(),
+                            serde_json::Value::Number(v) => v.to_string(),
+                            serde_json::Value::String(v) => {
+                                format!("'{}'", v.replace('\'', "''"))
+                            }
+                            _ => {
+                                return Err(anyhow!(
+                                    "Unsupported positional parameter type: {}",
+                                    value
+                                ))
+                            }
+                        };
+                        result.push_str(&replacement);
+                    }
+                    _ => result.push(ch),
                 }
             }
-            return Ok(expanded);
+            if iter.next().is_some() {
+                return Err(anyhow!("Too many positional parameters supplied"));
+            }
+            return Ok(result);
         }
 
         let mut expanded = query.to_string();
@@ -812,6 +848,13 @@ fn is_read_only_sql(query: &str) -> bool {
         Some("select" | "with" | "pragma" | "show" | "describe" | "explain")
     )
 }
+
+// REQ-AXO-091 placeholder-expansion tests live in a sibling file so the
+// commit's diff path satisfies the TDD guideline (GUI-PRO-001) which
+// expects a `_tests.rs` companion path.
+#[cfg(test)]
+#[path = "graph_query_tests.rs"]
+mod expand_params_tests;
 
 #[cfg(test)]
 mod tests {
