@@ -32,7 +32,7 @@ logs/
 # Rust & Build Artifacts
 target/
 src/axon-core/target/
-bin/
+/bin/
 .fastembed_cache/
 
 # Misplaced generated SOLL exports
