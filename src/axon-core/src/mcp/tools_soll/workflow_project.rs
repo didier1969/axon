@@ -162,6 +162,94 @@ impl McpServer {
         }
     }
 
+    // REQ-AXO-119 — kickoff bundle helpers. axon_init_project now returns
+    // a stable bundle on every call (first-init AND re-init) so an LLM
+    // that has only Axon MCP access can call axon_init_project once and
+    // have everything it needs to begin productive work without
+    // re-discovering the bootstrap protocol from scratch.
+
+    fn read_soll_node_description(&self, id: &str) -> Option<String> {
+        let escaped = escape_sql(id);
+        let raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT description FROM soll.main.Node WHERE id = '{}'",
+                escaped
+            ))
+            .ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
+        rows.into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn cold_start_entry_points() -> serde_json::Value {
+        serde_json::json!([
+            { "step": 1, "kind": "file", "target": "~/.claude/CLAUDE.md", "purpose": "cross-project standing rules" },
+            { "step": 2, "kind": "file", "target": "<project_root>/CLAUDE.md", "purpose": "project-specific discipline" },
+            { "step": 3, "kind": "file", "target": "<persistent_memory>/MEMORY.md", "purpose": "accumulated session memory and active handoff pointer" },
+            { "step": 4, "kind": "mcp", "target": "mcp__axon__help", "purpose": "confirm MCP reachable, return Axon identity and tool routing" },
+            { "step": 5, "kind": "mcp", "target": "mcp__axon__status mode=brief", "purpose": "runtime instance, profile, freshness, vector backlog" },
+            { "step": 6, "kind": "cypher", "target": "SELECT id, title, description FROM soll.main.Node WHERE project_code = '<CODE>' AND type = 'Vision'", "purpose": "project Vision in full" },
+            { "step": 7, "kind": "cypher", "target": "SELECT id, title, description FROM soll.main.Node WHERE project_code = '<CODE>' AND type = 'Pillar' ORDER BY id", "purpose": "every Pillar description in full" },
+            { "step": 8, "kind": "cypher", "target": "SELECT id, title FROM soll.main.Node WHERE project_code = '<CODE>' AND type IN ('Decision','Milestone') AND status IN ('accepted','delivered','completed') ORDER BY id DESC LIMIT 30", "purpose": "already-completed work" },
+            { "step": 9, "kind": "mcp", "target": "mcp__axon__soll_validate project_code=<CODE>", "purpose": "current SOLL invariant violations (target zero)" },
+            { "step": 10, "kind": "mcp", "target": "mcp__axon__soll_work_plan project_code=<CODE> format=brief top=5 limit=15", "purpose": "scored topological order of unblockers; wave 1 score is authoritative" }
+        ])
+    }
+
+    fn default_methodology_summary() -> &'static str {
+        "Observe -> Log to SOLL -> Link to Pillar/Concept -> Re-plan via soll_work_plan -> Execute the highest-score wave-1 unblocker. Repeat. Interrupt the user only for destructive irreversible actions, architectural decisions needing human authority, hard blockers, or external-impact milestones (deploy/release/fix unblocking another human). Canonical reference: CPT-AXO-019 in soll.main.Node."
+    }
+
+    fn default_kickoff_prompt() -> &'static str {
+        "Bootstrap prompt seed not yet in SOLL. Run mcp__axon__cypher with SELECT description FROM soll.main.Node WHERE id = 'DEC-PRO-001' once it is seeded. In the meantime, follow entry_points in the bundle in order, then enter the operational loop in methodology_summary."
+    }
+
+    fn find_active_handoff(project_path: &str) -> Option<String> {
+        let dir = std::path::Path::new(project_path).join("docs").join("working-notes");
+        if !dir.is_dir() {
+            return None;
+        }
+        let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_string_lossy().to_string();
+                // Match docs/working-notes/<date>-handoff-*.md pattern.
+                if !name.ends_with(".md") || !name.contains("-handoff-") {
+                    return None;
+                }
+                let mtime = entry.metadata().ok()?.modified().ok()?;
+                Some((mtime, path))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates
+            .into_iter()
+            .next()
+            .map(|(_, path)| path.to_string_lossy().to_string())
+    }
+
+    fn axon_init_project_bundle(&self, project_path: &str) -> serde_json::Value {
+        let kickoff_prompt = self
+            .read_soll_node_description("DEC-PRO-001")
+            .unwrap_or_else(|| Self::default_kickoff_prompt().to_string());
+        let methodology_summary = self
+            .read_soll_node_description("CPT-AXO-019")
+            .unwrap_or_else(|| Self::default_methodology_summary().to_string());
+        serde_json::json!({
+            "kickoff_prompt": kickoff_prompt,
+            "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
+            "methodology_summary": methodology_summary,
+            "methodology_summary_source": "soll://Node/CPT-AXO-019",
+            "entry_points": Self::cold_start_entry_points(),
+            "active_handoff": Self::find_active_handoff(project_path),
+        })
+    }
+
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let project_path = match args.get("project_path").and_then(|value| value.as_str()) {
             Some(path) if !path.trim().is_empty() => path.trim(),
@@ -289,6 +377,14 @@ impl McpServer {
             })]
         };
 
+        // REQ-AXO-119 — append the kickoff bundle pointer to the
+        // human-readable response so an LLM scanning content alone
+        // sees that the structured bundle is available in data.
+        let bundle = self.axon_init_project_bundle(project_path);
+        response_text.push_str(
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, active_handoff). Use it to onboard yourself or any future LLM session before doing project-specific work.",
+        );
+
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }],
             "data": {
@@ -296,7 +392,8 @@ impl McpServer {
                 "project_name": project_name,
                 "project_path": project_path,
                 "path_exists_on_disk": path_exists_on_disk,
-                "warnings": warnings
+                "warnings": warnings,
+                "kickoff_bundle": bundle
             }
         }))
     }

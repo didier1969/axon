@@ -4880,6 +4880,118 @@ fn test_axon_init_project_returns_global_guidelines() {
     );
 }
 
+// REQ-AXO-119 — axon_init_project must return a stable kickoff bundle
+// (kickoff_prompt, methodology_summary, entry_points, active_handoff)
+// on every call so an LLM with only Axon MCP access can onboard
+// itself in one round-trip without having to re-discover the
+// bootstrap protocol or the project's reading order.
+
+#[test]
+fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": { "project_path": "/home/dstadel/projects/BookingSystem" }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let bundle = result["data"]["kickoff_bundle"].as_object().expect(
+        "first init must return a kickoff_bundle in data",
+    );
+    assert!(bundle.contains_key("kickoff_prompt"));
+    assert!(bundle.contains_key("methodology_summary"));
+    assert!(bundle.contains_key("entry_points"));
+    assert!(bundle.contains_key("active_handoff"));
+    let entry_points = bundle["entry_points"]
+        .as_array()
+        .expect("entry_points must be an array");
+    assert!(
+        entry_points.len() >= 8,
+        "entry_points must list the cold-start reading order; got {} steps",
+        entry_points.len()
+    );
+    // Verify the four canonical kinds are represented.
+    let kinds: std::collections::HashSet<&str> = entry_points
+        .iter()
+        .filter_map(|e| e.get("kind").and_then(|v| v.as_str()))
+        .collect();
+    assert!(kinds.contains("file"), "entry_points must include `file` steps: {kinds:?}");
+    assert!(kinds.contains("mcp"), "entry_points must include `mcp` steps: {kinds:?}");
+    assert!(kinds.contains("cypher"), "entry_points must include `cypher` steps: {kinds:?}");
+
+    let content = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        content.contains("Kickoff bundle"),
+        "content must point to the bundle: {content}"
+    );
+}
+
+#[test]
+fn test_axon_init_project_returns_identical_bundle_on_re_init() {
+    let server = create_test_server();
+    let args = serde_json::json!({ "project_path": "/home/dstadel/projects/BookingSystem" });
+    let make_req = |id: u64| serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": { "name": "axon_init_project", "arguments": args },
+        "id": id
+    });
+    let first = server
+        .handle_request(serde_json::from_value(make_req(1)).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+    let second = server
+        .handle_request(serde_json::from_value(make_req(2)).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+    // Both calls must return the same project_code.
+    assert_eq!(first["data"]["project_code"], second["data"]["project_code"]);
+    // The kickoff bundle must be present and equivalent on both calls.
+    let b1 = &first["data"]["kickoff_bundle"];
+    let b2 = &second["data"]["kickoff_bundle"];
+    assert!(b1.is_object() && b2.is_object());
+    assert_eq!(b1["kickoff_prompt"], b2["kickoff_prompt"]);
+    assert_eq!(
+        b1["methodology_summary"],
+        b2["methodology_summary"]
+    );
+    assert_eq!(b1["entry_points"], b2["entry_points"]);
+    assert_eq!(b1["active_handoff"], b2["active_handoff"]);
+}
+
+#[test]
+fn test_axon_init_project_bundle_active_handoff_null_when_no_working_notes() {
+    let server = create_test_server();
+    // /tmp/non-existent-axon-project has no docs/working-notes directory.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": { "project_path": "/tmp/non-existent-axon-project-for-bundle-test" }
+        },
+        "id": 119
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let bundle = &result["data"]["kickoff_bundle"];
+    assert!(
+        bundle["active_handoff"].is_null(),
+        "active_handoff must be null when docs/working-notes is absent: {bundle}"
+    );
+}
+
 #[test]
 fn test_axon_init_project_rejects_client_project_code_when_it_differs_from_server_assignment() {
     let server = create_test_server();
