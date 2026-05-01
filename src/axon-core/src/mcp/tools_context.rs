@@ -119,9 +119,26 @@ impl McpServer {
         let started_at = Instant::now();
         let question = args.get("question")?.as_str()?.trim();
         if question.is_empty() {
+            // REQ-AXO-043 — bare error string was unactionable. Surface a
+            // structured contract so the LLM client knows what to supply.
             return Some(json!({
-                "content": [{"type": "text", "text": "retrieve_context requires a non-empty question"}],
-                "isError": true
+                "content": [{"type": "text", "text": "retrieve_context requires a non-empty `question`. Pass a free-form question describing the target (symbol, file, behavior, or rationale you want context for)."}],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "missing_field": "question",
+                    "next_action": "supply a non-empty `question` argument; example: question=\"how does the queue admission policy decide rejection?\"",
+                    "operator_guidance": {
+                        "problem_class": "input_invalid",
+                        "likely_cause": "empty_or_whitespace_question",
+                        "next_best_actions": [
+                            "supply a non-empty `question` describing the target",
+                            "alternatively, narrow to a specific symbol via `inspect` first",
+                        ],
+                        "follow_up_tools": ["inspect", "query"],
+                        "confidence": "high",
+                    }
+                }
             }));
         }
 

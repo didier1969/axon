@@ -1073,6 +1073,58 @@ fn test_brain_only_retrieve_context_does_not_return_tool_unavailable() {
 }
 
 #[test]
+fn test_retrieve_context_empty_question_returns_recovery_contract() {
+    // REQ-AXO-043 — empty `question` previously returned a bare error
+    // string with no operator_guidance, no next_action, and no example.
+    // Verify the structured contract.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": { "question": "   " }
+            })),
+            id: Some(json!(43101)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["isError"].as_bool(), Some(true));
+    let content = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        content.contains("non-empty") && content.contains("question"),
+        "content must explain the missing field: {content}"
+    );
+    assert!(
+        content.contains("example") || content.contains("Pass"),
+        "content must include guidance toward a valid call: {content}"
+    );
+
+    let data = &response["data"];
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    assert_eq!(data["missing_field"].as_str(), Some("question"));
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("input_invalid")
+    );
+    let actions = data["operator_guidance"]["next_best_actions"]
+        .as_array()
+        .expect("next_best_actions");
+    assert!(!actions.is_empty(), "next_best_actions must be non-empty");
+    let follow_up = data["operator_guidance"]["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools");
+    let follow_up_strs: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_up_strs.contains(&"inspect") || follow_up_strs.contains(&"query"),
+        "follow_up_tools must point to inspect/query: {follow_up_strs:?}"
+    );
+}
+
+#[test]
 fn test_brain_only_resume_vectorization_stays_unavailable() {
     let _guard = env_lock();
     unsafe {
