@@ -3852,6 +3852,65 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_anomalies_unknown_project_returns_recovery_contract() {
+    // REQ-AXO-043 — anomalies returned `Status: ok` with all-zero counts
+    // for an unregistered project_code. Mirror the wrong_project_scope
+    // contract used by soll_query_context / soll_work_plan.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "anomalies",
+                "arguments": { "project": "NOT_A_PROJECT_QQQ" }
+            })),
+            id: Some(json!(43103)),
+        })
+        .unwrap();
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["isError"].as_bool(), Some(true));
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("NOT_A_PROJECT_QQQ")
+    );
+    let registered = data["registered_project_codes"]
+        .as_array()
+        .expect("registered_project_codes array");
+    let registered_strs: Vec<&str> = registered.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        registered_strs.contains(&"AXO"),
+        "registered codes must include seeded AXO: {registered_strs:?}"
+    );
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+    let actions = data["operator_guidance"]["next_best_actions"]
+        .as_array()
+        .expect("next_best_actions");
+    let action_text: String = actions
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        action_text.contains("workspace") || action_text.contains("omit"),
+        "next_best_actions should mention the workspace fallback: {action_text}"
+    );
+}
+
+#[test]
 fn test_axon_why_empty_symbol_returns_recovery_contract() {
     // REQ-AXO-043 — symbol="" previously produced a malformed
     // "Why does  exist?" question (double space) that retrieve_context
