@@ -33,8 +33,6 @@ LIVE_RELEASE_CURRENT_MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
 LIVE_RELEASE_PENDING_MANIFEST="$PROJECT_ROOT/.axon/live-release/pending.json"
 LIVE_RELEASE_MANIFEST_SOURCE="${AXON_LIVE_RELEASE_MANIFEST:-$LIVE_RELEASE_CURRENT_MANIFEST}"
 LIVE_RELEASE_ACTIVE=0
-LIVE_RELEASE_ARTIFACT=""
-LIVE_RELEASE_BUILD_INFO=""
 LIVE_RELEASE_BRAIN_ARTIFACT=""
 LIVE_RELEASE_BRAIN_BUILD_INFO=""
 LIVE_RELEASE_INDEXER_ARTIFACT=""
@@ -78,8 +76,10 @@ PY
 )"
 
     mapfile -t live_release_fields <<<"$payload"
-    LIVE_RELEASE_ARTIFACT="${live_release_fields[0]:-}"
-    LIVE_RELEASE_BUILD_INFO="${live_release_fields[1]:-}"
+    # Fields 0/1 (combined artifact/build_info) are intentionally read
+    # but discarded — REQ-AXO-083: the combined-artifact contract is
+    # superseded by the per-role brain/indexer fields below. The python
+    # block above still emits them so the shape stays positional.
     LIVE_RELEASE_BRAIN_ARTIFACT="${live_release_fields[2]:-}"
     LIVE_RELEASE_BRAIN_BUILD_INFO="${live_release_fields[3]:-}"
     LIVE_RELEASE_INDEXER_ARTIFACT="${live_release_fields[4]:-}"
@@ -419,7 +419,7 @@ case "$RUNTIME_EXECUTABLE_NAME" in
         if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-brain" ]]; then
             RUNTIME_EXECUTABLE="bin/axon-brain"
         else
-            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#$PROJECT_ROOT/}/axon-brain"
+            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-brain"
         fi
         SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
         SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-brain"
@@ -428,7 +428,7 @@ case "$RUNTIME_EXECUTABLE_NAME" in
         if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-indexer" ]]; then
             RUNTIME_EXECUTABLE="bin/axon-indexer"
         else
-            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#$PROJECT_ROOT/}/axon-indexer"
+            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-indexer"
         fi
         SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
         SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-indexer"
@@ -536,7 +536,6 @@ if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/s
     fi
 fi
 
-REUSE_RUNNING_CORE=0
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     DELETED_EXE_PIDS=$(for pid in $(instance_runtime_pids); do
         exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
@@ -557,7 +556,6 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
             axon_log_warn "Axon core is healthy in TMUX session '$TMUX_SESSION' but dashboard is absent."
             echo "   Relaunching nexus window..."
             launch_dashboard_window
-            REUSE_RUNNING_CORE=1
         else
             echo "ℹ️ Axon is already running in TMUX session '$TMUX_SESSION'."
             echo "   Attach with: tmux attach -t $TMUX_SESSION"
@@ -861,7 +859,6 @@ if [[ "$RUNTIME_MODE" == "indexer_full" ]]; then
     PROFILE_EXPORT="export AXON_ENABLE_AUTONOMOUS_INGESTOR=true; export AXON_RUNTIME_PROFILE=full_autonomous; "
 fi
 PRELAUNCH_LD_LIBRARY_PATH_EXPORT=""
-CUDA_PACKAGE_SET="${AXON_CUDA_PACKAGE_SET:-cudaPackages}"
 axon_resolve_ort_runtime "$PROJECT_ROOT" "$EMBEDDING_PROVIDER_REQUEST" || exit 1
 if ! has_live_runtime_dataplane; then
     # Resolve axonctl binary for process supervision
