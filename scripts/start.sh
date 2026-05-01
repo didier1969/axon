@@ -166,6 +166,25 @@ cleanup_stale_runtime_state() {
     rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE"
 }
 
+# REQ-AXO-093 — real liveness probe for AF_UNIX sockets. The bare
+# `[[ -S sock ]]` test misreads orphan socket files (left over from a
+# crashed or non-cleanly-stopped run) as a live data plane. This probe
+# attempts a connect with a 0.5s timeout: orphan sockets reject or hang.
+socket_responds() {
+    local sock_path="$1"
+    [[ -S "$sock_path" ]] || return 1
+    python3 - "$sock_path" <<'PYEOF' 2>/dev/null
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(0.5)
+try:
+    s.connect(sys.argv[1])
+    s.close()
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
 probe_sql_gateway() {
     curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" \
         -H 'content-type: application/json' \
@@ -190,7 +209,8 @@ has_live_runtime_dataplane() {
     done
 
     if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-        if [[ -S "$AXON_TELEMETRY_SOCK" ]]; then
+        # REQ-AXO-093 — file-existence is not enough; orphan sockets must fail
+        if socket_responds "$AXON_TELEMETRY_SOCK"; then
             return 0
         fi
         return 1

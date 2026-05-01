@@ -339,6 +339,33 @@ if [[ -x "$AXONCTL_BIN" ]]; then
         rm -f "$AXON_DB_ROOT/"*.wal
     fi
 
+    # REQ-AXO-093 — orphan-socket guard: axonctl stop kills processes but
+    # does not always unlink the AF_UNIX sockets. Leftover sockets cause
+    # the next start to misread "data plane already up" and silently skip
+    # its launch, producing a green "Ready" line on a dead runtime.
+    _axon_cleanup_role_state() {
+        local role="$1"
+        local run_root_base
+        if [[ "${AXON_INSTANCE_KIND:-live}" == "dev" ]]; then
+            run_root_base="$PROJECT_ROOT/.axon-dev"
+        else
+            run_root_base="$PROJECT_ROOT/.axon"
+        fi
+        rm -f "/tmp/axon-${AXON_INSTANCE_KIND}-${role}-telemetry.sock" \
+              "/tmp/axon-${AXON_INSTANCE_KIND}-${role}-mcp.sock" \
+              "$run_root_base/run-${role}/axon-${role}.pid" \
+              "$run_root_base/run-${role}/runtime.env"
+    }
+    if [[ "$STOP_ROLE" == "all" ]]; then
+        _axon_cleanup_role_state brain
+        _axon_cleanup_role_state indexer
+    else
+        _axon_cleanup_role_state "$STOP_ROLE"
+    fi
+    # Legacy non-role-specific paths from older code paths in axon-instance.sh
+    rm -f "/tmp/axon-${AXON_INSTANCE_KIND}-telemetry.sock" \
+          "/tmp/axon-${AXON_INSTANCE_KIND}-mcp.sock"
+
     if [ "$AXONCTL_OK" = "1" ]; then
         echo "✅ Axon stopped (Other projects preserved)."
         exit 0
