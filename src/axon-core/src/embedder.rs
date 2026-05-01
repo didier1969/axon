@@ -5607,6 +5607,25 @@ fn schedule_vector_worker_restart(
     }
 }
 
+/// REQ-AXO-087 — distinguish profile-design exclusion (brain_only /
+/// indexer_graph never start the vector worker by design) from
+/// transient unavailability (indexer_vector / indexer_full profiles
+/// own the worker but it has not bound yet, or has crashed). The
+/// previous message ("MCP real-time embedding worker not ready") was
+/// indistinguishable across the two cases and caused LLM clients to
+/// retry indefinitely on profile-excluded runtimes and to file
+/// false-positive bug reports against intentional behavior.
+pub fn unavailable_embedding_reason(mode: crate::runtime_mode::AxonRuntimeMode) -> String {
+    if mode.semantic_workers_enabled() {
+        "Semantic fallback: MCP real-time embedding worker not yet available (transient). Retry, or fall back to structural search.".to_string()
+    } else {
+        format!(
+            "Semantic fallback: embedding worker not in current profile ({}). Semantic search will not become available without a profile change. Use structural search.",
+            mode.as_str()
+        )
+    }
+}
+
 pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
@@ -5622,7 +5641,8 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 
     let Some(sender) = current_query_embedding_sender() else {
         return Err(anyhow::anyhow!(
-            "MCP real-time embedding worker not ready. Use structural search."
+            "{}",
+            unavailable_embedding_reason(crate::runtime_mode::AxonRuntimeMode::from_env())
         ));
     };
 
@@ -5700,6 +5720,15 @@ pub fn run_gpu_embed_subprocess_stdio() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// REQ-AXO-087 — sibling tests file (the TDD checker GUI-PRO-001 expects
+// a `_tests.rs` companion path on diffs touching `src/axon-core/src/*`;
+// inline `#[cfg(test)] mod tests` modules are not recognized by the
+// path matcher per REQ-AXO-121). The companion holds focused tests for
+// the `unavailable_embedding_reason` LLM-contract helper.
+#[cfg(test)]
+#[path = "embedder_tests.rs"]
+mod embedder_tests;
 
 #[cfg(test)]
 mod tests {
