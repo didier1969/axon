@@ -3852,6 +3852,60 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_impact_unknown_symbol_with_no_suggestions_recommends_widening() {
+    // REQ-AXO-043 — `impact` had the same dead-end as inspect/path: report
+    // and operator_guidance said "retry with one suggested symbol" even
+    // when no suggestions could be produced. Verify the symmetric fix.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "impact",
+            "arguments": {
+                "symbol": "completely_made_up_symbol_qqq_zzz_999",
+            }
+        })),
+        id: Some(json!(50433)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        !content.contains("- retry with one suggested symbol"),
+        "report must not list 'retry with one suggested' when none exist: {content}"
+    );
+
+    let data = result.get("data").expect("data block present");
+    assert_eq!(data["impact_available"].as_bool(), Some(false));
+    let suggestions = data["suggestions"].as_array().expect("suggestions array");
+    assert!(suggestions.is_empty(), "preconditions: no suggestions: {suggestions:?}");
+    assert_eq!(data["next_action"]["kind"].as_str(), Some("broaden_search"));
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
+
+    // remediation_actions must not advise picking a nonexistent suggestion
+    let remediation = data["operator_guidance"]["remediation_actions"]
+        .as_array()
+        .expect("remediation_actions array");
+    let remediation_text: String = remediation
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        !remediation_text.contains("retry with one suggested"),
+        "remediation must not advise picking a nonexistent suggestion: {remediation_text}"
+    );
+}
+
+#[test]
 fn test_axon_path_unknown_symbol_with_no_suggestions_recommends_widening() {
     // REQ-AXO-043 — `path` (axon_bidi_trace) had the same dead-end as
     // inspect: report said "pick one suggested symbol" even when the

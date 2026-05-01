@@ -436,11 +436,47 @@ impl McpServer {
                 format_table_from_json(&suggestions, &["Suggested Symbol", "Type", "Project"]);
             let suggestions_rows: Vec<Vec<Value>> =
                 serde_json::from_str(&suggestions).unwrap_or_default();
+            // REQ-AXO-043 — same dead-end as inspect/path: "retry with one
+            // suggested symbol" is unactionable when there are no suggestions.
+            let has_suggestions = !suggestions_rows.is_empty();
+            let next_actions: &[&str] = if has_suggestions {
+                &[
+                    "retry with one suggested symbol",
+                    "use query/inspect to validate exact name",
+                ]
+            } else {
+                &[
+                    "broaden the search via `query` with a less specific term",
+                    "verify spelling and project scope",
+                    "or pass the exact canonical symbol id",
+                ]
+            };
             let suggestions = suggestions_rows
                 .iter()
                 .filter_map(|row| row.first().and_then(Value::as_str))
                 .map(|value| Value::from(value.to_string()))
                 .collect::<Vec<_>>();
+            let recommended_action = if has_suggestions {
+                "retry with one suggested symbol or validate the target with query/inspect first"
+            } else {
+                "broaden the search via `query` with a less specific term, or verify spelling and project scope"
+            };
+            let next_action_kind = if has_suggestions {
+                "select_valid_symbol_then_retry_impact"
+            } else {
+                "broaden_search"
+            };
+            let next_action_tool = if has_suggestions { "inspect" } else { "query" };
+            let next_action_when = if has_suggestions {
+                "after_symbol_selection"
+            } else {
+                "after_widening_or_correcting_the_search"
+            };
+            let follow_up_tools: Vec<&str> = if has_suggestions {
+                vec!["inspect"]
+            } else {
+                vec!["query", "inspect"]
+            };
             return Some(json!({
                 "content": [{
                     "type": "text",
@@ -452,7 +488,7 @@ impl McpServer {
                             "symbol not found in current scope",
                             &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
                             &format!("No exact matching symbol found in current scope.\n\n### Suggestions\n\n{}", suggestions_table),
-                            &["retry with one suggested symbol", "use query/inspect to validate exact name"],
+                            next_actions,
                             "medium",
                         )
                     )
@@ -467,22 +503,20 @@ impl McpServer {
                         "blocking_factors": [{
                             "factor": "symbol_not_found_in_scope",
                             "severity": "high",
-                            "recommended_action": "retry with one suggested symbol or validate the target with query/inspect first"
+                            "recommended_action": recommended_action
                         }],
-                        "remediation_actions": [
-                            "retry with one suggested symbol or validate the target with query/inspect first"
-                        ],
-                        "follow_up_tools": ["query", "inspect"],
+                        "remediation_actions": next_actions.iter().map(|s| Value::from(*s)).collect::<Vec<_>>(),
+                        "follow_up_tools": follow_up_tools,
                         "next_action": {
-                            "kind": "select_valid_symbol_then_retry_impact",
-                            "tool": "inspect",
-                            "when": "after_symbol_selection"
+                            "kind": next_action_kind,
+                            "tool": next_action_tool,
+                            "when": next_action_when
                         }
                     },
                     "next_action": {
-                        "kind": "select_valid_symbol_then_retry_impact",
-                        "tool": "inspect",
-                        "when": "after_symbol_selection"
+                        "kind": next_action_kind,
+                        "tool": next_action_tool,
+                        "when": next_action_when
                     }
                 }
             }));
