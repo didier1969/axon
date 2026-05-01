@@ -558,7 +558,21 @@ impl McpServer {
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
-        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        // REQ-AXO-089 — extend cwd auto-resolution from retrieve_context
+        // to query: when the caller omits `project`, try AXON_PROJECT_ROOT
+        // or current_dir against the registry. Exact one match returns
+        // the code; otherwise fall back to workspace:* as before. The
+        // `auto_project` String must outlive `project` because `project`
+        // borrows from it via `as_deref`.
+        let explicit_project = args.get("project").and_then(|v| v.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let project = explicit_project
+            .or(auto_project.as_deref())
+            .unwrap_or("*");
         let query_intent = Self::classify_query_intent(query_text);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
@@ -1025,7 +1039,18 @@ impl McpServer {
     pub(crate) fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
-        let project = args.get("project").and_then(|v| v.as_str());
+        // REQ-AXO-089 — extend cwd auto-resolution from retrieve_context
+        // to inspect: when the caller omits `project`, try
+        // AXON_PROJECT_ROOT or current_dir against the registry. The
+        // `auto_project` String must outlive `project` because `project`
+        // borrows from it via `as_deref`.
+        let explicit_project = args.get("project").and_then(|v| v.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let project = explicit_project.or(auto_project.as_deref());
         let backend_pressure =
             !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {

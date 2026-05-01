@@ -1122,6 +1122,69 @@ fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
 }
 
 #[test]
+fn test_auto_resolve_project_code_str_helper() {
+    // REQ-AXO-089 (helper coverage) — auto_resolve_project_code_str is
+    // the canonical helper used by retrieve_context, query, and
+    // inspect to map AXON_PROJECT_ROOT (or cwd) onto a single
+    // registered project_code. Direct unit coverage so the contract
+    // does not depend on the indexed-surface fixtures any individual
+    // tool needs to exercise its full code path.
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "AXO",
+            Some("axon"),
+            Some("/home/test/axon-cwd-fixture"),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "BKS",
+            Some("BookingSystem"),
+            Some("/home/test/bks-other"),
+        )
+        .unwrap();
+    // Exact match returns the code.
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axon-cwd-fixture");
+    }
+    assert_eq!(
+        server.auto_resolve_project_code_str().as_deref(),
+        Some("AXO")
+    );
+    // Subdirectory of a registered path also resolves.
+    unsafe {
+        std::env::set_var(
+            "AXON_PROJECT_ROOT",
+            "/home/test/axon-cwd-fixture/src/axon-core",
+        );
+    }
+    assert_eq!(
+        server.auto_resolve_project_code_str().as_deref(),
+        Some("AXO")
+    );
+    // Unrelated path returns None (workspace fallback at the call site).
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/tmp/unrelated");
+    }
+    assert!(server.auto_resolve_project_code_str().is_none());
+    // Empty env returns None.
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "");
+    }
+    // Empty AXON_PROJECT_ROOT falls through to current_dir; we cannot
+    // assert deterministically what that is, so just confirm the helper
+    // does not panic when fed back-to-back changes.
+    let _ = server.auto_resolve_project_code_str();
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+#[test]
 fn test_retrieve_context_falls_back_to_workspace_when_cwd_unmatched() {
     // REQ-AXO-089 — when AXON_PROJECT_ROOT doesn't match any
     // registered project, retrieve_context must fall back to
