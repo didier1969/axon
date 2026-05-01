@@ -5029,6 +5029,124 @@ fn test_axon_commit_work_enforces_guideline() {
         .unwrap_or(false));
 }
 
+// REQ-AXO-121 — `path_satisfies_required_path` must recognize inline
+// `#[cfg(test)]` blocks inside a modified `.rs` file as satisfying the
+// `tests.rs` requirement. This unblocks (a) Rust binary crates whose
+// canonical idiom is `#[cfg(test)] mod tests {}` inline, and (b)
+// trivial library hygiene fixes (one-line attribute changes in files
+// that already carry inline tests). The sibling `_tests.rs` patterns
+// remain valid; this is a pure addition to the matcher.
+#[test]
+fn test_axon_commit_work_recognizes_inline_cfg_test_in_modified_rs_file() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'TDD', 'tests required', 'active', \
+             '{\"trigger_path\":\"src/inline_tests/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
+        )
+        .unwrap();
+
+    // Write a temp file that emulates a Rust source with inline tests.
+    let tmp = tempdir().unwrap();
+    let inline_test_path = tmp.path().join("src/inline_tests/foo.rs");
+    std::fs::create_dir_all(inline_test_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &inline_test_path,
+        "fn foo() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn smoke() {}\n}\n",
+    )
+    .unwrap();
+    let inline_path_str = inline_test_path.to_string_lossy().to_string();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": [inline_path_str],
+                "message": "test: inline cfg(test) recognized",
+                "dry_run": true
+            }
+        },
+        "id": 1
+    });
+
+    let result = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        !result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "inline #[cfg(test)] must satisfy the TDD gate without a sibling _tests.rs file: {content}"
+    );
+    assert!(content.contains("Validation passed"), "{content}");
+}
+
+#[test]
+fn test_axon_commit_work_still_rejects_modified_rs_file_without_any_test_marker() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'TDD', 'tests required', 'active', \
+             '{\"trigger_path\":\"src/no_tests_here/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
+        )
+        .unwrap();
+
+    let tmp = tempdir().unwrap();
+    let bare_path = tmp.path().join("src/no_tests_here/bar.rs");
+    std::fs::create_dir_all(bare_path.parent().unwrap()).unwrap();
+    std::fs::write(&bare_path, "fn bar() {}\n").unwrap();
+    let bare_path_str = bare_path.to_string_lossy().to_string();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": [bare_path_str],
+                "message": "test: no inline tests, no sibling",
+                "dry_run": true
+            }
+        },
+        "id": 2
+    });
+
+    let result = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "a .rs file with neither inline tests nor a sibling test path must still be rejected: {content}"
+    );
+    assert!(content.contains("Remediation"), "{content}");
+}
+
 #[test]
 fn test_bootstrap_injects_global_guidelines() {
     let server = create_test_server();

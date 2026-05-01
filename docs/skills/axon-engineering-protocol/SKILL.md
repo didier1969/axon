@@ -480,6 +480,7 @@ Do not treat derived docs as restorable source of truth.
 - `axon_commit_work` does not mean “stage everything”
 - archival `SOLL_EXPORT_*.md` should not pollute routine delivery commits
 - derived outputs should be committed intentionally
+- TDD gate (GUI-PRO-001): the matcher recognizes a `.rs` file containing `#[cfg(test)]` as satisfying the `tests.rs` requirement on its own, in addition to sibling `_tests.rs` / `/tests/` paths (REQ-AXO-121). This unblocks Rust binary crates (whose canonical idiom is inline `#[cfg(test)] mod tests {}`) and trivial library hygiene fixes in files that already carry inline tests, without forcing an artificial sibling file. Files with neither inline `#[cfg(test)]` nor a sibling test path remain blocked by the gate.
 
 ## Maintenance
 Update this skill when:

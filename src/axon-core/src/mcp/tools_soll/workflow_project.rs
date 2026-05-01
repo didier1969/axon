@@ -1,5 +1,13 @@
 use super::*;
 
+/// REQ-AXO-121 — recognize inline `#[cfg(test)] mod tests { … }` blocks
+/// inside the modified `.rs` file itself when looking for a `tests.rs`
+/// satisfier. Without this, GUI-PRO-001 forced a sibling `_tests.rs`
+/// file for binaries (whose canonical idiom is inline tests) and
+/// blocked trivial library hygiene fixes (one-line attribute changes
+/// in files that already have inline tests). The sibling-file
+/// patterns from the original matcher are preserved so existing
+/// commits keep passing.
 fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
     if path.contains(required_path) {
         return true;
@@ -7,11 +15,27 @@ fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
 
     if required_path == "tests.rs" {
         let normalized = path.replace('\\', "/");
-        return normalized.ends_with("_test.rs")
+        if normalized.ends_with("_test.rs")
             || normalized.ends_with("_tests.rs")
             || normalized.ends_with("/tests.rs")
             || normalized.contains("/tests/")
-            || normalized.contains("/test/");
+            || normalized.contains("/test/")
+        {
+            return true;
+        }
+        // Inline-test recognition: open the file and look for the
+        // `#[cfg(test)]` attribute. The check is deliberately
+        // conservative — substring-only — so it does not require AST
+        // parsing and works on any Rust source. Files that do not
+        // exist or are not readable fall through to the negative
+        // branch (the gate stays strict on truly untested diffs).
+        if normalized.ends_with(".rs") {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if content.contains("#[cfg(test)]") {
+                    return true;
+                }
+            }
+        }
     }
 
     false
