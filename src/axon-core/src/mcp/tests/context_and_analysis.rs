@@ -728,6 +728,93 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .is_some());
 }
 
+// REQ-AXO-043 — conception_view and change_safety must adopt the
+// shared wrong_project_scope_response helper so an unregistered
+// project_code surfaces a structured recovery contract instead of a
+// "Status: ok" view with zero modules / Safety=unsafe with low
+// confidence (which the LLM caller would misread as a real signal
+// rather than an invalid input).
+
+#[test]
+fn test_conception_view_rejects_unregistered_project_code() {
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "conception_view",
+                "arguments": { "project_code": "ZZZ" }
+            })),
+            id: Some(json!(23010)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "unregistered project_code must surface isError; response={response:?}"
+    );
+    let data = response.get("data").expect("data");
+    assert_eq!(
+        data["status"].as_str(),
+        Some("wrong_project_scope")
+    );
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("ZZZ")
+    );
+    assert!(
+        data["registered_project_codes"].is_array(),
+        "registered_project_codes must be an array"
+    );
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("wrong_project_scope")
+    );
+}
+
+#[test]
+fn test_change_safety_rejects_unregistered_project_code() {
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "change_safety",
+                "arguments": {
+                    "project_code": "ZZZ",
+                    "target": "anything",
+                    "target_type": "symbol"
+                }
+            })),
+            id: Some(json!(23011)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "unregistered project_code must surface isError; response={response:?}"
+    );
+    let data = response.get("data").expect("data");
+    assert_eq!(
+        data["status"].as_str(),
+        Some("wrong_project_scope")
+    );
+    assert_eq!(
+        data["rejected_project_code"].as_str(),
+        Some("ZZZ")
+    );
+    assert_eq!(
+        data["operator_guidance"]["follow_up_tools"][0].as_str(),
+        Some("project_registry_lookup")
+    );
+}
+
 #[test]
 fn test_path_returns_bounded_call_path_between_symbols() {
     let server = create_test_server();

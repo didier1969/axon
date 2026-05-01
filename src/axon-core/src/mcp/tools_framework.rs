@@ -279,10 +279,18 @@ impl McpServer {
     }
 
     pub(crate) fn axon_conception_view(&self, args: &Value) -> Option<Value> {
-        let project_code = args
-            .get("project_code")
-            .and_then(|value| value.as_str())
-            .unwrap_or("AXO");
+        let explicit_project_code = args.get("project_code").and_then(|value| value.as_str());
+        // REQ-AXO-043 — when project_code is supplied but unregistered,
+        // surface the wrong_project_scope contract via the shared helper
+        // instead of returning a "Status: ok" view with zero modules
+        // (which the LLM caller would misread as "no architecture exists
+        // for this project" rather than "this project_code is invalid").
+        if let Some(code) = explicit_project_code {
+            if self.resolve_project_code(code).is_err() {
+                return Some(self.wrong_project_scope_response(code, "conception_view"));
+            }
+        }
+        let project_code = explicit_project_code.unwrap_or("AXO");
         let mode = args
             .get("mode")
             .and_then(|value| value.as_str())
@@ -359,10 +367,18 @@ impl McpServer {
     }
 
     pub(crate) fn axon_change_safety(&self, args: &Value) -> Option<Value> {
-        let project_code = args
-            .get("project_code")
-            .and_then(|value| value.as_str())
-            .unwrap_or("AXO");
+        let explicit_project_code = args.get("project_code").and_then(|value| value.as_str());
+        // REQ-AXO-043 — when project_code is supplied but unregistered,
+        // surface the wrong_project_scope contract via the shared helper
+        // instead of returning Safety=unsafe with confidence=low (the
+        // LLM caller would misread that as "this symbol is unsafe to
+        // change" rather than "this project_code is invalid").
+        if let Some(code) = explicit_project_code {
+            if self.resolve_project_code(code).is_err() {
+                return Some(self.wrong_project_scope_response(code, "change_safety"));
+            }
+        }
+        let project_code = explicit_project_code.unwrap_or("AXO");
         let target = args.get("target")?.as_str()?.trim();
         if target.is_empty() {
             return Some(json!({
