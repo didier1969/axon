@@ -254,16 +254,18 @@ Never fabricate:
 - SOLL entity IDs
 
 ## SOLL Model
-Canonical entity types:
+Canonical entity types (all reachable via `soll_manager(action=create)`):
 - `Vision`
 - `Pillar`
 - `Requirement`
 - `Decision`
 - `Concept`
-- `Guideline`
+- `Guideline` — id prefix `GUI-<project>-NNN` (REQ-AXO-092 enabled this path; previously rejected by the create branch)
 - `Milestone`
 - `Validation`
 - `Stakeholder`
+
+Unknown-entity errors (REQ-AXO-043 contract): when `entity` is outside the enum, `soll_manager` returns `data.status="input_invalid"`, `data.accepted_entities`, `data.next_action`, and `data.operator_guidance.problem_class="input_invalid"`. Do not retry with cypher INSERT — that is "tricher avec le système"; file the missing-API requirement instead.
 
 ### Vision Formulation Rule
 

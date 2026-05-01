@@ -549,6 +549,98 @@ fn test_soll_manager_create_returns_mutation_feedback() {
 }
 
 #[test]
+fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
+    // REQ-AXO-092 — schema enum advertises `guideline` but the create branch
+    // previously rejected it as "Unknown entity", forcing LLMs toward cypher
+    // INSERT workarounds. Storage layer already supports the GUI prefix.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "guideline",
+                    "project_code": "AXO",
+                    "data": {
+                        "project_code": "AXO",
+                        "title": "TDD with real I/O",
+                        "description": "Tests must hit real DBs, not mocks."
+                    }
+                }
+            })),
+            id: Some(json!(40921)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_ne!(result["isError"].as_bool(), Some(true), "create guideline should not error: {result}");
+
+    // Response should expose canonical id (GUI-{project}-NNN) and entity_type
+    let data = &result["data"];
+    let created_id = data["created_id"].as_str().expect("created_id present");
+    assert!(
+        created_id.starts_with("GUI-AXO-"),
+        "id must use GUI-AXO- prefix: {created_id}"
+    );
+    assert_eq!(data["entity_type"].as_str(), Some("Guideline"));
+}
+
+#[test]
+fn test_soll_manager_create_unknown_entity_returns_recovery_contract() {
+    // REQ-AXO-043 — unknown-entity error must surface accepted_entities and
+    // next_action so the LLM client can recover without re-reading source.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "rumour",  // not in schema
+                    "project_code": "AXO",
+                    "data": { "project_code": "AXO", "title": "x", "description": "y" }
+                }
+            })),
+            id: Some(json!(40431)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    let content = result["content"][0]["text"].as_str().expect("content text");
+    assert!(content.contains("Unknown entity"), "content must surface failure: {content}");
+    assert!(
+        content.contains("guideline") && content.contains("requirement"),
+        "content must list accepted entity types: {content}"
+    );
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    assert_eq!(data["rejected_entity"].as_str(), Some("rumour"));
+    let accepted = data["accepted_entities"].as_array().expect("accepted_entities array");
+    assert!(accepted.iter().any(|v| v.as_str() == Some("guideline")));
+    assert!(accepted.iter().any(|v| v.as_str() == Some("requirement")));
+    assert!(data["next_action"].as_str().is_some(), "next_action must be set");
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("input_invalid")
+    );
+}
+
+#[test]
 fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
     let server = create_test_server();
 

@@ -22,6 +22,55 @@ impl McpServer {
 
         match action {
             "create" => {
+                // REQ-AXO-092 / REQ-AXO-043 — validate entity BEFORE the registry
+                // resolves an ID. Otherwise an unknown entity surfaces as a generic
+                // "Registry error: Unknown id kind" which buries the schema mismatch.
+                let entity_type_cap = match entity {
+                    "vision" => "Vision",
+                    "pillar" => "Pillar",
+                    "requirement" => "Requirement",
+                    "concept" => "Concept",
+                    "decision" => "Decision",
+                    "milestone" => "Milestone",
+                    "stakeholder" => "Stakeholder",
+                    "validation" => "Validation",
+                    "guideline" => "Guideline",
+                    other => {
+                        let accepted = [
+                            "vision", "pillar", "requirement", "concept", "decision",
+                            "milestone", "stakeholder", "validation", "guideline",
+                        ];
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "Unknown entity: `{}`. Use one of: {}.",
+                                    other,
+                                    accepted.join(", "),
+                                ),
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "rejected_entity": other,
+                                "accepted_entities": accepted,
+                                "next_action": format!(
+                                    "retry with one of: {}",
+                                    accepted.join(", "),
+                                ),
+                                "operator_guidance": {
+                                    "problem_class": "input_invalid",
+                                    "likely_cause": "entity_not_in_schema_enum",
+                                    "next_best_actions": [
+                                        format!("retry with `entity` in: {}", accepted.join(", ")),
+                                    ],
+                                    "confidence": "high",
+                                },
+                            },
+                        }));
+                    }
+                };
+
                 let project_code_raw = args
                     .get("project_code")
                     .and_then(|v| v.as_str())
@@ -127,22 +176,6 @@ impl McpServer {
                 }
 
                 meta["updated_at"] = json!(now_unix_ms());
-
-                let entity_type_cap = match entity {
-                    "vision" => "Vision",
-                    "pillar" => "Pillar",
-                    "requirement" => "Requirement",
-                    "concept" => "Concept",
-                    "decision" => "Decision",
-                    "milestone" => "Milestone",
-                    "stakeholder" => "Stakeholder",
-                    "validation" => "Validation",
-                    _ => {
-                        return Some(
-                            json!({ "content": [{ "type": "text", "text": "Unknown entity" }], "isError": true }),
-                        )
-                    }
-                };
 
                 let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
                 let attach_to = data.get("attach_to").and_then(|v| v.as_str());
