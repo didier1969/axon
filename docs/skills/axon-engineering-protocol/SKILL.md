@@ -88,6 +88,11 @@ If freshness is missing:
 - text label: `**IST projection freshness:** fresh|stale (hint)`
 - `stale` does NOT gate any tool — structural reads remain authoritative; only consider it as a freshness lag indicator when interpreting results
 
+Brain semantic search capability (REQ-AXO-128 / DEC-AXO-061 / CPT-AXO-022):
+- the brain process spawns an in-process CPU query embedding worker at boot under non-indexer profiles (brain_only, indexer_graph). The worker uses the same fastembed model the indexer uses for chunk vectorization, so query and chunk embeddings live in the same vector space — DuckDB `array_cosine_distance` produces meaningful similarity scores.
+- LLM clients can call `query` with multi-token natural-language input under brain_only and receive ranked semantic results; no profile change is required.
+- the `unavailable_embedding_reason` message reached when the registered sender is None now describes either a transient indexer GPU subprocess outage OR a CPU embedder load failure (model snapshot missing / corrupt). Both are recoverable; neither is a permanent profile boundary anymore.
+
 Internal-only tools:
 - are transport or implementation primitives
 - are not hidden product value surfaces

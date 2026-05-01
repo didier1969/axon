@@ -53,6 +53,8 @@ use tracing::{debug, error, info, warn};
 
 #[path = "embedder/batch_lanes.rs"]
 mod batch_lanes;
+#[path = "embedder/cpu_query_service.rs"]
+mod cpu_query_service;
 #[path = "embedder/gpu_backend.rs"]
 mod gpu_backend;
 #[path = "embedder/gpu_policy.rs"]
@@ -78,6 +80,7 @@ pub(crate) use batch_lanes::{
     current_token_lane_thresholds, observe_token_lane_thresholds, service_guard_batch_lane,
     TokenLaneThresholds, VectorBatchLane,
 };
+pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 use gpu_backend::{
     abort_gpu_embed_if_vram_summit_reached, cuda_execution_provider_dispatch,
     gpu_embed_service_enabled, gpu_embed_service_prefers_tensorrt, gpu_embedding_service_client,
@@ -181,7 +184,7 @@ pub struct EmbeddingLaneConfig {
 // The model stays owned by the background worker; global state only holds a channel
 // sender so synchronous MCP queries can reuse the already-loaded model safely.
 
-struct QueryEmbeddingRequest {
+pub(super) struct QueryEmbeddingRequest {
     texts: Vec<String>,
     reply: Sender<anyhow::Result<Vec<Vec<f32>>>>,
 }
@@ -2126,7 +2129,7 @@ impl SemanticWorkerPool {
         }
     }
 
-    fn query_worker_loop(worker_idx: usize, query_rx: Receiver<QueryEmbeddingRequest>) {
+    pub(super) fn query_worker_loop(worker_idx: usize, query_rx: Receiver<QueryEmbeddingRequest>) {
         info!(
             "Semantic Query Worker [{}]: Initializing BGE-Large Model (1024d) in isolated thread...",
             worker_idx
@@ -5607,20 +5610,20 @@ fn schedule_vector_worker_restart(
     }
 }
 
-/// REQ-AXO-087 — distinguish profile-design exclusion (brain_only /
-/// indexer_graph never start the vector worker by design) from
-/// transient unavailability (indexer_vector / indexer_full profiles
-/// own the worker but it has not bound yet, or has crashed). The
-/// previous message ("MCP real-time embedding worker not ready") was
-/// indistinguishable across the two cases and caused LLM clients to
-/// retry indefinitely on profile-excluded runtimes and to file
-/// false-positive bug reports against intentional behavior.
+/// Per REQ-AXO-128 / DEC-AXO-061, brain_only and indexer_graph profiles
+/// no longer fail-fast on query-time embedding — they fall back to the
+/// in-process CPU embedder (`cpu_query_service`). This function is now
+/// only reached when the CPU fallback itself failed to load the ONNX
+/// model OR when an indexer profile's GPU subprocess is starting up.
+/// The wording reflects each case so the LLM client can decide whether
+/// to retry (transient indexer worker boot) or report a config issue
+/// (CPU embedder couldn't load the model file).
 pub fn unavailable_embedding_reason(mode: crate::runtime_mode::AxonRuntimeMode) -> String {
     if mode.semantic_workers_enabled() {
         "Semantic fallback: MCP real-time embedding worker not yet available (transient). Retry, or fall back to structural search.".to_string()
     } else {
         format!(
-            "Semantic fallback: embedding worker not in current profile ({}). Semantic search will not become available without a profile change. Use structural search.",
+            "Semantic fallback: in-process CPU query embedder unavailable in current profile ({}). Verify the model snapshot at runtime_embedding_snapshot_dir/onnx/model.onnx exists. Use structural search until the issue is resolved.",
             mode.as_str()
         )
     }
@@ -5639,6 +5642,12 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         ));
     }
 
+    // REQ-AXO-128 — under brain_only / indexer_graph the registered
+    // sender belongs to the in-process CPU worker spawned at boot
+    // (see cpu_query_service::spawn_brain_query_worker_if_needed).
+    // Under indexer_vector / indexer_full the sender belongs to the
+    // SemanticWorkerPool's GPU-backed worker. Either way, the routing
+    // is uniform from this function's perspective.
     let Some(sender) = current_query_embedding_sender() else {
         return Err(anyhow::anyhow!(
             "{}",

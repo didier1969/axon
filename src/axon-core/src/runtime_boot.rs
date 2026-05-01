@@ -564,6 +564,15 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         effective_lane_sizing.graph_batch_size
     );
 
+    // REQ-AXO-128 / DEC-AXO-061 — spawn the in-process CPU query
+    // embedding worker when the runtime profile does not own a GPU
+    // subprocess (brain_only, indexer_graph). The worker registers
+    // itself as the canonical query_embedding_sender so batch_embed
+    // routes through it transparently. No-op for indexer_vector /
+    // indexer_full where the SemanticWorkerPool spawns its own
+    // GPU-backed worker via the canonical pipeline.
+    crate::embedder::spawn_brain_query_worker_if_needed(runtime_mode);
+
     let mut acquired_writer_guards = Vec::new();
     for target in profile.writer_targets() {
         let result = match target {
