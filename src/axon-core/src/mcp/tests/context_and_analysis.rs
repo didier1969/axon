@@ -3852,6 +3852,51 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_why_empty_symbol_returns_recovery_contract() {
+    // REQ-AXO-043 — symbol="" previously produced a malformed
+    // "Why does  exist?" question (double space) that retrieve_context
+    // happily processed, returning Status: ok. Trim and reject empty
+    // input.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "why",
+            "arguments": { "symbol": "  " }
+        })),
+        id: Some(json!(50434)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    let content = result["content"][0]["text"].as_str().expect("content text");
+    assert!(
+        content.contains("symbol") && content.contains("question"),
+        "content must mention both fields: {content}"
+    );
+
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    assert_eq!(data["missing_field"].as_str(), Some("symbol_or_question"));
+    assert!(data["next_action"].as_str().is_some());
+    assert_eq!(
+        data["operator_guidance"]["problem_class"].as_str(),
+        Some("input_invalid")
+    );
+    let follow_up = data["operator_guidance"]["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools");
+    let follow_up_strs: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_up_strs.contains(&"inspect") || follow_up_strs.contains(&"retrieve_context"),
+        "follow_up_tools should point to inspect/retrieve_context: {follow_up_strs:?}"
+    );
+}
+
+#[test]
 fn test_axon_impact_unknown_symbol_with_no_suggestions_recommends_widening() {
     // REQ-AXO-043 — `impact` had the same dead-end as inspect/path: report
     // and operator_guidance said "retry with one suggested symbol" even

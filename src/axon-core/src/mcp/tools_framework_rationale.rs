@@ -308,6 +308,10 @@ impl McpServer {
             .get("include_graph")
             .and_then(|value| value.as_bool())
             .unwrap_or(mode != "brief");
+        // REQ-AXO-043 — `symbol=""` previously produced a malformed
+        // "Why does  exist?" question (double space) that retrieve_context
+        // happily processed, returning Status: ok with arbitrary supporting
+        // evidence. Trim and reject empty symbol BEFORE falling through.
         let question = args
             .get("question")
             .and_then(|value| value.as_str())
@@ -316,8 +320,37 @@ impl McpServer {
             .or_else(|| {
                 args.get("symbol")
                     .and_then(|value| value.as_str())
+                    .map(|symbol| symbol.trim().to_string())
+                    .filter(|symbol| !symbol.is_empty())
                     .map(|symbol| format!("Why does {} exist?", symbol))
-            })?;
+            });
+        let question = match question {
+            Some(value) => value,
+            None => {
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "why requires a non-empty `symbol` or `question`. Pass either a target symbol id/name or a free-form question (example: symbol=\"axon_query\" or question=\"why does the queue admission policy reject?\")."
+                    }],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "missing_field": "symbol_or_question",
+                        "next_action": "supply at least one of `symbol` or `question`",
+                        "operator_guidance": {
+                            "problem_class": "input_invalid",
+                            "likely_cause": "empty_or_whitespace_symbol_and_question",
+                            "next_best_actions": [
+                                "supply a non-empty `symbol` argument (canonical id or name)",
+                                "or supply a non-empty `question` describing the rationale you want",
+                            ],
+                            "follow_up_tools": ["query", "inspect", "retrieve_context"],
+                            "confidence": "high",
+                        }
+                    }
+                }));
+            }
+        };
         let mut response = self.axon_retrieve_context(&json!({
             "question": question,
             "project": args.get("project").and_then(|value| value.as_str()),
