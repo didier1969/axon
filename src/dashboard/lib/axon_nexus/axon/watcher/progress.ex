@@ -180,17 +180,30 @@ defmodule Axon.Watcher.Progress do
 
     case SqlGateway.query_json(query) do
       {:ok, json} ->
-        Telemetry.mark_sql_snapshot_success(System.monotonic_time(:millisecond) - started_at)
+        duration_ms = System.monotonic_time(:millisecond) - started_at
+
+        # REQ-AXO-107 — only log the recovery line on the first success
+        # after a sustained error streak. Without this gate, a flapping
+        # gateway emits a constant stream of `[cockpit] reconnected`.
+        if Telemetry.mark_sql_snapshot_success(duration_ms) == :recovered do
+          Logger.info("[cockpit] SQL gateway reconnected after sustained failure")
+        end
 
         decode_rows(json)
 
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - started_at
-        Telemetry.mark_sql_snapshot_error(reason, duration_ms)
 
-        Logger.warning(
-          "[cockpit] SQL snapshot query failed after #{duration_ms}ms: #{inspect(reason)}"
-        )
+        # REQ-AXO-107 — only log the warning when the failure reason
+        # differs from the last one. A sustained outage (e.g. brain not
+        # running on the same instance) used to flood the tmux pane
+        # with duplicate econnrefused warnings, hiding actual indexer
+        # events. The first occurrence carries the suppression hint.
+        if Telemetry.mark_sql_snapshot_error(reason, duration_ms) == :reason_changed do
+          Logger.warning(
+            "[cockpit] SQL snapshot query failed after #{duration_ms}ms: #{inspect(reason)} (further repeats with the same reason are suppressed)"
+          )
+        end
 
         []
     end

@@ -138,23 +138,53 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:bridge_last_disconnected_at, now})
   end
 
+  # REQ-AXO-107 — returns `:recovered` when this success follows a sustained
+  # error streak so the caller can emit a one-shot reconnection notice
+  # without re-deriving status from ETS. Returns `:ok` when the previous
+  # state was already `:ok` or `:unknown`.
   def mark_sql_snapshot_success(duration_ms) when is_integer(duration_ms) do
     now = DateTime.utc_now()
+
+    transition =
+      case get_val(:sql_snapshot_status) do
+        :error -> :recovered
+        _ -> :ok
+      end
+
     :ets.insert(:axon_telemetry, {:sql_snapshot_status, :ok})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_success_at, now})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
     :ets.insert(:axon_telemetry, {:sql_snapshot_ok_total, (get_val(:sql_snapshot_ok_total) || 0) + 1})
     push_latency_sample(:sql_latency_samples, duration_ms)
+    transition
   end
 
+  # REQ-AXO-107 — returns `:reason_changed` when the new failure reason
+  # differs from the last recorded one (or the cockpit was previously
+  # healthy), and `:reason_unchanged` when the same error is repeating.
+  # Callers MUST use the return value to gate their log emissions; without
+  # this gate, a sustained outage (e.g. brain not running) floods the
+  # tmux pane with duplicate `econnrefused` warnings.
   def mark_sql_snapshot_error(reason, duration_ms) do
     now = DateTime.utc_now()
+    reason_str = inspect(reason)
+    previous_reason = get_val(:sql_snapshot_last_error_reason)
+    previous_status = get_val(:sql_snapshot_status)
+
+    transition =
+      if previous_status == :error and previous_reason == reason_str do
+        :reason_unchanged
+      else
+        :reason_changed
+      end
+
     :ets.insert(:axon_telemetry, {:sql_snapshot_status, :error})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_at, now})
-    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, inspect(reason)})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, reason_str})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
     :ets.insert(:axon_telemetry, {:sql_snapshot_error_total, (get_val(:sql_snapshot_error_total) || 0) + 1})
     push_latency_sample(:sql_latency_samples, duration_ms)
+    transition
   end
 
   def mark_mcp_probe_success(duration_ms) when is_integer(duration_ms) do
