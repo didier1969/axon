@@ -9,4 +9,5 @@ pub mod embedder_vector_finalize_tests;
 pub mod graph_ingestion_split_tests;
 pub mod maillon_tests;
 pub mod pipeline_test;
+pub mod queue_decoupling_tests;
 pub mod test_helpers;

@@ -30,7 +30,13 @@ struct CostModel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryBudgetSnapshot {
     pub budget_bytes: u64,
+    /// Total accounted bytes (queued admissions + currently in-flight claims).
+    /// Preserved for backward compatibility with external consumers.
     pub reserved_bytes: u64,
+    /// Bytes claimed by workers and currently being processed.
+    /// `exhaustion_ratio` derives from this so admission pressure does not
+    /// stall the pipeline at bootstrap (see queue.rs decoupling fix).
+    pub inflight_bytes: u64,
     pub exhaustion_ratio: f64,
     pub reserved_task_count: usize,
     pub anonymous_trace_reserved_tasks: usize,
@@ -41,8 +47,10 @@ pub struct MemoryBudgetSnapshot {
 #[derive(Debug)]
 struct MemoryBudgetState {
     budget_bytes: u64,
-    reserved_bytes: u64,
-    reserved_tasks: HashMap<String, ReservedTask>,
+    queued_bytes: u64,
+    queued_tasks: HashMap<String, ReservedTask>,
+    inflight_bytes: u64,
+    inflight_tasks: HashMap<String, ReservedTask>,
     observed_cost_models: HashMap<String, CostModel>,
     anonymous_trace_admissions_total: u64,
     reservation_release_misses_total: u64,
@@ -52,23 +60,32 @@ impl MemoryBudgetState {
     fn new(budget_bytes: u64) -> Self {
         Self {
             budget_bytes: budget_bytes.max(1),
-            reserved_bytes: 0,
-            reserved_tasks: HashMap::new(),
+            queued_bytes: 0,
+            queued_tasks: HashMap::new(),
+            inflight_bytes: 0,
+            inflight_tasks: HashMap::new(),
             observed_cost_models: HashMap::new(),
             anonymous_trace_admissions_total: 0,
             reservation_release_misses_total: 0,
         }
     }
 
+    fn total_committed_bytes(&self) -> u64 {
+        self.queued_bytes.saturating_add(self.inflight_bytes)
+    }
+
     fn snapshot(&self) -> MemoryBudgetSnapshot {
+        let total_committed = self.total_committed_bytes();
         MemoryBudgetSnapshot {
             budget_bytes: self.budget_bytes,
-            reserved_bytes: self.reserved_bytes,
-            exhaustion_ratio: self.reserved_bytes as f64 / self.budget_bytes.max(1) as f64,
-            reserved_task_count: self.reserved_tasks.len(),
+            reserved_bytes: total_committed,
+            inflight_bytes: self.inflight_bytes,
+            exhaustion_ratio: self.inflight_bytes as f64 / self.budget_bytes.max(1) as f64,
+            reserved_task_count: self.queued_tasks.len() + self.inflight_tasks.len(),
             anonymous_trace_reserved_tasks: self
-                .reserved_tasks
+                .queued_tasks
                 .values()
+                .chain(self.inflight_tasks.values())
                 .filter(|task| is_anonymous_trace_id(&task.trace_id))
                 .count(),
             anonymous_trace_admissions_total: self.anonymous_trace_admissions_total,
@@ -222,24 +239,42 @@ impl QueueStore {
     }
 
     pub fn pop(&self) -> Option<Task> {
-        if let Ok(task) = self.priority_receiver.try_recv() {
-            return Some(task);
-        }
-        if let Ok(task) = self.bulk_receiver.try_recv() {
-            return Some(task);
-        }
-
-        select_biased! {
-            recv(self.priority_receiver) -> task => task.ok(),
-            recv(self.bulk_receiver) -> task => task.ok(),
-        }
+        let task = if let Ok(task) = self.priority_receiver.try_recv() {
+            Some(task)
+        } else if let Ok(task) = self.bulk_receiver.try_recv() {
+            Some(task)
+        } else {
+            select_biased! {
+                recv(self.priority_receiver) -> task => task.ok(),
+                recv(self.bulk_receiver) -> task => task.ok(),
+            }
+        };
+        task.map(|t| {
+            self.claim_for_inflight(&t.reservation_id);
+            t
+        })
     }
 
     pub fn try_pop(&self) -> Option<Task> {
-        self.priority_receiver
+        let task = self
+            .priority_receiver
             .try_recv()
             .or_else(|_| self.bulk_receiver.try_recv())
-            .ok()
+            .ok()?;
+        self.claim_for_inflight(&task.reservation_id);
+        Some(task)
+    }
+
+    fn claim_for_inflight(&self, reservation_id: &str) {
+        let Ok(mut state) = self.memory_budget.lock() else {
+            return;
+        };
+        if let Some(task) = state.queued_tasks.remove(reservation_id) {
+            let cost = task.estimated_cost_bytes;
+            state.queued_bytes = state.queued_bytes.saturating_sub(cost);
+            state.inflight_bytes = state.inflight_bytes.saturating_add(cost);
+            state.inflight_tasks.insert(reservation_id.to_string(), task);
+        }
     }
 
     pub fn mark_done(&self, task: &Task, observed_cost_bytes: Option<u64>) -> Result<(), String> {
@@ -284,6 +319,7 @@ impl QueueStore {
             .unwrap_or(MemoryBudgetSnapshot {
                 budget_bytes: DEFAULT_MEMORY_BUDGET_BYTES,
                 reserved_bytes: 0,
+                inflight_bytes: 0,
                 exhaustion_ratio: 0.0,
                 reserved_task_count: 0,
                 anonymous_trace_reserved_tasks: 0,
@@ -357,21 +393,26 @@ impl QueueStore {
                 estimated_cost_bytes, state.budget_bytes
             ));
         }
-        let next_reserved = state.reserved_bytes.saturating_add(estimated_cost_bytes);
+        let next_committed = state
+            .total_committed_bytes()
+            .saturating_add(estimated_cost_bytes);
 
-        if next_reserved > state.budget_bytes {
+        if next_committed > state.budget_bytes {
             return Err(format!(
-                "Memory budget exhausted (reserved={} estimate={} budget={})",
-                state.reserved_bytes, estimated_cost_bytes, state.budget_bytes
+                "Memory budget exhausted (queued={} inflight={} estimate={} budget={})",
+                state.queued_bytes,
+                state.inflight_bytes,
+                estimated_cost_bytes,
+                state.budget_bytes
             ));
         }
 
-        state.reserved_bytes = next_reserved;
+        state.queued_bytes = state.queued_bytes.saturating_add(estimated_cost_bytes);
         if is_anonymous_trace_id(trace_id) {
             state.anonymous_trace_admissions_total =
                 state.anonymous_trace_admissions_total.saturating_add(1);
         }
-        state.reserved_tasks.insert(
+        state.queued_tasks.insert(
             reservation_id.to_string(),
             ReservedTask {
                 trace_id: trace_id.to_string(),
@@ -388,35 +429,55 @@ impl QueueStore {
             return;
         };
 
-        if let Some(reserved_task) = state.reserved_tasks.remove(reservation_id) {
-            state.reserved_bytes = state
-                .reserved_bytes
+        // Normal completion path: task was claimed by a worker.
+        if let Some(reserved_task) = state.inflight_tasks.remove(reservation_id) {
+            state.inflight_bytes = state
+                .inflight_bytes
                 .saturating_sub(reserved_task.estimated_cost_bytes);
-
-            if let Some(observed_cost_bytes) = observed_cost_bytes {
-                if reserved_task.size_bytes > 0 {
-                    let observed_multiplier =
-                        observed_cost_bytes as f64 / reserved_task.size_bytes.max(1024) as f64;
-                    let entry = state
-                        .observed_cost_models
-                        .entry(reserved_task.estimation_key)
-                        .or_insert_with(|| CostModel {
-                            sample_count: 0,
-                            observed_multiplier,
-                        });
-                    entry.sample_count = entry.sample_count.saturating_add(1);
-                    if entry.sample_count == 1 {
-                        entry.observed_multiplier = observed_multiplier;
-                    } else {
-                        entry.observed_multiplier =
-                            (entry.observed_multiplier * 0.7) + (observed_multiplier * 0.3);
-                    }
-                }
-            }
-        } else {
-            state.reservation_release_misses_total =
-                state.reservation_release_misses_total.saturating_add(1);
+            learn_observed_cost(&mut state, &reserved_task, observed_cost_bytes);
+            return;
         }
+
+        // Cancellation path: task was purged or send-failed before claim.
+        if let Some(reserved_task) = state.queued_tasks.remove(reservation_id) {
+            state.queued_bytes = state
+                .queued_bytes
+                .saturating_sub(reserved_task.estimated_cost_bytes);
+            // No observed cost when work never ran; skip cost-model learning.
+            let _ = observed_cost_bytes;
+            return;
+        }
+
+        state.reservation_release_misses_total =
+            state.reservation_release_misses_total.saturating_add(1);
+    }
+}
+
+fn learn_observed_cost(
+    state: &mut MemoryBudgetState,
+    reserved_task: &ReservedTask,
+    observed_cost_bytes: Option<u64>,
+) {
+    let Some(observed_cost_bytes) = observed_cost_bytes else {
+        return;
+    };
+    if reserved_task.size_bytes == 0 {
+        return;
+    }
+    let observed_multiplier =
+        observed_cost_bytes as f64 / reserved_task.size_bytes.max(1024) as f64;
+    let entry = state
+        .observed_cost_models
+        .entry(reserved_task.estimation_key.clone())
+        .or_insert_with(|| CostModel {
+            sample_count: 0,
+            observed_multiplier,
+        });
+    entry.sample_count = entry.sample_count.saturating_add(1);
+    if entry.sample_count == 1 {
+        entry.observed_multiplier = observed_multiplier;
+    } else {
+        entry.observed_multiplier = (entry.observed_multiplier * 0.7) + (observed_multiplier * 0.3);
     }
 }
 
