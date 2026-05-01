@@ -1520,14 +1520,13 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
     );
 }
 
-// REQ-AXO-126 — soll_export disabled-branch is verified via the
-// soll_export_enabled() function logic and production smoke-test;
-// integration coverage is intentionally not added here because the
-// AXON_SOLL_EXPORT_DISABLED env var would race with the other
-// export tests under cargo's parallel runner. The cfg(test) branch
-// keeps the existing tests unchanged: tests are enabled by default,
-// production is disabled by default and opts in via
-// AXON_SOLL_EXPORT_ENABLED.
+// REQ-AXO-126 — soll_export is snapshot-per-release: the automatic
+// hook on `axon_commit_work` was removed and the MCP tool stays
+// available on demand (called once per live promotion by
+// scripts/release/promote_live_safe.sh, plus ad-hoc operator calls).
+// No env-var gate; the per-call rate is now bounded by promotion
+// frequency. This test exercises the on-demand path; commit-work
+// integration tests below assert that no auto-export occurs.
 
 #[test]
 fn test_axon_export_soll() {
@@ -5522,12 +5521,17 @@ fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
 }
 
 #[test]
-fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
+// REQ-AXO-126 — `axon_commit_work` no longer auto-fires `soll_export`.
+// The release-promotion pipeline owns the snapshot moment now (option D
+// in the retention design). The response must contain only the git
+// commit status and must NOT contain any "Exported to" / "Export
+// Report" markers.
+fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
     let server = create_test_server();
 
     // Insert a dummy Guideline that passes trivially
     server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
          VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
     ).unwrap();
 
@@ -5565,20 +5569,22 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
         content
     );
 
-    // It should contain Git and Export mentions
+    // Git commit happened (success or failure depending on git state in CI).
     assert!(
         content.contains("Commit succeeded") || content.contains("Commit failed"),
         "{}",
         content
     );
-    assert!(content.contains("Exported to"), "{}", content);
-    if let Some(export_path) = content
-        .lines()
-        .find_map(|line| line.strip_prefix("✅ Exported to "))
-        .map(str::trim)
-    {
-        let _ = std::fs::remove_file(export_path);
-    }
+    // REQ-AXO-126 — no auto-export markers must appear on the
+    // commit-work response surface.
+    assert!(
+        !content.contains("Exported to"),
+        "auto-export hook must be gone from commit_work: {content}"
+    );
+    assert!(
+        !content.contains("Export Report"),
+        "Export Report block must not be emitted from commit_work: {content}"
+    );
 }
 
 #[test]

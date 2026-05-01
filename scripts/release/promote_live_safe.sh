@@ -85,6 +85,17 @@ if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
   run_step "qualify live MCP core surface" "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
 fi
 
+# REQ-AXO-126 — snapshot the SOLL graph at the moment of promotion so
+# the artifact is part of the qualified-release lineage (PIL-AXO-005).
+# Best-effort: if the export call fails, log a warning but do not roll
+# back the promotion — the manifest is the authoritative artifact.
+ensure_head_stable
+echo "== snapshot SOLL for release lineage =="
+soll_export_args=$(printf '{"project_code":"%s"}' "$PROJECT_CODE")
+if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "$soll_export_args" --format text; then
+  echo "WARN: soll_export call failed; promotion is still complete (manifest is authoritative)" >&2
+fi
+
 ensure_head_stable
 run_step "final live status" bash "$ROOT_DIR/scripts/axon-live" status
 

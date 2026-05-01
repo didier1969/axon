@@ -1,45 +1,17 @@
 use super::*;
 
 impl McpServer {
-    fn soll_export_enabled() -> bool {
-        // REQ-AXO-126 — SOLL_EXPORT is disabled by default in production.
-        // Production paths opt in via AXON_SOLL_EXPORT_ENABLED=1 (or
-        // true/yes/on). Test builds keep the legacy "enabled by
-        // default" so the existing write-path assertions still execute;
-        // a test that wants to exercise the disabled branch sets
-        // AXON_SOLL_EXPORT_DISABLED=1 to flip it.
-        if cfg!(test) {
-            return !matches!(
-                std::env::var("AXON_SOLL_EXPORT_DISABLED")
-                    .ok()
-                    .map(|v| v.trim().to_ascii_lowercase())
-                    .as_deref(),
-                Some("1") | Some("true") | Some("yes") | Some("on")
-            );
-        }
-        match std::env::var("AXON_SOLL_EXPORT_ENABLED") {
-            Ok(v) => matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            ),
-            Err(_) => false,
-        }
-    }
-
     pub(crate) fn axon_export_soll(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
-        // REQ-AXO-126 — gate behind AXON_SOLL_EXPORT_ENABLED. Returns a
-        // success-shaped response when disabled so the calling
-        // axon_commit_work flow continues without raising an error.
-        if !Self::soll_export_enabled() {
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": "SOLL export disabled (REQ-AXO-126). Set AXON_SOLL_EXPORT_ENABLED=1 to re-enable." }],
-                "data": {
-                    "disabled": true,
-                    "reason": "REQ-AXO-126 retention policy pending; default off until decided",
-                    "enable_via": "AXON_SOLL_EXPORT_ENABLED=1"
-                }
-            }));
-        }
+        // REQ-AXO-126 — `soll_export` is now snapshot-per-release: the
+        // automatic hook that fired on every `axon_commit_work` is
+        // removed (PIL-AXO-005 alignment — exports are part of the
+        // qualified-release lineage, not a side-effect of routine
+        // commits). The MCP tool stays available on demand: the
+        // promotion pipeline (`scripts/release/promote_live_safe.sh`)
+        // calls it once per live promotion, and operators can call it
+        // manually for ad-hoc snapshots. No env-var gate is needed
+        // because the per-call rate is now bounded by promotion
+        // frequency, not commit frequency.
         let project_code = args.get("project_code").and_then(|v| v.as_str());
         let project_code = match project_code
             .map(|code| self.resolve_project_code(code))

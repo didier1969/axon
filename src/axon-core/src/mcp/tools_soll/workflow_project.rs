@@ -105,17 +105,10 @@ impl McpServer {
             }));
         }
 
-        let export_args = serde_json::json!({});
-        let export_res = self.axon_export_soll(&export_args);
-        let mut export_report = String::new();
-        if let Some(res) = export_res {
-            if soll_tool_is_error(Some(&res)) {
-                return Some(res);
-            }
-            if let Some(txt) = soll_tool_text(Some(&res)) {
-                export_report = txt;
-            }
-        }
+        // REQ-AXO-126 — SOLL export no longer auto-fires on every commit.
+        // The release-promotion pipeline owns the snapshot moment now.
+        // See scripts/release/promote_live_safe.sh for the canonical
+        // call site and `axon_export_soll` for the rationale.
 
         let mut add_cmd = std::process::Command::new("git");
         add_cmd.arg("add");
@@ -152,7 +145,7 @@ impl McpServer {
                     )
                 };
                 Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}\n\nExport Report (not auto-staged):\n{}", status, export_report) }]
+                    "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}", status) }]
                 }))
             }
             Err(e) => Some(serde_json::json!({
