@@ -3852,6 +3852,53 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_path_unknown_symbol_with_no_suggestions_recommends_widening() {
+    // REQ-AXO-043 — `path` (axon_bidi_trace) had the same dead-end as
+    // inspect: report said "pick one suggested symbol" even when the
+    // suggestion table was empty. Verify the symmetric fix.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "path",
+            "arguments": {
+                "source": "completely_made_up_symbol_zzz_abc_123",
+            }
+        })),
+        id: Some(json!(50432)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        !content.contains("- pick one suggested symbol"),
+        "report must not list 'pick one suggested symbol' when none exist: {content}"
+    );
+    assert!(
+        content.contains("broaden") || content.contains("query") || content.contains("spelling"),
+        "report must steer toward widening: {content}"
+    );
+
+    let data = result.get("data").expect("data block present");
+    assert_eq!(data["symbol_found"].as_bool(), Some(false));
+    let suggestions = data["suggestions"].as_array().expect("suggestions array");
+    assert!(
+        suggestions.is_empty(),
+        "preconditions: no suggestions for nonsense symbol: {suggestions:?}"
+    );
+    assert_eq!(data["next_action"]["kind"].as_str(), Some("broaden_search"));
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
+}
+
+#[test]
 fn test_axon_inspect_unknown_symbol_with_no_suggestions_recommends_widening() {
     // REQ-AXO-043 — when no suggestions can be produced, the next_action /
     // remediation_actions must NOT say "pick one suggested symbol" because

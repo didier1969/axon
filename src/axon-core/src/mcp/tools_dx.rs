@@ -1358,6 +1358,21 @@ impl McpServer {
                 .graph_store
                 .query_json_param(sugg_query, &sugg_params)
                 .unwrap_or_else(|_| "[]".to_string());
+            let suggestion_rows: Vec<Vec<Value>> =
+                serde_json::from_str(&suggestions).unwrap_or_default();
+            // REQ-AXO-043 — same gap as `inspect`: when the suggestion table
+            // is empty, "pick one suggested symbol" is unactionable. Tailor
+            // the recovery to the actual response state.
+            let has_suggestions = !suggestion_rows.is_empty();
+            let next_actions: &[&str] = if has_suggestions {
+                &["pick one suggested symbol", "or pass the exact symbol id"]
+            } else {
+                &[
+                    "broaden the search via `query` with a less specific term",
+                    "verify spelling and project scope",
+                    "or pass the exact canonical symbol id",
+                ]
+            };
             let evidence = format!(
                 "{}{}",
                 self.project_scope_truth_note(project).unwrap_or_default(),
@@ -1371,11 +1386,34 @@ impl McpServer {
                     "symbol not found in current scope",
                     &scope,
                     &evidence_by_mode(&evidence, mode),
-                    &["pick one suggested symbol", "or pass the exact symbol id"],
+                    next_actions,
                     "low",
                 )
             );
-            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+            let suggestion_strs: Vec<Value> = suggestion_rows
+                .iter()
+                .filter_map(|row| row.first().and_then(Value::as_str))
+                .map(|value| Value::from(value.to_string()))
+                .collect();
+            let next_action_kind = if has_suggestions {
+                "pick_canonical_symbol"
+            } else {
+                "broaden_search"
+            };
+            let next_action_tool = if has_suggestions { "path" } else { "query" };
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "symbol": symbol,
+                    "project": project,
+                    "symbol_found": false,
+                    "suggestions": suggestion_strs,
+                    "next_action": {
+                        "kind": next_action_kind,
+                        "tool": next_action_tool,
+                    }
+                }
+            }));
         };
 
         let scoped_filter = if project.is_some() {
