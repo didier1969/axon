@@ -931,17 +931,33 @@ fi
 if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
     echo ""
     echo "⚙️ Running MCP End-to-End Verification..."
-    if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
-        echo "❌ MCP tunnel verification failed."
-        echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
-    elif [ -x "bin/axon-mcp-tunnel" ]; then
-        echo "✅ MCP tunnel verification succeeded."
-    elif verify_mcp_http; then
-        echo "✅ MCP HTTP verification succeeded."
-    else
-        echo "❌ MCP HTTP verification failed."
-        echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
-        exit 1
+    # REQ-AXO-095 — verification was a partial elif chain that emitted
+    # "MCP tunnel verification failed" but never exited, so the start
+    # script continued to the final "Axon is rising" line on a runtime
+    # that was actually broken. The contract is now: try the tunnel
+    # first, fall back to the HTTP probe when the tunnel binary is
+    # missing OR the tunnel verify fails, and exit only when BOTH
+    # paths reject the runtime — that way the "rising" message can
+    # only print on a runtime the verification actually accepted.
+    _axon_mcp_verified=0
+    if [ -x "bin/axon-mcp-tunnel" ]; then
+        if echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' \
+            | bin/axon-mcp-tunnel | grep -q "axon_query"; then
+            echo "✅ MCP tunnel verification succeeded."
+            _axon_mcp_verified=1
+        else
+            echo "⚠️ MCP tunnel verification failed; falling back to HTTP probe."
+        fi
+    fi
+    if [ "$_axon_mcp_verified" = "0" ]; then
+        if verify_mcp_http; then
+            echo "✅ MCP HTTP verification succeeded."
+            _axon_mcp_verified=1
+        else
+            echo "❌ MCP verification failed (tunnel and HTTP both unreachable)."
+            echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
+            exit 1
+        fi
     fi
 fi
 
