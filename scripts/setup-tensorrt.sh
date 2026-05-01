@@ -147,8 +147,14 @@ echo "   manifest      : $manifest_path"
 echo "   build profile : ${AXON_ORT_TENSORRT_BUILD_PROFILE:-axon_embedding}"
 
 if [[ "$mode" == "qualify" ]]; then
-    exec bash "$SCRIPT_DIR/build-and-qualify-tensorrt-cold.sh" \
-        --tarball "$tarball_path" \
+    # REQ-AXO-113 — fold into unified qualify entry
+    exec python3 "$SCRIPT_DIR/qualify_runtime.py" \
+        --instance dev \
+        --profile ingestion \
+        --mode indexer_full \
+        --cold \
+        --tensorrt \
+        --build-tensorrt-from-tarball "$tarball_path" \
         --manifest "$manifest_path" \
         --duration "$duration" \
         --interval "$interval" \

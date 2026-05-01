@@ -111,7 +111,200 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=str(PROJECT_ROOT / "scripts" / "retrieval_context_cases.json"),
         help="Deterministic retrieve_context corpus JSON path",
     )
+    # REQ-AXO-113 — fold qualify-dev-*-cold.sh + reset-dev-*-baseline.sh +
+    # build-and-qualify-tensorrt-cold.sh into the unified qualify entrypoint.
+    parser.add_argument(
+        "--cold",
+        action="store_true",
+        help=(
+            "Reset the dev runtime to a cold baseline before qualifying: stop, clean "
+            "IST/run roots, restart, wait for stable measurement window. Implies "
+            "--reuse-runtime. Dev-only. Indexer-only baseline when --tensorrt or "
+            "--mode indexer_*; otherwise split (brain+indexer)."
+        ),
+    )
+    parser.add_argument(
+        "--tensorrt",
+        action="store_true",
+        help=(
+            "Enable the TensorRT GPU embedding service envelope: validate manifest, "
+            "force the dedicated GPU service on, set VRAM/workspace caps. Combine "
+            "with --cold for the equivalent of the legacy qualify-dev-indexer-tensorrt-cold."
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        default="",
+        help="TensorRT ORT artifact manifest path (used with --tensorrt). Default: $AXON_ORT_ARTIFACT_MANIFEST or .axon/ort-artifacts/onnxruntime-tensorrt-<set>/current.json",
+    )
+    parser.add_argument(
+        "--build-tensorrt-from-tarball",
+        default="",
+        help="Optional: before --cold --tensorrt, build the ORT TensorRT artifact from this local tarball.",
+    )
+    parser.add_argument(
+        "--max-vram-used-mb",
+        type=int,
+        default=None,
+        help="TensorRT VRAM budget in MB. Default: 2048. Min: 1024.",
+    )
+    parser.add_argument(
+        "--gpu-admission-vram-used-mb",
+        type=int,
+        default=None,
+        help="Maximum already-used VRAM before GPU batch admission. Default: budget minus max(10%%, 512 MiB).",
+    )
+    parser.add_argument(
+        "--tensorrt-workspace-mb",
+        type=int,
+        default=None,
+        help="TensorRT workspace/memory-pool cap in MB. Default: budget minus 1024 MiB.",
+    )
     return parser.parse_args(argv)
+
+
+def _default_tensorrt_manifest() -> Path:
+    cuda_pkg = os.environ.get("AXON_CUDA_PACKAGE_SET", "cudaPackages")
+    cuda_label = cuda_pkg.replace("_", "-")
+    return PROJECT_ROOT / ".axon" / "ort-artifacts" / f"onnxruntime-tensorrt-{cuda_label}" / "current.json"
+
+
+def _validate_tensorrt_envelope(args: argparse.Namespace) -> tuple[int, int, int, Path]:
+    """Resolve manifest path and VRAM envelope. Raises SystemExit on misuse."""
+    if args.manifest:
+        manifest_path = Path(args.manifest).resolve()
+    elif os.environ.get("AXON_ORT_ARTIFACT_MANIFEST"):
+        manifest_path = Path(os.environ["AXON_ORT_ARTIFACT_MANIFEST"]).resolve()
+    else:
+        manifest_path = _default_tensorrt_manifest()
+
+    if not manifest_path.is_file():
+        raise SystemExit(
+            f"[qualify] --tensorrt: manifest not found: {manifest_path}\n"
+            "Build it first with: axon qualify --cold --tensorrt --build-tensorrt-from-tarball PATH"
+        )
+
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"[qualify] --tensorrt: manifest parse error: {exc}")
+    if payload.get("provider") != "tensorrt":
+        raise SystemExit(
+            f"[qualify] --tensorrt: manifest provider must be 'tensorrt', found: {payload.get('provider')!r}"
+        )
+
+    validator = PROJECT_ROOT / "scripts" / "lib" / "validate_ort_manifest.py"
+    proc = shell(["python3", str(validator), str(manifest_path)], timeout=60)
+    if proc.returncode != 0:
+        raise SystemExit(
+            "[qualify] --tensorrt: manifest validation failed\n"
+            + completed_output(proc.stdout)
+            + completed_output(proc.stderr)
+        )
+
+    max_vram = args.max_vram_used_mb if args.max_vram_used_mb is not None else 2048
+    if max_vram < 1024:
+        raise SystemExit(f"[qualify] --max-vram-used-mb must be >= 1024, got {max_vram}")
+    admission = args.gpu_admission_vram_used_mb
+    if admission is None:
+        reserve = max(max_vram // 10, 512)
+        admission = max_vram - reserve
+    if admission >= max_vram:
+        raise SystemExit("[qualify] --gpu-admission-vram-used-mb must stay below --max-vram-used-mb")
+    workspace = args.tensorrt_workspace_mb
+    if workspace is None:
+        workspace = max_vram - 1024 if max_vram > 1024 else max_vram
+    if workspace < 512:
+        raise SystemExit(f"[qualify] --tensorrt-workspace-mb must be >= 512, got {workspace}")
+    if workspace > max_vram:
+        raise SystemExit("[qualify] --tensorrt-workspace-mb must not exceed --max-vram-used-mb")
+
+    return max_vram, admission, workspace, manifest_path
+
+
+def perform_cold_reset(args: argparse.Namespace) -> None:
+    """REQ-AXO-113 — fold qualify-dev-*-cold.sh + reset-dev-*-baseline.sh into qualify --cold."""
+    if args.instance != "dev":
+        raise SystemExit("[qualify] --cold is dev-only; pass --instance dev")
+
+    indexer_only = args.tensorrt or args.mode in {"indexer_full", "indexer_vector", "indexer_graph"}
+
+    # Step 1: optional TensorRT artifact build
+    if args.build_tensorrt_from_tarball:
+        tarball = Path(args.build_tensorrt_from_tarball).resolve()
+        if not tarball.is_file():
+            raise SystemExit(f"[qualify] --build-tensorrt-from-tarball: tarball not found: {tarball}")
+        manifest_path = (
+            Path(args.manifest).resolve() if args.manifest else _default_tensorrt_manifest()
+        )
+        env = os.environ.copy()
+        env["AXON_ORT_ARTIFACT_MANIFEST"] = str(manifest_path)
+        env["TENSORRT_LOCAL_TARBALL"] = str(tarball)
+        print(f"[qualify] building TensorRT ORT artifact from {tarball}")
+        proc = shell(
+            ["bash", str(PROJECT_ROOT / "scripts" / "build_ort_tensorrt_artifact.sh")],
+            env=env,
+            timeout=1800,
+        )
+        if proc.returncode != 0:
+            out = completed_output(proc.stdout) + completed_output(proc.stderr)
+            raise SystemExit(f"[qualify] TensorRT artifact build failed (rc={proc.returncode}):\n{out}")
+        if not manifest_path.is_file():
+            raise SystemExit(f"[qualify] TensorRT manifest missing after build: {manifest_path}")
+        args.manifest = str(manifest_path)
+
+    # Step 2: TensorRT envelope (validate manifest + export env vars)
+    if args.tensorrt:
+        max_vram, admission, workspace, manifest_path = _validate_tensorrt_envelope(args)
+        os.environ["AXON_ORT_ARTIFACT_MANIFEST"] = str(manifest_path)
+        os.environ["AXON_GPU_EMBED_SERVICE_ENABLED"] = "1"
+        os.environ["AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH"] = "0"
+        os.environ["AXON_GPU_EMBED_SERVICE_TENSORRT"] = "1"
+        os.environ.setdefault("AXON_GPU_TELEMETRY_BACKEND", "nvml")
+        os.environ.setdefault("AXON_NVML_LIBRARY_PATH", "/usr/lib/wsl/lib/libnvidia-ml.so.1")
+        os.environ["AXON_OPT_MAX_VRAM_USED_MB"] = str(max_vram)
+        os.environ["AXON_CUDA_MEMORY_SOFT_LIMIT_MB"] = str(max_vram)
+        os.environ["AXON_CUDA_MEMORY_LIMIT_MB"] = str(workspace)
+        os.environ["AXON_GPU_PRIMARY_WORKER_MAX_USED_MB"] = str(admission)
+        os.environ.setdefault("AXON_GPU_TELEMETRY_CACHE_TTL_MS", "250")
+        os.environ.setdefault("AXON_TENSORRT_OVERSHOOT_MB", "7900")
+        os.environ.setdefault("AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT", "1")
+        print(
+            f"[qualify] TensorRT envelope: max_vram={max_vram} admission={admission} "
+            f"workspace={workspace} manifest={manifest_path}"
+        )
+
+    # Step 3: dev baseline reset (stop + clean + start + wait)
+    baseline_kind = "indexer" if indexer_only else "split"
+    print(f"[qualify] --cold: resetting dev baseline ({baseline_kind})")
+
+    if indexer_only:
+        baseline_script = (
+            "set -euo pipefail; "
+            "source scripts/lib/dev-baseline.sh; "
+            "dev_baseline_require_dev_instance; "
+            "dev_baseline_stop_split; "
+            "dev_baseline_clean_state; "
+            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-indexer.sh; "
+            "dev_baseline_wait_for_indexer_measurement_window 240"
+        )
+    else:
+        baseline_script = (
+            "set -euo pipefail; "
+            "source scripts/lib/dev-baseline.sh; "
+            "dev_baseline_require_dev_instance; "
+            "dev_baseline_stop_split; "
+            "dev_baseline_clean_state; "
+            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-brain.sh; "
+            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-indexer.sh; "
+            "dev_baseline_wait_for_stable_measurement_window 240"
+        )
+
+    proc = shell(["bash", "-c", baseline_script], env=os.environ.copy(), timeout=600)
+    if proc.returncode != 0:
+        out = completed_output(proc.stdout) + completed_output(proc.stderr)
+        raise SystemExit(f"[qualify] cold baseline reset failed (rc={proc.returncode}):\n{out}")
+    print(f"[qualify] cold baseline ready ({baseline_kind})")
 
 
 def normalize_instance(instance: str) -> str:
@@ -2081,6 +2274,11 @@ def run_mode_profile(args: argparse.Namespace, mode: str, suite_run_dir: Path) -
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     args.instance = normalize_instance(args.instance)
+    if args.cold:
+        # REQ-AXO-113 — cold reset implies the runtime is freshly started by the
+        # baseline orchestrator; downstream qualify steps must not stop/restart it.
+        args.reuse_runtime = True
+        perform_cold_reset(args)
     modes = normalize_modes(args.mode, args.compare)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -2111,6 +2309,8 @@ def main(argv: list[str]) -> int:
         "reset_ist": args.reset_ist,
         "keep_running": args.keep_running,
         "gpu_qualified_runtime": args.gpu_qualified_runtime,
+        "cold": args.cold,
+        "tensorrt": args.tensorrt,
         "paths": {
             "project_root": str(PROJECT_ROOT),
             "run_dir": str(run_dir),

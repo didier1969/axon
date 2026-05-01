@@ -17,7 +17,7 @@ Commands:
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
-  qualify [args...]        Unified qualification pipeline (defaults to dev). Supports --mode cold|warm, --tensorrt, --sweep
+  qualify [args...]        Unified qualification pipeline (defaults to dev). Supports --cold, --tensorrt, --build-tensorrt-from-tarball
   qualify-mcp [args...]    MCP qualification for core/SOLL surfaces
   benchmark-vector-token-matrix [args...] Run indexer-only token-cap throughput matrix (cold or warm)
   mcp-call [args...]       Direct MCP HTTP caller for list/call operations against the selected instance

@@ -238,12 +238,30 @@ run_step() {
             export AXON_VECTOR_PREPARE_PIPELINE_DEPTH="$pipeline_depth"
         fi
         if [[ "$run_mode" == "cold" ]]; then
-            bash "$SCRIPT_DIR/qualify-dev-indexer-cold.sh" \
+            # REQ-AXO-113 — fold into unified qualify entry
+            python3 "$SCRIPT_DIR/qualify_runtime.py" \
+                --instance dev \
+                --profile ingestion \
+                --mode indexer_full \
+                --cold \
                 --duration "$duration" \
                 --interval "$interval" \
                 --label "$label"
         else
-            bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh"
+            # Warm path: reuse the already-running indexer baseline. The reset
+            # was previously delegated to scripts/reset-dev-indexer-baseline.sh
+            # (deleted by REQ-AXO-113 Phase 4); we now invoke the dev-baseline
+            # library functions directly since the warm path also needs the
+            # subsequent wait_for_warm_vector_window step before qualify.
+            (
+                # shellcheck source=scripts/lib/dev-baseline.sh
+                source "$SCRIPT_DIR/lib/dev-baseline.sh"
+                dev_baseline_require_dev_instance
+                dev_baseline_stop_split
+                dev_baseline_clean_state
+                AXON_INSTANCE_KIND=dev bash "$SCRIPT_DIR/lib/start-indexer.sh"
+                dev_baseline_wait_for_indexer_measurement_window 240
+            )
             wait_for_warm_vector_window "$warmup_timeout" "$warmup_poll_interval" "$warmup_settle_seconds"
             python3 "$SCRIPT_DIR/qualify_ingestion_run.py" \
                 --reuse-runtime \

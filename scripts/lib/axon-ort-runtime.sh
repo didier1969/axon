@@ -65,7 +65,7 @@ axon_resolve_ort_runtime() {
                 echo "❌ TensorRT mode requires a validated local ORT artifact manifest."
                 echo "   Missing or invalid manifest: $ORT_ARTIFACT_MANIFEST"
                 echo "   Build it first with: bash scripts/build_ort_tensorrt_artifact.sh"
-                echo "   Or use: ./scripts/axon build-and-qualify-tensorrt-cold"
+                echo "   Or use: ./scripts/axon-dev qualify --cold --tensorrt --build-tensorrt-from-tarball PATH"
                 return 1
             fi
 

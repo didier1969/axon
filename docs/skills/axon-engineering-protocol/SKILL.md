@@ -410,7 +410,11 @@ Removed in DEC-AXO-060 Phase 3 (no longer dispatched):
 - `reset-dev-baseline`, `reset-dev-indexer-baseline`
 - `upgrade-topology`
 
-Their behaviour folds into `qualify --profile <smoke|core|soll|latency|robustness|compare>` plus flags such as `--mode cold|warm`, `--tensorrt`, `--sweep` (Phase 4 — REQ-AXO-113 — completes the cold/reset folding; until then, the underlying `.sh` files remain on disk but are not reachable through the operator surface).
+Their behaviour folds into `qualify --profile <smoke|demo|full|ingestion|retrieval>` plus the `--cold` flag (resets the dev runtime baseline before qualifying — DEC-AXO-060 Phase 4 / REQ-AXO-113), the `--tensorrt` flag (TensorRT GPU envelope), and `--build-tensorrt-from-tarball PATH` (optional artifact build). Example replacements:
+- legacy `qualify-dev-cold`            → `axon-dev qualify --profile ingestion --cold --mode brain_only`
+- legacy `qualify-dev-indexer-cold`    → `axon-dev qualify --profile ingestion --cold --mode indexer_full`
+- legacy `qualify-dev-indexer-tensorrt-cold` → `axon-dev qualify --profile ingestion --cold --tensorrt --max-vram-used-mb 2048`
+- legacy `build-and-qualify-tensorrt-cold` → add `--build-tensorrt-from-tarball PATH` to the line above.
 
 Use `./scripts/axon-live qualify ...` (or `--instance live`) only when you intentionally assess promoted `live`.
 
