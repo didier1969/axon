@@ -124,6 +124,11 @@ impl McpServer {
         let mut operations = Vec::new();
 
         if let Some(plan) = args.get("plan") {
+            // REQ-AXO-092 — guideline / stakeholder / validation were absent
+            // from the plan ingest loop, so a `plan.guidelines` array was
+            // silently dropped on the floor with no diagnostic. Storage layer
+            // (storage.rs::entity_type_cap) already maps all three; the ingest
+            // loop just needed to enumerate them.
             for entity in [
                 "pillar",
                 "requirement",
@@ -131,6 +136,9 @@ impl McpServer {
                 "milestone",
                 "vision",
                 "concept",
+                "stakeholder",
+                "validation",
+                "guideline",
             ] {
                 if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
                     for item in items {

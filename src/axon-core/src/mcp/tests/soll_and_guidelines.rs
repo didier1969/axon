@@ -243,6 +243,80 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
 }
 
 #[test]
+fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
+    // REQ-AXO-092 — build_plan_operations only iterated pillar/requirement/
+    // decision/milestone/vision/concept, silently dropping plan.guidelines,
+    // plan.stakeholders, plan.validations even though the storage layer
+    // already supports all three. Adding them to the iteration list closes
+    // the gap and makes soll_apply_plan symmetric with soll_manager.
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "guidelines": [{
+                        "logical_key": "gui-tdd-real-io",
+                        "title": "TDD with real I/O",
+                        "description": "Tests must hit real DBs"
+                    }],
+                    "stakeholders": [{
+                        "logical_key": "stk-platform-eng",
+                        "title": "Platform Engineering",
+                        "description": "Owns runtime SLOs"
+                    }],
+                    "validations": [{
+                        "logical_key": "val-cold-start",
+                        "title": "Cold start validates GPU envelope",
+                        "description": "Validation node for the cold-start GPU envelope check",
+                        "result": "pending"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(10092)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let operations = result["data"]["operations"]
+        .as_array()
+        .expect("operations array");
+    let entities: std::collections::HashSet<&str> = operations
+        .iter()
+        .filter_map(|op| op.get("entity").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        entities.contains("guideline"),
+        "plan.guidelines must produce a `guideline` operation: {operations:?}"
+    );
+    assert!(
+        entities.contains("stakeholder"),
+        "plan.stakeholders must produce a `stakeholder` operation: {operations:?}"
+    );
+    assert!(
+        entities.contains("validation"),
+        "plan.validations must produce a `validation` operation: {operations:?}"
+    );
+    // Three new entries must each be `create` (none pre-existed)
+    let create_ops: Vec<&Value> = operations
+        .iter()
+        .filter(|op| op.get("kind").and_then(|v| v.as_str()) == Some("create"))
+        .collect();
+    assert!(
+        create_ops.len() >= 3,
+        "expected at least 3 create ops, got {}: {operations:?}",
+        create_ops.len()
+    );
+}
+
+#[test]
 fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
     let server = create_test_server();
     server

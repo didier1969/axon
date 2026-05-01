@@ -323,7 +323,7 @@ For `soll_apply_plan`:
 - start with `dry_run=true`
 - include `author`
 - use stable `logical_key` for idempotent creates/updates
-- put batch entities under `plan.<type>s`
+- put batch entities under `plan.<type>s` — accepted: `pillars`, `requirements`, `decisions`, `milestones`, `visions`, `concepts`, `stakeholders`, `validations`, `guidelines` (REQ-AXO-092 closed the prior gap where guidelines/stakeholders/validations were silently dropped)
 - put edges in top-level `relations`
 - poll `job_status` when the response returns `job_id`
 
