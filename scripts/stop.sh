@@ -11,6 +11,8 @@ REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
+# shellcheck source=scripts/lib/socket-lifecycle.sh
+source "$PROJECT_ROOT/scripts/lib/socket-lifecycle.sh"
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
 
@@ -342,29 +344,20 @@ if [[ -x "$AXONCTL_BIN" ]]; then
     # REQ-AXO-093 — orphan-socket guard: axonctl stop kills processes but
     # does not always unlink the AF_UNIX sockets. Leftover sockets cause
     # the next start to misread "data plane already up" and silently skip
-    # its launch, producing a green "Ready" line on a dead runtime.
-    _axon_cleanup_role_state() {
-        local role="$1"
-        local run_root_base
-        if [[ "${AXON_INSTANCE_KIND:-live}" == "dev" ]]; then
-            run_root_base="$PROJECT_ROOT/.axon-dev"
-        else
-            run_root_base="$PROJECT_ROOT/.axon"
-        fi
-        rm -f "/tmp/axon-${AXON_INSTANCE_KIND}-${role}-telemetry.sock" \
-              "/tmp/axon-${AXON_INSTANCE_KIND}-${role}-mcp.sock" \
-              "$run_root_base/run-${role}/axon-${role}.pid" \
-              "$run_root_base/run-${role}/runtime.env"
-    }
-    if [[ "$STOP_ROLE" == "all" ]]; then
-        _axon_cleanup_role_state brain
-        _axon_cleanup_role_state indexer
+    # its launch, producing a green "Ready" line on a dead runtime. The
+    # cleanup helpers live in scripts/lib/socket-lifecycle.sh.
+    if [[ "${AXON_INSTANCE_KIND:-live}" == "dev" ]]; then
+        _AXON_RUN_ROOT_BASE="$PROJECT_ROOT/.axon-dev"
     else
-        _axon_cleanup_role_state "$STOP_ROLE"
+        _AXON_RUN_ROOT_BASE="$PROJECT_ROOT/.axon"
     fi
-    # Legacy non-role-specific paths from older code paths in axon-instance.sh
-    rm -f "/tmp/axon-${AXON_INSTANCE_KIND}-telemetry.sock" \
-          "/tmp/axon-${AXON_INSTANCE_KIND}-mcp.sock"
+    if [[ "$STOP_ROLE" == "all" ]]; then
+        axon_cleanup_role_state "$AXON_INSTANCE_KIND" brain "$_AXON_RUN_ROOT_BASE"
+        axon_cleanup_role_state "$AXON_INSTANCE_KIND" indexer "$_AXON_RUN_ROOT_BASE"
+    else
+        axon_cleanup_role_state "$AXON_INSTANCE_KIND" "$STOP_ROLE" "$_AXON_RUN_ROOT_BASE"
+    fi
+    axon_cleanup_legacy_instance_paths "$AXON_INSTANCE_KIND"
 
     if [ "$AXONCTL_OK" = "1" ]; then
         echo "✅ Axon stopped (Other projects preserved)."

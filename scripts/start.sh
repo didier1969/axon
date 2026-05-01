@@ -17,6 +17,8 @@ source "$PROJECT_ROOT/scripts/lib/axon-resource-policy.sh"
 source "$PROJECT_ROOT/scripts/lib/axon-ort-runtime.sh"
 # shellcheck source=scripts/lib/axon-version.sh
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
+# shellcheck source=scripts/lib/socket-lifecycle.sh
+source "$PROJECT_ROOT/scripts/lib/socket-lifecycle.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
@@ -166,23 +168,10 @@ cleanup_stale_runtime_state() {
     rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE"
 }
 
-# REQ-AXO-093 — real liveness probe for AF_UNIX sockets. The bare
-# `[[ -S sock ]]` test misreads orphan socket files (left over from a
-# crashed or non-cleanly-stopped run) as a live data plane. This probe
-# attempts a connect with a 0.5s timeout: orphan sockets reject or hang.
+# socket_responds backwards-compatible alias — real liveness probe lives
+# in scripts/lib/socket-lifecycle.sh as axon_socket_responds (REQ-AXO-093).
 socket_responds() {
-    local sock_path="$1"
-    [[ -S "$sock_path" ]] || return 1
-    python3 - "$sock_path" <<'PYEOF' 2>/dev/null
-import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(0.5)
-try:
-    s.connect(sys.argv[1])
-    s.close()
-except Exception:
-    sys.exit(1)
-PYEOF
+    axon_socket_responds "$@"
 }
 
 probe_sql_gateway() {
