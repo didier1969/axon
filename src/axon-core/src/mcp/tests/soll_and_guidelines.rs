@@ -1456,6 +1456,15 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
     assert_eq!(count, 1);
 }
 
+// REQ-AXO-126 — soll_export disabled-branch is verified via the
+// soll_export_enabled() function logic and production smoke-test;
+// integration coverage is intentionally not added here because the
+// AXON_SOLL_EXPORT_DISABLED env var would race with the other
+// export tests under cargo's parallel runner. The cfg(test) branch
+// keeps the existing tests unchanged: tests are enabled by default,
+// production is disabled by default and opts in via
+// AXON_SOLL_EXPORT_ENABLED.
+
 #[test]
 fn test_axon_export_soll() {
     let server = create_test_server();

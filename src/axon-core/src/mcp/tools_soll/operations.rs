@@ -1,7 +1,45 @@
 use super::*;
 
 impl McpServer {
+    fn soll_export_enabled() -> bool {
+        // REQ-AXO-126 — SOLL_EXPORT is disabled by default in production.
+        // Production paths opt in via AXON_SOLL_EXPORT_ENABLED=1 (or
+        // true/yes/on). Test builds keep the legacy "enabled by
+        // default" so the existing write-path assertions still execute;
+        // a test that wants to exercise the disabled branch sets
+        // AXON_SOLL_EXPORT_DISABLED=1 to flip it.
+        if cfg!(test) {
+            return !matches!(
+                std::env::var("AXON_SOLL_EXPORT_DISABLED")
+                    .ok()
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            );
+        }
+        match std::env::var("AXON_SOLL_EXPORT_ENABLED") {
+            Ok(v) => matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            Err(_) => false,
+        }
+    }
+
     pub(crate) fn axon_export_soll(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        // REQ-AXO-126 — gate behind AXON_SOLL_EXPORT_ENABLED. Returns a
+        // success-shaped response when disabled so the calling
+        // axon_commit_work flow continues without raising an error.
+        if !Self::soll_export_enabled() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": "SOLL export disabled (REQ-AXO-126). Set AXON_SOLL_EXPORT_ENABLED=1 to re-enable." }],
+                "data": {
+                    "disabled": true,
+                    "reason": "REQ-AXO-126 retention policy pending; default off until decided",
+                    "enable_via": "AXON_SOLL_EXPORT_ENABLED=1"
+                }
+            }));
+        }
         let project_code = args.get("project_code").and_then(|v| v.as_str());
         let project_code = match project_code
             .map(|code| self.resolve_project_code(code))
@@ -92,6 +130,19 @@ impl McpServer {
         let _ = std::fs::create_dir_all(&export_dir);
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
+                // REQ-AXO-103 — auto-rotate to keep the most recent N
+                // exports. Without this, every axon_commit_work
+                // accumulates one SOLL_EXPORT file in docs/vision/
+                // (already gitignored, but the disk count grows
+                // unbounded — observed 700+ files within weeks of
+                // routine usage). Honors AXON_SOLL_EXPORT_RETAIN env
+                // override; defaults to 20 most-recent exports.
+                let retain: usize = std::env::var("AXON_SOLL_EXPORT_RETAIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(20);
+                Self::prune_old_soll_exports(&export_dir, retain);
+
                 let report = format!(
                     "✅ Exported to {}\n\n---\n\n{}",
                     file_path.display(),
@@ -102,6 +153,35 @@ impl McpServer {
             Err(e) => Some(
                 serde_json::json!({ "content": [{ "type": "text", "text": format!("Write error: {}", e) }], "isError": true }),
             ),
+        }
+    }
+
+    pub(crate) fn prune_old_soll_exports(export_dir: &std::path::Path, keep: usize) {
+        // Best-effort cleanup; swallow filesystem errors so a transient
+        // permission issue never blocks the SOLL export.
+        let entries = match std::fs::read_dir(export_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_string_lossy().to_string();
+                if !(name.starts_with("SOLL_EXPORT_") && name.ends_with(".md")) {
+                    return None;
+                }
+                let mtime = entry.metadata().ok()?.modified().ok()?;
+                Some((mtime, path))
+            })
+            .collect();
+        if candidates.len() <= keep {
+            return;
+        }
+        // Newest first.
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in candidates.into_iter().skip(keep) {
+            let _ = std::fs::remove_file(path);
         }
     }
 
