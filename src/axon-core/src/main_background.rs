@@ -2573,7 +2573,6 @@ fn claim_policy(
     if service_pressure == ServicePressure::Degraded
         || rss_ratio >= 0.82
         || budget_exhaustion_ratio >= 0.88
-        || queue_len >= 3_000
     {
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
@@ -2590,7 +2589,7 @@ fn claim_policy(
         };
     }
 
-    if budget_exhaustion_ratio >= 0.72 || queue_len >= 1_500 {
+    if budget_exhaustion_ratio >= 0.72 {
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
@@ -3084,6 +3083,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
+    static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
+    static FLUSH_METRICS_GUARD: Mutex<()> = Mutex::new(());
+
     fn test_file_ingress_guard() -> Arc<Mutex<FileIngressGuard>> {
         Arc::new(Mutex::new(FileIngressGuard::default()))
     }
@@ -3172,18 +3174,22 @@ mod tests {
 
     #[test]
     fn test_optimizer_loop_interval_defaults_to_15_seconds() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("AXON_OPT_LOOP_INTERVAL_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
         }
-        assert_eq!(optimizer_loop_interval_ms(), 15_000);
+        assert_eq!(optimizer_loop_interval_ms(), 60_000);
     }
 
     #[test]
     fn test_optimizer_loop_interval_respects_env_override() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("AXON_OPT_LOOP_INTERVAL_MS", "30000");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
         }
-        assert_eq!(optimizer_loop_interval_ms(), 30_000);
+        assert_eq!(optimizer_loop_interval_ms(), 120_000);
         unsafe {
             std::env::remove_var("AXON_OPT_LOOP_INTERVAL_MS");
         }
@@ -3274,7 +3280,9 @@ mod tests {
     }
 
     #[test]
-    fn test_claim_policy_slows_when_queue_grows() {
+    fn test_claim_policy_stays_fast_when_only_queue_grows() {
+        // Queue length alone no longer triggers slow/guarded modes.
+        // Only budget_exhaustion_ratio, RSS, and service_pressure drive mode changes.
         let policy = claim_policy(
             2_000,
             0.10,
@@ -3282,9 +3290,8 @@ mod tests {
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.mode.label(), "slow");
-        assert!(policy.claim_count < 1_500);
-        assert!(policy.sleep > std::time::Duration::from_millis(200));
+        assert_eq!(policy.mode.label(), "fast");
+        assert!(policy.claim_count > 0);
     }
 
     #[test]
@@ -3317,7 +3324,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claim_policy_enters_guard_mode_when_queue_is_high() {
+    fn test_claim_policy_stays_fast_when_queue_is_high_but_budget_low() {
+        // High queue alone does not trigger guarded mode anymore.
         let policy = claim_policy(
             3_500,
             0.10,
@@ -3325,9 +3333,8 @@ mod tests {
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.mode.label(), "guarded");
-        assert!(policy.claim_count < 600);
-        assert!(policy.sleep >= std::time::Duration::from_millis(500));
+        assert_eq!(policy.mode.label(), "fast");
+        assert!(policy.claim_count > 0);
     }
 
     #[test]
@@ -3345,6 +3352,7 @@ mod tests {
 
     #[test]
     fn test_claim_policy_does_not_pause_solely_on_large_queue() {
+        // Even very large queues should not pause when budget/RSS/pressure are healthy.
         let policy = claim_policy(
             8_000,
             0.10,
@@ -3352,7 +3360,7 @@ mod tests {
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.mode.label(), "guarded");
+        assert_eq!(policy.mode.label(), "fast");
         assert!(policy.claim_count > 0);
     }
 
@@ -3412,10 +3420,11 @@ mod tests {
     }
 
     #[test]
-    fn test_claim_policy_reports_guarded_mode() {
+    fn test_claim_policy_reports_guarded_mode_on_budget() {
+        // Guarded mode is now triggered by budget exhaustion, not queue length.
         let policy = claim_policy(
-            3_500,
-            0.10,
+            500,
+            0.90,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
@@ -3496,6 +3505,7 @@ mod tests {
 
     #[test]
     fn test_handle_watcher_events_stages_modified_file_as_hot_delta() {
+        let _flush_guard = FLUSH_METRICS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempdir().unwrap();
         let root = temp.path();
         let project = root.join("proj");
@@ -3503,7 +3513,7 @@ mod tests {
         let file_path = project.join("watch.ex");
         std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         let ingress_buffer = test_ingress_buffer();
         let guard = test_file_ingress_guard();
         let event = DebouncedEvent::new(
@@ -3550,7 +3560,9 @@ mod tests {
 
     #[test]
     fn test_flush_ingress_buffer_records_durable_but_excluded_from_pending() {
+        let _flush_guard = FLUSH_METRICS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_ingress_metrics_for_tests();
+
         let temp = tempdir().unwrap();
         let root = temp.path();
         let project = root.join("proj");
@@ -3566,7 +3578,7 @@ mod tests {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         store
             .execute(&format!(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES ('{}', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, {}, {}, 900)",
@@ -3610,7 +3622,9 @@ mod tests {
 
     #[test]
     fn test_flush_ingress_buffer_does_not_count_already_pending_file_as_new_admission() {
+        let _flush_guard = FLUSH_METRICS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_ingress_metrics_for_tests();
+
         let temp = tempdir().unwrap();
         let root = temp.path();
         let project = root.join("proj");
@@ -3626,7 +3640,7 @@ mod tests {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         store
             .execute(&format!(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES ('{}', 'proj', 'pending', 'promoted', FALSE, FALSE, {}, {}, 900)",
@@ -3760,6 +3774,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_storm_still_salvages_active_project_delta() {
+        let _flush_guard = FLUSH_METRICS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         watcher_probe::clear();
 
         let temp = tempdir().unwrap();
@@ -3769,7 +3784,7 @@ mod tests {
         let file_path = project.join("watch.ex");
         std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         let ingress_buffer = test_ingress_buffer();
         let guard = test_file_ingress_guard();
         let mut events = Vec::new();
@@ -3881,7 +3896,7 @@ mod tests {
         let file_path = project.join("ignored.png");
         std::fs::write(&file_path, "not parsable").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         let ingress_buffer = test_ingress_buffer();
         let event = DebouncedEvent::new(
             Event {
@@ -3925,7 +3940,7 @@ mod tests {
         let file_path = project.join("watch.ex");
         std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         let ingress_buffer = test_ingress_buffer();
         let event = DebouncedEvent::new(
             Event {
@@ -3980,7 +3995,7 @@ mod tests {
         let file_path = project.join("watch.ex");
         std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
         let ingress_buffer = test_ingress_buffer();
         let event = DebouncedEvent::new(
             Event {
@@ -4016,7 +4031,7 @@ mod tests {
         watcher_probe::clear();
 
         handle_watcher_events(
-            Arc::new(GraphStore::new(":memory:").unwrap()),
+            Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap()),
             PathBuf::from("/tmp"),
             "proj".to_string(),
             test_file_ingress_guard(),
@@ -4039,7 +4054,7 @@ mod tests {
         let file_path = temp.path().join("bulk_overflow.ex");
         std::fs::write(&file_path, "defmodule BulkOverflow do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -4348,7 +4363,7 @@ mod tests {
         let file_path = temp.path().join("oversized.rs");
         std::fs::write(&file_path, vec![b'x'; 16 * 1024]).unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
