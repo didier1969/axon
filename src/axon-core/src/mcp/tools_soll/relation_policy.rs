@@ -104,6 +104,24 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 70,
             },
         }),
+        // REQ-AXO-115 — A Concept that formalizes a Pillar-level
+        // operational protocol (e.g. CPT-AXO-019 → PIL-AXO-003) needs a
+        // canonical edge so the dependency is queryable. BELONGS_TO
+        // matches the REQ→PIL semantic ("this node is owned by the
+        // pillar"); higher child_order_rank than REQ→PIL (30) puts
+        // requirements before concepts in pillar children. Lower
+        // parent_preference_rank than CPT→REQ (40) reflects that a
+        // Concept's primary parent is its Pillar when one is declared.
+        ("CPT", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 15,
+                child_order_rank: 50,
+            },
+        }),
         ("DEC", "REQ") => Some(RelationPolicy {
             allowed: &["SOLVES", "REFINES"],
             default: Some("SOLVES"),

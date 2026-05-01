@@ -3869,6 +3869,57 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
     );
 }
 
+// REQ-AXO-115 — Concept→Pillar BELONGS_TO is the canonical edge for a
+// Concept that formalizes a Pillar-level operational protocol
+// (e.g. CPT-AXO-019 → PIL-AXO-003). Before this, the pair was forbidden
+// and the dependency had to be expressed indirectly via REQ traversal.
+#[test]
+fn test_axon_soll_manager_link_concept_belongs_to_pillar() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Operational truth', 'Pillar desc', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'Operational protocol', 'Concept desc', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "concept",
+                "data": {
+                    "source_id": "CPT-AXO-001",
+                    "target_id": "PIL-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(4106)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Link created"), "{content}");
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='BELONGS_TO' AND source_id='CPT-AXO-001' AND target_id='PIL-AXO-001'")
+            .unwrap(),
+        1
+    );
+}
+
 #[test]
 fn test_soll_relation_schema_resolves_pair_by_ids() {
     let server = create_test_server();

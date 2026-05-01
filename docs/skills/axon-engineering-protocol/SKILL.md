@@ -343,6 +343,7 @@ For `soll_work_plan`:
 
 Before retrying a bad link:
 - use `soll_relation_schema`
+- canonical pair `CPT -BELONGS_TO-> PIL` exists for Concepts that formalize Pillar-level operational protocols (e.g. `CPT-AXO-019 -> PIL-AXO-003`); use it instead of routing the dependency through a Requirement (REQ-AXO-115)
 
 CLI bridge:
 - use `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` for large JSON payloads
