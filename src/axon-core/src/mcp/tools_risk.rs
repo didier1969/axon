@@ -688,9 +688,38 @@ impl McpServer {
         let target_id = match self.resolve_scoped_symbol_id(symbol, project) {
             Some(id) => id,
             None => {
+                // REQ-AXO-043 — same dead-end as inspect/path/impact: when
+                // suggestion table is empty, "retry with one suggested
+                // symbol" is unactionable. Tailor recovery to actual state.
                 let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
                 let suggestions_table =
                     format_table_from_json(&suggestions, &["Suggested Symbol", "Type", "Project"]);
+                let suggestion_rows: Vec<Vec<Value>> =
+                    serde_json::from_str(&suggestions).unwrap_or_default();
+                let has_suggestions = !suggestion_rows.is_empty();
+                let next_actions: &[&str] = if has_suggestions {
+                    &[
+                        "retry with one suggested symbol",
+                        "run inspect to validate symbol name",
+                    ]
+                } else {
+                    &[
+                        "broaden the search via `query` with a less specific term",
+                        "verify spelling and project scope",
+                        "or pass the exact canonical symbol id",
+                    ]
+                };
+                let suggestion_strs: Vec<Value> = suggestion_rows
+                    .iter()
+                    .filter_map(|row| row.first().and_then(Value::as_str))
+                    .map(|value| Value::from(value.to_string()))
+                    .collect();
+                let next_action_kind = if has_suggestions {
+                    "select_valid_symbol_then_retry_simulate"
+                } else {
+                    "broaden_search"
+                };
+                let next_action_tool = if has_suggestions { "inspect" } else { "query" };
                 return Some(json!({
                     "content": [{
                         "type": "text",
@@ -705,11 +734,21 @@ impl McpServer {
                                     &format!("No exact symbol found in current scope.\n\n### Suggestions\n\n{}", suggestions_table),
                                     mode,
                                 ),
-                                &["retry with one suggested symbol", "run inspect to validate symbol name"],
+                                next_actions,
                                 "medium",
                             )
                         )
-                    }]
+                    }],
+                    "data": {
+                        "symbol": symbol,
+                        "project": project,
+                        "symbol_found": false,
+                        "suggestions": suggestion_strs,
+                        "next_action": {
+                            "kind": next_action_kind,
+                            "tool": next_action_tool,
+                        }
+                    }
                 }));
             }
         };

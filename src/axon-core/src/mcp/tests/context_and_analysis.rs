@@ -3852,6 +3852,46 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_axon_simulate_mutation_unknown_symbol_with_no_suggestions_recommends_widening() {
+    // REQ-AXO-043 — fourth symmetric fix (inspect, path, impact, simulate).
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "simulate_mutation",
+            "arguments": { "symbol": "completely_made_up_symbol_uvw_zzz_456" }
+        })),
+        id: Some(json!(50435)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        !content.contains("- retry with one suggested symbol"),
+        "report must not list 'retry with one suggested symbol' when none exist: {content}"
+    );
+    assert!(
+        content.contains("broaden") || content.contains("query") || content.contains("spelling"),
+        "report must steer toward widening: {content}"
+    );
+
+    let data = result.get("data").expect("data block present");
+    assert_eq!(data["symbol_found"].as_bool(), Some(false));
+    let suggestions = data["suggestions"].as_array().expect("suggestions array");
+    assert!(suggestions.is_empty(), "preconditions: no suggestions: {suggestions:?}");
+    assert_eq!(data["next_action"]["kind"].as_str(), Some("broaden_search"));
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
+}
+
+#[test]
 fn test_axon_anomalies_unknown_project_returns_recovery_contract() {
     // REQ-AXO-043 — anomalies returned `Status: ok` with all-zero counts
     // for an unregistered project_code. Mirror the wrong_project_scope
