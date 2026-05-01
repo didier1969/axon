@@ -1456,6 +1456,70 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
     assert_eq!(count, 1);
 }
 
+#[test]
+fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
+    // REQ-AXO-125 — when soll_manager update fails (e.g. the target id
+    // does not exist), the response must NOT echo raw SQL or DuckDB
+    // internals to the LLM-visible content. The normalized contract
+    // puts kind + category + recovery in `content.text` and keeps the
+    // truncated raw error under `data.diagnostic_excerpt` for opt-in
+    // inspection.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/tmp/fake"))
+        .unwrap();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "update",
+                "entity": "requirement",
+                "data": {
+                    "id": "REQ-AXO-9999",
+                    "status": "completed"
+                }
+            }
+        })),
+        id: Some(json!(125001)),
+    };
+    let response = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "update on missing id must surface isError"
+    );
+    let content = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        !content.contains("INSERT INTO") && !content.contains("UPDATE soll"),
+        "LLM-visible content must NOT contain raw SQL: {content}"
+    );
+    assert!(
+        content.contains("update failed"),
+        "content should describe the kind: {content}"
+    );
+    let data = response.get("data").expect("normalized error must include data");
+    assert_eq!(data["kind"].as_str(), Some("update_failed"));
+    assert!(
+        data["category"].is_string(),
+        "data.category must classify the error"
+    );
+    assert!(
+        data["next_action"].is_string(),
+        "data.next_action must give a recovery hint"
+    );
+    assert!(
+        data["diagnostic_excerpt"].is_string(),
+        "data.diagnostic_excerpt must hold the truncated raw error for opt-in inspection"
+    );
+}
+
 // REQ-AXO-126 — soll_export disabled-branch is verified via the
 // soll_export_enabled() function logic and production smoke-test;
 // integration coverage is intentionally not added here because the

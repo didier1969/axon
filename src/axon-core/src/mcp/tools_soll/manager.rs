@@ -1,6 +1,70 @@
 use super::*;
 
 impl McpServer {
+    /// REQ-AXO-125 — normalize writer errors so the LLM-visible text
+    /// contains only the action kind, category, and a recovery hint —
+    /// never the raw SQL or DuckDB internals (which previously leaked
+    /// the partially-substituted INSERT statement and bound metadata
+    /// JSON to the caller). The full error is surfaced under
+    /// `data.diagnostic_excerpt` (truncated to keep response small)
+    /// for clients that explicitly want to inspect it.
+    fn normalized_soll_writer_error(
+        action: &'static str,
+        e: anyhow::Error,
+    ) -> serde_json::Value {
+        let raw = format!("{}", e);
+        let category = if raw.contains("Writer Error") || raw.contains("INSERT INTO") {
+            "duckdb_writer"
+        } else if raw.contains("forbidden_relation") || raw.contains("No canonical relation allowed") {
+            "forbidden_relation"
+        } else if raw.contains("not found") {
+            "target_not_found"
+        } else if raw.contains("Unknown id kind") {
+            "registry_unknown_id_kind"
+        } else {
+            "unknown"
+        };
+        let recovery = match category {
+            "duckdb_writer" => {
+                "If your title/description contains literal `?` characters, strip them and retry — REQ-AXO-091 placeholder bug is fixed in the dev tree but the live brain still ships the pre-fix binary until promotion. Otherwise check that the data fits the column constraints (id collision, schema drift, missing project_code)."
+            }
+            "forbidden_relation" => {
+                "Use a canonical relation type: REQ -BELONGS_TO-> PIL, CPT -EXPLAINS-> REQ, DEC -SOLVES/IMPACTS-> REQ, PIL -EPITOMIZES-> VIS. Run `soll_relation_schema` to discover allowed pairs."
+            }
+            "target_not_found" => {
+                "Verify the target id exists via `cypher SELECT id FROM soll.main.Node WHERE id = '<id>'`. If the id was just created, ensure it was committed."
+            }
+            "registry_unknown_id_kind" => {
+                "Use one of the canonical entity types: vision, pillar, requirement, concept, decision, milestone, stakeholder, validation, guideline."
+            }
+            _ => "Inspect data.diagnostic_excerpt for the underlying writer error.",
+        };
+        let mut excerpt = raw.clone();
+        if excerpt.len() > 240 {
+            excerpt.truncate(240);
+            excerpt.push_str("...");
+        }
+        // Strip newlines so the excerpt fits inline.
+        let excerpt = excerpt.replace('\n', " ").replace("  ", " ");
+        let kind = format!("{}_failed", action);
+        let visible_text = format!("soll_manager {action} failed ({category}). {recovery}");
+        serde_json::json!({
+            "content": [{ "type": "text", "text": visible_text }],
+            "isError": true,
+            "data": {
+                "kind": kind,
+                "category": category,
+                "next_action": recovery,
+                "diagnostic_excerpt": excerpt,
+                "operator_guidance": {
+                    "problem_class": kind,
+                    "follow_up_tools": ["cypher", "soll_relation_schema", "project_registry_lookup"],
+                    "confidence": "high"
+                }
+            }
+        })
+    }
+
     fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
         if error_text.contains("Explicit relation required") {
             "needs_relation_hint"
@@ -301,9 +365,7 @@ impl McpServer {
                             "data": response_data
                         }))
                     }
-                    Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Insert error: {}", e) }], "isError": true }),
-                    ),
+                    Err(e) => Some(Self::normalized_soll_writer_error("insert", e)),
                 }
             }
             "update" => {
@@ -420,9 +482,7 @@ impl McpServer {
                         }
                         Some(payload)
                     }
-                    Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Update error: {}", e) }], "isError": true }),
-                    ),
+                    Err(e) => Some(Self::normalized_soll_writer_error("update", e)),
                 }
             }
             "link" => {
