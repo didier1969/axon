@@ -325,7 +325,11 @@ while [[ $# -gt 0 ]]; do
             RUNTIME_MODE="indexer_vector"
             RUNTIME_SHADOW_ROLE="indexer"
             ;;
-        --indexer-full|--indexerfull)
+        --indexer-full|--indexerfull|--full)
+            # REQ-AXO-100 — accept --full as an alias for --indexer-full so
+            # docs/getting-started.md (which uses --full as the daily
+            # shorthand) executes verbatim. Without the alias the canonical
+            # doc command would fail with "Unknown option: --full".
             RUNTIME_MODE="indexer_full"
             RUNTIME_SHADOW_ROLE="indexer"
             ;;
@@ -349,7 +353,7 @@ Modes:
   --brain-only      MCP + dashboard authority only, without graph or vector workers
   --indexer-graph   Indexer with graph ingestion only, without semantic/vector workers
   --indexer-vector  Indexer with semantic/vector workers only, without graph ingestion
-  --indexer-full    Indexer with graph + semantic/vector workloads
+  --indexer-full    Indexer with graph + semantic/vector workloads (alias: --full)
 
 Options:
   --tensorrt      Enable the TensorRT GPU embedding service for indexer vector/full modes
