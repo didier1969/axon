@@ -34,7 +34,7 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 | Task | Tool |
 |---|---|
 | Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` |
-| Inspect detail | `inspect` |
+| Inspect detail (callers/callees survive synthetic target_id format via name-suffix join, REQ-AXO-134) | `inspect` |
 | Evidence packet | `retrieve_context` |
 | Blast radius | `impact` |
 | Why it exists | `why` |
