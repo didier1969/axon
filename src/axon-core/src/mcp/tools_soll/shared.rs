@@ -130,6 +130,15 @@ pub(super) fn requirement_state_from(
     evidence_count: usize,
     broken_file_evidence_count: usize,
 ) -> &'static str {
+    // REQ-AXO-136: terminal-status requirements are done by definition.
+    // status=`completed` means the work was delivered; status=`delivered` is
+    // the Decision-side equivalent that a Requirement may inherit. No
+    // metadata cross-check is required for the terminal path — closing a
+    // REQ via `soll_manager update status=completed` is the canonical "I'm
+    // done" signal an LLM emits, and the verifier must mirror it.
+    if matches!(status, "completed" | "delivered") {
+        return "done";
+    }
     let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
     if evidence_count > 0
         && broken_file_evidence_count == 0
@@ -152,7 +161,10 @@ pub(super) fn requirement_missing_dimensions(
     broken_file_evidence_count: usize,
 ) -> Vec<String> {
     let mut missing = Vec::new();
-    if !matches!(status, "current" | "accepted") {
+    // REQ-AXO-136: terminal statuses count as the strongest "status" signal,
+    // not as a missing-status gap. Active statuses (current/accepted) also
+    // pass; everything else flags the status dimension.
+    if !matches!(status, "current" | "accepted" | "completed" | "delivered") {
         missing.push("status".to_string());
     }
     if !has_criteria {

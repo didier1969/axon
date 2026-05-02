@@ -4454,6 +4454,55 @@ fn test_soll_attach_evidence_rejected_all_returns_recovery_contract() {
 }
 
 #[test]
+fn test_soll_verify_requirements_terminal_status_counts_as_done() {
+    // REQ-AXO-136: status=`completed` and status=`delivered` are terminal —
+    // done by definition. The verifier must not flag missing dimensions and
+    // must increment the `done` count when an LLM closes a REQ via
+    // `soll_manager update status=completed`.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-501', 'Requirement', 'AXO', 'Closed work no metadata', '', 'completed', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-502', 'Requirement', 'AXO', 'Closed work delivered alias', '', 'delivered', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(45136)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["summary"]["done"].as_u64(), Some(2),
+        "both terminal-status REQs must count as done: {:?}", result["data"]);
+    assert_eq!(result["data"]["summary"]["partial"].as_u64(), Some(0),
+        "terminal REQs must not be partial: {:?}", result["data"]);
+    assert_eq!(result["data"]["summary"]["missing"].as_u64(), Some(0),
+        "terminal REQs must not be missing: {:?}", result["data"]);
+
+    let details = result["data"]["details"].as_array().expect("details");
+    let entry_501 = details.iter()
+        .find(|v| v["id"].as_str() == Some("REQ-AXO-501"))
+        .expect("REQ-AXO-501 entry");
+    assert_eq!(entry_501["state"].as_str(), Some("done"),
+        "completed REQ must be `done`: {:?}", entry_501);
+    let missing_501 = entry_501["missing_dimensions"].as_array()
+        .expect("missing dimensions array");
+    assert!(!missing_501.iter().any(|v| v.as_str() == Some("status")),
+        "completed status must not be flagged as missing: {:?}", missing_501);
+}
+
+#[test]
 fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
     let server = create_test_server();
     server

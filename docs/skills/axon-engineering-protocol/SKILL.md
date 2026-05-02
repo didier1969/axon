@@ -106,6 +106,8 @@ Async: response with `job_id` → `job_status(job_id)` until terminal (`succeede
 
 For `soll_work_plan`: `format=brief, limit, top` first; `include_validation_details=false` unless requirement-level detail needed. Terminal-state nodes (status ∈ `delivered`/`superseded`/`completed`/`archived`) are excluded from waves AND from descendant counting, so `unblocks N descendant(s)` reflects OPEN descendants only (REQ-AXO-135). Flip a closed item's status to mark it terminal — it disappears from wave 1 and stops inflating parent unblocker scores.
 
+For `soll_verify_requirements`: a Requirement is **done** EITHER when status ∈ `completed`/`delivered` (terminal — strongest done signal, no metadata cross-check; REQ-AXO-136) OR when status ∈ `current`/`accepted` AND acceptance criteria exist AND supporting evidence is attached AND no broken file evidence remains. **partial** = some required dimensions exist; **missing** = mostly absent. Closing a REQ via `soll_manager update status=completed` immediately moves the `done` count by +1.
+
 CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` (or `--args-file -` for stdin). Avoid fragile inline shell JSON.
 
 ## Identity

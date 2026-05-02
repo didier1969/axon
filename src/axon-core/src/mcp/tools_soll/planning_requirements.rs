@@ -72,7 +72,7 @@ impl McpServer {
             "warning_dimensions": [
                 requirement_dimension_descriptor("broken_file_evidence")
             ],
-            "done_rule": "status is current|accepted, acceptance criteria exist, supporting evidence exists, and a validation node VERIFIES the requirement",
+            "done_rule": "EITHER status is `completed` or `delivered` (terminal — done by definition, REQ-AXO-136) OR (status is `current`|`accepted` AND acceptance criteria exist AND supporting evidence exists AND no broken file evidence)",
             "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
             "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
         });
