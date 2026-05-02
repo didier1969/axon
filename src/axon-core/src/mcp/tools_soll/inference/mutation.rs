@@ -1,5 +1,41 @@
 use super::*;
 
+// REQ-AXO-147 — universal parameter_repair contract rollout for
+// inference/mutation.rs (REQ-AXO-139 follow-up). Five internal-error
+// stages share the same structured-recovery shape so the LLM can route on
+// `data.parameter_repair.{stage, target_id?, follow_up_tools, hint}`.
+fn entrench_internal_error_response(
+    stage: &str,
+    target_id: Option<&str>,
+    err: &str,
+) -> Value {
+    let text = match target_id {
+        Some(id) => format!("Entrenchment {} failed for `{}`: {}", stage, id, err),
+        None => format!("Entrenchment {} failed: {}", stage, err),
+    };
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": true,
+        "data": {
+            "status": "internal_error",
+            "operator_guidance": {
+                "problem_class": "internal_error",
+                "follow_up_tools": ["status", "infer_soll_mutation"],
+            },
+            "parameter_repair": {
+                "invalid_field": "target_ids",
+                "stage": stage,
+                "target_id": target_id,
+                "follow_up_tools": ["status", "infer_soll_mutation", "soll_manager"],
+                "hint": format!(
+                    "the {stage} stage failed during entrench_nuance; verify the runtime is healthy via `status` and the target exists via `infer_soll_mutation`. Fall back to `soll_manager(action=update)` for direct metadata writes."
+                )
+            },
+            "diagnostic_excerpt": err.chars().take(240).collect::<String>()
+        }
+    })
+}
+
 #[derive(Clone, Debug)]
 struct SollMutationCandidate {
     id: String,
@@ -290,10 +326,11 @@ impl McpServer {
                     }
                 }
             })),
-            Err(error) => Some(json!({
-                "content": [{ "type": "text", "text": format!("Inference failed: {}", error) }],
-                "isError": true
-            })),
+            Err(error) => Some(entrench_internal_error_response(
+                "inference",
+                None,
+                &error.to_string(),
+            )),
         }
     }
 
@@ -313,10 +350,11 @@ impl McpServer {
         let inference = match self.infer_soll_mutation_internal(project_code, statement) {
             Ok(inference) => inference,
             Err(error) => {
-                return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Entrenchment failed: {}", error) }],
-                    "isError": true
-                }))
+                return Some(entrench_internal_error_response(
+                    "inference",
+                    None,
+                    &error.to_string(),
+                ))
             }
         };
 
@@ -371,13 +409,21 @@ impl McpServer {
                 "content": [{ "type": "text", "text": "Wave 1 entrenchment cannot write without explicit or inferred existing target_ids." }],
                 "isError": true,
                 "data": {
+                    "status": "input_invalid",
                     "project_code": inference.project_code,
                     "confirm_required": false,
                     "target_ids": [],
                     "next_best_actions": [
                         "call `infer_soll_mutation` to inspect impacted nodes",
                         "provide `target_ids` explicitly or use `soll_manager` for manual graph changes"
-                    ]
+                    ],
+                    "parameter_repair": {
+                        "invalid_field": "target_ids",
+                        "stage": "input_validation",
+                        "supplied_value": Vec::<String>::new(),
+                        "follow_up_tools": ["infer_soll_mutation", "soll_manager"],
+                        "hint": "supply `target_ids` explicitly OR call `infer_soll_mutation` first to discover impacted canonical IDs; entrench_nuance refuses to write without an explicit scope"
+                    }
                 }
             }));
         }
@@ -387,14 +433,22 @@ impl McpServer {
                 "content": [{ "type": "text", "text": "Entrenchment confirmation refused because the inferred scope is still ambiguous. Provide explicit `target_ids` first." }],
                 "isError": true,
                 "data": {
+                    "status": "input_ambiguous",
                     "project_code": inference.project_code,
                     "confirm_required": false,
                     "target_ids": target_ids,
-                    "ambiguity_warnings": inference.ambiguity_warnings,
+                    "ambiguity_warnings": inference.ambiguity_warnings.clone(),
                     "next_best_actions": [
                         "review the impacted_candidates returned by `infer_soll_mutation`",
                         "rerun `entrench_nuance` with explicit `target_ids` once the scope is fully explicit"
-                    ]
+                    ],
+                    "parameter_repair": {
+                        "invalid_field": "target_ids",
+                        "stage": "ambiguity_check",
+                        "ambiguity_warnings": inference.ambiguity_warnings,
+                        "follow_up_tools": ["infer_soll_mutation"],
+                        "hint": "the inferred scope is ambiguous; supply explicit `target_ids` (canonical TYPE-CODE-NNN ids) to disambiguate before retrying with confirm=true"
+                    }
                 }
             }));
         }
@@ -412,14 +466,24 @@ impl McpServer {
                 "content": [{ "type": "text", "text": "Entrenchment confirmation refused because some target_ids do not belong to the requested project_code." }],
                 "isError": true,
                 "data": {
-                    "project_code": inference.project_code,
+                    "status": "wrong_project_scope",
+                    "project_code": inference.project_code.clone(),
                     "confirm_required": false,
-                    "target_ids": target_ids,
-                    "invalid_target_ids": cross_project_targets,
+                    "target_ids": target_ids.clone(),
+                    "invalid_target_ids": cross_project_targets.clone(),
                     "next_best_actions": [
                         "use only canonical IDs that belong to the requested project_code",
                         "re-run `infer_soll_mutation` if the intended scope is uncertain"
-                    ]
+                    ],
+                    "parameter_repair": {
+                        "invalid_field": "target_ids",
+                        "stage": "cross_project_check",
+                        "expected_project_code": inference.project_code,
+                        "supplied_target_ids": target_ids,
+                        "invalid_target_ids": cross_project_targets,
+                        "follow_up_tools": ["infer_soll_mutation", "project_registry_lookup"],
+                        "hint": "filter target_ids to canonical TYPE-CODE-NNN ids whose <CODE> segment matches the requested project_code; cross-project entrenchment is forbidden by design"
+                    }
                 }
             }));
         }
@@ -427,10 +491,11 @@ impl McpServer {
         let before = match self.soll_completeness_snapshot(Some(&inference.project_code)) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Entrenchment baseline failed: {}", error) }],
-                    "isError": true
-                }))
+                return Some(entrench_internal_error_response(
+                    "baseline_snapshot",
+                    None,
+                    &error.to_string(),
+                ))
             }
         };
 
@@ -445,10 +510,11 @@ impl McpServer {
             ) {
                 Ok(row) => row,
                 Err(error) => {
-                    return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Entrenchment target lookup failed for `{}`: {}", target_id, error) }],
-                        "isError": true
-                    }))
+                    return Some(entrench_internal_error_response(
+                        "target_lookup",
+                        Some(target_id),
+                        &error.to_string(),
+                    ))
                 }
             };
             let mut metadata: Value = serde_json::from_str(&row[3]).unwrap_or(json!({}));
@@ -475,10 +541,11 @@ impl McpServer {
                 "UPDATE soll.Node SET metadata = ? WHERE id = ?",
                 &json!([metadata.to_string(), target_id]),
             ) {
-                return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Entrenchment update failed for `{}`: {}", target_id, error) }],
-                    "isError": true
-                }));
+                return Some(entrench_internal_error_response(
+                    "metadata_update",
+                    Some(target_id),
+                    &error.to_string(),
+                ));
             }
 
             changed_entities.push(json!({
@@ -491,10 +558,11 @@ impl McpServer {
         let after = match self.soll_completeness_snapshot(Some(&inference.project_code)) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                return Some(json!({
-                    "content": [{ "type": "text", "text": format!("Entrenchment follow-up failed: {}", error) }],
-                    "isError": true
-                }))
+                return Some(entrench_internal_error_response(
+                    "followup_snapshot",
+                    None,
+                    &error.to_string(),
+                ))
             }
         };
 

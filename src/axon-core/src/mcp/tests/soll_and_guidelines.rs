@@ -520,6 +520,64 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
 }
 
 #[test]
+fn test_entrench_nuance_cross_project_returns_parameter_repair() {
+    // REQ-AXO-147 slice 2 — cross-project target_ids rejection now
+    // surfaces structured `data.parameter_repair` (status,
+    // expected_project_code, supplied_target_ids, invalid_target_ids,
+    // follow_up_tools, hint) so the LLM can filter the bad ids in one
+    // round-trip.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("NTO", Some("Nutri"), Some("/tmp/nutri"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-NTO-901', 'Requirement', 'NTO', 'Cross-project Req', 'Cross-project entrench rejection contract', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Cross-project rejection contract",
+                    "confirm": true,
+                    "target_ids": ["REQ-NTO-901"]
+                }
+            })),
+            id: Some(json!(91471)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    let data = result.get("data").expect("data");
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("target_ids"));
+    assert_eq!(repair["stage"].as_str(), Some("cross_project_check"));
+    assert_eq!(repair["expected_project_code"].as_str(), Some("AXO"));
+    let invalid = repair["invalid_target_ids"]
+        .as_array()
+        .expect("invalid_target_ids array");
+    let invalid_names: Vec<&str> = invalid.iter().filter_map(|v| v.as_str()).collect();
+    assert!(invalid_names.contains(&"REQ-NTO-901"));
+    let follow_up = repair["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let names: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.contains(&"infer_soll_mutation"),
+        "follow_up_tools must include infer_soll_mutation: {names:?}"
+    );
+}
+
+#[test]
 fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
     let server = create_test_server();
     server
