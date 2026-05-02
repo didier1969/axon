@@ -14,6 +14,18 @@ defmodule AxonDashboard.BridgeClient do
     GenServer.call(__MODULE__, :get_state)
   end
 
+  @doc """
+  REQ-AXO-094 — send a single line-terminated command up the
+  telemetry socket to the brain. Used by `BeamAlarmHandler` to push
+  `BEAM_ALARM` events. If the socket is not currently connected,
+  the command is dropped (the next reconnect will pick up the
+  next-fired alarm; no queueing intended). Returns :ok on send,
+  :error if no socket.
+  """
+  def send_command(line) when is_binary(line) do
+    GenServer.cast(__MODULE__, {:send_command, line})
+  end
+
   def init(_opts) do
     Process.send_after(self(), :connect, 500)
 
@@ -31,6 +43,29 @@ defmodule AxonDashboard.BridgeClient do
 
   def handle_call(:get_state, _from, state) do
     {:reply, state, state}
+  end
+
+  # REQ-AXO-094 — write a BEAM_ALARM (or any other line-terminated
+  # command) to the brain telemetry socket. We append a trailing
+  # newline because the brain's telemetry parser is line-based
+  # (see `main_telemetry::handle_telemetry_command`).
+  def handle_cast({:send_command, line}, %{socket: nil} = state) do
+    Logger.warning(
+      "[BRIDGE] send_command dropped: no socket connected; payload=#{String.slice(line, 0, 120)}"
+    )
+    {:noreply, state}
+  end
+
+  def handle_cast({:send_command, line}, %{socket: socket} = state) do
+    payload = if String.ends_with?(line, "\n"), do: line, else: line <> "\n"
+    case :gen_tcp.send(socket, payload) do
+      :ok ->
+        {:noreply, state}
+      {:error, reason} ->
+        Logger.warning("[BRIDGE] send_command failed: #{inspect(reason)}; will reconnect")
+        send(self(), :connect)
+        {:noreply, %{state | socket: nil}}
+    end
   end
 
   def handle_cast(_message, state), do: {:noreply, state}

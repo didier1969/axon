@@ -19,6 +19,10 @@ defmodule AxonDashboard.Application do
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
       AxonDashboard.BridgeClient,
+      # REQ-AXO-094 — install the BEAM alarm relay AFTER BridgeClient
+      # so a `:set_alarm` fired during startup has a connected (or
+      # connecting) socket to push through.
+      AxonDashboard.BeamAlarmReporter,
       # Start to serve requests, typically the last entry
       AxonDashboardWeb.Endpoint
     ]

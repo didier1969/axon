@@ -528,4 +528,80 @@ pub(crate) async fn handle_telemetry_command(
     if command == "SHUTDOWN" {
         std::process::exit(0);
     }
+
+    // REQ-AXO-094 — BEAM alarm classification. Elixir dashboard
+    // pushes raw `:alarm_handler` observations as line-based
+    // commands; the Rust side owns the alarm→subsystem mapping so
+    // the readiness contract authority (PIL-AXO-001 / REQ-AXO-098)
+    // stays in the brain. Unknown alarms are logged but do NOT
+    // mutate the registry (defensive: a dashboard bug or malicious
+    // payload cannot flap arbitrary subsystems).
+    if let Some(payload) = command.strip_prefix("BEAM_ALARM ") {
+        handle_beam_alarm(payload);
+        return;
+    }
 }
+
+/// REQ-AXO-094 — parse a BEAM_ALARM payload of the shape
+/// `{"alarm": "<name>", "action": "set"|"clear"}` and project it
+/// onto `runtime_readiness` per the alarm→subsystem mapping
+/// documented in DEC-AXO-062.
+pub(crate) fn handle_beam_alarm(payload: &str) {
+    use crate::runtime_readiness::{report_subsystem_state, SubsystemState};
+    let parsed: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(
+                target = "axon::beam_alarm",
+                "BEAM_ALARM payload is not valid JSON: {err}; payload={payload}"
+            );
+            return;
+        }
+    };
+    let alarm = parsed.get("alarm").and_then(|v| v.as_str()).unwrap_or("");
+    let action = parsed
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("set");
+    let Some((subsystem, degraded_reason)) = beam_alarm_to_subsystem(alarm) else {
+        warn!(
+            target = "axon::beam_alarm",
+            "BEAM_ALARM ignored: unknown alarm `{alarm}` (no canonical subsystem mapping)"
+        );
+        return;
+    };
+    let state = match action {
+        "clear" => SubsystemState::Ready,
+        _ => SubsystemState::Degraded {
+            reason: degraded_reason.to_string(),
+        },
+    };
+    info!(
+        target = "axon::beam_alarm",
+        event = "beam_alarm_projected",
+        alarm = alarm,
+        action = action,
+        subsystem = subsystem.as_str(),
+        "REQ-AXO-094: dashboard reported BEAM alarm; readiness updated"
+    );
+    report_subsystem_state(subsystem, state);
+}
+
+/// REQ-AXO-094 / DEC-AXO-062 — canonical mapping of BEAM
+/// `:alarm_handler` events to subsystem+reason. Returns None for
+/// alarms that have no defined mapping (those are logged but do
+/// not mutate the registry).
+fn beam_alarm_to_subsystem(
+    alarm: &str,
+) -> Option<(crate::runtime_readiness::Subsystem, &'static str)> {
+    use crate::runtime_readiness::Subsystem;
+    match alarm {
+        "system_memory_high_watermark" => Some((Subsystem::Dashboard, "memory_pressure")),
+        "disk_almost_full" => Some((Subsystem::IstWriter, "disk_almost_full")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "main_telemetry_beam_alarm_tests.rs"]
+mod main_telemetry_beam_alarm_tests;
