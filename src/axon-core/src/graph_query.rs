@@ -752,6 +752,25 @@ impl GraphStore {
             }
             let res = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
             free_fn(ptr);
+            // REQ-AXO-129 — detect plugin error envelope. Legitimate
+            // results are always a JSON array (`[`); error envelopes
+            // are always a JSON object (`{`) carrying
+            // `_axon_plugin_error`. This unwraps the silent-[] trap:
+            // column-not-found / table-not-found / Prepare errors
+            // now surface as `Err` instead of an indistinguishable
+            // empty result.
+            if res.starts_with('{') {
+                if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
+                    if let Some(message) = envelope
+                        .get("_axon_plugin_error")
+                        .and_then(|v| v.as_str())
+                    {
+                        return Err(anyhow::anyhow!(
+                            "DuckDB plugin error: {message}"
+                        ));
+                    }
+                }
+            }
             Ok(res)
         }
     }
@@ -1184,5 +1203,45 @@ mod tests {
             after.refresh_requested_epoch - before.refresh_requested_epoch,
             0
         );
+    }
+
+    /// REQ-AXO-129 — `query_on_ctx` must convert plugin error
+    /// envelopes to `Err`, so callers see a real failure instead of
+    /// the historical silent `Ok("[]")`. This guards the wrapper
+    /// contract end-to-end: invalid SQL produces an envelope at the
+    /// plugin layer (covered by the plugin's own tests) AND the
+    /// graph_query wrapper unwraps that envelope into anyhow::Error.
+    #[test]
+    fn query_on_ctx_returns_err_for_unknown_table_via_envelope() {
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
+        let result = store.query_json("SELECT * FROM definitely_not_a_table_xyz");
+        assert!(
+            result.is_err(),
+            "REQ-AXO-129: invalid SQL must propagate as Err, got Ok({:?})",
+            result.ok()
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("DuckDB plugin error"),
+            "error must label the source as DuckDB plugin, got: {msg}"
+        );
+        assert!(
+            msg.contains("definitely_not_a_table_xyz") || msg.contains("prepare"),
+            "error must echo a hint of the offending SQL or its stage, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn query_on_ctx_returns_ok_for_genuine_zero_rows() {
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
+        store
+            .execute("CREATE TABLE T (id INTEGER)")
+            .unwrap();
+        // Valid SQL with empty result must remain Ok("[]") — REQ-AXO-129
+        // distinguishes "binder error" from "zero rows" rigorously.
+        let result = store
+            .query_json("SELECT id FROM T WHERE id = -1")
+            .expect("zero-row query must return Ok, not Err");
+        assert_eq!(result.trim(), "[]");
     }
 }

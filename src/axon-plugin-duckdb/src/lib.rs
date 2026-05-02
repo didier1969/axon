@@ -5,6 +5,21 @@ pub struct PluginContext {
     pub conn: Connection,
 }
 
+/// REQ-AXO-129 — error envelope returned to the Rust caller in place
+/// of the historical silent `"[]"`. Legitimate result rows are always
+/// a JSON array (e.g. `[]` for zero rows, `[[...]]` for rows). An
+/// error is always an object `{"_axon_plugin_error": "..."}`. The
+/// caller (`graph_query::query_on_ctx`) dispatches on the first
+/// non-whitespace JSON character to convert envelopes to `Err`.
+fn plugin_error_envelope(stage: &str, sql: &str, err: impl std::fmt::Display) -> *mut c_char {
+    let payload = serde_json::json!({
+        "_axon_plugin_error": format!("{stage}: {err}"),
+        "stage": stage,
+        "sql_excerpt": sql.chars().take(240).collect::<String>(),
+    });
+    CString::new(payload.to_string()).unwrap().into_raw()
+}
+
 fn plugin_trace_enabled() -> bool {
     std::env::var("AXON_DUCKDB_PLUGIN_TRACE")
         .ok()
@@ -229,7 +244,9 @@ pub unsafe extern "C" fn duckdb_query_json(
             Ok(_) => return CString::new("[]").unwrap().into_raw(),
             Err(e) => {
                 eprintln!("Query Execution Error: {} | {}", e, query_str);
-                return CString::new("[]").unwrap().into_raw();
+                // REQ-AXO-129 — surface the error to the caller
+                // instead of swallowing it as `[]`.
+                return plugin_error_envelope("execute", query_str, e);
             }
         }
     }
@@ -238,7 +255,10 @@ pub unsafe extern "C" fn duckdb_query_json(
         Ok(s) => s,
         Err(e) => {
             eprintln!("Prepare Error: {} | Query: {}", e, query_str);
-            return CString::new("[]").unwrap().into_raw();
+            // REQ-AXO-129 — column-not-found / table-not-found / SQL
+            // syntax errors land here. Caller used to read `[]` and
+            // mistakenly conclude "no rows" instead of "invalid SQL".
+            return plugin_error_envelope("prepare", query_str, e);
         }
     };
 
@@ -258,7 +278,7 @@ pub unsafe extern "C" fn duckdb_query_json(
             let json = serde_json::to_string(&results).unwrap_or("[]".to_string());
             CString::new(json).unwrap().into_raw()
         }
-        Err(_) => CString::new("[]").unwrap().into_raw(),
+        Err(e) => plugin_error_envelope("query_map", query_str, e),
     }
 }
 
@@ -390,6 +410,93 @@ mod tests {
 
             assert!(json.starts_with("[["));
             assert!(json.contains("1"));
+
+            duckdb_close_db(ctx);
+        }
+    }
+
+    /// REQ-AXO-129 — invalid SQL must return an error envelope, not
+    /// the historical silent `[]` that was indistinguishable from a
+    /// genuine zero-row result. The envelope is a JSON object with
+    /// `_axon_plugin_error`, `stage`, and `sql_excerpt`.
+    #[test]
+    fn query_json_returns_error_envelope_for_unknown_table() {
+        unsafe {
+            let path = temp_db_path("axon_plugin_err_unknown_table");
+            let ctx = duckdb_init_db(path.as_ptr(), false);
+            assert!(!ctx.is_null());
+
+            let bad = CString::new("SELECT * FROM nonexistent_table_xyz").unwrap();
+            let raw = duckdb_query_json(ctx, bad.as_ptr());
+            assert!(!raw.is_null());
+            let json = CStr::from_ptr(raw).to_str().unwrap().to_string();
+            duckdb_free_string(raw);
+
+            // Must be a JSON object, not the literal "[]".
+            assert!(
+                json.starts_with('{'),
+                "REQ-AXO-129: invalid SQL must return error envelope (JSON object), got: {json}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("envelope is valid JSON");
+            let err = parsed
+                .get("_axon_plugin_error")
+                .and_then(|v| v.as_str())
+                .expect("envelope must carry _axon_plugin_error");
+            assert!(
+                err.contains("prepare"),
+                "stage label must distinguish prepare vs execute, got: {err}"
+            );
+            assert_eq!(
+                parsed.get("stage").and_then(|v| v.as_str()),
+                Some("prepare"),
+                "envelope must label the stage explicitly"
+            );
+            assert!(
+                parsed
+                    .get("sql_excerpt")
+                    .and_then(|v| v.as_str())
+                    .map(|excerpt| excerpt.contains("nonexistent_table_xyz"))
+                    .unwrap_or(false),
+                "envelope must echo the offending SQL for caller diagnosis"
+            );
+
+            duckdb_close_db(ctx);
+        }
+    }
+
+    #[test]
+    fn query_json_returns_error_envelope_for_unknown_column() {
+        unsafe {
+            let path = temp_db_path("axon_plugin_err_unknown_col");
+            let ctx = duckdb_init_db(path.as_ptr(), false);
+            assert!(!ctx.is_null());
+
+            let create = CString::new(
+                "CREATE TABLE t (id VARCHAR, name VARCHAR); INSERT INTO t VALUES ('a','x');",
+            )
+            .unwrap();
+            assert!(duckdb_execute(ctx, create.as_ptr()));
+
+            let bad = CString::new("SELECT id, nonexistent_column FROM t").unwrap();
+            let raw = duckdb_query_json(ctx, bad.as_ptr());
+            assert!(!raw.is_null());
+            let json = CStr::from_ptr(raw).to_str().unwrap().to_string();
+            duckdb_free_string(raw);
+
+            assert!(
+                json.starts_with('{'),
+                "REQ-AXO-129: column-not-found must return envelope, got: {json}"
+            );
+
+            // Genuine zero rows still return `[]` — control case.
+            let valid = CString::new("SELECT id FROM t WHERE id = 'absent'").unwrap();
+            let raw_ok = duckdb_query_json(ctx, valid.as_ptr());
+            let json_ok = CStr::from_ptr(raw_ok).to_str().unwrap().to_string();
+            duckdb_free_string(raw_ok);
+            assert_eq!(
+                json_ok, "[]",
+                "valid SQL with zero rows must still return literal []"
+            );
 
             duckdb_close_db(ctx);
         }
