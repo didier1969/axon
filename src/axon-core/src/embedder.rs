@@ -71,6 +71,8 @@ mod vector_executor;
 mod vector_finalize;
 #[path = "embedder/vector_maintenance_loop.rs"]
 mod vector_maintenance_loop;
+#[path = "embedder/vector_finalize_loop.rs"]
+mod vector_finalize_loop;
 #[path = "embedder/vector_orchestrator.rs"]
 mod vector_orchestrator;
 #[path = "embedder/vector_persist_loop.rs"]
@@ -2006,7 +2008,7 @@ impl SemanticWorkerPool {
             }));
             let finalize_graph_store = Arc::clone(&graph_store);
             vector_finalize_workers.push(thread::spawn(move || {
-                Self::vector_finalize_worker_loop(worker_idx, finalize_graph_store, finalize_rx);
+                vector_finalize_loop::vector_finalize_worker_loop(worker_idx, finalize_graph_store, finalize_rx);
             }));
             let worker_ready_queue = Arc::clone(&ready_queue);
             let refill_graph_store = Arc::clone(&graph_store);
@@ -3109,90 +3111,6 @@ impl SemanticWorkerPool {
                 }
             }
         }
-    }
-
-    fn vector_finalize_worker_loop(
-        worker_idx: usize,
-        graph_store: Arc<GraphStore>,
-        finalize_rx: Receiver<VectorFinalizeRequest>,
-    ) {
-        info!(
-            "Semantic Vector Finalize Worker [{}]: ready with bounded queue {}",
-            worker_idx, VECTOR_FINALIZE_QUEUE_BOUND
-        );
-        let mut wake_idle = true;
-        loop {
-            service_guard::record_vector_finalize_queue_depth(finalize_rx.len() as u64);
-            match finalize_rx.recv_timeout(Duration::from_millis(
-                vector_finalize_idle_poll_interval_ms(),
-            )) {
-                Ok(request) => {
-                    if wake_idle {
-                        service_guard::record_runtime_wakeup(
-                            service_guard::RuntimeWakeSource::SemanticVector,
-                            0,
-                            1,
-                        );
-                    }
-                    service_guard::record_vector_finalize_queue_wait_ms(
-                        request.enqueued_at.elapsed().as_millis() as u64,
-                    );
-                    process_finalize_request(worker_idx, &graph_store, request);
-                    while let Ok(request) = finalize_rx.try_recv() {
-                        service_guard::record_vector_finalize_queue_wait_ms(
-                            request.enqueued_at.elapsed().as_millis() as u64,
-                        );
-                        process_finalize_request(worker_idx, &graph_store, request);
-                    }
-                    while Self::process_vector_persist_outbox(worker_idx, &graph_store) > 0 {}
-                    wake_idle = finalize_rx.is_empty();
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    let mut processed_any = false;
-                    while Self::process_vector_persist_outbox(worker_idx, &graph_store) > 0 {
-                        processed_any = true;
-                    }
-                    if processed_any {
-                        if wake_idle {
-                            service_guard::record_runtime_wakeup(
-                                service_guard::RuntimeWakeSource::SemanticVector,
-                                0,
-                                1,
-                            );
-                        }
-                        wake_idle = false;
-                    } else {
-                        wake_idle = true;
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    }
-
-    fn process_vector_persist_outbox(worker_idx: usize, graph_store: &Arc<GraphStore>) -> usize {
-        let pending = match graph_store
-            .fetch_pending_vector_persist_outbox_work(configured_vector_outbox_fetch_batch_size())
-        {
-            Ok(pending) => pending,
-            Err(err) => {
-                error!(
-                    "Semantic Vector Finalize Worker [{}]: failed to fetch outbox work: {:?}",
-                    worker_idx, err
-                );
-                return 0;
-            }
-        };
-        let processed = pending.len();
-        for work in pending {
-            if let Err(err) = process_vector_persist_outbox_work(worker_idx, graph_store, work) {
-                error!(
-                    "Semantic Vector Finalize Worker [{}]: outbox work failed: {:?}",
-                    worker_idx, err
-                );
-            }
-        }
-        processed
     }
 
     fn graph_worker_loop(
