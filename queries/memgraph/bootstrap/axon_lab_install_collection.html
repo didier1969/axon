@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Install Axon Memgraph Lab Queries</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f2e8;
+        --ink: #17211b;
+        --muted: #58635d;
+        --accent: #276749;
+        --warn: #9a3412;
+        --card: #fffaf0;
+        --line: #d9cdb8;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(39, 103, 73, 0.18), transparent 32rem),
+          linear-gradient(135deg, #f7f2e8, #e9ddc8);
+        color: var(--ink);
+        font-family: Georgia, "Times New Roman", serif;
+      }
+
+      main {
+        width: min(44rem, calc(100vw - 2rem));
+        padding: 2rem;
+        border: 1px solid var(--line);
+        border-radius: 1.25rem;
+        background: var(--card);
+        box-shadow: 0 1.5rem 4rem rgba(23, 33, 27, 0.14);
+      }
+
+      h1 {
+        margin: 0 0 0.75rem;
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        line-height: 0.95;
+      }
+
+      p {
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      code {
+        padding: 0.1rem 0.35rem;
+        border-radius: 0.35rem;
+        background: rgba(39, 103, 73, 0.1);
+      }
+
+      #status {
+        margin-top: 1.25rem;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 0.75rem;
+        background: #fff;
+        white-space: pre-wrap;
+      }
+
+      .ok {
+        color: var(--accent);
+      }
+
+      .warn {
+        color: var(--warn);
+      }
+
+      a {
+        color: var(--accent);
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Axon query collection installer</h1>
+      <p>
+        This page installs the Axon IST/SOLL human query collection into the current
+        browser profile used by Memgraph Lab. LLM clients must keep using Axon MCP;
+        Memgraph Lab remains a human visualization surface.
+      </p>
+      <p>
+        If installation fails because the Lab database is not initialized, open
+        <a href="/login">Memgraph Lab</a>, connect once, then reload this page.
+      </p>
+      <div id="status">Installing...</div>
+    </main>
+    <script>
+      const statusEl = document.getElementById("status");
+
+      function log(message, className = "") {
+        statusEl.className = className;
+        statusEl.textContent = message;
+      }
+
+      function requestToPromise(request) {
+        return new Promise((resolve, reject) => {
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+      }
+
+      function openLabDb() {
+        return requestToPromise(indexedDB.open("memgraph-lab-db"));
+      }
+
+      async function install() {
+        const source = await fetch("/axon_lab_query_collection.json").then((response) => {
+          if (!response.ok) throw new Error(`collection fetch failed: HTTP ${response.status}`);
+          return response.json();
+        });
+        const pack = source.sampleCollections?.[0];
+        if (!pack || !Array.isArray(pack.queries)) {
+          throw new Error("invalid Axon Lab collection JSON");
+        }
+
+        const db = await openLabDb();
+        if (!db.objectStoreNames.contains("collections")) {
+          db.close();
+          throw new Error("Memgraph Lab IndexedDB is not initialized yet; connect to Lab once, then reload.");
+        }
+
+        const now = Date.now();
+        const style = { title: "System Style", code: { value: "// Axon Lab default style placeholder" } };
+        const collection = {
+          id: "axon-ist-soll-human-queries",
+          title: pack.title || "Axon IST/SOLL Human Queries",
+          order: 0,
+          createdAt: now,
+          lastModifiedAt: now,
+          items: pack.queries.map((query) => ({
+            id: crypto.randomUUID(),
+            title: query.title || "Axon query",
+            description: query.description || "",
+            query: { code: { value: query.query }, params: {} },
+            style,
+            createdAt: now,
+            lastModifiedAt: now,
+          })),
+        };
+
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction("collections", "readwrite");
+          const store = tx.objectStore("collections");
+          const getAll = store.getAll();
+          getAll.onerror = () => reject(getAll.error);
+          getAll.onsuccess = () => {
+            const existing = getAll.result || [];
+            for (const row of existing) {
+              if (row.id === collection.id || row.title === collection.title) store.delete(row.id);
+            }
+            const maxOrder = existing
+              .filter((row) => row.id !== collection.id && row.title !== collection.title)
+              .reduce((max, row) => Math.max(max, Number(row.order) || 0), -1);
+            collection.order = maxOrder + 1;
+            store.put(collection);
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+        db.close();
+
+        log(
+          `Installed: ${collection.title}\nQueries: ${collection.items.length}\n\nOpen Memgraph Lab Collections and reload if the sidebar was already open.`,
+          "ok",
+        );
+      }
+
+      install().catch((error) => log(`Install failed: ${error.message}`, "warn"));
+    </script>
+  </body>
+</html>
