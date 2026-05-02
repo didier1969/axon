@@ -3885,3 +3885,75 @@ fn test_status_exposes_advertised_endpoints_separately_from_runtime_local_urls()
         std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
     }
 }
+
+/// REQ-AXO-108 — `data.instance_identity.data_root_absolute` exposes
+/// the canonicalized absolute path of `AXON_DB_ROOT` so an LLM and an
+/// operator running `ls`/`du` against the same path can confirm they
+/// are looking at the same on-disk IST. The companion `data_root`
+/// (compact form) stays for human display.
+#[test]
+fn test_status_exposes_data_root_absolute_for_unambiguous_cross_reference() {
+    let _lock = crate::test_support::env_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmp = tempdir().unwrap();
+    let abs_path = tmp.path().to_path_buf();
+    let _g_db = crate::test_support::EnvVarGuard::set(
+        "AXON_DB_ROOT",
+        &abs_path.display().to_string(),
+    );
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+    let identity = data["instance_identity"].as_object().unwrap();
+
+    // Compact form for human display — present and not "unknown".
+    let compact = identity["data_root"].as_str().unwrap();
+    assert!(
+        compact != "unknown",
+        "data_root must be non-unknown when AXON_DB_ROOT is set, got: {compact}"
+    );
+
+    // Absolute form for cross-reference — REQ-AXO-108 contract.
+    let absolute = identity["data_root_absolute"].as_str().unwrap();
+    assert!(
+        absolute.starts_with('/'),
+        "data_root_absolute must be an absolute path starting with '/', got: {absolute}"
+    );
+    // canonicalize() resolves symlinks so the returned path may not
+    // string-equal abs_path; assert the file_name matches instead.
+    let abs_filename = std::path::PathBuf::from(absolute)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+    let expected_filename = abs_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+    assert_eq!(
+        abs_filename, expected_filename,
+        "data_root_absolute must point at the same final dir as AXON_DB_ROOT"
+    );
+}
+
+/// REQ-AXO-108 — when AXON_DB_ROOT is not set, data_root_absolute
+/// returns the literal "unknown" rather than panicking, mirroring the
+/// existing `data_root` field's behaviour. This keeps the contract
+/// safe in test fixtures or partial-boot scenarios.
+#[test]
+fn test_status_data_root_absolute_returns_unknown_when_env_missing() {
+    let _lock = crate::test_support::env_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _g_db = crate::test_support::EnvVarGuard::unset("AXON_DB_ROOT");
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+    let identity = data["instance_identity"].as_object().unwrap();
+
+    assert_eq!(
+        identity["data_root_absolute"].as_str(),
+        Some("unknown"),
+        "data_root_absolute must be the sentinel 'unknown' when AXON_DB_ROOT is unset"
+    );
+}

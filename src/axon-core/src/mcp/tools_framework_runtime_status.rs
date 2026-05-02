@@ -321,9 +321,25 @@ impl McpServer {
             std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
         let runtime_identity =
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string());
-        let data_root = Self::compact_runtime_path(
-            std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string()),
-        );
+        // REQ-AXO-108 — `data_root` is the compact form (e.g. `./.axon`)
+        // for human display; `data_root_absolute` is the canonical
+        // absolute path so an LLM and an operator running `ls /abs/path`
+        // or `du -sh /abs/path` can unambiguously confirm they are
+        // looking at the same on-disk IST. Without the absolute form,
+        // dual instances on the same host (live vs dev) and worktree
+        // layouts (`.worktrees/<branch>/.axon`) collapse to similar
+        // compact strings.
+        let data_root_raw =
+            std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string());
+        let data_root_absolute = if data_root_raw == "unknown" {
+            "unknown".to_string()
+        } else {
+            std::path::PathBuf::from(&data_root_raw)
+                .canonicalize()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| data_root_raw.clone())
+        };
+        let data_root = Self::compact_runtime_path(data_root_raw);
         let run_root = Self::compact_runtime_path(
             std::env::var("AXON_RUN_ROOT").unwrap_or_else(|_| "unknown".to_string()),
         );
@@ -916,6 +932,7 @@ impl McpServer {
                     "runtime_identity": runtime_identity,
                     "auto_detected_project": self.auto_detect_project_code_from_cwd(),
                     "data_root": data_root,
+                    "data_root_absolute": data_root_absolute,
                     "run_root": run_root,
                     "project_root": project_root,
                     "mcp_url": mcp_url,

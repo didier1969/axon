@@ -71,6 +71,11 @@ Endpoint rule:
 - `advertised_endpoints.*` = client-facing truth
 - isolated clients should prefer `advertised_endpoints`
 
+Data-root rule (REQ-AXO-108):
+- `instance_identity.data_root` = compact form (`./.axon`) for human display
+- `instance_identity.data_root_absolute` = canonicalized absolute path so an LLM and an operator running `ls`/`du` can confirm same on-disk IST
+- when comparing two MCP sessions or cross-checking against shell output, use `data_root_absolute` (compact form is lossy across worktree / dev / live layouts)
+
 ## Surface Model
 Assume:
 - one public MCP product surface
