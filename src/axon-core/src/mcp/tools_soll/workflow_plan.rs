@@ -180,10 +180,36 @@ impl McpServer {
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
                     if kind == "link" {
+                        // REQ-AXO-137: surface CANONICAL ids in data.linked[]
+                        // so callers can immediately query the resulting Edges
+                        // without re-resolving logical_keys themselves. The
+                        // payload field still references the original logical_key
+                        // (or canonical, when caller supplied one); we resolve
+                        // both endpoints against identity_mapping for the
+                        // response. Falls through to the original value when
+                        // already canonical (not a logical_key).
                         let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+                        let raw_source = payload
+                            .get("source_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let raw_target = payload
+                            .get("target_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let resolved_source = identity_mapping
+                            .get(raw_source)
+                            .cloned()
+                            .unwrap_or_else(|| raw_source.to_string());
+                        let resolved_target = identity_mapping
+                            .get(raw_target)
+                            .cloned()
+                            .unwrap_or_else(|| raw_target.to_string());
                         linked_results.push(json!({
-                            "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
-                            "target_id": payload.get("target_id").cloned().unwrap_or(Value::Null),
+                            "source_id": resolved_source,
+                            "target_id": resolved_target,
+                            "raw_source_id": raw_source,
+                            "raw_target_id": raw_target,
                             "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
                             "status": "linked"
                         }));

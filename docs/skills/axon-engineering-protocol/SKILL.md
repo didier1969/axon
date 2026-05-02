@@ -94,7 +94,7 @@ North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive
 ## SOLL writes
 | Tool | Use |
 |---|---|
-| `soll_apply_plan` | batch (`dry_run=true` first, `logical_key`, `author`); `relations` need canonical IDs (logical_keys do NOT resolve in relations — link separately via `soll_manager link`) |
+| `soll_apply_plan` | batch (`dry_run=true` first, `logical_key`, `author`); `relations` accept logical_keys AND canonical IDs — both resolve correctly during commit (REQ-AXO-137). `data.linked[]` exposes resolved canonical `source_id`/`target_id` plus `raw_source_id`/`raw_target_id` for audit |
 | `soll_manager create/update` | exact single op |
 | `soll_manager link` | post-batch relation creation on canonical IDs |
 | `infer_soll_mutation` | read-only assistive scope check |

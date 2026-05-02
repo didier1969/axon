@@ -5755,6 +5755,123 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
 }
 
 #[test]
+fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
+    // REQ-AXO-137: soll_apply_plan must resolve logical_key references in
+    // relations[].{source_id,target_id} to the canonical IDs produced by
+    // sibling create operations in the same plan, so a transactional batch
+    // truly creates BOTH the nodes AND the edges in one call.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Anchor pillar', '', 'current', '{}')")
+        .unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "author": "test_runner",
+                "dry_run": false,
+                "plan": {
+                    "concepts": [{
+                        "logical_key": "CPT-anchor-protocol",
+                        "title": "Anchor protocol concept",
+                        "description": "Concept created via plan to test logical_key resolution",
+                        "status": "accepted",
+                        "metadata": {}
+                    }]
+                },
+                "relations": [{
+                    "source_id": "CPT-anchor-protocol",
+                    "target_id": "PIL-AXO-001",
+                    "relation_type": "BELONGS_TO"
+                }]
+            }
+        },
+        "id": 1
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_ne!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "apply_plan must succeed: {:?}",
+        result
+    );
+
+    // Lookup the canonical id of the freshly-created concept.
+    let cpt_id = server
+        .graph_store
+        .query_json(
+            "SELECT id FROM soll.Node WHERE type='Concept' AND title='Anchor protocol concept' AND project_code='AXO' LIMIT 1",
+        )
+        .unwrap();
+    let cpt_rows: Vec<Vec<String>> = serde_json::from_str(&cpt_id).unwrap_or_default();
+    assert!(
+        !cpt_rows.is_empty(),
+        "concept must have been created: {}",
+        cpt_id
+    );
+    let canonical_concept_id = cpt_rows[0][0].clone();
+    assert!(
+        canonical_concept_id.starts_with("CPT-AXO-"),
+        "canonical id must follow CPT-AXO-NNN format, got {}",
+        canonical_concept_id
+    );
+
+    // Assert an Edge was created with the resolved canonical id.
+    let edge_count = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT count(*) FROM soll.Edge WHERE source_id = '{}' AND target_id = 'PIL-AXO-001' AND relation_type = 'BELONGS_TO'",
+            canonical_concept_id
+        ))
+        .unwrap();
+    let edge_rows: Vec<Vec<String>> = serde_json::from_str(&edge_count).unwrap_or_default();
+    let count: i64 = edge_rows.first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(
+        count, 1,
+        "Edge must be materialized via logical_key resolution; got {} edges (canonical id={}). Raw: {}",
+        count, canonical_concept_id, edge_count
+    );
+
+    // REQ-AXO-137 response-surface contract: data.linked[] must expose the
+    // RESOLVED canonical ids, not the original logical_keys, so the LLM can
+    // query Edge directly without re-resolving. raw_source_id/raw_target_id
+    // preserve the original input for audit.
+    let data = result.get("data").expect("response data");
+    let linked = data["linked"].as_array().expect("linked array");
+    assert_eq!(linked.len(), 1, "exactly one link expected: {:?}", data);
+    assert_eq!(
+        linked[0]["source_id"].as_str(),
+        Some(canonical_concept_id.as_str()),
+        "data.linked[].source_id must be canonical id, not logical_key: {:?}",
+        linked[0]
+    );
+    assert_eq!(
+        linked[0]["target_id"].as_str(),
+        Some("PIL-AXO-001"),
+        "target was canonical at input, must stay canonical: {:?}",
+        linked[0]
+    );
+    assert_eq!(
+        linked[0]["raw_source_id"].as_str(),
+        Some("CPT-anchor-protocol"),
+        "raw_source_id must preserve the original logical_key for audit: {:?}",
+        linked[0]
+    );
+}
+
+#[test]
 fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
     // REQ-AXO-138 — when `git add <diff_paths>` exits non-zero (e.g., a path
     // doesn't exist), axon_commit_work must NOT proceed to `git commit`.
