@@ -1183,6 +1183,13 @@ mod tests {
 
     #[test]
     fn split_boot_roles_claim_only_owned_writer_targets() {
+        // REQ-AXO-099 Phase 4 — `runtime_mode()` reads
+        // AXON_RUNTIME_MODE; a prior test in the suite leaks
+        // values like "indexer_full" through it. Lock + unset so
+        // this test sees only the role-default fallback.
+        let _lock = env_lock();
+        let _g_mode = crate::test_support::EnvVarGuard::unset("AXON_RUNTIME_MODE");
+
         let brain = RuntimeBootProfile::brain();
         assert_eq!(brain.role, RuntimeBootRole::Brain);
         assert_eq!(brain.writer_targets(), &[WriterTarget::Soll]);

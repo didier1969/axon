@@ -7437,17 +7437,21 @@ mod tests {
 
     #[test]
     fn test_embedding_model_cache_dir_defaults_outside_workspace() {
-        unsafe {
-            std::env::remove_var("FASTEMBED_CACHE_DIR");
-            std::env::remove_var("XDG_CACHE_HOME");
-            std::env::set_var("HOME", "/tmp/axon-home");
-        }
+        // REQ-AXO-099 Phase 4 — env_test_lock + EnvVarGuard so the
+        // mutated env vars are restored on Drop (panic-safe). The
+        // prior `std::env::remove_var("HOME")` at the end of this
+        // test was unconditionally clearing HOME — DuckDB's INSTALL
+        // json then could not find the extension cache, causing 18
+        // unrelated tests to fail in the suite. This is the root
+        // cause documented in REQ-AXO-099 Phase 4.
+        let _lock = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _g_fastembed = crate::test_support::EnvVarGuard::unset("FASTEMBED_CACHE_DIR");
+        let _g_xdg = crate::test_support::EnvVarGuard::unset("XDG_CACHE_HOME");
+        let _g_home = crate::test_support::EnvVarGuard::set("HOME", "/tmp/axon-home");
 
         let cache_dir = embedding_model_cache_dir();
-
-        unsafe {
-            std::env::remove_var("HOME");
-        }
 
         assert_eq!(
             cache_dir,

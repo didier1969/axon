@@ -169,6 +169,19 @@ fn assert_runtime_authority_roles(
     );
 }
 
+/// REQ-AXO-099 Phase 4 — process-wide mutex for the DuckDB
+/// `INSTALL json` step. The DuckDB extension cache lives in the
+/// user's home directory and is shared across DuckDB connections;
+/// concurrent INSTALL calls from parallel tests race on the cache
+/// and fail intermittently (exec returns false). Serializing
+/// INSTALL across the test process eliminates the race. After the
+/// first install the operation is a fast no-op for subsequent
+/// connections.
+fn duckdb_install_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn attach_distinct_reader_snapshot(store: &GraphStore) {
     let db_path = store
         .db_path
@@ -180,10 +193,6 @@ fn attach_distinct_reader_snapshot(store: &GraphStore) {
         path.set_file_name("soll.db");
         path
     };
-    let attach_q = format!(
-        "INSTALL json; LOAD json; SET checkpoint_threshold = '1GB'; ATTACH '{}' AS soll;",
-        soll_path.to_string_lossy().replace("'", "''")
-    );
 
     unsafe {
         let init_fn: LibSymbol<InitDbFunc> = store.pool.lib.get(b"duckdb_init_db\0").unwrap();
@@ -193,10 +202,43 @@ fn attach_distinct_reader_snapshot(store: &GraphStore) {
             !reader_ptr.is_null(),
             "failed to initialize distinct reader"
         );
-        assert!(exec_fn(
-            reader_ptr,
-            CString::new(attach_q).unwrap().as_ptr()
-        ));
+
+        // INSTALL/LOAD json hold the process-wide install lock so
+        // parallel tests do not corrupt the DuckDB extension cache.
+        // SET and ATTACH are connection-local so they release the
+        // lock immediately and stay parallel across tests.
+        {
+            let _install_lock = duckdb_install_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let install = CString::new("INSTALL json").unwrap();
+            assert!(
+                exec_fn(reader_ptr, install.as_ptr()),
+                "attach_distinct_reader_snapshot: INSTALL json failed (soll_path=`{}`)",
+                soll_path.display()
+            );
+            let load = CString::new("LOAD json").unwrap();
+            assert!(
+                exec_fn(reader_ptr, load.as_ptr()),
+                "attach_distinct_reader_snapshot: LOAD json failed"
+            );
+        }
+
+        let set = CString::new("SET checkpoint_threshold = '1GB'").unwrap();
+        assert!(
+            exec_fn(reader_ptr, set.as_ptr()),
+            "attach_distinct_reader_snapshot: SET checkpoint_threshold failed"
+        );
+        let attach = CString::new(format!(
+            "ATTACH '{}' AS soll",
+            soll_path.to_string_lossy().replace("'", "''")
+        ))
+        .unwrap();
+        assert!(
+            exec_fn(reader_ptr, attach.as_ptr()),
+            "attach_distinct_reader_snapshot: ATTACH soll failed (soll_path=`{}`)",
+            soll_path.display()
+        );
 
         let mut reader_guard = store
             .pool
