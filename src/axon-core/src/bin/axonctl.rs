@@ -195,6 +195,7 @@ Commands:
   stop          Orchestrated instance stop (kill processes, clean locks, verify)
   supervise     Spawn and supervise a runtime binary (signal forwarding, PID file)
   status        Health check for an instance
+  auto-restart  REQ-AXO-097: poll role health, respawn on failure detection
 
 Options:
   --project-root PATH     Axon project root directory
@@ -203,7 +204,10 @@ Options:
   --json                  Machine-readable JSON output
   --hard                  (stop only) Aggressive cleanup with port-based kill
   --timeout-ms N          (stop) SIGTERM grace period in ms (default 15000)
-  -- EXECUTABLE [ARGS]    (supervise) Binary to spawn and supervise
+  --interval-ms N         (auto-restart) Poll cadence in ms (default 5000)
+  --max-restarts N        (auto-restart) Cap on restart attempts (default unbounded)
+  --grace-ms N            (auto-restart) Grace period after restart before next probe (default 30000)
+  -- EXECUTABLE [ARGS]    (supervise/auto-restart) Binary to spawn (and re-spawn)
 "
 }
 
@@ -214,6 +218,14 @@ struct GlobalArgs {
     json: bool,
     hard: bool,
     timeout_ms: u64,
+    /// REQ-AXO-097 — auto-restart polling cadence in ms.
+    interval_ms: u64,
+    /// REQ-AXO-097 — auto-restart attempt cap. None = unbounded.
+    max_restarts: Option<u32>,
+    /// REQ-AXO-097 — grace window after spawning the restart command
+    /// before resuming polling, so a slow start does not trigger a
+    /// second restart attempt.
+    grace_ms: u64,
     remaining: Vec<String>,
     passthrough: Vec<String>,
 }
@@ -231,6 +243,9 @@ fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
         json: false,
         hard: false,
         timeout_ms: 15_000,
+        interval_ms: 5_000,
+        max_restarts: None,
+        grace_ms: 30_000,
         remaining: Vec::new(),
         passthrough: Vec::new(),
     };
@@ -255,6 +270,32 @@ fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
                 args.timeout_ms = value
                     .parse::<u64>()
                     .context("--timeout-ms must be a positive integer")?;
+            }
+            "--interval-ms" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--interval-ms requires a value"))?;
+                args.interval_ms = value
+                    .parse::<u64>()
+                    .context("--interval-ms must be a positive integer")?;
+            }
+            "--max-restarts" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--max-restarts requires a value"))?;
+                args.max_restarts = Some(
+                    value
+                        .parse::<u32>()
+                        .context("--max-restarts must be a non-negative integer")?,
+                );
+            }
+            "--grace-ms" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--grace-ms requires a value"))?;
+                args.grace_ms = value
+                    .parse::<u64>()
+                    .context("--grace-ms must be a positive integer")?;
             }
             "--help" | "-h" => return Err(anyhow!("{}", usage())),
             _ => args.remaining.push(arg),
@@ -302,6 +343,14 @@ fn main() -> Result<()> {
             result
         }
         "supervise" => cmd_supervise(require_config(&args)?, args.passthrough),
+        "auto-restart" => cmd_auto_restart(
+            require_config(&args)?,
+            args.passthrough,
+            args.interval_ms,
+            args.max_restarts,
+            args.grace_ms,
+            args.json,
+        ),
         "status" => {
             let base = require_config(&args)?;
             let roles = base.role.concrete_roles();
@@ -1015,6 +1064,191 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// REQ-AXO-097 — auto-restart: cross-process restart half of the
+// runtime watchdog. The in-process detection (runtime_watchdog +
+// runtime_readiness staleness flipper) marks subsystems Failed when
+// their tokio task dies. axonctl's auto-restart is the supervisor
+// half: it polls the role process's pid + cmdline, and when the role
+// is observed dead it spawns the user-supplied restart command.
+// Together, this closes REQ-AXO-097 — a SIGKILLed indexer is
+// detected and respawned without operator intervention.
+// ---------------------------------------------------------------------------
+//
+// Health probe is the same liveness logic used by `cmd_status`: pid
+// file present, kill -0 succeeds, cmdline matches the instance.
+// Anything weaker (e.g. pid file alone) would re-spawn against a
+// reused PID and double-up.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoleHealth {
+    /// Process alive AND cmdline matches the instance signature.
+    Healthy,
+    /// PID file points at a live process whose cmdline does NOT
+    /// match the instance signature (PID reuse): the role is gone,
+    /// some other process now owns that PID.
+    PidReused,
+    /// PID file present but the process is gone (stale pidfile).
+    Dead,
+    /// No PID file on disk: never started, or stop ran cleanly.
+    Absent,
+}
+
+impl RoleHealth {
+    /// Whether the role is OK and no action is required. Any other
+    /// state (Dead, PidReused, Absent) is treated by `auto-restart`
+    /// as "needs restart": the operator's intent in invoking the
+    /// command is "keep this role running" regardless of which
+    /// way it went down.
+    pub(crate) fn is_healthy(self) -> bool {
+        matches!(self, RoleHealth::Healthy)
+    }
+}
+
+pub(crate) fn role_health(config: &InstanceConfig) -> RoleHealth {
+    let pid_file_exists = config.pid_file.exists();
+    let pid = if pid_file_exists {
+        read_pid_file(&config.pid_file).ok().flatten()
+    } else {
+        None
+    };
+    let alive = pid.map(process_exists).unwrap_or(false);
+    if !pid_file_exists {
+        return RoleHealth::Absent;
+    }
+    if !alive {
+        return RoleHealth::Dead;
+    }
+    let pid = pid.expect("alive implies pid present");
+    if process_cmdline_matches_instance(pid, config) {
+        RoleHealth::Healthy
+    } else {
+        RoleHealth::PidReused
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AutoRestartTickEvent<'a> {
+    event: &'a str,
+    instance_kind: &'a str,
+    role: &'a str,
+    health: RoleHealth,
+    restart_count: u32,
+    max_restarts: Option<u32>,
+}
+
+fn emit_tick_event<'a>(json: bool, event: &'a str, config: &InstanceConfig, health: RoleHealth, restart_count: u32, max_restarts: Option<u32>) {
+    if json {
+        let payload = AutoRestartTickEvent {
+            event,
+            instance_kind: config.instance_kind.label(),
+            role: config.role.label(),
+            health,
+            restart_count,
+            max_restarts,
+        };
+        if let Ok(line) = serde_json::to_string(&payload) {
+            eprintln!("{line}");
+        }
+    } else {
+        eprintln!(
+            "axonctl auto-restart: {event} {} {} health={:?} restarts={}/{}",
+            config.instance_kind.label(),
+            config.role.label(),
+            health,
+            restart_count,
+            match max_restarts {
+                Some(n) => n.to_string(),
+                None => "∞".into(),
+            }
+        );
+    }
+}
+
+fn cmd_auto_restart(
+    config: InstanceConfig,
+    restart_command: Vec<String>,
+    interval_ms: u64,
+    max_restarts: Option<u32>,
+    grace_ms: u64,
+    json: bool,
+) -> Result<()> {
+    if restart_command.is_empty() {
+        return Err(anyhow!(
+            "auto-restart requires a restart command after --\n\
+             Usage: axonctl auto-restart ... -- EXECUTABLE [ARGS]"
+        ));
+    }
+    if interval_ms < 100 {
+        return Err(anyhow!(
+            "--interval-ms must be ≥ 100; got {interval_ms} (faster polling burns CPU without observing real signal)"
+        ));
+    }
+
+    let interval = Duration::from_millis(interval_ms);
+    let grace = Duration::from_millis(grace_ms);
+    let mut restart_count: u32 = 0;
+    emit_tick_event(json, "auto_restart_started", &config, role_health(&config), restart_count, max_restarts);
+
+    loop {
+        let health = role_health(&config);
+        if health.is_healthy() {
+            thread::sleep(interval);
+            continue;
+        }
+        if matches!(health, RoleHealth::Absent) {
+            // Never started, or stopped cleanly. Still try to start
+            // (operator semantics: auto-restart implies "keep this
+            // role running"), but cap by max_restarts.
+        }
+        if let Some(max) = max_restarts {
+            if restart_count >= max {
+                emit_tick_event(json, "auto_restart_cap_reached", &config, health, restart_count, max_restarts);
+                return Err(anyhow!(
+                    "auto-restart cap reached ({max} attempts); giving up"
+                ));
+            }
+        }
+        restart_count = restart_count.saturating_add(1);
+        emit_tick_event(json, "auto_restart_spawn", &config, health, restart_count, max_restarts);
+
+        // Spawn restart command without waiting — it is expected to
+        // be a `start` script that detaches its own runtime. We do
+        // wait for the immediate fork to return so we observe spawn
+        // failures (bad path, etc.).
+        let executable = &restart_command[0];
+        let extra_args = &restart_command[1..];
+        let spawn_result = Command::new(executable).args(extra_args).spawn();
+        match spawn_result {
+            Ok(mut child) => {
+                // Poll the spawned process briefly; for a script that
+                // forks-and-exits, the wait returns quickly. For a
+                // long-running supervisor, we stop waiting after the
+                // grace window and re-enter the polling loop.
+                let waited_at = Instant::now();
+                while waited_at.elapsed() < grace {
+                    match child.try_wait() {
+                        Ok(Some(_status)) => break,
+                        Ok(None) => thread::sleep(Duration::from_millis(200)),
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(err) => {
+                emit_tick_event(json, "auto_restart_spawn_failed", &config, health, restart_count, max_restarts);
+                return Err(anyhow!(
+                    "auto-restart failed to spawn `{executable}`: {err}"
+                ));
+            }
+        }
+
+        // Grace window: wait for the runtime to come back up
+        // before we observe it as "still dead" and double-restart.
+        thread::sleep(grace);
+    }
 }
 
 fn get_listening_ports() -> BTreeSet<u16> {
