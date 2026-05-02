@@ -1151,6 +1151,7 @@ impl McpServer {
             "soll_query_context" => self.axon_soll_query_context(arguments),
             "soll_work_plan" => self.axon_soll_work_plan(arguments),
             "soll_attach_evidence" => self.axon_soll_attach_evidence(arguments),
+            "document_intent" => self.axon_document_intent(arguments),
             "soll_verify_requirements" => self.axon_soll_verify_requirements(arguments),
             "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),
             "retrieve_context" => self.axon_retrieve_context(arguments),

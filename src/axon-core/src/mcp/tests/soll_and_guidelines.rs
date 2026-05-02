@@ -6023,6 +6023,124 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
 }
 
 #[test]
+fn test_document_intent_classifies_and_creates_canonical_soll_node() {
+    // REQ-AXO-141 — document_intent is the discoverable MCP entry point for
+    // "documente" / "document this" workflows. With suggest_type omitted,
+    // the server-side classifier picks one of {requirement, decision,
+    // concept, guideline} based on body keywords. Returns the canonical
+    // SOLL id assigned by soll_manager.
+    let server = create_test_server();
+
+    // Body contains both "framework" (concept-keyword) and "fix needed"
+    // (requirement-keyword); requirement must win because the LLM
+    // contract treats problem-class signals as more actionable.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "document_intent",
+            "arguments": {
+                "intent": "Indexer fails on empty file",
+                "body": "the framework is broken when the file is 0 bytes — fix needed before next release",
+                "project_code": "AXO",
+                "tags": ["llm-friction", "indexer"]
+            }
+        },
+        "id": 1
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_ne!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "document_intent must succeed: {result:?}"
+    );
+
+    let data = result.get("data").expect("response data");
+    assert_eq!(data["status"].as_str(), Some("ok"));
+    assert_eq!(
+        data["entity_type"].as_str(),
+        Some("requirement"),
+        "classifier must pick `requirement` when problem-class keyword fires: {data:?}"
+    );
+    assert_eq!(
+        data["classifier_reason"].as_str(),
+        Some("matched_requirement_keyword")
+    );
+    let canonical_id = data["canonical_id"].as_str().expect("canonical_id string");
+    assert!(
+        canonical_id.starts_with("REQ-AXO-"),
+        "auto-classified requirement must get a REQ-AXO-NNN id, got {canonical_id}"
+    );
+
+    // The actual SOLL Node row must exist with the expected fields.
+    let row = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT type, title, description, status, metadata FROM soll.Node WHERE id = '{}' LIMIT 1",
+            canonical_id
+        ))
+        .unwrap();
+    let parsed: Vec<Vec<String>> = serde_json::from_str(&row).unwrap_or_default();
+    let node = parsed.first().expect("created Node row");
+    assert_eq!(node[0], "Requirement");
+    assert_eq!(node[1], "Indexer fails on empty file");
+    assert!(
+        node[4].contains("classifier_reason"),
+        "metadata must persist classifier_reason: {}",
+        node[4]
+    );
+    assert!(
+        node[4].contains("llm-friction"),
+        "metadata.tags must be persisted: {}",
+        node[4]
+    );
+}
+
+#[test]
+fn test_document_intent_rejects_invalid_suggest_type_with_parameter_repair() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "document_intent",
+            "arguments": {
+                "intent": "x",
+                "body": "x",
+                "suggest_type": "wat"
+            }
+        },
+        "id": 2
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let data = result.get("data").expect("data");
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("suggest_type"));
+    assert_eq!(repair["supplied_value"].as_str(), Some("wat"));
+    let accepted = repair["accepted_values"]
+        .as_array()
+        .expect("accepted_values array");
+    let names: Vec<&str> = accepted.iter().filter_map(|v| v.as_str()).collect();
+    for kind in ["requirement", "decision", "concept", "guideline"] {
+        assert!(
+            names.contains(&kind),
+            "accepted_values must include `{kind}`: {names:?}"
+        );
+    }
+}
+
+#[test]
 fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter_repair() {
     // REQ-AXO-139 slice — when a relation references a logical_key that
     // is neither a canonical TYPE-CODE-NNN id nor created in the same plan

@@ -102,6 +102,7 @@ North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive
 | `soll_apply_plan` | batch (`dry_run=true` first, `logical_key`, `author`); `relations` accept logical_keys AND canonical IDs — both resolve correctly during commit (REQ-AXO-137). `data.linked[]` exposes resolved canonical `source_id`/`target_id` plus `raw_source_id`/`raw_target_id` for audit |
 | `soll_manager create/update` | exact single op |
 | `soll_manager link` | post-batch relation creation on canonical IDs |
+| `document_intent` (REQ-AXO-141) | discoverable entry point for "documente" / "document this" / "save observation" workflows — fresh LLM finds this in tools_catalog without per-client prompt config. `{intent, body, suggest_type?, tags?, project_code?}`; server-side classifier picks requirement (problem/gap/friction) / decision (choice/picks/we will) / concept (mental model) / guideline (rule/method) when `suggest_type` is omitted. Returns canonical SOLL id + `entity_type` + `classifier_reason`; follow up with `soll_manager(action=link)` to attach to a parent pillar/concept |
 | `infer_soll_mutation` | read-only assistive scope check |
 | `entrench_nuance` | bounded update of canonical entities |
 | `soll_attach_evidence` | proof (file/test/metric/diff); `data.status` ∈ ok\|partial\|rejected_all\|no_artifacts |

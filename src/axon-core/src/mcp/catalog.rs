@@ -296,6 +296,21 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "document_intent",
+                "description": "[DX/SOLL] Records an LLM-observed intent (requirement/decision/concept/guideline) into SOLL with auto-classification. Universal entry point for 'document this' / 'documente' / 'save observation' workflows; discoverable via tools_catalog so a fresh LLM can log to SOLL without per-client prompt configuration. Server-side classifier picks `requirement` (problem/gap/friction), `decision` (choice/picks/we will), `concept` (mental model / how this works), or `guideline` (rule/method/style) when `suggest_type` is omitted. Returns canonical SOLL ID + entity_type chosen + classification reason.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": { "type": "string", "description": "One-line summary used as the SOLL title." },
+                        "body": { "type": "string", "description": "Full description / rationale / acceptance text." },
+                        "suggest_type": { "type": "string", "enum": ["requirement", "decision", "concept", "guideline"], "description": "Optional hint; omit to let the server classify." },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag list, persisted to metadata.tags." },
+                        "project_code": { "type": "string", "description": "Optional canonical project code; resolved from cwd if omitted." }
+                    },
+                    "required": ["intent", "body"]
+                }
+            },
+            {
                 "name": "soll_verify_requirements",
                 "description": "[SOLL] Verify requirement coverage: done/partial/missing with top gaps and next-to-close.",
                 "inputSchema": {

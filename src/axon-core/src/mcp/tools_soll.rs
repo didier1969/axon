@@ -16,6 +16,7 @@ use crate::project_meta::{
 
 mod completeness;
 mod docs;
+mod document_intent;
 mod evidence;
 mod inference;
 mod manager;
