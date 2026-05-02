@@ -6023,6 +6023,122 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
 }
 
 #[test]
+fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter_repair() {
+    // REQ-AXO-139 slice — when a relation references a logical_key that
+    // is neither a canonical TYPE-CODE-NNN id nor created in the same plan
+    // batch, the response must surface the unresolved keys in `errors[]`
+    // and a top-level `parameter_repair` so the LLM can fix the inputs in
+    // one round-trip.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-091', 'Pillar', 'AXO', 'Anchor pillar 91', '', 'current', '{}')")
+        .unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "author": "test_runner",
+                "dry_run": false,
+                "plan": {
+                    "concepts": [{
+                        "logical_key": "CPT-resolved-cpt-91",
+                        "title": "Resolved concept slice 5",
+                        "description": "Concept created via plan; its logical_key resolves",
+                        "status": "accepted",
+                        "metadata": {}
+                    }]
+                },
+                "relations": [
+                    {
+                        // Resolved (sibling create) — no error expected for this row.
+                        "source_id": "CPT-resolved-cpt-91",
+                        "target_id": "PIL-AXO-091",
+                        "relation_type": "BELONGS_TO"
+                    },
+                    {
+                        // Unresolved logical_key on source — must show up in errors[].
+                        "source_id": "CPT-typo-not-created",
+                        "target_id": "PIL-AXO-091",
+                        "relation_type": "BELONGS_TO"
+                    }
+                ]
+            }
+        },
+        "id": 1
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    let data = result.get("data").expect("response data");
+
+    let errors = data["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("errors array required in: {data:?}"));
+    let unresolved_entries: Vec<&Value> = errors
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("unresolved_logical_key"))
+        .collect();
+    assert_eq!(
+        unresolved_entries.len(),
+        1,
+        "exactly one unresolved_logical_key error expected; got: {errors:?}"
+    );
+    let err = unresolved_entries[0];
+    assert_eq!(err["operation"].as_str(), Some("link"));
+    let unresolved_keys = err["unresolved_keys"]
+        .as_array()
+        .expect("unresolved_keys array");
+    let unresolved_names: Vec<&str> = unresolved_keys.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        unresolved_names.contains(&"CPT-typo-not-created"),
+        "unresolved_keys must list the missing logical_key: {unresolved_names:?}"
+    );
+    assert!(
+        err["available_logical_keys"]
+            .as_array()
+            .map(|arr| arr.iter().any(|v| v.as_str() == Some("CPT-resolved-cpt-91")))
+            .unwrap_or(false),
+        "available_logical_keys must list the keys that DID resolve: {err:?}"
+    );
+
+    let repair = data["parameter_repair"].clone();
+    assert!(
+        !repair.is_null(),
+        "parameter_repair must be set when unresolved logical_keys exist: {data:?}"
+    );
+    assert_eq!(
+        repair["invalid_field"].as_str(),
+        Some("operations[].payload.source_id|target_id")
+    );
+    let repair_unresolved = repair["unresolved_keys"]
+        .as_array()
+        .expect("repair unresolved_keys array");
+    let repair_unresolved_names: Vec<&str> =
+        repair_unresolved.iter().filter_map(|v| v.as_str()).collect();
+    assert!(repair_unresolved_names.contains(&"CPT-typo-not-created"));
+    let follow_up = repair["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let follow_names: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_names.contains(&"soll_manager"),
+        "follow_up_tools must include `soll_manager`: {follow_names:?}"
+    );
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("logical_key") || hint.contains("canonical"),
+        "hint must explain logical_key vs canonical id: {hint}"
+    );
+}
+
+#[test]
 fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
     // REQ-AXO-138 — when `git add <diff_paths>` exits non-zero (e.g., a path
     // doesn't exist), axon_commit_work must NOT proceed to `git commit`.

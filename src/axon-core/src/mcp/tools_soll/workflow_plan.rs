@@ -172,13 +172,62 @@ impl McpServer {
 
         let mut identity_mapping = std::collections::HashMap::new();
         let mut linked_results = Vec::new();
-        for op in &operations {
+        // REQ-AXO-139 slice — surface unresolved logical_keys in link
+        // operations so the LLM can fix the inputs in one round-trip instead
+        // of inspecting every Edge insert silently passing through bad keys.
+        let mut link_errors: Vec<Value> = Vec::new();
+        for (op_index, op) in operations.iter().enumerate() {
+            let kind = op
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+
+            // REQ-AXO-139 slice — pre-check link operations for unresolved
+            // logical_keys BEFORE attempting the insert so the failure mode
+            // is structured (errors[] + parameter_repair) rather than the
+            // generic SQL error path that rolls back the whole transaction.
+            if kind == "link" {
+                let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+                let raw_source = payload
+                    .get("source_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let raw_target = payload
+                    .get("target_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let mut unresolved: Vec<String> = Vec::new();
+                if !raw_source.is_empty()
+                    && !identity_mapping.contains_key(raw_source)
+                    && project_code_from_canonical_entity_id(raw_source).is_none()
+                {
+                    unresolved.push(raw_source.to_string());
+                }
+                if !raw_target.is_empty()
+                    && !identity_mapping.contains_key(raw_target)
+                    && project_code_from_canonical_entity_id(raw_target).is_none()
+                {
+                    unresolved.push(raw_target.to_string());
+                }
+                if !unresolved.is_empty() {
+                    let available: Vec<String> = identity_mapping.keys().cloned().collect();
+                    link_errors.push(json!({
+                        "operation_index": op_index,
+                        "kind": "unresolved_logical_key",
+                        "operation": "link",
+                        "raw_source_id": raw_source,
+                        "raw_target_id": raw_target,
+                        "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
+                        "unresolved_keys": unresolved,
+                        "available_logical_keys": available,
+                        "hint": "supply a canonical TYPE-CODE-NNN id, or ensure the same `logical_key` was created earlier in this `operations` batch"
+                    }));
+                    continue;
+                }
+            }
+
             match self.apply_operation_with_audit(&revision_id, op, &mut identity_mapping) {
                 Ok(generated_id) => {
-                    let kind = op
-                        .get("kind")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
                     if kind == "link" {
                         // REQ-AXO-137: surface CANONICAL ids in data.linked[]
                         // so callers can immediately query the resulting Edges
@@ -265,6 +314,41 @@ impl McpServer {
         }
         result_contract["linked"] = Value::Array(linked_results);
 
+        // REQ-AXO-139 slice — surface unresolved logical_keys (and a
+        // top-level parameter_repair shortcut) when present, mirroring
+        // cypher-binder / inspect / dispatch slices for one-round-trip
+        // recovery.
+        let parameter_repair = if link_errors.is_empty() {
+            Value::Null
+        } else {
+            let first = &link_errors[0];
+            let unresolved: Vec<String> = first
+                .get("unresolved_keys")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let available: Vec<String> = first
+                .get("available_logical_keys")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            json!({
+                "invalid_field": "operations[].payload.source_id|target_id",
+                "operation_index": first.get("operation_index").cloned().unwrap_or(Value::Null),
+                "unresolved_keys": unresolved,
+                "available_logical_keys": available,
+                "follow_up_tools": ["soll_apply_plan", "soll_manager"],
+                "hint": "either reuse a `logical_key` declared as `kind=create|update` earlier in the same `operations` batch, or pass a canonical TYPE-CODE-NNN id directly"
+            })
+        };
+        let mut errors = result_contract
+            .get("errors")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![]));
+        if let Some(arr) = errors.as_array_mut() {
+            arr.extend(link_errors);
+        }
+
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
             "data": {
@@ -275,7 +359,8 @@ impl McpServer {
                 "updated": result_contract.get("updated").cloned().unwrap_or_else(|| Value::Array(vec![])),
                 "linked": result_contract.get("linked").cloned().unwrap_or_else(|| Value::Array(vec![])),
                 "skipped": result_contract.get("skipped").cloned().unwrap_or_else(|| Value::Array(vec![])),
-                "errors": result_contract.get("errors").cloned().unwrap_or_else(|| Value::Array(vec![]))
+                "errors": errors,
+                "parameter_repair": parameter_repair,
             }
         }))
     }
