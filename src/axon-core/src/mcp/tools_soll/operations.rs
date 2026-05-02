@@ -1,5 +1,42 @@
 use super::*;
 
+// REQ-AXO-147 — universal parameter_repair contract rollout for
+// operations.rs (REQ-AXO-139 follow-up). The restore loop has 8 distinct
+// per-entity-kind failure paths that previously emitted bare
+// "SOLL restore <kind> error: <e>" strings without structured recovery.
+// `restore_step_error_response` standardises them so an LLM can route on
+// `data.parameter_repair.{step, entity_kind, hint, follow_up_tools}` in a
+// single round-trip.
+fn restore_step_error_response(step: &str, entity_kind: &str, err: &str) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "SOLL restore {} error: {}",
+                entity_kind, err
+            )
+        }],
+        "isError": true,
+        "data": {
+            "status": "internal_error",
+            "operator_guidance": {
+                "problem_class": "internal_error",
+                "follow_up_tools": ["soll_validate", "soll_query_context"],
+            },
+            "parameter_repair": {
+                "invalid_field": "path",
+                "step": step,
+                "entity_kind": entity_kind,
+                "follow_up_tools": ["soll_validate", "soll_query_context"],
+                "hint": format!(
+                    "{step} on entity_kind=`{entity_kind}` failed; verify the source SOLL export is well-formed and matches the canonical schema. Run `soll_validate` after partial restore to surface remaining gaps."
+                )
+            },
+            "diagnostic_excerpt": err.chars().take(240).collect::<String>()
+        }
+    })
+}
+
 impl McpServer {
     pub(crate) fn axon_export_soll(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         // REQ-AXO-126 — `soll_export` is now snapshot-per-release: the
@@ -12,19 +49,19 @@ impl McpServer {
         // manually for ad-hoc snapshots. No env-var gate is needed
         // because the per-call rate is now bounded by promotion
         // frequency, not commit frequency.
-        let project_code = args.get("project_code").and_then(|v| v.as_str());
-        let project_code = match project_code
+        let project_code_input = args.get("project_code").and_then(|v| v.as_str());
+        // REQ-AXO-147 — surface wrong_project_scope contract for unregistered
+        // project_code (matches soll_validate / soll_query_context / soll_work_plan).
+        if let Some(code) = project_code_input {
+            if self.resolve_project_code(code).is_err() {
+                return Some(self.wrong_project_scope_response(code, "soll_export"));
+            }
+        }
+        let project_code = project_code_input
             .map(|code| self.resolve_project_code(code))
             .transpose()
-        {
-            Ok(code) => code,
-            Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                    "isError": true
-                }))
-            }
-        };
+            .ok()
+            .flatten();
         let mut markdown = String::from("# SOLL Extraction\n\n");
 
         let now = std::time::SystemTime::now();
@@ -91,7 +128,19 @@ impl McpServer {
                         "type": "text",
                         "text": "Write error: cannot resolve canonical docs/vision directory"
                     }],
-                    "isError": true
+                    "isError": true,
+                    "data": {
+                        "status": "internal_error",
+                        "operator_guidance": {
+                            "problem_class": "internal_error",
+                            "follow_up_tools": ["status"],
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "canonical_soll_export_dir",
+                            "follow_up_tools": ["status"],
+                            "hint": "axon runtime cannot resolve docs/vision directory; verify project_path layout via `status mode=verbose` and the `instance_identity.data_root_absolute` field"
+                        }
+                    }
                 }))
             }
         };
@@ -122,9 +171,24 @@ impl McpServer {
                 );
                 Some(serde_json::json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(
-                serde_json::json!({ "content": [{ "type": "text", "text": format!("Write error: {}", e) }], "isError": true }),
-            ),
+            Err(e) => Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Write error: {}", e) }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "operator_guidance": {
+                        "problem_class": "internal_error",
+                        "follow_up_tools": ["status"],
+                    },
+                    "parameter_repair": {
+                        "invalid_field": "filesystem",
+                        "supplied_path": file_path.display().to_string(),
+                        "follow_up_tools": ["status"],
+                        "hint": "fs::write to docs/vision failed; check disk space, permissions on the project root, and AXON_SOLL_EXPORT_RETAIN if pruning was attempted"
+                    },
+                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                }
+            })),
         }
     }
 
@@ -174,7 +238,20 @@ impl McpServer {
             Err(e) => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                    "isError": true
+                    "isError": true,
+                    "data": {
+                        "status": "internal_error",
+                        "operator_guidance": {
+                            "problem_class": "internal_error",
+                            "follow_up_tools": ["status", "soll_query_context"],
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "soll_completeness_snapshot",
+                            "follow_up_tools": ["status", "soll_query_context"],
+                            "hint": "graph snapshot computation failed; runtime may be degraded — check `status` and retry, or fall back to `soll_query_context` for a partial view"
+                        },
+                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                    }
                 }))
             }
         };
@@ -378,7 +455,21 @@ impl McpServer {
             Err(e) => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": format!("SOLL restore read error: {}", e) }],
-                    "isError": true
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "operator_guidance": {
+                            "problem_class": "input_invalid",
+                            "follow_up_tools": ["status"],
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "path",
+                            "supplied_value": path.clone(),
+                            "follow_up_tools": ["status"],
+                            "hint": "supply a path to a SOLL_EXPORT_*.md file under docs/vision/ (or omit `path` to restore from the latest export)"
+                        },
+                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                    }
                 }))
             }
         };
@@ -388,7 +479,21 @@ impl McpServer {
             Err(e) => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": format!("SOLL restore parse error: {}", e) }],
-                    "isError": true
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "operator_guidance": {
+                            "problem_class": "input_invalid",
+                            "follow_up_tools": ["soll_export"],
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "path",
+                            "supplied_value": path.clone(),
+                            "follow_up_tools": ["soll_export"],
+                            "hint": "the file does not match the canonical SOLL_EXPORT Markdown schema (sections: Vision / Pillars / Concepts / Milestones / Requirements / Decisions / Validations / Relations). Generate a fresh canonical export via `soll_export` and restore from that"
+                        },
+                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                    }
                 }))
             }
         };
@@ -398,10 +503,11 @@ impl McpServer {
              VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
              ON CONFLICT (project_code) DO NOTHING"
         ) {
-            return Some(json!({
-                "content": [{ "type": "text", "text": format!("SOLL restore registry error: {}", e) }],
-                "isError": true
-            }));
+            return Some(restore_step_error_response(
+                "registry_seed",
+                "soll.Registry",
+                &e.to_string(),
+            ));
         }
 
         let mut restored = SollRestoreCounts::default();
@@ -428,7 +534,7 @@ impl McpServer {
                     "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore vision error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Vision", &e.to_string()));
             }
             restored.vision += 1;
         }
@@ -446,7 +552,7 @@ impl McpServer {
                     "metadata": metadata
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore pillar error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Pillar", &e.to_string()));
             }
             restored.pillars += 1;
         }
@@ -475,7 +581,7 @@ impl McpServer {
                     "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore requirement error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Requirement", &e.to_string()));
             }
             restored.requirements += 1;
         }
@@ -498,7 +604,7 @@ impl McpServer {
                     "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore decision error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Decision", &e.to_string()));
             }
             restored.decisions += 1;
         }
@@ -516,7 +622,7 @@ impl McpServer {
                     "metadata": metadata
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore milestone error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Milestone", &e.to_string()));
             }
             restored.milestones += 1;
         }
@@ -537,7 +643,7 @@ impl McpServer {
                     "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore validation error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Validation", &e.to_string()));
             }
             restored.validations += 1;
         }
@@ -566,7 +672,7 @@ impl McpServer {
                     "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_node", "Concept", &e.to_string()));
             }
             restored.concepts += 1;
         }
@@ -576,7 +682,7 @@ impl McpServer {
                 "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, ?, '{}') ON CONFLICT DO NOTHING",
                 &serde_json::json!([rel.source_id, rel.target_id, rel.relation_type])
             ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }));
+                return Some(restore_step_error_response("insert_edge", "Edge", &e.to_string()));
             }
             restored.relations += 1;
         }

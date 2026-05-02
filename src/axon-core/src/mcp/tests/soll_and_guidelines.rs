@@ -6023,6 +6023,82 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
 }
 
 #[test]
+fn test_restore_soll_invalid_path_returns_parameter_repair() {
+    // REQ-AXO-147 slice 1 — operations.rs failure paths now surface
+    // data.parameter_repair so the LLM can recover in one round-trip.
+    // Restoring from a path that does not exist must point at the `path`
+    // field with a hint to use docs/vision/SOLL_EXPORT_*.md.
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "restore_soll",
+            "arguments": {
+                "path": "/tmp/this/path/definitely/does/not/exist-axo-147.md"
+            }
+        },
+        "id": 9001
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_eq!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "non-existent path must surface isError=true: {result:?}"
+    );
+    let data = result.get("data").expect("data payload required");
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("path"));
+    assert!(
+        repair["supplied_value"]
+            .as_str()
+            .unwrap_or("")
+            .contains("does/not/exist"),
+        "parameter_repair must echo the supplied path: {repair}"
+    );
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("SOLL_EXPORT") || hint.contains("docs/vision"),
+        "hint must point at the canonical export location: {hint}"
+    );
+}
+
+#[test]
+fn test_soll_export_unregistered_project_code_returns_wrong_project_scope() {
+    // REQ-AXO-147 slice 1 — soll_export now uses the shared
+    // wrong_project_scope_response helper for unregistered codes
+    // (consistent with soll_validate / soll_query_context / soll_work_plan).
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_export",
+            "arguments": {
+                "project_code": "ZZZ"
+            }
+        },
+        "id": 9002
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    let data = result.get("data").expect("data payload required");
+    let status = data["status"].as_str().unwrap_or("");
+    assert!(
+        status == "wrong_project_scope" || status == "input_invalid",
+        "unregistered project_code must surface a structured status (got `{status}`): {data:?}"
+    );
+}
+
+#[test]
 fn test_document_intent_classifies_and_creates_canonical_soll_node() {
     // REQ-AXO-141 — document_intent is the discoverable MCP entry point for
     // "documente" / "document this" workflows. With suggest_type omitted,
