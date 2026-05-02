@@ -134,6 +134,16 @@ impl McpServer {
         // See scripts/release/promote_live_safe.sh for the canonical
         // call site and `axon_export_soll` for the rationale.
 
+        // REQ-AXO-138 — auto-stage every diff_path so Edit/Write modifications
+        // never silently drop out of the commit. The previous implementation
+        // ran `git add` but only failed if the process couldn't spawn — exit-
+        // code failures (path missing, ignore conflict, etc.) passed through
+        // silently and the subsequent `git commit` captured only whatever
+        // was pre-staged elsewhere (e.g. earlier `git rm`). The result was
+        // commits that referenced symbols absent from HEAD, breaking bisect.
+        //
+        // Fix: status-check the add invocation and return a structured error
+        // listing the offending stderr so the caller can repair before retry.
         let mut add_cmd = std::process::Command::new("git");
         add_cmd.arg("add");
         for p in diff_paths {
@@ -141,11 +151,56 @@ impl McpServer {
                 add_cmd.arg(path_str);
             }
         }
-        let add_out = add_cmd.output();
-        if let Err(e) = add_out {
+        let add_out = match add_cmd.output() {
+            Ok(output) => output,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Git add spawn failed: {}", e) }],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "next_action": {
+                            "kind": "verify_paths_then_retry",
+                            "tool": "axon_commit_work",
+                            "when": "after_paths_resolved"
+                        },
+                        "operator_guidance": {
+                            "problem_class": "git_invocation_failure",
+                            "follow_up_tools": ["axon_pre_flight_check"],
+                        }
+                    }
+                }));
+            }
+        };
+        if !add_out.status.success() {
+            let stderr = String::from_utf8_lossy(&add_out.stderr);
+            let stdout = String::from_utf8_lossy(&add_out.stdout);
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Git add failed: {}", e) }],
-                "isError": true
+                "content": [{ "type": "text", "text": format!(
+                    "Git add failed (exit {}). Refusing to commit a partial diff. stderr: {}",
+                    add_out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                )}],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "git_add_exit_code": add_out.status.code(),
+                    "git_add_stderr": stderr,
+                    "git_add_stdout": stdout,
+                    "next_action": {
+                        "kind": "fix_path_then_retry",
+                        "tool": "axon_commit_work",
+                        "when": "after_paths_resolved"
+                    },
+                    "operator_guidance": {
+                        "problem_class": "git_add_rejected_paths",
+                        "follow_up_tools": ["axon_pre_flight_check"],
+                    },
+                    "parameter_repair": {
+                        "invalid_field": "diff_paths",
+                        "hint": "verify each path exists relative to repo root and is not gitignored, then retry"
+                    }
+                }
             }));
         }
 

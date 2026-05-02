@@ -5755,6 +5755,79 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
 }
 
 #[test]
+fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
+    // REQ-AXO-138 — when `git add <diff_paths>` exits non-zero (e.g., a path
+    // doesn't exist), axon_commit_work must NOT proceed to `git commit`.
+    // Previously the code only checked Command::output() Err (process-spawn
+    // failure) and let exit-code failures pass through silently, resulting in
+    // commits that captured only whatever was pre-staged. Now the exit status
+    // is checked and a structured parameter_repair response is returned.
+    let server = create_test_server();
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+         VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
+    ).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["this/path/definitely/does/not/exist.rs"],
+                "message": "test: REQ-AXO-138 partial-diff refusal",
+                "dry_run": false
+            }
+        },
+        "id": 1
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert_eq!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "non-existent diff_path must surface isError=true: {}",
+        content
+    );
+    assert!(
+        content.contains("Git add failed") || content.contains("Refusing to commit"),
+        "error text must explain partial-diff refusal: {}",
+        content
+    );
+    let data = result.get("data").expect("data payload required for repair");
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("input_invalid")
+    );
+    assert!(
+        data.get("git_add_exit_code")
+            .and_then(|v| v.as_i64())
+            .is_some(),
+        "git_add_exit_code must be exposed for diagnostics"
+    );
+    assert_eq!(
+        data.get("parameter_repair")
+            .and_then(|pr| pr.get("invalid_field"))
+            .and_then(|v| v.as_str()),
+        Some("diff_paths")
+    );
+    assert!(
+        !content.contains("Commit succeeded"),
+        "commit must NOT have happened: {}",
+        content
+    );
+}
+
+#[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();
     let out = tempdir().unwrap();

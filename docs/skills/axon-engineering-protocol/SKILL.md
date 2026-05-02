@@ -119,7 +119,7 @@ Server-owned IDs `TYPE-CODE-NNN`. Never fabricate: project_code, preview, revisi
 3. `impact` / `why` / `path` / `anomalies` if needed
 4. SOLL update if intent changed (REQ created/updated, evidence attached BEFORE code)
 5. `axon_pre_flight_check`
-6. **Pre-stage** `git add <Edit/Write modified files>` (axon_commit_work only auto-stages git-rm)
+6. **Pre-stage** `git add <Edit/Write modified files>` — `axon_commit_work` runs `git add <diff_paths>` itself and refuses partial-staging since REQ-AXO-138 (returns `data.git_add_exit_code` + `parameter_repair` if any path fails); pre-staging stays best practice for repos with conditional hooks
 7. `axon_commit_work`
 8. **Verify** `git status` after — if `M` files remain, commit dropped modifications
 
