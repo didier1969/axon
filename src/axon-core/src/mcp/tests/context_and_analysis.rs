@@ -1443,6 +1443,99 @@ fn test_soll_work_plan_returns_top_recommendations() {
 }
 
 #[test]
+fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
+    // REQ-AXO-135: terminal-state Decisions (delivered/superseded) and
+    // Requirements (completed/superseded/archived) must be excluded from
+    // wave 1 AND from descendant counting so 'unblocks N descendants'
+    // reflects OPEN descendants only.
+    let server = create_test_server();
+    // Open work: DEC-AXO-001 (accepted) -> REQ-AXO-001 (current)
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Open work', '', 'current', '{\"priority\":\"P1\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Active decision', '', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+    // Terminal: DEC-AXO-002 (delivered) -> REQ-AXO-002 (completed)
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Closed work', '', 'completed', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Delivered decision', '', 'delivered', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-002', 'REQ-AXO-002', 'SOLVES')")
+        .unwrap();
+    // Superseded edge case
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-003', 'Decision', 'AXO', 'Superseded decision', '', 'superseded', '{}')")
+        .unwrap();
+    // Archived edge case
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'Archived work', '', 'archived', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json" }
+        })),
+        id: Some(json!(550)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let item_ids: Vec<&str> = waves
+        .iter()
+        .flat_map(|wave| wave["items"].as_array().unwrap().iter())
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+
+    // Open items present.
+    assert!(item_ids.contains(&"DEC-AXO-001"), "open accepted decision must be in waves: {:?}", item_ids);
+    assert!(item_ids.contains(&"REQ-AXO-001"), "open current requirement must be in waves: {:?}", item_ids);
+    // Terminal items excluded.
+    assert!(!item_ids.contains(&"DEC-AXO-002"), "delivered decision must be excluded: {:?}", item_ids);
+    assert!(!item_ids.contains(&"REQ-AXO-002"), "completed requirement must be excluded: {:?}", item_ids);
+    assert!(!item_ids.contains(&"DEC-AXO-003"), "superseded decision must be excluded: {:?}", item_ids);
+    assert!(!item_ids.contains(&"REQ-AXO-003"), "archived requirement must be excluded: {:?}", item_ids);
+
+    // Descendant counter weighted by OPEN descendants only — DEC-AXO-001
+    // should report 'unblocks 1 descendant(s)' (REQ-AXO-001), not 0 or 2.
+    let dec1 = waves
+        .iter()
+        .flat_map(|wave| wave["items"].as_array().unwrap().iter())
+        .find(|item| item["id"].as_str() == Some("DEC-AXO-001"))
+        .expect("DEC-AXO-001 must be in waves");
+    let reasons = dec1["reasons"]
+        .as_array()
+        .expect("reasons array")
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect::<Vec<_>>();
+    let unblocks_str = reasons
+        .iter()
+        .find(|r| r.starts_with("unblocks "))
+        .expect("unblocks reason must be present");
+    assert!(unblocks_str.contains("1 descendant"), "expected unblocks 1 descendant, got: {}", unblocks_str);
+}
+
+#[test]
 fn test_soll_work_plan_counts_decision_evidence() {
     let server = create_test_server();
     server

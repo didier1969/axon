@@ -58,10 +58,19 @@ impl McpServer {
             }
         }
 
+        // REQ-AXO-135: terminal-state Decisions/Requirements/Milestones are
+        // not actionable — exclude them from wave 1 AND from descendant
+        // counting so 'unblocks N descendants' reflects OPEN descendants only.
+        // Terminal states across SOLL types: delivered/superseded (Decision),
+        // completed/superseded (Requirement, Milestone), archived (any).
         let schedulable_ids = nodes
-            .keys()
-            .filter(|id| !cycle_node_ids.contains(*id) && !blocked_by_cycles.contains(*id))
-            .cloned()
+            .iter()
+            .filter(|(id, node)| {
+                !cycle_node_ids.contains(*id)
+                    && !blocked_by_cycles.contains(*id)
+                    && !is_terminal_status(&node.status)
+            })
+            .map(|(id, _)| id.clone())
             .collect::<HashSet<_>>();
         let schedulable_adj = filter_adjacency(&adjacency, &schedulable_ids);
         let descendants = compute_descendant_counts(&schedulable_ids, &schedulable_adj);

@@ -104,7 +104,7 @@ North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive
 
 Async: response with `job_id` → `job_status(job_id)` until terminal (`succeeded` / `failed`).
 
-For `soll_work_plan`: `format=brief, limit, top` first; `include_validation_details=false` unless requirement-level detail needed.
+For `soll_work_plan`: `format=brief, limit, top` first; `include_validation_details=false` unless requirement-level detail needed. Terminal-state nodes (status ∈ `delivered`/`superseded`/`completed`/`archived`) are excluded from waves AND from descendant counting, so `unblocks N descendant(s)` reflects OPEN descendants only (REQ-AXO-135). Flip a closed item's status to mark it terminal — it disappears from wave 1 and stops inflating parent unblocker scores.
 
 CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` (or `--args-file -` for stdin). Avoid fragile inline shell JSON.
 

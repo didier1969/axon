@@ -64,6 +64,18 @@ pub(super) struct WorkPlanBlocker {
     pub(super) reason: String,
 }
 
+/// Returns true when a SOLL Node status represents a terminal lifecycle
+/// state. Terminal nodes are excluded from `soll_work_plan` scheduling and
+/// from descendant counting (REQ-AXO-135). Recognized terminal states across
+/// SOLL types: `delivered` and `superseded` (Decision); `completed` and
+/// `superseded` (Requirement, Milestone); `archived` (any).
+pub(super) fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "delivered" | "superseded" | "completed" | "archived"
+    )
+}
+
 pub(super) fn build_adjacency_map(edges: &[(String, String)]) -> HashMap<String, BTreeSet<String>> {
     let mut adjacency: HashMap<String, BTreeSet<String>> = HashMap::new();
     for (source, target) in edges {
