@@ -436,7 +436,15 @@ pub(crate) fn parse_duckdb_binder_error(raw: &str) -> Option<(String, Vec<String
     let ref_end = raw[ref_start..].find('"')?;
     let missing = raw[ref_start..ref_start + ref_end].to_string();
     let cand_start = raw.find(candidate_marker)? + candidate_marker.len();
-    let cand_block = &raw[cand_start..];
+    // DuckDB appends `LINE N: ...` location markers AFTER the candidate list.
+    // Terminate the block at the first newline to avoid swallowing the
+    // location pointer into the last candidate (REQ-AXO-139 follow-up:
+    // single-candidate edge case where there's no comma to split on).
+    let cand_tail = &raw[cand_start..];
+    let cand_block = match cand_tail.find('\n') {
+        Some(nl) => &cand_tail[..nl],
+        None => cand_tail,
+    };
     // Split candidates on commas, trim quotes/whitespace.
     let candidates: Vec<String> = cand_block
         .split(',')
@@ -481,5 +489,20 @@ mod parse_duckdb_binder_error_tests {
         let (missing, candidates) = parse_duckdb_binder_error(raw).expect("must parse");
         assert_eq!(missing, "foo");
         assert_eq!(candidates, vec!["bar"]);
+    }
+
+    #[test]
+    fn ignores_duckdb_line_marker_after_candidates() {
+        // DuckDB appends `LINE N: ... \n  ^` location pointers after the
+        // candidate list. Earlier parser swallowed the marker into the
+        // last candidate when there was no comma to split on.
+        let raw = "Binder Error: Referenced column \"callee\" not found in FROM clause!\nCandidate bindings: \"target_id\"\n\nLINE 1: SELECT callee FROM main.CALLS LIMIT 1\n               ^";
+        let (missing, candidates) = parse_duckdb_binder_error(raw).expect("must parse");
+        assert_eq!(missing, "callee");
+        assert_eq!(
+            candidates,
+            vec!["target_id"],
+            "LINE marker must NOT contaminate the candidate"
+        );
     }
 }

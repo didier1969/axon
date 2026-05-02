@@ -58,7 +58,7 @@ Default `mode=brief`. `query` brain semantic search works under `brain_only` pro
 | Status returned | Recover via |
 |---|---|
 | `input_invalid` (missing_field) | retry with example call from `data.next_action` |
-| `input_invalid` cypher binder (REQ-AXO-139 slice) | inspect `data.parameter_repair.{missing_column, available_columns, hint}` and retry with valid column |
+| `input_invalid` cypher binder (REQ-AXO-139 slice) | inspect `data.parameter_repair.{missing_column, available_columns, hint}` and retry with valid column. `available_columns` is clean of DuckDB `LINE N: ...` location markers |
 | `wrong_project_scope` | `project_registry_lookup` then `axon_init_project` |
 | `input_not_found` | retry with suggested symbol or widen via `query` |
 | `input_ambiguous` | pick exact symbol or narrow project scope |
