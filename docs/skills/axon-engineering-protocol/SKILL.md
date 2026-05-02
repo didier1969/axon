@@ -60,6 +60,7 @@ Default `mode=brief`. `query` brain semantic search works under `brain_only` pro
 | `input_invalid` (missing_field) | retry with example call from `data.next_action` |
 | `input_invalid` cypher binder (REQ-AXO-139 slice) | inspect `data.parameter_repair.{missing_column, available_columns, hint}` and retry with valid column. `available_columns` is clean of DuckDB `LINE N: ...` location markers |
 | `rejected_all` / `partial` / `no_artifacts` from `soll_attach_evidence` (REQ-AXO-139 slice) | inspect `data.parameter_repair.{invalid_field, rejected_artifact_index, rejected_artifact_kind, primary_reason, accepted_aliases, required_field_hint, hint}`. For `invalid_field=artifact_type` also use `supplied_artifact_type` + `accepted_artifact_schema`. Per-kind `required_field_hint` covers File / Document / Symbol / Test / Metric / Validation / Rationale / Diff |
+| `inspect` `symbol_found=false` (REQ-AXO-139 slice) | inspect `data.parameter_repair.{invalid_field, supplied_value, scope, suggestions, widening_actions, follow_up_tools, hint}`. With suggestions: pick one and retry `inspect`. Without: widen via `query` (less specific term) or `list_labels_tables` |
 | `wrong_project_scope` | `project_registry_lookup` then `axon_init_project` |
 | `input_not_found` | retry with suggested symbol or widen via `query` |
 | `input_ambiguous` | pick exact symbol or narrow project scope |

@@ -1165,6 +1165,46 @@ impl McpServer {
             } else {
                 "after_widening_or_correcting_the_search"
             };
+            // REQ-AXO-139 slice — universal parameter_repair contract for
+            // inspect symbol-not-found. Mirrors cypher-binder + evidence
+            // slices so the LLM can fix the input field in one round-trip:
+            // pick a suggestion when present, else widen the search via the
+            // suggested follow-up tools.
+            let widening_actions: Vec<&str> = if has_suggestions {
+                vec![
+                    "pick one of `suggestions` and retry `inspect`",
+                    "or pass the exact canonical symbol id",
+                ]
+            } else {
+                vec![
+                    "retry `query` with a less specific term (drop the trailing `::method`, prefix-only, single token)",
+                    "verify spelling and project scope",
+                    "use `list_labels_tables` to list indexed kinds when the symbol class is uncertain",
+                ]
+            };
+            let parameter_repair = json!({
+                "invalid_field": "symbol",
+                "supplied_value": symbol,
+                "scope": scope,
+                "suggestions": suggestions,
+                "widening_actions": widening_actions,
+                "follow_up_tools": if has_suggestions {
+                    vec!["inspect"]
+                } else {
+                    vec!["query", "list_labels_tables", "inspect"]
+                },
+                "hint": if has_suggestions {
+                    format!(
+                        "no exact match for `{}` in {}; pick one of `suggestions` or pass a canonical symbol id",
+                        symbol, scope
+                    )
+                } else {
+                    format!(
+                        "no candidate found for `{}` in {}; widen the search via `query` or list kinds via `list_labels_tables`",
+                        symbol, scope
+                    )
+                },
+            });
             let response = json!({
                 "content": [{ "type": "text", "text": report }],
                 "data": {
@@ -1187,7 +1227,8 @@ impl McpServer {
                         "kind": next_action_kind,
                         "tool": next_action_tool,
                         "when": next_action_when
-                    }
+                    },
+                    "parameter_repair": parameter_repair
                 }
             });
             return Some(if Self::mcp_guidance_authoritative_enabled() {

@@ -4340,6 +4340,77 @@ fn test_axon_inspect_unknown_symbol_with_no_suggestions_recommends_widening() {
 }
 
 #[test]
+fn test_axon_inspect_unknown_symbol_returns_parameter_repair_with_widening_actions() {
+    // REQ-AXO-139 slice — universal parameter_repair contract for inspect
+    // symbol-not-found. Mirrors cypher-binder + soll_attach_evidence slices.
+    // When no suggestions exist the LLM should be steered toward widening
+    // tools (`query`, `list_labels_tables`) instead of guessing.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "inspect",
+            "arguments": {
+                "symbol": "totally_unrelated_symbol_zz_qq_42",
+            }
+        })),
+        id: Some(json!(50443)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(false));
+
+    let repair = data
+        .get("parameter_repair")
+        .expect("parameter_repair payload required for inspect not-found");
+    assert_eq!(repair["invalid_field"].as_str(), Some("symbol"));
+    assert_eq!(
+        repair["supplied_value"].as_str(),
+        Some("totally_unrelated_symbol_zz_qq_42")
+    );
+    assert!(
+        repair["scope"].as_str().is_some(),
+        "parameter_repair must surface scope: {repair}"
+    );
+
+    let widening = repair["widening_actions"]
+        .as_array()
+        .expect("widening_actions array");
+    let widening_text: String = widening
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        widening_text.contains("query") || widening_text.contains("less specific"),
+        "widening_actions must steer toward broader query: {widening_text}"
+    );
+
+    let follow_up = repair["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let follow_up_names: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_up_names.contains(&"query"),
+        "no-suggestions follow_up_tools must include `query`: {follow_up_names:?}"
+    );
+    assert!(
+        follow_up_names.contains(&"list_labels_tables"),
+        "no-suggestions follow_up_tools must include `list_labels_tables`: {follow_up_names:?}"
+    );
+
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("totally_unrelated_symbol_zz_qq_42"),
+        "hint must reference the supplied symbol: {hint}"
+    );
+}
+
+#[test]
 fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let _guard = env_lock();
     unsafe {
