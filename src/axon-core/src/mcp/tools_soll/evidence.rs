@@ -278,6 +278,32 @@ impl McpServer {
             "confidence": "high",
         });
 
+        // REQ-AXO-139 slice — universal parameter_repair contract for
+        // soll_attach_evidence. When an artifact is rejected, surface a
+        // structured `parameter_repair` mirroring the cypher-binder slice so
+        // the LLM can fix the input in one round-trip without re-reading the
+        // per-artifact `artifact_diagnostics`.
+        let parameter_repair = match status_str {
+            "ok" => Value::Null,
+            "no_artifacts" => json!({
+                "invalid_field": "artifacts",
+                "hint": "supply at least one artifact object in the `artifacts` array; \
+                        each artifact needs `artifact_type` and one of `artifact_ref` / \
+                        `path` / `file_path` / `uri`",
+                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "accepted_artifact_schema": accepted_schema,
+            }),
+            _ => first_rejected_repair(&artifact_diagnostics, &accepted_schema)
+                .unwrap_or_else(|| {
+                    json!({
+                        "invalid_field": "artifacts",
+                        "hint": "review `artifact_diagnostics` for per-artifact rejection reasons",
+                        "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                        "accepted_artifact_schema": accepted_schema,
+                    })
+                }),
+        };
+
         let content_text = match status_str {
             "ok" => format!(
                 "Attached {} evidence item(s) to {}:{}",
@@ -323,7 +349,124 @@ impl McpServer {
                 "fallback_guidance": fallback_guidance,
                 "next_action": next_action,
                 "operator_guidance": operator_guidance,
+                "parameter_repair": parameter_repair,
             }
         }))
     }
+}
+
+// REQ-AXO-139 slice — extract structured parameter_repair from the first
+// rejected artifact so an LLM can fix one input field per round-trip.
+// Returns None when no rejection diagnostic is present (caller falls back to
+// a generic shape).
+fn first_rejected_repair(
+    artifact_diagnostics: &[Value],
+    accepted_schema: &[String],
+) -> Option<Value> {
+    for diag in artifact_diagnostics {
+        let status = diag.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status != "rejected" {
+            continue;
+        }
+        let idx = diag.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let kind = diag
+            .get("normalized_artifact_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let supplied = diag
+            .get("input")
+            .and_then(|v| v.get("artifact_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let raw_ref = diag
+            .get("input")
+            .and_then(|v| {
+                v.get("artifact_ref")
+                    .or_else(|| v.get("path"))
+                    .or_else(|| v.get("file_path"))
+                    .or_else(|| v.get("uri"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let reasons: Vec<&str> = diag
+            .get("reasons")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let primary = reasons
+            .iter()
+            .find(|r| {
+                **r != "traceability_inserted"
+                    && **r != "matched_indexed_file"
+                    && **r != "normalized_relative_project_path"
+                    && **r != "resolved_existing_project_file"
+                    && **r != "resolved_existing_absolute_file"
+            })
+            .copied()
+            .unwrap_or("");
+
+        let repair = match primary {
+            "missing_artifact_ref" | "empty_path" => json!({
+                "invalid_field": "artifact_ref",
+                "rejected_artifact_index": idx,
+                "rejected_artifact_kind": kind,
+                "primary_reason": primary,
+                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "required_field_hint": required_field_hint_for_artifact_kind(kind),
+                "hint": format!(
+                    "artifact #{idx} ({kind}) is missing a value: {}",
+                    required_field_hint_for_artifact_kind(kind)
+                ),
+            }),
+            "artifact_type_not_allowed_for_entity" => json!({
+                "invalid_field": "artifact_type",
+                "rejected_artifact_index": idx,
+                "supplied_artifact_type": supplied,
+                "accepted_artifact_schema": accepted_schema,
+                "primary_reason": primary,
+                "hint": format!(
+                    "artifact #{idx} type `{supplied}` is not accepted; use one of {accepted_schema:?}"
+                ),
+            }),
+            "path_not_resolvable" => json!({
+                "invalid_field": "artifact_ref",
+                "rejected_artifact_index": idx,
+                "rejected_artifact_kind": kind,
+                "supplied_artifact_ref": raw_ref,
+                "primary_reason": primary,
+                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "required_field_hint": required_field_hint_for_artifact_kind(kind),
+                "hint": format!(
+                    "artifact #{idx} path `{raw_ref}` does not resolve under the project root \
+                     and is not absolute; {}",
+                    required_field_hint_for_artifact_kind(kind)
+                ),
+            }),
+            "traceability_insert_failed" => json!({
+                "invalid_field": "artifact_ref",
+                "rejected_artifact_index": idx,
+                "rejected_artifact_kind": kind,
+                "primary_reason": primary,
+                "hint": "graph_store insert failed; check Traceability schema and DB availability"
+            }),
+            other => json!({
+                "invalid_field": "artifact_ref",
+                "rejected_artifact_index": idx,
+                "rejected_artifact_kind": kind,
+                "primary_reason": other,
+                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "required_field_hint": required_field_hint_for_artifact_kind(kind),
+                "hint": format!(
+                    "artifact #{idx} rejected: `{other}`; see artifact_diagnostics for full detail"
+                ),
+            }),
+        };
+
+        return Some(repair);
+    }
+    None
 }

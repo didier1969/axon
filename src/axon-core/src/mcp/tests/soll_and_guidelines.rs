@@ -4454,6 +4454,157 @@ fn test_soll_attach_evidence_rejected_all_returns_recovery_contract() {
 }
 
 #[test]
+fn test_soll_attach_evidence_parameter_repair_per_kind_hint_for_missing_artifact_ref() {
+    // REQ-AXO-139 slice — when an artifact is rejected because `artifact_ref`
+    // (and its aliases) are absent, surface a structured `parameter_repair`
+    // payload with a per-kind `required_field_hint` so the LLM can fix the
+    // input in one round-trip.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-213a', 'Requirement', 'AXO', 'Per-kind hint contract', 'Missing artifact_ref must surface per-kind hint', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-213a",
+                    "artifacts": [
+                        { "artifact_type": "symbol" }
+                    ]
+                }
+            })),
+            id: Some(json!(41139)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["status"].as_str(), Some("rejected_all"));
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("artifact_ref"));
+    assert_eq!(repair["rejected_artifact_kind"].as_str(), Some("Symbol"));
+    assert_eq!(
+        repair["primary_reason"].as_str(),
+        Some("missing_artifact_ref")
+    );
+    let aliases = repair["accepted_aliases"]
+        .as_array()
+        .expect("accepted_aliases array");
+    let alias_names: Vec<&str> = aliases.iter().filter_map(|v| v.as_str()).collect();
+    assert!(alias_names.contains(&"artifact_ref"));
+    assert!(alias_names.contains(&"path"));
+    assert!(alias_names.contains(&"file_path"));
+    assert!(alias_names.contains(&"uri"));
+    let hint = repair["required_field_hint"]
+        .as_str()
+        .expect("required_field_hint string");
+    assert!(
+        hint.contains("symbol id"),
+        "Symbol-kind hint must reference symbol id: {hint}"
+    );
+    let top_hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        top_hint.contains("(Symbol)"),
+        "top-level hint must mention rejected kind: {top_hint}"
+    );
+}
+
+#[test]
+fn test_soll_attach_evidence_parameter_repair_no_artifacts() {
+    // REQ-AXO-139 slice — empty `artifacts` array surfaces a generic
+    // parameter_repair pointing at the `artifacts` field.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-213b', 'Requirement', 'AXO', 'Empty artifacts contract', 'Empty array must surface parameter_repair', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-213b",
+                    "artifacts": []
+                }
+            })),
+            id: Some(json!(41140)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["status"].as_str(), Some("no_artifacts"));
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("artifacts"));
+    assert!(repair["accepted_aliases"].is_array());
+    assert!(repair["accepted_artifact_schema"].is_array());
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("artifact_ref"),
+        "no_artifacts hint must mention artifact_ref alias: {hint}"
+    );
+}
+
+#[test]
+fn test_soll_attach_evidence_parameter_repair_artifact_type_not_allowed() {
+    // REQ-AXO-139 slice — when artifact_type isn't in the entity's
+    // accepted_artifact_schema, parameter_repair surfaces invalid_field
+    // = `artifact_type` plus the supplied + accepted lists for one-shot fix.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-913', 'Concept', 'AXO', 'Schema-not-allowed contract', 'Concept does not accept Test artifacts', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Concept",
+                    "entity_id": "CPT-AXO-913",
+                    "artifacts": [
+                        // Concept's accepted_artifact_schema = [document, file, symbol, rationale];
+                        // `test` is not allowed.
+                        { "artifact_type": "test", "artifact_ref": "module::tests::dummy" }
+                    ]
+                }
+            })),
+            id: Some(json!(41141)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["status"].as_str(), Some("rejected_all"));
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("artifact_type"));
+    assert_eq!(repair["supplied_artifact_type"].as_str(), Some("test"));
+    let accepted = repair["accepted_artifact_schema"]
+        .as_array()
+        .expect("accepted_artifact_schema array");
+    let accepted_names: Vec<&str> = accepted.iter().filter_map(|v| v.as_str()).collect();
+    assert!(accepted_names.contains(&"document"));
+    assert!(accepted_names.contains(&"rationale"));
+    assert!(!accepted_names.contains(&"test"));
+}
+
+#[test]
 fn test_soll_verify_requirements_terminal_status_counts_as_done() {
     // REQ-AXO-136: status=`completed` and status=`delivered` are terminal —
     // done by definition. The verifier must not flag missing dimensions and

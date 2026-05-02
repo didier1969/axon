@@ -377,6 +377,41 @@ pub(super) fn project_code_from_canonical_entity_id(entity_id: &str) -> Option<S
     }
 }
 
+/// REQ-AXO-139 slice (`soll_attach_evidence`): per-kind required-field hint
+/// returned via `data.parameter_repair.required_field_hint` when an artifact
+/// is rejected for a missing `artifact_ref`. The kind values are the
+/// normalized artifact types produced by [`normalize_evidence_artifact_type`].
+pub(super) fn required_field_hint_for_artifact_kind(kind: &str) -> &'static str {
+    match kind {
+        "File" => {
+            "supply a file path (relative to the project root or absolute) — \
+             accepted aliases: `artifact_ref`, `path`, `file_path`, `uri`"
+        }
+        "Document" => {
+            "supply a document reference (file path or URL) — \
+             accepted aliases: `artifact_ref`, `path`, `file_path`, `uri`"
+        }
+        "Symbol" => {
+            "supply a canonical symbol id (e.g. `module::function`) in `artifact_ref`"
+        }
+        "Test" => {
+            "supply a qualified test path (e.g. `module::tests::test_name`) \
+             or canonical test id in `artifact_ref`"
+        }
+        "Metric" => "supply a metric name or dashboard URL in `artifact_ref`",
+        "Validation" => {
+            "supply a canonical validation id (`VAL-CODE-NNN`) in `artifact_ref`"
+        }
+        "Rationale" => {
+            "supply rationale text or a document reference in `artifact_ref`"
+        }
+        "Diff" => {
+            "supply a commit SHA or a path to a `.diff` artifact in `artifact_ref`"
+        }
+        _ => "supply a non-empty `artifact_ref` value matching the artifact_type",
+    }
+}
+
 /// REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): standardised `project_code`
 /// scoping fragment for SOLL/IST queries.
 ///
