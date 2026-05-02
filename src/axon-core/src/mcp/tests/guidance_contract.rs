@@ -562,6 +562,69 @@ fn unavailable_tool_authoritative_guidance_emits_public_phase1_fields() {
 }
 
 #[test]
+fn test_invalid_arguments_returns_parameter_repair_with_input_schema_reference() {
+    // REQ-AXO-139 slice — universal parameter_repair contract for the
+    // dispatcher's Invalid-arguments fallback path. When a tool handler
+    // returns None because a required arg is missing or malformed, the
+    // dispatcher must surface `data.parameter_repair` with the missing
+    // required fields, the supplied arguments, the canonical input_schema,
+    // and a `help` follow-up tool — same shape as cypher binder /
+    // soll_attach_evidence / inspect slices.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": {}
+            })),
+            id: Some(json!(91391)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["data"]["status"], "input_invalid");
+    assert_eq!(result["data"]["problem_class"], "invalid_arguments");
+
+    let repair = result["data"]
+        .get("parameter_repair")
+        .expect("parameter_repair payload required for invalid_arguments");
+    assert_eq!(repair["tool"].as_str(), Some("query"));
+    let missing = repair["missing_required_fields"]
+        .as_array()
+        .expect("missing_required_fields array");
+    let missing_names: Vec<&str> = missing.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        missing_names.contains(&"query"),
+        "missing_required_fields must include `query`: {missing_names:?}"
+    );
+    assert_eq!(
+        repair["invalid_field"].as_str(),
+        Some("query"),
+        "invalid_field must point at the first missing required field"
+    );
+
+    assert!(
+        repair["input_schema"].is_object(),
+        "parameter_repair must reference the canonical input_schema: {repair}"
+    );
+    let follow_up = repair["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let follow_names: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        follow_names.contains(&"help"),
+        "follow_up_tools must include `help`: {follow_names:?}"
+    );
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("help") && hint.contains("query"),
+        "hint must steer toward `help(tool=\"query\")`: {hint}"
+    );
+}
+
+#[test]
 fn invalid_arguments_authoritative_guidance_includes_micro_instruction_and_contract() {
     let _guard = env_lock();
     unsafe {

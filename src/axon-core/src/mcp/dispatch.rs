@@ -110,6 +110,44 @@ impl McpServer {
                     .map(|s| serde_json::to_string(s).unwrap_or_default())
                     .unwrap_or_default();
                 let args_str = serde_json::to_string(arguments).unwrap_or_default();
+
+                // REQ-AXO-139 slice — derive missing-required-fields and the
+                // first invalid_field from the schema so the LLM can fix one
+                // field per round-trip without diffing schema vs args itself.
+                let supplied_keys: std::collections::HashSet<String> = arguments
+                    .as_object()
+                    .map(|map| map.keys().cloned().collect())
+                    .unwrap_or_default();
+                let required_fields: Vec<String> = schema
+                    .as_ref()
+                    .and_then(|s| s.get("required"))
+                    .and_then(|r| r.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let missing_required: Vec<String> = required_fields
+                    .iter()
+                    .filter(|f| !supplied_keys.contains(*f))
+                    .cloned()
+                    .collect();
+                let first_invalid_field = missing_required
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "arguments".to_string());
+                let parameter_repair = json!({
+                    "invalid_field": first_invalid_field,
+                    "tool": normalized_name,
+                    "missing_required_fields": missing_required,
+                    "required_fields": required_fields,
+                    "supplied_arguments": arguments,
+                    "input_schema": schema,
+                    "follow_up_tools": ["help"],
+                    "hint": format!(
+                        "compare `supplied_arguments` against `input_schema.required`; \
+                         call `help(tool=\"{}\")` for the contract and retry once the \
+                         missing/invalid fields are filled",
+                        normalized_name
+                    ),
+                });
                 json!({
                     "content": [{
                         "type": "text",
@@ -120,6 +158,7 @@ impl McpServer {
                     }],
                     "isError": true,
                     "data": {
+                        "status": "input_invalid",
                         "problem_class": "invalid_arguments",
                         "tool": normalized_name,
                         "received_arguments": arguments,
@@ -128,7 +167,8 @@ impl McpServer {
                         "next_action": {
                             "tool": "help",
                             "arguments": { "tool": normalized_name }
-                        }
+                        },
+                        "parameter_repair": parameter_repair
                     }
                 })
             }),
