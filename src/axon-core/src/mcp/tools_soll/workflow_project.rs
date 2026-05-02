@@ -1,5 +1,38 @@
 use super::*;
 
+// REQ-AXO-147 — universal parameter_repair contract rollout for
+// workflow_project.rs (REQ-AXO-139 follow-up). 12 bare isError sites in
+// axon_init_project / axon_apply_guidelines / commit_work share the same
+// recovery shape so the LLM can route on `data.parameter_repair`.
+fn project_workflow_error(
+    invalid_field: &str,
+    supplied_value: Option<&str>,
+    follow_up: &[&str],
+    visible_text: String,
+    hint: &str,
+    err: Option<&str>,
+) -> serde_json::Value {
+    let follow_up_vec: Vec<String> = follow_up.iter().map(|s| s.to_string()).collect();
+    serde_json::json!({
+        "content": [{ "type": "text", "text": visible_text }],
+        "isError": true,
+        "data": {
+            "status": "input_invalid",
+            "operator_guidance": {
+                "problem_class": "input_invalid",
+                "follow_up_tools": follow_up_vec.clone(),
+            },
+            "parameter_repair": {
+                "invalid_field": invalid_field,
+                "supplied_value": supplied_value,
+                "follow_up_tools": follow_up_vec,
+                "hint": hint,
+            },
+            "diagnostic_excerpt": err.map(|e| e.chars().take(240).collect::<String>()).unwrap_or_default()
+        }
+    })
+}
+
 /// REQ-AXO-121 — recognize inline `#[cfg(test)] mod tests { … }` blocks
 /// inside the modified `.rs` file itself when looking for a `tests.rs`
 /// satisfier. Without this, GUI-PRO-001 forced a sibling `_tests.rs`
@@ -227,10 +260,14 @@ impl McpServer {
                     "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}", status) }]
                 }))
             }
-            Err(e) => Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Git commit failed: {}", e) }],
-                "isError": true
-            })),
+            Err(e) => Some(project_workflow_error(
+                "git_environment",
+                None,
+                &["axon_pre_flight_check", "status"],
+                format!("Git commit failed: {}", e),
+                "git commit invocation failed; verify the git binary is on PATH and the repo is in a valid state, then retry `axon_pre_flight_check`",
+                Some(&e.to_string()),
+            )),
         }
     }
 
@@ -326,10 +363,14 @@ impl McpServer {
         let project_path = match args.get("project_path").and_then(|value| value.as_str()) {
             Some(path) if !path.trim().is_empty() => path.trim(),
             _ => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": "`project_path` is required for `axon_init_project`." }],
-                    "isError": true
-                }))
+                return Some(project_workflow_error(
+                    "project_path",
+                    None,
+                    &["help"],
+                    "`project_path` is required for `axon_init_project`.".to_string(),
+                    "supply an absolute project path; example: `/home/user/projects/myrepo`",
+                    None,
+                ))
             }
         };
         // REQ-AXO-118 — flag (but do not reject) project_path values that do
@@ -344,19 +385,27 @@ impl McpServer {
         let project_name = match self.derive_project_name_from_path(project_path) {
             Ok(name) => name,
             Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Project error: {}", e) }],
-                    "isError": true
-                }))
+                return Some(project_workflow_error(
+                    "project_path",
+                    Some(project_path),
+                    &["help"],
+                    format!("Project error: {}", e),
+                    "could not derive project_name from the supplied path; verify the path resolves to a directory with a sensible last segment",
+                    Some(&e.to_string()),
+                ))
             }
         };
         let project_code = match self.assign_project_code_for_init(&project_name, project_path) {
             Ok(code) => code,
             Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                    "isError": true
-                }))
+                return Some(project_workflow_error(
+                    "project_path",
+                    Some(project_path),
+                    &["project_registry_lookup"],
+                    format!("Canonical project error: {}", e),
+                    "automatic project_code assignment failed; the registry may already contain an incompatible entry. Run `project_registry_lookup` to inspect, or supply an explicit `project_code`",
+                    Some(&e.to_string()),
+                ))
             }
         };
         if let Some(requested_code) = args.get("project_code").and_then(|value| value.as_str()) {
@@ -365,17 +414,25 @@ impl McpServer {
             {
                 Ok(code) => code,
                 Err(e) => {
-                    return Some(serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                        "isError": true
-                    }))
+                    return Some(project_workflow_error(
+                        "project_code",
+                        Some(requested_code),
+                        &["help"],
+                        format!("Canonical project error: {}", e),
+                        "the supplied `project_code` is malformed (must be 3 ASCII alphanumerics, conventionally uppercase); omit it to let the server assign one",
+                        Some(&e.to_string()),
+                    ))
                 }
             };
             if requested != project_code {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: `project_code` is server-assigned. Omit it or use `{}` for this project.", project_code) }],
-                    "isError": true
-                }));
+                return Some(project_workflow_error(
+                    "project_code",
+                    Some(requested_code),
+                    &["axon_init_project"],
+                    format!("Canonical project error: `project_code` is server-assigned. Omit it or use `{}` for this project.", project_code),
+                    &format!("omit `project_code` (server-assigned) or pass `{}` for this project", project_code),
+                    None,
+                ));
             }
         }
         let concept_text = args
@@ -387,16 +444,24 @@ impl McpServer {
             Some(&project_name),
             Some(project_path),
         ) {
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Project registration error: {}", e) }],
-                "isError": true
-            }));
+            return Some(project_workflow_error(
+                "project_path",
+                Some(project_path),
+                &["status", "project_registry_lookup"],
+                format!("Project registration error: {}", e),
+                "writing to soll.ProjectCodeRegistry failed; verify runtime is healthy via `status` and inspect the registry via `project_registry_lookup`",
+                Some(&e.to_string()),
+            ));
         }
         if let Err(e) = self.ensure_soll_registry_row(&project_code) {
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("SOLL initialization error for project: {}", e) }],
-                "isError": true
-            }));
+            return Some(project_workflow_error(
+                "project_code",
+                Some(&project_code),
+                &["status"],
+                format!("SOLL initialization error for project: {}", e),
+                "seeding soll.Registry counters failed; verify runtime is healthy via `status` and retry",
+                Some(&e.to_string()),
+            ));
         }
 
         let rows_raw = self.graph_store.query_json(
@@ -474,16 +539,21 @@ impl McpServer {
         &self,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
+        let supplied_project = args.get("project_code").and_then(|value| value.as_str()).unwrap_or("");
         let project_code = match self.require_registered_mutation_project_code(
             args.get("project_code").and_then(|value| value.as_str()),
             "axon_apply_guidelines",
         ) {
             Ok(code) => code,
             Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                    "isError": true
-                }))
+                return Some(project_workflow_error(
+                    "project_code",
+                    Some(supplied_project),
+                    &["project_registry_lookup", "axon_init_project"],
+                    format!("Canonical project error: {}", e),
+                    "supply a registered `project_code`; call `project_registry_lookup` to list registered codes or `axon_init_project` first",
+                    Some(&e.to_string()),
+                ))
             }
         };
         let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
@@ -515,10 +585,14 @@ impl McpServer {
                 {
                     Ok(parts) => parts,
                     Err(e) => {
-                        return Some(serde_json::json!({
-                            "content": [{ "type": "text", "text": format!("SOLL registry error: {}", e) }],
-                            "isError": true
-                        }))
+                        return Some(project_workflow_error(
+                            "project_code",
+                            Some(&project_code),
+                            &["status", "project_registry_lookup"],
+                            format!("SOLL registry error: {}", e),
+                            "soll.Registry id-reservation failed during guideline import; verify runtime health via `status`",
+                            Some(&e.to_string()),
+                        ))
                     }
                 };
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);

@@ -520,6 +520,42 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
 }
 
 #[test]
+fn test_init_project_missing_path_returns_parameter_repair() {
+    // REQ-AXO-147 slice 4 — axon_init_project rejection paths surface
+    // canonical data.parameter_repair so a fresh LLM that calls without
+    // arguments can fix the input in one round-trip.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "init_project",
+                "arguments": {}
+            })),
+            id: Some(json!(91474)),
+        })
+        .unwrap();
+    let result = response.result.expect("expected result");
+    let data = result.get("data").expect("data");
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("project_path"));
+    let follow_up = repair["follow_up_tools"]
+        .as_array()
+        .expect("follow_up_tools array");
+    let names: Vec<&str> = follow_up.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.contains(&"help"),
+        "follow_up_tools must include `help`: {names:?}"
+    );
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("project") && hint.contains("absolute"),
+        "hint must guide toward absolute project path: {hint}"
+    );
+}
+
+#[test]
 fn test_soll_manager_unknown_entity_returns_parameter_repair() {
     // REQ-AXO-147 slice 3 — soll_manager rejection paths now surface
     // the canonical data.parameter_repair shape so the LLM can fix
