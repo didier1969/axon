@@ -376,3 +376,79 @@ pub(super) fn project_code_from_canonical_entity_id(entity_id: &str) -> Option<S
         None
     }
 }
+
+/// REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): standardised `project_code`
+/// scoping fragment for SOLL/IST queries.
+///
+/// - `Some(code)` validated by [`is_valid_project_code`] →
+///   `" AND <column_prefix>project_code = '<code>'"`.
+/// - `None` or empty/invalid code → `""` (caller is responsible for unscoped reads).
+///
+/// Single quotes inside `code` are escaped per the existing codebase
+/// convention (`code.replace('\'', "''")`); valid project codes never
+/// contain quotes, but the escape is kept defensively.
+pub(crate) fn scoped_query_filter(project_code: Option<&str>, column_prefix: &str) -> String {
+    let Some(code) = project_code else {
+        return String::new();
+    };
+    let trimmed = code.trim();
+    if trimmed.is_empty() || !is_valid_project_code(trimmed) {
+        return String::new();
+    }
+    let escaped = trimmed.replace('\'', "''");
+    format!(" AND {column_prefix}project_code = '{escaped}'")
+}
+
+#[cfg(test)]
+mod scoped_query_filter_tests {
+    use super::scoped_query_filter;
+
+    #[test]
+    fn returns_empty_when_project_code_is_none() {
+        assert_eq!(scoped_query_filter(None, ""), "");
+        assert_eq!(scoped_query_filter(None, "n."), "");
+    }
+
+    #[test]
+    fn returns_empty_when_project_code_is_blank() {
+        assert_eq!(scoped_query_filter(Some(""), ""), "");
+        assert_eq!(scoped_query_filter(Some("   "), "n."), "");
+    }
+
+    #[test]
+    fn returns_empty_when_project_code_is_invalid() {
+        // is_valid_project_code requires exactly 3 ascii alphanumerics; case
+        // insensitive (uppercase is the convention but not enforced).
+        assert_eq!(scoped_query_filter(Some("AX"), ""), "");
+        assert_eq!(scoped_query_filter(Some("AXON"), ""), "");
+        assert_eq!(scoped_query_filter(Some("AX!"), ""), "");
+    }
+
+    #[test]
+    fn applies_filter_with_unprefixed_column() {
+        assert_eq!(
+            scoped_query_filter(Some("AXO"), ""),
+            " AND project_code = 'AXO'"
+        );
+    }
+
+    #[test]
+    fn applies_filter_with_qualified_column_prefix() {
+        assert_eq!(
+            scoped_query_filter(Some("BKS"), "n."),
+            " AND n.project_code = 'BKS'"
+        );
+        assert_eq!(
+            scoped_query_filter(Some("PRO"), "soll.Node."),
+            " AND soll.Node.project_code = 'PRO'"
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_around_valid_code() {
+        assert_eq!(
+            scoped_query_filter(Some("  AXO  "), ""),
+            " AND project_code = 'AXO'"
+        );
+    }
+}

@@ -128,11 +128,8 @@ impl McpServer {
         let total_nodes = self
             .graph_store
             .query_count(&format!(
-                "SELECT count(*) FROM soll.Node n WHERE 1=1 {}",
-                resolved_project_code
-                    .as_deref()
-                    .map(|code| format!("AND n.project_code = '{}'", escape_sql(code)))
-                    .unwrap_or_default()
+                "SELECT count(*) FROM soll.Node n WHERE 1=1{}",
+                scoped_query_filter(resolved_project_code.as_deref(), "n.")
             ))
             .unwrap_or(0) as usize;
 
@@ -181,15 +178,11 @@ impl McpServer {
             "SELECT type, title, string_agg(id, ', ' ORDER BY id)
              FROM soll.Node
              WHERE type IN ('Requirement', 'Decision', 'Concept')
-               AND COALESCE(title, '') <> ''
-               {}
+               AND COALESCE(title, '') <> ''{}
              GROUP BY type, title
              HAVING COUNT(*) > 1
              ORDER BY type, title",
-            resolved_project_code
-                .as_deref()
-                .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
-                .unwrap_or_default()
+            scoped_query_filter(resolved_project_code.as_deref(), "")
         ))?;
         let duplicate_title_rows: Vec<Vec<String>> =
             serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();

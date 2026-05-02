@@ -999,6 +999,7 @@ impl GraphStore {
         // Drop indexes on File table to allow ALTER TABLE ... ADD COLUMN with DEFAULT values
         let _ = self.execute("DROP INDEX IF EXISTS file_project_code_idx");
         let _ = self.execute("DROP INDEX IF EXISTS file_status_idx");
+        let _ = self.execute("DROP INDEX IF EXISTS file_project_path_idx");
 
         self.execute(
             "ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE",
@@ -1157,6 +1158,19 @@ impl GraphStore {
             self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
         }
 
+        // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): composite (project_code, key)
+        // indexes for multi-tenant lookups on hot IST tables.
+        self.execute("CREATE INDEX IF NOT EXISTS calls_project_source_idx ON CALLS(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_project_target_idx ON CALLS(project_code, target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_project_source_idx ON CALLS_NIF(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_project_target_idx ON CALLS_NIF(project_code, target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS contains_project_source_idx ON CONTAINS(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS contains_project_target_idx ON CONTAINS(project_code, target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS impacts_project_source_idx ON IMPACTS(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS substantiates_project_source_idx ON SUBSTANTIATES(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS symbol_project_id_idx ON Symbol(project_code, id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)")?;
+
         Ok(())
     }
 
@@ -1217,6 +1231,41 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_code VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
+
+        // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): denormalize project_code on
+        // the remaining SOLL tables so per-tenant filtering does not require
+        // joining soll.Node every time.
+        self.execute("ALTER TABLE soll.Edge ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE soll.McpJob ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE soll.Revision ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute(
+            "ALTER TABLE soll.RevisionChange ADD COLUMN IF NOT EXISTS project_code VARCHAR",
+        )?;
+
+        // Backfill is idempotent: edges inherit from the source Node when known,
+        // everything else falls back to 'AXO' since pre-Phase-1 rows predate
+        // multi-tenant scoping (single-project history).
+        self.execute(
+            "UPDATE soll.Edge SET project_code = COALESCE(
+                NULLIF(soll.Edge.project_code, ''),
+                (SELECT n.project_code FROM soll.Node n WHERE n.id = soll.Edge.source_id),
+                'AXO'
+            ) WHERE soll.Edge.project_code IS NULL OR soll.Edge.project_code = ''",
+        )?;
+        self.execute("UPDATE soll.McpJob SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+        self.execute("UPDATE soll.Revision SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+        self.execute("UPDATE soll.RevisionChange SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+
+        // Composite (project_code, key) indexes for hot SOLL multi-tenant lookups.
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS soll_node_project_id_idx ON soll.Node(project_code, id)",
+        )?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_project_source_idx ON soll.Edge(project_code, source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_project_target_idx ON soll.Edge(project_code, target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_project_status_idx ON soll.McpJob(project_code, status)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_revision_project_idx ON soll.Revision(project_code, created_at)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_revision_change_project_idx ON soll.RevisionChange(project_code, revision_id)")?;
+
         self.normalize_project_code_registry()?;
         self.seed_project_code_registry()?;
         self.normalize_soll_registry()?;
@@ -2283,6 +2332,15 @@ impl GraphStore {
             "CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE, first_seen_at_ms BIGINT, indexing_started_at_ms BIGINT, graph_ready_at_ms BIGINT, vectorization_started_at_ms BIGINT, vector_ready_at_ms BIGINT, last_state_change_at_ms BIGINT, last_error_at_ms BIGINT)",
         )?;
 
+        // The DROP+CREATE above discards every index on File. Recreate the
+        // multi-tenant indexes (REQ-AXO-066 Phase 1, DEC-AXO-064 Option A) so
+        // post-hard-rebuild reads stay scale-correct.
+        self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)",
+        )?;
+
         info!("IST state reset complete. SOLL sanctuary preserved.");
         Ok(())
     }
@@ -2341,6 +2399,15 @@ impl GraphStore {
         )?;
         self.execute("DROP TABLE File;")?;
         self.execute("ALTER TABLE File_rebuilt RENAME TO File;")?;
+
+        // The DROP+RENAME above discards every index on File. Recreate the
+        // multi-tenant indexes (REQ-AXO-066 Phase 1, DEC-AXO-064 Option A) so
+        // post-soft-invalidation reads stay scale-correct.
+        self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)",
+        )?;
         Ok(())
     }
 }
@@ -2652,6 +2719,133 @@ mod graph_bootstrap_tests {
         assert!(!reader_db_exists(&Some(PathBuf::from(
             "/tmp/axon-missing-reader-db-test.db"
         ))));
+    }
+
+    // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): two projects coexist in the
+    // shared SOLL store and remain semantically isolated under project_code
+    // filters; the composite multi-tenant indexes are present after bootstrap.
+    #[test]
+    fn test_two_projects_are_semantically_isolated_in_soll() {
+        let store = create_test_db().unwrap();
+
+        store
+            .execute(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ('REQ-AXO-90001', 'Requirement', 'AXO', 'AXO smoke', 'd', 'planned', '{}')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ('REQ-BKS-90001', 'Requirement', 'BKS', 'BKS smoke', 'd', 'planned', '{}')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ('CPT-AXO-90001', 'Concept', 'AXO', 'AXO concept', 'd', 'planned', '{}')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ('CPT-BKS-90001', 'Concept', 'BKS', 'BKS concept', 'd', 'planned', '{}')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code)
+                 VALUES ('REQ-AXO-90001', 'CPT-AXO-90001', 'BELONGS_TO', '{}', 'AXO')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code)
+                 VALUES ('REQ-BKS-90001', 'CPT-BKS-90001', 'BELONGS_TO', '{}', 'BKS')",
+            )
+            .unwrap();
+
+        let axo_nodes = store
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE project_code = 'AXO' AND id LIKE '%-90001'",
+            )
+            .unwrap();
+        let bks_nodes = store
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE project_code = 'BKS' AND id LIKE '%-90001'",
+            )
+            .unwrap();
+        assert_eq!(axo_nodes, 2, "AXO scope must see exactly 2 seeded nodes");
+        assert_eq!(bks_nodes, 2, "BKS scope must see exactly 2 seeded nodes");
+
+        // Cross-project leak: AXO scope must never expose BKS rows.
+        let axo_seeing_bks = store
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE project_code = 'AXO' AND id LIKE '%-BKS-%'",
+            )
+            .unwrap();
+        let bks_seeing_axo = store
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE project_code = 'BKS' AND id LIKE '%-AXO-%'",
+            )
+            .unwrap();
+        assert_eq!(axo_seeing_bks, 0, "AXO scope leaked BKS rows");
+        assert_eq!(bks_seeing_axo, 0, "BKS scope leaked AXO rows");
+
+        // Edge.project_code denormalization works under per-tenant filter.
+        let axo_edges = store
+            .query_count(
+                "SELECT count(*) FROM soll.Edge WHERE project_code = 'AXO' AND source_id = 'REQ-AXO-90001'",
+            )
+            .unwrap();
+        let bks_edges = store
+            .query_count(
+                "SELECT count(*) FROM soll.Edge WHERE project_code = 'BKS' AND source_id = 'REQ-BKS-90001'",
+            )
+            .unwrap();
+        assert_eq!(axo_edges, 1);
+        assert_eq!(bks_edges, 1);
+
+        // Composite indexes from REQ-AXO-066 Phase 1 are registered by bootstrap.
+        let raw = store
+            .query_json(
+                "SELECT index_name FROM duckdb_indexes()
+                 WHERE schema_name = 'main'
+                   AND index_name IN (
+                       'soll_node_project_id_idx',
+                       'soll_edge_project_source_idx',
+                       'soll_edge_project_target_idx',
+                       'soll_mcp_job_project_status_idx',
+                       'soll_revision_project_idx',
+                       'soll_revision_change_project_idx',
+                       'symbol_project_id_idx',
+                       'calls_project_source_idx',
+                       'file_project_path_idx'
+                   )
+                 ORDER BY index_name",
+            )
+            .unwrap();
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap();
+        let names: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect();
+        for expected in [
+            "calls_project_source_idx",
+            "file_project_path_idx",
+            "soll_edge_project_source_idx",
+            "soll_edge_project_target_idx",
+            "soll_mcp_job_project_status_idx",
+            "soll_node_project_id_idx",
+            "soll_revision_change_project_idx",
+            "soll_revision_project_idx",
+            "symbol_project_id_idx",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing composite multi-tenant index `{expected}`; present: {names:?}"
+            );
+        }
     }
 }
 
