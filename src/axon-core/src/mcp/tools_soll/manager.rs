@@ -48,10 +48,21 @@ impl McpServer {
         let excerpt = excerpt.replace('\n', " ").replace("  ", " ");
         let kind = format!("{}_failed", action);
         let visible_text = format!("soll_manager {action} failed ({category}). {recovery}");
+        // REQ-AXO-147 — surface canonical parameter_repair alongside the
+        // existing kind/category fields so the LLM can route on a single
+        // shape across all 5 slices of the universal contract.
+        let repair_field = match category {
+            "duckdb_writer" => "data.title|description",
+            "forbidden_relation" => "relation_type",
+            "target_not_found" => "target_id",
+            "registry_unknown_id_kind" => "entity",
+            _ => "data",
+        };
         serde_json::json!({
             "content": [{ "type": "text", "text": visible_text }],
             "isError": true,
             "data": {
+                "status": "input_invalid",
                 "kind": kind,
                 "category": category,
                 "next_action": recovery,
@@ -60,6 +71,13 @@ impl McpServer {
                     "problem_class": kind,
                     "follow_up_tools": ["cypher", "soll_relation_schema", "project_registry_lookup"],
                     "confidence": "high"
+                },
+                "parameter_repair": {
+                    "invalid_field": repair_field,
+                    "category": category,
+                    "action": action,
+                    "follow_up_tools": ["cypher", "soll_relation_schema", "project_registry_lookup"],
+                    "hint": recovery,
                 }
             }
         })
@@ -146,6 +164,16 @@ impl McpServer {
                                     ],
                                     "confidence": "high",
                                 },
+                                "parameter_repair": {
+                                    "invalid_field": "entity",
+                                    "supplied_value": other,
+                                    "accepted_values": accepted,
+                                    "follow_up_tools": ["help"],
+                                    "hint": format!(
+                                        "retry with one of the accepted entity types: {}",
+                                        accepted.join(", "),
+                                    ),
+                                },
                             },
                         }));
                     }
@@ -162,9 +190,24 @@ impl McpServer {
                 ) {
                     Ok(code) => code,
                     Err(e) => {
+                        let supplied = project_code_raw.unwrap_or("");
                         return Some(json!({
                             "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                            "isError": true
+                            "isError": true,
+                            "data": {
+                                "status": "wrong_project_scope",
+                                "operator_guidance": {
+                                    "problem_class": "wrong_project_scope",
+                                    "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                                },
+                                "parameter_repair": {
+                                    "invalid_field": "project_code",
+                                    "supplied_value": supplied,
+                                    "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                                    "hint": "supply a registered project_code; call `project_registry_lookup` to list registered codes or `axon_init_project` to register the current project"
+                                },
+                                "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                            }
                         }))
                     }
                 };
@@ -178,9 +221,24 @@ impl McpServer {
                             (canonical_code, project_code, reserved_id.to_string())
                         }
                         Err(e) => {
-                            return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Registry error: {}", e) }], "isError": true }),
-                            )
+                            return Some(json!({
+                                "content": [{ "type": "text", "text": format!("Registry error: {}", e) }],
+                                "isError": true,
+                                "data": {
+                                    "status": "internal_error",
+                                    "operator_guidance": {
+                                        "problem_class": "internal_error",
+                                        "follow_up_tools": ["status", "project_registry_lookup"],
+                                    },
+                                    "parameter_repair": {
+                                        "invalid_field": "project_code",
+                                        "stage": "id_reservation",
+                                        "follow_up_tools": ["status", "project_registry_lookup"],
+                                        "hint": "soll.Registry id-reservation failed; verify runtime is healthy via `status` and the project_code is registered via `project_registry_lookup`"
+                                    },
+                                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                                }
+                            }))
                         }
                     }
                 } else {
@@ -191,9 +249,24 @@ impl McpServer {
                             format!("{}-{}-{:03}", prefix, project_code, next_num),
                         ),
                         Err(e) => {
-                            return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Registry error: {}", e) }], "isError": true }),
-                            )
+                            return Some(json!({
+                                "content": [{ "type": "text", "text": format!("Registry error: {}", e) }],
+                                "isError": true,
+                                "data": {
+                                    "status": "internal_error",
+                                    "operator_guidance": {
+                                        "problem_class": "internal_error",
+                                        "follow_up_tools": ["status", "project_registry_lookup"],
+                                    },
+                                    "parameter_repair": {
+                                        "invalid_field": "project_code",
+                                        "stage": "id_reservation",
+                                        "follow_up_tools": ["status", "project_registry_lookup"],
+                                        "hint": "soll.Registry id-reservation failed; verify runtime is healthy via `status` and the project_code is registered via `project_registry_lookup`"
+                                    },
+                                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                                }
+                            }))
                         }
                     }
                 };
@@ -556,11 +629,26 @@ impl McpServer {
                                 }
                                 Some(payload)
                             }
-                            Err(e) => Some(json!({
-                                "content": [{ "type": "text", "text": Self::sanitized_link_error_text(&e) }],
-                                "isError": true,
-                                "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
-                            })),
+                            Err(e) => {
+                                let mut data = self.relation_guidance_for_link(src, tgt, explicit_rel);
+                                if let Some(obj) = data.as_object_mut() {
+                                    obj.insert("status".to_string(), json!("input_invalid"));
+                                    obj.insert("parameter_repair".to_string(), json!({
+                                        "invalid_field": "relation_type",
+                                        "supplied_source_id": src,
+                                        "supplied_target_id": tgt,
+                                        "supplied_relation_type": explicit_rel,
+                                        "follow_up_tools": ["soll_relation_schema", "cypher"],
+                                        "hint": "the link insert failed; verify both endpoints exist via `cypher SELECT id FROM soll.main.Node WHERE id IN ('<src>','<tgt>')` and the relation_type is allowed via `soll_relation_schema`"
+                                    }));
+                                    obj.insert("diagnostic_excerpt".to_string(), json!(e.to_string().chars().take(240).collect::<String>()));
+                                }
+                                Some(json!({
+                                    "content": [{ "type": "text", "text": Self::sanitized_link_error_text(&e) }],
+                                    "isError": true,
+                                    "data": data
+                                }))
+                            }
                         }
                     }
                     Err(e) => Some(json!({

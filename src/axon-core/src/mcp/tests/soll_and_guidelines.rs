@@ -520,6 +520,54 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
 }
 
 #[test]
+fn test_soll_manager_unknown_entity_returns_parameter_repair() {
+    // REQ-AXO-147 slice 3 — soll_manager rejection paths now surface
+    // the canonical data.parameter_repair shape so the LLM can fix
+    // input fields in one round-trip.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "wat-not-an-entity",
+                    "data": { "project_code": "AXO", "title": "x", "description": "x" }
+                }
+            })),
+            id: Some(json!(91473)),
+        })
+        .unwrap();
+    let result = response.result.expect("expected result");
+    let data = result.get("data").expect("data");
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["invalid_field"].as_str(), Some("entity"));
+    assert_eq!(
+        repair["supplied_value"].as_str(),
+        Some("wat-not-an-entity")
+    );
+    let accepted = repair["accepted_values"]
+        .as_array()
+        .expect("accepted_values array");
+    let names: Vec<&str> = accepted.iter().filter_map(|v| v.as_str()).collect();
+    for kind in ["requirement", "decision", "concept", "guideline", "vision"] {
+        assert!(
+            names.contains(&kind),
+            "accepted_values must include `{kind}`: {names:?}"
+        );
+    }
+    let hint = repair["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("entity"),
+        "hint must mention entity: {hint}"
+    );
+}
+
+#[test]
 fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     // REQ-AXO-147 slice 2 — cross-project target_ids rejection now
     // surfaces structured `data.parameter_repair` (status,
