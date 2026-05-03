@@ -116,6 +116,13 @@ AXON_PACKAGE_VERSION="$(axon_package_version "$PROJECT_ROOT")"
 install_release_bin "axon-core"
 install_release_bin "axon-brain"
 install_release_bin "axon-indexer"
+# REQ-AXO-153 — axonctl supervises the runtime processes and exposes the
+# status JSON consumed by `axon status` / qualify-mcp. Including it in the
+# release artifact set ensures every promotion ships the supervisor that
+# matches the runtime contract; without it, axonctl-side fixes (e.g.
+# REQ-AXO-151 role_contract_violations) compile and commit but stay inert
+# in production.
+install_release_bin "axonctl"
 
 if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
     if [[ "$WITH_TENSORRT" -eq 1 ]]; then
