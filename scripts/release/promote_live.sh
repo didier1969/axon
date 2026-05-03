@@ -169,7 +169,13 @@ PY
     elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-      for attempt in {1..12}; do
+      # REQ-AXO-155 — brain cold-start (BGE-Large model load + Phoenix
+      # dashboard) typically takes 60-90s; the previous 12*5s=60s window
+      # timed out before the post-check could observe the new
+      # runtime_version even when the live was actually fine. Widened to
+      # 24*5s=120s to fit the standard cold-start budget.
+      POSTCHECK_ATTEMPTS=24
+      for ((attempt = 1; attempt <= POSTCHECK_ATTEMPTS; attempt++)); do
         if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
@@ -179,7 +185,7 @@ PY
           verified=1
           break
         fi
-        echo "Live MCP runtime post-check not ready yet (attempt $attempt/12); retrying..." >&2
+        echo "Live MCP runtime post-check not ready yet (attempt $attempt/$POSTCHECK_ATTEMPTS); retrying..." >&2
         sleep 5
       done
       if [[ "$verified" -ne 1 ]]; then
