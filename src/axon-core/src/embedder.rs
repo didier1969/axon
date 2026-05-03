@@ -3969,6 +3969,69 @@ pub fn run_gpu_embed_subprocess_stdio() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// REQ-AXO-176 — Public benchmarking facade for the in-process ORT
+/// embedder. Accepts a vector of texts, loads the configured BGE
+/// model with `force_gpu` honoured, and runs `embed_texts_with_breakdown_ort`
+/// once. Returns timing breakdown for fast-iteration perf work
+/// (target throughput: 30 chunks/s end-to-end → 200 chunks/s stretch).
+///
+/// All ORT environment variables (`ORT_DYLIB_PATH`,
+/// `AXON_GPU_EMBED_SERVICE_TENSORRT`, etc.) MUST be set by the
+/// caller — this function does not patch the process env.
+pub fn run_embedder_throughput_bench(
+    label: &str,
+    texts: Vec<String>,
+    force_gpu: bool,
+) -> anyhow::Result<EmbeddingThroughputBench> {
+    let load_start = std::time::Instant::now();
+    let mut model = OrtGpuFirstTextEmbedding::try_new(label, 0, force_gpu)?;
+    let load_ms = load_start.elapsed().as_millis() as u64;
+
+    let n = texts.len();
+    let embed_start = std::time::Instant::now();
+    let (embeddings, host_prepare_ms, input_copy_ms, inference_ms, output_extract_ms) =
+        embed_texts_with_breakdown_ort(&mut model, &texts)?;
+    let total_embed_ms = embed_start.elapsed().as_millis() as u64;
+
+    Ok(EmbeddingThroughputBench {
+        n,
+        embedding_dim: embeddings.first().map(|v| v.len()).unwrap_or(0),
+        load_ms,
+        total_embed_ms,
+        host_prepare_ms,
+        input_copy_ms,
+        inference_ms,
+        output_extract_ms,
+    })
+}
+
+/// REQ-AXO-176 — Result of `run_embedder_throughput_bench`. All times
+/// are in milliseconds. `inference_ms` is GPU/CPU compute only;
+/// `total_embed_ms` includes tokenization + host prep + inference +
+/// output extract.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbeddingThroughputBench {
+    pub n: usize,
+    pub embedding_dim: usize,
+    pub load_ms: u64,
+    pub total_embed_ms: u64,
+    pub host_prepare_ms: u64,
+    pub input_copy_ms: u64,
+    pub inference_ms: u64,
+    pub output_extract_ms: u64,
+}
+
+impl EmbeddingThroughputBench {
+    /// Throughput in chunks per second over the embed phase only
+    /// (excludes model load).
+    pub fn chunks_per_second(&self) -> f64 {
+        if self.total_embed_ms == 0 || self.n == 0 {
+            return 0.0;
+        }
+        (self.n as f64) * 1000.0 / (self.total_embed_ms as f64)
+    }
+}
+
 // REQ-AXO-087 — sibling tests file (the TDD checker GUI-PRO-001 expects
 // a `_tests.rs` companion path on diffs touching `src/axon-core/src/*`;
 // inline `#[cfg(test)] mod tests` modules are not recognized by the
