@@ -1029,8 +1029,28 @@ pub(super) fn vector_worker_loop(
     }
 }
 
+/// REQ-AXO-173 — Gate the GPU embed subprocess spawn on the canonical
+/// embedding provider being CUDA. Without this gate, dev with `gpu=avoid`
+/// (provider=cpu) still spawned the GPU subprocess (because
+/// `AXON_GPU_EMBED_SERVICE_ENABLED=1` is a runtime_boot default), which
+/// immediately panicked on `dlopen` of `libonnxruntime.so` — start.sh's
+/// `axon-ort-runtime.sh` only configures `ORT_DYLIB_PATH` and
+/// `LD_LIBRARY_PATH` when provider=cuda, so the subprocess inherited
+/// no usable ORT runtime and zombified. Pre-fix: 9-14 zombies stacked
+/// per dev session under `--indexer-full` + gpu=avoid. The in-process
+/// CPU branch below is the canonical path for non-CUDA providers.
+pub(super) fn gpu_embed_subprocess_should_spawn(
+    provider_requested: &str,
+    service_enabled: bool,
+) -> bool {
+    service_enabled && provider_requested.eq_ignore_ascii_case("cuda")
+}
+
 fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBackend> {
-    if gpu_embed_service_enabled() {
+    let provider_requested = effective_provider_request_for_lane("vector");
+    let cuda_requested = provider_requested.eq_ignore_ascii_case("cuda");
+
+    if gpu_embed_subprocess_should_spawn(&provider_requested, gpu_embed_service_enabled()) {
         match gpu_embedding_service_client() {
             Ok(client) => {
                 publish_embedding_provider_state(gpu_service_provider_effective_label(), None);
@@ -1051,8 +1071,6 @@ fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBack
         }
     }
 
-    let provider_requested = effective_provider_request_for_lane("vector");
-    let cuda_requested = provider_requested.eq_ignore_ascii_case("cuda");
     let cuda_available = std::env::var("AXON_EMBEDDING_GPU_PRESENT")
         .ok()
         .map(|value| value.eq_ignore_ascii_case("true"))
@@ -1125,6 +1143,8 @@ fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBack
 
 #[cfg(test)]
 mod tests {
+    use super::gpu_embed_subprocess_should_spawn;
+
     #[test]
     fn extracted_function_links_to_runtime() {
         let _: fn(
@@ -1135,5 +1155,38 @@ mod tests {
             crossbeam_channel::Sender<super::VectorFinalizeRequest>,
             std::sync::Arc<super::SharedPreparedBatchQueue>,
         ) = super::vector_worker_loop;
+    }
+
+    #[test]
+    fn gpu_embed_subprocess_should_spawn_only_when_provider_is_cuda() {
+        // REQ-AXO-173 — the GPU embed subprocess MUST NOT be spawned
+        // when the canonical embedding provider is anything other than
+        // CUDA. Pre-fix: dev with gpu=avoid (provider=cpu) still spawned
+        // the subprocess via the unconditional `AXON_GPU_EMBED_SERVICE_ENABLED=1`
+        // runtime_boot default; subprocess panicked on dlopen of
+        // libonnxruntime.so because start.sh's axon-ort-runtime.sh only
+        // configures ORT_DYLIB_PATH + LD_LIBRARY_PATH when provider=cuda.
+        // 9-14 zombies stacked per session.
+
+        // Service disabled ⇒ never spawn, regardless of provider
+        assert!(!gpu_embed_subprocess_should_spawn("cuda", false));
+        assert!(!gpu_embed_subprocess_should_spawn("cpu", false));
+        assert!(!gpu_embed_subprocess_should_spawn("", false));
+
+        // Service enabled + cuda ⇒ spawn (canonical happy path)
+        assert!(gpu_embed_subprocess_should_spawn("cuda", true));
+        assert!(
+            gpu_embed_subprocess_should_spawn("CUDA", true),
+            "provider compare must be case-insensitive (canonical_embedding_provider_request \
+             returns lowercase but downstream callers may pass through upstream casing)"
+        );
+
+        // Service enabled + non-cuda ⇒ DO NOT spawn (the bug we are fixing)
+        assert!(!gpu_embed_subprocess_should_spawn("cpu", true));
+        assert!(!gpu_embed_subprocess_should_spawn("tensorrt", true),
+            "tensorrt provider routes through the cuda path inside the subprocess (force_gpu=true) \
+             but the canonical provider request returned by canonical_embedding_provider_request_for_mode \
+             is always literally \"cuda\" or \"cpu\" — anything else is unknown and must not spawn");
+        assert!(!gpu_embed_subprocess_should_spawn("", true));
     }
 }
