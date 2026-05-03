@@ -5828,6 +5828,124 @@ fn test_axon_init_project_bundle_active_handoff_null_when_no_working_notes() {
     );
 }
 
+// REQ-AXO-143 — `session_pointer` is the canonical workflow-agnostic
+// onboarding pointer. Persisted on axon_init_project, surfaced on the
+// kickoff bundle AND on `status.data.instance_identity.session_pointer`.
+#[test]
+fn test_axon_init_project_persists_session_pointer_url_kind() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/tmp/req143-url-fixture",
+                "session_pointer": {
+                    "kind": "url",
+                    "value": "https://linear.app/team/issue/AXO-143",
+                    "label": "active ticket"
+                }
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let bundle = &result["data"]["kickoff_bundle"];
+    let pointer = bundle.get("session_pointer").expect("session_pointer present");
+    assert_eq!(pointer["kind"].as_str(), Some("url"));
+    assert_eq!(
+        pointer["value"].as_str(),
+        Some("https://linear.app/team/issue/AXO-143")
+    );
+    assert_eq!(pointer["label"].as_str(), Some("active ticket"));
+    // active_handoff alias only mirrors kind=file.
+    assert!(
+        bundle["active_handoff"].is_null(),
+        "active_handoff alias must stay null when kind=url: {bundle}"
+    );
+}
+
+#[test]
+fn test_axon_init_project_session_pointer_kind_none_clears_value() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/tmp/req143-none-fixture",
+                "session_pointer": { "kind": "none" }
+            }
+        },
+        "id": 2
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let pointer = result["data"]["kickoff_bundle"]["session_pointer"].clone();
+    assert_eq!(pointer["kind"].as_str(), Some("none"));
+    assert!(pointer["value"].is_null());
+}
+
+#[test]
+fn test_axon_init_project_rejects_invalid_session_pointer_kind() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/tmp/req143-invalid-fixture",
+                "session_pointer": { "kind": "wiki", "value": "ignored" }
+            }
+        },
+        "id": 3
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(
+        result["isError"].as_bool(),
+        Some(true),
+        "invalid kind must be rejected: {result}"
+    );
+    let parameter_repair = result["data"]["parameter_repair"].clone();
+    assert_eq!(
+        parameter_repair["invalid_field"].as_str(),
+        Some("session_pointer")
+    );
+}
+
+#[test]
+fn test_axon_init_project_rejects_session_pointer_missing_value_for_url_kind() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/tmp/req143-missing-value-fixture",
+                "session_pointer": { "kind": "soll_node" }
+            }
+        },
+        "id": 4
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+}
+
 #[test]
 fn test_axon_init_project_rejects_client_project_code_when_it_differs_from_server_assignment() {
     let server = create_test_server();

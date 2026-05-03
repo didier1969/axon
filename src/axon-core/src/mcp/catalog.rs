@@ -154,7 +154,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "project_name": { "type": "string", "description": "Optional. Display name will be derived from the last segment of `project_path`." },
                         "project_code": { "type": "string", "description": "Optional, reserved for internal compatibility. In normal usage, omit it: the server assigns and returns the canonical code." },
                         "project_path": { "type": "string", "description": "Canonical absolute path of the project (e.g. /home/dstadel/projects/BookingSystem)." },
-                        "concept_document_url_or_text": { "type": "string", "description": "Optional: text or link to the project vision." }
+                        "concept_document_url_or_text": { "type": "string", "description": "Optional: text or link to the project vision." },
+                        "session_pointer": {
+                            "type": "object",
+                            "description": "REQ-AXO-143: workflow-agnostic onboarding pointer persisted on the project. Surfaced by `axon_init_project.data.kickoff_bundle.session_pointer` and `status.data.instance_identity.session_pointer`. Pass null to clear. `kind=file` → value is a path; `kind=url` → value is a URL (Linear/Notion/etc.); `kind=soll_node` → value is a canonical SOLL ID (e.g. CPT-AXO-019); `kind=none` → declares no pointer (value optional).",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["file", "url", "soll_node", "none"] },
+                                "value": { "type": "string", "description": "Required when kind is file|url|soll_node." },
+                                "label": { "type": "string", "description": "Optional human-friendly label." }
+                            },
+                            "required": ["kind"]
+                        }
                     },
                     "required": ["project_path"]
                 }

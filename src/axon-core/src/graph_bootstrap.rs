@@ -1190,6 +1190,12 @@ impl GraphStore {
         self.execute(
             "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_path VARCHAR",
         )?;
+        // REQ-AXO-143 — per-project session pointer (file|url|soll_node|none).
+        // Stored as serialized JSON object: {kind, value, label?}.
+        // NULL when the project does not declare a session-pointer convention.
+        self.execute(
+            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS session_pointer_json VARCHAR",
+        )?;
         self.normalize_project_code_registry_schema()?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
@@ -1653,6 +1659,56 @@ impl GraphStore {
         )?;
 
         Ok(())
+    }
+
+    /// REQ-AXO-143 — persist a project's session pointer (file|url|soll_node|none).
+    /// `pointer` is the canonical JSON object `{kind, value, label?}` or `None`
+    /// to clear the field. Idempotent.
+    pub(crate) fn write_session_pointer(
+        &self,
+        project_code: &str,
+        pointer: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let normalized_code = project_code.trim().to_ascii_uppercase();
+        if normalized_code.is_empty()
+            || !crate::project_meta::is_valid_project_code(&normalized_code)
+        {
+            return Ok(());
+        }
+        let serialized = pointer
+            .map(serde_json::Value::to_string)
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null);
+        self.execute_param(
+            "UPDATE soll.ProjectCodeRegistry SET session_pointer_json = ? WHERE project_code = ?",
+            &serde_json::json!([serialized, normalized_code]),
+        )?;
+        Ok(())
+    }
+
+    /// REQ-AXO-143 — read a project's session pointer; returns `None` when
+    /// the column is NULL or carries an unparseable string.
+    pub(crate) fn read_session_pointer(
+        &self,
+        project_code: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let normalized_code = project_code.trim().to_ascii_uppercase();
+        if normalized_code.is_empty() {
+            return Ok(None);
+        }
+        let raw = self.query_json_param(
+            "SELECT COALESCE(session_pointer_json, '') FROM soll.ProjectCodeRegistry WHERE project_code = ? LIMIT 1",
+            &serde_json::json!([normalized_code]),
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let payload = row.first().map(String::as_str).unwrap_or("").trim();
+        if payload.is_empty() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_str::<serde_json::Value>(payload).ok())
     }
 
     fn migrate_canonical_soll_ids(&self) -> Result<()> {

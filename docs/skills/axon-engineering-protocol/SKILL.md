@@ -8,7 +8,7 @@ description: Use when working in the Axon repository and choosing MCP tools, run
 LLM-only doc per CPT-AXO-024. For full prose see archived `docs/archive/2026-05-02/SKILL.md.bak`. For canonical concepts use `cypher SELECT description FROM soll.main.Node WHERE id='<ID>'`.
 
 ## Boot
-On user phrase "Axon init" / "init Axon" / "Axon démarre" / "go" / "continue" / "reprends" → first call MUST be `mcp__axon__axon_init_project project_path=<cwd>`. Read `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, active_handoff). Apply `active_handoff` Part 1 before anything else.
+On user phrase "Axon init" / "init Axon" / "Axon démarre" / "go" / "continue" / "reprends" → first call MUST be `mcp__axon__axon_init_project project_path=<cwd>`. Read `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff). REQ-AXO-143: `session_pointer = {kind, value, label?}` is the canonical workflow-agnostic onboarding pointer (`kind ∈ file|url|soll_node|none`); persist via `axon_init_project.session_pointer` arg. Apply the pointed artefact before anything else (file path, Linear ticket URL, SOLL node, …). `active_handoff` is preserved as a backward-compat alias mirroring `session_pointer.value` only when kind=file.
 
 Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. `project_code` auto-resolved from cwd.
 

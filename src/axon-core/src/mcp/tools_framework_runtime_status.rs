@@ -938,7 +938,14 @@ impl McpServer {
                     "mcp_url": mcp_url,
                     "sql_url": sql_url,
                     "dashboard_url": dashboard_url,
-                    "mutation_policy": mutation_policy
+                    "mutation_policy": mutation_policy,
+                    // REQ-AXO-143 — workflow-agnostic onboarding pointer for
+                    // the auto-detected project. `null` when no pointer is
+                    // configured and no legacy handoff fallback applies.
+                    "session_pointer": self.resolve_session_pointer(
+                        self.auto_resolve_project_code_str().as_deref().unwrap_or(""),
+                        Some(project_root.as_str())
+                    )
                 },
                 "advertised_endpoints": {
                     "available": advertised_available,

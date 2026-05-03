@@ -316,6 +316,89 @@ impl McpServer {
         "Bootstrap prompt seed not yet in SOLL. Run mcp__axon__cypher with SELECT description FROM soll.main.Node WHERE id = 'DEC-PRO-001' once it is seeded. In the meantime, follow entry_points in the bundle in order, then enter the operational loop in methodology_summary."
     }
 
+    /// REQ-AXO-143 — validate a session_pointer JSON object supplied via
+    /// `axon_init_project` arg. Returns the canonical normalized form
+    /// `{kind, value, label?}` or an error message describing the
+    /// rejection. `kind` ∈ `file|url|soll_node|none`. `value` is required
+    /// for the first three kinds; ignored for `none`.
+    fn validate_session_pointer(
+        pointer: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let object = pointer
+            .as_object()
+            .ok_or_else(|| "session_pointer must be a JSON object".to_string())?;
+        let kind = object
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .ok_or_else(|| "session_pointer.kind is required (file|url|soll_node|none)".to_string())?;
+        if !matches!(kind, "file" | "url" | "soll_node" | "none") {
+            return Err(format!(
+                "session_pointer.kind must be one of file|url|soll_node|none (got `{}`)",
+                kind
+            ));
+        }
+        let label = object
+            .get("label")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        if kind == "none" {
+            let mut canonical = serde_json::Map::new();
+            canonical.insert("kind".to_string(), serde_json::Value::from("none"));
+            canonical.insert("value".to_string(), serde_json::Value::Null);
+            if let Some(label_value) = label {
+                canonical.insert("label".to_string(), serde_json::Value::from(label_value));
+            }
+            return Ok(serde_json::Value::Object(canonical));
+        }
+        let value = object
+            .get("value")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "session_pointer.value is required when kind=`{}` (non-empty string)",
+                    kind
+                )
+            })?;
+        let mut canonical = serde_json::Map::new();
+        canonical.insert("kind".to_string(), serde_json::Value::from(kind));
+        canonical.insert("value".to_string(), serde_json::Value::from(value));
+        if let Some(label_value) = label {
+            canonical.insert("label".to_string(), serde_json::Value::from(label_value));
+        }
+        Ok(serde_json::Value::Object(canonical))
+    }
+
+    /// REQ-AXO-143 — surface the per-project session pointer for the
+    /// kickoff bundle and `status` instance_identity. Reads the persisted
+    /// JSON from the project registry first; falls back to synthesizing
+    /// a `{kind:"file", value:<path>}` shape from `find_active_handoff`
+    /// so legacy AXO-style projects keep working without explicit
+    /// configuration.
+    pub(crate) fn resolve_session_pointer(
+        &self,
+        project_code: &str,
+        project_path: Option<&str>,
+    ) -> serde_json::Value {
+        if let Ok(Some(value)) = self.graph_store.read_session_pointer(project_code) {
+            return value;
+        }
+        if let Some(path) = project_path {
+            if let Some(handoff) = Self::find_active_handoff(path) {
+                return serde_json::json!({
+                    "kind": "file",
+                    "value": handoff,
+                    "label": "synthesized from docs/working-notes/<date>-handoff-*.md (legacy fallback)"
+                });
+            }
+        }
+        serde_json::Value::Null
+    }
+
     fn find_active_handoff(project_path: &str) -> Option<String> {
         let dir = std::path::Path::new(project_path).join("docs").join("working-notes");
         if !dir.is_dir() {
@@ -342,20 +425,39 @@ impl McpServer {
             .map(|(_, path)| path.to_string_lossy().to_string())
     }
 
-    fn axon_init_project_bundle(&self, project_path: &str) -> serde_json::Value {
+    fn axon_init_project_bundle(
+        &self,
+        project_code: &str,
+        project_path: &str,
+    ) -> serde_json::Value {
         let kickoff_prompt = self
             .read_soll_node_description("DEC-PRO-001")
             .unwrap_or_else(|| Self::default_kickoff_prompt().to_string());
         let methodology_summary = self
             .read_soll_node_description("CPT-AXO-019")
             .unwrap_or_else(|| Self::default_methodology_summary().to_string());
+        // REQ-AXO-143 — `session_pointer` is the canonical workflow-agnostic
+        // onboarding pointer. `active_handoff` is retained as a backward-compat
+        // alias for one release cycle (LLM clients that already read
+        // `bundle.active_handoff` keep working). When session_pointer.kind is
+        // `file`, active_handoff mirrors session_pointer.value; otherwise null.
+        let session_pointer = self.resolve_session_pointer(project_code, Some(project_path));
+        let active_handoff_alias = match session_pointer.get("kind").and_then(|v| v.as_str()) {
+            Some("file") => session_pointer
+                .get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| serde_json::Value::from(s.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::Null,
+        };
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
             "methodology_summary": methodology_summary,
             "methodology_summary_source": "soll://Node/CPT-AXO-019",
             "entry_points": Self::cold_start_entry_points(),
-            "active_handoff": Self::find_active_handoff(project_path),
+            "session_pointer": session_pointer,
+            "active_handoff": active_handoff_alias,
         })
     }
 
@@ -514,12 +616,50 @@ impl McpServer {
             })]
         };
 
+        // REQ-AXO-143 — accept and persist an optional session_pointer arg
+        // BEFORE building the kickoff bundle so the bundle reads back the
+        // freshly-stored value. See `validate_session_pointer` for the
+        // canonical shape `{kind: file|url|soll_node|none, value, label?}`.
+        if let Some(pointer_arg) = args.get("session_pointer") {
+            if !pointer_arg.is_null() {
+                let canonical = match Self::validate_session_pointer(pointer_arg) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return Some(project_workflow_error(
+                            "session_pointer",
+                            None,
+                            &["help", "axon_init_project"],
+                            format!("Session pointer error: {}", message),
+                            "session_pointer must be {kind: file|url|soll_node|none, value, label?}; omit or set null to clear",
+                            None,
+                        ));
+                    }
+                };
+                if let Err(e) = self
+                    .graph_store
+                    .write_session_pointer(&project_code, Some(&canonical))
+                {
+                    return Some(project_workflow_error(
+                        "session_pointer",
+                        None,
+                        &["status"],
+                        format!("Session pointer write error: {}", e),
+                        "writing session_pointer to soll.ProjectCodeRegistry failed; verify runtime is healthy via `status` and retry",
+                        Some(&e.to_string()),
+                    ));
+                }
+            } else {
+                // Explicit null clears any prior pointer.
+                let _ = self.graph_store.write_session_pointer(&project_code, None);
+            }
+        }
+
         // REQ-AXO-119 — append the kickoff bundle pointer to the
         // human-readable response so an LLM scanning content alone
         // sees that the structured bundle is available in data.
-        let bundle = self.axon_init_project_bundle(project_path);
+        let bundle = self.axon_init_project_bundle(&project_code, project_path);
         response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, active_handoff). Use it to onboard yourself or any future LLM session before doing project-specific work.",
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff). Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
         Some(serde_json::json!({
