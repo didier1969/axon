@@ -47,6 +47,22 @@ fn candidate_directories() -> Vec<PathBuf> {
     let mut seen = HashSet::new();
 
     let mut roots = Vec::new();
+    // REQ-AXO-172 — honour AXON_WATCH_DIR / AXON_PROJECTS_ROOT as
+    // discovery roots so a freshly-set isolation env (e.g. for
+    // DEC-AXO-066 stepwise minimal-corpus validation under /tmp/X)
+    // can find projects whose path is OUTSIDE the cwd / repo-root
+    // walk. Without these, the orchestrator's scope filter
+    // (filter_orchestration_candidates_by_watch_root) correctly
+    // rejects extraneous projects but never discovers the target
+    // test project either, yielding zero scans instead of one.
+    for env_key in ["AXON_WATCH_DIR", "AXON_PROJECTS_ROOT"] {
+        if let Ok(value) = std::env::var(env_key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                roots.push(PathBuf::from(trimmed));
+            }
+        }
+    }
     if let Ok(current_dir) = std::env::current_dir() {
         roots.push(current_dir.clone());
         if let Some(parent) = current_dir.parent() {
@@ -387,5 +403,76 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Aucun projet canonique enregistré"));
+    }
+
+    /// REQ-AXO-172 — discover_project_identities must honour
+    /// `AXON_WATCH_DIR` (and `AXON_PROJECTS_ROOT`) as discovery roots
+    /// so an isolated minimal corpus under a directory unrelated to
+    /// cwd / repo-root (e.g. `/tmp/axon-stepwise/`) becomes
+    /// reachable. Without this, `filter_orchestration_candidates_by_watch_root`
+    /// (REQ-AXO-172 piece 1) correctly rejects out-of-scope projects
+    /// but never finds the in-scope test project either, yielding zero
+    /// scans instead of one — DEC-AXO-066 stepwise validation cannot
+    /// proceed.
+    #[test]
+    fn discover_project_identities_honours_axon_watch_dir() {
+        use super::discover_project_identities;
+        use std::fs;
+
+        let _guard = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Use a unique tempdir tagged with the test thread id so this
+        // test is robust under cargo test parallelism even within the
+        // same process (the env_test_lock serialises env mutations).
+        let tag = format!(
+            "axon-req172-discover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp_root = std::env::temp_dir().join(&tag);
+        let project_dir = tmp_root.join("sample");
+        let meta_dir = project_dir.join(".axon");
+        fs::create_dir_all(&meta_dir).expect("create meta dir");
+        fs::write(meta_dir.join("meta.json"), r#"{"code":"TST","name":"req172-test"}"#)
+            .expect("write meta.json");
+
+        let prior_watch = std::env::var("AXON_WATCH_DIR").ok();
+        let prior_projects = std::env::var("AXON_PROJECTS_ROOT").ok();
+        unsafe {
+            std::env::set_var("AXON_WATCH_DIR", tmp_root.to_string_lossy().as_ref());
+            std::env::remove_var("AXON_PROJECTS_ROOT");
+        }
+
+        let identities = discover_project_identities();
+        let tst = identities.iter().find(|id| id.code == "TST");
+
+        // Restore env BEFORE asserting so a failure doesn't leak state
+        // into subsequent tests.
+        unsafe {
+            match prior_watch {
+                Some(v) => std::env::set_var("AXON_WATCH_DIR", v),
+                None => std::env::remove_var("AXON_WATCH_DIR"),
+            }
+            match prior_projects {
+                Some(v) => std::env::set_var("AXON_PROJECTS_ROOT", v),
+                None => std::env::remove_var("AXON_PROJECTS_ROOT"),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp_root);
+
+        let tst = tst.unwrap_or_else(|| {
+            panic!(
+                "TST not discovered under AXON_WATCH_DIR={}; got identities: {:?}",
+                tmp_root.display(),
+                identities.iter().map(|id| &id.code).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(tst.code, "TST");
+        assert_eq!(tst.name.as_deref(), Some("req172-test"));
     }
 }
