@@ -2953,8 +2953,33 @@ fn federation_orchestration_candidates_from_identities(
     projects
 }
 
+/// REQ-AXO-172 — Restrict the federation orchestrator's project sweep
+/// to projects whose canonical path falls under the configured
+/// `AXON_WATCH_DIR`. Without this filter, `discover_project_identities`
+/// finds every project on disk via cwd / cwd-parent / repo-root /
+/// repo-root-parent walking (project_meta.rs:candidate_directories),
+/// so the orchestrator spawns a watcher and initial scan for ALL of
+/// them — making AXON_WATCH_DIR isolation impossible and breaking
+/// DEC-AXO-066 stepwise validation. Empty `watch_root` ⇒ identity
+/// (no filter), preserving the legacy "scan everything" behaviour
+/// for callers that have not opted in.
+pub(crate) fn filter_orchestration_candidates_by_watch_root(
+    candidates: Vec<(String, String)>,
+    watch_root: &str,
+) -> Vec<(String, String)> {
+    if watch_root.trim().is_empty() {
+        return candidates;
+    }
+    let watch_root_path = std::path::Path::new(watch_root);
+    candidates
+        .into_iter()
+        .filter(|(_code, path)| std::path::Path::new(path).starts_with(watch_root_path))
+        .collect()
+}
+
 pub(crate) fn spawn_federation_orchestrator(
     store: Arc<GraphStore>,
+    watch_root: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
@@ -2965,7 +2990,14 @@ pub(crate) fn spawn_federation_orchestrator(
     std::thread::spawn(move || {
         let mut known_projects = std::collections::HashSet::new();
         let mut stable_sweeps_without_new_projects: u32 = 0;
-        info!("Fédération : Démarrage de l'orchestrateur de projets locaux.");
+        info!(
+            "Fédération : Démarrage de l'orchestrateur de projets locaux (scope: {}).",
+            if watch_root.is_empty() {
+                "<unrestricted>"
+            } else {
+                watch_root.as_str()
+            }
+        );
         loop {
             let base_interval_ms = if stable_sweeps_without_new_projects >= 8 {
                 30_000
@@ -2979,8 +3011,14 @@ pub(crate) fn spawn_federation_orchestrator(
                 1_000,
                 60_000,
             )));
-            let local_projects = federation_orchestration_candidates_from_identities(
-                axon_core::project_meta::discover_project_identities(),
+            // REQ-AXO-172 — apply AXON_WATCH_DIR scoping at orchestration time so
+            // a freshly-dropped meta.json under a path outside watch_root never
+            // turns into a per-project scan + watcher.
+            let local_projects = filter_orchestration_candidates_by_watch_root(
+                federation_orchestration_candidates_from_identities(
+                    axon_core::project_meta::discover_project_identities(),
+                ),
+                &watch_root,
             );
             let mut newly_discovered = Vec::new();
             for (project_code, path) in local_projects {
@@ -3057,13 +3095,13 @@ mod tests {
     use super::{
         active_project_hot_targets, admission_controller_decision, bootstrap_salvage_paths,
         claim_policy, enqueue_claimed_files, federation_orchestration_candidates_from_identities,
-        federation_orchestrator_enabled, flush_ingress_buffer_once, handle_watcher_events,
-        ingress_flush_batch_size, ingress_promoter_backoff_ms, ingress_promoter_sleep_ms,
-        memory_limit_bytes, memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes,
-        optimizer_loop_interval_ms, plan_admissions, should_attempt_memory_reclaim,
-        should_suppress_bootstrap_event_storm, ClaimMode, RescanGuardReset,
-        INGRESS_FORCE_BATCH_SIZE, INGRESS_HOT_PRIORITY_BATCH_CAP, INGRESS_MAX_BATCH_SIZE,
-        OVERSIZED_PROBATION_DEFER_THRESHOLD,
+        federation_orchestrator_enabled, filter_orchestration_candidates_by_watch_root,
+        flush_ingress_buffer_once, handle_watcher_events, ingress_flush_batch_size,
+        ingress_promoter_backoff_ms, ingress_promoter_sleep_ms, memory_limit_bytes,
+        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, optimizer_loop_interval_ms,
+        plan_admissions, should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm,
+        ClaimMode, RescanGuardReset, INGRESS_FORCE_BATCH_SIZE, INGRESS_HOT_PRIORITY_BATCH_CAP,
+        INGRESS_MAX_BATCH_SIZE, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
@@ -4474,5 +4512,60 @@ mod tests {
             started,
             cold_arm_completed_at,
         ));
+    }
+
+    #[test]
+    fn filter_orchestration_candidates_by_watch_root_scopes_to_subtree() {
+        // REQ-AXO-172 — restore AXON_WATCH_DIR isolation. Pre-fix, the
+        // federation orchestrator discovered every project via
+        // project_meta::candidate_directories (cwd / cwd-parent /
+        // repo-root / repo-root-parent walking) and spawned a watcher +
+        // initial scan for each — making minimal-corpus testing
+        // (DEC-AXO-066 stepwise validation) impossible.
+        let candidates = vec![
+            ("AXO".to_string(), "/home/dstadel/projects/axon".to_string()),
+            ("FOO".to_string(), "/home/dstadel/projects/foo".to_string()),
+            ("TEST".to_string(), "/tmp/axon-test/sample".to_string()),
+        ];
+
+        // watch_root scoped to /tmp ⇒ only TEST kept
+        let kept = filter_orchestration_candidates_by_watch_root(
+            candidates.clone(),
+            "/tmp/axon-test",
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "TEST");
+
+        // watch_root = parent ⇒ both AXO and FOO kept (TEST out)
+        let kept = filter_orchestration_candidates_by_watch_root(
+            candidates.clone(),
+            "/home/dstadel/projects",
+        );
+        assert_eq!(kept.len(), 2);
+        let codes: Vec<&str> = kept.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(codes.contains(&"AXO"));
+        assert!(codes.contains(&"FOO"));
+
+        // watch_root = exact project path ⇒ only that one kept
+        let kept = filter_orchestration_candidates_by_watch_root(
+            candidates.clone(),
+            "/home/dstadel/projects/axon",
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "AXO");
+
+        // Empty watch_root ⇒ identity (legacy "scan everything" preserved
+        // for callers that have not opted in)
+        let kept = filter_orchestration_candidates_by_watch_root(candidates.clone(), "");
+        assert_eq!(kept.len(), 3);
+
+        // Whitespace-only watch_root ⇒ also treated as identity
+        let kept = filter_orchestration_candidates_by_watch_root(candidates.clone(), "   ");
+        assert_eq!(kept.len(), 3);
+
+        // watch_root with no matching projects ⇒ empty result (the
+        // path that breaks DEC-AXO-066 if not honoured)
+        let kept = filter_orchestration_candidates_by_watch_root(candidates, "/var/empty");
+        assert!(kept.is_empty());
     }
 }

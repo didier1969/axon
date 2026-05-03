@@ -785,6 +785,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
         main_background::spawn_federation_orchestrator(
             graph_store.clone(),
+            watch_root_str.clone(),
             file_ingress_guard.clone(),
             ingress_buffer.clone(),
         );
