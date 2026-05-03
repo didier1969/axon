@@ -911,8 +911,8 @@ struct StatusReport {
     sockets: Vec<SocketStatus>,
     writer_guards: Vec<WriterGuardStatus>,
     /// REQ-AXO-151 — list of role contract items the runtime is missing.
-    /// Examples: `mcp_socket_missing` for a brain instance whose primary
-    /// public surface is the MCP HTTP/socket endpoint;
+    /// Examples: `mcp_unavailable` for a brain instance whose MCP surface is
+    /// neither exposed via unix socket nor via HTTP port (REQ-AXO-156);
     /// `telemetry_socket_missing` for an indexer whose telemetry stream is
     /// part of its operator contract. When this list is non-empty, `overall`
     /// is downgraded to `degraded` even if the process is alive.
@@ -920,20 +920,32 @@ struct StatusReport {
     overall: String,
 }
 
-/// REQ-AXO-151 — given the runtime role and the observed socket state, return
-/// the role contract items the instance is failing to satisfy. Returns an
-/// empty vec when the contract is whole. Pure function for unit testing.
-fn compute_role_contract_violations(role: RuntimeRole, sockets: &[SocketStatus]) -> Vec<String> {
+/// REQ-AXO-151 — given the runtime role and the observed socket / port state,
+/// return the role contract items the instance is failing to satisfy.
+///
+/// REQ-AXO-156 — MCP availability is satisfied when EITHER the unix socket
+/// is present OR the MCP HTTP port is listening. Production brains may run
+/// HTTP-only (no socket file), so a strict socket-presence check would
+/// false-positive `mcp_socket_missing` on a fully working live runtime.
+///
+/// Returns an empty vec when the contract is whole. Pure function for unit
+/// testing.
+fn compute_role_contract_violations(
+    role: RuntimeRole,
+    sockets: &[SocketStatus],
+    mcp_http_listening: bool,
+) -> Vec<String> {
     let socket_present = |name: &str| -> bool {
         sockets
             .iter()
             .any(|s| s.name == name && s.exists)
     };
+    let mcp_available = socket_present("mcp") || mcp_http_listening;
     let mut violations = Vec::new();
     match role {
         RuntimeRole::Brain => {
-            if !socket_present("mcp") {
-                violations.push("mcp_socket_missing".to_string());
+            if !mcp_available {
+                violations.push("mcp_unavailable".to_string());
             }
         }
         RuntimeRole::Indexer => {
@@ -942,8 +954,8 @@ fn compute_role_contract_violations(role: RuntimeRole, sockets: &[SocketStatus])
             }
         }
         RuntimeRole::All => {
-            if !socket_present("mcp") {
-                violations.push("mcp_socket_missing".to_string());
+            if !mcp_available {
+                violations.push("mcp_unavailable".to_string());
             }
             if !socket_present("telemetry") {
                 violations.push("telemetry_socket_missing".to_string());
@@ -1051,13 +1063,16 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         });
     }
 
-    // REQ-AXO-151 — role contract: brain MUST expose its MCP socket;
+    // REQ-AXO-151 — role contract: brain MUST expose its MCP surface;
     // indexer MUST expose its telemetry socket. A live process whose role
-    // contract is broken is `degraded`, never `healthy`. Without this gate,
-    // a brain that lost its MCP socket (e.g. the 2026-05-03 promotion that
-    // restarted live in indexer-graph mode) reports `healthy` while serving
-    // no MCP — misleading both human operators and LLM clients parsing JSON.
-    let role_contract_violations = compute_role_contract_violations(config.role, &sockets);
+    // contract is broken is `degraded`, never `healthy`. REQ-AXO-156 — MCP
+    // availability is satisfied via socket OR `hydra_http_port` listening,
+    // since production brains may serve HTTP-only.
+    let mcp_http_listening = ports
+        .iter()
+        .any(|p| p.port == config.hydra_http_port && p.listening);
+    let role_contract_violations =
+        compute_role_contract_violations(config.role, &sockets, mcp_http_listening);
 
     let overall = if !alive {
         "down"

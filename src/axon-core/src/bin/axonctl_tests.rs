@@ -158,9 +158,12 @@ fn role_health_is_pid_reused_when_alive_but_cmdline_mismatch() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
-// REQ-AXO-151 — role contract: brain MUST expose mcp socket; indexer MUST
-// expose telemetry socket. A live process whose contract is broken reports
-// `degraded`, never `healthy`.
+// REQ-AXO-151 — role contract: brain MUST expose its MCP surface; indexer
+// MUST expose telemetry socket. A live process whose contract is broken
+// reports `degraded`, never `healthy`.
+//
+// REQ-AXO-156 — MCP availability = socket present OR `hydra_http_port`
+// listening; HTTP-only brains do not violate the contract.
 
 fn socket(name: &str, exists: bool) -> SocketStatus {
     SocketStatus {
@@ -173,7 +176,7 @@ fn socket(name: &str, exists: bool) -> SocketStatus {
 #[test]
 fn role_contract_violations_empty_for_brain_with_mcp_socket() {
     let sockets = vec![socket("telemetry", true), socket("mcp", true)];
-    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets);
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets, false);
     assert!(
         violations.is_empty(),
         "brain with mcp socket must satisfy contract, got {violations:?}"
@@ -181,31 +184,51 @@ fn role_contract_violations_empty_for_brain_with_mcp_socket() {
 }
 
 #[test]
-fn role_contract_violations_brain_without_mcp_flags_mcp_socket_missing() {
+fn role_contract_violations_brain_with_http_listening_no_socket_satisfies_contract() {
+    // REQ-AXO-156 — production brains may serve MCP via HTTP only.
     let sockets = vec![socket("telemetry", true), socket("mcp", false)];
-    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets);
-    assert_eq!(violations, vec!["mcp_socket_missing".to_string()]);
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets, true);
+    assert!(
+        violations.is_empty(),
+        "brain with HTTP MCP listening should satisfy contract, got {violations:?}"
+    );
+}
+
+#[test]
+fn role_contract_violations_brain_without_mcp_socket_or_http_flags_mcp_unavailable() {
+    let sockets = vec![socket("telemetry", true), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets, false);
+    assert_eq!(violations, vec!["mcp_unavailable".to_string()]);
 }
 
 #[test]
 fn role_contract_violations_indexer_without_telemetry_flags_telemetry_socket_missing() {
+    // Indexer telemetry is socket-only; mcp_http listening is irrelevant.
     let sockets = vec![socket("telemetry", false), socket("mcp", false)];
-    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets);
+    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets, true);
     assert_eq!(violations, vec!["telemetry_socket_missing".to_string()]);
 }
 
 #[test]
 fn role_contract_violations_indexer_with_telemetry_satisfies_contract_even_without_mcp() {
-    // Indexer's contract is telemetry, not MCP. Brain owns MCP.
     let sockets = vec![socket("telemetry", true), socket("mcp", false)];
-    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets);
+    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets, false);
     assert!(violations.is_empty(), "indexer should not require mcp");
 }
 
 #[test]
-fn role_contract_violations_all_role_requires_both_sockets() {
+fn role_contract_violations_all_role_requires_both_mcp_and_telemetry() {
     let sockets = vec![socket("telemetry", false), socket("mcp", false)];
-    let violations = compute_role_contract_violations(RuntimeRole::All, &sockets);
-    assert!(violations.contains(&"mcp_socket_missing".to_string()));
+    let violations = compute_role_contract_violations(RuntimeRole::All, &sockets, false);
+    assert!(violations.contains(&"mcp_unavailable".to_string()));
     assert!(violations.contains(&"telemetry_socket_missing".to_string()));
+}
+
+#[test]
+fn role_contract_violations_all_role_with_http_mcp_only_flags_telemetry_only() {
+    // REQ-AXO-156 — HTTP MCP satisfies the brain side; telemetry still needs
+    // its socket.
+    let sockets = vec![socket("telemetry", false), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::All, &sockets, true);
+    assert_eq!(violations, vec!["telemetry_socket_missing".to_string()]);
 }
