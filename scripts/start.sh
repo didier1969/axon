@@ -112,7 +112,28 @@ if [[ -z "$PROJECT_CODE" && -f "$PROJECT_ROOT/.axon/meta.json" ]]; then
     PROJECT_CODE="$(python3 -c 'import json; print(json.load(open("'"$PROJECT_ROOT"'/.axon/meta.json")).get("code",""))' 2>/dev/null || true)"
 fi
 PROJECT_CODE="${PROJECT_CODE:-$(basename "$PROJECT_ROOT")}"
-RUNTIME_MODE="${AXON_RUNTIME_MODE:-indexer_graph}"
+# REQ-AXO-150 — runtime mode resolution priority: env override > last-known
+# good (instance-state.json) > customer-facing default (brain_only). The
+# previous default was `indexer_graph`, which left live MCP socket missing
+# whenever a stale runtime triggered a fresh `start` without flags — bricking
+# the customer-facing `axon init` workflow (observed 2026-05-03).
+case "${AXON_INSTANCE_KIND:-live}" in
+    live) AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon/instance-state.json" ;;
+    dev)  AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon-dev/instance-state.json" ;;
+    *)    AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon/instance-state.json" ;;
+esac
+AXON_LAST_RUNTIME_MODE=""
+if [[ -f "$AXON_INSTANCE_STATE_FILE" ]]; then
+    AXON_LAST_RUNTIME_MODE="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("last_mode",""))
+except Exception:
+    pass' "$AXON_INSTANCE_STATE_FILE" 2>/dev/null || true)"
+fi
+RUNTIME_MODE="${AXON_RUNTIME_MODE:-${AXON_LAST_RUNTIME_MODE:-brain_only}}"
+# axon_runtime_shadow_role reads AXON_RUNTIME_MODE; export so the resolved
+# mode (after env > state > default) is what the helper sees.
+export AXON_RUNTIME_MODE="$RUNTIME_MODE"
 RUNTIME_SHADOW_ROLE="$(axon_runtime_shadow_role)"
 RUNTIME_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
 RUNTIME_EXECUTABLE="bin/axon-core"
@@ -499,6 +520,29 @@ run_devenv_shell() {
     done
 }
 
+# REQ-AXO-149 — verify nix-daemon BEFORE the first devenv shell call. Without
+# the daemon (e.g. fresh WSL boot), `devenv shell` fails with a cryptic
+# `cannot connect to socket /nix/var/nix/daemon-socket/socket` and the
+# customer-facing `axon init` cold-start cannot complete. Previous code did
+# this check ~70 lines later, after the first devenv invocation had already
+# failed.
+if ! nix store info >/dev/null 2>&1; then
+    axon_log_warn "Nix daemon is not responding. Attempting to start it..."
+    if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
+        sudo systemctl start nix-daemon || true
+    else
+        # WSL2 / non-systemd hosts — direct daemon launch.
+        sudo bash -c "/nix/var/nix/profiles/default/bin/nix-daemon --daemon &" || true
+        sleep 2
+    fi
+    if ! nix store info >/dev/null 2>&1; then
+        echo "❌ nix-daemon is still not responding after auto-start attempt."
+        echo "   Check that /nix/var/nix/profiles/default/bin/nix-daemon exists, then retry."
+        echo "   On WSL2 you may need: sudo /nix/var/nix/profiles/default/bin/nix-daemon &"
+        exit 1
+    fi
+fi
+
 echo "📦 Validating Devenv environment..."
 run_devenv_shell './scripts/validate-devenv.sh'
 
@@ -571,18 +615,10 @@ elif [[ -S "$AXON_TELEMETRY_SOCK" || -S "$AXON_MCP_SOCK" || -f "$AXON_PID_FILE" 
     cleanup_stale_runtime_state
 fi
 
-# 1. Verify nix-daemon is running (WSL2 specific mitigation)
-if ! nix store info >/dev/null 2>&1; then
-    axon_log_warn "Nix daemon is not responding. Attempting to start it..."
-    if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
-        sudo systemctl start nix-daemon
-    else
-        sudo bash -c "/nix/var/nix/profiles/default/bin/nix-daemon --daemon &"
-        sleep 2
-    fi
-fi
+# nix-daemon was verified earlier (REQ-AXO-149) before the first devenv
+# shell invocation. No re-check needed here.
 
-# 2. Synchronize binaries (handle 'Text file busy' via install)
+# Synchronize binaries (handle 'Text file busy' via install)
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
 DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
 DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
@@ -1043,6 +1079,20 @@ case "$readiness_kind" in
         echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
         ;;
 esac
+
+# REQ-AXO-150 — persist the runtime mode so the next plain `start` resumes
+# the same role. Only persist when the runtime reached at least `degraded`
+# (i.e. the process is alive); a `failed` start should not poison future
+# defaults. Survives WSL reboots, brain crashes, and stale-pid recoveries.
+if [[ "$readiness_kind" == "ready" || "$readiness_kind" == "degraded" ]]; then
+    mkdir -p "$(dirname "$AXON_INSTANCE_STATE_FILE")"
+    python3 - "$AXON_INSTANCE_STATE_FILE" "$RUNTIME_MODE" "$RUNTIME_SHADOW_ROLE" <<'PY' 2>/dev/null || true
+import json, sys, time
+state_path, mode, role = sys.argv[1], sys.argv[2], sys.argv[3]
+state = {"last_mode": mode, "last_role": role, "last_started_at_ms": int(time.time()*1000)}
+open(state_path, "w").write(json.dumps(state, indent=2))
+PY
+fi
 echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
 if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
     echo "Telemetry socket: $AXON_TELEMETRY_SOCK"
