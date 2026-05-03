@@ -132,6 +132,12 @@ for g in data.get("writer_guards", []):
     else:
         print(f"OK      guard {target}: held (pid={owner_pid})")
 
+# REQ-AXO-151 — print role contract violations so operators see why an
+# alive process is still `degraded` (e.g. brain with no MCP socket).
+violations = data.get("role_contract_violations", [])
+for v in violations:
+    print(f"FAIL    role contract: {v}")
+
 print()
 print(f"STATUS  {overall.upper()}")
 

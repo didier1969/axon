@@ -910,7 +910,47 @@ struct StatusReport {
     ports: Vec<PortStatus>,
     sockets: Vec<SocketStatus>,
     writer_guards: Vec<WriterGuardStatus>,
+    /// REQ-AXO-151 — list of role contract items the runtime is missing.
+    /// Examples: `mcp_socket_missing` for a brain instance whose primary
+    /// public surface is the MCP HTTP/socket endpoint;
+    /// `telemetry_socket_missing` for an indexer whose telemetry stream is
+    /// part of its operator contract. When this list is non-empty, `overall`
+    /// is downgraded to `degraded` even if the process is alive.
+    role_contract_violations: Vec<String>,
     overall: String,
+}
+
+/// REQ-AXO-151 — given the runtime role and the observed socket state, return
+/// the role contract items the instance is failing to satisfy. Returns an
+/// empty vec when the contract is whole. Pure function for unit testing.
+fn compute_role_contract_violations(role: RuntimeRole, sockets: &[SocketStatus]) -> Vec<String> {
+    let socket_present = |name: &str| -> bool {
+        sockets
+            .iter()
+            .any(|s| s.name == name && s.exists)
+    };
+    let mut violations = Vec::new();
+    match role {
+        RuntimeRole::Brain => {
+            if !socket_present("mcp") {
+                violations.push("mcp_socket_missing".to_string());
+            }
+        }
+        RuntimeRole::Indexer => {
+            if !socket_present("telemetry") {
+                violations.push("telemetry_socket_missing".to_string());
+            }
+        }
+        RuntimeRole::All => {
+            if !socket_present("mcp") {
+                violations.push("mcp_socket_missing".to_string());
+            }
+            if !socket_present("telemetry") {
+                violations.push("telemetry_socket_missing".to_string());
+            }
+        }
+    }
+    violations
 }
 
 #[derive(Debug, Serialize)]
@@ -1011,13 +1051,22 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         });
     }
 
-    // Overall status
-    let overall = if alive && cmdline_matches {
-        "healthy"
-    } else if alive {
+    // REQ-AXO-151 — role contract: brain MUST expose its MCP socket;
+    // indexer MUST expose its telemetry socket. A live process whose role
+    // contract is broken is `degraded`, never `healthy`. Without this gate,
+    // a brain that lost its MCP socket (e.g. the 2026-05-03 promotion that
+    // restarted live in indexer-graph mode) reports `healthy` while serving
+    // no MCP — misleading both human operators and LLM clients parsing JSON.
+    let role_contract_violations = compute_role_contract_violations(config.role, &sockets);
+
+    let overall = if !alive {
+        "down"
+    } else if !cmdline_matches {
+        "degraded"
+    } else if !role_contract_violations.is_empty() {
         "degraded"
     } else {
-        "down"
+        "healthy"
     };
 
     let report = StatusReport {
@@ -1027,6 +1076,7 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         ports,
         sockets,
         writer_guards,
+        role_contract_violations,
         overall: overall.to_string(),
     };
 

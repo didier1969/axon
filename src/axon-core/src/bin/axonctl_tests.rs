@@ -157,3 +157,55 @@ fn role_health_is_pid_reused_when_alive_but_cmdline_mismatch() {
     assert!(!health.is_healthy());
     let _ = fs::remove_dir_all(&tmp);
 }
+
+// REQ-AXO-151 — role contract: brain MUST expose mcp socket; indexer MUST
+// expose telemetry socket. A live process whose contract is broken reports
+// `degraded`, never `healthy`.
+
+fn socket(name: &str, exists: bool) -> SocketStatus {
+    SocketStatus {
+        name: name.into(),
+        path: format!("/tmp/{name}.sock"),
+        exists,
+    }
+}
+
+#[test]
+fn role_contract_violations_empty_for_brain_with_mcp_socket() {
+    let sockets = vec![socket("telemetry", true), socket("mcp", true)];
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets);
+    assert!(
+        violations.is_empty(),
+        "brain with mcp socket must satisfy contract, got {violations:?}"
+    );
+}
+
+#[test]
+fn role_contract_violations_brain_without_mcp_flags_mcp_socket_missing() {
+    let sockets = vec![socket("telemetry", true), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &sockets);
+    assert_eq!(violations, vec!["mcp_socket_missing".to_string()]);
+}
+
+#[test]
+fn role_contract_violations_indexer_without_telemetry_flags_telemetry_socket_missing() {
+    let sockets = vec![socket("telemetry", false), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets);
+    assert_eq!(violations, vec!["telemetry_socket_missing".to_string()]);
+}
+
+#[test]
+fn role_contract_violations_indexer_with_telemetry_satisfies_contract_even_without_mcp() {
+    // Indexer's contract is telemetry, not MCP. Brain owns MCP.
+    let sockets = vec![socket("telemetry", true), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::Indexer, &sockets);
+    assert!(violations.is_empty(), "indexer should not require mcp");
+}
+
+#[test]
+fn role_contract_violations_all_role_requires_both_sockets() {
+    let sockets = vec![socket("telemetry", false), socket("mcp", false)];
+    let violations = compute_role_contract_violations(RuntimeRole::All, &sockets);
+    assert!(violations.contains(&"mcp_socket_missing".to_string()));
+    assert!(violations.contains(&"telemetry_socket_missing".to_string()));
+}
