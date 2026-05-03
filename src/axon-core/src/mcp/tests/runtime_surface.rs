@@ -1370,6 +1370,45 @@ fn test_status_brief_omits_public_tools_list_in_text() {
 }
 
 #[test]
+fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
+    // REQ-AXO-042 — `status mode=brief` text rendering must expose
+    // `Trust boundary:` and `Next best action:` so an LLM reading the
+    // markdown can act without parsing raw `data.truth_cockpit`. Before
+    // this, the text only carried low-level signals (drain_state, IST
+    // freshness, vector backlog) and the LLM had to derive the next
+    // tool itself.
+    let server = create_test_server();
+    let brief = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(420010)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let text = brief["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("**Trust boundary:**"),
+        "brief text must surface a trust boundary line; got: {text}"
+    );
+    assert!(
+        text.contains("**Next best action:**"),
+        "brief text must surface a next best action line; got: {text}"
+    );
+    // The line must name an actual tool. status is a safe default fallback;
+    // project_status is the canonical when the runtime is canonical.
+    assert!(
+        text.contains("`project_status`") || text.contains("`status`"),
+        "next best action must name a tool; got: {text}"
+    );
+}
+
+#[test]
 fn test_auto_resolve_project_code_str_helper() {
     // REQ-AXO-089 (helper coverage) — auto_resolve_project_code_str is
     // the canonical helper used by retrieve_context, query, and

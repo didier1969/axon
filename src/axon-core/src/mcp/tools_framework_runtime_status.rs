@@ -500,6 +500,26 @@ impl McpServer {
             utility_scheduler.reason,
             drain_state,
         );
+        // REQ-AXO-042 — surface the LLM-actionable signals in the brief
+        // text rendering, not just inside `data.truth_cockpit`. Without
+        // this, an LLM reading the markdown text has to compute the next
+        // best action from low-level fields (truth_status, drain_state,
+        // ist freshness) when the server has already derived it.
+        let next_best_tool = status_next_action
+            .get("tool")
+            .and_then(|value| value.as_str())
+            .unwrap_or("status");
+        evidence.push_str(&format!(
+            "**Trust boundary:** `{}` (use `next_best_action` to recover when degraded)\n\
+**Next best action:** `{}`\n",
+            truth_status, next_best_tool,
+        ));
+        if !degraded_notes.is_empty() {
+            evidence.push_str(&format!(
+                "**Current blocker:** {}\n",
+                degraded_notes.first().cloned().unwrap_or_default(),
+            ));
+        }
         if matches!(mode, Some("verbose") | Some("VERBOSE")) {
             evidence.push_str(&format!(
                 "**Public tools:** {}\n",

@@ -171,6 +171,7 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 - Derived docs (`soll_generate_docs`, `docs/derived/soll/...`) are read surfaces, NOT canonical truth — don't restore from them
 - Canonical truth = live SOLL + `soll_export`
 - `status mode=brief` no longer inlines `public_tools` catalog — count + pointer (REQ-AXO-104); `data.public_tools` still always-on for machines
+- `status mode=brief` text rendering surfaces `Trust boundary:` + `Next best action:` lines (REQ-AXO-042) so an LLM reading the markdown can act without parsing raw `data.truth_cockpit`. When `degraded_notes` are present, a `Current blocker:` line follows. Always inspect these three lines first when `truth_status != canonical` — they name the exact recovery tool.
 - Multi-tenant query scoping (REQ-AXO-066 Phase 1 / DEC-AXO-064 Option A): use `scoped_query_filter(project_code, prefix)` from `tools_soll/shared.rs` for the canonical `AND <prefix>project_code = '<code>'` fragment. Composite `(project_code, key)` indexes are present on hot IST tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES / Symbol / File) and SOLL tables (Node / Edge / McpJob / Revision / RevisionChange). `soll.Edge`, `soll.McpJob`, `soll.Revision`, `soll.RevisionChange` carry a denormalized `project_code` column (backfilled to `'AXO'` on first boot for legacy rows; edges inherit from source Node when known)
 
 ## Maintenance
