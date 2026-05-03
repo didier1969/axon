@@ -44,6 +44,10 @@ pub(super) struct WorkPlanNode {
     pub(super) reasons: Vec<String>,
     pub(super) validation_gates: Vec<String>,
     pub(super) ist_signals: Vec<String>,
+    /// REQ-AXO-144 — last-update timestamp (ms since epoch) read from
+    /// node metadata. `None` when the node has no `updated_at` field
+    /// (older fixtures, hand-inserted rows). Drives temporal score decay.
+    pub(super) updated_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -244,9 +248,39 @@ pub(super) fn compute_descendant_counts(
     descendants
 }
 
+/// REQ-AXO-144 — half-life used when no override is supplied via args.
+pub(super) const DEFAULT_DECAY_HALF_LIFE_DAYS: f64 = 30.0;
+
+/// REQ-AXO-144 — temporal decay multiplier `exp(-age_days / half_life_days)`.
+/// Returns 1.0 when decay is disabled, when the node has no `updated_at`
+/// metadata, or when `half_life_days` is non-positive (guard against
+/// misconfiguration).
+pub(super) fn decay_factor_for_node(
+    node: &WorkPlanNode,
+    include_decay: bool,
+    half_life_days: f64,
+    now_ms: i64,
+) -> f64 {
+    if !include_decay {
+        return 1.0;
+    }
+    if half_life_days <= 0.0 {
+        return 1.0;
+    }
+    let Some(updated_ms) = node.updated_at_ms else {
+        return 1.0;
+    };
+    let age_ms = (now_ms - updated_ms).max(0);
+    let age_days = (age_ms as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+    (-age_days / half_life_days).exp()
+}
+
 pub(super) fn score_node(
     node: &WorkPlanNode,
     include_ist: bool,
+    include_decay: bool,
+    half_life_days: f64,
+    now_ms: i64,
 ) -> (i64, Vec<String>, Vec<String>) {
     let mut score = (node.descendants as i64) * 40;
     let mut reasons = vec![format!("unblocks {} descendant(s)", node.descendants)];
@@ -305,6 +339,22 @@ pub(super) fn score_node(
     if matches!(node.entity_type, WorkPlanEntityType::Milestone) && node.descendants == 0 {
         score -= 10;
         reasons.push("isolated milestone".to_string());
+    }
+
+    // REQ-AXO-144 — apply temporal decay so accepted Decisions and other
+    // mature nodes without recent activity fall naturally out of wave 1
+    // even when their structural score (descendants, evidence gaps, …)
+    // would still rank them on top. Only nodes carrying an `updated_at`
+    // timestamp are affected (back-compat: hand-inserted fixtures stay
+    // unchanged). The reasons[] line surfaces the decay only when it is
+    // material (factor < 0.5, i.e. the node is older than ~1 half-life)
+    // so noise stays low for fresh nodes.
+    let decay = decay_factor_for_node(node, include_decay, half_life_days, now_ms);
+    if (decay - 1.0).abs() > f64::EPSILON {
+        score = (score as f64 * decay).round() as i64;
+        if decay < 0.5 {
+            reasons.push(format!("decayed by age (factor {:.2})", decay));
+        }
     }
 
     (score, reasons, validation_gates)

@@ -278,6 +278,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "top": { "type": "integer" },
                         "include_ist": { "type": "boolean" },
                         "include_validation_details": { "type": "boolean", "description": "Default false to preserve LLM context. Set true only if full `soll_verify_requirements` details are needed." },
+                        "include_decay": { "type": "boolean", "description": "REQ-AXO-144: temporal score decay. Default true. Set false to disable (benchmarking, A/B). Decays score by exp(-age_days/half_life_days) when the node carries `updated_at` metadata." },
+                        "half_life_days": { "type": "number", "description": "REQ-AXO-144: half-life (in days) for the temporal decay curve. Default 30." },
                         "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
                     },
                     "required": ["project_code"]

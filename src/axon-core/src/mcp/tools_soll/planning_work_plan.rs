@@ -30,6 +30,22 @@ impl McpServer {
             .get("include_validation_details")
             .and_then(|v| v.as_bool())
             .unwrap_or(format == "verbose");
+        // REQ-AXO-144 — temporal score decay. Default include_decay=true so
+        // mature accepted Decisions without recent activity drop out of
+        // wave 1 even when their structural score would still rank them
+        // on top. Set include_decay=false to disable (benchmarking, A/B).
+        let include_decay = args
+            .get("include_decay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let half_life_days = args
+            .get("half_life_days")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(DEFAULT_DECAY_HALF_LIFE_DAYS);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
 
         let mut nodes = self.load_work_plan_nodes(project_code);
         let edges = self.load_work_plan_edges(project_code);
@@ -77,7 +93,8 @@ impl McpServer {
 
         for node in nodes.values_mut() {
             node.descendants = *descendants.get(&node.id).unwrap_or(&0);
-            let (score, reasons, gates) = score_node(node, include_ist);
+            let (score, reasons, gates) =
+                score_node(node, include_ist, include_decay, half_life_days, now_ms);
             node.score = score;
             node.reasons = reasons;
             node.validation_gates = gates;
@@ -233,6 +250,7 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
                 let status = row[2].clone();
                 let id = row[0].clone();
                 let coverage_entry = requirement_coverage_by_id.get(&id);
@@ -259,23 +277,27 @@ impl McpServer {
                         reasons: Vec::new(),
                         validation_gates: Vec::new(),
                         ist_signals: Vec::new(),
+                        updated_at_ms,
                     },
                 );
             }
         }
 
         let dec_query = format!(
-            "SELECT id, title, COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id",
+            "SELECT id, title, COALESCE(status,''), COALESCE(metadata,'{{}}') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&dec_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             for row in rows {
-                if row.len() < 3 {
+                if row.len() < 4 {
                     continue;
                 }
                 let id = row[0].clone();
                 let evidence_count = decision_evidence_counts.get(&id).copied().unwrap_or(0);
+                let meta: serde_json::Value =
+                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
+                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -293,23 +315,27 @@ impl McpServer {
                         reasons: Vec::new(),
                         validation_gates: Vec::new(),
                         ist_signals: Vec::new(),
+                        updated_at_ms,
                     },
                 );
             }
         }
 
         let mil_query = format!(
-            "SELECT id, title, COALESCE(status,'') FROM soll.Node WHERE type='Milestone' AND id LIKE 'MIL-{}-%' ORDER BY id",
+            "SELECT id, title, COALESCE(status,''), COALESCE(metadata,'{{}}') FROM soll.Node WHERE type='Milestone' AND id LIKE 'MIL-{}-%' ORDER BY id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&mil_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             for row in rows {
-                if row.len() < 3 {
+                if row.len() < 4 {
                     continue;
                 }
                 let id = row[0].clone();
                 let evidence_count = milestone_evidence_counts.get(&id).copied().unwrap_or(0);
+                let meta: serde_json::Value =
+                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
+                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -327,6 +353,7 @@ impl McpServer {
                         reasons: Vec::new(),
                         validation_gates: Vec::new(),
                         ist_signals: Vec::new(),
+                        updated_at_ms,
                     },
                 );
             }

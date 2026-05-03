@@ -1536,6 +1536,129 @@ fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
 }
 
 #[test]
+fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
+    // REQ-AXO-144 — temporal score decay. Two structurally identical
+    // Decisions (each unblocking one open REQ) ranked by activity:
+    // DEC-AXO-001 was updated 1 day ago, DEC-AXO-002 was updated
+    // 100 days ago. With decay enabled (default), the 100-day old
+    // Decision must score strictly lower. Disabling decay yields
+    // identical scores again (back-compat / benchmarking knob).
+    let server = create_test_server();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let recent_ms = now_ms - day_ms;
+    let old_ms = now_ms - 100 * day_ms;
+
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Recent target', '', 'current', '{{\"priority\":\"P1\"}}'),\
+                    ('REQ-AXO-002', 'Requirement', 'AXO', 'Old target', '', 'current', '{{\"priority\":\"P1\"}}'),\
+                    ('DEC-AXO-001', 'Decision', 'AXO', 'Recent decision', '', 'accepted', '{{\"updated_at\":{}}}'),\
+                    ('DEC-AXO-002', 'Decision', 'AXO', 'Old decision', '', 'accepted', '{{\"updated_at\":{}}}')",
+            recent_ms, old_ms
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES \
+             ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES'),\
+             ('DEC-AXO-002', 'REQ-AXO-002', 'SOLVES')",
+        )
+        .unwrap();
+
+    // 1) Decay enabled (default).
+    let req_decay = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json" }
+        })),
+        id: Some(json!(701)),
+    };
+    let response = server.handle_request(req_decay);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let mut score_by_id: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    for wave in waves {
+        for item in wave["items"].as_array().expect("items") {
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let score = item["score"].as_i64().unwrap_or(0);
+            score_by_id.insert(id, score);
+        }
+    }
+    let recent_score = *score_by_id
+        .get("DEC-AXO-001")
+        .expect("DEC-AXO-001 in waves");
+    let old_score = *score_by_id.get("DEC-AXO-002").expect("DEC-AXO-002 in waves");
+    assert!(
+        old_score < recent_score,
+        "100-day-old decision must score lower than 1-day-old decision when decay is enabled (recent={}, old={})",
+        recent_score,
+        old_score
+    );
+
+    // The old decision must surface a `decayed by age` reason because
+    // its decay factor is well below 0.5 (~exp(-100/30) ≈ 0.036).
+    let old_item = waves
+        .iter()
+        .flat_map(|wave| wave["items"].as_array().unwrap().iter())
+        .find(|item| item["id"].as_str() == Some("DEC-AXO-002"))
+        .expect("DEC-AXO-002 must be in waves");
+    let reasons: Vec<&str> = old_item["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    assert!(
+        reasons.iter().any(|r| r.starts_with("decayed by age")),
+        "old decision must surface 'decayed by age' reason: {:?}",
+        reasons
+    );
+
+    // 2) Decay disabled — both decisions score identically again.
+    let req_no_decay = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json", "include_decay": false }
+        })),
+        id: Some(json!(702)),
+    };
+    let response = server.handle_request(req_no_decay);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let mut score_by_id: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    for wave in waves {
+        for item in wave["items"].as_array().expect("items") {
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let score = item["score"].as_i64().unwrap_or(0);
+            score_by_id.insert(id, score);
+        }
+    }
+    let recent_score = *score_by_id
+        .get("DEC-AXO-001")
+        .expect("DEC-AXO-001 in waves");
+    let old_score = *score_by_id.get("DEC-AXO-002").expect("DEC-AXO-002 in waves");
+    assert_eq!(
+        recent_score, old_score,
+        "include_decay=false must yield identical scores for structurally identical nodes"
+    );
+}
+
+#[test]
 fn test_soll_work_plan_counts_decision_evidence() {
     let server = create_test_server();
     server
