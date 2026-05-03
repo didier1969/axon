@@ -1656,11 +1656,17 @@ fn embed_prepared_batch_with_breakdown_ort(
 fn embed_texts_with_breakdown_ort(
     model: &mut OrtGpuFirstTextEmbedding,
     texts: &[String],
-) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
+) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64, u64)> {
     if texts.is_empty() {
-        return Ok((Vec::new(), 0, 0, 0, 0));
+        return Ok((Vec::new(), 0, 0, 0, 0, 0));
     }
 
+    // REQ-AXO-176 — instrument tokenization separately. Pre-fix the
+    // bench reported `total_embed_ms - sum(host+input+inference+output)`
+    // as ~60% of total on n=600, with no breakdown showing where it
+    // went. Confirmed via this timer: encode_batch + micro-batch
+    // build is the unaccounted phase.
+    let tokenize_start = std::time::Instant::now();
     let inputs = texts.iter().map(|text| text.as_str()).collect::<Vec<_>>();
     let encodings = model
         .tokenizer
@@ -1676,6 +1682,7 @@ fn embed_texts_with_breakdown_ort(
         configured_embedding_micro_batch_max_items(texts.len()),
         configured_embedding_micro_batch_max_total_tokens(texts.len()),
     );
+    let tokenize_ms = tokenize_start.elapsed().as_millis() as u64;
 
     let mut ordered_embeddings = vec![None; texts.len()];
     let mut host_prepare_ms = 0u64;
@@ -1715,6 +1722,7 @@ fn embed_texts_with_breakdown_ort(
 
     Ok((
         embeddings,
+        tokenize_ms,
         host_prepare_ms,
         input_copy_ms,
         inference_ms,
@@ -3928,6 +3936,7 @@ pub fn run_gpu_embed_subprocess_stdio() -> anyhow::Result<()> {
             Ok(request) => match embed_texts_with_breakdown_ort(&mut model, &request.texts) {
                 Ok((
                     embeddings,
+                    _tokenize_ms,
                     host_prepare_ms,
                     input_copy_ms,
                     inference_ms,
@@ -3989,8 +3998,14 @@ pub fn run_embedder_throughput_bench(
 
     let n = texts.len();
     let embed_start = std::time::Instant::now();
-    let (embeddings, host_prepare_ms, input_copy_ms, inference_ms, output_extract_ms) =
-        embed_texts_with_breakdown_ort(&mut model, &texts)?;
+    let (
+        embeddings,
+        tokenize_ms,
+        host_prepare_ms,
+        input_copy_ms,
+        inference_ms,
+        output_extract_ms,
+    ) = embed_texts_with_breakdown_ort(&mut model, &texts)?;
     let total_embed_ms = embed_start.elapsed().as_millis() as u64;
 
     Ok(EmbeddingThroughputBench {
@@ -3998,6 +4013,7 @@ pub fn run_embedder_throughput_bench(
         embedding_dim: embeddings.first().map(|v| v.len()).unwrap_or(0),
         load_ms,
         total_embed_ms,
+        tokenize_ms,
         host_prepare_ms,
         input_copy_ms,
         inference_ms,
@@ -4015,6 +4031,9 @@ pub struct EmbeddingThroughputBench {
     pub embedding_dim: usize,
     pub load_ms: u64,
     pub total_embed_ms: u64,
+    /// REQ-AXO-176 — encode_batch + token-count + micro-batch build.
+    /// Empirically the dominant non-inference cost on n>100 with BGE-Large.
+    pub tokenize_ms: u64,
     pub host_prepare_ms: u64,
     pub input_copy_ms: u64,
     pub inference_ms: u64,

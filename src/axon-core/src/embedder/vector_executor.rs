@@ -96,7 +96,25 @@ impl VectorEmbeddingBackend {
         let _executor_label = self.executor_strategy().label();
         match self {
             Self::CpuInProcess(model) | Self::CudaInProcess(model) => {
-                embed_texts_with_breakdown_ort(model, texts)
+                // REQ-AXO-176 — drop tokenize_ms here; the production
+                // hot path tracks throughput at queue level. Bench
+                // facade `run_embedder_throughput_bench` reads the
+                // 6-tuple directly.
+                let (
+                    embeddings,
+                    _tokenize_ms,
+                    host_prepare_ms,
+                    input_copy_ms,
+                    inference_ms,
+                    output_extract_ms,
+                ) = embed_texts_with_breakdown_ort(model, texts)?;
+                Ok((
+                    embeddings,
+                    host_prepare_ms,
+                    input_copy_ms,
+                    inference_ms,
+                    output_extract_ms,
+                ))
             }
             Self::CudaService(client) | Self::TensorRtService(client) => client
                 .lock()

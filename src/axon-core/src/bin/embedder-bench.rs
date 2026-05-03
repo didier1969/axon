@@ -169,15 +169,16 @@ fn run() -> anyhow::Result<()> {
         OutputMode::Csv => {
             // Header on stderr (so stdout stays parseable as a single CSV row)
             eprintln!(
-                "label,n,dim,load_ms,total_embed_ms,host_prepare_ms,input_copy_ms,inference_ms,output_extract_ms,chunks_per_sec"
+                "label,n,dim,load_ms,total_embed_ms,tokenize_ms,host_prepare_ms,input_copy_ms,inference_ms,output_extract_ms,chunks_per_sec"
             );
             println!(
-                "{},{},{},{},{},{},{},{},{},{:.2}",
+                "{},{},{},{},{},{},{},{},{},{},{:.2}",
                 args.label,
                 bench.n,
                 bench.embedding_dim,
                 bench.load_ms,
                 bench.total_embed_ms,
+                bench.tokenize_ms,
                 bench.host_prepare_ms,
                 bench.input_copy_ms,
                 bench.inference_ms,
@@ -186,19 +187,40 @@ fn run() -> anyhow::Result<()> {
             );
         }
         OutputMode::Human => {
+            let unaccounted = bench.total_embed_ms.saturating_sub(
+                bench.tokenize_ms
+                    + bench.host_prepare_ms
+                    + bench.input_copy_ms
+                    + bench.inference_ms
+                    + bench.output_extract_ms,
+            );
             println!("📊 embedder-bench [{}]", args.label);
             println!("   n              {}", bench.n);
             println!("   dim            {}", bench.embedding_dim);
             println!("   load_ms        {}", bench.load_ms);
             println!("   total_embed_ms {}", bench.total_embed_ms);
+            println!("     tokenize     {} ({}%)",
+                bench.tokenize_ms,
+                pct(bench.tokenize_ms, bench.total_embed_ms));
             println!("     host_prepare {}", bench.host_prepare_ms);
             println!("     input_copy   {}", bench.input_copy_ms);
-            println!("     inference    {}", bench.inference_ms);
+            println!("     inference    {} ({}%)",
+                bench.inference_ms,
+                pct(bench.inference_ms, bench.total_embed_ms));
             println!("     output_extract {}", bench.output_extract_ms);
+            println!("     unaccounted  {}", unaccounted);
             println!("   chunks/sec     {:.2}", bench.chunks_per_second());
         }
     }
     Ok(())
+}
+
+fn pct(part: u64, total: u64) -> u64 {
+    if total == 0 {
+        0
+    } else {
+        (part * 100) / total
+    }
 }
 
 /// Split the source file into roughly-512-char chunks, tagged with
