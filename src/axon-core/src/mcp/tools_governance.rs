@@ -630,9 +630,19 @@ impl McpServer {
                 }
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }], "isError": true }),
-            ),
+            Err(e) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "parameter_repair": {
+                        "invalid_field": "symbol",
+                        "follow_up_tools": ["inspect", "query", "status"],
+                        "hint": "semantic-clones computation failed; verify the symbol resolves via `inspect` and runtime is healthy"
+                    },
+                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                }
+            })),
         }
     }
 
@@ -699,9 +709,21 @@ impl McpServer {
                 };
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }], "isError": true }),
-            ),
+            Err(e) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "parameter_repair": {
+                        "invalid_field": "source_layer|target_layer",
+                        "supplied_source_layer": source_layer,
+                        "supplied_target_layer": target_layer,
+                        "follow_up_tools": ["status", "list_labels_tables"],
+                        "hint": "drift analysis query failed; verify both layer substrings match indexed File paths and runtime is healthy"
+                    },
+                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                }
+            })),
         }
     }
 }

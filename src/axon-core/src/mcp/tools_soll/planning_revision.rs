@@ -32,9 +32,21 @@ impl McpServer {
 
             if let Err(e) = self.apply_rollback_operation(&op) {
                 let _ = self.graph_store.execute("ROLLBACK");
-                return Some(
-                    json!({"content":[{"type":"text","text": format!("Rollback failed: {}", e)}],"isError": true}),
-                );
+                return Some(json!({
+                    "content":[{"type":"text","text": format!("Rollback failed: {}", e)}],
+                    "isError": true,
+                    "data": {
+                        "status": "internal_error",
+                        "parameter_repair": {
+                            "invalid_field": "revision_id",
+                            "stage": "rollback_operation",
+                            "supplied_revision_id": revision_id,
+                            "follow_up_tools": ["soll_validate", "cypher"],
+                            "hint": "rollback operation failed mid-transaction; verify revision integrity via `cypher SELECT * FROM soll.main.Revision WHERE revision_id='<id>'` and `soll_validate` post-rollback"
+                        },
+                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                    }
+                }));
             }
         }
 

@@ -346,6 +346,12 @@ impl McpServer {
                             ],
                             "follow_up_tools": ["query", "inspect", "retrieve_context"],
                             "confidence": "high",
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "symbol|question",
+                            "accepted_aliases": ["symbol", "question"],
+                            "follow_up_tools": ["query", "inspect", "retrieve_context"],
+                            "hint": "supply at least one of `symbol` (canonical id or name) or `question` (free-form rationale prompt); example: symbol=\"axon_query\" or question=\"why does the queue admission policy reject?\""
                         }
                     }
                 }));

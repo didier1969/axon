@@ -137,6 +137,11 @@ impl McpServer {
                         ],
                         "follow_up_tools": ["inspect", "query"],
                         "confidence": "high",
+                    },
+                    "parameter_repair": {
+                        "invalid_field": "question",
+                        "follow_up_tools": ["inspect", "query"],
+                        "hint": "supply a non-empty `question` describing the target (symbol, file, behavior, or rationale you want context for); example: \"how does the queue admission policy decide rejection?\""
                     }
                 }
             }));

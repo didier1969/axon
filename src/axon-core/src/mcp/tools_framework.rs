@@ -383,7 +383,15 @@ impl McpServer {
         if target.is_empty() {
             return Some(json!({
                 "content": [{ "type": "text", "text": "change_safety requires a non-empty `target`" }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "invalid_field": "target",
+                        "follow_up_tools": ["help", "query"],
+                        "hint": "supply a non-empty `target` (symbol id or file path); use `query` to discover indexed targets"
+                    }
+                }
             }));
         }
         let target_type = args

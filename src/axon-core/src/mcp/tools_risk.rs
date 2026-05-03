@@ -396,9 +396,19 @@ impl McpServer {
                 Self::write_impact_cache(cache_key, now_ms, &response);
                 Some(response)
             }
-            Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true }),
-            ),
+            Err(e) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "parameter_repair": {
+                        "invalid_field": "symbol",
+                        "follow_up_tools": ["inspect", "query", "status"],
+                        "hint": "impact computation failed; verify the symbol resolves via `inspect` and the runtime is healthy via `status`"
+                    },
+                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                }
+            })),
         }
     }
 
@@ -678,7 +688,15 @@ impl McpServer {
             _ => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": "Missing required argument: symbol" }],
-                    "isError": true
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "parameter_repair": {
+                            "invalid_field": "symbol",
+                            "follow_up_tools": ["help", "query"],
+                            "hint": "supply a non-empty `symbol`; use `query` to discover symbol names"
+                        }
+                    }
                 }));
             }
         };
@@ -785,9 +803,19 @@ impl McpServer {
                 );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }], "isError": true }),
-            ),
+            Err(e) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "parameter_repair": {
+                        "invalid_field": "symbol",
+                        "follow_up_tools": ["inspect", "impact", "status"],
+                        "hint": "mutation simulation failed; verify symbol resolves via `inspect`, runtime is healthy via `status`, and depth is reasonable (≤6 typical)"
+                    },
+                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                }
+            })),
         }
     }
 }

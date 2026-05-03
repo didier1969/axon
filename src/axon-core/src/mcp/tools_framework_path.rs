@@ -9,7 +9,15 @@ impl McpServer {
         if source.is_empty() {
             return Some(json!({
                 "content": [{ "type": "text", "text": "path requires a non-empty `source`" }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "invalid_field": "source",
+                        "follow_up_tools": ["help", "query"],
+                        "hint": "supply a non-empty `source` symbol; use `query` to discover symbol names"
+                    }
+                }
             }));
         }
         let sink = args
@@ -37,13 +45,31 @@ impl McpServer {
         let Some(source_id) = self.resolve_scoped_symbol_id_canonical(source, project) else {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("path source '{}' not found in current scope", source) }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_not_found",
+                    "parameter_repair": {
+                        "invalid_field": "source",
+                        "supplied_value": source,
+                        "follow_up_tools": ["query", "inspect"],
+                        "hint": format!("symbol `{}` does not resolve in scope; widen via `query` or pass a canonical symbol id", source)
+                    }
+                }
             }));
         };
         let Some(sink_id) = self.resolve_scoped_symbol_id_canonical(sink, project) else {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("path sink '{}' not found in current scope", sink) }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_not_found",
+                    "parameter_repair": {
+                        "invalid_field": "sink",
+                        "supplied_value": sink,
+                        "follow_up_tools": ["query", "inspect"],
+                        "hint": format!("symbol `{}` does not resolve in scope; widen via `query` or pass a canonical symbol id", sink)
+                    }
+                }
             }));
         };
 
@@ -172,7 +198,14 @@ impl McpServer {
                         "tool": "inspect",
                         "when": "now"
                     },
-                    "canonical_sources": Self::canonical_sources_snapshot()
+                    "canonical_sources": Self::canonical_sources_snapshot(),
+                    "parameter_repair": {
+                        "invalid_field": "depth",
+                        "supplied_value": depth,
+                        "max_depth": 12,
+                        "follow_up_tools": ["inspect", "impact"],
+                        "hint": format!("no path within depth {}; retry with a larger depth (max 12), or call `inspect` on each endpoint to verify they live in the same call graph", depth)
+                    }
                 }
             }));
         };

@@ -394,7 +394,16 @@ impl McpServer {
         {
             return Some(json!({
                 "content": [{ "type": "text", "text": "`soll_relation_schema` attend au moins un de: `source_type`, `target_type`, `source_id`, `target_id`." }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "invalid_field": "source_type|target_type|source_id|target_id",
+                        "accepted_aliases": ["source_type", "target_type", "source_id", "target_id"],
+                        "follow_up_tools": ["help"],
+                        "hint": "supply at least one of `source_type` / `target_type` (entity type) or `source_id` / `target_id` (canonical id) to scope the relation lookup"
+                    }
+                }
             }));
         }
 

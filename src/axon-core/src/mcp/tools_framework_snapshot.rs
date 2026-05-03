@@ -45,7 +45,16 @@ impl McpServer {
         if snapshots.is_empty() {
             return json!({
                 "content": [{ "type": "text", "text": format!("No structural snapshots found for {}", project_code) }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_not_found",
+                    "parameter_repair": {
+                        "invalid_field": "project_code",
+                        "supplied_value": project_code,
+                        "follow_up_tools": ["snapshot_history", "project_registry_lookup"],
+                        "hint": "no snapshots exist for this project; run `snapshot_history` to inspect available snapshots, or verify project_code via `project_registry_lookup`"
+                    }
+                }
             });
         }
         let from_snapshot_id = args

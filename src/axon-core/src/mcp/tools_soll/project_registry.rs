@@ -435,7 +435,7 @@ impl McpServer {
             "data": {
                 "status": "wrong_project_scope",
                 "rejected_project_code": rejected_project_code,
-                "registered_project_codes": registered_values,
+                "registered_project_codes": registered_values.clone(),
                 "next_action": next_action,
                 "operator_guidance": {
                     "problem_class": "wrong_project_scope",
@@ -444,6 +444,13 @@ impl McpServer {
                     "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
                     "confidence": "high",
                 },
+                "parameter_repair": {
+                    "invalid_field": "project_code",
+                    "supplied_value": rejected_project_code,
+                    "registered_project_codes": registered_values,
+                    "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                    "hint": format!("`{}` is not in the project registry; pick one of `registered_project_codes`, or call `axon_init_project` to register a new one", rejected_project_code),
+                }
             }
         })
     }
@@ -473,7 +480,16 @@ impl McpServer {
         if project_code.is_none() && project_name.is_none() && project_path.is_none() {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": "`project_registry_lookup` attend au moins un de: `project_code`, `project_name`, `project_path`." }],
-                "isError": true
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "invalid_field": "project_code|project_name|project_path",
+                        "accepted_aliases": ["project_code", "project_name", "project_path"],
+                        "follow_up_tools": ["help"],
+                        "hint": "supply at least one of `project_code` / `project_name` / `project_path` to scope the lookup"
+                    }
+                }
             }));
         }
 

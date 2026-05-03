@@ -345,7 +345,16 @@ impl McpServer {
                 Err(e) => {
                     return Some(json!({
                         "content": [{ "type": "text", "text": format!("Canonical project error: {}", e) }],
-                        "isError": true
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "parameter_repair": {
+                                "invalid_field": "project_code",
+                                "follow_up_tools": ["project_registry_lookup", "axon_init_project"],
+                                "hint": "supply a registered `project_code`; call `project_registry_lookup` to list registered codes"
+                            },
+                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                        }
                     }))
                 }
             },
@@ -364,7 +373,15 @@ impl McpServer {
                 None => {
                     return Some(json!({
                         "content": [{ "type": "text", "text": "Cannot resolve canonical docs/derived/soll directory." }],
-                        "isError": true
+                        "isError": true,
+                        "data": {
+                            "status": "internal_error",
+                            "parameter_repair": {
+                                "invalid_field": "site_root_dir",
+                                "follow_up_tools": ["status"],
+                                "hint": "axon runtime cannot resolve docs/derived/soll directory; supply explicit `output_dir` or `site_root_dir`, or check `instance_identity.data_root_absolute` via `status mode=verbose`"
+                            }
+                        }
                     }))
                 }
             }
@@ -408,8 +425,17 @@ impl McpServer {
                 }
             })),
             Err(error) => Some(json!({
-                "content": [{ "type": "text", "text": error }],
-                "isError": true
+                "content": [{ "type": "text", "text": error.clone() }],
+                "isError": true,
+                "data": {
+                    "status": "internal_error",
+                    "parameter_repair": {
+                        "invalid_field": "site_root_dir|output_dir",
+                        "follow_up_tools": ["status", "soll_validate"],
+                        "hint": "doc generation failed; verify SOLL state via `soll_validate` and the runtime is healthy via `status`. Filesystem write errors usually indicate permission or disk-space issues at the supplied output_dir/site_root_dir"
+                    },
+                    "diagnostic_excerpt": error.chars().take(240).collect::<String>()
+                }
             })),
         }
     }
