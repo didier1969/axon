@@ -743,9 +743,12 @@ impl McpServer {
                     &serde_json::json!([local_id, p_code, title, desc, meta])
                 );
 
+                // REQ-AXO-152: project_code on INSERT. p_code is in scope (the
+                // local tenant the Guideline is being inherited into), so use it
+                // directly rather than re-deriving from canonical ID prefixes.
                 let _ = self.graph_store.execute_param(
-                    "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, 'INHERITS_FROM', '{}')",
-                    &serde_json::json!([local_id, global_id])
+                    "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code) VALUES (?, ?, 'INHERITS_FROM', '{}', ?)",
+                    &serde_json::json!([local_id, global_id, p_code])
                 );
 
                 applied.push(local_id);

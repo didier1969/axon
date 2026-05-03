@@ -251,9 +251,19 @@ impl McpServer {
             }
         }
 
+        // REQ-AXO-152: derive project_code from canonical ID prefix and write
+        // it on INSERT. NULL project_code rows brick brain boot via WAL replay
+        // / backfill PK conflict (observed 2026-05-03 promotion). Source first,
+        // target as fallback (cross-project edges are rare; default to source's
+        // tenant). 'AXO' fallback preserves pre-multi-tenant single-project
+        // semantics for any caller that passes a non-canonical ID.
+        let project_code = super::shared::project_code_from_canonical_entity_id(source_id)
+            .or_else(|| super::shared::project_code_from_canonical_entity_id(target_id))
+            .unwrap_or_else(|| "AXO".to_string());
+
         self.graph_store.execute_param(
-            "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, ?, '{}') ON CONFLICT DO NOTHING",
-            &serde_json::json!([source_id, target_id, relation_type]),
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code) VALUES (?, ?, ?, '{}', ?) ON CONFLICT DO NOTHING",
+            &serde_json::json!([source_id, target_id, relation_type, project_code]),
         )?;
         Ok(true)
     }
@@ -519,5 +529,84 @@ impl McpServer {
             "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved with explicit directional guidance." }],
             "data": data
         }))
+    }
+}
+
+#[cfg(test)]
+mod insert_validated_relation_tests {
+    // REQ-AXO-152: every soll.Edge INSERT must populate `project_code`.
+    // NULL `project_code` rows brick brain boot via DuckDB WAL replay /
+    // backfill PK conflict (observed 2026-05-03 promotion). Regression test:
+    // create a link via soll_manager, assert the new edge carries
+    // project_code derived from the source/target canonical ID.
+    use crate::mcp::JsonRpcRequest;
+    use crate::test_support::ist_fixtures::{
+        assert_ist_count, create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn soll_manager_link_populates_project_code_on_new_edge() {
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .node(SollNodeFixture::new(
+                    "REQ-AXO-9001",
+                    "Requirement",
+                    "AXO",
+                    "REQ-AXO-152 fixture",
+                ))
+                .node(SollNodeFixture::new(
+                    "PIL-AXO-9001",
+                    "Pillar",
+                    "AXO",
+                    "REQ-AXO-152 pillar",
+                )),
+        )
+        .unwrap();
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": {
+                        "action": "link",
+                        "entity": "requirement",
+                        "data": {
+                            "source_id": "REQ-AXO-9001",
+                            "target_id": "PIL-AXO-9001",
+                            "relation_type": "BELONGS_TO"
+                        }
+                    }
+                })),
+                id: Some(json!(15201)),
+            })
+            .expect("handle_request returned an envelope");
+        let result = response.result.expect("link returned a result body");
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("Link created"),
+            "expected link to be created, got: {text}"
+        );
+
+        // The fix: the new edge must carry project_code='AXO' (derived from
+        // source/target canonical ID prefix). Before REQ-AXO-152 fix this
+        // count was 0; the row existed with project_code = NULL.
+        assert_ist_count(
+            &harness.store,
+            "SELECT count(*) FROM soll.Edge WHERE source_id = 'REQ-AXO-9001' \
+             AND target_id = 'PIL-AXO-9001' AND relation_type = 'BELONGS_TO' \
+             AND project_code = 'AXO'",
+            1,
+        );
+        // No NULL row leaked into the table from this insert.
+        assert_ist_count(
+            &harness.store,
+            "SELECT count(*) FROM soll.Edge WHERE source_id = 'REQ-AXO-9001' \
+             AND project_code IS NULL",
+            0,
+        );
     }
 }

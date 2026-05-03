@@ -678,9 +678,15 @@ impl McpServer {
         }
 
         for rel in restore.relations {
+            // REQ-AXO-152: derive project_code from canonical ID prefix and write
+            // it on INSERT. NULL project_code rows brick brain boot via WAL replay.
+            let project_code =
+                super::shared::project_code_from_canonical_entity_id(&rel.source_id)
+                    .or_else(|| super::shared::project_code_from_canonical_entity_id(&rel.target_id))
+                    .unwrap_or_else(|| "AXO".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, ?, '{}') ON CONFLICT DO NOTHING",
-                &serde_json::json!([rel.source_id, rel.target_id, rel.relation_type])
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code) VALUES (?, ?, ?, '{}', ?) ON CONFLICT DO NOTHING",
+                &serde_json::json!([rel.source_id, rel.target_id, rel.relation_type, project_code])
             ) {
                 return Some(restore_step_error_response("insert_edge", "Edge", &e.to_string()));
             }
