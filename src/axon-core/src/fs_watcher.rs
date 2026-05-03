@@ -40,6 +40,7 @@ pub fn stage_hot_delta_with_guard(
 }
 
 pub fn enqueue_hot_delta_with_guard(
+    store: Option<&GraphStore>,
     watch_root: &Path,
     project_code: &str,
     path: &Path,
@@ -48,6 +49,7 @@ pub fn enqueue_hot_delta_with_guard(
     ingress: &SharedIngressBuffer,
 ) -> Result<bool> {
     Ok(enqueue_hot_path_delta_count(
+        store,
         watch_root,
         project_code,
         path,
@@ -239,6 +241,7 @@ where
 }
 
 pub fn enqueue_hot_deltas_with_guard<I>(
+    store: Option<&GraphStore>,
     watch_root: &Path,
     project_code: &str,
     paths: I,
@@ -250,6 +253,7 @@ where
     I: IntoIterator<Item = PathBuf>,
 {
     enqueue_hot_deltas_inner(
+        store,
         watch_root,
         project_code,
         paths,
@@ -287,6 +291,7 @@ where
 }
 
 fn enqueue_hot_deltas_inner<I>(
+    store: Option<&GraphStore>,
     watch_root: &Path,
     project_code: &str,
     paths: I,
@@ -307,6 +312,7 @@ where
         }
 
         staged += enqueue_hot_path_delta_count(
+            store,
             watch_root,
             project_code,
             &path,
@@ -444,6 +450,7 @@ fn stage_single_file_delta(
 }
 
 fn enqueue_hot_path_delta_count(
+    store: Option<&GraphStore>,
     watch_root: &Path,
     project_code: &str,
     path: &Path,
@@ -540,10 +547,11 @@ fn enqueue_hot_path_delta_count(
         return Ok(1);
     }
 
-    enqueue_single_file_delta(&scanner, path, priority, guard, ingress)
+    enqueue_single_file_delta(store, &scanner, path, priority, guard, ingress)
 }
 
 fn enqueue_single_file_delta(
+    store: Option<&GraphStore>,
     scanner: &Scanner,
     path: &Path,
     priority: i64,
@@ -586,14 +594,30 @@ fn enqueue_single_file_delta(
 
     let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let project_code = match scanner.project_code.trim() {
-        "" => {
-            watcher_probe::record(
-                "watcher.filtered",
-                Some(&absolute),
-                "reason=missing_explicit_project_context_for_buffered_delta",
-            );
-            return Ok(0);
-        }
+        "" => match store {
+            Some(store_ref) => match scanner.project_code_for_path(store_ref, &absolute) {
+                Ok(code) => code,
+                Err(err) => {
+                    watcher_probe::record(
+                        "watcher.filtered",
+                        Some(&absolute),
+                        format!(
+                            "reason=unregistered_project_path_for_buffered_delta error={}",
+                            err
+                        ),
+                    );
+                    return Ok(0);
+                }
+            },
+            None => {
+                watcher_probe::record(
+                    "watcher.filtered",
+                    Some(&absolute),
+                    "reason=missing_explicit_project_context_for_buffered_delta",
+                );
+                return Ok(0);
+            }
+        },
         explicit => explicit.to_string(),
     };
 

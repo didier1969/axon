@@ -2756,6 +2756,7 @@ fn handle_watcher_events(
                 );
                 if !salvaged.is_empty() {
                     match fs_watcher::enqueue_hot_deltas_with_guard(
+                        Some(store.as_ref()),
                         &watch_root,
                         &project_code,
                         salvaged.clone(),
@@ -2845,6 +2846,7 @@ fn handle_watcher_events(
             }
 
             match fs_watcher::enqueue_hot_deltas_with_guard(
+                Some(store.as_ref()),
                 &watch_root,
                 &project_code,
                 paths,

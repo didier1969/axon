@@ -677,6 +677,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &file_path,
@@ -1338,6 +1339,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &project.join("node_modules"),
@@ -1377,6 +1379,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &project_worktree,
@@ -1407,6 +1410,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &root.join("PRJ").join("_build"),
@@ -1441,6 +1445,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &root.join("PRJ").join("_bmad-output"),
@@ -1474,6 +1479,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &nested.join(".gitignore"),
@@ -1511,6 +1517,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
             root,
             "PRJ",
             &blocked.join(".gitignore"),
@@ -4002,5 +4009,131 @@ mod tests {
 
         assert_eq!(risks.len(), 1, "There should be one NIF blocking risk");
         assert_eq!(risks[0], "rust::nif_func (profondeur: 6)");
+    }
+
+    #[test]
+    fn test_maillon_2h7_watcher_buffered_delta_path_routes_to_registered_project_when_explicit_code_empty(
+    ) {
+        // REQ-AXO-148: enqueue_single_file_delta path-routes via store when
+        // scanner.project_code is empty AND store is Some.
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let project_a = root.join("project_a");
+        let project_b = root.join("project_b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+
+        let file_a = project_a.join("alpha.ex");
+        let file_b = project_b.join("beta.ex");
+        std::fs::write(&file_a, "defmodule Alpha do\nend\n").unwrap();
+        std::fs::write(&file_b, "defmodule Beta do\nend\n").unwrap();
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .sync_project_registry_entry(
+                "PJA",
+                Some("project_a"),
+                Some(project_a.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+        store
+            .sync_project_registry_entry(
+                "PJB",
+                Some("project_b"),
+                Some(project_b.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged_a = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            Some(store.as_ref()),
+            root,
+            "",
+            &file_a,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+        let staged_b = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            Some(store.as_ref()),
+            root,
+            "",
+            &file_b,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(staged_a, "file_a must be buffered (path-routed to PJA)");
+        assert!(staged_b, "file_b must be buffered (path-routed to PJB)");
+
+        let mut locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        let batch = locked.drain_batch(10);
+        assert_eq!(batch.files.len(), 2, "Both files must be buffered");
+
+        let canonical_a = std::fs::canonicalize(&file_a)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let canonical_b = std::fs::canonicalize(&file_b)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let mut by_path = std::collections::HashMap::new();
+        for event in batch.files.iter() {
+            by_path.insert(event.path.clone(), event.project_code.clone());
+        }
+
+        assert_eq!(
+            by_path.get(&canonical_a).map(String::as_str),
+            Some("PJA"),
+            "file_a must route to PJA"
+        );
+        assert_eq!(
+            by_path.get(&canonical_b).map(String::as_str),
+            Some("PJB"),
+            "file_b must route to PJB"
+        );
+    }
+
+    #[test]
+    fn test_maillon_2h8_watcher_buffered_delta_rejects_when_no_store_and_no_explicit_code() {
+        // REQ-AXO-148: backward-compat — None store + empty code still rejects.
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("PRJ");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("orphan.ex");
+        std::fs::write(&file_path, "defmodule Orphan do\nend\n").unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            None,
+            root,
+            "",
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            !staged,
+            "Empty project_code with no store must reject the buffered delta"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.buffered_entries(), 0);
     }
 }
