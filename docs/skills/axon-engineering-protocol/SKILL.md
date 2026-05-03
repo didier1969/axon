@@ -164,6 +164,7 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 
 ## Hygiene
 - TDD gate (GUI-PRO-001 / REQ-AXO-121): `.rs` containing `#[cfg(test)]` substring satisfies tests.rs requirement; sibling `_tests.rs` / `/tests/` still valid; files with neither remain blocked
+- IST/SOLL test fixtures (REQ-AXO-142): use `crate::test_support::ist_fixtures::{SymbolFixture, CallFixture, SollNodeFixture, EdgeFixture, IstSeed, create_test_server_with_ist_seed}` for new IST/SOLL projection tests instead of inline `INSERT INTO Symbol/CALLS/...` SQL. `CallFixture::synthetic(file, name, project)` covers the REQ-AXO-134 `<file>::<name>` target_id form; canonical Symbol.id form via `CallFixture::canonical(...)`.
 - `axon_commit_work` does NOT mean "stage everything" — only auto-stages git-rm
 - archival `SOLL_EXPORT_*.md` not in routine commits (REQ-AXO-126 — `soll_export` is snapshot-per-release, fired by `promote_live_safe.sh`)
 - Derived docs (`soll_generate_docs`, `docs/derived/soll/...`) are read surfaces, NOT canonical truth — don't restore from them

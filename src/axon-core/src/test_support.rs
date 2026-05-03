@@ -92,3 +92,6 @@ impl Drop for EnvVarGuard {
 #[cfg(test)]
 #[path = "test_support_tests.rs"]
 mod test_support_tests;
+
+#[cfg(test)]
+pub mod ist_fixtures;

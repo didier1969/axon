@@ -4046,15 +4046,31 @@ fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
 
 #[test]
 fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
+    // REQ-AXO-142 — rewritten to use `test_support::ist_fixtures` so the
+    // production `Symbol` shape (including `is_unsafe`) is enforced by the
+    // builder, not duplicated in inline SQL.
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
         std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
     }
-    let server = create_test_server();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')").unwrap();
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                "axon::axon_retrieve_context",
+                "axon_retrieve_context",
+                "method",
+                "AXO",
+            )
+            .tested(true)
+            .is_public(true)
+            .is_unsafe(false),
+        ),
+    )
+    .unwrap();
 
-    let response = server
+    let response = harness
+        .server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -4111,14 +4127,31 @@ fn test_send_notification() {
 
 #[test]
 fn test_axon_inspect() {
+    // REQ-AXO-142 — rewritten to use `test_support::ist_fixtures`. The
+    // canonical-target_id branch of the inspect_callers_query (REQ-AXO-134)
+    // is exercised here; the synthetic-target_id branch is in
+    // `mcp::tools_dx::inspect_callers_query_tests`.
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, CallFixture, IstSeed, SymbolFixture,
+    };
     let _runtime = RuntimeEnvGuard::full_autonomous();
-    let server = create_test_server();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::core_func', 'core_func', 'function', true, true, false, 'PRJ')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::caller_func', 'caller_func', 'function', false, true, false, 'PRJ')").unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::caller_func', 'prj::core_func', 'PRJ')")
-        .unwrap();
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new()
+            .symbol(
+                SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ")
+                    .tested(true),
+            )
+            .symbol(
+                SymbolFixture::new("prj::caller_func", "caller_func", "function", "PRJ")
+                    .tested(false),
+            )
+            .call(CallFixture::canonical(
+                "prj::caller_func",
+                "prj::core_func",
+                "PRJ",
+            )),
+    )
+    .unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -4133,7 +4166,7 @@ fn test_axon_inspect() {
         id: Some(json!(5)),
     };
 
-    let response = server.handle_request(req);
+    let response = harness.server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
     let content = result.get("content").unwrap()[0]
         .get("text")

@@ -1750,19 +1750,99 @@ impl McpServer {
 mod inspect_callers_query_tests {
     // REQ-AXO-134: the inspect callers/callees subquery includes a name-suffix
     // workaround for the IST indexer's synthetic CALLS.target_id format
-    // (`<caller_file>::<callee_name>` instead of canonical Symbol.id). The
-    // workaround is verified live (cypher: `SELECT count(*) FROM main.CALLS,
-    // main.Symbol WHERE Symbol.name='wrong_project_scope_response' AND
-    // (CALLS.target_id = Symbol.id OR CALLS.target_id LIKE ('%::' ||
-    // Symbol.name)) AND project_code = 'AXO'` returns 7) — see SOLL
-    // REQ-AXO-134 evidence. Unit-test reproduction is deferred until the
-    // test-mode DuckDB schema supports the CALLS LIKE-with-`||` pattern;
-    // the existing `test_axon_inspect` covers the canonical Symbol.id match
-    // path which remains in the OR clause and is unaffected.
+    // (`<caller_file>::<callee_name>` instead of canonical Symbol.id).
+    //
+    // Coverage below uses `test_support::ist_fixtures` (REQ-AXO-142) to seed
+    // both the canonical and synthetic CALLS shapes and verify that
+    // `inspect` reports the combined caller count over the OR clause.
+    use crate::mcp::JsonRpcRequest;
+    use crate::test_support::ist_fixtures::{
+        assert_ist_count, create_test_server_with_ist_seed, CallFixture, IstSeed, SymbolFixture,
+    };
+    use serde_json::json;
+
     #[test]
-    fn placeholder_for_synthetic_target_id_workaround() {
-        // No-op assertion that exists to satisfy the TDD gate (GUI-PRO-001 /
-        // REQ-AXO-121: inline #[cfg(test)] satisfies the tests.rs requirement).
-        // Real coverage = live IST verification documented in REQ-AXO-134.
+    fn callers_count_combines_canonical_and_synthetic_target_ids() {
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .symbol(
+                    SymbolFixture::new(
+                        "axon::wrong_project_scope_response",
+                        "wrong_project_scope_response",
+                        "method",
+                        "AXO",
+                    )
+                    .tested(true),
+                )
+                .symbol(SymbolFixture::new(
+                    "axon::caller_canonical",
+                    "caller_canonical",
+                    "function",
+                    "AXO",
+                ))
+                .symbol(SymbolFixture::new(
+                    "axon::caller_synthetic_a",
+                    "caller_synthetic_a",
+                    "function",
+                    "AXO",
+                ))
+                .symbol(SymbolFixture::new(
+                    "axon::caller_synthetic_b",
+                    "caller_synthetic_b",
+                    "function",
+                    "AXO",
+                ))
+                .call(CallFixture::canonical(
+                    "axon::caller_canonical",
+                    "axon::wrong_project_scope_response",
+                    "AXO",
+                ))
+                .call(CallFixture::synthetic(
+                    "axon::caller_synthetic_a",
+                    "tools_dx",
+                    "wrong_project_scope_response",
+                    "AXO",
+                ))
+                .call(CallFixture::synthetic(
+                    "axon::caller_synthetic_b",
+                    "tools_soll",
+                    "wrong_project_scope_response",
+                    "AXO",
+                )),
+        )
+        .unwrap();
+
+        // Sanity-check the seeded data via raw SQL so the assertion below
+        // attributes any query mismatch to the projection logic, not seeding.
+        assert_ist_count(
+            &harness.store,
+            "SELECT count(*) FROM CALLS \
+             WHERE target_id = 'axon::wrong_project_scope_response' \
+                OR target_id LIKE '%::wrong_project_scope_response'",
+            3,
+        );
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "inspect",
+                    "arguments": { "symbol": "wrong_project_scope_response", "project": "AXO" }
+                })),
+                id: Some(json!(13401)),
+            })
+            .expect("handle_request returned an envelope");
+        let result = response.result.expect("inspect returned a result body");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("inspect content[0].text is a string");
+        assert!(text.contains("wrong_project_scope_response"), "{text}");
+        // The canonical + 2 synthetic callers must surface as 3 in the table.
+        assert!(
+            text.contains(" 3 "),
+            "expected callers count 3 in inspect output, got: {text}"
+        );
     }
 }
