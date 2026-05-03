@@ -5371,6 +5371,147 @@ fn test_axon_commit_work_enforces_guideline() {
         .unwrap_or(false));
 }
 
+// REQ-AXO-145 — `axon_pre_flight_check` accepts `incremental: true` to
+// validate each diff_path individually and return per-file violations.
+// Default (omitted/false) preserves the batch-validation contract.
+//
+// Tests use a unique trigger path (`src/req145_fixture/`) so the new
+// guideline isolates from any pre-seeded GUI-PRO-* rules.
+fn insert_req145_fixture_guideline(server: &McpServer) {
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('GUI-REQ145-001', 'Guideline', 'AXO', 'REQ-145 fixture rule', \
+             'Diffs touching src/req145_fixture/ must include req145_marker.rs', 'active', \
+             '{\"trigger_path\":\"src/req145_fixture/\",\"required_path\":\"req145_marker.rs\",\"enforcement\":\"strict\"}')",
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_axon_pre_flight_check_incremental_returns_per_file_violations() {
+    let server = create_test_server();
+    insert_req145_fixture_guideline(&server);
+
+    // Mixed batch: bad file (triggers fixture rule, no marker) +
+    // good file (carries the marker).
+    let req_incremental = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_pre_flight_check",
+            "arguments": {
+                "diff_paths": [
+                    "src/req145_fixture/feature.rs",
+                    "src/req145_fixture/req145_marker.rs"
+                ],
+                "incremental": true
+            }
+        },
+        "id": 1
+    });
+
+    let res = server
+        .handle_request(serde_json::from_value(req_incremental).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(
+        res.get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "incremental dry-run with one failing file must surface isError=true"
+    );
+
+    let data = res.get("data").expect("data field present");
+    assert_eq!(
+        data.get("incremental").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(data.get("files_checked").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(data.get("failing_files").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        data.get("first_failing_path").and_then(|v| v.as_str()),
+        Some("src/req145_fixture/feature.rs")
+    );
+
+    let per_file = data
+        .get("per_file_violations")
+        .and_then(|v| v.as_object())
+        .expect("per_file_violations is an object");
+    let bad_entry = per_file
+        .get("src/req145_fixture/feature.rs")
+        .expect("bad path entry present");
+    assert_eq!(bad_entry.get("ok").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        bad_entry
+            .get("violations")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "bad path must carry at least one violation"
+    );
+    let good_entry = per_file
+        .get("src/req145_fixture/req145_marker.rs")
+        .expect("good path entry present");
+    assert_eq!(good_entry.get("ok").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn test_axon_pre_flight_check_default_mode_remains_batch() {
+    let server = create_test_server();
+    insert_req145_fixture_guideline(&server);
+
+    // Same mixed batch but WITHOUT incremental. The aggregate batch view
+    // satisfies the rule because the marker file is in the same set,
+    // so it must pass.
+    let req_default = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_pre_flight_check",
+            "arguments": {
+                "diff_paths": [
+                    "src/req145_fixture/feature.rs",
+                    "src/req145_fixture/req145_marker.rs"
+                ]
+            }
+        },
+        "id": 2
+    });
+
+    let res = server
+        .handle_request(serde_json::from_value(req_default).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(
+        !res.get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "default (batch) mode passes when marker is in the same diff_paths set"
+    );
+    let text = res
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    assert!(
+        text.contains("Validation passed"),
+        "batch mode must surface the batch validation message"
+    );
+    // Default mode never sets the incremental marker.
+    let incremental_marker = res
+        .pointer("/data/incremental")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(!incremental_marker);
+}
+
 // REQ-AXO-121 — `path_satisfies_required_path` must recognize inline
 // `#[cfg(test)]` blocks inside a modified `.rs` file as satisfying the
 // `tests.rs` requirement. This unblocks (a) Rust binary crates whose

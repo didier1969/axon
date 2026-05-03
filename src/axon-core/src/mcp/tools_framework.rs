@@ -243,10 +243,84 @@ impl McpServer {
             .get("message")
             .and_then(|value| value.as_str())
             .unwrap_or("pre-flight-check");
-        self.axon_commit_work(&json!({
-            "diff_paths": diff_paths,
-            "message": message,
-            "dry_run": true
+        let incremental = args
+            .get("incremental")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        if !incremental {
+            return self.axon_commit_work(&json!({
+                "diff_paths": diff_paths,
+                "message": message,
+                "dry_run": true
+            }));
+        }
+
+        // REQ-AXO-145 — per-file incremental dry-run. Re-runs axon_commit_work
+        // for each diff_path individually so an LLM authoring N files
+        // sequentially detects a TDD-gate failure on file 1 without first
+        // authoring files 2..N.
+        let mut per_file = serde_json::Map::new();
+        let mut total_violations = 0usize;
+        let mut failing_files = 0usize;
+        let mut first_failing_path: Option<String> = None;
+        for path_value in diff_paths.iter() {
+            let Some(path_str) = path_value.as_str() else {
+                continue;
+            };
+            let result = self.axon_commit_work(&json!({
+                "diff_paths": [path_value.clone()],
+                "message": message,
+                "dry_run": true
+            }));
+            let mut entry = json!({ "ok": true, "violations": [] });
+            if let Some(value) = result.as_ref() {
+                if value
+                    .get("isError")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let violations = value
+                        .pointer("/data/violations")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
+                    let count = violations.as_array().map(|a| a.len()).unwrap_or(0);
+                    total_violations += count;
+                    failing_files += 1;
+                    if first_failing_path.is_none() {
+                        first_failing_path = Some(path_str.to_string());
+                    }
+                    entry = json!({ "ok": false, "violations": violations });
+                }
+            }
+            per_file.insert(path_str.to_string(), entry);
+        }
+
+        let summary_text = if total_violations == 0 {
+            format!(
+                "Validation passed (Dry Run, incremental). {} file(s) checked individually.",
+                per_file.len()
+            )
+        } else {
+            format!(
+                "Incremental dry run found {} violation(s) across {} file(s). First failing path: {}",
+                total_violations,
+                failing_files,
+                first_failing_path.as_deref().unwrap_or("?")
+            )
+        };
+
+        Some(json!({
+            "content": [{ "type": "text", "text": summary_text }],
+            "isError": total_violations > 0,
+            "data": {
+                "incremental": true,
+                "files_checked": per_file.len(),
+                "failing_files": failing_files,
+                "total_violations": total_violations,
+                "first_failing_path": first_failing_path,
+                "per_file_violations": per_file,
+            }
         }))
     }
 

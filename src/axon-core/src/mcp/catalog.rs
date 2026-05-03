@@ -203,7 +203,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "items": { "type": "string" },
                             "description": "List of modified file paths."
                         },
-                        "message": { "type": "string", "description": "Optional message to log the validation. Default: 'pre-flight-check'." }
+                        "message": { "type": "string", "description": "Optional message to log the validation. Default: 'pre-flight-check'." },
+                        "incremental": { "type": "boolean", "description": "If true (default false), validate each file individually and return per-file violations. Use to detect a TDD-gate failure on file 1 without first authoring files 2..N." }
                     },
                     "required": ["diff_paths"]
                 }

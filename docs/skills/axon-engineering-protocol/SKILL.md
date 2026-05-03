@@ -129,7 +129,7 @@ Server-owned IDs `TYPE-CODE-NNN`. Never fabricate: project_code, preview, revisi
 2. `query` / `inspect` / `retrieve_context`
 3. `impact` / `why` / `path` / `anomalies` if needed
 4. SOLL update if intent changed (REQ created/updated, evidence attached BEFORE code)
-5. `axon_pre_flight_check`
+5. `axon_pre_flight_check` — add `incremental: true` (REQ-AXO-145) to validate each `diff_paths` entry individually; returns `data.per_file_violations` keyed by path so an LLM authoring N files sequentially can fix file 1 before authoring 2..N
 6. **Pre-stage** `git add <Edit/Write modified files>` — `axon_commit_work` runs `git add <diff_paths>` itself and refuses partial-staging since REQ-AXO-138 (returns `data.git_add_exit_code` + `parameter_repair` if any path fails); pre-staging stays best practice for repos with conditional hooks
 7. `axon_commit_work`
 8. **Verify** `git status` after — if `M` files remain, commit dropped modifications
