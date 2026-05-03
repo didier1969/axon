@@ -1579,6 +1579,63 @@ impl McpServer {
 
     pub(crate) fn axon_job_status(&self, args: &Value) -> Option<Value> {
         let job_id = args.get("job_id")?.as_str()?;
+        // REQ-AXO-146 — optional event-driven wait. Default polling unchanged.
+        // wait=true blocks the call until the job reaches a terminal state
+        // (completed|failed) OR `timeout_ms` elapses, eliminating the need
+        // for the LLM to issue N round-trips. Timeout returns a partial
+        // snapshot with `data.next_action.kind = continue_polling_until_terminal_state`
+        // so the existing polling guidance still applies.
+        let wait = args
+            .get("wait")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30_000);
+        let poll_interval_ms = args
+            .get("poll_interval_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(250)
+            .max(10);
+        let started = std::time::Instant::now();
+        let mut polls = 0u64;
+
+        loop {
+            polls += 1;
+            let mut snapshot = self.job_status_snapshot(job_id)?;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let state_str = snapshot
+                .pointer("/data/state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let is_terminal = matches!(state_str.as_str(), "completed" | "failed");
+            let timed_out = wait && elapsed_ms >= timeout_ms;
+            if wait {
+                let wait_meta = json!({
+                    "wait": true,
+                    "polls": polls,
+                    "elapsed_ms": elapsed_ms,
+                    "timeout_ms": timeout_ms,
+                    "poll_interval_ms": poll_interval_ms,
+                    "timed_out": timed_out,
+                    "reached_terminal": is_terminal,
+                });
+                if let Some(data) = snapshot.get_mut("data").and_then(|v| v.as_object_mut()) {
+                    data.insert("wait_metadata".to_string(), wait_meta);
+                }
+            }
+            if !wait || is_terminal || timed_out {
+                return Some(snapshot);
+            }
+            let remaining = timeout_ms.saturating_sub(elapsed_ms);
+            let sleep_ms = poll_interval_ms.min(remaining).max(1);
+            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+        }
+    }
+
+    fn job_status_snapshot(&self, job_id: &str) -> Option<Value> {
         let rows = self
             .graph_store
             .query_json_param(

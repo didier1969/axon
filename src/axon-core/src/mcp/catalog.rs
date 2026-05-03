@@ -383,11 +383,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "job_status",
-                "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`.",
+                "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`. REQ-AXO-146: pass `wait: true` to block until terminal (completed|failed) or `timeout_ms` elapses, eliminating polling round-trips.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "job_id": { "type": "string", "description": "Job identifier (e.g. JOB-1712851200000)." }
+                        "job_id": { "type": "string", "description": "Job identifier (e.g. JOB-1712851200000)." },
+                        "wait": { "type": "boolean", "description": "REQ-AXO-146: when true, blocks the call until the job reaches a terminal state or `timeout_ms` elapses. Default false (polling). When wait completes, `data.wait_metadata` reports polls/elapsed_ms/timed_out/reached_terminal." },
+                        "timeout_ms": { "type": "integer", "description": "REQ-AXO-146: max time (ms) to wait when `wait=true`. Default 30000. On timeout the response carries the latest snapshot plus `data.next_action.kind = continue_polling_until_terminal_state` so existing polling guidance still applies." },
+                        "poll_interval_ms": { "type": "integer", "description": "REQ-AXO-146: internal sleep (ms) between snapshot reads when `wait=true`. Default 250. Floor 10." }
                     },
                     "required": ["job_id"]
                 }

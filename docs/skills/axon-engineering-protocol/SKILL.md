@@ -113,7 +113,7 @@ North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive
 | `soll_attach_evidence` | proof (file/test/metric/diff); `data.status` ∈ ok\|partial\|rejected_all\|no_artifacts |
 | `soll_commit_revision` | atomic checkpoint per `preview_id` |
 
-Async: response with `job_id` → `job_status(job_id)` until terminal (`succeeded` / `failed`).
+Async: response with `job_id` → `job_status(job_id)` until terminal (`succeeded` / `failed`). REQ-AXO-146: pass `wait: true` (with optional `timeout_ms` default 30000, `poll_interval_ms` default 250) to block until terminal in a single round-trip; on timeout the snapshot keeps `next_action.kind = continue_polling_until_terminal_state`. `data.wait_metadata` reports polls/elapsed_ms/timed_out/reached_terminal.
 
 For `soll_work_plan`: `format=brief, limit, top` first; `include_validation_details=false` unless requirement-level detail needed. Terminal-state nodes (status ∈ `delivered`/`superseded`/`completed`/`archived`) are excluded from waves AND from descendant counting, so `unblocks N descendant(s)` reflects OPEN descendants only (REQ-AXO-135). Flip a closed item's status to mark it terminal — it disappears from wave 1 and stops inflating parent unblocker scores. Temporal score decay (REQ-AXO-144): `score *= exp(-age_days / half_life_days)` for nodes carrying `updated_at` metadata; defaults `include_decay=true`, `half_life_days=30`. `reasons[]` surfaces `decayed by age (factor X.XX)` when factor < 0.5. Disable with `include_decay=false` for benchmarking.
 

@@ -3957,3 +3957,113 @@ fn test_status_data_root_absolute_returns_unknown_when_env_missing() {
         "data_root_absolute must be the sentinel 'unknown' when AXON_DB_ROOT is unset"
     );
 }
+
+// REQ-AXO-146 — `job_status(wait: true)` blocks the call until the job
+// reaches a terminal state OR `timeout_ms` elapses, eliminating the
+// polling round-trips that the LLM would otherwise pay 2s+/iteration.
+#[test]
+fn test_job_status_wait_returns_immediately_when_already_terminal() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.McpJob (job_id, tool_name, status, submitted_at, finished_at, request_json, reserved_ids_json, result_json, error_text) \
+             VALUES ('JOB-REQ146-OK', 'soll_apply_plan', 'succeeded', 1, 2, '{}', '{}', '{\"data\":{\"applied\":1}}', '')",
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "job_status",
+            "arguments": {
+                "job_id": "JOB-REQ146-OK",
+                "wait": true,
+                "timeout_ms": 5_000,
+                "poll_interval_ms": 50
+            }
+        })),
+        id: Some(json!(801)),
+    };
+    let started = std::time::Instant::now();
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    assert!(
+        elapsed_ms < 1_000,
+        "wait must short-circuit when the job is already terminal (took {}ms)",
+        elapsed_ms
+    );
+    let data = response.get("data").expect("data payload");
+    assert_eq!(data["state"].as_str(), Some("completed"));
+    let wait_meta = data
+        .get("wait_metadata")
+        .expect("wait_metadata present when wait=true");
+    assert_eq!(wait_meta["wait"].as_bool(), Some(true));
+    assert_eq!(wait_meta["timed_out"].as_bool(), Some(false));
+    assert_eq!(wait_meta["reached_terminal"].as_bool(), Some(true));
+    assert!(wait_meta["polls"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
+fn test_job_status_wait_returns_partial_snapshot_on_timeout() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.McpJob (job_id, tool_name, status, submitted_at, request_json, reserved_ids_json) \
+             VALUES ('JOB-REQ146-WAIT', 'soll_apply_plan', 'queued', 1, '{}', '{}')",
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "job_status",
+            "arguments": {
+                "job_id": "JOB-REQ146-WAIT",
+                "wait": true,
+                "timeout_ms": 120,
+                "poll_interval_ms": 30
+            }
+        })),
+        id: Some(json!(802)),
+    };
+    let started = std::time::Instant::now();
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    assert!(
+        elapsed_ms >= 100,
+        "wait must honour timeout_ms (took {}ms, expected ≥100)",
+        elapsed_ms
+    );
+    assert!(
+        elapsed_ms < 2_000,
+        "wait must not block longer than timeout_ms + small slack (took {}ms)",
+        elapsed_ms
+    );
+    let data = response.get("data").expect("data payload");
+    assert_eq!(
+        data["state"].as_str(),
+        Some("queued"),
+        "non-terminal job stays in queued state across the wait"
+    );
+    let wait_meta = data
+        .get("wait_metadata")
+        .expect("wait_metadata present when wait=true");
+    assert_eq!(wait_meta["timed_out"].as_bool(), Some(true));
+    assert_eq!(wait_meta["reached_terminal"].as_bool(), Some(false));
+    assert!(
+        wait_meta["polls"].as_u64().unwrap_or(0) >= 2,
+        "wait should issue ≥2 snapshot reads inside a 120ms window with 30ms interval"
+    );
+    // Continue-polling guidance still surfaces so an LLM resuming the
+    // call after the wait returns sees the canonical recovery path.
+    assert_eq!(
+        data["next_action"]["when"].as_str(),
+        Some("continue_polling_until_terminal_state")
+    );
+}
