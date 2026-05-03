@@ -427,11 +427,29 @@ impl RuntimeBootProfile {
     }
 }
 
+/// REQ-AXO-171 — When the parent fork-execs the same binary to enter
+/// GPU embed service mode (see `embedder/gpu_backend.rs:GpuEmbedSubprocess::spawn_child`),
+/// it tags the child with `AXON_GPU_EMBED_SERVICE_CHILD=1`. Without
+/// this short-circuit the child runs the full indexer/brain boot,
+/// conflicts with the parent's locks, never writes the JSON init
+/// handshake, and ends up as a zombie — Pipeline 2 fully broken.
+fn gpu_embed_subprocess_child_requested() -> bool {
+    std::env::var("AXON_GPU_EMBED_SERVICE_CHILD")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 pub fn run_brain() -> anyhow::Result<()> {
+    if gpu_embed_subprocess_child_requested() {
+        return crate::embedder::run_gpu_embed_subprocess_stdio();
+    }
     run(RuntimeBootProfile::brain())
 }
 
 pub fn run_indexer() -> anyhow::Result<()> {
+    if gpu_embed_subprocess_child_requested() {
+        return crate::embedder::run_gpu_embed_subprocess_stdio();
+    }
     run(RuntimeBootProfile::indexer())
 }
 
@@ -823,8 +841,8 @@ mod tests {
         apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
         apply_canonical_ort_thread_defaults_from_openmp, apply_canonical_watcher_runtime_env,
         apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
-        canonical_embedding_provider_request, graph_first_indexer_lane_sizing, RuntimeBootProfile,
-        RuntimeBootRole,
+        canonical_embedding_provider_request, gpu_embed_subprocess_child_requested,
+        graph_first_indexer_lane_sizing, RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
@@ -1463,6 +1481,57 @@ mod tests {
             std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
             std::env::remove_var("AXON_GPU_RECYCLE_REQUIRED_BATCHES");
+        }
+    }
+
+    #[test]
+    fn gpu_embed_subprocess_child_requested_reads_canonical_env() {
+        // REQ-AXO-171 — restore the missing dispatch wiring. The parent
+        // (gpu_backend.rs:GpuEmbedSubprocess::spawn_child) fork-execs
+        // current_exe and sets AXON_GPU_EMBED_SERVICE_CHILD=1 to flag
+        // GPU embed service mode. Without this predicate, run_indexer
+        // and run_brain run the full boot in the child, conflict with
+        // the parent's locks, never write the JSON init handshake,
+        // and zombify — Pipeline 2 fully broken.
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_CHILD");
+        }
+        assert!(
+            !gpu_embed_subprocess_child_requested(),
+            "no env var ⇒ child mode must be off"
+        );
+
+        unsafe {
+            std::env::set_var("AXON_GPU_EMBED_SERVICE_CHILD", "1");
+        }
+        assert!(
+            gpu_embed_subprocess_child_requested(),
+            "AXON_GPU_EMBED_SERVICE_CHILD=1 ⇒ child mode must be on"
+        );
+
+        // Anything other than the literal "1" must NOT trigger child
+        // mode — protects against accidental leak from a parent that
+        // exported the var but didn't unset it before re-exec.
+        unsafe {
+            std::env::set_var("AXON_GPU_EMBED_SERVICE_CHILD", "0");
+        }
+        assert!(
+            !gpu_embed_subprocess_child_requested(),
+            "value=0 must NOT trigger child mode"
+        );
+
+        unsafe {
+            std::env::set_var("AXON_GPU_EMBED_SERVICE_CHILD", "true");
+        }
+        assert!(
+            !gpu_embed_subprocess_child_requested(),
+            "non-canonical truthy values must NOT trigger child mode \
+             (only the literal \"1\" is canonical)"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_GPU_EMBED_SERVICE_CHILD");
         }
     }
 }
