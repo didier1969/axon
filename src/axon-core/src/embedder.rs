@@ -238,11 +238,7 @@ static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingReques
 
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
-    _vector_prepare_workers: Vec<thread::JoinHandle<()>>,
-    _vector_refill_workers: Vec<thread::JoinHandle<()>>,
     _vector_workers: Vec<thread::JoinHandle<()>>,
-    _vector_persist_workers: Vec<thread::JoinHandle<()>>,
-    _vector_finalize_workers: Vec<thread::JoinHandle<()>>,
     _vector_maintenance_workers: Vec<thread::JoinHandle<()>>,
     _graph_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -1972,11 +1968,11 @@ impl SemanticWorkerPool {
             }));
         }
 
-        let mut vector_prepare_workers = Vec::new();
-        let mut vector_refill_workers = Vec::new();
+        // DEC-AXO-070 single-loop vector lane: claim → prepare → embed →
+        // persist → finalize, all in one thread per worker. Channels and the
+        // 5-loop pipeline are gone. Maintenance loop (stale-inflight recovery)
+        // remains as a separate thread.
         let mut vector_workers = Vec::new();
-        let mut vector_persist_workers = Vec::new();
-        let mut vector_finalize_workers = Vec::new();
         let mut vector_maintenance_workers = Vec::new();
         if config.vector_workers > 0 {
             let maintenance_graph_store = Arc::clone(&graph_store);
@@ -1984,64 +1980,10 @@ impl SemanticWorkerPool {
                 vector_maintenance_loop::vector_maintenance_worker_loop(maintenance_graph_store);
             }));
         }
-        let bootstrap_prepare_workers_per_vector = single_worker_gpu_prepare_worker_count(
-            embedding_provider_requested_is_gpu(),
-            config.vector_workers,
-            configured_vector_prepare_workers_per_vector(),
-        );
         for worker_idx in 0..config.vector_workers {
-            let graph_store = Arc::clone(&graph_store);
-            let ready_queue = Arc::new(SharedPreparedBatchQueue::new());
-            let (prepare_tx, prepare_rx) =
-                bounded::<VectorPrepareRequest>(configured_vector_prepare_queue_bound());
-            let (refill_tx, refill_rx) = unbounded::<VectorRefillCommand>();
-            let (persist_tx, persist_rx) =
-                bounded::<VectorPersistRequest>(configured_vector_persist_queue_bound());
-            let (finalize_tx, finalize_rx) =
-                bounded::<VectorFinalizeRequest>(VECTOR_FINALIZE_QUEUE_BOUND);
-            for _ in 0..bootstrap_prepare_workers_per_vector {
-                let prepare_graph_store = Arc::clone(&graph_store);
-                let prepare_rx = prepare_rx.clone();
-                let prepare_ready_queue = Arc::clone(&ready_queue);
-                vector_prepare_workers.push(thread::spawn(move || {
-                    vector_prepare_loop::vector_prepare_worker_loop(
-                        worker_idx,
-                        prepare_graph_store,
-                        prepare_rx,
-                        prepare_ready_queue,
-                    );
-                }));
-            }
-            let persist_graph_store = Arc::clone(&graph_store);
-            vector_persist_workers.push(thread::spawn(move || {
-                vector_persist_loop::vector_persist_worker_loop(worker_idx, persist_graph_store, persist_rx);
-            }));
-            let finalize_graph_store = Arc::clone(&graph_store);
-            vector_finalize_workers.push(thread::spawn(move || {
-                vector_finalize_loop::vector_finalize_worker_loop(worker_idx, finalize_graph_store, finalize_rx);
-            }));
-            let worker_ready_queue = Arc::clone(&ready_queue);
-            let refill_graph_store = Arc::clone(&graph_store);
-            let refill_prepare_tx = prepare_tx.clone();
-            let refill_ready_queue = Arc::clone(&ready_queue);
-            vector_refill_workers.push(thread::spawn(move || {
-                vector_refill_loop::vector_refill_worker_loop(
-                    worker_idx,
-                    refill_graph_store,
-                    refill_prepare_tx,
-                    refill_rx,
-                    refill_ready_queue,
-                );
-            }));
+            let lane_graph_store = Arc::clone(&graph_store);
             vector_workers.push(thread::spawn(move || {
-                vector_worker_loop::vector_worker_loop(
-                    worker_idx,
-                    graph_store,
-                    refill_tx,
-                    persist_tx,
-                    finalize_tx,
-                    worker_ready_queue,
-                );
+                vector_worker_loop::vector_lane_worker(worker_idx, lane_graph_store);
             }));
         }
 
@@ -2055,11 +1997,7 @@ impl SemanticWorkerPool {
         }
         Self {
             _query_workers: query_workers,
-            _vector_prepare_workers: vector_prepare_workers,
-            _vector_refill_workers: vector_refill_workers,
             _vector_workers: vector_workers,
-            _vector_persist_workers: vector_persist_workers,
-            _vector_finalize_workers: vector_finalize_workers,
             _vector_maintenance_workers: vector_maintenance_workers,
             _graph_workers: graph_workers,
         }
