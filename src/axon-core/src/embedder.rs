@@ -67,20 +67,8 @@ mod provider_contract;
 mod provider_runtime;
 #[path = "embedder/vector_executor.rs"]
 mod vector_executor;
-#[path = "embedder/vector_finalize.rs"]
-mod vector_finalize;
 #[path = "embedder/vector_maintenance_loop.rs"]
 mod vector_maintenance_loop;
-#[path = "embedder/vector_finalize_loop.rs"]
-mod vector_finalize_loop;
-#[path = "embedder/vector_orchestrator.rs"]
-mod vector_orchestrator;
-#[path = "embedder/vector_persist_loop.rs"]
-mod vector_persist_loop;
-#[path = "embedder/vector_prepare_loop.rs"]
-mod vector_prepare_loop;
-#[path = "embedder/vector_refill_loop.rs"]
-mod vector_refill_loop;
 #[path = "embedder/vector_worker_loop.rs"]
 mod vector_worker_loop;
 
@@ -139,17 +127,6 @@ pub use provider_runtime::{
     EmbeddingProviderDiagnostics,
 };
 use vector_executor::VectorEmbeddingBackend;
-use vector_finalize::{
-    apply_vector_persist_outcome, dispatch_vector_persist_plan,
-    flush_completed_vectorization_works, process_finalize_request,
-    process_vector_persist_outbox_work,
-};
-#[cfg(test)]
-use vector_finalize::{
-    finalize_completed_vectorization_works, is_irrecoverable_outbox_finalize_error,
-    reconcile_outbox_finalize_failure,
-};
-use vector_orchestrator::{VectorRefillCommand, VectorRefillProducerState};
 
 #[allow(dead_code)]
 pub(crate) fn embedder_cuda_execution_provider_dispatch(
@@ -2710,31 +2687,6 @@ fn record_vector_frontier_metrics(
     service_guard::set_vector_ready_replenishment_deficit(active_command_gap as u64);
 }
 
-fn send_vector_refill_requeue(
-    graph_store: &GraphStore,
-    worker_idx: usize,
-    refill_tx: &Sender<VectorRefillCommand>,
-    works: Vec<FileVectorizationWork>,
-) {
-    if works.is_empty() {
-        return;
-    }
-    if let Err(err) = refill_tx.send(VectorRefillCommand::RequeueWorks(works.clone())) {
-        error!(
-            "Semantic Vector Worker [{}]: refill worker unavailable while requeueing vector work: {}",
-            worker_idx, err
-        );
-        if let Err(requeue_err) = graph_store
-            .mark_file_vectorization_work_failed(&works, "refill_worker_unavailable_requeued")
-        {
-            error!(
-                "Semantic Vector Worker [{}]: failed to requeue vector work after refill worker loss: {:?}",
-                worker_idx, requeue_err
-            );
-        }
-    }
-}
-
 fn wait_for_vector_persist_outcome(
     graph_store: &Arc<GraphStore>,
     worker_idx: usize,
@@ -4159,14 +4111,13 @@ mod tests {
         dispatch_prepared_vector_embed_sequence, effective_embedding_provider_is_gpu,
         embedding_download_progress_enabled, embedding_lane_config_from_env,
         embedding_model_cache_dir, embedding_provider_diagnostics,
-        finalize_completed_vectorization_works, flush_completed_vectorization_works,
         gpu_memory_soft_limit_mb, gpu_primary_worker_max_used_mb, gpu_ready_queue_push_allowed,
         gpu_recycle_after_vram_summit_observe, gpu_secondary_worker_allowed,
         gpu_worker_consumption_allowed, gpu_worker_has_pending_work,
         gpu_worker_should_wait_for_ready, is_fatal_embedding_error,
-        is_irrecoverable_outbox_finalize_error, load_runtime_embedding_tokenizer,
+        load_runtime_embedding_tokenizer,
         merge_vectorization_work, observe_token_lane_thresholds, query_embedding_allowed,
-        reconcile_outbox_finalize_failure, record_vector_frontier_metrics, replenish_target_chunks,
+        record_vector_frontier_metrics, replenish_target_chunks,
         replenish_target_ready_depth, request_query_embedding,
         reset_token_lane_classifier_for_tests, single_worker_gpu_prepare_worker_count,
         split_prepared_batch_by_lane, split_prepared_batch_for_gpu_budget,
@@ -4175,7 +4126,7 @@ mod tests {
         GpuMemorySnapshot, PreparedBatchEnvelope, PreparedVectorEmbedBatch,
         PreparedVectorPrepareOutcome, QueryEmbeddingRequest, TokenLaneThresholdSource,
         TokenLaneThresholds, VectorBatchLane, VectorBatchPlan, VectorChunkWorkItem,
-        VectorFinalizeRequest, VectorPrepareRequest, VectorRefillProducerState,
+        VectorFinalizeRequest, VectorPrepareRequest,
         VectorReplenishmentMode,
     };
     use crate::embedding_contract::{fastembed_model, CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH};
@@ -6529,321 +6480,6 @@ mod tests {
         assert_eq!(envelope.persist_plan.batch_run.file_count, 2);
     }
 
-    #[test]
-    fn test_irrecoverable_outbox_finalize_error_is_quarantined_and_requeued() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/outbox-poison.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
-                 VALUES ('/tmp/outbox-poison.rs', 'inflight', 1, 'claim-current', 1, 1, 'outbox', 7)",
-            )
-            .unwrap();
-
-        let payload = VectorPersistOutboxPayload {
-            updates: vec![],
-            completed_works: vec![FileVectorizationWork {
-                file_path: "/tmp/outbox-poison.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            }],
-            completed_lease_snapshots: vec![FileVectorizationLeaseSnapshot {
-                file_path: "/tmp/outbox-poison.rs".to_string(),
-                claim_token: "claim-stale".to_string(),
-                lease_epoch: 1,
-            }],
-            batch_run: VectorBatchRun {
-                run_id: "outbox-poison-run".to_string(),
-                prepare_started_at_ms: 0,
-                prepare_finished_at_ms: 0,
-                ready_enqueued_at_ms: 0,
-                started_at_ms: 1,
-                finished_at_ms: 1,
-                gpu_started_at_ms: 0,
-                gpu_finished_at_ms: 0,
-                persist_enqueued_at_ms: 0,
-                persist_started_at_ms: 0,
-                persist_finished_at_ms: 0,
-                finalize_enqueued_at_ms: 0,
-                finalize_finished_at_ms: 0,
-                provider: "cpu".to_string(),
-                runner_kind: "test".to_string(),
-                model_id: CHUNK_MODEL_ID.to_string(),
-                chunk_count: 64,
-                file_count: 1,
-                input_bytes: 1024,
-                total_tokens: 0,
-                max_item_tokens: 0,
-                avg_item_tokens: 0.0,
-                micro_batch_count: 0,
-                max_micro_batch_tokens: 0,
-                avg_micro_batch_tokens: 0.0,
-                effective_vector_workers_admitted: 0,
-                ready_queue_depth_at_gpu_start: 0,
-                prepare_inflight_at_gpu_start: 0,
-                ready_queue_chunks_at_gpu_start: 0,
-                prepare_inflight_chunks_at_gpu_start: 0,
-                vector_worker_admission_reason: String::new(),
-                allowed_gpu_workers: 0,
-                batch_wait_for_ready_ms: 0,
-                persist_queue_wait_ms: 0,
-                finalize_queue_wait_ms: 0,
-                batch_lane: "mixed".to_string(),
-                batch_shape: "homogeneous".to_string(),
-                lane_small_max_tokens: 0,
-                lane_medium_max_tokens: 0,
-                fetch_ms: 1,
-                embed_ms: 1,
-                db_write_ms: 0,
-                mark_done_ms: 0,
-                success: true,
-                error_reason: None,
-            },
-        };
-        let payload_json = serde_json::to_string(&payload).unwrap();
-        let escaped_payload_json = payload_json.replace('\'', "''");
-        let escaped_run_id = payload.batch_run.run_id.replace('\'', "''");
-        let escaped_model_id = payload.batch_run.model_id.replace('\'', "''");
-        store
-            .execute(&format!(
-                "INSERT INTO VectorPersistOutbox (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, payload_json) \
-                 VALUES ('outbox-poison', '{}', '{}', 'inflight', 1, 1, 1, 1, 'outbox', '{}')",
-                escaped_run_id,
-                escaped_model_id,
-                escaped_payload_json
-            ))
-            .unwrap();
-
-        let mut batch_runs = vec![payload.batch_run.clone()];
-        let quarantined = reconcile_outbox_finalize_failure(
-            &store,
-            "outbox-poison",
-            &payload,
-            &anyhow::anyhow!("finalize refused: expected 1 outbox-owned rows, matched 0"),
-            &mut batch_runs,
-            "failed to finalize outbox vectorization completion: finalize refused",
-            7,
-        )
-        .unwrap();
-
-        assert!(quarantined);
-
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM VectorPersistOutbox WHERE outbox_id = 'outbox-poison'"
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM FileVectorizationQueue \
-                     WHERE file_path = '/tmp/outbox-poison.rs' \
-                       AND status = 'queued' \
-                       AND claim_token IS NULL \
-                       AND COALESCE(lease_owner, '') = ''"
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM sqlite_master \
-                     WHERE type = 'table' \
-                       AND name = 'VectorBatchRun'"
-                )
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn test_irrecoverable_outbox_finalize_error_detection() {
-        assert!(is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
-            "finalize refused: expected 9 outbox-owned rows, matched 0"
-        )));
-        assert!(is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
-            "finalize refused: expected 2 lease snapshots, got 1"
-        )));
-        assert!(!is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
-            "database is locked"
-        )));
-    }
-
-    #[test]
-    fn test_finalize_completed_vectorization_works_clears_queue_and_enqueues_projection() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/finalize_vector.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
-                 VALUES ('/tmp/finalize_vector.rs', 'inflight', 1, 'claim-finalize-vector', 1, 1, 'finalize', 1)",
-            )
-            .unwrap();
-
-        let outcome = finalize_completed_vectorization_works(
-            &store,
-            vec![FileVectorizationWork {
-                file_path: "/tmp/finalize_vector.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            }],
-            vec![FileVectorizationLeaseSnapshot {
-                file_path: "/tmp/finalize_vector.rs".to_string(),
-                claim_token: "claim-finalize-vector".to_string(),
-                lease_epoch: 1,
-            }],
-            vec![],
-        )
-        .unwrap();
-
-        assert_eq!(outcome.completed_works.len(), 1);
-        assert_eq!(
-            store.query_count(
-                "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/finalize_vector.rs'"
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            store.query_count(
-                "SELECT count(*) FROM GraphProjectionQueue WHERE anchor_type = 'file' AND anchor_id = '/tmp/finalize_vector.rs'"
-            )
-            .unwrap(),
-            if crate::runtime_mode::graph_embeddings_enabled() {
-                1
-            } else {
-                0
-            }
-        );
-    }
-
-    #[test]
-    fn test_finalize_completed_vectorization_works_marks_file_ready_under_file_level_contract() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/file_level_ready.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-1', 'symbol', 'sym-1', 'PRJ', '/tmp/file_level_ready.rs', 'function', 'fn a() {}', 'hash-a', 1, 1)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
-                 VALUES ('/tmp/file_level_ready.rs', 'inflight', 1, 'claim-file-ready', 1, 1, 'finalize', 1)",
-            )
-            .unwrap();
-
-        finalize_completed_vectorization_works(
-            &store,
-            vec![FileVectorizationWork {
-                file_path: "/tmp/file_level_ready.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            }],
-            vec![FileVectorizationLeaseSnapshot {
-                file_path: "/tmp/file_level_ready.rs".to_string(),
-                claim_token: "claim-file-ready".to_string(),
-                lease_epoch: 1,
-            }],
-            vec![],
-        )
-        .unwrap();
-
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM File WHERE path = '/tmp/file_level_ready.rs' AND vector_ready = TRUE"
-                )
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn test_finalize_completed_vectorization_works_batches_graph_projection_refreshes() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
-                 ('/tmp/finalize_a.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100), \
-                 ('/tmp/finalize_b.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
-                 ('/tmp/finalize_a.rs', 'inflight', 1, 'claim-finalize-a', 1, 1, 'finalize', 1), \
-                 ('/tmp/finalize_b.rs', 'inflight', 1, 'claim-finalize-b', 1, 1, 'finalize', 1)",
-            )
-            .unwrap();
-
-        let outcome = finalize_completed_vectorization_works(
-            &store,
-            vec![
-                FileVectorizationWork {
-                    file_path: "/tmp/finalize_a.rs".to_string(),
-                    resumed_after_interactive_pause: false,
-                },
-                FileVectorizationWork {
-                    file_path: "/tmp/finalize_b.rs".to_string(),
-                    resumed_after_interactive_pause: false,
-                },
-            ],
-            vec![
-                FileVectorizationLeaseSnapshot {
-                    file_path: "/tmp/finalize_a.rs".to_string(),
-                    claim_token: "claim-finalize-a".to_string(),
-                    lease_epoch: 1,
-                },
-                FileVectorizationLeaseSnapshot {
-                    file_path: "/tmp/finalize_b.rs".to_string(),
-                    claim_token: "claim-finalize-b".to_string(),
-                    lease_epoch: 1,
-                },
-            ],
-            vec![],
-        )
-        .unwrap();
-
-        assert_eq!(outcome.completed_works.len(), 2);
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'"
-                )
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM GraphProjectionQueue WHERE anchor_type = 'file' AND anchor_id IN ('/tmp/finalize_a.rs', '/tmp/finalize_b.rs')"
-                )
-                .unwrap(),
-            if crate::runtime_mode::graph_embeddings_enabled() {
-                2
-            } else {
-                0
-            }
-        );
-    }
 
     #[test]
     fn test_request_prepared_vector_embed_sequence_round_trips_over_prepare_channel() {
@@ -7349,48 +6985,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_flush_completed_vectorization_works_enqueues_finalize_request() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
-                 ('/tmp/flush_finalize.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
-                 ('/tmp/flush_finalize.rs', 'inflight', 1, 'test-claim', 1, 1, 'vector', 0)",
-            )
-            .unwrap();
-        let (finalize_tx, finalize_rx) = bounded::<VectorFinalizeRequest>(1);
-        let mut completed_works = vec![FileVectorizationWork {
-            file_path: "/tmp/flush_finalize.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        }];
-        let mut completed_batch_runs = vec![];
-        let mut failed = HashMap::new();
-
-        flush_completed_vectorization_works(
-            0,
-            &store,
-            &finalize_tx,
-            &mut completed_works,
-            &mut completed_batch_runs,
-            &mut failed,
-        );
-
-        assert!(completed_works.is_empty());
-        assert!(failed.is_empty());
-        let request = finalize_rx.try_recv().expect("finalize request");
-        assert_eq!(request.envelope.completed_works.len(), 1);
-        assert!(request.envelope.batch_runs.is_empty());
-        assert_eq!(
-            request.envelope.completed_works[0].file_path,
-            "/tmp/flush_finalize.rs"
-        );
-    }
 
     #[test]
     fn test_vector_claim_target_expands_when_ready_reserve_is_missing() {
@@ -7430,131 +7024,6 @@ mod tests {
         assert!(reserve > 32);
     }
 
-    #[test]
-    fn test_dispatch_prepared_vector_embed_sequence_returns_reply_channel() {
-        let (prepare_tx, prepare_rx) = bounded::<VectorPrepareRequest>(1);
-        std::thread::spawn(move || {
-            let request = prepare_rx.recv().unwrap();
-            request
-                .reply
-                .send(PreparedVectorPrepareOutcome {
-                    remaining_claimed_after_success: ClaimedLeaseSet::new(vec![]),
-                })
-                .unwrap();
-        });
-
-        let reply_rx = dispatch_prepared_vector_embed_sequence(
-            &prepare_tx,
-            ClaimedLeaseSet::new(vec![FileVectorizationWork {
-                file_path: "/tmp/prefetched.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            }]),
-            64,
-            64,
-            512 * 1024,
-            2,
-        )
-        .unwrap();
-        let prepared = reply_rx.recv().unwrap();
-
-        assert!(prepared
-            .remaining_claimed_after_success
-            .as_slice()
-            .is_empty());
-    }
-
-    #[test]
-    fn vector_refill_ownership_top_up_moves_into_producer_state() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
-                 ('/tmp/refill-a.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100), \
-                 ('/tmp/refill-b.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100), \
-                 ('/tmp/refill-c.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
-                 ('/tmp/refill-a.rs', 'queued', 1), \
-                 ('/tmp/refill-b.rs', 'queued', 2), \
-                 ('/tmp/refill-c.rs', 'queued', 3)",
-            )
-            .unwrap();
-
-        let seed_claimed = store.fetch_pending_file_vectorization_work(1).unwrap();
-        let mut producer = VectorRefillProducerState::new(seed_claimed);
-
-        let added = producer
-            .top_up_from_claimable_queue(&store, 3, &[], 0)
-            .expect("producer top-up");
-
-        assert_eq!(added, 2);
-        assert_eq!(producer.active_works().len(), 3);
-    }
-
-    #[test]
-    fn vector_refill_ownership_dispatch_moves_claims_out_of_local_wave_storage() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let (prepare_tx, prepare_rx) = bounded::<VectorPrepareRequest>(1);
-        let mut producer = VectorRefillProducerState::new(vec![
-            FileVectorizationWork {
-                file_path: "/tmp/dispatch-a.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-            FileVectorizationWork {
-                file_path: "/tmp/dispatch-b.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-        ]);
-
-        assert!(producer
-            .dispatch_prepare_request(&store, &prepare_tx, 2, 64, 64, 512 * 1024, 2, 128)
-            .expect("dispatch prepare"));
-
-        let request = prepare_rx.try_recv().expect("prepare request");
-        assert_eq!(request.claimed.as_slice().len(), 2);
-        assert!(producer.active_works().is_empty());
-        assert_eq!(producer.inflight_prepare_count(), 1);
-        assert_eq!(producer.inflight_prepare_chunk_count(), 128);
-    }
-
-    #[test]
-    fn vector_refill_ownership_prepare_replies_merge_back_into_producer_state() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let (prepare_tx, prepare_rx) = bounded::<VectorPrepareRequest>(1);
-        let mut producer = VectorRefillProducerState::new(vec![FileVectorizationWork {
-            file_path: "/tmp/reply-a.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        }]);
-
-        assert!(producer
-            .dispatch_prepare_request(&store, &prepare_tx, 1, 64, 64, 512 * 1024, 1, 64)
-            .expect("dispatch prepare"));
-        let request = prepare_rx.try_recv().expect("prepare request");
-        request
-            .reply
-            .send(PreparedVectorPrepareOutcome {
-                remaining_claimed_after_success: ClaimedLeaseSet::new(vec![
-                    FileVectorizationWork {
-                        file_path: "/tmp/reply-remaining.rs".to_string(),
-                        resumed_after_interactive_pause: false,
-                    },
-                ]),
-            })
-            .unwrap();
-
-        producer.poll_prepare_replies(0);
-
-        assert_eq!(producer.inflight_prepare_count(), 0);
-        assert_eq!(producer.inflight_prepare_chunk_count(), 0);
-        assert_eq!(producer.active_works().len(), 1);
-        assert_eq!(
-            producer.active_works()[0].file_path,
-            "/tmp/reply-remaining.rs"
-        );
-    }
 
     #[test]
     fn continuous_prepare_feed_continues_when_ready_is_low_and_claimable_supply_exists() {
