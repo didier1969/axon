@@ -44,7 +44,6 @@ pub(crate) mod test_support;
 pub mod scanner;
 pub mod service_guard;
 pub mod vector_control;
-pub mod vector_pipeline;
 pub mod watcher_probe;
 pub mod worker;
 
