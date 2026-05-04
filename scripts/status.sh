@@ -16,7 +16,16 @@ axon_load_worktree_env "$ROOT_DIR"
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
 axon_resolve_version "$ROOT_DIR"
-STATUS_ROLE="$(axon_runtime_shadow_role)"
+# REQ-AXO-178 — auto-detect role from pid files when env override is absent
+# (fresh shell calling status sees no AXON_RUNTIME_* vars; the previous
+# default was 'indexer' which masked a healthy brain-only runtime).
+STATUS_ROLE=""
+if [[ -z "${AXON_RUNTIME_SHADOW_ROLE:-}" && -z "${AXON_RUNTIME_BOOT_ROLE:-}" && -z "${AXON_RUNTIME_MODE:-}" ]]; then
+  STATUS_ROLE="$(axon_detect_role_from_pid_files "$ROOT_DIR" "$AXON_INSTANCE_KIND" 2>/dev/null || true)"
+fi
+if [[ -z "$STATUS_ROLE" ]]; then
+  STATUS_ROLE="$(axon_runtime_shadow_role)"
+fi
 axon_apply_runtime_role_layout "$ROOT_DIR" "$STATUS_ROLE"
 if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
   # shellcheck disable=SC1090

@@ -1,5 +1,40 @@
 #!/usr/bin/env bash
 
+# REQ-AXO-178 — detect the active runtime role of a given instance by inspecting
+# pid files under .axon{,-dev}/run-{brain,indexer}/. Returns "brain" or
+# "indexer" on the first alive PID found; non-zero exit when none alive.
+# Env-var override (AXON_RUNTIME_SHADOW_ROLE / AXON_RUNTIME_BOOT_ROLE) is
+# honoured by callers that prefer it over auto-detection.
+axon_detect_role_from_pid_files() {
+    local project_root="${1:?project root required}"
+    local instance_kind="${2:-live}"
+    local run_root_base
+    if [[ "$instance_kind" == "dev" ]]; then
+        run_root_base="$project_root/.axon-dev"
+    else
+        run_root_base="$project_root/.axon"
+    fi
+
+    _axon_pid_alive() {
+        local pid_file="$1"
+        [[ -f "$pid_file" ]] || return 1
+        local pid
+        pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null)"
+        [[ -n "$pid" ]] || return 1
+        kill -0 "$pid" 2>/dev/null
+    }
+
+    if _axon_pid_alive "$run_root_base/run-brain/axon-brain.pid"; then
+        printf 'brain\n'
+        return 0
+    fi
+    if _axon_pid_alive "$run_root_base/run-indexer/axon-indexer.pid"; then
+        printf 'indexer\n'
+        return 0
+    fi
+    return 1
+}
+
 axon_runtime_shadow_role() {
     local role="${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}"
     local mode="${AXON_RUNTIME_MODE:-}"
