@@ -98,6 +98,11 @@ pub(super) fn vector_worker_loop(
             Some("model_loaded".to_string()),
             None,
         );
+        // REQ-AXO-181 / DEC-AXO-070: keep BGE-Large alive across idle
+        // iterations. Idle `continue;` paths now target this inner loop
+        // (model preserved). Fault paths still use `continue 'worker_lifecycle;`
+        // (model dropped, re-init via outer iteration).
+        loop {
         service_guard::record_vector_worker_heartbeat();
         let current_pressure = service_guard::current_pressure();
         let claimable_file_backlog_depth = graph_store
@@ -1026,6 +1031,7 @@ pub(super) fn vector_worker_loop(
                 thread::sleep(policy.idle_sleep);
             }
         }
+        } // close inner work-polling loop (REQ-AXO-181)
     }
 }
 
