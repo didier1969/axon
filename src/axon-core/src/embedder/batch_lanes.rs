@@ -14,26 +14,6 @@ pub(crate) enum VectorBatchLane {
     Mixed,
 }
 
-impl VectorBatchLane {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::Large => "large",
-            Self::Mixed => "mixed",
-        }
-    }
-
-    pub(crate) fn priority(self) -> usize {
-        match self {
-            Self::Large => 3,
-            Self::Medium => 2,
-            Self::Small => 1,
-            Self::Mixed => 0,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenLaneThresholdSource {
     Bootstrap,
@@ -136,17 +116,6 @@ pub(crate) fn observe_token_lane_thresholds(token_counts: &[usize]) -> TokenLane
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .observe(token_counts)
-}
-
-pub(crate) fn service_guard_batch_lane(
-    lane: VectorBatchLane,
-) -> service_guard::VectorBatchLaneKind {
-    match lane {
-        VectorBatchLane::Small => service_guard::VectorBatchLaneKind::Small,
-        VectorBatchLane::Medium => service_guard::VectorBatchLaneKind::Medium,
-        VectorBatchLane::Large => service_guard::VectorBatchLaneKind::Large,
-        VectorBatchLane::Mixed => service_guard::VectorBatchLaneKind::Mixed,
-    }
 }
 
 #[cfg(test)]

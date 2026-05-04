@@ -73,8 +73,8 @@ pub(crate) use batch_lanes::reset_token_lane_classifier_for_tests;
 #[cfg(test)]
 pub(crate) use batch_lanes::TokenLaneThresholdSource;
 pub(crate) use batch_lanes::{
-    current_token_lane_thresholds, observe_token_lane_thresholds, service_guard_batch_lane,
-    TokenLaneThresholds, VectorBatchLane,
+    current_token_lane_thresholds, observe_token_lane_thresholds, TokenLaneThresholds,
+    VectorBatchLane,
 };
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 use gpu_backend::{
@@ -88,11 +88,8 @@ use gpu_backend::{
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
 use gpu_policy::{
-    embedding_provider_requested_is_gpu, gpu_primary_worker_max_used_mb,
-    gpu_recreate_session_every_batch_enabled, gpu_recycle_after_vram_summit_observe,
-    gpu_recycle_immediate_required, gpu_recycle_vram_summit_mb, gpu_secondary_worker_allowed,
-    gpu_stuck_recovery_reason, gpu_worker_consumption_allowed, gpu_worker_has_pending_work,
-    gpu_worker_should_wait_for_ready,
+    embedding_provider_requested_is_gpu, gpu_recycle_immediate_required,
+    gpu_recycle_vram_summit_mb,
 };
 #[cfg(test)]
 use gpu_policy::gpu_memory_pressure_active;
@@ -964,15 +961,6 @@ impl PreparedVectorEmbedBatch {
         self.token_counts.iter().copied().sum::<usize>() as u64
     }
 
-    pub(crate) fn density_score(&self) -> u64 {
-        let chunk_count = self.chunk_count().max(1);
-        let base = self.total_token_count().saturating_mul(100) / chunk_count;
-        if self.mixed_fallback {
-            base / 4
-        } else {
-            base.saturating_add((self.batch_lane.priority() as u64) * 10_000)
-        }
-    }
 
     fn max_item_tokens(&self) -> u64 {
         self.token_counts.iter().copied().max().unwrap_or(0) as u64
@@ -2702,10 +2690,7 @@ mod tests {
         effective_embedding_provider_is_gpu,
         embedding_download_progress_enabled, embedding_lane_config_from_env,
         embedding_model_cache_dir, embedding_provider_diagnostics,
-        gpu_memory_soft_limit_mb, gpu_primary_worker_max_used_mb,
-        gpu_recycle_after_vram_summit_observe, gpu_secondary_worker_allowed,
-        gpu_worker_consumption_allowed, gpu_worker_has_pending_work,
-        gpu_worker_should_wait_for_ready, is_fatal_embedding_error,
+        gpu_memory_soft_limit_mb, is_fatal_embedding_error,
         load_runtime_embedding_tokenizer, observe_token_lane_thresholds, query_embedding_allowed,
         request_query_embedding,
         reset_token_lane_classifier_for_tests, EmbeddingLaneConfig,
@@ -5237,44 +5222,7 @@ mod tests {
         std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB");
     }
 
-    #[test]
-    fn test_gpu_stuck_recovery_reason_detects_inflight_stall() {
-        let _guard = lock_env_guard();
-        std::env::set_var("AXON_GPU_STUCK_RECOVERY_ENABLED", "true");
-        std::env::set_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "1000");
 
-        let mut metrics = crate::service_guard::vector_runtime_metrics();
-        metrics.embed_inflight_started_at_ms =
-            chrono::Utc::now().timestamp_millis().max(0) as u64 - 1_500;
-        metrics.embed_inflight_texts_current = 12;
-        metrics.embed_inflight_text_bytes_current = 4_096;
-
-        let reason = super::gpu_stuck_recovery_reason(metrics, 0).expect("recovery reason");
-        assert!(reason.contains("embed_inflight_stuck"), "{reason}");
-
-        std::env::remove_var("AXON_GPU_STUCK_RECOVERY_ENABLED");
-        std::env::remove_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS");
-    }
-
-    #[test]
-    fn test_gpu_stuck_recovery_reason_detects_ready_stock_stall() {
-        let _guard = lock_env_guard();
-        std::env::set_var("AXON_GPU_STUCK_RECOVERY_ENABLED", "true");
-        std::env::set_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "1000");
-        std::env::set_var("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS", "2000");
-
-        let mut metrics = crate::service_guard::vector_runtime_metrics();
-        metrics.ready_queue_chunks_current = 256;
-        metrics.oldest_ready_batch_age_ms_current = 3_500;
-        metrics.last_embed_gap_ms = 1_500;
-
-        let reason = super::gpu_stuck_recovery_reason(metrics, 0).expect("recovery reason");
-        assert!(reason.contains("ready_stock_stalled"), "{reason}");
-
-        std::env::remove_var("AXON_GPU_STUCK_RECOVERY_ENABLED");
-        std::env::remove_var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS");
-        std::env::remove_var("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS");
-    }
 
 
     #[test]
