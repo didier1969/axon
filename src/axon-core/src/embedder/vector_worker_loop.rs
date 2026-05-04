@@ -295,41 +295,9 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
     }
 }
 
-/// REQ-AXO-173 — Gate the GPU embed subprocess spawn on the canonical
-/// embedding provider being CUDA. (Subprocess path slated for removal in
-/// DEC-AXO-070 commit B; kept here so build_vector_embedding_model still
-/// compiles during the incremental rewrite.)
-pub(super) fn gpu_embed_subprocess_should_spawn(
-    provider_requested: &str,
-    service_enabled: bool,
-) -> bool {
-    service_enabled && provider_requested.eq_ignore_ascii_case("cuda")
-}
-
 fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBackend> {
     let provider_requested = effective_provider_request_for_lane("vector");
     let cuda_requested = provider_requested.eq_ignore_ascii_case("cuda");
-
-    if gpu_embed_subprocess_should_spawn(&provider_requested, gpu_embed_service_enabled()) {
-        match gpu_embedding_service_client() {
-            Ok(client) => {
-                publish_embedding_provider_state(gpu_service_provider_effective_label(), None);
-                return Some(VectorEmbeddingBackend::gpu_service(
-                    client,
-                    gpu_embed_service_prefers_tensorrt(),
-                ));
-            }
-            Err(err) => {
-                let rendered = format!("{err:?}");
-                error!(
-                    "❌ Vector lane [{}]: GPU embedding service init failed: {:?}",
-                    worker_idx, err
-                );
-                publish_embedding_provider_state("unavailable", Some(&rendered));
-                return None;
-            }
-        }
-    }
 
     let cuda_available = std::env::var("AXON_EMBEDDING_GPU_PRESENT")
         .ok()
@@ -403,30 +371,10 @@ fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBack
 
 #[cfg(test)]
 mod tests {
-    use super::gpu_embed_subprocess_should_spawn;
 
     #[test]
     fn vector_lane_worker_links_to_runtime() {
         let _: fn(usize, std::sync::Arc<crate::graph::GraphStore>) = super::vector_lane_worker;
     }
 
-    #[test]
-    fn gpu_embed_subprocess_should_spawn_only_when_provider_is_cuda() {
-        // REQ-AXO-173 — the GPU embed subprocess MUST NOT be spawned
-        // when the canonical embedding provider is anything other than
-        // CUDA. Pre-fix: dev with gpu=avoid (provider=cpu) still spawned
-        // the subprocess via the unconditional `AXON_GPU_EMBED_SERVICE_ENABLED=1`
-        // runtime_boot default; subprocess panicked on dlopen of
-        // libonnxruntime.so. This whole subprocess path is slated for
-        // removal in DEC-AXO-070 commit B, but the contract test stays
-        // until then.
-        assert!(!gpu_embed_subprocess_should_spawn("cuda", false));
-        assert!(!gpu_embed_subprocess_should_spawn("cpu", false));
-        assert!(!gpu_embed_subprocess_should_spawn("", false));
-        assert!(gpu_embed_subprocess_should_spawn("cuda", true));
-        assert!(gpu_embed_subprocess_should_spawn("CUDA", true));
-        assert!(!gpu_embed_subprocess_should_spawn("cpu", true));
-        assert!(!gpu_embed_subprocess_should_spawn("tensorrt", true));
-        assert!(!gpu_embed_subprocess_should_spawn("", true));
-    }
 }

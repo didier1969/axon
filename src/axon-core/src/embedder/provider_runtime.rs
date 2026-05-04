@@ -27,14 +27,6 @@ fn embedding_provider_slot() -> &'static Mutex<EmbeddingProviderDiagnostics> {
         .get_or_init(|| Mutex::new(embedding_provider_diagnostics("unspecified".to_string())))
 }
 
-pub(crate) fn gpu_service_provider_effective_label() -> &'static str {
-    if super::gpu_embed_service_prefers_tensorrt() {
-        "tensorrt_service"
-    } else {
-        "cuda_service"
-    }
-}
-
 pub(crate) fn current_embedding_provider_effective() -> String {
     std::env::var("AXON_EMBEDDING_PROVIDER_EFFECTIVE")
         .ok()
@@ -103,8 +95,11 @@ pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingPr
     let ort_dylib_path = std::env::var("ORT_DYLIB_PATH")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let gpu_service_enabled = super::gpu_embed_service_enabled();
-    let gpu_service_tensorrt_requested = super::gpu_embed_service_prefers_tensorrt();
+    // DEC-AXO-070 commit F: subprocess GPU embed service removed; the
+    // diagnostic surface keeps the field shape (false/false) for backward
+    // compatibility with the JSON contract expected by status callers.
+    let gpu_service_enabled = false;
+    let gpu_service_tensorrt_requested = false;
     let provider_init_error = std::env::var("AXON_EMBEDDING_PROVIDER_INIT_ERROR")
         .ok()
         .filter(|value| !value.trim().is_empty());

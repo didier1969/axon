@@ -79,10 +79,7 @@ pub(crate) use batch_lanes::{
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 use gpu_backend::{
     abort_gpu_embed_if_vram_summit_reached, cuda_execution_provider_dispatch,
-    gpu_embed_service_enabled, gpu_embed_service_prefers_tensorrt, gpu_embedding_service_client,
-    ort_cuda_provider_library_available, ort_cuda_provider_library_path,
-    recycle_existing_gpu_embedding_service, GpuEmbedSubprocessInit, GpuEmbedSubprocessRequest,
-    GpuEmbedSubprocessResponse, OrtGpuFirstTextEmbedding,
+    ort_cuda_provider_library_available, ort_cuda_provider_library_path, OrtGpuFirstTextEmbedding,
 };
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
@@ -112,8 +109,8 @@ pub use provider_contract::{
 pub(crate) use provider_runtime::provider_resolution_for_label;
 use provider_runtime::{
     cpu_provider_effective_label, current_embedding_provider_effective,
-    gpu_service_provider_effective_label, publish_embedding_provider_state,
-    register_embedding_provider_diagnostics, set_embedding_provider_runtime_state,
+    publish_embedding_provider_state, register_embedding_provider_diagnostics,
+    set_embedding_provider_runtime_state,
 };
 pub use provider_runtime::{
     current_embedding_provider_diagnostics, embedding_provider_diagnostics,
@@ -2136,10 +2133,6 @@ pub fn apply_runtime_embedding_lane_adjustment(
     refresh_vector_batch_controller_from_env();
 }
 
-pub fn recycle_gpu_embedding_service_for_runtime_control() -> anyhow::Result<bool> {
-    recycle_existing_gpu_embedding_service()
-}
-
 pub fn current_runtime_tuning_state() -> RuntimeTuningState {
     runtime_tuning_state(bootstrap_runtime_tuning_state_from_env())
 }
@@ -2376,78 +2369,6 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     request_query_embedding(&sender, texts)
 }
 
-pub fn run_gpu_embed_subprocess_stdio() -> anyhow::Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    let stdin = std::io::stdin();
-    let mut reader = BufReader::new(stdin.lock());
-
-    let mut model = OrtGpuFirstTextEmbedding::try_new("vector-subprocess", 0, true)
-        .map_err(|err| anyhow!("failed to initialize GPU embed subprocess model: {err}"))?;
-    serde_json::to_writer(
-        &mut stdout,
-        &GpuEmbedSubprocessInit {
-            ok: true,
-            error: None,
-        },
-    )?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<GpuEmbedSubprocessRequest>(line.trim()) {
-            Ok(request) => match embed_texts_with_breakdown_ort(&mut model, &request.texts) {
-                Ok((
-                    embeddings,
-                    _tokenize_ms,
-                    host_prepare_ms,
-                    input_copy_ms,
-                    inference_ms,
-                    output_extract_ms,
-                )) => GpuEmbedSubprocessResponse {
-                    ok: true,
-                    embeddings: Some(embeddings),
-                    host_prepare_ms,
-                    input_copy_ms,
-                    inference_ms,
-                    output_extract_ms,
-                    error: None,
-                },
-                Err(err) => GpuEmbedSubprocessResponse {
-                    ok: false,
-                    embeddings: None,
-                    host_prepare_ms: 0,
-                    input_copy_ms: 0,
-                    inference_ms: 0,
-                    output_extract_ms: 0,
-                    error: Some(format!("{err:?}")),
-                },
-            },
-            Err(err) => GpuEmbedSubprocessResponse {
-                ok: false,
-                embeddings: None,
-                host_prepare_ms: 0,
-                input_copy_ms: 0,
-                inference_ms: 0,
-                output_extract_ms: 0,
-                error: Some(format!("failed to parse request: {err}")),
-            },
-        };
-        serde_json::to_writer(&mut stdout, &response)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
-    }
-
-    Ok(())
-}
 
 /// REQ-AXO-176 — Public benchmarking facade for the in-process ORT
 /// embedder. Accepts a vector of texts, loads the configured BGE
@@ -2949,55 +2870,7 @@ mod tests {
         assert!(!effective_embedding_provider_is_gpu());
     }
 
-    #[test]
-    fn test_gpu_service_provider_effective_label_tracks_tensorrt_toggle() {
-        let _guard = lock_env_guard();
-        unsafe {
-            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-        }
-        assert_eq!(
-            super::gpu_service_provider_effective_label(),
-            "cuda_service"
-        );
 
-        unsafe {
-            std::env::set_var("AXON_GPU_EMBED_SERVICE_TENSORRT", "1");
-        }
-        assert_eq!(
-            super::gpu_service_provider_effective_label(),
-            "tensorrt_service"
-        );
-
-        unsafe {
-            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-        }
-    }
-
-    #[test]
-    fn test_vector_executor_strategy_preserves_provider_roles_without_new_lane() {
-        use super::{vector_executor::VectorExecutorStrategy, ProviderStrategy};
-
-        assert_eq!(
-            VectorExecutorStrategy::CpuInProcess.provider_strategy(),
-            ProviderStrategy::Cpu
-        );
-        assert_eq!(
-            VectorExecutorStrategy::CudaInProcess.provider_strategy(),
-            ProviderStrategy::Cuda
-        );
-        assert_eq!(
-            VectorExecutorStrategy::CudaService.provider_strategy(),
-            ProviderStrategy::Cuda
-        );
-        assert_eq!(
-            VectorExecutorStrategy::TensorRtService.provider_strategy(),
-            ProviderStrategy::TensorRt
-        );
-        assert_eq!(
-            VectorExecutorStrategy::TensorRtService.label(),
-            "tensorrt_service"
-        );
-    }
 
     #[test]
     fn test_apply_cpu_fallback_ort_runtime_env_restores_cpu_threads_when_autoconfigured() {
@@ -3650,35 +3523,6 @@ mod tests {
         assert_eq!(config.vector_workers, 5);
     }
 
-    #[test]
-    fn test_embedding_provider_diagnostics_reflects_requested_runtime() {
-        let _guard = lock_env_guard();
-        unsafe {
-            std::env::set_var("ORT_STRATEGY", "system");
-            std::env::set_var("ORT_DYLIB_PATH", "/tmp/libonnxruntime.so");
-            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
-            std::env::set_var("AXON_GPU_EMBED_SERVICE_ENABLED", "1");
-            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-        }
-        let diagnostics = embedding_provider_diagnostics("cpu_fallback".to_string());
-        unsafe {
-            std::env::remove_var("ORT_STRATEGY");
-            std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
-            std::env::remove_var("AXON_GPU_EMBED_SERVICE_ENABLED");
-            std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-        }
-
-        assert_eq!(diagnostics.provider_requested, "cuda");
-        assert_eq!(diagnostics.provider_effective, "cpu_fallback");
-        assert_eq!(diagnostics.ort_strategy, "system");
-        assert_eq!(
-            diagnostics.ort_dylib_path.as_deref(),
-            Some("/tmp/libonnxruntime.so")
-        );
-        assert!(diagnostics.gpu_service_enabled);
-        assert!(!diagnostics.gpu_service_tensorrt_requested);
-    }
 
     #[test]
     fn test_configured_embedding_max_length_defaults_to_model_cap() {

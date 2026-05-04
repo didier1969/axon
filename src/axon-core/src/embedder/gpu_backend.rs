@@ -36,95 +36,14 @@ pub(super) struct OrtGpuFirstTextEmbedding {
     pub(super) token_type_ids_buffer: Vec<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct GpuEmbedSubprocessInit {
-    pub(super) ok: bool,
-    pub(super) error: Option<String>,
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct GpuEmbedSubprocessRequest {
-    pub(super) texts: Vec<String>,
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct GpuEmbedSubprocessResponse {
-    pub(super) ok: bool,
-    pub(super) embeddings: Option<Vec<Vec<f32>>>,
-    pub(super) host_prepare_ms: u64,
-    pub(super) input_copy_ms: u64,
-    pub(super) inference_ms: u64,
-    pub(super) output_extract_ms: u64,
-    pub(super) error: Option<String>,
-}
 
-struct GpuEmbedSubprocess {
-    child: Child,
-    stdin: BufWriter<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-}
 
-pub(super) struct GpuEmbeddingServiceClient {
-    subprocess: GpuEmbedSubprocess,
-}
 
-static GPU_EMBED_SERVICE_CLIENT: OnceLock<Arc<Mutex<GpuEmbeddingServiceClient>>> = OnceLock::new();
 
-pub(super) fn gpu_embed_service_enabled() -> bool {
-    std::env::var("AXON_GPU_EMBED_SERVICE_ENABLED")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .or_else(|| {
-            std::env::var("AXON_GPU_EMBED_SUBPROCESS")
-                .ok()
-                .map(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                })
-        })
-        .unwrap_or(false)
-}
 
-fn gpu_embed_service_recycle_every_batch_enabled() -> bool {
-    std::env::var("AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .or_else(|| {
-            std::env::var("AXON_GPU_EMBED_SUBPROCESS_RECYCLE_EVERY_BATCH")
-                .ok()
-                .map(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                })
-        })
-        .unwrap_or(false)
-}
 
-pub(super) fn gpu_embed_service_prefers_tensorrt() -> bool {
-    std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
 
 impl OrtGpuFirstTextEmbedding {
     pub(super) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
@@ -139,7 +58,13 @@ impl OrtGpuFirstTextEmbedding {
             .map_err(|err| anyhow!("failed to disable ORT memory pattern: {err}"))?;
 
         if use_cuda {
-            let providers = gpu_service_execution_providers()?;
+            // Default: TensorRT EP first, fall back to CUDA EP if TensorRT init fails.
+            let mut providers = Vec::new();
+            match tensorrt_execution_provider_dispatch() {
+                Ok(tensorrt) => providers.push(tensorrt),
+                Err(err) => warn!("TensorRT EP unavailable, using CUDA EP: {err}"),
+            }
+            providers.push(cuda_execution_provider_dispatch());
             builder = builder.with_execution_providers(providers).map_err(|err| {
                 anyhow!("failed to configure GPU execution providers for ORT session: {err}")
             })?;
@@ -371,213 +296,10 @@ impl OrtGpuFirstTextEmbedding {
     }
 }
 
-impl GpuEmbedSubprocess {
-    fn spawn_child() -> AnyhowResult<(Child, BufWriter<ChildStdin>, BufReader<ChildStdout>)> {
-        let exe = std::env::current_exe().map_err(|err| {
-            anyhow!("failed to resolve current executable for GPU subprocess: {err}")
-        })?;
-        let mut child = Command::new(&exe)
-            .env("AXON_GPU_EMBED_SERVICE_CHILD", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|err| {
-                anyhow!(
-                    "failed to spawn GPU embed subprocess {}: {err}",
-                    exe.display()
-                )
-            })?;
-        let child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("GPU embed subprocess missing stdin"))?;
-        let child_stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("GPU embed subprocess missing stdout"))?;
-        Ok((
-            child,
-            BufWriter::new(child_stdin),
-            BufReader::new(child_stdout),
-        ))
-    }
 
-    fn spawn() -> AnyhowResult<Self> {
-        let (child, stdin, mut stdout) = Self::spawn_child()?;
-        let mut init_line = String::new();
-        stdout
-            .read_line(&mut init_line)
-            .map_err(|err| anyhow!("failed to read GPU embed subprocess init: {err}"))?;
-        if init_line.trim().is_empty() {
-            return Err(anyhow!("GPU embed subprocess exited before init handshake"));
-        }
-        let init: GpuEmbedSubprocessInit = serde_json::from_str(init_line.trim())
-            .map_err(|err| anyhow!("failed to parse GPU embed subprocess init: {err}"))?;
-        if !init.ok {
-            return Err(anyhow!(
-                "GPU embed subprocess failed to initialize: {}",
-                init.error.unwrap_or_else(|| "unknown error".to_string())
-            ));
-        }
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
-        })
-    }
 
-    fn recycle(&mut self) -> AnyhowResult<()> {
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let (child, stdin, mut stdout) = Self::spawn_child()?;
-        let mut init_line = String::new();
-        stdout
-            .read_line(&mut init_line)
-            .map_err(|err| anyhow!("failed to read GPU embed subprocess recycle init: {err}"))?;
-        if init_line.trim().is_empty() {
-            return Err(anyhow!(
-                "GPU embed subprocess exited before recycle init handshake"
-            ));
-        }
-        let init: GpuEmbedSubprocessInit = serde_json::from_str(init_line.trim())
-            .map_err(|err| anyhow!("failed to parse recycled GPU embed subprocess init: {err}"))?;
-        if !init.ok {
-            return Err(anyhow!(
-                "recycled GPU embed subprocess failed to initialize: {}",
-                init.error.unwrap_or_else(|| "unknown error".to_string())
-            ));
-        }
-        self.child = child;
-        self.stdin = stdin;
-        self.stdout = stdout;
-        Ok(())
-    }
 
-    pub(super) fn embed_texts(
-        &mut self,
-        texts: &[String],
-    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
-        let request = GpuEmbedSubprocessRequest {
-            texts: texts.to_vec(),
-        };
-        let payload = serde_json::to_string(&request)
-            .map_err(|err| anyhow!("failed to serialize GPU embed request: {err}"))?;
-        self.stdin
-            .write_all(payload.as_bytes())
-            .and_then(|_| self.stdin.write_all(b"\n"))
-            .and_then(|_| self.stdin.flush())
-            .map_err(|err| anyhow!("failed to send GPU embed request to subprocess: {err}"))?;
 
-        let mut response_line = String::new();
-        self.stdout
-            .read_line(&mut response_line)
-            .map_err(|err| anyhow!("failed to read GPU embed subprocess response: {err}"))?;
-        if response_line.trim().is_empty() {
-            return Err(anyhow!(
-                "GPU embed subprocess exited before sending response"
-            ));
-        }
-        let response: GpuEmbedSubprocessResponse = serde_json::from_str(response_line.trim())
-            .map_err(|err| anyhow!("failed to parse GPU embed subprocess response: {err}"))?;
-        if !response.ok {
-            return Err(anyhow!(
-                "{}",
-                response
-                    .error
-                    .unwrap_or_else(|| "GPU embed subprocess returned unknown error".to_string())
-            ));
-        }
-        let result = (
-            response.embeddings.unwrap_or_default(),
-            response.host_prepare_ms,
-            response.input_copy_ms,
-            response.inference_ms,
-            response.output_extract_ms,
-        );
-        if gpu_embed_service_recycle_every_batch_enabled()
-            || gpu_recycle_immediate_required(current_gpu_memory_snapshot(), 0)
-        {
-            info!("GPU embedding service: recycling child process after batch");
-            self.recycle()?;
-        }
-        Ok(result)
-    }
-}
-
-impl GpuEmbeddingServiceClient {
-    fn connect() -> AnyhowResult<Self> {
-        Ok(Self {
-            subprocess: GpuEmbedSubprocess::spawn()?,
-        })
-    }
-
-    fn recycle(&mut self) -> AnyhowResult<()> {
-        self.subprocess.recycle()
-    }
-
-    pub(super) fn embed_texts(
-        &mut self,
-        texts: &[String],
-    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
-        match self.subprocess.embed_texts(texts) {
-            Ok(result) => Ok(result),
-            Err(first_err) => {
-                warn!(
-                    "GPU embedding service request failed, recycling service process: {:?}",
-                    first_err
-                );
-                self.recycle().map_err(|recycle_err| {
-                    anyhow!(
-                        "GPU embedding service request failed: {first_err:?}; recycle failed: {recycle_err:?}"
-                    )
-                })?;
-                self.subprocess.embed_texts(texts).map_err(|retry_err| {
-                    anyhow!(
-                        "GPU embedding service retry failed after recycle: first={first_err:?}, retry={retry_err:?}"
-                    )
-                })
-            }
-        }
-    }
-}
-
-pub(super) fn gpu_embedding_service_client() -> AnyhowResult<Arc<Mutex<GpuEmbeddingServiceClient>>>
-{
-    if let Some(existing) = GPU_EMBED_SERVICE_CLIENT.get() {
-        return Ok(Arc::clone(existing));
-    }
-
-    let client = Arc::new(Mutex::new(GpuEmbeddingServiceClient::connect()?));
-    match GPU_EMBED_SERVICE_CLIENT.set(Arc::clone(&client)) {
-        Ok(()) => Ok(client),
-        Err(_) => GPU_EMBED_SERVICE_CLIENT
-            .get()
-            .cloned()
-            .ok_or_else(|| anyhow!("GPU embedding service singleton missing after initialization")),
-    }
-}
-
-/// Recycle the existing GPU embedding service subprocess to free CUDA memory.
-pub(super) fn recycle_existing_gpu_embedding_service() -> AnyhowResult<bool> {
-    let Some(client) = GPU_EMBED_SERVICE_CLIENT.get() else {
-        return Ok(false);
-    };
-    let mut guard = client
-        .lock()
-        .map_err(|e| anyhow!("GPU service mutex poisoned: {}", e))?;
-    guard.recycle()?;
-    Ok(true)
-}
-
-impl Drop for GpuEmbedSubprocess {
-    fn drop(&mut self) {
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 pub(super) fn abort_gpu_embed_if_vram_summit_reached() -> AnyhowResult<()> {
     if gpu_recycle_immediate_required(current_gpu_memory_snapshot(), 0) {
@@ -653,14 +375,6 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     Ok(ExecutionProviderDispatch::from(provider).error_on_failure())
 }
 
-pub(super) fn gpu_service_execution_providers() -> AnyhowResult<Vec<ExecutionProviderDispatch>> {
-    let mut providers = Vec::new();
-    if gpu_embed_service_prefers_tensorrt() {
-        providers.push(tensorrt_execution_provider_dispatch()?);
-    }
-    providers.push(cuda_execution_provider_dispatch());
-    Ok(providers)
-}
 
 pub(crate) fn cuda_memory_limit_bytes() -> usize {
     (std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")

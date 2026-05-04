@@ -53,28 +53,6 @@ fn split_boot_roles_enable_only_owned_services() {
     assert!(indexer.promotable);
 }
 
-#[test]
-fn embedding_provider_diagnostics_tracks_tensorrt_service_toggle() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-    }
-    assert!(
-        !embedding_provider_diagnostics("cuda_service".to_string()).gpu_service_tensorrt_requested
-    );
-
-    unsafe {
-        std::env::set_var("AXON_GPU_EMBED_SERVICE_TENSORRT", "1");
-    }
-    assert!(
-        embedding_provider_diagnostics("tensorrt_service".to_string())
-            .gpu_service_tensorrt_requested
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_GPU_EMBED_SERVICE_TENSORRT");
-    }
-}
 
 struct RuntimeEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
