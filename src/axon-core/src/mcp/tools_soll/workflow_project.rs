@@ -425,6 +425,147 @@ impl McpServer {
             .map(|(_, path)| path.to_string_lossy().to_string())
     }
 
+    // REQ-AXO-176 — bundle enrichment helpers. Aggregate the recent
+    // activity an LLM would otherwise discover via 3-4 separate MCP/Bash
+    // calls. The four fields are scoped per project; empty arrays are
+    // returned when no rows match. Bounded LIMITs guarantee a sparse
+    // project does not bloat the response.
+
+    fn read_in_progress_requirements(
+        &self,
+        project_code: &str,
+        limit: usize,
+    ) -> serde_json::Value {
+        let escaped = escape_sql(project_code);
+        let raw = match self.graph_store.query_json(&format!(
+            "SELECT id, title, COALESCE(json_extract_string(metadata, '$.priority'), '') \
+             FROM soll.main.Node \
+             WHERE project_code = '{}' AND type = 'Requirement' AND status = 'in_progress' \
+             ORDER BY CAST(NULLIF(json_extract_string(metadata, '$.updated_at'), '') AS BIGINT) DESC NULLS LAST \
+             LIMIT {}",
+            escaped, limit
+        )) {
+            Ok(s) => s,
+            Err(_) => return serde_json::json!([]),
+        };
+        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(_) => return serde_json::json!([]),
+        };
+        serde_json::Value::Array(
+            rows.into_iter()
+                .filter_map(|row| {
+                    let mut iter = row.into_iter();
+                    let id = iter.next()?;
+                    let title = iter.next()?;
+                    let priority = iter.next().unwrap_or_default();
+                    Some(serde_json::json!({
+                        "id": id,
+                        "title": title,
+                        "priority": if priority.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::from(priority)
+                        },
+                    }))
+                })
+                .collect(),
+        )
+    }
+
+    fn read_recent_soll_writes(
+        &self,
+        project_code: &str,
+        limit: usize,
+    ) -> serde_json::Value {
+        let escaped = escape_sql(project_code);
+        let raw = match self.graph_store.query_json(&format!(
+            "SELECT id, type, title, COALESCE(json_extract_string(metadata, '$.updated_at'), '') \
+             FROM soll.main.Node \
+             WHERE project_code = '{}' \
+             ORDER BY CAST(NULLIF(json_extract_string(metadata, '$.updated_at'), '') AS BIGINT) DESC NULLS LAST \
+             LIMIT {}",
+            escaped, limit
+        )) {
+            Ok(s) => s,
+            Err(_) => return serde_json::json!([]),
+        };
+        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(_) => return serde_json::json!([]),
+        };
+        serde_json::Value::Array(
+            rows.into_iter()
+                .filter_map(|row| {
+                    let mut iter = row.into_iter();
+                    let id = iter.next()?;
+                    let r#type = iter.next()?;
+                    let title = iter.next()?;
+                    let updated_at = iter.next().unwrap_or_default();
+                    Some(serde_json::json!({
+                        "id": id,
+                        "type": r#type,
+                        "title": title,
+                        "updated_at": if updated_at.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::from(updated_at)
+                        },
+                    }))
+                })
+                .collect(),
+        )
+    }
+
+    fn read_recent_req_commits(project_path: &str, limit: usize) -> serde_json::Value {
+        let output = match std::process::Command::new("git")
+            .arg("-C")
+            .arg(project_path)
+            .arg("log")
+            .arg("--oneline")
+            .arg(format!("--max-count={}", limit * 4))
+            .arg("-E")
+            .arg("--grep=REQ-[A-Z]+-[0-9]+")
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return serde_json::json!([]),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        serde_json::Value::Array(
+            stdout
+                .lines()
+                .take(limit)
+                .filter_map(|line| {
+                    let mut parts = line.splitn(2, ' ');
+                    let sha = parts.next()?.to_string();
+                    let subject = parts.next()?.to_string();
+                    Some(serde_json::json!({
+                        "sha": sha,
+                        "subject": subject,
+                    }))
+                })
+                .collect(),
+        )
+    }
+
+    fn read_wave_1_unblockers(&self, project_code: &str) -> serde_json::Value {
+        let args = serde_json::json!({
+            "project_code": project_code,
+            "format": "brief",
+            "top": 3,
+            "limit": 5,
+        });
+        match self.axon_soll_work_plan(&args) {
+            Some(response) => response
+                .get("data")
+                .and_then(|d| d.get("top_recommendations"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+            None => serde_json::json!([]),
+        }
+    }
+
     fn axon_init_project_bundle(
         &self,
         project_code: &str,
@@ -450,6 +591,13 @@ impl McpServer {
                 .unwrap_or(serde_json::Value::Null),
             _ => serde_json::Value::Null,
         };
+        // REQ-AXO-176 — kickoff bundle enrichment: aggregate recent project
+        // activity inline so a fresh LLM session reaches productive state
+        // from a single MCP call.
+        let in_progress_requirements = self.read_in_progress_requirements(project_code, 10);
+        let wave_1_unblockers = self.read_wave_1_unblockers(project_code);
+        let recent_req_commits = Self::read_recent_req_commits(project_path, 5);
+        let recent_soll_writes = self.read_recent_soll_writes(project_code, 8);
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -458,6 +606,10 @@ impl McpServer {
             "entry_points": Self::cold_start_entry_points(),
             "session_pointer": session_pointer,
             "active_handoff": active_handoff_alias,
+            "in_progress_requirements": in_progress_requirements,
+            "wave_1_unblockers": wave_1_unblockers,
+            "recent_req_commits": recent_req_commits,
+            "recent_soll_writes": recent_soll_writes,
         })
     }
 
@@ -659,7 +811,7 @@ impl McpServer {
         // sees that the structured bundle is available in data.
         let bundle = self.axon_init_project_bundle(&project_code, project_path);
         response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff). Use it to onboard yourself or any future LLM session before doing project-specific work.",
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes). Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
         Some(serde_json::json!({

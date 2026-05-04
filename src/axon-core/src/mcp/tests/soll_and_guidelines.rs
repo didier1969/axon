@@ -5828,6 +5828,88 @@ fn test_axon_init_project_bundle_active_handoff_null_when_no_working_notes() {
     );
 }
 
+// REQ-AXO-176 — kickoff bundle enrichment: aggregate recent project
+// activity inline so a fresh LLM session reaches productive state from
+// a single MCP call, without adding a 10th SOLL entity type.
+#[test]
+fn test_axon_init_project_bundle_includes_recent_activity_fields() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": { "project_path": "/home/dstadel/projects/BookingSystem" }
+        },
+        "id": 176
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let bundle = result["data"]["kickoff_bundle"]
+        .as_object()
+        .expect("kickoff_bundle must be present");
+
+    // Each new field must be an array; content may be empty for a sparse
+    // project. The contract is shape-stable, not row-count-stable.
+    for field in [
+        "in_progress_requirements",
+        "wave_1_unblockers",
+        "recent_req_commits",
+        "recent_soll_writes",
+    ] {
+        assert!(
+            bundle.contains_key(field),
+            "bundle must contain `{field}` (REQ-AXO-176)"
+        );
+        assert!(
+            bundle[field].is_array(),
+            "`{field}` must be an array, got {}: {}",
+            bundle[field],
+            bundle.get(field).map(|v| v.to_string()).unwrap_or_default()
+        );
+    }
+
+    // in_progress_requirements rows must carry the documented schema.
+    if let Some(arr) = bundle["in_progress_requirements"].as_array() {
+        for row in arr {
+            assert!(
+                row.get("id").and_then(|v| v.as_str()).is_some(),
+                "in_progress_requirements row must have id: {row}"
+            );
+            assert!(
+                row.get("title").and_then(|v| v.as_str()).is_some(),
+                "in_progress_requirements row must have title: {row}"
+            );
+            assert!(
+                row.get("priority").is_some(),
+                "in_progress_requirements row must have priority key (may be null): {row}"
+            );
+        }
+    }
+
+    // recent_soll_writes rows must carry id+type+title+updated_at keys.
+    if let Some(arr) = bundle["recent_soll_writes"].as_array() {
+        for row in arr {
+            for key in ["id", "type", "title", "updated_at"] {
+                assert!(
+                    row.get(key).is_some(),
+                    "recent_soll_writes row must have `{key}` key: {row}"
+                );
+            }
+        }
+    }
+
+    // Human-readable text must reference the new fields so an LLM
+    // scanning content alone can discover them.
+    let content = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        content.contains("in_progress_requirements"),
+        "response text must advertise the new bundle fields: {content}"
+    );
+}
+
 // REQ-AXO-143 — `session_pointer` is the canonical workflow-agnostic
 // onboarding pointer. Persisted on axon_init_project, surfaced on the
 // kickoff bundle AND on `status.data.instance_identity.session_pointer`.
