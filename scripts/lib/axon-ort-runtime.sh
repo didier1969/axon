@@ -116,6 +116,15 @@ axon_resolve_ort_runtime() {
         if [[ -d "/usr/lib/wsl/lib" ]]; then
             cuda_ld_path_segments+=("/usr/lib/wsl/lib")
         fi
+        # REQ-AXO-181: Nix gcc-cc.lib provides libstdc++.so.6 with GLIBCXX
+        # symbols required by Nix-built libonnxruntime.so. Mirrors
+        # scripts/dev/embed-bench.sh:64. Without this, indexer subprocess
+        # dlopen fails against system /lib/x86_64-linux-gnu/libstdc++.
+        local nix_gcc_lib
+        nix_gcc_lib="$(find /nix/store -maxdepth 1 -name '*-gcc-*-lib' -type d 2>/dev/null | head -1)/lib"
+        if [[ -n "$nix_gcc_lib" && -d "$nix_gcc_lib" ]]; then
+            cuda_ld_path_segments+=("$nix_gcc_lib")
+        fi
         if [[ ${#cuda_ld_path_segments[@]} -gt 0 ]]; then
             cuda_ld_prefix="$(IFS=:; echo "${cuda_ld_path_segments[*]}")"
             if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
