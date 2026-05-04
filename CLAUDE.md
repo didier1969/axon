@@ -7,20 +7,8 @@
 3. `query("symbol")` — find code symbols
 4. `help(tool=X)` — tool schema + examples
 
-## ⚠️ IST freshness requirement (operator + LLM)
-`status` MUST report `IST projection freshness: fresh` AND `Trust boundary: canonical`. If `freshness: stale` or `trust: degraded`, the brain is reading a frozen snapshot — `inspect`/`query`/`impact` return outdated call-graph and will miss recently added/removed symbols.
-
-**Fix:** start the indexer-graph alongside the brain (brain alone is insufficient — it doesn't update IST):
-```bash
-./scripts/axon-live stop --hard
-bash scripts/lib/start-split.sh                  # brain + indexer-graph composed
-# OR (until REQ-AXO-182 lands a clean CLI):
-./scripts/axon-live start --indexer-graph        # just the indexer
-bash scripts/lib/start-brain.sh                  # then brain on top
-```
-Indexer-graph is CPU-only (no GPU contention with dev's `--indexer-full`). The watcher → graph projection updates IST in seconds; new symbols become MCP-visible in real time.
-
-REQ-AXO-182 tracks the CLI redesign that replaces the `split` helper with composable `start brain` / `start indexer` verbs.
+## ⚠️ IST freshness gate
+Before relying on `inspect`/`query`/`impact`, verify `status` reports `freshness: fresh` + `trust: canonical`. If degraded, brain serves a stale snapshot — start indexer-graph alongside. Full contract + recovery commands: **CPT-AXO-029**.
 
 ## Build & Test
 ```
