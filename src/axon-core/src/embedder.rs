@@ -4021,6 +4021,152 @@ pub fn run_embedder_throughput_bench(
     })
 }
 
+/// REQ-AXO-176 — Multi-worker variant. Spawns `workers` threads, each
+/// with its own `OrtGpuFirstTextEmbedding` instance, partitions `texts`
+/// roughly evenly, and runs the embed phase concurrently. Aggregate
+/// throughput is `total_n / max(per-worker wall time)`.
+///
+/// Note: each worker pays the model-load cost (~12 s on warm cache,
+/// ~30-60 s cold). VRAM scales with `workers` (each instance ≈ 680 MB
+/// engine + activation). On 8 GB GPUs, 2 workers fit; 3+ may OOM.
+pub fn run_embedder_throughput_bench_parallel(
+    label: &str,
+    texts: Vec<String>,
+    force_gpu: bool,
+    workers: usize,
+) -> anyhow::Result<EmbeddingThroughputBench> {
+    if workers <= 1 {
+        return run_embedder_throughput_bench(label, texts, force_gpu);
+    }
+    let n_total = texts.len();
+    if n_total == 0 {
+        anyhow::bail!("parallel bench requires at least one text");
+    }
+
+    // Partition texts into `workers` chunks. Last shard absorbs the
+    // remainder so the work is balanced within ±1 chunk.
+    let shard_size = n_total.div_ceil(workers);
+    let mut shards: Vec<Vec<String>> = Vec::with_capacity(workers);
+    let mut iter = texts.into_iter();
+    for _ in 0..workers {
+        let mut shard = Vec::with_capacity(shard_size);
+        for _ in 0..shard_size {
+            match iter.next() {
+                Some(t) => shard.push(t),
+                None => break,
+            }
+        }
+        if !shard.is_empty() {
+            shards.push(shard);
+        }
+    }
+    let actual_workers = shards.len();
+
+    let parallel_start = std::time::Instant::now();
+    let handles: Vec<_> = shards
+        .into_iter()
+        .enumerate()
+        .map(|(idx, shard)| {
+            let label = format!("{label}-w{idx}");
+            std::thread::spawn(move || -> anyhow::Result<EmbeddingThroughputBench> {
+                let load_start = std::time::Instant::now();
+                let mut model = OrtGpuFirstTextEmbedding::try_new(&label, idx, force_gpu)?;
+                let load_ms = load_start.elapsed().as_millis() as u64;
+
+                let n = shard.len();
+                let embed_start = std::time::Instant::now();
+                let (
+                    embeddings,
+                    tokenize_ms,
+                    host_prepare_ms,
+                    input_copy_ms,
+                    inference_ms,
+                    output_extract_ms,
+                ) = embed_texts_with_breakdown_ort(&mut model, &shard)?;
+                let total_embed_ms = embed_start.elapsed().as_millis() as u64;
+                Ok(EmbeddingThroughputBench {
+                    n,
+                    embedding_dim: embeddings.first().map(|v| v.len()).unwrap_or(0),
+                    load_ms,
+                    total_embed_ms,
+                    tokenize_ms,
+                    host_prepare_ms,
+                    input_copy_ms,
+                    inference_ms,
+                    output_extract_ms,
+                })
+            })
+        })
+        .collect();
+
+    let mut aggregate = EmbeddingThroughputBench {
+        n: 0,
+        embedding_dim: 0,
+        load_ms: 0,
+        total_embed_ms: 0,
+        tokenize_ms: 0,
+        host_prepare_ms: 0,
+        input_copy_ms: 0,
+        inference_ms: 0,
+        output_extract_ms: 0,
+    };
+
+    for h in handles {
+        let res = h
+            .join()
+            .map_err(|payload| {
+                anyhow!(
+                    "worker thread panicked: {}",
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<no-payload>".to_string())
+                )
+            })??;
+        aggregate.n = aggregate.n.saturating_add(res.n);
+        if res.embedding_dim > aggregate.embedding_dim {
+            aggregate.embedding_dim = res.embedding_dim;
+        }
+        // Per-worker timings: keep MAX (slowest worker bounds wall time)
+        // so chunks_per_second() reflects parallel throughput.
+        if res.load_ms > aggregate.load_ms {
+            aggregate.load_ms = res.load_ms;
+        }
+        if res.total_embed_ms > aggregate.total_embed_ms {
+            aggregate.total_embed_ms = res.total_embed_ms;
+        }
+        if res.tokenize_ms > aggregate.tokenize_ms {
+            aggregate.tokenize_ms = res.tokenize_ms;
+        }
+        if res.inference_ms > aggregate.inference_ms {
+            aggregate.inference_ms = res.inference_ms;
+        }
+        // host_prepare/input_copy/output_extract are reported as 0 by
+        // the inner timer in practice — leave as max for completeness.
+        if res.host_prepare_ms > aggregate.host_prepare_ms {
+            aggregate.host_prepare_ms = res.host_prepare_ms;
+        }
+        if res.input_copy_ms > aggregate.input_copy_ms {
+            aggregate.input_copy_ms = res.input_copy_ms;
+        }
+        if res.output_extract_ms > aggregate.output_extract_ms {
+            aggregate.output_extract_ms = res.output_extract_ms;
+        }
+    }
+
+    // Override total_embed_ms with the actual parallel wall time so
+    // chunks_per_second is computed on the real elapsed window, not
+    // the slowest single-worker phase (in case load was async).
+    let parallel_wall_ms = parallel_start.elapsed().as_millis() as u64;
+    if parallel_wall_ms > aggregate.total_embed_ms {
+        aggregate.total_embed_ms = parallel_wall_ms;
+    }
+
+    let _ = actual_workers;
+    Ok(aggregate)
+}
+
 /// REQ-AXO-176 — Result of `run_embedder_throughput_bench`. All times
 /// are in milliseconds. `inference_ms` is GPU/CPU compute only;
 /// `total_embed_ms` includes tokenization + host prep + inference +

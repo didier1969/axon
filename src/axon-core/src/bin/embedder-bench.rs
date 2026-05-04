@@ -40,6 +40,7 @@ struct Args {
     force_gpu: bool,
     label: String,
     output: OutputMode,
+    workers: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +57,7 @@ impl Args {
         let mut force_gpu = true;
         let mut label = "bench".to_string();
         let mut output = OutputMode::Csv;
+        let mut workers: usize = 1;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -96,6 +98,13 @@ impl Args {
                     output = OutputMode::Human;
                     i += 1;
                 }
+                "--workers" => {
+                    workers = args
+                        .get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--workers requires value"))?
+                        .parse()?;
+                    i += 2;
+                }
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -111,13 +120,14 @@ impl Args {
             force_gpu,
             label,
             output,
+            workers,
         })
     }
 }
 
 fn print_help() {
     println!(
-        "embedder-bench [--n N] [--source PATH] [--no-force-gpu] [--label L] [--csv|--human]"
+        "embedder-bench [--n N] [--source PATH] [--no-force-gpu] [--label L] [--csv|--human] [--workers N]"
     );
     println!("  --n N            number of texts to embed (default 256)");
     println!("  --source PATH    real source file to read embedding texts from");
@@ -126,6 +136,8 @@ fn print_help() {
     println!("  --label LABEL    label passed to OrtGpuFirstTextEmbedding::try_new");
     println!("  --csv            (default) single-line CSV: see header on first stderr line");
     println!("  --human          multi-line summary");
+    println!("  --workers N      spawn N parallel embedder instances (REQ-AXO-176)");
+    println!("                   each instance ≈ 680 MB VRAM; default 1");
 }
 
 fn run() -> anyhow::Result<()> {
@@ -146,9 +158,10 @@ fn run() -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "📊 embedder-bench: n={} force_gpu={} source={} label={}",
+        "📊 embedder-bench: n={} force_gpu={} workers={} source={} label={}",
         args.n,
         args.force_gpu,
+        args.workers,
         args.source.display(),
         args.label
     );
@@ -159,11 +172,20 @@ fn run() -> anyhow::Result<()> {
         std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap_or_else(|_| "<unset>".into())
     );
 
-    let bench = axon_core::embedder::run_embedder_throughput_bench(
-        &args.label,
-        texts,
-        args.force_gpu,
-    )?;
+    let bench = if args.workers > 1 {
+        axon_core::embedder::run_embedder_throughput_bench_parallel(
+            &args.label,
+            texts,
+            args.force_gpu,
+            args.workers,
+        )?
+    } else {
+        axon_core::embedder::run_embedder_throughput_bench(
+            &args.label,
+            texts,
+            args.force_gpu,
+        )?
+    };
 
     match args.output {
         OutputMode::Csv => {

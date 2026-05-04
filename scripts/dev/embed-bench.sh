@@ -74,6 +74,12 @@ export LD_LIBRARY_PATH="$LDP"
 # Mirror the runtime_boot defaults so the bench sees the same env the
 # real subprocess would see — inflight tuning happens via these.
 export AXON_GPU_EMBED_SERVICE_ENABLED="${AXON_GPU_EMBED_SERVICE_ENABLED:-1}"
+# REQ-AXO-176 — operator note 2026-05-04: nvidia-smi VRAM readings are
+# unreliable; switch to NVML for any VRAM-aware decision. When VRAM
+# exceeds the 8 GB GPU limit (treat 7 GB as safe ceiling) the driver
+# spills allocations to system RAM and throughput collapses.
+export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
+export AXON_NVML_LIBRARY_PATH="${AXON_NVML_LIBRARY_PATH:-/usr/lib/wsl/lib/libnvidia-ml.so.1}"
 
 # Auto-rebuild if any embedder .rs is newer than the binary, or --rebuild
 BIN=".axon/cargo-target/release/embedder-bench"
