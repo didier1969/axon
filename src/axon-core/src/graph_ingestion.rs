@@ -463,6 +463,14 @@ impl GraphStore {
         let mut seen_calls_nif = std::collections::HashSet::new();
         let mut symbol_values = Vec::new();
         let mut chunk_values = Vec::new();
+        // DEC-AXO-071 H.2: when inline mode is enabled, capture chunk
+        // metadata so we can embed inline immediately after the chunk
+        // INSERT execute_batch returns. Empty when
+        // AXON_VECTOR_PIPELINE_INLINE is unset or when the caller passed
+        // enqueue_vectorization=false.
+        let inline_enabled = enqueue_vectorization
+            && crate::embedder::inline_embed::inline_pipeline_enabled();
+        let mut inline_chunks: Vec<(String, String, String, String)> = Vec::new();
         let mut contains_values = Vec::new();
         let mut calls_values = Vec::new();
         let mut calls_nif_values = Vec::new();
@@ -561,6 +569,14 @@ impl GraphStore {
                                     derived_chunk.part_count,
                                     Self::escape_sql(&derived_chunk.chunk_path)
                                 ));
+                                if inline_enabled {
+                                    inline_chunks.push((
+                                        path.clone(),
+                                        chunk_id.clone(),
+                                        derived_chunk.content.clone(),
+                                        chunk_hash.clone(),
+                                    ));
+                                }
                             }
                             vectorizable_paths.insert(path.clone());
                         }
@@ -835,14 +851,23 @@ impl GraphStore {
             200,
         ));
         let mut enqueued_vectorization = false;
+        // DEC-AXO-071 H.2: paths that will skip the queue and be embedded
+        // inline below. Failures fall back to the queue in the inline
+        // pass, so the safety net is preserved.
+        let mut inline_target_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         if !file_vectorization_paths.is_empty() {
             file_vectorization_paths.sort();
             file_vectorization_paths.dedup();
             let now_ms = chrono::Utc::now().timestamp_millis();
             for path in file_vectorization_paths {
                 if vectorizable_paths.contains(&path) {
-                    queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
-                    enqueued_vectorization = true;
+                    if inline_enabled {
+                        inline_target_paths.insert(path.clone());
+                    } else {
+                        queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
+                        enqueued_vectorization = true;
+                    }
                 } else {
                     queries.push(format!(
                         "DELETE FROM FileVectorizationQueue WHERE file_path = '{}';",
@@ -852,6 +877,90 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
+
+        // DEC-AXO-071 H.2 inline embedding pass. Runs after chunks are
+        // committed so embeddings reference rows that exist in the DB.
+        // Each file is embedded as one batch via the shared vector lane
+        // (single BGE-Large model — no multi-worker GPU contention,
+        // REQ-AXO-181 step 4 cascade still avoided). On any failure
+        // (channel timeout, lane error, mismatched count, persist error)
+        // the affected file falls back to FileVectorizationQueue.
+        if inline_enabled && !inline_target_paths.is_empty() {
+            let mut by_file: std::collections::HashMap<String, Vec<(String, String, String)>> =
+                std::collections::HashMap::new();
+            for (file_path, chunk_id, content, content_hash) in inline_chunks {
+                if !inline_target_paths.contains(&file_path) {
+                    continue;
+                }
+                by_file
+                    .entry(file_path)
+                    .or_default()
+                    .push((chunk_id, content, content_hash));
+            }
+            let mut inline_completed_paths: Vec<String> = Vec::new();
+            let mut inline_failed_paths: Vec<String> = Vec::new();
+            for (file_path, rows) in by_file {
+                let texts: Vec<String> = rows
+                    .iter()
+                    .map(|(_, content, _)| content.clone())
+                    .collect();
+                match crate::embedder::inline_embed::embed_via_vector_lane(texts) {
+                    Ok(embeddings) if embeddings.len() == rows.len() => {
+                        let updates: Vec<(String, String, Vec<f32>)> = rows
+                            .into_iter()
+                            .zip(embeddings.into_iter())
+                            .map(|((chunk_id, _, content_hash), emb)| {
+                                (chunk_id, content_hash, emb)
+                            })
+                            .collect();
+                        if let Err(e) =
+                            self.update_chunk_embeddings(CHUNK_EMBEDDING_MODEL_ID, &updates)
+                        {
+                            tracing::warn!(
+                                file_path = %file_path,
+                                error = ?e,
+                                "inline embed: persist failed; falling back to queue"
+                            );
+                            inline_failed_paths.push(file_path);
+                        } else {
+                            inline_completed_paths.push(file_path);
+                        }
+                    }
+                    Ok(embeddings) => {
+                        tracing::warn!(
+                            file_path = %file_path,
+                            expected = rows.len(),
+                            received = embeddings.len(),
+                            "inline embed: lane returned mismatched embedding count; falling back to queue"
+                        );
+                        inline_failed_paths.push(file_path);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            file_path = %file_path,
+                            error = ?e,
+                            "inline embed: vector lane error; falling back to queue"
+                        );
+                        inline_failed_paths.push(file_path);
+                    }
+                }
+            }
+            if !inline_completed_paths.is_empty() {
+                self.mark_file_vectorization_done(
+                    &inline_completed_paths,
+                    CHUNK_EMBEDDING_MODEL_ID,
+                )?;
+            }
+            if !inline_failed_paths.is_empty() {
+                let now_ms_fallback = chrono::Utc::now().timestamp_millis();
+                let fallback_queries: Vec<String> = inline_failed_paths
+                    .iter()
+                    .map(|p| file_vectorization_queue_upsert_if_needed(p, now_ms_fallback))
+                    .collect();
+                self.execute_batch(&fallback_queries)?;
+                enqueued_vectorization = true;
+            }
+        }
         let repaired_orphan_vectorization = if enqueue_vectorization {
             let graph_ready_paths = indexed_paths_raw
                 .iter()
