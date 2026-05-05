@@ -464,6 +464,32 @@ impl GraphStore {
         let mut seen_calls_nif = std::collections::HashSet::new();
         let mut symbol_values = Vec::new();
         let mut chunk_values = Vec::new();
+        // DEC-AXO-074 M.2: when AXON_PARQUET_CHUNK_CONTENT_ENABLED=true and
+        // a `ParquetChunkContentStore` is installed, the variable-length
+        // `Chunk.content` payload is routed to an append-only Parquet
+        // side-store instead of the DuckDB column-store. We collect the
+        // raw chunk metadata + content here and defer chunk_values SQL
+        // formatting until after the Parquet append decision so we can
+        // fall back gracefully on append failure.
+        let parquet_chunk_content_active =
+            parquet_chunk_content_store::parquet_chunk_content_enabled()
+                && parquet_chunk_content_store::store().is_some();
+        struct PendingChunkRow {
+            chunk_id: String,
+            symbol_id: String,
+            project_code: String,
+            path: String,
+            kind: String,
+            content: String,
+            content_hash: String,
+            start_line: usize,
+            end_line: usize,
+            part_index: usize,
+            part_count: usize,
+            chunk_path: String,
+        }
+        let mut pending_chunk_rows: Vec<PendingChunkRow> = Vec::new();
+        let mut parquet_chunk_content_rows: Vec<(String, String, String)> = Vec::new();
         // DEC-AXO-071 H.2: when inline mode is enabled, capture chunk
         // metadata so we can embed inline immediately after the chunk
         // INSERT execute_batch returns. Empty when
@@ -555,21 +581,47 @@ impl GraphStore {
                                     derived_chunk.part_count,
                                 );
                                 let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
-                                chunk_values.push(format!(
-                                    "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
-                                    Self::escape_sql(&chunk_id),
-                                    Self::escape_sql(&symbol_id),
-                                    Self::escape_sql(project_code),
-                                    Self::escape_sql(path),
-                                    Self::escape_sql(&sym.kind),
-                                    Self::escape_sql(&derived_chunk.content),
-                                    Self::escape_sql(&chunk_hash),
-                                    derived_chunk.start_line,
-                                    derived_chunk.end_line,
-                                    derived_chunk.part_index,
-                                    derived_chunk.part_count,
-                                    Self::escape_sql(&derived_chunk.chunk_path)
-                                ));
+                                if parquet_chunk_content_active {
+                                    // Defer chunk_values SQL formatting; we'll decide between
+                                    // empty content (Parquet succeeded) and full content
+                                    // (Parquet append failed → legacy fallback) after the
+                                    // outer task loop completes.
+                                    parquet_chunk_content_rows.push((
+                                        chunk_id.clone(),
+                                        chunk_hash.clone(),
+                                        derived_chunk.content.clone(),
+                                    ));
+                                    pending_chunk_rows.push(PendingChunkRow {
+                                        chunk_id: chunk_id.clone(),
+                                        symbol_id: symbol_id.clone(),
+                                        project_code: project_code.to_string(),
+                                        path: path.clone(),
+                                        kind: sym.kind.clone(),
+                                        content: derived_chunk.content.clone(),
+                                        content_hash: chunk_hash.clone(),
+                                        start_line: derived_chunk.start_line,
+                                        end_line: derived_chunk.end_line,
+                                        part_index: derived_chunk.part_index,
+                                        part_count: derived_chunk.part_count,
+                                        chunk_path: derived_chunk.chunk_path.clone(),
+                                    });
+                                } else {
+                                    chunk_values.push(format!(
+                                        "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
+                                        Self::escape_sql(&chunk_id),
+                                        Self::escape_sql(&symbol_id),
+                                        Self::escape_sql(project_code),
+                                        Self::escape_sql(path),
+                                        Self::escape_sql(&sym.kind),
+                                        Self::escape_sql(&derived_chunk.content),
+                                        Self::escape_sql(&chunk_hash),
+                                        derived_chunk.start_line,
+                                        derived_chunk.end_line,
+                                        derived_chunk.part_index,
+                                        derived_chunk.part_count,
+                                        Self::escape_sql(&derived_chunk.chunk_path)
+                                    ));
+                                }
                                 if inline_enabled {
                                     inline_chunks.push((
                                         path.clone(),
@@ -827,6 +879,50 @@ impl GraphStore {
                 chrono::Utc::now().timestamp_millis(),
                 skipped_paths.join(",")
             ));
+        }
+        // DEC-AXO-074 M.2: Parquet side-store append decision.
+        // If active, attempt to write the variable-length content payload
+        // to Parquet first; on success, the DuckDB Chunk INSERT carries an
+        // empty `content` cell. On failure (or if no store is installed),
+        // fall back to the legacy combined INSERT with full content
+        // preserved per row — no chunk loss.
+        if parquet_chunk_content_active && !pending_chunk_rows.is_empty() {
+            let parquet_succeeded = match parquet_chunk_content_store::store() {
+                Some(store) => match store.append_batch(&parquet_chunk_content_rows) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            chunks = parquet_chunk_content_rows.len(),
+                            "parquet chunk_content append failed; falling back to legacy DuckDB content path"
+                        );
+                        false
+                    }
+                },
+                None => false,
+            };
+            for row in &pending_chunk_rows {
+                let content_for_sql: &str = if parquet_succeeded {
+                    ""
+                } else {
+                    row.content.as_str()
+                };
+                chunk_values.push(format!(
+                    "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
+                    Self::escape_sql(&row.chunk_id),
+                    Self::escape_sql(&row.symbol_id),
+                    Self::escape_sql(&row.project_code),
+                    Self::escape_sql(&row.path),
+                    Self::escape_sql(&row.kind),
+                    Self::escape_sql(content_for_sql),
+                    Self::escape_sql(&row.content_hash),
+                    row.start_line,
+                    row.end_line,
+                    row.part_index,
+                    row.part_count,
+                    Self::escape_sql(&row.chunk_path)
+                ));
+            }
         }
         sort_and_dedup_sql_tuples(&mut contains_values);
         sort_and_dedup_sql_tuples(&mut calls_values);
