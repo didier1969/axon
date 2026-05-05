@@ -302,8 +302,14 @@ impl WorkerPool {
         thread::spawn(move || {
             info!("DB Writer Actor online. Transactional pipeline ready.");
             let mut batch = Vec::new();
+            // DEC-AXO-072 follow-up profiling: trace commit cadence to
+            // confirm the 20s ON / 20s OFF GPU cycle hypothesis. Sidecar
+            // file at $AXON_RUN_ROOT/writer-actor.trace; bypasses the
+            // tracing subscriber so the diagnostic survives any filter.
+            let mut last_commit_done_at = Instant::now();
 
             loop {
+                let idle_started_at = Instant::now();
                 // 1. BLOCKING WAIT for first message
                 match db_receiver.recv() {
                     Ok(DbWriteTask::FileExtraction {
@@ -360,6 +366,8 @@ impl WorkerPool {
                     Err(_) => break,
                 }
 
+                let recv_done_at = Instant::now();
+
                 // 2. FILL BATCH up to 100
                 while batch.len() < 100 {
                     match db_receiver.try_recv() {
@@ -367,9 +375,15 @@ impl WorkerPool {
                         _ => break,
                     }
                 }
+                let fill_done_at = Instant::now();
 
                 // 3. COMMIT BATCH
                 if !batch.is_empty() {
+                    let pre_idle_ms = idle_started_at.duration_since(last_commit_done_at).as_millis();
+                    let recv_wait_ms = recv_done_at.duration_since(idle_started_at).as_millis();
+                    let fill_ms = fill_done_at.duration_since(recv_done_at).as_millis();
+                    let commit_started_at = Instant::now();
+                    let batch_size = batch.len();
                     let commit_batch = consolidate_writer_batch(&batch);
                     if let Err(e) = graph_store.insert_file_data_batch(&commit_batch) {
                         error!("Writer Actor: Batch commit failed: {:?}", e);
@@ -391,11 +405,32 @@ impl WorkerPool {
                         }
                         release_writer_batch_reservations(&queue, &batch);
                     }
+                    let commit_done_at = Instant::now();
+                    let commit_ms = commit_done_at.duration_since(commit_started_at).as_millis();
+                    writer_actor_trace(&format!(
+                        "commit batch_size={} pre_idle_ms={} recv_wait_ms={} fill_ms={} commit_ms={}",
+                        batch_size, pre_idle_ms, recv_wait_ms, fill_ms, commit_ms
+                    ));
+                    last_commit_done_at = commit_done_at;
                     batch.clear();
                 }
             }
         });
     }
+}
+
+fn writer_actor_trace(line: &str) {
+    let Ok(run_root) = std::env::var("AXON_RUN_ROOT") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(run_root).join("writer-actor.trace");
+    let now = chrono::Utc::now().format("%H:%M:%S%.3f");
+    let formatted = format!("{} {}\n", now, line);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, formatted.as_bytes()));
 }
 
 fn build_feedback_messages(batch: &[DbWriteTask]) -> Vec<String> {

@@ -866,9 +866,17 @@ impl GraphStore {
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
             exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
+            // DEC-AXO-072 follow-up: vector pipeline profiling (2026-05-05)
+            // showed the Writer Actor commit_ms growing from 132ms to 12298ms
+            // (100x slowdown) over 80s on the Axon repo because the prior
+            // `SET checkpoint_threshold = '1GB'` lets the WAL accumulate to
+            // ~1 GB before compaction, dragging every subsequent commit/SELECT
+            // through ever-longer WAL replay. Lowering the threshold to 64MB
+            // forces ~16x more checkpoints (each cheap) but caps the per-op
+            // cost. Standard for OLTP-heavy DuckDB workloads.
             exec_fn(
                 ctx,
-                CString::new("SET checkpoint_threshold = '1GB';")?.as_ptr(),
+                CString::new("SET checkpoint_threshold = '64MB';")?.as_ptr(),
             );
             if duckdb_memory_limit_gb > 0 {
                 exec_fn(

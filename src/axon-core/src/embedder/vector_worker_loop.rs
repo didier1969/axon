@@ -110,12 +110,17 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
     let file_batch_size = lane_config.file_vectorization_batch_size.max(1);
 
     let mut tick: u64 = 0;
+    let mut last_iter_done_at: Option<Instant> = None;
     loop {
         service_guard::record_vector_worker_heartbeat();
         tick += 1;
         if tick % 200 == 1 {
             vector_trace(&format!("[{}] tick={} loop_alive", worker_idx, tick));
         }
+        let iter_started_at = Instant::now();
+        let inter_iter_idle_ms = last_iter_done_at
+            .map(|t| iter_started_at.duration_since(t).as_millis())
+            .unwrap_or(0);
 
         // DEC-AXO-071 H.1: drain inline embed requests before fetching
         // from the queue. Implicit priority — keeps inline graph
@@ -188,6 +193,9 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
             }
         };
         vector_trace(&format!("[{}] claimed={}", worker_idx, claimed.len()));
+        let claim_done_at = Instant::now();
+        let claim_ms = claim_done_at.duration_since(iter_started_at).as_millis();
+        let files_claimed = claimed.len();
 
         info!(
             "Vector lane [{}]: claimed {} file(s) for embedding",
@@ -203,12 +211,20 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 worker_idx, e
             );
         }
+        let mark_started_done_at = Instant::now();
+        let mark_started_ms = mark_started_done_at.duration_since(claim_done_at).as_millis();
 
         let mut active = claimed;
         let mut completed_files: Vec<FileVectorizationWork> = Vec::new();
         let mut reserved_chunk_ids: HashSet<String> = HashSet::new();
+        let mut total_prep_ms: u128 = 0;
+        let mut total_tok_ms: u128 = 0;
+        let mut total_embed_ms: u128 = 0;
+        let mut total_persist_ms: u128 = 0;
+        let mut total_chunks_persisted: usize = 0;
 
         while !active.is_empty() {
+            let prep_started_at = Instant::now();
             let mut prepared = prepare_vector_embed_batch(
                 &graph_store,
                 &active,
@@ -217,6 +233,7 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 batch_max_bytes,
                 &reserved_chunk_ids,
             );
+            total_prep_ms += prep_started_at.elapsed().as_millis();
             for item in &prepared.work_items {
                 reserved_chunk_ids.insert(item.chunk_id.clone());
             }
@@ -257,6 +274,7 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 || !prepared.oversized_works.is_empty();
 
             if !prepared.texts.is_empty() {
+                let tok_started_at = Instant::now();
                 if let Err(e) = attach_preencoded_micro_batches(&tokenizer, &mut prepared) {
                     error!(
                         "Vector lane [{}]: tokenize failed: {:?}",
@@ -269,14 +287,17 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                     active = prepared.next_active_after_failure;
                     continue;
                 }
+                total_tok_ms += tok_started_at.elapsed().as_millis();
 
                 let embed_started = Instant::now();
                 let embeddings = match model.embed_prepared_batch_with_breakdown(&prepared) {
                     Ok((embeddings, _, _, _, _)) => {
+                        let embed_elapsed = embed_started.elapsed().as_millis();
+                        total_embed_ms += embed_elapsed;
                         service_guard::record_vector_lane_success();
                         service_guard::record_vector_stage_ms(
                             service_guard::VectorStageKind::Embed,
-                            embed_started.elapsed().as_millis() as u64,
+                            embed_elapsed as u64,
                         );
                         embeddings
                     }
@@ -319,9 +340,12 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                     active = prepared.next_active_after_failure;
                     continue;
                 }
+                let db_elapsed = db_started.elapsed().as_millis();
+                total_persist_ms += db_elapsed;
+                total_chunks_persisted += updates.len();
                 service_guard::record_vector_stage_ms(
                     service_guard::VectorStageKind::DbWrite,
-                    db_started.elapsed().as_millis() as u64,
+                    db_elapsed as u64,
                 );
                 service_guard::record_vector_embed_call(
                     updates.len() as u64,
@@ -339,6 +363,7 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
         }
 
         vector_trace(&format!("[{}] completed_files={}", worker_idx, completed_files.len()));
+        let finalize_started_at = Instant::now();
         if !completed_files.is_empty() {
             // DEC-AXO-072 J.4: when cache is enabled, evict completed
             // entries from cache so subsequent pending_for_lane scans
@@ -363,6 +388,30 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 service_guard::record_vector_files_completed(completed_files.len() as u64);
             }
         }
+        let finalize_ms = finalize_started_at.elapsed().as_millis();
+        let iter_done_at = Instant::now();
+        let iter_total_ms = iter_done_at.duration_since(iter_started_at).as_millis();
+        // Per-iteration profiling summary (DEC-AXO-072 follow-up). Emitted
+        // for every iteration that did real work (claimed > 0); skip for
+        // pure-idle ticks to avoid noise.
+        if files_claimed > 0 {
+            vector_trace(&format!(
+                "[{}] iter inter_idle_ms={} claim_ms={} mark_started_ms={} prep_ms={} tok_ms={} embed_ms={} persist_ms={} finalize_ms={} total_ms={} files={} chunks={}",
+                worker_idx,
+                inter_iter_idle_ms,
+                claim_ms,
+                mark_started_ms,
+                total_prep_ms,
+                total_tok_ms,
+                total_embed_ms,
+                total_persist_ms,
+                finalize_ms,
+                iter_total_ms,
+                files_claimed,
+                total_chunks_persisted
+            ));
+        }
+        last_iter_done_at = Some(iter_done_at);
 
         // DEC-AXO-070 commit G: vector lane is chunks-only. Symbol embeddings
         // were judged low-value (operator directive 2026-05-05) and were
