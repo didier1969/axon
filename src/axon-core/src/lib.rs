@@ -16,6 +16,7 @@ pub mod graph_analytics;
 pub mod graph_bootstrap;
 pub mod graph_ingestion;
 pub mod graph_query;
+pub mod hot_status_cache;
 pub mod indexing_policy;
 pub mod ingress_buffer;
 mod main_background;
