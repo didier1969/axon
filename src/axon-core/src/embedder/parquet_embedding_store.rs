@@ -67,11 +67,15 @@ impl ParquetEmbeddingStore {
         }
     }
 
-    pub fn append_batch(&self, rows: &[(String, Vec<f32>)]) -> Result<()> {
+    /// Append a batch of `(chunk_id, source_hash, embedding)` rows to the
+    /// current Parquet partition. `source_hash` is the Chunk content hash
+    /// at embed time — used by retrieve_context to filter out stale
+    /// vectors when chunk content has since been modified.
+    pub fn append_batch(&self, rows: &[(String, String, Vec<f32>)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
-        for (chunk_id, embedding) in rows {
+        for (chunk_id, _source_hash, embedding) in rows {
             if embedding.len() != EMBEDDING_DIM {
                 return Err(anyhow::anyhow!(
                     "parquet_store: embedding for {} has dim {} (expected {})",
@@ -128,6 +132,7 @@ impl ParquetEmbeddingStore {
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("chunk_id", DataType::Utf8, false),
+            Field::new("source_hash", DataType::Utf8, false),
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(
@@ -145,13 +150,16 @@ impl ParquetEmbeddingStore {
             .build()
     }
 
-    fn rows_to_batch(rows: &[(String, Vec<f32>)]) -> Result<RecordBatch> {
-        let chunk_ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    fn rows_to_batch(rows: &[(String, String, Vec<f32>)]) -> Result<RecordBatch> {
+        let chunk_ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
         let chunk_id_array: ArrayRef = Arc::new(StringArray::from(chunk_ids));
+
+        let source_hashes: Vec<&str> = rows.iter().map(|(_, h, _)| h.as_str()).collect();
+        let source_hash_array: ArrayRef = Arc::new(StringArray::from(source_hashes));
 
         let flat: Vec<f32> = rows
             .iter()
-            .flat_map(|(_, e)| e.iter().copied())
+            .flat_map(|(_, _, e)| e.iter().copied())
             .collect();
         let values = Float32Array::from(flat);
         let item_field = Arc::new(Field::new("item", DataType::Float32, false));
@@ -164,7 +172,7 @@ impl ParquetEmbeddingStore {
 
         Ok(RecordBatch::try_new(
             Self::schema(),
-            vec![chunk_id_array, embed_array],
+            vec![chunk_id_array, source_hash_array, embed_array],
         )?)
     }
 
@@ -214,8 +222,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn fixture_row(chunk_id: &str, fill: f32) -> (String, Vec<f32>) {
-        (chunk_id.to_string(), vec![fill; EMBEDDING_DIM])
+    fn fixture_row(chunk_id: &str, fill: f32) -> (String, String, Vec<f32>) {
+        (
+            chunk_id.to_string(),
+            format!("hash-{}", chunk_id),
+            vec![fill; EMBEDDING_DIM],
+        )
     }
 
     #[test]
@@ -235,7 +247,7 @@ mod tests {
     fn append_batch_rejects_wrong_dimension() {
         let tmp = TempDir::new().unwrap();
         let store = ParquetEmbeddingStore::new(tmp.path().to_path_buf());
-        let bad = vec![("c1".to_string(), vec![0.0_f32; 512])];
+        let bad = vec![("c1".to_string(), "h".to_string(), vec![0.0_f32; 512])];
         let err = store.append_batch(&bad).unwrap_err();
         assert!(err.to_string().contains("dim 512"), "{err}");
     }
@@ -245,7 +257,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = ParquetEmbeddingStore::new(tmp.path().to_path_buf());
         // First batch fills most of the partition.
-        let mut rows: Vec<(String, Vec<f32>)> = (0..ROWS_PER_PARTITION - 10)
+        let mut rows: Vec<(String, String, Vec<f32>)> = (0..ROWS_PER_PARTITION - 10)
             .map(|i| fixture_row(&format!("c{}", i), 0.5))
             .collect();
         store.append_batch(&rows).unwrap();

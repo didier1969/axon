@@ -339,9 +339,9 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 let persist_result: Result<(), anyhow::Error> = if crate::embedder::parquet_embedding_store::parquet_store_enabled() {
                     match crate::embedder::parquet_embedding_store::store() {
                         Some(parquet) => {
-                            let rows: Vec<(String, Vec<f32>)> = updates
+                            let rows: Vec<(String, String, Vec<f32>)> = updates
                                 .iter()
-                                .map(|(id, _hash, emb)| (id.clone(), emb.clone()))
+                                .map(|(id, hash, emb)| (id.clone(), hash.clone(), emb.clone()))
                                 .collect();
                             match parquet.append_batch(&rows) {
                                 Ok(()) => Ok(()),

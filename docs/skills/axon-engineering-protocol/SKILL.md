@@ -35,7 +35,7 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 |---|---|
 | Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` |
 | Inspect detail (callers/callees survive synthetic target_id format via name-suffix join, REQ-AXO-134) | `inspect` |
-| Evidence packet | `retrieve_context` |
+| Evidence packet | `retrieve_context` (DEC-AXO-073 L.3: when `AXON_PARQUET_EMBEDDING_STORE_ENABLED=true`, semantic JOIN reads ChunkEmbedding vectors from Parquet partitions via `parquet_scan` — same source_hash freshness check, behavior preserved when env=false) |
 | Blast radius | `impact` |
 | Why it exists | `why` |
 | Source-sink flow | `path` |

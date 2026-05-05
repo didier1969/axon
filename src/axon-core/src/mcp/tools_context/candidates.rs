@@ -323,22 +323,54 @@ impl McpServer {
             if !anchored_candidates.is_empty() { return anchored_candidates; }
         }
 
+        // DEC-AXO-073 L.3: when the Parquet side-store is active, semantic
+        // candidates pull the embedding column from the Parquet partition
+        // tree rather than the DuckDB ChunkEmbedding column. The JOIN
+        // shape is preserved (same predicate columns, same source_hash
+        // freshness check) so all downstream scoring logic is unchanged.
+        // Cache disabled => existing DuckDB column path (commit G + H.2).
+        let parquet_active = crate::embedder::parquet_embedding_store::parquet_store_enabled();
+        let parquet_glob = if parquet_active {
+            crate::embedder::parquet_embedding_store::default_base_dir()
+                .join("**/*.parquet")
+                .to_string_lossy()
+                .replace('\'', "''")
+        } else {
+            String::new()
+        };
+
         let query = if let Some(embedding) = semantic {
             let vector = format!("{embedding:?}");
+            let (embed_join, embed_col) = if parquet_active {
+                (
+                    format!(
+                        "JOIN parquet_scan('{glob}') ce ON ce.chunk_id = c.id AND ce.source_hash = c.content_hash",
+                        glob = parquet_glob
+                    ),
+                    "ce.embedding",
+                )
+            } else {
+                (
+                    format!(
+                        "JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash",
+                        model_id = CHUNK_MODEL_ID
+                    ),
+                    "ce.embedding",
+                )
+            };
             format!(
                 "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE WHEN ({entry_id_match}) THEN 'entry_anchor' WHEN ({entry_uri_match}) THEN 'same_file' \
                              WHEN ({path_match}) THEN 'file_path' WHEN ({lexical_predicate}) THEN 'lexical+semantic' \
                              ELSE 'semantic' END, \
-                        array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}])) \
+                        array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) \
                  FROM Chunk c \
-                 JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash \
+                 {embed_join} \
                  LEFT JOIN CONTAINS rel ON rel.target_id = c.source_id LEFT JOIN File f ON f.path = rel.source_id \
                  WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match}) \
-                        OR array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}])) < 0.55){project_filter} \
-                 ORDER BY array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}])) ASC LIMIT {limit}",
-                model_id = CHUNK_MODEL_ID,
+                        OR array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) < 0.55){project_filter} \
+                 ORDER BY array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) ASC LIMIT {limit}",
                 project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]))
         } else {
             format!(
