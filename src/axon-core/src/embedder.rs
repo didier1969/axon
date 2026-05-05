@@ -78,8 +78,8 @@ pub(crate) use batch_lanes::{
 };
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 use gpu_backend::{
-    abort_gpu_embed_if_vram_summit_reached, cuda_execution_provider_dispatch,
-    ort_cuda_provider_library_available, ort_cuda_provider_library_path, OrtGpuFirstTextEmbedding,
+    cuda_execution_provider_dispatch, ort_cuda_provider_library_available,
+    ort_cuda_provider_library_path, OrtGpuFirstTextEmbedding,
 };
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
@@ -704,7 +704,6 @@ fn embed_prepared_batch_with_breakdown_ort(
         let mut output_extract_ms = 0u64;
 
         for micro_batch in &prepared.encoded_micro_batches {
-            abort_gpu_embed_if_vram_summit_reached()?;
             let (
                 batch_embeddings,
                 batch_host_prepare_ms,
@@ -724,7 +723,6 @@ fn embed_prepared_batch_with_breakdown_ort(
             {
                 ordered_embeddings[index] = Some(embedding);
             }
-            abort_gpu_embed_if_vram_summit_reached()?;
         }
 
         let embeddings = ordered_embeddings
@@ -790,7 +788,6 @@ fn embed_texts_with_breakdown_ort(
     let mut output_extract_ms = 0u64;
 
     for batch_indices in micro_batches {
-        abort_gpu_embed_if_vram_summit_reached()?;
         let batch_encodings = batch_indices
             .iter()
             .map(|index| encodings[*index].clone())
@@ -809,7 +806,6 @@ fn embed_texts_with_breakdown_ort(
         for (index, embedding) in batch_indices.into_iter().zip(batch_embeddings) {
             ordered_embeddings[index] = Some(embedding);
         }
-        abort_gpu_embed_if_vram_summit_reached()?;
     }
 
     let embeddings = ordered_embeddings

@@ -11,12 +11,31 @@
 //! (DEC-AXO-068 / VAL-AXO-028).
 
 use std::collections::HashSet;
+use std::io::Write as _;
 
 use super::*;
+
+/// Write a single trace line to `<AXON_RUN_ROOT>/vector-lane.trace`.
+/// Bypasses the tracing subscriber so the diagnostic survives any log-filter
+/// or scrollback truncation (REQ-AXO-185).
+fn vector_trace(line: &str) {
+    let Ok(run_root) = std::env::var("AXON_RUN_ROOT") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(run_root).join("vector-lane.trace");
+    let now = chrono::Utc::now().format("%H:%M:%S%.3f");
+    let formatted = format!("{} {}\n", now, line);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(formatted.as_bytes()));
+}
 
 pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>) {
     let _liveness = VectorWorkerLivenessGuard::new();
     let lane_config = embedding_lane_config_from_env();
+    vector_trace(&format!("[{}] worker_entry", worker_idx));
 
     if let Err(e) = graph_store.ensure_embedding_model(
         SYMBOL_MODEL_ID,
@@ -68,22 +87,32 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
         }
     };
     info!("Vector lane [{}]: ready, polling for work", worker_idx);
+    vector_trace(&format!("[{}] ready", worker_idx));
 
     let target_chunks = lane_config.chunk_batch_size.max(1);
     let per_file_fetch_limit = lane_config.max_chunks_per_file;
     let batch_max_bytes = lane_config.max_embed_batch_bytes;
     let file_batch_size = lane_config.file_vectorization_batch_size.max(1);
 
+    let mut tick: u64 = 0;
     loop {
         service_guard::record_vector_worker_heartbeat();
+        tick += 1;
+        if tick % 200 == 1 {
+            vector_trace(&format!("[{}] tick={} loop_alive", worker_idx, tick));
+        }
 
         let claimed = match graph_store.fetch_pending_file_vectorization_work(file_batch_size) {
             Ok(work) if !work.is_empty() => work,
             Ok(_) => {
+                if tick % 200 == 1 {
+                    vector_trace(&format!("[{}] tick={} fetch_empty", worker_idx, tick));
+                }
                 let _ = wait_for_vector_backlog_or_timeout(Duration::from_millis(50));
                 continue;
             }
             Err(e) => {
+                vector_trace(&format!("[{}] fetch_err: {:?}", worker_idx, e));
                 error!(
                     "Vector lane [{}]: fetch_pending_file_vectorization_work failed: {:?}",
                     worker_idx, e
@@ -92,7 +121,13 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 continue;
             }
         };
+        vector_trace(&format!("[{}] claimed={}", worker_idx, claimed.len()));
 
+        info!(
+            "Vector lane [{}]: claimed {} file(s) for embedding",
+            worker_idx,
+            claimed.len()
+        );
         if let Err(e) = graph_store.mark_file_vectorization_started(&claimed) {
             warn!(
                 "Vector lane [{}]: mark_file_vectorization_started failed: {:?}",
@@ -136,6 +171,17 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                     .mark_file_vectorization_work_failed(std::slice::from_ref(w), reason);
             }
 
+            info!(
+                "Vector lane [{}]: prepared chunks={} immediate_completed={} finalize_after_success={} oversized={} next_active_success={} next_active_failure={} failed_fetches={}",
+                worker_idx,
+                prepared.work_items.len(),
+                prepared.immediate_completed.len(),
+                prepared.finalize_after_success.len(),
+                prepared.oversized_works.len(),
+                prepared.next_active_after_success.len(),
+                prepared.next_active_after_failure.len(),
+                prepared.failed_fetches.len()
+            );
             let made_progress = !prepared.work_items.is_empty()
                 || !prepared.immediate_completed.is_empty()
                 || !prepared.finalize_after_success.is_empty()
@@ -166,23 +212,18 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                         embeddings
                     }
                     Err(e) => {
-                        let fatal = is_gpu_recycle_immediate_error(&e)
-                            || fatal_embedding_error_class(&e).is_some();
+                        // DEC-AXO-070 single-loop design: never exit on transient
+                        // embed errors. Mark the batch failed and continue. axonctl
+                        // supervises the process; in-loop self-termination just
+                        // hides the recoverable failure mode.
                         error!(
-                            "Vector lane [{}]: embed failed (fatal={}): {:?}",
-                            worker_idx, fatal, e
+                            "Vector lane [{}]: embed failed: {:?}",
+                            worker_idx, e
                         );
                         let _ = graph_store.mark_file_vectorization_work_failed(
                             &prepared.touched_works,
                             &format!("embed: {:?}", e),
                         );
-                        if fatal {
-                            error!(
-                                "Vector lane [{}]: fatal embed error; exiting (axonctl will restart)",
-                                worker_idx
-                            );
-                            return;
-                        }
                         active = prepared.next_active_after_failure;
                         continue;
                     }
@@ -228,8 +269,10 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
             }
         }
 
+        vector_trace(&format!("[{}] completed_files={}", worker_idx, completed_files.len()));
         if !completed_files.is_empty() {
             if let Err(e) = graph_store.mark_file_vectorization_work_done(&completed_files) {
+                vector_trace(&format!("[{}] mark_done_err: {:?}", worker_idx, e));
                 error!(
                     "Vector lane [{}]: mark_file_vectorization_work_done failed: {:?}",
                     worker_idx, e
@@ -239,49 +282,11 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
             }
         }
 
-        // Symbol embeddings: small-volume side-channel, drain opportunistically.
-        match graph_store.fetch_unembedded_symbols(SYMBOL_BATCH_SIZE) {
-            Ok(symbols) if !symbols.is_empty() => {
-                let texts: Vec<String> = symbols.iter().map(|s| s.1.clone()).collect();
-                match model.embed_texts_with_breakdown(&texts) {
-                    Ok((embeddings, _, _, _, _)) => {
-                        let updates: Vec<(String, Vec<f32>)> = symbols
-                            .into_iter()
-                            .zip(embeddings)
-                            .map(|((id, _), emb)| (id, emb))
-                            .collect();
-                        if let Err(e) = graph_store.update_symbol_embeddings(&updates) {
-                            error!(
-                                "Vector lane [{}]: update_symbol_embeddings failed: {:?}",
-                                worker_idx, e
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let fatal = is_gpu_recycle_immediate_error(&e)
-                            || fatal_embedding_error_class(&e).is_some();
-                        error!(
-                            "Vector lane [{}]: symbol embed failed (fatal={}): {:?}",
-                            worker_idx, fatal, e
-                        );
-                        if fatal {
-                            error!(
-                                "Vector lane [{}]: fatal symbol embed; exiting (axonctl will restart)",
-                                worker_idx
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                error!(
-                    "Vector lane [{}]: fetch_unembedded_symbols failed: {:?}",
-                    worker_idx, e
-                );
-            }
-        }
+        // DEC-AXO-070 commit G: vector lane is chunks-only. Symbol embeddings
+        // were judged low-value (operator directive 2026-05-05) and were
+        // additionally creating writer contention that blocked chunk
+        // throughput. The Symbol.embedding column persists in the schema for
+        // downstream callers but is no longer populated by the live indexer.
 
         if let Some(snap) = current_gpu_memory_snapshot() {
             if snap.used_mb >= 7000 {

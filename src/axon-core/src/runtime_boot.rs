@@ -322,15 +322,14 @@ fn apply_graph_first_indexer_memory_defaults(
             "0".to_string(),
         ),
         ("AXON_GPU_EMBED_SERVICE_TENSORRT", "1".to_string()),
-        ("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true".to_string()),
-        (
-            "AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT",
-            "true".to_string(),
-        ),
-        ("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT", "96".to_string()),
-        ("AXON_GPU_STUCK_RECOVERY_ENABLED", "true".to_string()),
-        ("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS", "2500".to_string()),
-        ("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS", "5000".to_string()),
+        // DEC-AXO-070 commit G: graph workers MUST NOT load BGE-Large.
+        // 4× workers competing for VRAM cascade-OOM into CPU fallback,
+        // saturating CPU and starving the vector lane. The graph projection
+        // structure (Symbol nodes, relationships, Chunks) is the canonical
+        // value; embedding those is delegated to the single-worker vector
+        // lane. Operators can re-enable explicitly if they need legacy
+        // graph-embedding parity.
+        ("AXON_GRAPH_EMBEDDINGS_ENABLED", "false".to_string()),
     ] {
         if std::env::var(env_name).is_err() {
             unsafe {
@@ -1212,6 +1211,7 @@ mod tests {
 
     #[test]
     fn indexer_shadow_gpu_boot_prefers_graph_first_lane_sizing() {
+        let _guard = env_lock();
         let runtime_profile = RuntimeProfile {
             cpu_cores: 8,
             ram_total_gb: 32,
@@ -1231,8 +1231,19 @@ mod tests {
             graph_batch_size: 8,
         };
 
+        // DEC-AXO-070 commit G: graph_embeddings_enabled defaults to false.
+        // This test exercises the legacy graph-first sizing path, so we
+        // explicitly opt back in for the duration of the assertion.
+        unsafe {
+            std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
+        }
+
         let adjusted =
             graph_first_indexer_lane_sizing(RuntimeBootProfile::indexer(), &runtime_profile, base);
+
+        unsafe {
+            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+        }
 
         assert_eq!(adjusted.query_workers, 0);
         assert_eq!(adjusted.vector_workers, 1);
@@ -1395,29 +1406,15 @@ mod tests {
             std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap(),
             "1"
         );
+        // DEC-AXO-070 commit G: VRAM summit guard + stuck-recovery defaults
+        // were removed; their call sites were dead since commit C and the
+        // 2 GB summit threshold was misconfigured (AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT=96
+        // failed the [50,95] parser filter, falling back to soft_limit_mb).
+        // Replaced by the single canonical AXON_GRAPH_EMBEDDINGS_ENABLED=false
+        // default that prevents multi-worker BGE-Large GPU contention.
         assert_eq!(
-            std::env::var("AXON_GPU_STUCK_RECOVERY_ENABLED").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT").unwrap(),
-            "96"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_STUCK_RECOVERY_IDLE_GAP_MS").unwrap(),
-            "2500"
-        );
-        assert_eq!(
-            std::env::var("AXON_GPU_STUCK_RECOVERY_READY_AGE_MS").unwrap(),
-            "5000"
+            std::env::var("AXON_GRAPH_EMBEDDINGS_ENABLED").unwrap(),
+            "false"
         );
         assert_eq!(
             std::env::var("AXON_SEMANTIC_SLEEP_SCALE_PCT").unwrap(),
@@ -1464,6 +1461,7 @@ mod tests {
             std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
             std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
             std::env::remove_var("AXON_GPU_RECYCLE_REQUIRED_BATCHES");
+            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
         }
     }
 

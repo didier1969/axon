@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use tracing::info;
+use tracing::{debug, info};
 
 const MAX_EVENTS: usize = 512;
 
@@ -25,7 +25,14 @@ pub fn record(checkpoint: &str, path: Option<&Path>, detail: impl Into<String>) 
         guard.push_back(line.clone());
     }
 
-    info!("WatcherProbe {}", line);
+    // REQ-AXO-185 #4: filtered/ignored_directory_event is high-volume noise.
+    // Keep it queryable via `recent()` ring buffer, but log at debug level so
+    // INFO-level capture remains useful for diagnosing the pipeline.
+    if detail.contains("ignored_directory_event") || checkpoint == "watcher.filtered" {
+        debug!("WatcherProbe {}", line);
+    } else {
+        info!("WatcherProbe {}", line);
+    }
 }
 
 #[allow(dead_code)]
