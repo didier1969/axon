@@ -60,6 +60,14 @@ async-trait = "0.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 libc = "0.2"
 
+# DEC-AXO-073: Parquet side-store for ChunkEmbedding (vector hot-path).
+# Writing FLOAT[1024] vectors directly to Parquet bypasses the DuckDB
+# column-store INSERT scaling problem (see VAL-AXO-034, VAL-AXO-036).
+# Minimal feature flags; ZSTD compression keeps payloads compact.
+parquet = { version = "54", default-features = false, features = ["zstd", "arrow"] }
+arrow-array = "54"
+arrow-schema = "54"
+
 [dev-dependencies]
 rand = "0.8"
 tempfile = "3.8"
