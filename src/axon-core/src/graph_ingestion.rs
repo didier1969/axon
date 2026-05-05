@@ -856,6 +856,12 @@ impl GraphStore {
         // pass, so the safety net is preserved.
         let mut inline_target_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // DEC-AXO-072 J.3: when the hot status cache is enabled, route
+        // ready-state writes through the cache instead of generating
+        // INSERT FVQ SQL here. The cache batches and flushes
+        // asynchronously (100ms window). Cache disabled -> existing
+        // direct-DB path (commit G + H.2 behavior).
+        let hot_cache_enabled = crate::hot_status_cache::cache_enabled();
         if !file_vectorization_paths.is_empty() {
             file_vectorization_paths.sort();
             file_vectorization_paths.dedup();
@@ -864,6 +870,14 @@ impl GraphStore {
                 if vectorizable_paths.contains(&path) {
                     if inline_enabled {
                         inline_target_paths.insert(path.clone());
+                    } else if hot_cache_enabled {
+                        if let Some(cache) = crate::hot_status_cache::cache() {
+                            cache.mark_ready(&path, now_ms);
+                            enqueued_vectorization = true;
+                        } else {
+                            queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
+                            enqueued_vectorization = true;
+                        }
                     } else {
                         queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
                         enqueued_vectorization = true;
@@ -953,11 +967,19 @@ impl GraphStore {
             }
             if !inline_failed_paths.is_empty() {
                 let now_ms_fallback = chrono::Utc::now().timestamp_millis();
-                let fallback_queries: Vec<String> = inline_failed_paths
-                    .iter()
-                    .map(|p| file_vectorization_queue_upsert_if_needed(p, now_ms_fallback))
-                    .collect();
-                self.execute_batch(&fallback_queries)?;
+                if hot_cache_enabled {
+                    if let Some(cache) = crate::hot_status_cache::cache() {
+                        for path in &inline_failed_paths {
+                            cache.mark_ready(path, now_ms_fallback);
+                        }
+                    }
+                } else {
+                    let fallback_queries: Vec<String> = inline_failed_paths
+                        .iter()
+                        .map(|p| file_vectorization_queue_upsert_if_needed(p, now_ms_fallback))
+                        .collect();
+                    self.execute_batch(&fallback_queries)?;
+                }
                 enqueued_vectorization = true;
             }
         }
