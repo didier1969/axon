@@ -6,6 +6,7 @@ use std::{fs, path::PathBuf};
 
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
+use axon_core::embedder::current_embedding_provider_diagnostics;
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
@@ -116,6 +117,7 @@ fn write_runtime_heartbeat_export(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown-runtime".to_string());
+    let embedder_provider = current_embedding_provider_diagnostics();
     let payload = serde_json::json!({
         "process_role": process_role,
         "runtime_mode": runtime_mode.as_str(),
@@ -130,6 +132,11 @@ fn write_runtime_heartbeat_export(
         "stale": runtime_truth_feed.stale,
         "degraded_reason": runtime_truth_feed.degraded_reason,
         "runtime_truth_feed": runtime_truth_feed,
+        "embedder_provider": {
+            "requested": embedder_provider.provider_requested,
+            "effective": embedder_provider.provider_effective,
+            "init_error": embedder_provider.provider_init_error,
+        },
         "runtime_telemetry": {
             "ingress_enabled": runtime_snapshot.ingress_enabled,
             "ingress_buffered_entries": runtime_snapshot.ingress_buffered_entries,
