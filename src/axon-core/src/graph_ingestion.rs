@@ -1532,21 +1532,40 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(",");
 
+        // DEC-AXO-074 M.3: when Chunk.content lives in Parquet, the DuckDB
+        // column carries an empty string. COALESCE with parquet_scan to
+        // surface the actual content for the embedder. JOIN keys mirror
+        // the write path (chunk_id + content_hash) to filter stale rows.
+        let parquet_content_active = parquet_chunk_content_store::parquet_chunk_content_enabled();
+        let (content_join, content_expr) = if parquet_content_active {
+            let glob = parquet_chunk_content_store::default_base_dir()
+                .join("**/*.parquet")
+                .to_string_lossy()
+                .replace('\'', "''");
+            (
+                format!(
+                    " LEFT JOIN parquet_scan('{glob}') pc ON pc.chunk_id = c.id AND pc.content_hash = c.content_hash"
+                ),
+                "COALESCE(NULLIF(c.content, ''), pc.content, '')".to_string(),
+            )
+        } else {
+            (String::new(), "c.content".to_string())
+        };
+
         let query = format!(
             "SELECT file_path, id, content, content_hash FROM ( \
-                 SELECT c.file_path, c.id, c.content, c.content_hash, \
+                 SELECT c.file_path, c.id, {content_expr} AS content, c.content_hash, \
                         ROW_NUMBER() OVER (PARTITION BY c.file_path) AS rn \
-                 FROM Chunk c \
-                 WHERE c.file_path IN ({}) \
+                 FROM Chunk c{content_join} \
+                 WHERE c.file_path IN ({in_list}) \
                  AND NOT EXISTS ( \
                      SELECT 1 \
                      FROM ChunkEmbedding ce \
                      WHERE ce.chunk_id = c.id \
-                       AND ce.model_id = '{}' \
+                       AND ce.model_id = '{escaped_model}' \
                        AND ce.source_hash = c.content_hash \
                  ) \
-             ) sub WHERE rn <= {}",
-            in_list, escaped_model, per_file_limit
+             ) sub WHERE rn <= {per_file_limit}"
         );
 
         let res = self.query_json_writer(&query)?;
