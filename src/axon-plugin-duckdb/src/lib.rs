@@ -103,7 +103,23 @@ pub unsafe extern "C" fn duckdb_init_db(
             } else if plugin_trace_enabled() {
                 eprintln!("[duckdb_init_db] duckpgq_skipped");
             }
-            let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+            // VAL-AXO-035 confirmed: synchronous=OFF still shows
+            // commit_ms growing 28ms -> 7734ms over 90s. WAL fsync is
+            // NOT the dominant cost; the geometric degradation comes
+            // from inside DuckDB column-store (re-encoding, tombstone
+            // accumulation, B-tree maintenance, or memory pressure).
+            // Reverting to synchronous=NORMAL (safe production default).
+            // The structural fix is DEC-AXO-073 (Parquet side-store for
+            // ChunkEmbedding). Toggle via AXON_DUCKDB_SYNC_MODE=off for
+            // future diagnostics.
+            let sync_mode = std::env::var("AXON_DUCKDB_SYNC_MODE")
+                .unwrap_or_else(|_| "normal".to_string())
+                .to_uppercase();
+            let pragmas = format!(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous={};",
+                sync_mode
+            );
+            let _ = conn.execute_batch(&pragmas);
             if plugin_trace_enabled() {
                 eprintln!("[duckdb_init_db] pragmas_done");
             }

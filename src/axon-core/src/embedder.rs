@@ -59,6 +59,8 @@ mod gpu_policy;
 mod gpu_telemetry;
 #[path = "embedder/inline_embed.rs"]
 pub(crate) mod inline_embed;
+#[path = "embedder/parquet_embedding_store.rs"]
+pub(crate) mod parquet_embedding_store;
 #[path = "embedder/provider_contract.rs"]
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]
@@ -1152,6 +1154,15 @@ impl SemanticWorkerPool {
 
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
+
+        // DEC-AXO-073 L.1: install Parquet embedding side-store singleton.
+        // Disabled by default; vector_lane falls through to DuckDB INSERT.
+        // Activated via AXON_PARQUET_EMBEDDING_STORE_ENABLED=true.
+        let _ = parquet_embedding_store::install(Arc::new(
+            parquet_embedding_store::ParquetEmbeddingStore::new(
+                parquet_embedding_store::default_base_dir(),
+            ),
+        ));
 
         // DEC-AXO-072 J.2: install hot status cache singleton; enable per
         // env. Cache disabled by default — the flush thread below

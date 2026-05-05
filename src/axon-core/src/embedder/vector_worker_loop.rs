@@ -328,9 +328,40 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                     })
                     .collect();
                 let db_started = Instant::now();
-                if let Err(e) = graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates) {
+                // DEC-AXO-073 L.2: when the Parquet side-store is
+                // enabled, write the FLOAT[1024] vectors to append-only
+                // Parquet files instead of the DuckDB ChunkEmbedding
+                // table. Skipping the DuckDB INSERT eliminates the
+                // column-store growth penalty (VAL-AXO-034). When
+                // disabled, fall through to update_chunk_embeddings
+                // (commit G + H.2 path). On Parquet failure, fall back
+                // to DuckDB so no chunk is lost.
+                let persist_result: Result<(), anyhow::Error> = if crate::embedder::parquet_embedding_store::parquet_store_enabled() {
+                    match crate::embedder::parquet_embedding_store::store() {
+                        Some(parquet) => {
+                            let rows: Vec<(String, Vec<f32>)> = updates
+                                .iter()
+                                .map(|(id, _hash, emb)| (id.clone(), emb.clone()))
+                                .collect();
+                            match parquet.append_batch(&rows) {
+                                Ok(()) => Ok(()),
+                                Err(e) => {
+                                    warn!(
+                                        "Vector lane [{}]: parquet append failed: {:?}; falling back to DuckDB",
+                                        worker_idx, e
+                                    );
+                                    graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
+                                }
+                            }
+                        }
+                        None => graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates),
+                    }
+                } else {
+                    graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
+                };
+                if let Err(e) = persist_result {
                     error!(
-                        "Vector lane [{}]: update_chunk_embeddings failed: {:?}",
+                        "Vector lane [{}]: persist failed: {:?}",
                         worker_idx, e
                     );
                     let _ = graph_store.mark_file_vectorization_work_failed(

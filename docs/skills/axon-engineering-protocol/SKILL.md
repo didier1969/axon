@@ -174,5 +174,30 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 - `status mode=brief` text rendering surfaces `Trust boundary:` + `Next best action:` lines (REQ-AXO-042) so an LLM reading the markdown can act without parsing raw `data.truth_cockpit`. When `degraded_notes` are present, a `Current blocker:` line follows. Always inspect these three lines first when `truth_status != canonical` — they name the exact recovery tool.
 - Multi-tenant query scoping (REQ-AXO-066 Phase 1 / DEC-AXO-064 Option A): use `scoped_query_filter(project_code, prefix)` from `tools_soll/shared.rs` for the canonical `AND <prefix>project_code = '<code>'` fragment. Composite `(project_code, key)` indexes are present on hot IST tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES / Symbol / File) and SOLL tables (Node / Edge / McpJob / Revision / RevisionChange). `soll.Edge`, `soll.McpJob`, `soll.Revision`, `soll.RevisionChange` carry a denormalized `project_code` column (backfilled to `'AXO'` on first boot for legacy rows; edges inherit from source Node when known)
 
+## Architecture-state CPTs (load these at session start for perf work)
+Each CPT below names a load-bearing structural fact discovered the hard way. Fetch via `cypher SELECT description FROM soll.main.Node WHERE id='<CPT-ID>'` (IDs assigned when entries are created in SOLL).
+
+| CPT | Anchor | When to load |
+|---|---|---|
+| Single writer mutex serialization | `graph.rs:33` | Any perf or contention work |
+| DuckDB plugin layer (FFI) | `axon-plugin-duckdb/src/lib.rs` | Extending DB capabilities (Appender, Parquet, etc.) |
+| Writer Actor batching pattern | `worker.rs:296` | Throughput / pipeline work |
+| Memgraph publication contract | `bin_memgraph_publication.rs` | Visualization or publication |
+| Env var 2-layer propagation | `axon-instance.sh` + `start.sh` | Adding new `AXON_*` env knobs |
+| DuckDB workload boundaries | empirical (VAL-AXO-034/036) | Any storage or write-heavy redesign |
+
+## Performance investigation playbook
+1. **Instrument first** — add per-stage `Instant::now()` to `vector_worker_loop` + `writer_actor`; emit timings via sidecar trace files (pattern: `writer_actor_trace()` / `vector_trace()`). Bypass tracing subscriber so signal stays clean under noisy `RUST_LOG`.
+2. **Run 90s diagnostic probes** with fresh `.axon-dev/graph_v2`. Short windows surface upstream-feed stalls vs sink stalls; long windows hide them.
+3. **Falsify hypotheses cheaply** — single-line env-flag toggles before refactors. Example: `AXON_DIAG_SKIP_CHUNKEMBED` isolated 70-75% of the bottleneck in 5 minutes; a cache refactor would have taken days to falsify the same hypothesis.
+4. **Capture VAL even when hypothesis fails** — failed VALs (e.g. VAL-AXO-033 rejecting REQ-AXO-187) prevent re-treading dead ends. Link `VERIFIES`/`REJECTS` to the parent REQ/DEC with the measurement CSV as evidence.
+
+## Sub-agent delegation rules (Axon-specific)
+| Mode | Rule |
+|---|---|
+| ALLOWED | shell exec (probe scripts, `cargo build`/`cargo test`), doc writing, MCP-only tasks (`soll_manager` / `soll_apply_plan` calls) |
+| FORBIDDEN | code exploration that would force IST reconstruction — sub-agents have no MCP, so they re-read source and burn 100-200K tokens |
+| PERMISSION CAVEAT | sub-agents can be denied `axon-dev start` permissions. Always verify by starting long-running services from the parent shell. Pattern: parent runs `./scripts/axon-dev start ...`; sub-agent runs `sleep N; capture heartbeat snapshots; ./scripts/axon-dev stop` |
+
 ## Maintenance
 Update this skill when: tool names change, surface visibility changes, runtime authority changes, SOLL workflow/schema changes, qualification or release protocol changes. Concept canonicals (CPT-AXO-018/019/020/021/024/025) live in SOLL — `soll_manager(action=update)` them, never copy-paste.
