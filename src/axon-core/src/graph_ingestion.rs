@@ -24,6 +24,7 @@ const CHUNK_EMBEDDING_UPSERT_BATCH_ROWS: usize = 500;
 
 mod file_ingress;
 mod graph_projection_queue;
+pub(crate) mod parquet_chunk_content_store;
 mod sql_helpers;
 mod types;
 mod vector_runtime;
