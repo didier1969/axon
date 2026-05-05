@@ -368,8 +368,16 @@ impl WorkerPool {
 
                 let recv_done_at = Instant::now();
 
-                // 2. FILL BATCH up to 100
-                while batch.len() < 100 {
+                // 2. FILL BATCH up to 20 (DEC-AXO-072 follow-up VAL-AXO-034:
+                // cap was 100, but profiling showed commit_ms grows to 22s+
+                // for batch=37 because the writer mutex is held for the full
+                // BEGIN/COMMIT cycle, blocking vector_lane writes. Cap at 20
+                // bounds per-commit mutex hold time to ~1-2s, letting the
+                // vector_lane interleave its update_chunk_embeddings + DELETE
+                // FVQ between scanner-side commits. Trade-off: more fsyncs
+                // (one per batch instead of one per ~5x batch), partially
+                // offset by the background CHECKPOINT thread.
+                while batch.len() < 20 {
                     match db_receiver.try_recv() {
                         Ok(task) => batch.push(task),
                         _ => break,

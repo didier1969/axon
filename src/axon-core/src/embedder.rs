@@ -1007,6 +1007,33 @@ impl PreparedVectorEmbedBatch {
     }
 }
 
+/// DEC-AXO-072 follow-up: spawn a thread that issues `CHECKPOINT` against
+/// the writer connection every 10s. Prevents WAL accumulation that drove
+/// commit_ms from 132ms to 22s+ in VAL-AXO-034 profiling. The CHECKPOINT
+/// itself takes the writer mutex briefly; cadence chosen to amortize over
+/// many writes without long pauses.
+fn spawn_background_checkpoint_thread(graph_store: Arc<GraphStore>) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(10));
+        let started = Instant::now();
+        match graph_store.execute("CHECKPOINT;") {
+            Ok(()) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                if elapsed_ms > 250 {
+                    info!(
+                        "Background CHECKPOINT took {} ms",
+                        elapsed_ms
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Background CHECKPOINT failed: {:?}", e);
+            }
+        }
+    });
+    info!("Background CHECKPOINT thread spawned (10s cadence)");
+}
+
 /// DEC-AXO-072 J.2: hydrate the hot status cache from FileVectorizationQueue
 /// and spawn the periodic flush thread (100ms timer). Called only when
 /// `AXON_HOT_STATUS_CACHE_ENABLED=true`.
@@ -1138,6 +1165,21 @@ impl SemanticWorkerPool {
             if cache.is_enabled() {
                 spawn_hot_status_cache_workers(Arc::clone(&graph_store), cache);
             }
+        }
+
+        // DEC-AXO-072 follow-up VAL-AXO-034: background CHECKPOINT thread
+        // every 10s. Profiling showed commit_ms grows to 22s+ as the WAL
+        // accumulates between checkpoints (default DuckDB threshold doesn't
+        // fire often enough for this workload). Forcing periodic
+        // CHECKPOINTs keeps WAL bounded and per-op cost flat over time.
+        // Disable via AXON_BG_CHECKPOINT_DISABLED=true if it ever causes
+        // issues.
+        if !std::env::var("AXON_BG_CHECKPOINT_DISABLED")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+            .unwrap_or(false)
+        {
+            spawn_background_checkpoint_thread(Arc::clone(&graph_store));
         }
 
         let mut query_workers = Vec::new();
