@@ -50,89 +50,57 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-const ROWS_PER_PARTITION: usize = 10_000;
-const BYTES_PER_PARTITION: usize = 5 * 1024 * 1024;
-
 pub struct ParquetChunkContentStore {
     base_dir: PathBuf,
-    current: Mutex<Option<CurrentPartition>>,
-}
-
-struct CurrentPartition {
-    path: PathBuf,
-    writer: ArrowWriter<File>,
-    rows_written: usize,
-    bytes_written: usize,
+    last_path: Mutex<Option<PathBuf>>,
 }
 
 impl ParquetChunkContentStore {
     pub fn new(base_dir: PathBuf) -> Self {
         Self {
             base_dir,
-            current: Mutex::new(None),
+            last_path: Mutex::new(None),
         }
     }
 
-    /// Append a batch of `(chunk_id, content_hash, content)` rows to the
-    /// current Parquet partition. `content_hash` mirrors `Chunk.content_hash`
-    /// in DuckDB so retrieve_context can JOIN on `chunk_id + content_hash` to
-    /// filter out stale rows when chunks have been re-projected with new
-    /// content but the Parquet store still carries the prior version.
+    /// Append a batch of `(chunk_id, content_hash, content)` rows to a fresh
+    /// Parquet file (one file per batch). Each file is immediately closed so
+    /// the footer is written and `parquet_scan` can read it on the next
+    /// vector-lane fetch cycle. Without this property the indexer-side
+    /// COALESCE read path returns empty content (Parquet's reader requires
+    /// the file footer; an unclosed file is unreadable), which collapses
+    /// throughput to 0 ch/s. Validated empirically in val39 m4 run #1
+    /// before this fix landed.
+    ///
+    /// `content_hash` mirrors `Chunk.content_hash` in DuckDB so
+    /// retrieve_context can JOIN on `chunk_id + content_hash` to filter
+    /// out stale rows when chunks have been re-projected with new content
+    /// but the Parquet store still carries the prior version.
     pub fn append_batch(&self, rows: &[(String, String, String)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
-        let batch_bytes: usize = rows
-            .iter()
-            .map(|(id, h, c)| id.len() + h.len() + c.len())
-            .sum();
-        let mut guard = self.current.lock().expect("parquet partition lock poisoned");
-        let need_rotate = match guard.as_ref() {
-            None => true,
-            Some(part) => {
-                part.rows_written + rows.len() > ROWS_PER_PARTITION
-                    || part.bytes_written + batch_bytes > BYTES_PER_PARTITION
-            }
-        };
-        if need_rotate {
-            if let Some(mut part) = guard.take() {
-                part.writer.close().context("closing previous partition")?;
-            }
-            let path = self.next_partition_path()?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).context("creating partition dir")?;
-            }
-            let file = File::create(&path).context("creating partition file")?;
-            let writer = ArrowWriter::try_new(file, Self::schema(), Some(Self::props()))
-                .context("opening parquet writer")?;
-            *guard = Some(CurrentPartition {
-                path,
-                writer,
-                rows_written: 0,
-                bytes_written: 0,
-            });
+        let path = self.next_partition_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("creating partition dir")?;
         }
-        let part = guard.as_mut().expect("partition just opened");
+        let file = File::create(&path).context("creating partition file")?;
+        let mut writer = ArrowWriter::try_new(file, Self::schema(), Some(Self::props()))
+            .context("opening parquet writer")?;
         let batch = Self::rows_to_batch(rows)?;
-        part.writer.write(&batch).context("parquet write batch")?;
-        part.rows_written += rows.len();
-        part.bytes_written += batch_bytes;
+        writer.write(&batch).context("parquet write batch")?;
+        writer.close().context("closing parquet writer")?;
+        *self.last_path.lock().expect("parquet last_path lock poisoned") = Some(path);
         Ok(())
     }
 
     pub fn flush(&self) -> Result<()> {
-        let mut guard = self.current.lock().expect("parquet partition lock poisoned");
-        if let Some(mut part) = guard.take() {
-            part.writer.close().context("flushing parquet partition")?;
-        }
+        // Each batch is a self-contained closed file; flush is a no-op.
         Ok(())
     }
 
     pub fn current_partition_path(&self) -> Option<PathBuf> {
-        self.current
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|p| p.path.clone()))
+        self.last_path.lock().ok().and_then(|g| g.clone())
     }
 
     fn schema() -> Arc<Schema> {
@@ -236,46 +204,33 @@ mod tests {
     }
 
     #[test]
-    fn append_batch_rotates_partition_at_row_threshold() {
+    fn each_append_batch_writes_its_own_closed_file() {
+        // Per-batch file ensures parquet_scan can read mid-stream — vector
+        // lane needs the footer written before fetch_unembedded_chunks_batch
+        // can JOIN. See val39 m4 run #1 for the empirical motivation.
         let tmp = TempDir::new().unwrap();
         let store = ParquetChunkContentStore::new(tmp.path().to_path_buf());
-        // Fill most of the partition with tiny content so we hit the row cap, not byte cap.
-        let mut rows: Vec<(String, String, String)> = (0..ROWS_PER_PARTITION - 10)
-            .map(|i| fixture_row(&format!("c{}", i), "x"))
-            .collect();
-        store.append_batch(&rows).unwrap();
-        let part_a = store.current_partition_path().unwrap();
-        // Overflow row cap.
-        rows = (0..50)
-            .map(|i| fixture_row(&format!("c2-{}", i), "x"))
-            .collect();
-        store.append_batch(&rows).unwrap();
-        let part_b = store.current_partition_path().unwrap();
-        assert_ne!(part_a, part_b, "partition rotated when row threshold crossed");
-        store.flush().unwrap();
-        assert!(part_a.exists());
-        assert!(part_b.exists());
-    }
-
-    #[test]
-    fn append_batch_rotates_partition_at_byte_threshold() {
-        let tmp = TempDir::new().unwrap();
-        let store = ParquetChunkContentStore::new(tmp.path().to_path_buf());
-        // 50 rows of ~120 KB each -> 6 MB > 5 MB cap, but only 50 rows (well under 10k cap).
-        // Force rotate via byte budget, not row count.
-        let big_content = "y".repeat(120 * 1024);
-        let rows: Vec<(String, String, String)> = (0..50)
-            .map(|i| fixture_row(&format!("c{}", i), &big_content))
-            .collect();
-        store.append_batch(&rows).unwrap();
-        let part_a = store.current_partition_path().unwrap();
-        let next: Vec<(String, String, String)> = (0..5)
-            .map(|i| fixture_row(&format!("c2-{}", i), "small"))
-            .collect();
-        store.append_batch(&next).unwrap();
-        let part_b = store.current_partition_path().unwrap();
-        assert_ne!(part_a, part_b, "partition rotated when byte threshold crossed");
-        store.flush().unwrap();
+        for batch in 0..3 {
+            let rows = vec![
+                fixture_row(&format!("c{batch}-1"), "fn one() {}"),
+                fixture_row(&format!("c{batch}-2"), "fn two() {}"),
+            ];
+            store.append_batch(&rows).unwrap();
+        }
+        let mut files: Vec<PathBuf> = Vec::new();
+        for hour_dir in std::fs::read_dir(tmp.path()).unwrap() {
+            let hour_dir = hour_dir.unwrap();
+            if hour_dir.file_type().unwrap().is_dir() {
+                for f in std::fs::read_dir(hour_dir.path()).unwrap() {
+                    files.push(f.unwrap().path());
+                }
+            }
+        }
+        assert_eq!(files.len(), 3, "one file per batch: {files:?}");
+        for f in files {
+            let metadata = std::fs::metadata(&f).unwrap();
+            assert!(metadata.len() > 0, "file {} is non-empty (footer present)", f.display());
+        }
     }
 
     #[test]
