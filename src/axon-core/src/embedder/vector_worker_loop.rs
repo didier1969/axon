@@ -128,23 +128,63 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
             let _ = req.respond_to.send(result);
         }
 
-        let claimed = match graph_store.fetch_pending_file_vectorization_work(file_batch_size) {
-            Ok(work) if !work.is_empty() => work,
-            Ok(_) => {
-                if tick % 200 == 1 {
-                    vector_trace(&format!("[{}] tick={} fetch_empty", worker_idx, tick));
+        // DEC-AXO-072 J.4: when the hot status cache is enabled, claim
+        // pending files from cache (process-local; no DB JOIN). Cache
+        // hydrated at boot from FVQ; subsequent mark_ready calls from
+        // graph_ingestion populate it. Cache disabled -> existing
+        // multi-table fetch JOIN against DB.
+        let hot_cache_enabled = crate::hot_status_cache::cache_enabled();
+        let claimed = if hot_cache_enabled {
+            match crate::hot_status_cache::cache() {
+                Some(cache) => {
+                    let pending = cache.pending_for_lane(file_batch_size);
+                    if pending.is_empty() {
+                        if tick % 200 == 1 {
+                            vector_trace(&format!("[{}] tick={} cache_empty", worker_idx, tick));
+                        }
+                        let _ = wait_for_vector_backlog_or_timeout(Duration::from_millis(50));
+                        continue;
+                    }
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let lane_owner = format!("vector-{}", worker_idx);
+                    let granted: Vec<FileVectorizationWork> = pending
+                        .into_iter()
+                        .filter_map(|path| {
+                            cache
+                                .try_claim(&path, &lane_owner, now_ms)
+                                .map(|_| FileVectorizationWork {
+                                    file_path: path,
+                                    resumed_after_interactive_pause: false,
+                                })
+                        })
+                        .collect();
+                    if granted.is_empty() {
+                        let _ = wait_for_vector_backlog_or_timeout(Duration::from_millis(50));
+                        continue;
+                    }
+                    granted
                 }
-                let _ = wait_for_vector_backlog_or_timeout(Duration::from_millis(50));
-                continue;
+                None => Vec::new(),
             }
-            Err(e) => {
-                vector_trace(&format!("[{}] fetch_err: {:?}", worker_idx, e));
-                error!(
-                    "Vector lane [{}]: fetch_pending_file_vectorization_work failed: {:?}",
-                    worker_idx, e
-                );
-                thread::sleep(Duration::from_millis(100));
-                continue;
+        } else {
+            match graph_store.fetch_pending_file_vectorization_work(file_batch_size) {
+                Ok(work) if !work.is_empty() => work,
+                Ok(_) => {
+                    if tick % 200 == 1 {
+                        vector_trace(&format!("[{}] tick={} fetch_empty", worker_idx, tick));
+                    }
+                    let _ = wait_for_vector_backlog_or_timeout(Duration::from_millis(50));
+                    continue;
+                }
+                Err(e) => {
+                    vector_trace(&format!("[{}] fetch_err: {:?}", worker_idx, e));
+                    error!(
+                        "Vector lane [{}]: fetch_pending_file_vectorization_work failed: {:?}",
+                        worker_idx, e
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
             }
         };
         vector_trace(&format!("[{}] claimed={}", worker_idx, claimed.len()));
@@ -154,6 +194,9 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
             worker_idx,
             claimed.len()
         );
+        // mark_file_vectorization_started updates File.vectorization_started_at_ms
+        // (cold field on File table, not on FVQ). Always call — cache only
+        // covers the FVQ side; File-side bookkeeping stays direct-DB.
         if let Err(e) = graph_store.mark_file_vectorization_started(&claimed) {
             warn!(
                 "Vector lane [{}]: mark_file_vectorization_started failed: {:?}",
@@ -297,6 +340,19 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
 
         vector_trace(&format!("[{}] completed_files={}", worker_idx, completed_files.len()));
         if !completed_files.is_empty() {
+            // DEC-AXO-072 J.4: when cache is enabled, evict completed
+            // entries from cache so subsequent pending_for_lane scans
+            // don't re-claim them. The DB DELETE below removes the
+            // FVQ row (cache.mark_done is evict-only; flush thread
+            // never sees a Done state, no race vs the DELETE).
+            if hot_cache_enabled {
+                if let Some(cache) = crate::hot_status_cache::cache() {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    for f in &completed_files {
+                        cache.mark_done(&f.file_path, now_ms);
+                    }
+                }
+            }
             if let Err(e) = graph_store.mark_file_vectorization_work_done(&completed_files) {
                 vector_trace(&format!("[{}] mark_done_err: {:?}", worker_idx, e));
                 error!(

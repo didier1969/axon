@@ -133,22 +133,21 @@ impl HotStatusCache {
         Some(grant)
     }
 
-    pub fn mark_done(&self, file_path: &str, now_ms: i64) {
+    /// Mark the entry as completed and evict it from memory. The lane
+    /// caller is expected to issue the actual `DELETE FROM
+    /// FileVectorizationQueue` against DB in the same iteration; the
+    /// cache no longer tracks done files. Evict-on-done is the
+    /// canonical semantic — keeping a Done state in cache would race
+    /// the DB DELETE with the periodic upsert flush and re-create the
+    /// row.
+    pub fn mark_done(&self, file_path: &str, _now_ms: i64) {
         let mut entries = self.entries.write().expect("hot cache write lock poisoned");
-        let Some(entry) = entries.get_mut(file_path) else {
-            return;
-        };
-        if entry.status == FvqStatus::Done {
-            return;
-        }
-        entry.status = FvqStatus::Done;
-        entry.last_change_at_ms = now_ms;
-        entry.last_error = None;
+        entries.remove(file_path);
         drop(entries);
         self.dirty
             .lock()
             .expect("hot cache dirty lock poisoned")
-            .insert(file_path.to_string());
+            .remove(file_path);
     }
 
     pub fn mark_failed(&self, file_path: &str, reason: &str, now_ms: i64) {
@@ -341,16 +340,16 @@ mod tests {
     }
 
     #[test]
-    fn mark_ready_skips_done_entries() {
+    fn mark_done_evicts_entry_so_subsequent_mark_ready_starts_fresh() {
         let cache = fresh_cache();
         cache.mark_ready("/p/a.rs", 100);
-        cache.mark_done("/p/a.rs", 200);
-        cache.mark_ready("/p/a.rs", 300);
-        // Idempotency contract: a Done file does not regress to Ready
-        // via mark_ready (callers must explicitly delete + reinsert).
-        let snap = cache.snapshot_dirty();
-        let entry = snap.iter().find(|(p, _)| p == "/p/a.rs").unwrap();
-        assert_eq!(entry.1.status, FvqStatus::Done);
+        cache.try_claim("/p/a.rs", "lane-0", 110);
+        cache.mark_done("/p/a.rs", 120);
+        assert_eq!(cache.entries_len(), 0);
+        assert_eq!(cache.dirty_len(), 0);
+
+        cache.mark_ready("/p/a.rs", 200);
+        assert_eq!(cache.pending_for_lane(10), vec!["/p/a.rs".to_string()]);
     }
 
     #[test]
