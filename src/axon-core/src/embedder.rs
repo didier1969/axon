@@ -1007,6 +1007,109 @@ impl PreparedVectorEmbedBatch {
     }
 }
 
+/// DEC-AXO-072 J.2: hydrate the hot status cache from FileVectorizationQueue
+/// and spawn the periodic flush thread (100ms timer). Called only when
+/// `AXON_HOT_STATUS_CACHE_ENABLED=true`.
+fn spawn_hot_status_cache_workers(
+    graph_store: Arc<GraphStore>,
+    cache: Arc<crate::hot_status_cache::HotStatusCache>,
+) {
+    use crate::hot_status_cache::{
+        parse_fvq_status, render_flush_queries, FileHotState, FvqStatus,
+    };
+
+    // Boot hydration: load existing FVQ rows so the lane sees pending
+    // work after a restart. Only hydrate live rows (queued/inflight) —
+    // done/failed are terminal and stay in DB only.
+    match graph_store.query_json(
+        "SELECT file_path, status, COALESCE(claim_token, ''), COALESCE(lease_epoch, 0), \
+                COALESCE(lease_owner, ''), COALESCE(queued_at, 0), COALESCE(claimed_at_ms, 0), \
+                COALESCE(last_error_reason, '') \
+         FROM FileVectorizationQueue \
+         WHERE status IN ('queued', 'inflight')",
+    ) {
+        Ok(raw) => {
+            let rows: Vec<Vec<serde_json::Value>> =
+                serde_json::from_str(&raw).unwrap_or_default();
+            let mut hydrated = 0usize;
+            for row in rows {
+                let path = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if path.is_empty() {
+                    continue;
+                }
+                let status_s = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let Some(status) = parse_fvq_status(status_s) else {
+                    continue;
+                };
+                let claim_token = row
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let lease_epoch = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
+                let lease_owner = row
+                    .get(4)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let enqueued_at_ms = row.get(5).and_then(|v| v.as_i64()).unwrap_or(0);
+                let claimed_at_ms = row.get(6).and_then(|v| v.as_i64()).filter(|v| *v > 0);
+                let last_error = row
+                    .get(7)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let started_at_ms = if matches!(status, FvqStatus::Inflight) {
+                    claimed_at_ms
+                } else {
+                    None
+                };
+                let state = FileHotState {
+                    status,
+                    claim_token,
+                    lease_epoch,
+                    lease_owner,
+                    enqueued_at_ms,
+                    started_at_ms,
+                    last_error,
+                    last_change_at_ms: enqueued_at_ms.max(claimed_at_ms.unwrap_or(0)),
+                };
+                cache.upsert_from_db(&path, state);
+                hydrated += 1;
+            }
+            info!("Hot status cache: hydrated {} entries from FVQ", hydrated);
+        }
+        Err(e) => {
+            warn!("Hot status cache: hydration failed: {:?}", e);
+        }
+    }
+
+    // Periodic flush thread: snapshot dirty entries every 100ms, render
+    // a single batched UPSERT, execute. Runs forever; the indexer
+    // process is the only owner.
+    let flush_store = graph_store;
+    let flush_cache = cache;
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(100));
+        let snap = flush_cache.snapshot_dirty();
+        if snap.is_empty() {
+            continue;
+        }
+        let queries = render_flush_queries(&snap);
+        if queries.is_empty() {
+            continue;
+        }
+        if let Err(e) = flush_store.execute_batch(&queries) {
+            warn!(
+                "Hot status cache flush: execute_batch failed for {} entries: {:?}",
+                snap.len(),
+                e
+            );
+        }
+    });
+    info!("Hot status cache: flush thread spawned (100ms cadence)");
+}
+
 impl SemanticWorkerPool {
     pub fn new(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) -> Self {
         let config = embedding_lane_config_from_env();
@@ -1022,6 +1125,20 @@ impl SemanticWorkerPool {
 
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
+
+        // DEC-AXO-072 J.2: install hot status cache singleton; enable per
+        // env. Cache disabled by default — the flush thread below
+        // does nothing and graph_ingestion / vector_lane fall through to
+        // direct-DB paths (commit G + H.2 behavior preserved).
+        let _ = crate::hot_status_cache::install(std::sync::Arc::new(
+            crate::hot_status_cache::HotStatusCache::new(),
+        ));
+        if let Some(cache) = crate::hot_status_cache::cache() {
+            cache.set_enabled(crate::hot_status_cache::parse_env_enabled());
+            if cache.is_enabled() {
+                spawn_hot_status_cache_workers(Arc::clone(&graph_store), cache);
+            }
+        }
 
         let mut query_workers = Vec::new();
         for worker_idx in 0..config.query_workers {

@@ -207,6 +207,86 @@ impl HotStatusCache {
     }
 }
 
+fn fvq_status_str(status: FvqStatus) -> &'static str {
+    match status {
+        FvqStatus::Ready => "queued",
+        FvqStatus::Inflight => "inflight",
+        FvqStatus::Done => "done",
+        FvqStatus::Failed => "failed",
+    }
+}
+
+pub fn parse_fvq_status(s: &str) -> Option<FvqStatus> {
+    match s {
+        "queued" | "ready" => Some(FvqStatus::Ready),
+        "inflight" => Some(FvqStatus::Inflight),
+        "done" => Some(FvqStatus::Done),
+        "failed" => Some(FvqStatus::Failed),
+        _ => None,
+    }
+}
+
+fn sql_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn sql_quote_opt(s: &Option<String>) -> String {
+    match s {
+        Some(v) => sql_quote(v),
+        None => "NULL".to_string(),
+    }
+}
+
+fn sql_i64_opt(v: Option<i64>) -> String {
+    match v {
+        Some(x) => x.to_string(),
+        None => "NULL".to_string(),
+    }
+}
+
+/// Render a snapshot of dirty cache entries into batched DuckDB upsert
+/// queries. One INSERT...ON CONFLICT per chunk of <=500 rows; the
+/// per-row payload mirrors the FileVectorizationQueue schema in
+/// `graph_bootstrap::CREATE TABLE FileVectorizationQueue`. Empty
+/// snapshot returns an empty Vec.
+pub fn render_flush_queries(snap: &[(String, FileHotState)]) -> Vec<String> {
+    if snap.is_empty() {
+        return Vec::new();
+    }
+    let rows: Vec<String> = snap
+        .iter()
+        .map(|(path, state)| {
+            format!(
+                "({path}, {status}, {queued_at}, {claim_token}, {claimed_at}, {lease_owner}, {lease_epoch}, {last_err})",
+                path = sql_quote(path),
+                status = sql_quote(fvq_status_str(state.status)),
+                queued_at = state.enqueued_at_ms,
+                claim_token = sql_quote_opt(&state.claim_token),
+                claimed_at = sql_i64_opt(state.started_at_ms),
+                lease_owner = sql_quote_opt(&state.lease_owner),
+                lease_epoch = state.lease_epoch,
+                last_err = sql_quote_opt(&state.last_error),
+            )
+        })
+        .collect();
+
+    let mut queries = Vec::new();
+    for chunk in rows.chunks(500) {
+        queries.push(format!(
+            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_owner, lease_epoch, last_error_reason) VALUES {} \
+             ON CONFLICT(file_path) DO UPDATE SET \
+                status = EXCLUDED.status, \
+                claim_token = EXCLUDED.claim_token, \
+                claimed_at_ms = EXCLUDED.claimed_at_ms, \
+                lease_owner = EXCLUDED.lease_owner, \
+                lease_epoch = EXCLUDED.lease_epoch, \
+                last_error_reason = EXCLUDED.last_error_reason;",
+            chunk.join(",")
+        ));
+    }
+    queries
+}
+
 impl Default for HotStatusCache {
     fn default() -> Self {
         Self::new()
@@ -319,6 +399,27 @@ mod tests {
         // After snapshot, additional changes re-mark dirty
         cache.mark_ready("/p/a.rs", 200);
         assert_eq!(cache.dirty_len(), 1);
+    }
+
+    #[test]
+    fn render_flush_queries_emits_upsert_with_escaped_paths() {
+        let cache = fresh_cache();
+        cache.mark_ready("/p/a's.rs", 100);
+        cache.try_claim("/p/a's.rs", "lane-0", 110);
+        let snap = cache.snapshot_dirty();
+        let queries = render_flush_queries(&snap);
+        assert_eq!(queries.len(), 1);
+        let q = &queries[0];
+        assert!(q.contains("INSERT INTO FileVectorizationQueue"));
+        assert!(q.contains("ON CONFLICT(file_path) DO UPDATE"));
+        assert!(q.contains("'/p/a''s.rs'"), "path quoted: {q}");
+        assert!(q.contains("'inflight'"), "status set: {q}");
+    }
+
+    #[test]
+    fn render_flush_queries_empty_snapshot_returns_empty_vec() {
+        let queries = render_flush_queries(&[]);
+        assert!(queries.is_empty());
     }
 
     #[test]
