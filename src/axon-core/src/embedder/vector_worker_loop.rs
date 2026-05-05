@@ -89,6 +89,21 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
     info!("Vector lane [{}]: ready, polling for work", worker_idx);
     vector_trace(&format!("[{}] ready", worker_idx));
 
+    // DEC-AXO-071 H.1: register inline-embed inbox so graph projection
+    // workers can route embed requests through this single vector lane
+    // (single GPU model load — guards against the REQ-AXO-181 step 4
+    // multi-worker OOM cascade). H.1 only wires the channel; graph
+    // projection does not call `embed_via_vector_lane` until H.2 lands.
+    // With zero senders by default the drain below is a no-op for
+    // existing operators (DEC-AXO-070 commit G behavior preserved).
+    let (inline_tx, inline_rx) = inline_embed::create_vector_lane_inbox();
+    if !inline_embed::register_vector_lane_inbox(inline_tx) {
+        warn!(
+            "Vector lane [{}]: inline embed inbox already registered; this lane will not receive inline requests",
+            worker_idx
+        );
+    }
+
     let target_chunks = lane_config.chunk_batch_size.max(1);
     let per_file_fetch_limit = lane_config.max_chunks_per_file;
     let batch_max_bytes = lane_config.max_embed_batch_bytes;
@@ -100,6 +115,17 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
         tick += 1;
         if tick % 200 == 1 {
             vector_trace(&format!("[{}] tick={} loop_alive", worker_idx, tick));
+        }
+
+        // DEC-AXO-071 H.1: drain inline embed requests before fetching
+        // from the queue. Implicit priority — keeps inline graph
+        // projection latency low. No-op when no graph worker has
+        // registered as a sender (default in H.1).
+        while let Ok(req) = inline_rx.try_recv() {
+            let result = model
+                .embed_texts_with_breakdown(&req.texts)
+                .map(|(embeddings, _, _, _, _)| embeddings);
+            let _ = req.respond_to.send(result);
         }
 
         let claimed = match graph_store.fetch_pending_file_vectorization_work(file_batch_size) {
