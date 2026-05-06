@@ -222,13 +222,15 @@ impl GraphStore {
             .join(",");
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // REQ-AXO-194 Bug 2: when the vector lane finishes a file, BOTH
-        // (1) delete the FVQ row AND (2) mark File.vector_ready=TRUE in
-        // a single Writer Actor commit. Without (2), graph_projection's
-        // initial UPDATE leaves vector_ready=FALSE forever (it runs
-        // before chunks are embedded; no production code path re-fires
-        // it). Combining (1)+(2) here saves one writer round-trip vs.
-        // calling mark_file_vectorization_done separately.
+        // REQ-AXO-194 Bug 2: ALSO mark File.vector_ready=TRUE here in the
+        // SAME execute_batch as the FVQ DELETE. Without this UPDATE,
+        // graph_projection's initial vector_ready CASE leaves it FALSE
+        // forever (graph_projection runs BEFORE chunks are embedded; no
+        // production path re-fires the projection-side UPDATE).
+        // execute_batch wraps both statements in a single BEGIN/COMMIT,
+        // delivering one Writer Actor mutex grab per claim cycle (vs.
+        // two separate auto-commit grabs for split execute calls — the
+        // latter measured marginally worse in VAL-AXO-040 isolate runs).
         self.execute_batch(&[
             format!(
                 "DELETE FROM FileVectorizationQueue WHERE ({predicates})"
