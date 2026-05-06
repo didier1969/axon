@@ -42,8 +42,14 @@ use tracing::{info, warn};
 use super::parquet_chunk_content_store::ParquetChunkContentStore;
 use crate::graph::GraphStore;
 
-const ARCHIVE_INTERVAL: Duration = Duration::from_secs(30);
-const ARCHIVE_BATCH_SIZE: usize = 1000;
+// Smaller batches + faster cadence than the original (30s × 1000) trade
+// steady-state archive rate (~10 chunks/sec) for shorter Writer Actor
+// blocking per cycle. UPDATE 200 rows in DuckDB completes in O(100ms)
+// — small enough to interleave with graph_projection writes without
+// halving indexing throughput. Confirmed via VAL-AXO-040 v3 regression
+// trace where 30s × 1000 cycles produced 25 ch/s vs 57 baseline.
+const ARCHIVE_INTERVAL: Duration = Duration::from_secs(15);
+const ARCHIVE_BATCH_SIZE: usize = 200;
 
 /// Spawn the archiver thread. Caller must have already installed the
 /// `ParquetChunkContentStore` singleton.
@@ -63,12 +69,39 @@ pub fn spawn(graph_store: Arc<GraphStore>, parquet_store: Arc<ParquetChunkConten
     );
 }
 
+/// Threshold above which the archiver yields to active indexing. With
+/// the smaller per-cycle batch (200 rows ~ 100ms UPDATE), we can be
+/// less aggressive about yielding; only skip when the writer is truly
+/// saturated (many hundreds of pending files). Earlier 50-row threshold
+/// would mean the archiver almost never ran during a probe.
+const ARCHIVER_FVQ_BUSY_THRESHOLD: i64 = 500;
+
 /// Single archive pass. Returns the number of chunks archived (0 if no
-/// work). Public for tests + manual one-shot invocation.
+/// work or system is busy). Public for tests + manual one-shot invocation.
 pub fn archive_one_pass(
     graph_store: &GraphStore,
     parquet_store: &ParquetChunkContentStore,
 ) -> Result<usize> {
+    // Yield to active indexing: when the FVQ has many pending entries,
+    // the writer is being kept busy by graph_projection; archiving now
+    // would steal mutex time and slow throughput. Defer to a quieter
+    // pass.
+    let busy_check = graph_store
+        .query_json(&format!(
+            "SELECT COUNT(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'inflight') LIMIT 1"
+        ))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw).ok())
+        .and_then(|rows| rows.first().and_then(|r| r.first()).cloned());
+    let pending = match busy_check {
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    };
+    if pending > ARCHIVER_FVQ_BUSY_THRESHOLD {
+        return Ok(0);
+    }
+
     let select_query = format!(
         "SELECT c.id, c.content_hash, c.content \
          FROM Chunk c \
