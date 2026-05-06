@@ -227,6 +227,74 @@ impl GraphStore {
         Self::canonicalize_sql_text(value).replace('\'', "''")
     }
 
+    /// REQ-AXO-194 Bug 2: build a SELECT subquery that surfaces (chunk_id,
+    /// source_hash) tuples representing "an embedding exists for this
+    /// chunk with this source_hash". When the L.1+L.2 Parquet embedding
+    /// store is active (`AXON_PARQUET_EMBEDDING_STORE_ENABLED=true`) AND
+    /// at least one Parquet file has been written, embeddings live in
+    /// Parquet and DuckDB ChunkEmbedding stays empty; the returned
+    /// subquery UNIONs DuckDB rows with parquet_scan rows so downstream
+    /// `vector_ready` evaluation correctly recognizes Parquet-only
+    /// embeddings.
+    ///
+    /// When Parquet is disabled OR no Parquet files exist yet (fresh
+    /// start), the subquery is a simple SELECT from DuckDB ChunkEmbedding
+    /// filtered by model_id. The filesystem-existence guard avoids the
+    /// "No files found that match the pattern" IO Error that DuckDB
+    /// raises on parquet_scan over an empty glob.
+    fn chunk_embedding_lookup_sql() -> String {
+        let model_id = Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID);
+        let legacy = format!(
+            "SELECT chunk_id, source_hash FROM ChunkEmbedding WHERE model_id = '{model_id}'"
+        );
+        if !crate::embedder::parquet_embedding_store::parquet_store_enabled() {
+            return legacy;
+        }
+        let base = crate::embedder::parquet_embedding_store::default_base_dir();
+        if !Self::parquet_dir_has_files(&base) {
+            return legacy;
+        }
+        let glob = base
+            .join("**/*.parquet")
+            .to_string_lossy()
+            .replace('\'', "''");
+        format!(
+            "{legacy} \
+             UNION ALL \
+             SELECT chunk_id, source_hash FROM parquet_scan('{glob}')"
+        )
+    }
+
+    /// Lightweight filesystem check: returns true if `base` contains
+    /// at least one *.parquet file in any subdirectory. Used by
+    /// `chunk_embedding_lookup_sql` to skip the parquet_scan UNION when
+    /// the store has not yet produced files (avoids DuckDB's
+    /// empty-glob IO error).
+    fn parquet_dir_has_files(base: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if let Ok(inner) = std::fs::read_dir(entry.path()) {
+                    for f in inner.flatten() {
+                        if f.path().extension().and_then(|s| s.to_str()) == Some("parquet")
+                            && f.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            } else if entry.path().extension().and_then(|s| s.to_str()) == Some("parquet")
+                && entry.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn symbol_id(project_code: &str, path: &str, name: &str) -> String {
         if Self::is_globally_qualified_symbol(name) {
             format!("{}::{}", project_code, name)
@@ -692,14 +760,13 @@ impl GraphStore {
                          SELECT 1 \
                          FROM Chunk c \
                          JOIN CONTAINS co ON co.target_id = c.source_id \
-                         LEFT JOIN ChunkEmbedding ce \
+                         LEFT JOIN ({}) ce \
                            ON ce.chunk_id = c.id \
-                          AND ce.model_id = '{}' \
                           AND ce.source_hash = c.content_hash \
                          WHERE co.source_id = File.path \
                            AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                      )",
-                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                    Self::chunk_embedding_lookup_sql()
                 )
             } else {
                 format!(
@@ -709,16 +776,15 @@ impl GraphStore {
                              SELECT 1 \
                              FROM Chunk c \
                              JOIN CONTAINS co ON co.target_id = c.source_id \
-                             LEFT JOIN ChunkEmbedding ce \
+                             LEFT JOIN ({}) ce \
                                ON ce.chunk_id = c.id \
-                              AND ce.model_id = '{}' \
                               AND ce.source_hash = c.content_hash \
                              WHERE co.source_id = File.path \
                                AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                          ) \
                      END",
                     indexed_vectorizable_paths.join(","),
-                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                    Self::chunk_embedding_lookup_sql()
                 )
             };
             queries.push(format!(
@@ -753,14 +819,13 @@ impl GraphStore {
                          SELECT 1 \
                          FROM Chunk c \
                          JOIN CONTAINS co ON co.target_id = c.source_id \
-                         LEFT JOIN ChunkEmbedding ce \
+                         LEFT JOIN ({}) ce \
                            ON ce.chunk_id = c.id \
-                          AND ce.model_id = '{}' \
                           AND ce.source_hash = c.content_hash \
                          WHERE co.source_id = File.path \
                            AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                      )",
-                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                    Self::chunk_embedding_lookup_sql()
                 )
             } else {
                 format!(
