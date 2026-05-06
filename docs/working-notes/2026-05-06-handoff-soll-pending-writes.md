@@ -7,7 +7,7 @@
 
 This file is a **transient placeholder** per CPT-AXO-019 fallback (markdown allowed only when MCP is unrecoverable). Once `bin/axon-brain` recovers, transfer everything below into SOLL via `soll_manager` / `soll_apply_plan`, then **delete this file** (or commit `docs: drop markdown handoff — content moved to SOLL` per the lesson learned in REQ-AXO-196).
 
-## Why MCP is down
+## Why MCP is down — REAL ROOT CAUSE (updated 2026-05-06 ~23:35)
 
 `bin/axon-brain` crashes on startup with DuckDB FATAL exception:
 ```
@@ -15,17 +15,26 @@ This file is a **transient placeholder** per CPT-AXO-019 fallback (markdown allo
 Constraint Error: PRIMARY KEY or UNIQUE constraint violation: duplicate key \"JOB-1778012869260\""}
 ```
 
-Root cause located: `src/axon-core/src/mcp.rs:1297`
-```rust
-let submitted_at = Self::now_unix_ms();
-let job_id = format!("JOB-{submitted_at}");
-```
+**Initial hypothesis (incorrect)**: race condition in `mcp.rs:1297` (`JOB-{ms_timestamp}` collision). That bug DOES exist (separate REQ logged below) but it's NOT the cause of this specific crash.
 
-Two MCP submissions inside the same millisecond → identical `job_id` → primary-key violation → process abort. Reproducible deterministically because boot-time job replay submits multiple jobs in burst. Brain has been crashing on every restart since this session — operator stopped live indexer for benchmarks and brain hasn't come back up since.
+**Actual root cause (confirmed via web search + reproduction with DuckDB CLI)**:
+1. **graph_bootstrap.rs:1277** runs at every brain boot:
+   ```rust
+   self.execute("UPDATE soll.McpJob SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+   ```
+2. soll.db has 4 McpJob rows with `project_code = NULL` (pre-migration leftovers from soll_apply_plan jobs).
+3. UPDATE on a primary-keyed row in DuckDB internally does DELETE + INSERT on the same PK.
+4. This triggers **DuckDB upstream issue [#15836](https://github.com/duckdb/duckdb/issues/15836)** "Unable to open a database if wal file has same primary key delete + insert" — still "under review" as of January 2025, NOT fixed in v1.5.1 (brain) NOR v1.5.2 (CLI).
+5. WORSE: the index is now in a state where even `DELETE FROM McpJob WHERE project_code IS NULL` fails with `FATAL Error: Invalid Input Error: Failed to delete all rows from index. Only deleted 0 out of 4 rows.` — deeper corruption than just #15836.
 
-`bin/axon-indexer` (live, indexing /home/dstadel/projects) is HEALTHY. Only the brain is crashed → MCP is down.
+**Reproduction (confirmed in this session)**:
+- DuckDB CLI v1.5.2 (newer than brain's v1.5.1 binding) running the same UPDATE statement crashes IDENTICALLY.
+- Pure DELETE on those 4 rows also fails with the index corruption error.
+- INSERT/CHECKPOINT operations on other tables succeed normally.
 
-`soll.db` was successfully flushed at 20:27 local — my session SOLL writes (REQ-AXO-193 update, REQ-AXO-196 creation) are safe on disk. `soll.db.wal` (35 KB, 21:21) likely contains the failing McpJob inserts only.
+**4 problematic rows captured for audit** before any mutation attempt: `/tmp/mcpjob-deleted-rows-2026-05-06.json` (37 KB). They're succeeded `soll_apply_plan` jobs (admin history, no active work).
+
+`bin/axon-indexer` (live, indexing /home/dstadel/projects) was HEALTHY at restart this session. Only the brain is crashed → MCP is down. `soll.db` byte-identical to its 20:27 backup (md5 `749765eb...`); WAL identical to backup (md5 `df9bb6b2...`); all session SOLL writes (REQ-AXO-193 update, REQ-AXO-196 creation) safe on disk.
 
 ## Pending SOLL writes (in priority order)
 
@@ -272,17 +281,63 @@ These have my agreement but lower priority — log when MCP recovers if not redu
 - Fiscaly P3.10 expose job_status MCP tool (already exists server-side)
 - Fiscaly P3.11 runtime mode × tools matrix (REQ-AXO-087/088 family)
 
-## Recovery procedure (next session)
+## Recovery procedure (next session) — UPDATED after attempted recovery
 
-1. Move `.axon/graph_v2/soll.db.wal` aside: `mv .axon/graph_v2/soll.db.wal /tmp/soll.db.wal-corrupted-2026-05-06`. Reversible.
-2. `./scripts/axon-live stop --hard` (clean any orphans).
-3. `./scripts/axon-live start --brain-only` — should succeed now without the poisoned WAL.
+The simple "move WAL aside" approach DOES NOT WORK. Tried and failed during this session. The McpJob index is genuinely corrupted: even a pure `DELETE FROM McpJob WHERE project_code IS NULL` returns `Failed to delete all rows from index. Only deleted 0 out of 4 rows.`
+
+Two viable code-path recovery options:
+
+### Option A — Patch graph_bootstrap.rs to skip the UPDATE when no rows match (~5 LOC)
+
+Replace `src/axon-core/src/graph_bootstrap.rs:1277`:
+```rust
+self.execute("UPDATE soll.McpJob SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+```
+with a guarded form:
+```rust
+let needs_backfill: i64 = self
+    .query_count("SELECT count(*) FROM soll.McpJob WHERE project_code IS NULL OR project_code = ''")?;
+if needs_backfill > 0 {
+    // TODO: avoid UPDATE here — it triggers DuckDB issue #15836 with the legacy NULL rows.
+    // Use `INSERT INTO new_table SELECT ... ; DROP old; ALTER RENAME` instead, or
+    // bump the bundled DuckDB to a version with #15836 patched.
+    tracing::warn!(
+        "soll_mcpjob_backfill_skipped count={} reason=duckdb_15836_workaround",
+        needs_backfill
+    );
+}
+```
+
+This is a TEMPORARY guard. The 4 rows stay with `project_code = NULL` until proper fix. Brain boots clean. Acceptable since no MCP feature reads `McpJob.project_code` for routing on those legacy rows.
+
+### Option B — Rebuild McpJob via CTAS into a healthy table (avoids UPDATE entirely)
+
+Write a small one-shot Rust binary linking `axon-plugin-duckdb` (matches brain's DuckDB version) that:
+1. `CREATE TABLE McpJob_new AS SELECT job_id, tool_name, COALESCE(NULLIF(project_code, ''), 'AXO') AS project_code, status, ... FROM McpJob;`
+2. `DROP TABLE McpJob;`
+3. `ALTER TABLE McpJob_new RENAME TO McpJob;`
+4. Re-add PK + indexes.
+5. CHECKPOINT.
+
+Heavier (~50 LOC + cargo build) but rebuilds the corrupted index from scratch. Permanent fix.
+
+### Recommended: Option A first (quick unblock), then Option B as proper migration.
+
+After either recovery:
+1. `./scripts/axon-live stop --hard`
+2. `cargo build --manifest-path src/axon-core/Cargo.toml --bin axon-brain --release` (releases binary to bin/axon-brain via promote_live_safe.sh, or use scripts/axon-live start auto-rebuild path).
+3. `./scripts/axon-live start --brain-only` — should succeed.
 4. Verify: `curl -fs --max-time 2 -X POST http://127.0.0.1:44129/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' >/dev/null && echo OK`.
-5. Restart indexer too per operator policy (live indexer always ON): `./scripts/axon-live start --indexer-full --tensorrt`.
-6. Open this file, transfer each section above into SOLL via soll_manager (action=create / update / link).
-7. Verify each write via cypher SELECT description WHERE id=<NEW_ID> (REQ-AXO-196 lesson — read-back).
-8. Once all transferred + read-back-verified, commit `docs: drop markdown handoff — content moved to SOLL` removing this file.
-9. Apply `git rm` on the soll.db.wal-corrupted file too (or delete from /tmp).
+5. Restart indexer per policy (live indexer always ON): `./scripts/axon-live start --indexer-full --tensorrt`.
+6. Open this file, transfer each section into SOLL via soll_manager.
+7. Read-back-verify each write (REQ-AXO-196 lesson).
+8. Commit `docs: drop markdown handoff — content moved to SOLL`.
+
+## Backups in /tmp (safety net for next session)
+- `/tmp/soll.db.backup-2026-05-06T23` (md5 `749765eb...`) — soll.db pre-mutation, byte-identical to current state.
+- `/tmp/soll.db.wal.backup-2026-05-06T23` (md5 `df9bb6b2...`) — WAL pre-mutation.
+- `/tmp/mcpjob-deleted-rows-2026-05-06.json` — full content of the 4 problematic rows (audit dump, JSON).
+- `/tmp/soll.db.wal.before-fix-2329`, `/tmp/soll.db.wal.before-truncate-2322` — intermediate WAL snapshots from this session's recovery attempts.
 
 ## Live runtime state at handoff time
 
