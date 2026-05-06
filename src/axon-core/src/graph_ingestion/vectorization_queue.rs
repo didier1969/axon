@@ -223,18 +223,20 @@ impl GraphStore {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         // REQ-AXO-194 Bug 2: ALSO mark File.vector_ready=TRUE here in the
-        // SAME execute_batch as the FVQ DELETE. Without this UPDATE,
+        // SAME batch as the FVQ DELETE. Without this UPDATE,
         // graph_projection's initial vector_ready CASE leaves it FALSE
         // forever (graph_projection runs BEFORE chunks are embedded; no
         // production path re-fires the projection-side UPDATE).
-        // execute_batch wraps both statements in a single BEGIN/COMMIT,
-        // delivering one Writer Actor mutex grab per claim cycle (vs.
-        // two separate auto-commit grabs for split execute calls — the
-        // latter measured marginally worse in VAL-AXO-040 isolate runs).
-        self.execute_batch(&[
-            format!(
-                "DELETE FROM FileVectorizationQueue WHERE ({predicates})"
-            ),
+        //
+        // REQ-AXO-193 E.3a: route through the async writer when
+        // installed. fetch_pending claims with status='inflight', so the
+        // delayed DELETE cannot cause re-claiming (the row is already
+        // out of the 'queued'/'paused_for_interactive_priority' set).
+        // The vector lane is the only producer for this batch; releasing
+        // the writer mutex eliminates the −56% regression measured in
+        // VAL-AXO-040.
+        let queries = vec![
+            format!("DELETE FROM FileVectorizationQueue WHERE ({predicates})"),
             format!(
                 "UPDATE File \
                  SET vector_ready = TRUE, \
@@ -242,7 +244,8 @@ impl GraphStore {
                      last_state_change_at_ms = {now_ms} \
                  WHERE graph_ready = TRUE AND path IN ({path_list})"
             ),
-        ])
+        ];
+        super::async_writer::route_writer_batch(self, &queries)
     }
 
     pub fn refresh_inflight_file_vectorization_claims(

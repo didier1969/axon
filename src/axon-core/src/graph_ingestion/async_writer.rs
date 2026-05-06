@@ -104,6 +104,12 @@ pub enum WriteDiff {
     FileState(FileStateUpdate),
     FileVectorizationDone(Vec<FileVectorizationWork>),
     ChunkEmbeddingPersist(Vec<ChunkEmbeddingPersistRow>),
+    /// E.3a: passthrough variant carrying pre-rendered SQL. Lets the
+    /// vector-lane mark-done call (the −56% regression in VAL-AXO-040)
+    /// move off the producer thread without waiting for the typed-row
+    /// port (E.3 / E.7). Writer accumulates these strings and flushes
+    /// them inside a single transaction.
+    RawQueries(Vec<String>),
 }
 
 #[derive(Debug, Default)]
@@ -116,6 +122,7 @@ pub struct WriteAccumulator {
     pub file_state: Vec<FileStateUpdate>,
     pub vector_done: Vec<FileVectorizationWork>,
     pub embedding_persist: Vec<ChunkEmbeddingPersistRow>,
+    pub raw_queries: Vec<String>,
 }
 
 impl WriteAccumulator {
@@ -133,6 +140,7 @@ impl WriteAccumulator {
             WriteDiff::FileState(update) => self.file_state.push(update),
             WriteDiff::FileVectorizationDone(rows) => self.vector_done.extend(rows),
             WriteDiff::ChunkEmbeddingPersist(rows) => self.embedding_persist.extend(rows),
+            WriteDiff::RawQueries(rows) => self.raw_queries.extend(rows),
         }
     }
 
@@ -145,18 +153,18 @@ impl WriteAccumulator {
             + self.file_state.iter().map(|u| u.paths.len()).sum::<usize>()
             + self.vector_done.len()
             + self.embedding_persist.len()
+            + self.raw_queries.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.row_count() == 0
     }
 
-    // E.3 ports the existing INSERT/UPDATE templates from
-    // insert_file_data_batch_with_vectorization_policy. Until then the
-    // accumulator is a no-op renderer so E.2's writer thread loop can
-    // wire end-to-end without the SQL surface.
+    // E.3a: emits the RawQueries passthrough (vector-lane mark-done
+    // path). E.3 / E.7 will additionally render the typed buckets
+    // (Symbols / Chunks / etc.) into INSERT…ON CONFLICT statements.
     pub fn render_bulk_queries(&self) -> Vec<String> {
-        Vec::new()
+        self.raw_queries.clone()
     }
 
     pub fn reset(&mut self) {
@@ -168,7 +176,32 @@ impl WriteAccumulator {
         self.file_state.clear();
         self.vector_done.clear();
         self.embedding_persist.clear();
+        self.raw_queries.clear();
     }
+}
+
+/// Send a pre-rendered batch of writer queries through the async writer
+/// when it's installed; fall through to the synchronous `execute_batch`
+/// otherwise. Used by call sites that previously held the writer mutex
+/// directly (e.g. `mark_file_vectorization_work_done`) and don't depend
+/// on read-after-write visibility within the producer thread.
+pub fn route_writer_batch(graph_store: &GraphStore, queries: &[String]) -> anyhow::Result<()> {
+    if queries.is_empty() {
+        return Ok(());
+    }
+    if let Some(disp) = dispatcher() {
+        match disp.dispatch(WriteDiff::RawQueries(queries.to_vec())) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(
+                    "async_writer: dispatch failed ({} queries); falling through to sync: {:?}",
+                    queries.len(),
+                    e
+                );
+            }
+        }
+    }
+    graph_store.execute_batch(queries)
 }
 
 #[derive(Debug, Default)]
@@ -474,13 +507,35 @@ mod tests {
     }
 
     #[test]
-    fn render_bulk_queries_is_empty_until_e3() {
-        // E.1 stubs SQL rendering. E.3 will port the existing
-        // INSERT/UPDATE templates and replace this assertion with shape
-        // checks on the generated batch.
+    fn render_emits_raw_queries_passthrough_only() {
+        // E.3a emits the RawQueries passthrough variant. Typed buckets
+        // (Symbols / Chunks / etc.) still render to nothing; E.3 / E.7
+        // will replace this assertion with shape checks once the typed
+        // INSERT/UPDATE templates land.
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::Symbols(vec![sample_symbol("s1")]));
         acc.absorb(WriteDiff::Chunks(vec![sample_chunk("c1")]));
+        assert!(acc.render_bulk_queries().is_empty());
+
+        acc.absorb(WriteDiff::RawQueries(vec![
+            "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
+            "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+        ]));
+        let rendered = acc.render_bulk_queries();
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].starts_with("DELETE FROM FileVectorizationQueue"));
+        assert!(rendered[1].starts_with("UPDATE File"));
+    }
+
+    #[test]
+    fn raw_queries_absorb_appends_and_reset_clears() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::RawQueries(vec!["q1".to_string()]));
+        acc.absorb(WriteDiff::RawQueries(vec!["q2".to_string(), "q3".to_string()]));
+        assert_eq!(acc.row_count(), 3);
+        assert_eq!(acc.raw_queries.len(), 3);
+        acc.reset();
+        assert!(acc.raw_queries.is_empty());
         assert!(acc.render_bulk_queries().is_empty());
     }
 
@@ -595,6 +650,35 @@ mod tests {
         // Sink's fail_next was primed but render returned no queries, so
         // the sink wasn't called — leaving fail_next untouched.
         assert_eq!(sink.fail_next.load(Ordering::Relaxed), 3);
+        drop(dispatcher);
+        handle.join().expect("writer thread joined");
+    }
+
+    #[test]
+    fn raw_queries_reach_sink_through_dispatcher() {
+        let sink = Arc::new(RecordingSink::default());
+        let (dispatcher, handle) = spawn(Arc::clone(&sink));
+
+        dispatcher
+            .dispatch(WriteDiff::RawQueries(vec![
+                "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
+                "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+            ]))
+            .expect("dispatch ok");
+
+        assert!(
+            wait_for(
+                || !sink.batches().is_empty(),
+                Duration::from_secs(2),
+            ),
+            "sink should receive flushed RawQueries: stats={:?}",
+            dispatcher.stats(),
+        );
+        let batches = sink.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 2);
+        assert!(batches[0][0].starts_with("DELETE FROM FileVectorizationQueue"));
+        assert!(batches[0][1].starts_with("UPDATE File"));
         drop(dispatcher);
         handle.join().expect("writer thread joined");
     }
