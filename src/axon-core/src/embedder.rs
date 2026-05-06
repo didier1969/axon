@@ -1164,15 +1164,6 @@ impl SemanticWorkerPool {
             ),
         ));
 
-        // DEC-AXO-074 M.2: install Parquet chunk-content side-store singleton.
-        // Disabled by default; graph_ingestion falls through to DuckDB INSERT
-        // with full content. Activated via AXON_PARQUET_CHUNK_CONTENT_ENABLED=true.
-        let _ = crate::graph_ingestion::parquet_chunk_content_store::install(Arc::new(
-            crate::graph_ingestion::parquet_chunk_content_store::ParquetChunkContentStore::new(
-                crate::graph_ingestion::parquet_chunk_content_store::default_base_dir(),
-            ),
-        ));
-
         // DEC-AXO-072 J.2: install hot status cache singleton; enable per
         // env. Cache disabled by default — the flush thread below
         // does nothing and graph_ingestion / vector_lane fall through to
