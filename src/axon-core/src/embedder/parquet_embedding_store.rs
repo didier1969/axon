@@ -45,32 +45,33 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-const ROWS_PER_PARTITION: usize = 10_000;
 const EMBEDDING_DIM: usize = 1024;
 
 pub struct ParquetEmbeddingStore {
     base_dir: PathBuf,
-    current: Mutex<Option<CurrentPartition>>,
-}
-
-struct CurrentPartition {
-    path: PathBuf,
-    writer: ArrowWriter<File>,
-    rows_written: usize,
+    last_path: Mutex<Option<PathBuf>>,
 }
 
 impl ParquetEmbeddingStore {
     pub fn new(base_dir: PathBuf) -> Self {
         Self {
             base_dir,
-            current: Mutex::new(None),
+            last_path: Mutex::new(None),
         }
     }
 
-    /// Append a batch of `(chunk_id, source_hash, embedding)` rows to the
-    /// current Parquet partition. `source_hash` is the Chunk content hash
-    /// at embed time — used by retrieve_context to filter out stale
-    /// vectors when chunk content has since been modified.
+    /// Append a batch of `(chunk_id, source_hash, embedding)` rows to a
+    /// fresh Parquet file (one file per batch, written + closed atomically
+    /// so the footer is present and `parquet_scan` can read it on the
+    /// next reader cycle). The original long-running-file design left the
+    /// current partition open until rotation, which means readers (L.3
+    /// retrieve_context, mark_done logic, archivers) saw 0-byte
+    /// unfinalized files mid-stream and failed with "File too small to
+    /// be a Parquet file" (REQ-AXO-194 Bug 1, observed during VAL-AXO-040).
+    ///
+    /// `source_hash` is the Chunk content hash at embed time — used by
+    /// retrieve_context to filter out stale vectors when chunk content
+    /// has since been modified.
     pub fn append_batch(&self, rows: &[(String, String, Vec<f32>)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -85,48 +86,27 @@ impl ParquetEmbeddingStore {
                 ));
             }
         }
-        let mut guard = self.current.lock().expect("parquet partition lock poisoned");
-        let need_rotate = match guard.as_ref() {
-            None => true,
-            Some(part) => part.rows_written + rows.len() > ROWS_PER_PARTITION,
-        };
-        if need_rotate {
-            if let Some(mut part) = guard.take() {
-                part.writer.close().context("closing previous partition")?;
-            }
-            let path = self.next_partition_path()?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).context("creating partition dir")?;
-            }
-            let file = File::create(&path).context("creating partition file")?;
-            let writer = ArrowWriter::try_new(file, Self::schema(), Some(Self::props()))
-                .context("opening parquet writer")?;
-            *guard = Some(CurrentPartition {
-                path,
-                writer,
-                rows_written: 0,
-            });
+        let path = self.next_partition_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("creating partition dir")?;
         }
-        let part = guard.as_mut().expect("partition just opened");
+        let file = File::create(&path).context("creating partition file")?;
+        let mut writer = ArrowWriter::try_new(file, Self::schema(), Some(Self::props()))
+            .context("opening parquet writer")?;
         let batch = Self::rows_to_batch(rows)?;
-        part.writer.write(&batch).context("parquet write batch")?;
-        part.rows_written += rows.len();
+        writer.write(&batch).context("parquet write batch")?;
+        writer.close().context("closing parquet writer")?;
+        *self.last_path.lock().expect("parquet last_path lock poisoned") = Some(path);
         Ok(())
     }
 
     pub fn flush(&self) -> Result<()> {
-        let mut guard = self.current.lock().expect("parquet partition lock poisoned");
-        if let Some(mut part) = guard.take() {
-            part.writer.close().context("flushing parquet partition")?;
-        }
+        // Each batch is a self-contained closed file; flush is a no-op.
         Ok(())
     }
 
     pub fn current_partition_path(&self) -> Option<PathBuf> {
-        self.current
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|p| p.path.clone()))
+        self.last_path.lock().ok().and_then(|g| g.clone())
     }
 
     fn schema() -> Arc<Schema> {
@@ -253,25 +233,34 @@ mod tests {
     }
 
     #[test]
-    fn append_batch_rotates_partition_at_threshold() {
+    fn each_append_batch_writes_its_own_closed_file() {
+        // REQ-AXO-194 Bug 1: per-batch close ensures footer is written so
+        // parquet_scan can read mid-stream. Without this fix, downstream
+        // readers (L.3 retrieve_context, archivers) saw 0-byte unfinalized
+        // files.
         let tmp = TempDir::new().unwrap();
         let store = ParquetEmbeddingStore::new(tmp.path().to_path_buf());
-        // First batch fills most of the partition.
-        let mut rows: Vec<(String, String, Vec<f32>)> = (0..ROWS_PER_PARTITION - 10)
-            .map(|i| fixture_row(&format!("c{}", i), 0.5))
-            .collect();
-        store.append_batch(&rows).unwrap();
-        let part_a = store.current_partition_path().unwrap();
-        // Second batch overflows -> rotate to new partition.
-        rows = (0..50)
-            .map(|i| fixture_row(&format!("c2-{}", i), 0.7))
-            .collect();
-        store.append_batch(&rows).unwrap();
-        let part_b = store.current_partition_path().unwrap();
-        assert_ne!(part_a, part_b, "partition rotated when threshold crossed");
-        store.flush().unwrap();
-        assert!(part_a.exists());
-        assert!(part_b.exists());
+        for batch in 0..3 {
+            let rows = vec![
+                fixture_row(&format!("c{batch}-1"), 0.1 * batch as f32),
+                fixture_row(&format!("c{batch}-2"), 0.2 * batch as f32),
+            ];
+            store.append_batch(&rows).unwrap();
+        }
+        let mut files: Vec<PathBuf> = Vec::new();
+        for hour_dir in std::fs::read_dir(tmp.path()).unwrap() {
+            let hour_dir = hour_dir.unwrap();
+            if hour_dir.file_type().unwrap().is_dir() {
+                for f in std::fs::read_dir(hour_dir.path()).unwrap() {
+                    files.push(f.unwrap().path());
+                }
+            }
+        }
+        assert_eq!(files.len(), 3, "one file per batch: {files:?}");
+        for f in files {
+            let metadata = std::fs::metadata(&f).unwrap();
+            assert!(metadata.len() > 0, "file {} is non-empty (footer present)", f.display());
+        }
     }
 
     #[test]
