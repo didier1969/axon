@@ -417,32 +417,6 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
                 );
             } else {
                 service_guard::record_vector_files_completed(completed_files.len() as u64);
-                // REQ-AXO-194 Bug 2: graph_projection's `vector_ready` CASE
-                // expression runs at file-commit time BEFORE chunks are
-                // embedded — its NOT EXISTS subquery against ChunkEmbedding
-                // always evaluates to FALSE, so chunked files never reach
-                // vector_ready=TRUE through that path. The vector lane is
-                // the only authority on "all chunks of this file have been
-                // embedded" — propagate that signal here so File.vector_ready
-                // reflects reality (and downstream consumers like the
-                // chunk_content_archiver can find candidate files).
-                let completed_paths: Vec<String> = completed_files
-                    .iter()
-                    .map(|f| f.file_path.clone())
-                    .collect();
-                if let Err(e) = graph_store.mark_file_vectorization_done(
-                    &completed_paths,
-                    crate::embedding_contract::CHUNK_MODEL_ID,
-                ) {
-                    vector_trace(&format!(
-                        "[{}] mark_file_vectorization_done_err: {:?}",
-                        worker_idx, e
-                    ));
-                    error!(
-                        "Vector lane [{}]: mark_file_vectorization_done failed: {:?}",
-                        worker_idx, e
-                    );
-                }
             }
         }
         let finalize_ms = finalize_started_at.elapsed().as_millis();

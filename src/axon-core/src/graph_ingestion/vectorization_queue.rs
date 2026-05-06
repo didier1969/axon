@@ -215,12 +215,32 @@ impl GraphStore {
             .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
             .collect::<Vec<_>>()
             .join(" OR ");
+        let path_list = work
+            .iter()
+            .map(|item| format!("'{}'", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
-        self.execute(&format!(
-            "DELETE FROM FileVectorizationQueue \
-             WHERE ({})",
-            predicates
-        ))
+        // REQ-AXO-194 Bug 2: when the vector lane finishes a file, BOTH
+        // (1) delete the FVQ row AND (2) mark File.vector_ready=TRUE in
+        // a single Writer Actor commit. Without (2), graph_projection's
+        // initial UPDATE leaves vector_ready=FALSE forever (it runs
+        // before chunks are embedded; no production code path re-fires
+        // it). Combining (1)+(2) here saves one writer round-trip vs.
+        // calling mark_file_vectorization_done separately.
+        self.execute_batch(&[
+            format!(
+                "DELETE FROM FileVectorizationQueue WHERE ({predicates})"
+            ),
+            format!(
+                "UPDATE File \
+                 SET vector_ready = TRUE, \
+                     vector_ready_at_ms = COALESCE(vector_ready_at_ms, {now_ms}), \
+                     last_state_change_at_ms = {now_ms} \
+                 WHERE graph_ready = TRUE AND path IN ({path_list})"
+            ),
+        ])
     }
 
     pub fn refresh_inflight_file_vectorization_claims(
