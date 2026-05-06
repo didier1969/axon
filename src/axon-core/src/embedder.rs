@@ -1185,6 +1185,14 @@ impl SemanticWorkerPool {
             );
         }
 
+        // REQ-AXO-193 direction E (E.2): install async-writer dispatcher
+        // singleton. Disabled by default; producers fall through to the
+        // legacy synchronous path. Activated via
+        // AXON_ASYNC_WRITER_ENABLED=true. E.3 will route producer SQL
+        // through this channel; until then the dispatcher accepts diffs
+        // but render_bulk_queries returns empty (no DB writes occur).
+        let _ = crate::graph_ingestion::async_writer::install_global(Arc::clone(&graph_store));
+
         // DEC-AXO-072 J.2: install hot status cache singleton; enable per
         // env. Cache disabled by default — the flush thread below
         // does nothing and graph_ingestion / vector_lane fall through to

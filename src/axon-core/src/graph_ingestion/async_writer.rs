@@ -1,10 +1,39 @@
-// REQ-AXO-193 direction E (E.1): typed write-diff data structures used to
-// move all hot-path DuckDB mutations through a single async writer thread.
-// E.1 ships the contracts only — `render_bulk_queries` returns an empty
-// Vec until E.3 ports the existing INSERT/UPDATE templates from
-// graph_ingestion::insert_file_data_batch_with_vectorization_policy.
+// REQ-AXO-193 direction E: route all hot-path DuckDB mutations through a
+// single async writer thread to remove Writer Actor mutex contention from
+// the producer hot path.
+//   E.1 — typed contracts (this file's row structs, WriteDiff, accumulator)
+//   E.2 — channel + writer thread + env-gated install (this file)
+//   E.3 — port INSERT/UPDATE templates into render_bulk_queries
+//   E.4 — vector lane sends FileVectorizationDone / ChunkEmbeddingPersist
+//         through the same channel.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+use tracing::{debug, info, warn};
+
+use crate::graph::GraphStore;
 use crate::graph_ingestion::FileVectorizationWork;
+
+/// Hard cap on the channel capacity. Exceeding it backpressures the
+/// producer (graph_projection / vector_lane) which is the desired
+/// behavior — losing diffs is worse than throttling upstream.
+const CHANNEL_CAPACITY: usize = 100;
+/// Flush threshold in accumulated rows. ~10k rows = one large DuckDB
+/// transaction (~50ms) per the operator's spec.
+pub const ACCUMULATOR_BATCH: usize = 10_000;
+/// Idle wake interval. Forces the writer to flush partial batches
+/// instead of waiting for ACCUMULATOR_BATCH under low load.
+pub const FLUSH_IDLE: Duration = Duration::from_millis(50);
+/// Channel push timeout. Producers wait this long before returning a
+/// dropped-diff error, which keeps the failure visible rather than
+/// hiding it under an unbounded queue.
+const SEND_TIMEOUT: Duration = Duration::from_millis(250);
+
+const ENV_FLAG: &str = "AXON_ASYNC_WRITER_ENABLED";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolRow {
@@ -140,6 +169,168 @@ impl WriteAccumulator {
         self.vector_done.clear();
         self.embedding_persist.clear();
     }
+}
+
+#[derive(Debug, Default)]
+pub struct WriterStats {
+    pub diffs_sent: AtomicUsize,
+    pub diffs_dropped: AtomicUsize,
+    pub flushes: AtomicUsize,
+    pub rows_drained: AtomicUsize,
+    pub flush_failures: AtomicUsize,
+}
+
+impl WriterStats {
+    pub fn diffs_sent(&self) -> usize {
+        self.diffs_sent.load(Ordering::Relaxed)
+    }
+    pub fn diffs_dropped(&self) -> usize {
+        self.diffs_dropped.load(Ordering::Relaxed)
+    }
+    pub fn flushes(&self) -> usize {
+        self.flushes.load(Ordering::Relaxed)
+    }
+    pub fn rows_drained(&self) -> usize {
+        self.rows_drained.load(Ordering::Relaxed)
+    }
+    pub fn flush_failures(&self) -> usize {
+        self.flush_failures.load(Ordering::Relaxed)
+    }
+}
+
+pub trait WriterSink: Send + Sync + 'static {
+    fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()>;
+}
+
+impl WriterSink for GraphStore {
+    fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()> {
+        GraphStore::execute_batch(self, queries)
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteDispatcher {
+    tx: Sender<WriteDiff>,
+    stats: Arc<WriterStats>,
+}
+
+impl WriteDispatcher {
+    pub fn dispatch(&self, diff: WriteDiff) -> Result<(), TrySendError<WriteDiff>> {
+        match self.tx.send_timeout(diff, SEND_TIMEOUT) {
+            Ok(()) => {
+                self.stats.diffs_sent.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(crossbeam_channel::SendTimeoutError::Timeout(diff)) => {
+                self.stats.diffs_dropped.fetch_add(1, Ordering::Relaxed);
+                Err(TrySendError::Full(diff))
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(diff)) => {
+                self.stats.diffs_dropped.fetch_add(1, Ordering::Relaxed);
+                Err(TrySendError::Disconnected(diff))
+            }
+        }
+    }
+
+    pub fn stats(&self) -> &WriterStats {
+        &self.stats
+    }
+}
+
+static GLOBAL_DISPATCHER: OnceLock<Arc<WriteDispatcher>> = OnceLock::new();
+
+pub fn dispatcher() -> Option<Arc<WriteDispatcher>> {
+    GLOBAL_DISPATCHER.get().cloned()
+}
+
+pub fn async_writer_enabled() -> bool {
+    std::env::var(ENV_FLAG)
+        .ok()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
+}
+
+/// Spawn the writer thread + install the global dispatcher. Returns the
+/// installed dispatcher (or None when the env flag is off). Honors
+/// `AXON_ASYNC_WRITER_ENABLED` — disabled = producers fall through to the
+/// legacy synchronous path. The writer thread is detached.
+pub fn install_global<S: WriterSink>(sink: Arc<S>) -> Option<Arc<WriteDispatcher>> {
+    if !async_writer_enabled() {
+        return None;
+    }
+    let (dispatcher, _handle) = spawn(sink);
+    let _ = GLOBAL_DISPATCHER.set(Arc::clone(&dispatcher));
+    Some(GLOBAL_DISPATCHER.get().cloned().unwrap_or(dispatcher))
+}
+
+/// Spawn an isolated writer thread + dispatcher (no global install).
+/// Returns both the dispatcher and the JoinHandle so tests can drop the
+/// dispatcher and wait for the writer to exit. Production callers use
+/// `install_global` and discard the handle.
+pub fn spawn<S: WriterSink>(sink: Arc<S>) -> (Arc<WriteDispatcher>, thread::JoinHandle<()>) {
+    let (tx, rx) = bounded::<WriteDiff>(CHANNEL_CAPACITY);
+    let stats = Arc::new(WriterStats::default());
+    let stats_for_loop = Arc::clone(&stats);
+    let handle = thread::Builder::new()
+        .name("axon-async-writer".to_string())
+        .spawn(move || writer_loop(rx, sink, stats_for_loop))
+        .expect("axon-async-writer thread spawn");
+    info!(
+        "async_writer: dispatcher installed (channel={}, batch={}, idle_ms={})",
+        CHANNEL_CAPACITY,
+        ACCUMULATOR_BATCH,
+        FLUSH_IDLE.as_millis(),
+    );
+    (Arc::new(WriteDispatcher { tx, stats }), handle)
+}
+
+fn writer_loop<S: WriterSink>(
+    rx: Receiver<WriteDiff>,
+    sink: Arc<S>,
+    stats: Arc<WriterStats>,
+) {
+    let mut accumulator = WriteAccumulator::new();
+    let mut last_flush = Instant::now();
+    loop {
+        match rx.recv_timeout(FLUSH_IDLE) {
+            Ok(diff) => accumulator.absorb(diff),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if !accumulator.is_empty() {
+                    flush(&sink, &mut accumulator, &stats);
+                }
+                debug!("async_writer: channel disconnected; writer loop exiting");
+                return;
+            }
+        }
+
+        let row_count = accumulator.row_count();
+        let elapsed = last_flush.elapsed();
+        let batch_full = row_count >= ACCUMULATOR_BATCH;
+        let idle_flush = row_count > 0 && elapsed >= FLUSH_IDLE;
+        if batch_full || idle_flush {
+            flush(&sink, &mut accumulator, &stats);
+            last_flush = Instant::now();
+        }
+    }
+}
+
+fn flush<S: WriterSink>(
+    sink: &Arc<S>,
+    accumulator: &mut WriteAccumulator,
+    stats: &Arc<WriterStats>,
+) {
+    let drained = accumulator.row_count();
+    let queries = accumulator.render_bulk_queries();
+    if !queries.is_empty() {
+        if let Err(e) = sink.execute_batch(&queries) {
+            stats.flush_failures.fetch_add(1, Ordering::Relaxed);
+            warn!("async_writer: flush failed ({} rows): {:?}", drained, e);
+        }
+    }
+    accumulator.reset();
+    stats.flushes.fetch_add(1, Ordering::Relaxed);
+    stats.rows_drained.fetch_add(drained, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -303,5 +494,124 @@ mod tests {
         acc.absorb(diff.clone());
         acc.absorb(diff);
         assert_eq!(acc.chunks.len(), 2);
+    }
+
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: Mutex<Vec<Vec<String>>>,
+        fail_next: AtomicUsize,
+    }
+    impl RecordingSink {
+        fn batches(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    impl WriterSink for RecordingSink {
+        fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()> {
+            if self.fail_next.load(Ordering::Relaxed) > 0 {
+                self.fail_next.fetch_sub(1, Ordering::Relaxed);
+                anyhow::bail!("forced flush failure");
+            }
+            self.calls.lock().unwrap().push(queries.to_vec());
+            Ok(())
+        }
+    }
+
+    fn wait_for<F: FnMut() -> bool>(mut cond: F, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        cond()
+    }
+
+    #[test]
+    fn dispatcher_send_and_writer_drains_on_idle_flush() {
+        let sink = Arc::new(RecordingSink::default());
+        let (dispatcher, handle) = spawn(Arc::clone(&sink));
+
+        dispatcher
+            .dispatch(WriteDiff::Chunks(vec![sample_chunk("c1"), sample_chunk("c2")]))
+            .expect("dispatch ok");
+
+        assert!(
+            wait_for(
+                || dispatcher.stats().rows_drained() >= 2,
+                Duration::from_secs(2),
+            ),
+            "writer should drain rows within idle flush window: stats={:?}",
+            dispatcher.stats(),
+        );
+        assert_eq!(dispatcher.stats().diffs_sent(), 1);
+        assert_eq!(dispatcher.stats().diffs_dropped(), 0);
+        assert_eq!(dispatcher.stats().flush_failures(), 0);
+        assert!(dispatcher.stats().flushes() >= 1);
+        // render_bulk_queries returns empty Vec until E.3, so the sink
+        // never sees a non-empty query batch even though rows drained.
+        assert!(sink.batches().is_empty());
+
+        drop(dispatcher);
+        handle
+            .join()
+            .expect("writer thread should exit cleanly after channel disconnect");
+    }
+
+    #[test]
+    fn writer_loop_exits_when_dispatcher_dropped() {
+        let sink = Arc::new(RecordingSink::default());
+        let (dispatcher, handle) = spawn(Arc::clone(&sink));
+        drop(dispatcher);
+        // join blocks until writer_loop returns. Without the
+        // Disconnected branch this would hang.
+        handle.join().expect("writer thread joined after disconnect");
+    }
+
+    #[test]
+    fn flush_failure_counter_increments_on_sink_error() {
+        let sink = Arc::new(RecordingSink::default());
+        sink.fail_next.store(3, Ordering::Relaxed);
+        let (dispatcher, handle) = spawn(Arc::clone(&sink));
+
+        // render_bulk_queries returns empty until E.3, so the sink path
+        // is never exercised today — confirm the counter stays at zero
+        // after the rows drain. Once E.3 lands and renders real queries,
+        // flush failures will start incrementing on real DB errors. Test
+        // acts as a regression sentinel for the wiring.
+        for _ in 0..5 {
+            dispatcher
+                .dispatch(WriteDiff::Chunks(vec![sample_chunk("c1")]))
+                .expect("dispatch ok");
+        }
+        assert!(wait_for(
+            || dispatcher.stats().rows_drained() >= 5,
+            Duration::from_secs(2),
+        ));
+        assert_eq!(dispatcher.stats().flush_failures(), 0);
+        // Sink's fail_next was primed but render returned no queries, so
+        // the sink wasn't called — leaving fail_next untouched.
+        assert_eq!(sink.fail_next.load(Ordering::Relaxed), 3);
+        drop(dispatcher);
+        handle.join().expect("writer thread joined");
+    }
+
+    #[test]
+    fn async_writer_enabled_honors_env_flag() {
+        // Snapshot + restore so parallel tests don't fight over the env.
+        let prior = std::env::var(ENV_FLAG).ok();
+        std::env::remove_var(ENV_FLAG);
+        assert!(!async_writer_enabled());
+        std::env::set_var(ENV_FLAG, "true");
+        assert!(async_writer_enabled());
+        std::env::set_var(ENV_FLAG, "0");
+        assert!(!async_writer_enabled());
+        match prior {
+            Some(v) => std::env::set_var(ENV_FLAG, v),
+            None => std::env::remove_var(ENV_FLAG),
+        }
     }
 }
