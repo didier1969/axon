@@ -22,6 +22,7 @@ pub const INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT: i64 = 2;
 static FILE_VECTORIZATION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
 const CHUNK_EMBEDDING_UPSERT_BATCH_ROWS: usize = 500;
 
+pub(crate) mod chunk_content_archiver;
 mod file_ingress;
 mod graph_projection_queue;
 pub(crate) mod parquet_chunk_content_store;

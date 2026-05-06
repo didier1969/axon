@@ -1164,6 +1164,27 @@ impl SemanticWorkerPool {
             ),
         ));
 
+        // DEC-AXO-074 Direction A: install Parquet chunk-content side-store
+        // singleton + spawn background archiver. Archiver is a no-op when
+        // env disabled — it sleeps every 30s and finds nothing to archive
+        // because writes still go to DuckDB.content (no migration is
+        // initiated unless the operator opts in via
+        // AXON_PARQUET_CHUNK_CONTENT_ENABLED=true).
+        let chunk_content_store = Arc::new(
+            crate::graph_ingestion::parquet_chunk_content_store::ParquetChunkContentStore::new(
+                crate::graph_ingestion::parquet_chunk_content_store::default_base_dir(),
+            ),
+        );
+        let _ = crate::graph_ingestion::parquet_chunk_content_store::install(
+            Arc::clone(&chunk_content_store),
+        );
+        if crate::graph_ingestion::parquet_chunk_content_store::parquet_chunk_content_enabled() {
+            crate::graph_ingestion::chunk_content_archiver::spawn(
+                Arc::clone(&graph_store),
+                chunk_content_store,
+            );
+        }
+
         // DEC-AXO-072 J.2: install hot status cache singleton; enable per
         // env. Cache disabled by default — the flush thread below
         // does nothing and graph_ingestion / vector_lane fall through to

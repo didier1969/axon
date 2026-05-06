@@ -1038,6 +1038,14 @@ impl GraphStore {
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS chunk_part_index BIGINT")?;
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS chunk_part_count BIGINT")?;
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS chunk_path VARCHAR")?;
+        // DEC-AXO-074 Direction A: tracks whether Chunk.content has been
+        // archived to the Parquet side-store and cleared from DuckDB. The
+        // background archiver flips this to TRUE after a successful Parquet
+        // append; retrieve_context COALESCEs DuckDB content with parquet_scan
+        // so archived rows still surface their content (M.3b).
+        // No DEFAULT clause — DuckDB rejects defaults on ALTER TABLE when
+        // dependent indexes exist. Queries use COALESCE(c.content_archived, FALSE).
+        self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS content_archived BOOLEAN")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
