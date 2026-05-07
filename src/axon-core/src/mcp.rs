@@ -1210,6 +1210,27 @@ impl McpServer {
             .as_millis() as i64
     }
 
+    /// REQ-AXO-210: monotonic counter that pairs with `now_unix_ms` to
+    /// build a job id immune to same-millisecond collisions. The
+    /// previous `JOB-{ms}` form crashed the brain on PRIMARY_McpJob_0
+    /// when two `mcp.submit_async_job` calls arrived within the same
+    /// millisecond — observed deterministically on 2026-05-06 burst
+    /// MCP submissions.
+    fn next_job_seq() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// REQ-AXO-210 — public for unit tests; combines monotonic ms with
+    /// the atomic counter so two calls in the same ms differ in the
+    /// suffix.
+    pub(crate) fn next_job_id() -> String {
+        let ms = Self::now_unix_ms();
+        let seq = Self::next_job_seq();
+        format!("JOB-{ms}-{seq:08}")
+    }
+
     fn reserve_mutation_ids(&self, normalized_name: &str, arguments: &Value) -> Value {
         match normalized_name {
             "soll_apply_plan" => {
@@ -1294,7 +1315,8 @@ impl McpServer {
         }
 
         let submitted_at = Self::now_unix_ms();
-        let job_id = format!("JOB-{submitted_at}");
+        // REQ-AXO-210: collision-proof job id (atomic seq paired with ms).
+        let job_id = Self::next_job_id();
         let public_tool_name = Self::public_tool_name_for(requested_tool_name, normalized_name);
         let known_ids = self.async_known_ids_for(normalized_name, &reserved_ids);
         let mut request_json = json!({
