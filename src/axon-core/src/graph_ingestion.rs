@@ -6,11 +6,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
-use libloading::Symbol as LibSymbol;
 
 use crate::code_chunker::build_symbol_chunks;
 use crate::embedding_contract::{CHUNK_MODEL_ID as CHUNK_EMBEDDING_MODEL_ID, DIMENSION};
-use crate::graph::{ExecFunc, GraphStore, PendingFile};
+use crate::graph::{GraphStore, PendingFile};
 use crate::queue::ProcessingMode;
 use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
@@ -1046,7 +1045,7 @@ impl GraphStore {
             .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
 
             if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
                 return Err(anyhow!("Pending Fetch Error: BEGIN TRANSACTION failed"));
@@ -1093,14 +1092,9 @@ impl GraphStore {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
-                    if let Ok(exec_fn) = self
-                        .pool
-                        .lib
-                        .get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0")
-                    {
-                        if let Ok(rb_query) = CString::new("ROLLBACK;") {
-                            let _ = exec_fn(*guard, rb_query.as_ptr());
-                        }
+                    let exec_fn = self.pool.symbols.exec_fn;
+                    if let Ok(rb_query) = CString::new("ROLLBACK;") {
+                        let _ = exec_fn(*guard, rb_query.as_ptr());
                     }
                 }
                 return Err(e);
@@ -1108,7 +1102,7 @@ impl GraphStore {
         };
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
             if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
                 return Err(anyhow!("Pending Fetch Error: COMMIT failed"));
             }
@@ -1165,7 +1159,7 @@ impl GraphStore {
             .join(",");
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
 
             if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
                 return Err(anyhow!("Claim Paths Error: BEGIN TRANSACTION failed"));
@@ -1207,14 +1201,9 @@ impl GraphStore {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
-                    if let Ok(exec_fn) = self
-                        .pool
-                        .lib
-                        .get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0")
-                    {
-                        if let Ok(rb_query) = CString::new("ROLLBACK;") {
-                            let _ = exec_fn(*guard, rb_query.as_ptr());
-                        }
+                    let exec_fn = self.pool.symbols.exec_fn;
+                    if let Ok(rb_query) = CString::new("ROLLBACK;") {
+                        let _ = exec_fn(*guard, rb_query.as_ptr());
                     }
                 }
                 return Err(e);
@@ -1222,7 +1211,7 @@ impl GraphStore {
         };
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
             if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
                 return Err(anyhow!("Claim Paths Error: COMMIT failed"));
             }

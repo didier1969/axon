@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use libloading::{Library, Symbol as LibSymbol};
+use libloading::Library;
 use tracing::{info, warn};
 
 use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
-use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
+use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::current_runtime_process_role;
@@ -165,8 +165,9 @@ impl GraphStore {
     ) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
-        let init_fn: LibSymbol<InitDbFunc> = unsafe { lib.get(b"duckdb_init_db\0")? };
-        let close_fn: LibSymbol<CloseDbFunc> = unsafe { lib.get(b"duckdb_close_db\0")? };
+        let symbols = unsafe { crate::graph::PluginSymbols::resolve_duckdb(&lib) }?;
+        let init_fn = symbols.init_fn;
+        let close_fn = symbols.close_fn;
         let is_memory = db_root == ":memory:";
         let split_brain_mode = !is_memory && split_brain_mode;
         info!(
@@ -231,6 +232,7 @@ impl GraphStore {
 
             let pool = Arc::new(LatticePool {
                 lib: lib.clone(),
+                symbols,
                 writer_ctx: Mutex::new(writer_ptr),
                 reader_ctx: Mutex::new(std::ptr::null_mut()),
             });
@@ -453,8 +455,8 @@ impl GraphStore {
 
         let c_path = CString::new(db_path.to_string_lossy().to_string())?;
         let refresh_result = unsafe {
-            let init_fn: LibSymbol<InitDbFunc> = self.pool.lib.get(b"duckdb_init_db\0")?;
-            let close_fn: LibSymbol<CloseDbFunc> = self.pool.lib.get(b"duckdb_close_db\0")?;
+            let init_fn = self.pool.symbols.init_fn;
+            let close_fn = self.pool.symbols.close_fn;
 
             if !self.reader_only_ist_mode {
                 self.publish_ist_reader_replica()?;
@@ -817,7 +819,7 @@ impl GraphStore {
         let replica_shm_path = replica_path.with_extension("db.shm");
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
             let writer_guard = self
                 .pool
                 .writer_ctx
@@ -864,7 +866,7 @@ impl GraphStore {
             .filter(|value| *value > 0)
             .unwrap_or(0);
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
             exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
             // DEC-AXO-072 follow-up: vector pipeline profiling (2026-05-05)
             // showed the Writer Actor commit_ms growing from 132ms to 12298ms

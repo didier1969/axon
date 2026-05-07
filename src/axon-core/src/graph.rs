@@ -1,4 +1,4 @@
-use libloading::{Library, Symbol as LibSymbol};
+use libloading::Library;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -28,8 +28,50 @@ pub(crate) type QueryCountFunc =
 pub(crate) type FreeStrFunc = unsafe extern "C" fn(ptr: *mut std::os::raw::c_char);
 pub(crate) type CloseDbFunc = unsafe extern "C" fn(ctx: *mut c_void);
 
+/// MIL-AXO-015 P3 slice 3a: cached FFI fn pointers for the loaded
+/// plugin. Resolved once at `LatticePool` construction; all subsequent
+/// hot-path call sites read directly from these fields rather than
+/// hitting `Library::get` again per call. Pure refactor — behaviour
+/// preserved for the duckdb backend; lays the groundwork for slice 3b
+/// to swap the underlying symbol set for axon-plugin-postgres without
+/// touching the consumers.
+#[derive(Copy, Clone)]
+pub(crate) struct PluginSymbols {
+    pub(crate) init_fn: InitDbFunc,
+    pub(crate) close_fn: CloseDbFunc,
+    pub(crate) exec_fn: ExecFunc,
+    pub(crate) query_count_fn: QueryCountFunc,
+    pub(crate) query_json_fn: QueryJsonFunc,
+    pub(crate) free_str_fn: FreeStrFunc,
+}
+
+impl PluginSymbols {
+    /// Resolve every plugin symbol up-front against the loaded
+    /// dynamic library. Returns an error if any symbol is missing,
+    /// which is also the precise contract that the per-callsite
+    /// `lib.get(b"duckdb_*\0")?` checks would have surfaced.
+    ///
+    /// # Safety
+    ///
+    /// `lib` must remain alive for the lifetime of the returned
+    /// `PluginSymbols` because the cached fn pointers reference
+    /// addresses inside the loaded image. `LatticePool` enforces this
+    /// by owning the `Arc<Library>` alongside the symbols.
+    pub(crate) unsafe fn resolve_duckdb(lib: &Library) -> anyhow::Result<Self> {
+        Ok(Self {
+            init_fn: *lib.get::<InitDbFunc>(b"duckdb_init_db\0")?,
+            close_fn: *lib.get::<CloseDbFunc>(b"duckdb_close_db\0")?,
+            exec_fn: *lib.get::<ExecFunc>(b"duckdb_execute\0")?,
+            query_count_fn: *lib.get::<QueryCountFunc>(b"duckdb_query_count\0")?,
+            query_json_fn: *lib.get::<QueryJsonFunc>(b"duckdb_query_json\0")?,
+            free_str_fn: *lib.get::<FreeStrFunc>(b"duckdb_free_string\0")?,
+        })
+    }
+}
+
 pub(crate) struct LatticePool {
     pub(crate) lib: Arc<Library>,
+    pub(crate) symbols: PluginSymbols,
     pub(crate) writer_ctx: Mutex<*mut c_void>,
     pub(crate) reader_ctx: Mutex<*mut c_void>,
 }
@@ -101,7 +143,7 @@ pub struct GraphStore {
 impl Drop for LatticePool {
     fn drop(&mut self) {
         unsafe {
-            let close_fn: LibSymbol<CloseDbFunc> = self.lib.get(b"duckdb_close_db\0").unwrap();
+            let close_fn = self.symbols.close_fn;
             let writer_ctx = *self.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
             let reader_ctx = *self.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
             if !writer_ctx.is_null() {

@@ -5,10 +5,9 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
-use libloading::Symbol as LibSymbol;
 use serde_json::Value;
 
-use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
+use crate::graph::GraphStore;
 use crate::runtime_truth_contract::RuntimeFreshnessState;
 
 #[allow(dead_code)]
@@ -161,7 +160,7 @@ impl GraphStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
-            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+            let count_fn = self.pool.symbols.query_count_fn;
             Ok(count_fn(
                 *writer,
                 CString::new(normalized.as_ref())?.as_ptr(),
@@ -280,8 +279,7 @@ impl GraphStore {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner());
                     return unsafe {
-                        let count_fn: LibSymbol<QueryCountFunc> =
-                            self.pool.lib.get(b"duckdb_query_count\0")?;
+                        let count_fn = self.pool.symbols.query_count_fn;
                         Ok(count_fn(
                             *writer,
                             CString::new(normalized.as_ref())?.as_ptr(),
@@ -289,8 +287,7 @@ impl GraphStore {
                     };
                 }
                 unsafe {
-                    let count_fn: LibSymbol<QueryCountFunc> =
-                        self.pool.lib.get(b"duckdb_query_count\0")?;
+                    let count_fn = self.pool.symbols.query_count_fn;
                     let result = Ok(count_fn(
                         *guard,
                         CString::new(normalized.as_ref())?.as_ptr(),
@@ -610,7 +607,7 @@ impl GraphStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
             if !exec_fn(*guard, CString::new(normalized.as_ref())?.as_ptr()) {
                 return Err(anyhow!("Writer Error: {}", normalized.as_ref()));
             }
@@ -703,7 +700,7 @@ impl GraphStore {
             .unwrap_or_else(|p| p.into_inner());
 
         unsafe {
-            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let exec_fn = self.pool.symbols.exec_fn;
 
             if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
                 return Err(anyhow!("Batch Writer Error: BEGIN TRANSACTION failed"));
@@ -744,8 +741,8 @@ impl GraphStore {
     pub(crate) fn query_on_ctx(&self, query: &str, ctx: *mut std::ffi::c_void) -> Result<String> {
         let normalized = self.normalize_attached_soll_query(query);
         unsafe {
-            let query_fn: LibSymbol<QueryJsonFunc> = self.pool.lib.get(b"duckdb_query_json\0")?;
-            let free_fn: LibSymbol<FreeStrFunc> = self.pool.lib.get(b"duckdb_free_string\0")?;
+            let query_fn = self.pool.symbols.query_json_fn;
+            let free_fn = self.pool.symbols.free_str_fn;
             let ptr = query_fn(ctx, CString::new(normalized.as_ref())?.as_ptr());
             if ptr.is_null() {
                 return Ok("[]".to_string());
@@ -878,8 +875,7 @@ mod expand_params_tests;
 #[cfg(test)]
 mod tests {
     use super::ReadFreshness;
-    use crate::graph::{ExecFunc, GraphStore, InitDbFunc};
-    use libloading::Symbol as LibSymbol;
+    use crate::graph::GraphStore;
     use std::ffi::CString;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
@@ -909,8 +905,8 @@ mod tests {
         );
 
         unsafe {
-            let init_fn: LibSymbol<InitDbFunc> = store.pool.lib.get(b"duckdb_init_db\0").unwrap();
-            let exec_fn: LibSymbol<ExecFunc> = store.pool.lib.get(b"duckdb_execute\0").unwrap();
+            let init_fn = store.pool.symbols.init_fn;
+            let exec_fn = store.pool.symbols.exec_fn;
             let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
             assert!(
                 !reader_ptr.is_null(),

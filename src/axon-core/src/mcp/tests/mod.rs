@@ -6,7 +6,7 @@ use crate::embedder::{embedding_lane_config_from_env, embedding_provider_diagnos
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
-use crate::graph::{ExecFunc, GraphStore, InitDbFunc};
+use crate::graph::GraphStore;
 use crate::ingress_buffer::{
     record_ingress_flush, reset_ingress_metrics_for_tests, IngressBuffer, IngressCause,
     IngressFileEvent, IngressSource,
@@ -20,7 +20,6 @@ use crate::vector_control::{
     current_utility_first_scheduler_diagnostics, reset_utility_first_scheduler_for_tests,
     reset_vector_batch_controller_for_tests,
 };
-use libloading::Symbol as LibSymbol;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -173,8 +172,8 @@ fn attach_distinct_reader_snapshot(store: &GraphStore) {
     };
 
     unsafe {
-        let init_fn: LibSymbol<InitDbFunc> = store.pool.lib.get(b"duckdb_init_db\0").unwrap();
-        let exec_fn: LibSymbol<ExecFunc> = store.pool.lib.get(b"duckdb_execute\0").unwrap();
+        let init_fn = store.pool.symbols.init_fn;
+        let exec_fn = store.pool.symbols.exec_fn;
         let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
         assert!(
             !reader_ptr.is_null(),
