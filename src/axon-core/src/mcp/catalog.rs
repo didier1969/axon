@@ -197,7 +197,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "description": "List of modified file paths."
                         },
                         "message": { "type": "string", "description": "Commit message (Conventional Commits)." },
-                        "dry_run": { "type": "boolean", "description": "If true, validates only without committing." }
+                        "dry_run": { "type": "boolean", "description": "If true, validates only without committing." },
+                        "project_path": { "type": "string", "description": "REQ-AXO-191: absolute path of the project to commit in. When set, git commands run with this directory as cwd. Required for cross-project commits; otherwise the brain's cwd (typically the Axon repo) is used and the commit lands in the wrong tree." },
+                        "project_code": { "type": "string", "description": "REQ-AXO-191: alternative to project_path — server resolves the path via the registry. Falls back to brain cwd when neither is supplied." }
                     },
                     "required": ["diff_paths", "message"]
                 }
