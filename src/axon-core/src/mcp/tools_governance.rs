@@ -97,42 +97,97 @@ impl McpServer {
             file_filter
         ));
 
-        let mut causes = Vec::new();
+        // REQ-AXO-212 — sub-causes carry ADR-2026-04-18-aligned
+        // vocabulary so the LLM gets a single actionable next step
+        // instead of the historical generic "scope_mismatch" message.
+        // Each cause is (machine_id, human_explanation, remediation).
+        let mut causes: Vec<(&'static str, String, &'static str)> = Vec::new();
+        let runtime_mode = std::env::var("AXON_RUNTIME_MODE").unwrap_or_default();
+        let watch_root_set = std::env::var("AXON_WATCH_DIR")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+
         if known == 0 {
-            if project != "*" && global_known > 0 {
-                causes.push(
-                    "scope_mismatch_or_wrong_project_code: workspace contains files, but not for this project"
+            if !watch_root_set {
+                causes.push((
+                    "watch_root_unconfigured",
+                    "no AXON_WATCH_DIR configured for this runtime; the indexer has no roots to scan"
                         .to_string(),
-                );
+                    "set AXON_WATCH_DIR or watch_root in .axon/config.json then restart axon-indexer",
+                ));
+            } else if runtime_mode == "brain_only" {
+                causes.push((
+                    "runtime_mode_excludes_indexing",
+                    "current runtime mode is brain_only; the indexer process is intentionally not running"
+                        .to_string(),
+                    "switch to indexer_full (or indexer_graph) via `axon-{live,dev} start --indexer-full`",
+                ));
+            } else if project != "*" && global_known > 0 {
+                causes.push((
+                    "path_not_in_runtime_registry",
+                    "the workspace contains indexed files, but none for this project_code; \
+                     the project may not be registered yet"
+                        .to_string(),
+                    "run `axon_init_project(project_path=<absolute path of the project>)` to register \
+                     the project_code in the runtime registry",
+                ));
             } else {
-                causes.push(
-                    "discovery_absent_or_filtered: no files discovered (watch root, ignore rules, permissions)"
+                causes.push((
+                    "discovery_absent_or_filtered",
+                    "no files discovered under the configured watch root \
+                     (filter, .axonignore, .gitignore, or permissions)"
                         .to_string(),
-                );
+                    "edit .axonignore to re-include relevant paths via `+pattern`, or verify \
+                     filesystem permissions on the watch root",
+                ));
             }
         }
         if known > 0 && completed == 0 && (pending + indexing) > 0 {
-            causes.push(
-                "ingestion_not_completed: files in pending/indexing, pipeline possibly blocked or still running"
-                    .to_string(),
-            );
+            causes.push((
+                "ingestion_not_completed",
+                "files in pending/indexing; pipeline possibly blocked or still running".to_string(),
+                "wait one or two indexer cycles, then re-run diagnose_indexing; if still stuck, \
+                 inspect `last_error_reason` and `status_reason` columns",
+            ));
+        }
+        // file_too_large_for_budget surfaces the oversized_for_current_budget status.
+        let oversized = self.sql_scalar(&format!(
+            "SELECT count(*) FROM File WHERE {} AND status = 'oversized_for_current_budget'",
+            file_filter
+        ));
+        if oversized > 0 {
+            causes.push((
+                "file_too_large_for_budget",
+                format!(
+                    "{} file(s) exceed the indexer queue memory budget for the current runtime profile",
+                    oversized
+                ),
+                "increase AXON_QUEUE_MEMORY_BUDGET_BYTES, or split the offending file(s) before \
+                 reindexing",
+            ));
         }
         if known > 0 && symbols == 0 {
-            causes.push(
-                "parser_extraction_gap: files known but 0 symbols extracted (unsupported language or parse failure)"
+            causes.push((
+                "parser_extraction_gap",
+                "files known but 0 symbols extracted (unsupported language or parse failure)"
                     .to_string(),
-            );
+                "verify tree-sitter grammar coverage for the file extensions; inspect \
+                 `last_error_reason` for parser-side failures",
+            ));
         }
         if symbols > 0 && (calls_direct + calls_nif) == 0 {
-            causes.push(
-                "call_graph_gap: symbols present but call graph empty for this scope"
-                    .to_string(),
-            );
+            causes.push((
+                "call_graph_gap",
+                "symbols present but call graph empty for this scope".to_string(),
+                "run bridge refinement; inspect FFI / NIF boundaries for cross-module calls",
+            ));
         }
         if causes.is_empty() {
-            causes.push(
-                "no_blocker_detected: no major blocker detected by this diagnostic".to_string(),
-            );
+            causes.push((
+                "no_blocker_detected",
+                "no major blocker detected by this diagnostic".to_string(),
+                "no remediation needed; verify expected counts against `audit` for the project",
+            ));
         }
 
         let reason_lines = if top_reasons.is_empty() {
@@ -171,7 +226,7 @@ impl McpServer {
 
         let cause_lines = causes
             .iter()
-            .map(|c| format!("* {}", c))
+            .map(|(id, explain, remediation)| format_diagnose_cause_line(id, explain, remediation))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -725,5 +780,40 @@ impl McpServer {
                 }
             })),
         }
+    }
+}
+
+/// REQ-AXO-212 — render one diagnose_indexing cause as a two-line
+/// markdown bullet: the machine-stable id + 1-line remediation. Pure
+/// helper factored out so tests can exercise the rendering contract
+/// without booting a full McpServer.
+fn format_diagnose_cause_line(id: &str, explain: &str, remediation: &str) -> String {
+    format!("* **{id}**: {explain}\n  * remediation: {remediation}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cause_line_renders_machine_id_and_remediation() {
+        let line = format_diagnose_cause_line(
+            "watch_root_unconfigured",
+            "no AXON_WATCH_DIR configured",
+            "set AXON_WATCH_DIR or watch_root in .axon/config.json then restart axon-indexer",
+        );
+        assert!(line.starts_with("* **watch_root_unconfigured**:"));
+        assert!(line.contains("\n  * remediation: set AXON_WATCH_DIR"));
+        assert!(line.contains("axon-indexer"));
+    }
+
+    #[test]
+    fn cause_line_preserves_distinct_id_and_explanation() {
+        let line = format_diagnose_cause_line("path_not_in_runtime_registry", "explain", "fix");
+        let lines: Vec<&str> = line.lines().collect();
+        assert_eq!(lines.len(), 2, "cause renders on exactly two lines");
+        assert!(lines[0].contains("path_not_in_runtime_registry"));
+        assert!(lines[0].contains("explain"));
+        assert!(lines[1].trim_start().starts_with("* remediation: fix"));
     }
 }

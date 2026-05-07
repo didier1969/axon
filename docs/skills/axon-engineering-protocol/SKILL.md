@@ -73,6 +73,7 @@ Default `mode=brief`. `query` brain semantic search works under `brain_only` pro
 | `input_ambiguous` | pick exact symbol or narrow project scope |
 | `degraded` | treat partial; retry after runtime stabilization |
 | weak `why` | `retrieve_context` (tighter), then `inspect`, `query`, `impact`, `path`, `conception_view`, `project_status` |
+| `diagnose_indexing` causes (REQ-AXO-212) | each cause renders machine-stable id + 1-line remediation: `watch_root_unconfigured`, `runtime_mode_excludes_indexing`, `path_not_in_runtime_registry`, `discovery_absent_or_filtered`, `file_too_large_for_budget`, `ingestion_not_completed`, `parser_extraction_gap`, `call_graph_gap`, `no_blocker_detected` — pick the remediation line and act |
 
 NEVER inspect Axon source as recovery path for ordinary LLM operation.
 
