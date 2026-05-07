@@ -1,0 +1,53 @@
+# MIL-AXO-015 P8 — Docker compose template for client PostgreSQL deployment.
+#
+# Per DEC-AXO-075 + CPT-AXO-037, the client owns storage. This template
+# brings up the PostgreSQL instance Axon connects to (AGE + pgvector
+# preinstalled). The Axon brain itself runs from the client's bin/
+# artifact pointing at the resulting DATABASE_URL.
+#
+# Usage:
+#   1. Build the test/runtime image once (also used by integration tests):
+#        docker build -t axon-test/age-pgvector:pg17 \
+#            -f src/axon-plugin-postgres/tests/fixtures/Dockerfile.age-pgvector \
+#            src/axon-plugin-postgres/tests/fixtures
+#   2. docker compose -f docker-compose.postgres.yml up -d
+#   3. Export the connection URL on the host running axon-brain:
+#        export AXON_DB_BACKEND=postgres
+#        export AXON_LIVE_DATABASE_URL=postgres://axon:axon@127.0.0.1:44144/axon_live
+#   4. (optional) point at a SOLL bootstrap seed:
+#        export AXON_SOLL_SEED_PATH=/path/to/axon-bootstrap.json
+#   5. ./scripts/axon-live start --brain-only
+#
+# Volumes are bind-mounted to ./data/postgres so the operator owns the
+# disk. Replace with a managed volume / network volume as the
+# environment requires (CPT-AXO-037 — Axon never owns the persistence
+# layer).
+
+services:
+  postgres:
+    image: axon-test/age-pgvector:pg17
+    container_name: axon-postgres
+    restart: unless-stopped
+    ports:
+      # Use the dev/live port from devenv.nix so live-on-PG dev
+      # workflow reaches the same conventions.
+      - "44144:5432"
+    environment:
+      POSTGRES_USER: axon
+      POSTGRES_PASSWORD: ${AXON_PG_PASSWORD:-axon}
+      POSTGRES_DB: axon_live
+      # AGE + pgvector are loaded by the Axon brain at boot
+      # (`bootstrap_global_pg_schema`) — no init script needed beyond
+      # the standard postgres entrypoint.
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axon -d axon_live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+# Operators who want a separate dev database can copy this file and
+# bump the published port to 44145 + change POSTGRES_DB to axon_dev.
+# DEC-AXO-060 dual-instance discipline expects two distinct
+# AXON_*_DATABASE_URL endpoints.
