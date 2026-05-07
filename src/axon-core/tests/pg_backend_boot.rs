@@ -1,7 +1,7 @@
 //! MIL-AXO-015 P3 smoke test: GraphStore::new under AXON_DB_BACKEND=postgres.
 //!
 //! Marked `#[ignore]`. Requirements:
-//!   1. Docker runtime available (testcontainers spawns apache/age).
+//!   1. Docker runtime available (testcontainers spawns axon-test/age-pgvector).
 //!   2. `libaxon_plugin_postgres.so` already built — the test does not
 //!      shell out to cargo. Build with:
 //!
@@ -32,7 +32,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn graphstore_boots_under_postgres_backend() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-    let container = GenericImage::new("apache/age", "release_PG17_1.6.0")
+    let container = GenericImage::new("axon-test/age-pgvector", "pg17")
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
@@ -97,35 +97,56 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("query_count on pg_extension should succeed under PG");
     assert_eq!(age_count, 1, "AGE extension should be installed");
 
-    // MIL-AXO-015 P3 slice 3f: per-project schema generator round-trip
-    // against a real PG. axon_init_project will issue these statements
-    // for every newly registered project_code under
-    // AXON_DB_BACKEND=postgres. The test image ships AGE without
-    // pgvector, so vector-typed tables and the HNSW index will fail —
-    // we tolerate those failures here and still assert that the
-    // pgvector-free tables (File, CONTAINS, CALLS, queues, …) come up.
-    // P4 covers the full vector-typed validation against a combined
-    // AGE+pgvector image.
+    // MIL-AXO-015 P3 slice 3f + P4 slice 4b: full per-project schema
+    // round-trip. The combined AGE+pgvector test image lets every
+    // statement apply cleanly, including vector(1024) tables and the
+    // HNSW index.
     let project_stmts = axon_core::postgres::ddl::generate_project_schema("TST")
         .expect("generate_project_schema('TST') should succeed");
-    let mut applied = 0usize;
-    let mut tolerated = 0usize;
     for stmt in &project_stmts {
-        let touches_vector =
-            stmt.contains("vector(") || stmt.contains("USING hnsw") || stmt.contains("Symbol")
-                || stmt.contains("ChunkEmbedding") || stmt.contains("HourlyVectorizationRollup");
-        match store.execute(stmt) {
-            Ok(()) => applied += 1,
-            Err(_) if touches_vector => tolerated += 1,
-            Err(e) => panic!("non-vector schema stmt failed: {stmt}\n{e:?}"),
-        }
+        store
+            .execute(stmt)
+            .unwrap_or_else(|e| panic!("project schema stmt failed: {stmt}\n{e:?}"));
     }
-    assert!(applied > 0, "at least some project DDL must apply");
-    let _ = tolerated;
     let project_files_count = store
         .query_count("SELECT count(*)::BIGINT FROM tst.File")
         .expect("query against per-project File table should succeed");
     assert_eq!(project_files_count, 0);
+
+    // P4 slice 4b: round-trip a single ChunkEmbedding via the upsert
+    // helper from `crate::postgres::vector`. Validates pgvector text
+    // serialisation + the HNSW-backed table accepts the row.
+    use axon_core::postgres::vector::{upsert_chunk_embedding_sql, vector_literal};
+    let mut sample = vec![0.0_f32; axon_core::embedding_contract::DIMENSION];
+    sample[0] = 0.42;
+    sample[1] = -0.13;
+    let upsert = upsert_chunk_embedding_sql(
+        "tst",
+        "chunk-x",
+        "code-1024",
+        "hash-abc",
+        &sample,
+        1714999999000,
+    )
+    .expect("upsert SQL builds");
+    store
+        .execute(&upsert)
+        .expect("pgvector upsert should succeed against combined image");
+    let count = store
+        .query_count("SELECT count(*)::BIGINT FROM tst.ChunkEmbedding")
+        .expect("count ChunkEmbedding");
+    assert_eq!(count, 1, "upsert should land exactly one row");
+    // Idempotence: re-issuing the same upsert under ON CONFLICT keeps
+    // the row count at 1.
+    store
+        .execute(&upsert)
+        .expect("pgvector upsert idempotent");
+    let count_after_replay = store
+        .query_count("SELECT count(*)::BIGINT FROM tst.ChunkEmbedding")
+        .expect("count after replay");
+    assert_eq!(count_after_replay, 1);
+    // Sanity: vector_literal parses back via the same helper.
+    let _ = vector_literal(&sample).expect("literal builds for round-trip");
 
     // MIL-AXO-015 P5: seed loader round-trip. Apply a synthetic
     // SeedDocument with one node, one edge, one registry row, and one

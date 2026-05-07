@@ -61,7 +61,7 @@ fn cdylib_path() -> PathBuf {
 }
 
 fn start_pg() -> (impl Drop, String) {
-    let container = GenericImage::new("apache/age", "release_PG17_1.6.0")
+    let container = GenericImage::new("axon-test/age-pgvector", "pg17")
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",

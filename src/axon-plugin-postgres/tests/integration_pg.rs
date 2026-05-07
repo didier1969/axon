@@ -6,8 +6,9 @@
 //!     cargo test --manifest-path src/axon-plugin-postgres/Cargo.toml \
 //!                --test integration_pg -- --ignored --nocapture
 //!
-//! Image: `apache/age:release_PG17_1.6.0` (latest stable PG17+AGE
-//! tag on Docker Hub as of 2026-05-07). AGE is preinstalled, pgvector is
+//! Image: `axon-test/age-pgvector:pg17` (combined AGE+pgvector,
+//! built locally from `tests/fixtures/Dockerfile.age-pgvector`). AGE
+//! and pgvector are both preinstalled, so the full schema generator
 //! NOT and will be exercised separately under MIL-AXO-015 P4 once we
 //! settle on a combined AGE+pgvector image (custom Dockerfile or a
 //! published derivative).
@@ -24,10 +25,14 @@ use axon_plugin_postgres::{
     pg_close_db, pg_execute, pg_free_string, pg_init_db, pg_query_count, pg_query_json,
 };
 
-/// Spin up an `apache/age:PG17_latest` container and return both the
-/// `Container` (kept alive by the test) and a usable `DATABASE_URL`.
+/// Spin up an `axon-test/age-pgvector:pg17` container and return
+/// both the `Container` (kept alive by the test) and a usable
+/// `DATABASE_URL`. Build the image once with:
+///
+///     docker build -t axon-test/age-pgvector:pg17 \
+///         -f tests/fixtures/Dockerfile.age-pgvector tests/fixtures
 fn start_pg() -> (impl Drop, String) {
-    let container = GenericImage::new("apache/age", "release_PG17_1.6.0")
+    let container = GenericImage::new("axon-test/age-pgvector", "pg17")
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
