@@ -1800,6 +1800,52 @@ impl GraphStore {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // MIL-AXO-015 P4 slice 4c: under the PostgreSQL backend, route
+        // each row through `crate::postgres::vector::upsert_chunk_embedding_sql`
+        // which emits the pgvector `'[…]'::vector(N)` text form +
+        // `INSERT … ON CONFLICT (chunk_id, model_id) DO UPDATE`.
+        //
+        // The per-project schema namespacing (CPT-AXO-039) requires a
+        // project_code; the indexer's vector_worker_loop currently
+        // calls this method without one. Until P9 threads project_code
+        // through the worker call sites, we resolve it from the first
+        // chunk_id's project prefix (chunk_ids always start with the
+        // project_code per the indexer's id-generation contract). For
+        // single-project deployments this is exact; for multi-project
+        // batches this method MUST be called once per project_code by
+        // the worker, which is already the indexer's natural batching
+        // boundary.
+        if self.is_postgres_backend() {
+            let project_code = updates
+                .first()
+                .and_then(|(chunk_id, _, _)| chunk_id.split('-').next())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!(
+                    "update_chunk_embeddings under PG cannot infer project_code \
+                     from empty/malformed chunk_id"
+                ))?;
+            let schema = crate::postgres::ddl::schema_name_for(project_code)
+                .map_err(|e| anyhow!("invalid project_code '{}': {}", project_code, e))?;
+            let mut queries = Vec::with_capacity(updates.len());
+            for (chunk_id, source_hash, vector) in updates {
+                let sql = crate::postgres::vector::upsert_chunk_embedding_sql(
+                    &schema,
+                    chunk_id,
+                    model_id,
+                    source_hash,
+                    vector,
+                    now_ms,
+                )
+                .map_err(|e| anyhow!("pgvector upsert SQL build failed: {}", e))?;
+                queries.push(sql);
+            }
+            self.execute_batch(&queries)?;
+            // Hourly rollup uses DuckDB-shaped SQL today; skip under PG.
+            // Owned by P9 indexer migration.
+            return Ok(());
+        }
+
         let mut queries = Vec::new();
         let values: Vec<String> = updates
             .iter()
