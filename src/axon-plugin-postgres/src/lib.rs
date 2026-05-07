@@ -14,14 +14,16 @@
 //! - Error envelope contract (REQ-AXO-129) preserved: invalid SQL
 //!   returns a JSON object `{"_axon_plugin_error", "stage",
 //!   "sql_excerpt"}`. A genuine empty result is still `[]`.
-//! - Optional `schema_search_path`: when provided, every connection
-//!   acquired from the pool emits `SET search_path TO <schema>, public`
-//!   before running the user SQL. This is how the per-project namespace
-//!   from CPT-AXO-039 surfaces inside dynamic SQL without the caller
-//!   needing to qualify table names.
+//! - Per-connection session setup: when a `schema_search_path` is
+//!   configured AND/OR the AGE extension is detected at init time,
+//!   every connection acquired from the pool emits the equivalent of
+//!   `LOAD 'age'; SET search_path TO <schema>, ag_catalog, public`
+//!   before running the user SQL. This is how the per-project
+//!   namespace from CPT-AXO-039 surfaces inside dynamic SQL and how
+//!   `cypher()` / `agtype` resolve unqualified per Apache AGE README
+//!   (CPT-AXO-040).
 //!
 //! Out of scope (deferred to subsequent P3 slices):
-//! - Apache AGE Cypher wrapper (the agtype deserialization helper).
 //! - Vector parameter binding for pgvector (P4).
 //! - axon-core graph_bootstrap wiring (separate commit).
 
@@ -37,6 +39,12 @@ pub struct PgPluginContext {
     pool: Pool,
     runtime: Runtime,
     schema_search_path: Option<String>,
+    /// Detected at init time. When true, every connection acquired
+    /// from the pool runs `LOAD 'age'` and prepends `ag_catalog` to
+    /// `search_path` so callers can write unqualified Cypher via
+    /// `cypher()`. Disabled automatically when the AGE extension is
+    /// not installed in the database.
+    age_enabled: bool,
 }
 
 fn plugin_trace_enabled() -> bool {
@@ -58,22 +66,98 @@ fn plugin_error_envelope(stage: &str, sql: &str, err: impl std::fmt::Display) ->
     CString::new(payload.to_string()).unwrap().into_raw()
 }
 
+/// Specialised envelope for `tokio_postgres::Error`: drills into the
+/// `DbError` payload (when present) so the caller sees the SQLSTATE
+/// message + position rather than the generic `db error` Display.
+fn plugin_db_error_envelope(
+    stage: &str,
+    sql: &str,
+    err: &tokio_postgres::Error,
+) -> *mut c_char {
+    let display = err.to_string();
+    let mut detail = serde_json::json!({});
+    if let Some(db) = err.as_db_error() {
+        detail = serde_json::json!({
+            "code": db.code().code(),
+            "severity": db.severity(),
+            "message": db.message(),
+            "detail": db.detail(),
+            "hint": db.hint(),
+            "position": db.position().map(|p| format!("{p:?}")),
+        });
+    }
+    let payload = serde_json::json!({
+        "_axon_plugin_error": format!("{stage}: {display}"),
+        "stage": stage,
+        "sql_excerpt": sql.chars().take(240).collect::<String>(),
+        "pg_error": detail,
+    });
+    CString::new(payload.to_string()).unwrap().into_raw()
+}
+
 fn empty_array_cstr() -> *mut c_char {
     CString::new("[]").unwrap().into_raw()
 }
 
-/// Apply `SET search_path TO <schema>, public` on a freshly acquired
-/// connection. Returns `Ok(())` if no schema was configured.
-async fn apply_search_path(
+/// Build the per-connection session-setup SQL, given an optional
+/// validated schema name and whether AGE is loaded in this database.
+///
+/// The ordering rules:
+/// - When AGE is enabled, `LOAD 'age'` MUST run before any cypher()
+///   call; deadpool may hand out a freshly-recycled connection that
+///   has lost the load.
+/// - `ag_catalog` MUST be on `search_path` so `cypher()` and `agtype`
+///   operators resolve unqualified, per AGE README.
+/// - The project schema goes FIRST so unqualified table names
+///   (e.g. `File`) resolve to `<schema>.File` exactly as the duckdb
+///   plugin does today.
+///
+/// Returns `None` when there is nothing to run (no schema, no AGE).
+fn build_session_setup_sql(schema: Option<&str>, age_enabled: bool) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if age_enabled {
+        parts.push("LOAD 'age'".to_string());
+    }
+    let path: Vec<&str> = match (schema, age_enabled) {
+        (Some(s), true) => vec![s, "ag_catalog", "public"],
+        (Some(s), false) => vec![s, "public"],
+        (None, true) => vec!["ag_catalog", "public"],
+        (None, false) => return None,
+    };
+    parts.push(format!("SET search_path TO {}", path.join(", ")));
+    Some(parts.join("; "))
+}
+
+/// Run session-setup statements on a freshly acquired connection.
+async fn apply_session_setup(
     conn: &deadpool_postgres::Client,
     schema: &Option<String>,
+    age_enabled: bool,
 ) -> Result<(), tokio_postgres::Error> {
-    if let Some(s) = schema {
-        // Identifier was validated at `pg_init_db`; safe to interpolate.
-        let stmt = format!("SET search_path TO {s}, public");
-        conn.batch_execute(&stmt).await?;
+    if let Some(sql) = build_session_setup_sql(schema.as_deref(), age_enabled) {
+        conn.batch_execute(&sql).await?;
     }
     Ok(())
+}
+
+/// Probe the connected database for the AGE extension. Used at init
+/// to flip `age_enabled` on the context. Returns `false` on any error
+/// (treats AGE as unavailable rather than panicking the plugin).
+async fn probe_age_installed(pool: &Pool) -> bool {
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match conn
+        .query_opt(
+            "SELECT 1 FROM pg_extension WHERE extname = $1",
+            &[&"age"],
+        )
+        .await
+    {
+        Ok(Some(_)) => true,
+        _ => false,
+    }
 }
 
 /// `[a-zA-Z0-9_]{1,64}` — the schema check mirrors
@@ -167,17 +251,24 @@ pub unsafe extern "C" fn pg_init_db(
         }
     };
 
-    // Probe one connection so misconfigured URLs fail fast at boot.
+    // Probe one connection so misconfigured URLs fail fast at boot,
+    // and detect whether the AGE extension is installed so subsequent
+    // session setups can opt in.
     let probe = runtime.block_on(async { pool.get().await });
     if let Err(e) = probe {
         eprintln!("[pg_init_db] probe connection failed: {e}");
         return std::ptr::null_mut();
+    }
+    let age_enabled = runtime.block_on(probe_age_installed(&pool));
+    if plugin_trace_enabled() {
+        eprintln!("[pg_init_db] age_enabled={age_enabled}");
     }
 
     Box::into_raw(Box::new(PgPluginContext {
         pool,
         runtime,
         schema_search_path,
+        age_enabled,
     }))
 }
 
@@ -237,7 +328,7 @@ pub unsafe extern "C" fn pg_execute(ctx: *mut PgPluginContext, sql: *const c_cha
                 return false;
             }
         };
-        if let Err(e) = apply_search_path(&conn, &ctx_ref.schema_search_path).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
             eprintln!("[pg_execute] set search_path failed: {e}");
             return false;
         }
@@ -298,7 +389,7 @@ pub unsafe extern "C" fn pg_execute_param(
                 return false;
             }
         };
-        if let Err(e) = apply_search_path(&conn, &ctx_ref.schema_search_path).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
             eprintln!("[pg_execute_param] set search_path failed: {e}");
             return false;
         }
@@ -342,7 +433,7 @@ pub unsafe extern "C" fn pg_query_count(ctx: *mut PgPluginContext, sql: *const c
                 return -1;
             }
         };
-        if let Err(e) = apply_search_path(&conn, &ctx_ref.schema_search_path).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
             eprintln!("[pg_query_count] set search_path failed: {e}");
             return -1;
         }
@@ -400,14 +491,14 @@ pub unsafe extern "C" fn pg_query_json(
             Ok(c) => c,
             Err(e) => return plugin_error_envelope("acquire", sql_str, e),
         };
-        if let Err(e) = apply_search_path(&conn, &ctx_ref.schema_search_path).await {
-            return plugin_error_envelope("set_search_path", sql_str, e);
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
+            return plugin_db_error_envelope("set_search_path", sql_str, &e);
         }
 
         if !returns_rows {
             return match conn.batch_execute(sql_str).await {
                 Ok(_) => empty_array_cstr(),
-                Err(e) => plugin_error_envelope("execute", sql_str, e),
+                Err(e) => plugin_db_error_envelope("execute", sql_str, &e),
             };
         }
 
@@ -424,7 +515,7 @@ pub unsafe extern "C" fn pg_query_json(
                 let json = serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string());
                 CString::new(json).unwrap().into_raw()
             }
-            Err(e) => plugin_error_envelope("query", sql_str, e),
+            Err(e) => plugin_db_error_envelope("query", sql_str, &e),
         }
     })
 }
@@ -614,5 +705,32 @@ mod tests {
         unsafe {
             assert!(pg_init_db(url.as_ptr(), bad_schema.as_ptr()).is_null());
         }
+    }
+
+    #[test]
+    fn session_setup_sql_combinations_are_well_formed() {
+        // No schema, no AGE — nothing to do.
+        assert_eq!(build_session_setup_sql(None, false), None);
+
+        // Schema only — preserves the duckdb plugin's prior contract.
+        assert_eq!(
+            build_session_setup_sql(Some("axo"), false).unwrap(),
+            "SET search_path TO axo, public"
+        );
+
+        // AGE only — `LOAD 'age'` precedes the SET, ag_catalog first
+        // so unqualified cypher() / agtype operators resolve.
+        assert_eq!(
+            build_session_setup_sql(None, true).unwrap(),
+            "LOAD 'age'; SET search_path TO ag_catalog, public"
+        );
+
+        // Schema + AGE — project schema first (so unqualified table
+        // names resolve to the project namespace), ag_catalog still
+        // visible for cypher() / agtype.
+        assert_eq!(
+            build_session_setup_sql(Some("axo"), true).unwrap(),
+            "LOAD 'age'; SET search_path TO axo, ag_catalog, public"
+        );
     }
 }
