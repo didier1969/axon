@@ -1274,7 +1274,26 @@ impl GraphStore {
                 'AXO'
             ) WHERE soll.Edge.project_code IS NULL OR soll.Edge.project_code = ''",
         )?;
-        self.execute("UPDATE soll.McpJob SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
+        // DuckDB upstream issue #15836: UPDATE on a primary-keyed row
+        // internally does DELETE+INSERT. For soll.McpJob's legacy rows that
+        // were committed under different transaction shapes, this corrupts
+        // the PK index — once corrupted, the UPDATE crashes the brain on
+        // every boot AND a plain DELETE fails too ("Failed to delete all
+        // rows from index. Only deleted 0 out of 4 rows."). Skip the
+        // backfill when legacy NULL rows exist; emit a warning so we know
+        // the table still needs migration. Proper fix: CTAS rebuild of
+        // soll.McpJob OR bumping the bundled DuckDB to a version that ships
+        // #15836's patch. Boot stays unblocked either way.
+        let mcp_job_needs_backfill: i64 = self.query_count(
+            "SELECT count(*) FROM soll.McpJob WHERE project_code IS NULL OR project_code = ''",
+        )?;
+        if mcp_job_needs_backfill > 0 {
+            tracing::warn!(
+                count = mcp_job_needs_backfill,
+                reason = "duckdb_15836_workaround",
+                "soll_mcpjob_backfill_skipped: legacy rows with NULL project_code retained to avoid PK-index corruption on UPDATE; CTAS rebuild required for proper migration"
+            );
+        }
         self.execute("UPDATE soll.Revision SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
         self.execute("UPDATE soll.RevisionChange SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
 
