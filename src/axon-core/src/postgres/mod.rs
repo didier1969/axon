@@ -21,6 +21,7 @@
 
 pub mod ddl;
 pub mod seed;
+pub mod vector;
 
 use std::time::Duration;
 
