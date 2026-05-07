@@ -122,7 +122,7 @@ For `soll_verify_requirements`: a Requirement is **done** EITHER when status ∈
 CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` (or `--args-file -` for stdin). Avoid fragile inline shell JSON.
 
 ## Identity
-Server-owned IDs `TYPE-CODE-NNN`. Never fabricate: project_code, preview, revision, SOLL IDs. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only, registration succeeds. MIL-AXO-015 P3 slice 3f: when `AXON_DB_BACKEND=postgres`, `axon_init_project` additionally executes `crate::postgres::ddl::generate_project_schema(<code>)` against the configured PG (idempotent; CREATE TABLE / INDEX IF NOT EXISTS + DO $$ guard around create_graph). Per-statement failures land as `tracing::warn!` (registration itself succeeds).
+Server-owned IDs `TYPE-CODE-NNN`. Never fabricate: project_code, preview, revision, SOLL IDs. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only, registration succeeds. Backend-agnostic: same contract under DuckDB or PostgreSQL deployment (DEC-AXO-075).
 
 ## Delivery flow
 1. `status`
