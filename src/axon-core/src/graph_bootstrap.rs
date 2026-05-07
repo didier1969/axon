@@ -1019,14 +1019,38 @@ impl GraphStore {
     /// public.ProjectCodeRegistry + soll layer + cross-project
     /// indexes). Per-project IST schemas are created lazily by
     /// `axon_init_project` (P5).
+    ///
+    /// `CREATE EXTENSION` statements are run inside a graceful-degrade
+    /// loop: if an extension is unavailable on the host PostgreSQL
+    /// install (the image lacks AGE or pgvector), the bootstrap logs a
+    /// warning and continues so the SOLL layer still comes up. Per
+    /// DEC-AXO-075, production deployments MUST ship both extensions —
+    /// the warning is the operator's signal to fix the install.
     fn bootstrap_global_pg_schema(&self) -> Result<()> {
         for stmt in crate::postgres::ddl::generate_global_schema() {
-            self.execute(&stmt).with_context(|| {
-                format!(
-                    "PostgreSQL global schema bootstrap failed on statement: {}",
-                    stmt.chars().take(80).collect::<String>()
-                )
-            })?;
+            let trimmed = stmt.trim_start();
+            let is_optional_extension = trimmed
+                .to_uppercase()
+                .starts_with("CREATE EXTENSION IF NOT EXISTS");
+            match self.execute(&stmt) {
+                Ok(()) => {}
+                Err(err) if is_optional_extension => {
+                    warn!(
+                        statement = stmt.chars().take(80).collect::<String>().as_str(),
+                        error = %err,
+                        "PostgreSQL extension unavailable on this host; continuing without it. \
+                         Install the extension to unlock dependent features (DEC-AXO-075)."
+                    );
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "PostgreSQL global schema bootstrap failed on statement: {}",
+                            stmt.chars().take(80).collect::<String>()
+                        )
+                    });
+                }
+            }
         }
         Ok(())
     }

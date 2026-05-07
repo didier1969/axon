@@ -26,6 +26,16 @@ enum ReadRoute {
 
 impl GraphStore {
     fn normalize_attached_soll_query<'a>(&self, query: &'a str) -> Cow<'a, str> {
+        // MIL-AXO-015 P3 slice 3d: under PostgreSQL the SOLL layer is
+        // a single PG schema (`soll`), not a DuckDB ATTACH'd database
+        // with a nested `main` schema. The duckdb-only `soll.X →
+        // soll.main.X` rewrite must not run on PG queries; otherwise
+        // statements like `CREATE TABLE soll.Registry` get mangled to
+        // `CREATE TABLE soll.main.Registry` which has no parser
+        // meaning under PG.
+        if self.pool.symbols.backend == crate::graph::PluginBackend::Postgres {
+            return Cow::Borrowed(query);
+        }
         if !self.soll_attached || !query.contains("soll.") {
             return Cow::Borrowed(query);
         }
