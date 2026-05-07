@@ -1,19 +1,25 @@
-// MIL-AXO-015 P1: PostgreSQL backend scaffold.
+// MIL-AXO-015 P1+P2: PostgreSQL backend scaffold + DDL generator.
 //
 // This module is the entry point for the PostgreSQL replacement of the
-// DuckDB-based GraphStore (DEC-AXO-075). P1 ships only the minimal
-// foundations:
-//   - `build_pool` returning a `deadpool_postgres::Pool` from a
-//     DATABASE_URL (or AXON_LIVE_DATABASE_URL / AXON_DEV_DATABASE_URL).
-//   - `smoke_check` that loads `age` + `vector` extensions and reports
+// DuckDB-based GraphStore (DEC-AXO-075).
+//
+// Surface:
+//   - `build_pool` (P1): deadpool_postgres::Pool from a DATABASE_URL
+//     (or AXON_LIVE_DATABASE_URL / AXON_DEV_DATABASE_URL).
+//   - `smoke_check` (P1): loads `age` + `vector` extensions and reports
 //     versions, so a misconfigured client database fails fast at brain
 //     bootstrap.
+//   - `ddl::generate_global_schema` (P2): idempotent DDL for public +
+//     soll layers (extensions, ProjectCodeRegistry, Node/Edge/Revision/
+//     Traceability).
+//   - `ddl::generate_project_schema(project_code)` (P2): idempotent DDL
+//     for one project's IST namespace + AGE graph + pgvector HNSW.
 //
-// Deferred to later phases:
-//   - P2 will populate `ddl.rs` with the per-project schema generator
-//     (CPT-AXO-039).
+// Deferred:
 //   - P3 will populate `store.rs` with the full GraphStorePg impl.
 //   - P5 will populate `seed.rs` with the bootstrap loader.
+
+pub mod ddl;
 
 use std::time::Duration;
 
