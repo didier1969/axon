@@ -10,7 +10,7 @@ let
     pandas
     pydantic
   ]);
-  
+
   beamPackages = pkgs.beam.packages.erlang_27;
 in
 {
@@ -23,6 +23,35 @@ in
 
   languages.elixir.enable = true;
   languages.elixir.package = beamPackages.elixir_1_18;
+
+  # MIL-AXO-015 P1: PostgreSQL 17 + Apache AGE + pgvector
+  # Replaces DuckDB as the canonical Axon storage layer (DEC-AXO-075).
+  # CPT-AXO-039 per-project schema namespace, CPT-AXO-040 AGE Cypher,
+  # CPT-AXO-041 pgvector HNSW. Single dev instance for Axon team; live/dev
+  # process separation handled at runtime via 2 different DATABASE_URLs
+  # (different DBs on this single instance, or 2 separate PG instances in
+  # production - client choice per CPT-AXO-042 distribution model).
+  services.postgres = {
+    enable = true;
+    package = pkgs.postgresql_17;
+    extensions = exts: [ exts.age exts.pgvector ];
+    initialDatabases = [
+      { name = "axon_dev"; }
+      { name = "axon_live"; }
+    ];
+    listen_addresses = "127.0.0.1";
+    port = 44144;
+    settings = {
+      # Axon's hot path benefits from generous shared_buffers; client tunes
+      # for their own scale via standard PG ops procedures (CPT-AXO-038).
+      shared_buffers = "512MB";
+      # AGE requires loading via session_preload_libraries so cypher() is
+      # available without per-connection LOAD 'age'.
+      session_preload_libraries = "age";
+      # pgvector index build benefits from larger maintenance memory.
+      maintenance_work_mem = "256MB";
+    };
+  };
 
   packages = with pkgs; [
     # General Native & Build Tools
@@ -40,6 +69,8 @@ in
     psmisc
     tree-sitter
     emscripten
+    # Postgres CLI for hand inspection / migration scripts
+    postgresql_17
   ];
 
   env = {
@@ -60,6 +91,16 @@ in
     HYDRA_HTTP2_PORT = 44131;
     HYDRA_MCP_PORT = 44132;
     WATCHER_PORT = 6001;
+
+    # MIL-AXO-015 P1: PostgreSQL connection strings for Axon runtime.
+    # Live and dev share the dev devenv-managed PG (single instance, two
+    # DBs). Production deployments override these via client-supplied
+    # DATABASE_URLs (CPT-AXO-042).
+    AXON_LIVE_DATABASE_URL = "postgres://localhost:44144/axon_live";
+    AXON_DEV_DATABASE_URL = "postgres://localhost:44144/axon_dev";
+    # PGHOST/PGPORT used by psql CLI and sqlx-cli for hand operations.
+    PGHOST = "localhost";
+    PGPORT = "44144";
 
     # devenv-nix-best-practices: Isolation Patterns
     RELEASE_COOKIE = "axon_v1_isolated_cookie";
@@ -105,10 +146,11 @@ in
       mix local.rebar --force > /dev/null 2>&1
     fi
 
-    echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---" >&2
+    echo "--- AXON v1.0 - DEVENV ARCHITECTURE (MIL-AXO-015) ---" >&2
     echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')" >&2
-    echo "Plane B (Runtime+DuckDB): Rust $(rustc --version | awk '{print $2}')" >&2
+    echo "Plane B (Runtime + Postgres): Rust $(rustc --version | awk '{print $2}')" >&2
     echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')" >&2
+    echo "Storage:                 PostgreSQL 17 + AGE + pgvector @ 127.0.0.1:44144" >&2
     echo "HydraDB:                 detached legacy workflow" >&2
     echo "---------------------------------------" >&2
   '';

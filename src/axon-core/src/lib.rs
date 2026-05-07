@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod mcp_http;
 pub mod optimizer;
 pub mod parser;
+pub mod postgres;
 pub mod project_meta;
 pub mod queue;
 pub mod runtime_boot;

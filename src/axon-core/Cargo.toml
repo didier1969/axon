@@ -64,11 +64,38 @@ libc = "0.2"
 # Writing FLOAT[1024] vectors directly to Parquet bypasses the DuckDB
 # column-store INSERT scaling problem (see VAL-AXO-034, VAL-AXO-036).
 # Minimal feature flags; ZSTD compression keeps payloads compact.
+# NOTE: scheduled for removal in MIL-AXO-015 P4 (vectors -> pgvector).
 parquet = { version = "54", default-features = false, features = ["zstd", "arrow"] }
 arrow-array = "54"
 arrow-schema = "54"
+
+# MIL-AXO-015 P1 (DEC-AXO-075): PostgreSQL backend.
+# tokio-postgres + deadpool-postgres preferred over sqlx because Axon's
+# query patterns are predominantly dynamic SQL (DDL generators, AGE
+# Cypher passthrough, multi-tenant schema namespacing) which doesn't
+# benefit from sqlx's compile-time query checking. Avoiding sqlx also
+# sidesteps a libsqlite3-sys conflict with the existing rusqlite dep
+# used by benchmark_store. JSON/chrono/uuid round-trips supported via
+# tokio_postgres types.
+tokio-postgres = { version = "0.7", features = [
+    "with-chrono-0_4",
+    "with-serde_json-1",
+    "with-uuid-1",
+] }
+deadpool-postgres = "0.14"
+postgres-types = { version = "0.2", features = ["derive"] }
+# pgvector crate: provides pgvector::Vector type with tokio-postgres
+# encode/decode integration. Used by ChunkEmbedding (CPT-AXO-041 HNSW
+# index).
+pgvector = { version = "0.4", features = ["postgres"] }
+# refinery for versioned schema migrations (sqlx-migrate replacement).
+refinery = { version = "0.8", features = ["tokio-postgres"] }
 
 [dev-dependencies]
 rand = "0.8"
 tempfile = "3.8"
 tower = { version = "0.5.3", features = ["util"] }
+# MIL-AXO-015 P1: ephemeral PG instances for unit/integration tests.
+# Bypasses the need for a long-lived devenv-managed PG during cargo test.
+testcontainers = { version = "0.23", features = ["blocking"] }
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
