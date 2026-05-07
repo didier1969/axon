@@ -299,6 +299,34 @@ pub unsafe extern "C" fn pg_close_db(ctx: *mut PgPluginContext) {
     }
 }
 
+/// Shim with the same FFI shape as `axon-plugin-duckdb::duckdb_init_db`
+/// (path: *const c_char, read_only: bool) -> *mut c_void.
+///
+/// This is the entry point axon-core's `PluginSymbols::resolve_postgres`
+/// resolves under MIL-AXO-015 P3 slice 3b so the consumer code path can
+/// stay backend-agnostic. The first argument is reinterpreted as a
+/// `DATABASE_URL` (file paths under duckdb). The `_read_only` flag is
+/// ignored — PostgreSQL handles concurrency at the server layer, so we
+/// surface the same pool to both reader and writer call sites.
+///
+/// The schema search_path is left null at this layer; axon-core injects
+/// it later by issuing a `SET search_path` on the acquired connection
+/// once the project_code is known. This keeps slice 3b additive: the
+/// shim does not depend on slice 3a's PluginSymbols-on-LatticePool
+/// abstraction.
+///
+/// # Safety
+///
+/// `database_url` must be a valid C string. The bool argument is
+/// ignored; pass either value.
+#[no_mangle]
+pub unsafe extern "C" fn pg_init_db_compat(
+    database_url: *const c_char,
+    _read_only: bool,
+) -> *mut PgPluginContext {
+    pg_init_db(database_url, std::ptr::null())
+}
+
 /// Execute a SQL batch (semicolon-separated allowed) without binding
 /// parameters. Returns `true` on success.
 ///

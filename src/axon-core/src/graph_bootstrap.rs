@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use libloading::Library;
 use tracing::{info, warn};
 
@@ -21,6 +21,32 @@ const IST_INGESTION_VERSION: &str = "4";
 // crash-safe table reconstruction path was introduced.
 const IST_EMBEDDING_VERSION: &str = "2";
 const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
+
+/// MIL-AXO-015 P3 slice 3b: resolve the connection URL to use for
+/// the PostgreSQL plugin. Honoured precedence — `AXON_LIVE_DATABASE_URL`
+/// > `AXON_DEV_DATABASE_URL` > `DATABASE_URL`. The preference for live
+/// matches the brain's most common runtime mode; callers running a dev
+/// loop must override `AXON_LIVE_DATABASE_URL` (e.g. set it to empty)
+/// or set the dev URL explicitly. axon-core does not currently know
+/// which AxonInstance the caller intends — that resolution lives one
+/// layer up in `RuntimeProcessRole` and is wired in slice 3c.
+fn resolve_pg_database_url() -> Result<String> {
+    for var in [
+        "AXON_LIVE_DATABASE_URL",
+        "AXON_DEV_DATABASE_URL",
+        "DATABASE_URL",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.trim().is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    Err(anyhow!(
+        "no PostgreSQL connection URL configured (set AXON_LIVE_DATABASE_URL, \
+         AXON_DEV_DATABASE_URL, or DATABASE_URL)"
+    ))
+}
 
 pub fn canonical_soll_db_path(db_root: &str) -> Option<PathBuf> {
     if db_root == ":memory:" {
@@ -163,19 +189,44 @@ impl GraphStore {
         split_brain_mode: bool,
         soll_access_mode: SollAccessMode,
     ) -> Result<Self> {
-        let plugin_path = Self::find_plugin_path()?;
+        let backend = crate::graph::PluginBackend::current();
+        let plugin_path = Self::find_plugin_path_for(backend)?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
-        let symbols = unsafe { crate::graph::PluginSymbols::resolve_duckdb(&lib) }?;
+        let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib, backend) }?;
         let init_fn = symbols.init_fn;
         let close_fn = symbols.close_fn;
         let is_memory = db_root == ":memory:";
-        let split_brain_mode = !is_memory && split_brain_mode;
+        // MIL-AXO-015 P3 slice 3b: split-brain is a duckdb-specific
+        // file-isolation pattern. PostgreSQL's MVCC handles
+        // reader/writer concurrency natively, so we collapse to a
+        // single context regardless of caller intent.
+        let split_brain_mode = !is_memory
+            && split_brain_mode
+            && backend == crate::graph::PluginBackend::Duckdb;
         info!(
-            "GraphStore init modes: db_root={}, split_brain_mode={}, soll_access_mode={:?}",
-            db_root, split_brain_mode, soll_access_mode
+            "GraphStore init modes: backend={:?}, db_root={}, split_brain_mode={}, soll_access_mode={:?}",
+            backend, db_root, split_brain_mode, soll_access_mode
         );
 
-        if !is_memory && matches!(soll_access_mode, SollAccessMode::ReadWrite) {
+        // MIL-AXO-015 P3 slice 3b: under PostgreSQL the "DB path" is a
+        // DATABASE_URL passed verbatim to pg_init_db_compat. The SOLL /
+        // IST file-layout below applies only to the duckdb backend;
+        // PG keeps SOLL + per-project IST inside the same database via
+        // schema namespacing (CPT-AXO-039).
+        let pg_database_url: Option<String> = match backend {
+            crate::graph::PluginBackend::Postgres => {
+                Some(resolve_pg_database_url().with_context(|| {
+                    "AXON_DB_BACKEND=postgres requires AXON_LIVE_DATABASE_URL, \
+                     AXON_DEV_DATABASE_URL, or DATABASE_URL to be set"
+                })?)
+            }
+            crate::graph::PluginBackend::Duckdb => None,
+        };
+
+        if backend == crate::graph::PluginBackend::Duckdb
+            && !is_memory
+            && matches!(soll_access_mode, SollAccessMode::ReadWrite)
+        {
             let soll_dir = PathBuf::from(db_root);
             std::fs::create_dir_all(&soll_dir)?;
 
@@ -192,7 +243,7 @@ impl GraphStore {
             }
         }
 
-        let live_ist_path = if is_memory {
+        let live_ist_path = if is_memory || backend == crate::graph::PluginBackend::Postgres {
             None
         } else {
             let ist_path = canonical_ist_db_path(db_root)
@@ -209,12 +260,15 @@ impl GraphStore {
         } else {
             live_ist_path.clone()
         };
-        let db_path_str = reader_db_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_else(|| ":memory:".to_string());
+        let db_path_str = match (&pg_database_url, &reader_db_path) {
+            (Some(url), _) => url.clone(),
+            (None, Some(path)) => path.to_string_lossy().to_string(),
+            (None, None) => ":memory:".to_string(),
+        };
         let db_path = reader_db_path.clone();
-        let writer_db_path = if split_brain_mode {
+        let writer_db_path = if let Some(url) = pg_database_url.as_ref() {
+            url.clone()
+        } else if split_brain_mode {
             ":memory:".to_string()
         } else if let Some(path) = live_ist_path.as_ref() {
             path.to_string_lossy().to_string()
@@ -223,6 +277,9 @@ impl GraphStore {
         };
         let writer_c_path = CString::new(writer_db_path)?;
         let reader_c_path = CString::new(db_path_str.clone())?;
+        // Suppress the unused-let lint; reader_c_path is consumed when
+        // the duckdb path opens the read-only context further below.
+        let _ = &reader_c_path;
 
         unsafe {
             let writer_ptr = init_fn(writer_c_path.as_ptr(), false);
@@ -898,6 +955,13 @@ impl GraphStore {
     }
 
     fn find_plugin_path() -> Result<String> {
+        Self::find_plugin_path_for(crate::graph::PluginBackend::current())
+    }
+
+    /// MIL-AXO-015 P3 slice 3b: backend-aware plugin discovery.
+    /// Picks `libaxon_plugin_duckdb.so` or `libaxon_plugin_postgres.so`
+    /// based on `AXON_DB_BACKEND`, defaulting to duckdb when unset.
+    fn find_plugin_path_for(backend: crate::graph::PluginBackend) -> Result<String> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir
             .parent()
@@ -905,16 +969,17 @@ impl GraphStore {
             .ok_or_else(|| anyhow!("Unable to resolve repository root from CARGO_MANIFEST_DIR"))?
             .to_path_buf();
 
+        let crate_dir = backend.crate_dir();
+        let so = backend.plugin_filename();
+
         let mut candidates = vec![
-            repo_root.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"),
-            repo_root.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"),
+            repo_root.join(format!("{crate_dir}/target/release/{so}")),
+            repo_root.join(format!("{crate_dir}/target/debug/{so}")),
         ];
 
         if let Ok(cwd) = std::env::current_dir() {
-            candidates
-                .push(cwd.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"));
-            candidates
-                .push(cwd.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"));
+            candidates.push(cwd.join(format!("{crate_dir}/target/release/{so}")));
+            candidates.push(cwd.join(format!("{crate_dir}/target/debug/{so}")));
         }
 
         for path in candidates {
@@ -922,7 +987,11 @@ impl GraphStore {
                 return Ok(path.to_string_lossy().to_string());
             }
         }
-        Err(anyhow!("Plugin not found"))
+        Err(anyhow!(
+            "Plugin not found for backend {:?} (expected {})",
+            backend,
+            so
+        ))
     }
 
     fn init_schema(&self, _is_memory: bool) -> Result<()> {
