@@ -20,6 +20,7 @@
 //   - P5 will populate `seed.rs` with the bootstrap loader.
 
 pub mod ddl;
+pub mod seed;
 
 use std::time::Duration;
 

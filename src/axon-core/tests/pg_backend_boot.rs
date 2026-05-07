@@ -127,6 +127,61 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("query against per-project File table should succeed");
     assert_eq!(project_files_count, 0);
 
+    // MIL-AXO-015 P5: seed loader round-trip. Apply a synthetic
+    // SeedDocument with one node, one edge, one registry row, and one
+    // revision; confirm the rows land in the live SOLL layer and that
+    // re-applying is a no-op (the empty-check on soll.Node guards
+    // double-loading).
+    let synthetic = serde_json::json!({
+        "version": 1,
+        "generated_at_ms": 1714999999000_i64,
+        "nodes": [
+            {"id": "VIS-TST-001", "type": "Vision", "project_code": "TST",
+             "title": "Test vision", "description": "smoke", "status": "active",
+             "metadata": {"tag": "smoke"}}
+        ],
+        "edges": [
+            {"source_id": "VIS-TST-001", "target_id": "VIS-TST-001",
+             "relation_type": "EPITOMIZES", "project_code": "TST"}
+        ],
+        "registry": [
+            {"project_code": "TST", "id": "TST", "last_vis": 1, "last_pil": 0,
+             "last_req": 0, "last_cpt": 0, "last_dec": 0, "last_mil": 0,
+             "last_val": 0, "last_stk": 0, "last_gui": 0, "last_prv": 0,
+             "last_rev": 0}
+        ],
+        "revisions": [
+            {"revision_id": "REV-TST-001", "project_code": "TST",
+             "author": "smoke-test", "summary": "initial",
+             "created_at": 1714999999000_i64}
+        ]
+    });
+    let doc: axon_core::postgres::seed::SeedDocument =
+        serde_json::from_value(synthetic).unwrap();
+    let inserted = axon_core::postgres::seed::apply_seed(&store, &doc)
+        .expect("apply_seed should succeed against PG-backed store");
+    assert_eq!(inserted, 4, "expected 1 registry + 1 node + 1 edge + 1 revision");
+    assert_eq!(
+        store
+            .query_count("SELECT count(*)::BIGINT FROM soll.Node")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .query_count("SELECT count(*)::BIGINT FROM soll.Edge")
+            .unwrap(),
+        1
+    );
+
+    // Re-applying via load_seed_if_needed must no-op now that
+    // soll.Node is non-empty. Use a tempfile so the empty-check fires.
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmpfile.path(), serde_json::to_string(&doc).unwrap()).unwrap();
+    let inserted_again = axon_core::postgres::seed::load_seed_if_needed(&store, tmpfile.path())
+        .expect("re-apply should be a no-op");
+    assert_eq!(inserted_again, 0);
+
     drop(store);
 
     // Reset env so subsequent test runs in the same `cargo test`
