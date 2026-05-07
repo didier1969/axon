@@ -19,11 +19,50 @@ source "$PROJECT_ROOT/scripts/lib/socket-lifecycle.sh"
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
 
-# Determine role: use explicit env if set, otherwise stop ALL roles to
-# guarantee cleanup even when the instance is already down and env vars
-# are absent (the default fallback in axon_runtime_shadow_role is
-# "indexer" which would miss a stopped brain).
-if [[ -n "${AXON_RUNTIME_SHADOW_ROLE:-}" || -n "${AXON_RUNTIME_BOOT_ROLE:-}" ]]; then
+# REQ-AXO-209 — explicit role-scoped stop. Operator wants
+# `./scripts/axon-{live,dev} stop --role indexer` to stop ONLY the
+# indexer (brain stays up + MCP responsive), and `--role brain` to
+# stop ONLY the brain (indexer keeps indexing). CLI flag takes
+# priority over the env-driven defaults below.
+CLI_ROLE_OVERRIDE=""
+_pending_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --role)
+            if [[ $# -lt 2 ]]; then
+                echo "stop.sh: --role requires brain|indexer|all" >&2
+                exit 2
+            fi
+            CLI_ROLE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --role=*)
+            CLI_ROLE_OVERRIDE="${1#*=}"
+            shift
+            ;;
+        *)
+            _pending_args+=("$1")
+            shift
+            ;;
+    esac
+done
+# Restore unconsumed args for the post-resolution argument loop below.
+set -- "${_pending_args[@]+"${_pending_args[@]}"}"
+
+# Determine role: CLI override > explicit env > default ALL.
+# axon_runtime_shadow_role's "indexer" fallback would miss a stopped
+# brain when no role context is available, so the default stays "all".
+if [[ -n "$CLI_ROLE_OVERRIDE" ]]; then
+    case "$CLI_ROLE_OVERRIDE" in
+        brain|indexer|all)
+            STOP_ROLE="$CLI_ROLE_OVERRIDE"
+            ;;
+        *)
+            echo "stop.sh: --role must be brain|indexer|all (got '$CLI_ROLE_OVERRIDE')" >&2
+            exit 2
+            ;;
+    esac
+elif [[ -n "${AXON_RUNTIME_SHADOW_ROLE:-}" || -n "${AXON_RUNTIME_BOOT_ROLE:-}" ]]; then
     STOP_ROLE="$(axon_runtime_shadow_role)"
 else
     STOP_ROLE="all"
@@ -78,9 +117,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/stop.sh [--hard|--verify]
+Usage: ./scripts/stop.sh [--role brain|indexer|all] [--hard|--verify]
 
 Options:
+  --role    Scope the stop to one Axon role only. `--role brain` keeps the
+            indexer running (and vice versa); default is `all` when no role
+            is set via env or CLI. (REQ-AXO-209)
   --hard    Force a broader kill pass (patterns + pkill fallback, still best-effort).
   --verify  Audit-only mode: verify Axon not running without killing anything.
 EOF
