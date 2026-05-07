@@ -431,6 +431,26 @@ pub fn run_brain() -> anyhow::Result<()> {
 }
 
 pub fn run_indexer() -> anyhow::Result<()> {
+    // MIL-AXO-015 P3 slice 3h: under the PostgreSQL backend, the
+    // indexer hot path still emits DuckDB-shaped writes (INSERT OR
+    // REPLACE on FLOAT[1024], FileVectorizationQueue lifecycle, etc.)
+    // that don't translate cleanly to PG without the P9 migration.
+    // Fail fast with a precise error rather than crashing on the first
+    // DuckDB-only SQL statement. Brain-only on PG is fully supported
+    // and remains the recommended profile until P4 + P9 land.
+    if matches!(
+        crate::graph::PluginBackend::current(),
+        crate::graph::PluginBackend::Postgres
+    ) {
+        return Err(anyhow::anyhow!(
+            "axon-indexer is not yet supported under AXON_DB_BACKEND=postgres. \
+             The brain (brain_only profile) works on PostgreSQL today; the indexer \
+             still requires the DuckDB writer path until MIL-AXO-015 P4 (vector lane → \
+             pgvector) and P9 (indexer migration) ship. Run the brain on PG and the \
+             indexer on the DuckDB instance, OR run a fully-DuckDB stack until the \
+             migration completes."
+        ));
+    }
     run(RuntimeBootProfile::indexer())
 }
 
