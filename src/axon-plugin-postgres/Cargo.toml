@@ -31,7 +31,11 @@ log = "0.4"
 # Real PostgreSQL containers for integration tests. Default
 # `cargo test --lib` runs only sync unit tests; container-backed cases
 # carry `#[ignore]` so CI can opt in via `cargo test -- --ignored`.
-# AGE+pgvector currently arrive via the `apache/age:PG17_latest` image
-# (AGE preinstalled, pgvector exercised by P4).
+# AGE arrives via the `apache/age:release_PG17_1.6.0` image (AGE
+# preinstalled, pgvector exercised by P4).
 testcontainers = { version = "0.23", features = ["blocking"] }
+# libloading lets the FFI-contract test load this crate's own cdylib
+# the same way axon-core does at runtime, validating that the
+# pg_* symbols resolve and behave under the C ABI.
+libloading = "0.8"
 tempfile = "3.8"

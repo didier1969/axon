@@ -310,7 +310,21 @@ impl GraphStore {
                 reader_refresh_notify: std::sync::Condvar::new(),
             };
 
-            if !is_memory && store.soll_attached {
+            if backend == crate::graph::PluginBackend::Postgres {
+                // MIL-AXO-015 P3 slice 3c: bootstrap the PG global
+                // schema (extensions + soll layer) via the canonical
+                // DDL generator. Per-project IST schemas are deferred
+                // to axon_init_project (P5). The duckdb-specific
+                // ATTACH / additive-schema dance is intentionally
+                // skipped — those code paths emit DuckDB dialect SQL
+                // (FLOAT[1024], INSTALL json, ALTER TABLE quirks) that
+                // is not portable to PostgreSQL. The PG dialect
+                // equivalents live in `crate::postgres::ddl`.
+                store.bootstrap_global_pg_schema()?;
+                info!(
+                    "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
+                );
+            } else if !is_memory && store.soll_attached {
                 let soll_path = canonical_soll_db_path(db_root)
                     .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
                 let attach_q = build_soll_attach_query(&soll_path, soll_access_mode);
@@ -326,7 +340,12 @@ impl GraphStore {
                 let _ = store.execute("CREATE SCHEMA IF NOT EXISTS soll;");
             }
 
-            if split_brain_mode {
+            if backend == crate::graph::PluginBackend::Postgres {
+                // PG runtime compatibility / per-project IST recovery
+                // are owned by separate sub-phases (P3 slices 3d-3e).
+                // Skipping here keeps the boot path linear without
+                // emitting duckdb-shaped SQL against PostgreSQL.
+            } else if split_brain_mode {
                 store.ensure_additive_soll_schema()?;
                 info!(
                     "GraphStore startup: split brain mode active; IST writer bootstrap skipped and SOLL writer attached separately."
@@ -992,6 +1011,24 @@ impl GraphStore {
             backend,
             so
         ))
+    }
+
+    /// MIL-AXO-015 P3 slice 3c: PostgreSQL global schema bootstrap.
+    /// Idempotent. Executes the canonical DDL produced by
+    /// `crate::postgres::ddl::generate_global_schema` (extensions +
+    /// public.ProjectCodeRegistry + soll layer + cross-project
+    /// indexes). Per-project IST schemas are created lazily by
+    /// `axon_init_project` (P5).
+    fn bootstrap_global_pg_schema(&self) -> Result<()> {
+        for stmt in crate::postgres::ddl::generate_global_schema() {
+            self.execute(&stmt).with_context(|| {
+                format!(
+                    "PostgreSQL global schema bootstrap failed on statement: {}",
+                    stmt.chars().take(80).collect::<String>()
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn init_schema(&self, _is_memory: bool) -> Result<()> {
