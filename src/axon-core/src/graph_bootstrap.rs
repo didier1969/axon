@@ -1026,6 +1026,11 @@ impl GraphStore {
     /// warning and continues so the SOLL layer still comes up. Per
     /// DEC-AXO-075, production deployments MUST ship both extensions —
     /// the warning is the operator's signal to fix the install.
+    ///
+    /// Slice 5b: when `AXON_SOLL_SEED_PATH` points at a JSON seed and
+    /// `soll.Node` is empty, load the snapshot via
+    /// `crate::postgres::seed::load_seed_if_needed` so fresh
+    /// deployments come up with canonical SOLL nodes preloaded.
     fn bootstrap_global_pg_schema(&self) -> Result<()> {
         for stmt in crate::postgres::ddl::generate_global_schema() {
             let trimmed = stmt.trim_start();
@@ -1049,6 +1054,35 @@ impl GraphStore {
                             stmt.chars().take(80).collect::<String>()
                         )
                     });
+                }
+            }
+        }
+
+        if let Ok(seed_path) = std::env::var("AXON_SOLL_SEED_PATH") {
+            if !seed_path.trim().is_empty() {
+                let path = std::path::Path::new(seed_path.trim());
+                match crate::postgres::seed::load_seed_if_needed(self, path) {
+                    Ok(0) => {
+                        info!(
+                            seed_path = seed_path.as_str(),
+                            "SOLL seed loader: nothing to load (file missing or SOLL non-empty)."
+                        );
+                    }
+                    Ok(n) => {
+                        info!(
+                            seed_path = seed_path.as_str(),
+                            inserted = n,
+                            "SOLL seed loaded into fresh PostgreSQL deployment."
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            seed_path = seed_path.as_str(),
+                            error = %err,
+                            "SOLL seed loader failed; brain is starting with whatever \
+                             SOLL state currently exists. Re-run after fixing the seed file."
+                        );
+                    }
                 }
             }
         }
