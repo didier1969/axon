@@ -718,6 +718,41 @@ impl McpServer {
             ));
         }
 
+        // MIL-AXO-015 P3 slice 3f: under the PostgreSQL backend, every
+        // newly registered project_code gets its own per-project schema
+        // namespace (CPT-AXO-039) materialised lazily here. The DDL is
+        // produced by `crate::postgres::ddl::generate_project_schema`
+        // and is idempotent (CREATE TABLE IF NOT EXISTS / CREATE INDEX
+        // IF NOT EXISTS / DO $$ guard around create_graph), so calling
+        // it again on a returning project is a no-op. Failures are
+        // logged but non-fatal: the project registration itself
+        // succeeded; the operator can retry the schema generation
+        // through `axon_init_project` again or via SQL directly.
+        if self.graph_store.is_postgres_backend() {
+            match crate::postgres::ddl::generate_project_schema(&project_code) {
+                Ok(stmts) => {
+                    for stmt in stmts {
+                        if let Err(e) = self.graph_store.execute(&stmt) {
+                            tracing::warn!(
+                                project_code = %project_code,
+                                statement = stmt.chars().take(80).collect::<String>().as_str(),
+                                error = %e,
+                                "per-project PG schema bootstrap failed; retry via axon_init_project"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        project_code = %project_code,
+                        error = %e,
+                        "generate_project_schema rejected the project_code; \
+                         registry entry created without IST schema"
+                    );
+                }
+            }
+        }
+
         let rows_raw = self.graph_store.query_json(
             "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_code='PRO'",
         ).unwrap_or_else(|_| "[]".to_string());

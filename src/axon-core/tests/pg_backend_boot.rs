@@ -97,6 +97,36 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("query_count on pg_extension should succeed under PG");
     assert_eq!(age_count, 1, "AGE extension should be installed");
 
+    // MIL-AXO-015 P3 slice 3f: per-project schema generator round-trip
+    // against a real PG. axon_init_project will issue these statements
+    // for every newly registered project_code under
+    // AXON_DB_BACKEND=postgres. The test image ships AGE without
+    // pgvector, so vector-typed tables and the HNSW index will fail —
+    // we tolerate those failures here and still assert that the
+    // pgvector-free tables (File, CONTAINS, CALLS, queues, …) come up.
+    // P4 covers the full vector-typed validation against a combined
+    // AGE+pgvector image.
+    let project_stmts = axon_core::postgres::ddl::generate_project_schema("TST")
+        .expect("generate_project_schema('TST') should succeed");
+    let mut applied = 0usize;
+    let mut tolerated = 0usize;
+    for stmt in &project_stmts {
+        let touches_vector =
+            stmt.contains("vector(") || stmt.contains("USING hnsw") || stmt.contains("Symbol")
+                || stmt.contains("ChunkEmbedding") || stmt.contains("HourlyVectorizationRollup");
+        match store.execute(stmt) {
+            Ok(()) => applied += 1,
+            Err(_) if touches_vector => tolerated += 1,
+            Err(e) => panic!("non-vector schema stmt failed: {stmt}\n{e:?}"),
+        }
+    }
+    assert!(applied > 0, "at least some project DDL must apply");
+    let _ = tolerated;
+    let project_files_count = store
+        .query_count("SELECT count(*)::BIGINT FROM tst.File")
+        .expect("query against per-project File table should succeed");
+    assert_eq!(project_files_count, 0);
+
     drop(store);
 
     // Reset env so subsequent test runs in the same `cargo test`

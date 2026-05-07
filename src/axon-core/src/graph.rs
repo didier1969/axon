@@ -204,6 +204,17 @@ pub(crate) struct ReaderSnapshotDiagnostics {
     pub(crate) reader_refresh_failures_total: u64,
 }
 
+impl GraphStore {
+    /// MIL-AXO-015 P3 slice 3f: is this `GraphStore` backed by the
+    /// PostgreSQL plugin? Callers (`axon_init_project`,
+    /// `bootstrap_global_pg_schema`, etc.) branch on this rather than
+    /// re-reading the env var so the answer stays consistent within a
+    /// single store's lifetime.
+    pub fn is_postgres_backend(&self) -> bool {
+        self.pool.symbols.backend == PluginBackend::Postgres
+    }
+}
+
 pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
     pub(crate) db_path: Option<PathBuf>,
