@@ -165,15 +165,60 @@ impl WriteAccumulator {
     /// the producer's legacy output bit-for-bit, then chain the
     /// E.3a RawQueries passthrough.
     ///
-    /// Order matters: typed buckets render INSERTs first, then
-    /// RawQueries (which may carry trailing UPDATE/DELETE on the same
-    /// rows). The writer thread executes them as a single
-    /// `execute_batch`, so the SQL transactional ordering is preserved.
+    /// Order matters: Symbols → Chunks → RawQueries. Symbols come
+    /// before Chunks because Chunk.source_id may reference a freshly-
+    /// inserted Symbol.id; the legacy producer emits them in that
+    /// order at graph_ingestion.rs:920/927. RawQueries land last
+    /// because they typically carry trailing UPDATE/DELETE that
+    /// depend on the typed INSERTs already taking effect.
     pub fn render_bulk_queries(&self) -> Vec<String> {
         let mut out = Vec::new();
+        out.extend(self.render_symbols_duckdb());
         out.extend(self.render_chunks_duckdb());
         out.extend(self.raw_queries.iter().cloned());
         out
+    }
+
+    /// Render accumulated `SymbolRow`s into INSERT…ON CONFLICT
+    /// statements chunked at 500 rows per query. Format matches
+    /// `graph_ingestion.rs:617-628 + 920-923` byte-for-byte under the
+    /// DuckDB backend, including the embedding-column CAST literal
+    /// (`CAST([0.1, 0.2, ...] AS FLOAT[1024])`) when set.
+    pub fn render_symbols_duckdb(&self) -> Vec<String> {
+        if self.symbols.is_empty() {
+            return Vec::new();
+        }
+        use super::sql_helpers::escape_sql_text;
+        use crate::embedding_contract::DIMENSION;
+        let mut queries = Vec::with_capacity(self.symbols.len() / 500 + 1);
+        for batch in self.symbols.chunks(500) {
+            let values: Vec<String> = batch
+                .iter()
+                .map(|s| {
+                    let embedding_sql = match s.embedding.as_ref() {
+                        Some(v) => format!("CAST({:?} AS FLOAT[{DIMENSION}])", v),
+                        None => "NULL".to_string(),
+                    };
+                    format!(
+                        "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
+                        escape_sql_text(&s.symbol_id),
+                        escape_sql_text(&s.name),
+                        s.kind,
+                        s.tested,
+                        s.is_public,
+                        s.is_nif,
+                        s.is_unsafe,
+                        escape_sql_text(&s.project_code),
+                        embedding_sql,
+                    )
+                })
+                .collect();
+            queries.push(format!(
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;",
+                values.join(",")
+            ));
+        }
+        queries
     }
 
     /// Render accumulated `ChunkRow`s into INSERT…ON CONFLICT statements
@@ -558,34 +603,111 @@ mod tests {
     }
 
     #[test]
-    fn render_emits_chunks_then_raw_queries_passthrough() {
-        // E.7 (REQ-AXO-238): the typed `Chunks` bucket now renders into
-        // bulk INSERT…ON CONFLICT statements. The Symbols bucket is
-        // still pending its own renderer (next slice), so absorbing
-        // only a Symbol leaves render_bulk_queries empty.
+    fn render_emits_symbols_then_chunks_then_raw_queries() {
+        // E.7 (REQ-AXO-238): both Symbols and Chunks render. Order
+        // contract: Symbols → Chunks → RawQueries. Symbols come before
+        // Chunks because Chunk.source_id may reference a freshly-
+        // inserted Symbol.id; legacy producer order at
+        // graph_ingestion.rs:920 (Symbols) then :927 (Chunks).
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::Symbols(vec![sample_symbol("s1")]));
-        assert!(
-            acc.render_bulk_queries().is_empty(),
-            "Symbols renderer not yet wired (next E.7 slice)"
-        );
+        let rendered = acc.render_bulk_queries();
+        assert_eq!(rendered.len(), 1, "single Symbol batch -> single query");
+        assert!(rendered[0].starts_with("INSERT INTO Symbol"));
 
         acc.absorb(WriteDiff::Chunks(vec![sample_chunk("c1")]));
         let rendered = acc.render_bulk_queries();
-        assert_eq!(rendered.len(), 1, "single Chunk batch -> single query");
-        assert!(rendered[0].starts_with("INSERT INTO Chunk"));
-        assert!(rendered[0].contains("ON CONFLICT(id) DO UPDATE"));
+        assert_eq!(rendered.len(), 2, "Symbols + Chunks -> two queries");
+        assert!(rendered[0].starts_with("INSERT INTO Symbol"));
+        assert!(rendered[1].starts_with("INSERT INTO Chunk"));
 
         acc.absorb(WriteDiff::RawQueries(vec![
             "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
             "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
         ]));
         let rendered = acc.render_bulk_queries();
-        // Order: typed INSERTs first, then RawQueries.
-        assert_eq!(rendered.len(), 3);
-        assert!(rendered[0].starts_with("INSERT INTO Chunk"));
-        assert!(rendered[1].starts_with("DELETE FROM FileVectorizationQueue"));
-        assert!(rendered[2].starts_with("UPDATE File"));
+        assert_eq!(rendered.len(), 4);
+        assert!(rendered[0].starts_with("INSERT INTO Symbol"));
+        assert!(rendered[1].starts_with("INSERT INTO Chunk"));
+        assert!(rendered[2].starts_with("DELETE FROM FileVectorizationQueue"));
+        assert!(rendered[3].starts_with("UPDATE File"));
+    }
+
+    #[test]
+    fn render_symbols_duckdb_matches_legacy_producer_format() {
+        // Parity gate for E.7 Symbol slice. Mirrors graph_ingestion.rs:
+        // 617-628 (value tuple shape) + :920-923 (header + ON CONFLICT
+        // clause). Embedding-column branch covered:
+        //   - None  -> NULL literal
+        //   - Some  -> CAST([f1, f2, ...] AS FLOAT[1024])
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Symbols(vec![
+            SymbolRow {
+                symbol_id: "AXO::path::no_embed".to_string(),
+                name: "alpha".to_string(),
+                kind: "function".to_string(),
+                tested: true,
+                is_public: false,
+                is_nif: false,
+                is_unsafe: false,
+                project_code: "AXO".to_string(),
+                embedding: None,
+            },
+            SymbolRow {
+                symbol_id: "AXO::path::with_embed".to_string(),
+                name: "beta".to_string(),
+                kind: "function".to_string(),
+                tested: false,
+                is_public: true,
+                is_nif: false,
+                is_unsafe: true,
+                project_code: "AXO".to_string(),
+                embedding: Some(vec![0.1_f32, 0.2_f32, -0.3_f32]),
+            },
+        ]));
+        let rendered = acc.render_symbols_duckdb();
+        assert_eq!(rendered.len(), 1, "two symbols fit in a single 500-row batch");
+        let q = &rendered[0];
+
+        // Header + ON CONFLICT clause shape.
+        assert!(q.starts_with(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES "
+        ));
+        assert!(q.contains(
+            "ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;"
+        ));
+
+        // Boolean columns rendered as bare `true`/`false` literals
+        // (DuckDB accepts both keywords). Integer columns absent here.
+        assert!(q.contains(", true, false, false, false, "), "first row booleans: {q}");
+        assert!(q.contains(", false, true, false, true, "), "second row booleans: {q}");
+
+        // Embedding branch: None -> NULL, Some -> CAST literal with the
+        // canonical FLOAT[1024] cast.
+        assert!(q.contains(", NULL)"), "no-embed row should emit NULL: {q}");
+        assert!(
+            q.contains("CAST([0.1, 0.2, -0.3] AS FLOAT[1024])"),
+            "embed row should emit CAST literal: {q}"
+        );
+    }
+
+    #[test]
+    fn render_symbols_duckdb_empty_returns_empty() {
+        let acc = WriteAccumulator::new();
+        assert!(acc.render_symbols_duckdb().is_empty());
+    }
+
+    #[test]
+    fn render_symbols_duckdb_batches_at_500_rows() {
+        let mut acc = WriteAccumulator::new();
+        let rows: Vec<SymbolRow> = (0..1100).map(|i| sample_symbol(&format!("s{i}"))).collect();
+        acc.absorb(WriteDiff::Symbols(rows));
+        let rendered = acc.render_symbols_duckdb();
+        assert_eq!(rendered.len(), 3, "1100 symbols split into 500/500/100 batches");
+        for q in &rendered {
+            assert!(q.starts_with("INSERT INTO Symbol"));
+            assert!(q.ends_with("embedding=EXCLUDED.embedding;"));
+        }
     }
 
     #[test]
