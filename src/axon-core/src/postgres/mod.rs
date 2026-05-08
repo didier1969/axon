@@ -9,16 +9,22 @@
 //   - `smoke_check` (P1): loads `age` + `vector` extensions and reports
 //     versions, so a misconfigured client database fails fast at brain
 //     bootstrap.
-//   - `ddl::generate_global_schema` (P2): idempotent DDL for public +
-//     soll layers (extensions, ProjectCodeRegistry, Node/Edge/Revision/
-//     Traceability).
-//   - `ddl::generate_project_schema(project_code)` (P2): idempotent DDL
-//     for one project's IST namespace + AGE graph + pgvector HNSW.
-//
-// Deferred:
-//   - P3 will populate `store.rs` with the full GraphStorePg impl.
-//   - P5 will populate `seed.rs` with the bootstrap loader.
+//   - `ddl::generate_global_schema` (P2; expanded 2026-05-08 to provision
+//     multi-project IST tables + axon_runtime telemetry + AGE labels).
+//   - `ddl::generate_project_schema(project_code)` (post-CPT-AXO-039
+//     supersedure 2026-05-08): no-op DDL, kept for API stability +
+//     project_code injection guard.
+//   - `vector::{vector_literal, upsert_chunk_embedding_sql,
+//     cosine_ann_where_order_limit}` (P4): pgvector helpers, all
+//     multi-project after the CPT-AXO-039 supersedure.
+//   - `age::{cypher_merge_vertex, cypher_merge_edge, cypher_query,
+//     cypher_props_literal}` (option B.2 foundation 2026-05-08):
+//     AGE Cypher writer + reader helpers, validate identifiers and
+//     escape property strings so the heredoc cannot be terminated.
+//   - `seed::{apply_seed, load_seed_if_needed, SeedDocument}` (P5):
+//     SOLL bootstrap loader for empty PG instances.
 
+pub mod age;
 pub mod ddl;
 pub mod seed;
 pub mod vector;
