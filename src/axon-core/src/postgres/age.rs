@@ -132,17 +132,27 @@ fn strip_agtype_value_suffixes(raw: &str) -> String {
 }
 
 /// Read-once env knob that gates the option B.3 AGE reader transition.
-/// Default: OFF. When ON, MCP graph-traversal readers (`path`,
-/// `impact`, `bidi_trace`, `anomalies`, `architectural_drift` call-graph
-/// section) try the AGE Cypher MATCH first under PG, falling back to
-/// the legacy SQL relation-table read on empty result or error. Once
-/// the readers are validated against a populated AGE graph, the env
-/// defaults to ON; once B.4 drops the SQL relation tables, the gate
-/// disappears entirely.
+///
+/// Default: **ON** (post 2026-05-08 session 4 phase 11, after all 6
+/// graph-traversal readers shipped + smoke-test validated against
+/// `axon-test/age-pgvector:pg17`).
+///
+/// Behaviour:
+/// - Default ON: MCP graph-traversal readers (`path`, `impact`,
+///   `bidi_trace`, `anomalies`, `architectural_drift` call-graph
+///   section) try the AGE Cypher MATCH first under PG. On empty
+///   result or error they fall back to the legacy SQL relation-table
+///   read — zero regression for PG installs without dual-write
+///   populated.
+/// - Set `AXON_AGE_READ=0` (or `false` / `no` / `off`) to force the
+///   legacy SQL path explicitly. Useful for benchmarking AGE vs SQL
+///   parity or recovering from an AGE schema regression.
+/// - Once B.4 drops the SQL relation tables (REQ-AXO-216), the gate
+///   disappears entirely and AGE becomes the sole read path.
 pub fn age_read_enabled() -> bool {
     std::env::var("AXON_AGE_READ")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
 }
 
 /// Validate that an identifier (graph / label / vertex id) is safe to
