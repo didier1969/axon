@@ -92,7 +92,7 @@ pub fn generate_global_schema() -> Vec<String> {
         "CREATE TABLE IF NOT EXISTS soll.Node (\
             id TEXT PRIMARY KEY,\
             type TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             title TEXT,\
             description TEXT,\
             status TEXT,\
@@ -103,14 +103,14 @@ pub fn generate_global_schema() -> Vec<String> {
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
             relation_type TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             metadata JSONB,\
             PRIMARY KEY (source_id, target_id, relation_type)\
          )"
         .to_string(),
         "CREATE TABLE IF NOT EXISTS soll.Revision (\
             revision_id TEXT PRIMARY KEY,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             author TEXT,\
             source TEXT,\
             summary TEXT,\
@@ -123,7 +123,7 @@ pub fn generate_global_schema() -> Vec<String> {
             revision_id TEXT NOT NULL,\
             entity_type TEXT NOT NULL,\
             entity_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             action TEXT NOT NULL,\
             before_json JSONB,\
             after_json JSONB,\
@@ -133,7 +133,7 @@ pub fn generate_global_schema() -> Vec<String> {
         "CREATE TABLE IF NOT EXISTS soll.RevisionPreview (\
             preview_id TEXT PRIMARY KEY,\
             author TEXT,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             payload JSONB,\
             created_at BIGINT\
          )"
@@ -294,7 +294,7 @@ fn ist_ddl_global() -> Vec<String> {
         // ── Core IST tables ────────────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.File (\
             path TEXT PRIMARY KEY,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             status TEXT,\
             size BIGINT,\
             priority BIGINT,\
@@ -327,7 +327,7 @@ fn ist_ddl_global() -> Vec<String> {
                 is_public BOOLEAN NOT NULL DEFAULT FALSE,\
                 is_nif BOOLEAN NOT NULL DEFAULT FALSE,\
                 is_unsafe BOOLEAN NOT NULL DEFAULT FALSE,\
-                project_code TEXT NOT NULL,\
+                project_code TEXT NOT NULL DEFAULT '',\
                 embedding vector({dim})\
              )"
         ),
@@ -335,7 +335,7 @@ fn ist_ddl_global() -> Vec<String> {
             id TEXT PRIMARY KEY,\
             source_type TEXT,\
             source_id TEXT,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             file_path TEXT,\
             kind TEXT,\
             content TEXT,\
@@ -351,7 +351,7 @@ fn ist_ddl_global() -> Vec<String> {
             "CREATE TABLE IF NOT EXISTS public.ChunkEmbedding (\
                 chunk_id TEXT NOT NULL,\
                 model_id TEXT NOT NULL,\
-                project_code TEXT NOT NULL,\
+                project_code TEXT NOT NULL DEFAULT '',\
                 source_hash TEXT NOT NULL,\
                 embedding vector({dim}) NOT NULL,\
                 embedded_at_ms BIGINT NOT NULL,\
@@ -362,42 +362,42 @@ fn ist_ddl_global() -> Vec<String> {
         "CREATE TABLE IF NOT EXISTS public.CONTAINS (\
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             PRIMARY KEY (source_id, target_id)\
          )"
         .to_string(),
         "CREATE TABLE IF NOT EXISTS public.CALLS (\
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             PRIMARY KEY (source_id, target_id)\
          )"
         .to_string(),
         "CREATE TABLE IF NOT EXISTS public.CALLS_NIF (\
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             PRIMARY KEY (source_id, target_id)\
          )"
         .to_string(),
         "CREATE TABLE IF NOT EXISTS public.IMPACTS (\
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             PRIMARY KEY (source_id, target_id)\
          )"
         .to_string(),
         "CREATE TABLE IF NOT EXISTS public.SUBSTANTIATES (\
             source_id TEXT NOT NULL,\
             target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             PRIMARY KEY (source_id, target_id)\
          )"
         .to_string(),
         // ── Queues ────────────────────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.FileVectorizationQueue (\
             file_path TEXT PRIMARY KEY,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             status TEXT NOT NULL DEFAULT 'queued',\
             status_reason TEXT,\
             attempts BIGINT NOT NULL DEFAULT 0,\
@@ -418,7 +418,7 @@ fn ist_ddl_global() -> Vec<String> {
             anchor_type TEXT NOT NULL,\
             anchor_id TEXT NOT NULL,\
             radius BIGINT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             status TEXT NOT NULL DEFAULT 'queued',\
             attempts BIGINT NOT NULL DEFAULT 0,\
             queued_at BIGINT,\
@@ -459,7 +459,7 @@ fn ist_ddl_global() -> Vec<String> {
             edge_kind TEXT,\
             distance BIGINT,\
             radius BIGINT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             projection_version TEXT,\
             created_at BIGINT\
          )"
@@ -468,7 +468,7 @@ fn ist_ddl_global() -> Vec<String> {
             anchor_type TEXT NOT NULL,\
             anchor_id TEXT NOT NULL,\
             radius BIGINT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             source_signature TEXT,\
             projection_version TEXT,\
             updated_at BIGINT,\
@@ -483,7 +483,7 @@ fn ist_ddl_global() -> Vec<String> {
                 anchor_id TEXT NOT NULL,\
                 radius BIGINT NOT NULL,\
                 model_id TEXT NOT NULL,\
-                project_code TEXT NOT NULL,\
+                project_code TEXT NOT NULL DEFAULT '',\
                 source_signature TEXT,\
                 projection_version TEXT,\
                 embedding vector({dim}),\
@@ -508,7 +508,7 @@ fn ist_ddl_global() -> Vec<String> {
         // ── Telemetry / lifecycle ─────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.FileLifecycleEvent (\
             file_path TEXT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             stage TEXT NOT NULL,\
             status TEXT NOT NULL,\
             reason TEXT,\
@@ -520,7 +520,7 @@ fn ist_ddl_global() -> Vec<String> {
         .to_string(),
         "CREATE TABLE IF NOT EXISTS public.HourlyVectorizationRollup (\
             bucket_start_ms BIGINT NOT NULL,\
-            project_code TEXT NOT NULL,\
+            project_code TEXT NOT NULL DEFAULT '',\
             model_id TEXT NOT NULL,\
             chunks_embedded BIGINT NOT NULL DEFAULT 0,\
             files_vector_ready BIGINT NOT NULL DEFAULT 0,\
