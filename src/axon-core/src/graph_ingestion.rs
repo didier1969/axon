@@ -37,7 +37,7 @@ use sql_helpers::{
     hourly_bucket_start_ms, insert_unique_relation_queries, next_vector_persist_outbox_claim_token,
     orphaned_file_vectorization_candidates_query, orphaned_file_vectorization_requeue_sql,
     parse_file_ingress_row, parse_i64_field, parse_pending_file_row, parse_u64_field,
-    replace_relation_queries, sort_and_dedup_sql_tuples,
+    replace_relation_queries,
 };
 pub use types::{
     FileLifecycleEvent, FileVectorizationLeaseSnapshot, FileVectorizationWork, GraphProjectionWork,
@@ -513,9 +513,13 @@ impl GraphStore {
         let inline_enabled = enqueue_vectorization
             && crate::embedder::inline_embed::inline_pipeline_enabled();
         let mut inline_chunks: Vec<(String, String, String, String)> = Vec::new();
-        let mut contains_values = Vec::new();
-        let mut calls_values = Vec::new();
-        let mut calls_nif_values = Vec::new();
+        // MIL-AXO-015 option B.2: typed triples are the source of
+        // truth — SQL string tuples are derived at the helper call
+        // site below, and the same triples feed the AGE Cypher
+        // dual-write pass after execute_batch.
+        let mut contains_triples: Vec<(String, String, String)> = Vec::new();
+        let mut calls_triples: Vec<(String, String, String)> = Vec::new();
+        let mut calls_nif_triples: Vec<(String, String, String)> = Vec::new();
         let mut file_vectorization_paths = Vec::new();
         let mut vectorizable_paths = std::collections::HashSet::new();
 
@@ -578,11 +582,10 @@ impl GraphStore {
                             embedding_sql
                         ));
 
-                        contains_values.push(format!(
-                            "('{}', '{}', '{}')",
-                            Self::escape_sql(path),
-                            Self::escape_sql(&symbol_id),
-                            Self::escape_sql(project_code)
+                        contains_triples.push((
+                            path.clone(),
+                            symbol_id.clone(),
+                            project_code.to_string(),
                         ));
 
                         if matches!(processing_mode, ProcessingMode::Full) {
@@ -631,25 +634,18 @@ impl GraphStore {
 
                         let source_id = Self::symbol_id(project_code, path, &relation.from);
                         let target_id = Self::symbol_id(project_code, path, &relation.to);
-
-                        let relation_value = format!(
-                            "('{}', '{}', '{}')",
-                            Self::escape_sql(&source_id),
-                            Self::escape_sql(&target_id),
-                            Self::escape_sql(project_code)
-                        );
-
-                        let relation_key = (source_id, target_id, project_code.to_string());
+                        let relation_triple =
+                            (source_id, target_id, project_code.to_string());
 
                         match table {
                             "CALLS" => {
-                                if seen_calls.insert(relation_key) {
-                                    calls_values.push(relation_value);
+                                if seen_calls.insert(relation_triple.clone()) {
+                                    calls_triples.push(relation_triple);
                                 }
                             }
                             "CALLS_NIF" => {
-                                if seen_calls_nif.insert(relation_key) {
-                                    calls_nif_values.push(relation_value);
+                                if seen_calls_nif.insert(relation_triple.clone()) {
+                                    calls_nif_triples.push(relation_triple);
                                 }
                             }
                             _ => {}
@@ -869,9 +865,12 @@ impl GraphStore {
                 skipped_paths.join(",")
             ));
         }
-        sort_and_dedup_sql_tuples(&mut contains_values);
-        sort_and_dedup_sql_tuples(&mut calls_values);
-        sort_and_dedup_sql_tuples(&mut calls_nif_values);
+        contains_triples.sort_unstable();
+        contains_triples.dedup();
+        calls_triples.sort_unstable();
+        calls_triples.dedup();
+        calls_nif_triples.sort_unstable();
+        calls_nif_triples.dedup();
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
                 "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;",
@@ -885,6 +884,21 @@ impl GraphStore {
                 chunk.join(",")
             ));
         }
+        // MIL-AXO-015 B.2: derive SQL tuples from typed triples just-
+        // in-time so the helpers stay backend-agnostic. The same
+        // triples feed the AGE Cypher dual-write below.
+        let triple_to_sql = |(a, b, c): &(String, String, String)| -> String {
+            format!(
+                "('{}', '{}', '{}')",
+                Self::escape_sql(a),
+                Self::escape_sql(b),
+                Self::escape_sql(c)
+            )
+        };
+        let contains_values: Vec<String> = contains_triples.iter().map(triple_to_sql).collect();
+        let calls_values: Vec<String> = calls_triples.iter().map(triple_to_sql).collect();
+        let calls_nif_values: Vec<String> =
+            calls_nif_triples.iter().map(triple_to_sql).collect();
         queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
         queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
         queries.extend(replace_relation_queries(
@@ -933,6 +947,38 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
+
+        // MIL-AXO-015 option B.2: dual-write the same edges into the
+        // AGE graph under PG when AXON_AGE_DUAL_WRITE=true. Best-effort
+        // — failures log a warning but never abort the SQL path. The
+        // same typed triples that fed the SQL INSERTs are reused here
+        // so the two graphs stay in lockstep without re-parsing SQL.
+        if self.is_postgres_backend() && age_dual_write_enabled() {
+            self.dual_write_relation_edges_age(
+                "File",
+                "path",
+                "Symbol",
+                "id",
+                "CONTAINS",
+                &contains_triples,
+            );
+            self.dual_write_relation_edges_age(
+                "Symbol",
+                "id",
+                "Symbol",
+                "id",
+                "CALLS",
+                &calls_triples,
+            );
+            self.dual_write_relation_edges_age(
+                "Symbol",
+                "id",
+                "Symbol",
+                "id",
+                "CALLS_NIF",
+                &calls_nif_triples,
+            );
+        }
 
         // DEC-AXO-071 H.2 inline embedding pass. Runs after chunks are
         // committed so embeddings reference rows that exist in the DB.
@@ -1962,6 +2008,70 @@ impl GraphStore {
         }
         Ok(())
     }
+
+    /// MIL-AXO-015 option B.2 batch dual-write: emit one Cypher MERGE
+    /// per typed (src_id, dst_id, project_code) triple into the
+    /// `axon_graph` AGE graph. Each MERGE is executed independently
+    /// — failures are logged at warn level and do not abort the SQL
+    /// path that ran upstream. Empty triples is a no-op.
+    fn dual_write_relation_edges_age(
+        &self,
+        src_label: &str,
+        src_id_property: &str,
+        dst_label: &str,
+        dst_id_property: &str,
+        edge_label: &str,
+        triples: &[(String, String, String)],
+    ) {
+        if triples.is_empty() {
+            return;
+        }
+        // Each triple's (src_id, dst_id) drives a Cypher MERGE; the
+        // project_code rides as an edge property so MATCH queries can
+        // filter on it without touching the vertex catalog.
+        let edges: Vec<(String, String, serde_json::Value)> = triples
+            .iter()
+            .map(|(s, t, p)| {
+                (
+                    s.clone(),
+                    t.clone(),
+                    serde_json::json!({"project_code": p}),
+                )
+            })
+            .collect();
+        let cyphers = match crate::postgres::age::cypher_merge_edges_batch(
+            "axon_graph",
+            src_label,
+            src_id_property,
+            edge_label,
+            dst_label,
+            dst_id_property,
+            &edges,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "AGE dual-write skipped for {} batch ({} edges): {}",
+                    edge_label,
+                    triples.len(),
+                    e
+                );
+                return;
+            }
+        };
+        for (i, sql) in cyphers.iter().enumerate() {
+            if let Err(e) = self.execute(sql) {
+                let (s, t, _) = &triples[i];
+                log::warn!(
+                    "AGE dual-write {} edge failed (SQL succeeded) {} -> {}: {}",
+                    edge_label,
+                    s,
+                    t,
+                    e
+                );
+            }
+        }
+    }
 }
 
 /// Read-once env knob that gates the option B.2 dual-write transition.
@@ -1980,37 +2090,15 @@ fn age_dual_write_enabled() -> bool {
 mod tests {
     use super::{
         dedup_file_batch_rows, insert_unique_relation_queries, parse_i64_field,
-        replace_relation_queries, sort_and_dedup_sql_tuples, FileUpsertSource,
-        FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun,
-        VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
-        VectorWorkerFault, CHUNK_EMBEDDING_MODEL_ID,
+        replace_relation_queries, FileUpsertSource, FileVectorizationLeaseSnapshot,
+        FileVectorizationWork, VectorBatchRun, VectorLaneStateRecord,
+        VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorWorkerFault,
+        CHUNK_EMBEDDING_MODEL_ID,
     };
     use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
     use crate::parser::{ExtractionResult, Relation, Symbol};
     use crate::queue::ProcessingMode;
     use crate::worker::DbWriteTask;
-
-    #[test]
-    fn sort_and_dedup_sql_tuples_removes_duplicate_relation_rows() {
-        let mut values = vec![
-            "('b', 'c', 'PRJ')".to_string(),
-            "('a', 'b', 'PRJ')".to_string(),
-            "('b', 'c', 'PRJ')".to_string(),
-            "('a', 'b', 'PRJ')".to_string(),
-            "('c', 'd', 'PRJ')".to_string(),
-        ];
-
-        sort_and_dedup_sql_tuples(&mut values);
-
-        assert_eq!(
-            values,
-            vec![
-                "('a', 'b', 'PRJ')".to_string(),
-                "('b', 'c', 'PRJ')".to_string(),
-                "('c', 'd', 'PRJ')".to_string(),
-            ]
-        );
-    }
 
     #[test]
     fn insert_unique_relation_queries_emit_conflict_safe_single_row_inserts() {

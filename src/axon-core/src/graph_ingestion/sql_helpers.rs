@@ -217,11 +217,6 @@ pub(super) fn next_vector_persist_outbox_claim_token(now_ms: i64) -> String {
     format!("outbox-claim-{}-{}", now_ms, seq)
 }
 
-pub(super) fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
-    values.sort_unstable();
-    values.dedup();
-}
-
 pub(super) fn insert_unique_relation_queries(table: &str, values: &[String]) -> Vec<String> {
     values
         .iter()
