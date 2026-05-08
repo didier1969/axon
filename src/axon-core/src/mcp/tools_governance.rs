@@ -304,9 +304,17 @@ impl McpServer {
             .ok()?;
         let anchor_rows: Vec<Vec<Value>> = serde_json::from_str(&anchor_res).unwrap_or_default();
         let anchor_id = anchor_rows.first()?.first()?.as_str()?;
+        // MIL-AXO-015 P6: cosine distance dialect — pgvector uses
+        // the `<=>` operator; DuckDB exposes `array_cosine_distance`.
+        // Same column shape on both backends post-CPT-AXO-043.
+        let cosine_expr = if self.graph_store.is_postgres_backend() {
+            "(anchor.embedding <=> peer.embedding)"
+        } else {
+            "array_cosine_distance(anchor.embedding, peer.embedding)"
+        };
         let query = format!(
             "
-            SELECT other.name, other.kind, array_cosine_distance(anchor.embedding, peer.embedding) AS score
+            SELECT other.name, other.kind, {cosine_expr} AS score
             FROM GraphEmbedding anchor
             JOIN GraphProjectionState anchor_state
               ON anchor_state.anchor_type = anchor.anchor_type
@@ -330,7 +338,7 @@ impl McpServer {
             WHERE anchor.anchor_type = 'symbol'
               AND anchor.anchor_id = $anchor
               AND anchor.model_id = '{GRAPH_MODEL_ID}'
-              AND array_cosine_distance(anchor.embedding, peer.embedding) < 0.05
+              AND {cosine_expr} < 0.05
             ORDER BY score ASC
             LIMIT 5"
         );
@@ -658,10 +666,20 @@ impl McpServer {
 
     pub(crate) fn axon_semantic_clones(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        // MIL-AXO-015 P6: cosine dialect swap (pgvector `<=>` vs
+        // DuckDB `array_cosine_distance`). Symbol.embedding is
+        // `vector(N)` on PG / `FLOAT[N]` on DuckDB; the operator
+        // semantics match since both return cosine distance scaled
+        // identically.
+        let cosine_expr = if self.graph_store.is_postgres_backend() {
+            "(s.embedding <=> other.embedding)"
+        } else {
+            "array_cosine_distance(s.embedding, other.embedding)"
+        };
         let query = format!(
-            "SELECT other.name, other.kind, array_cosine_distance(s.embedding, other.embedding) as score \
+            "SELECT other.name, other.kind, {cosine_expr} as score \
              FROM Symbol s, Symbol other \
-             WHERE s.name = '{}' AND s.name <> other.name AND array_cosine_distance(s.embedding, other.embedding) < 0.05 \
+             WHERE s.name = '{}' AND s.name <> other.name AND {cosine_expr} < 0.05 \
              ORDER BY score ASC LIMIT 5",
             symbol.replace("'", "''")
         );
