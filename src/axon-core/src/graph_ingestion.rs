@@ -520,6 +520,11 @@ impl GraphStore {
         let mut contains_triples: Vec<(String, String, String)> = Vec::new();
         let mut calls_triples: Vec<(String, String, String)> = Vec::new();
         let mut calls_nif_triples: Vec<(String, String, String)> = Vec::new();
+        // MIL-AXO-015 P4 4e: backend selector for the Symbol.embedding
+        // inline render. PG stores `vector(1024)` (pgvector); DuckDB
+        // stores FLOAT[1024]. Captured once per call to avoid the
+        // is_postgres_backend probe per-symbol.
+        let backend_is_pg = self.is_postgres_backend();
         let mut file_vectorization_paths = Vec::new();
         let mut vectorizable_paths = std::collections::HashSet::new();
 
@@ -564,10 +569,22 @@ impl GraphStore {
                         if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
                             continue; // Prevent UNIQUE constraint violation in DuckDB ON CONFLICT batches
                         }
-                        let embedding_sql = if let Some(ref v) = sym.embedding {
-                            format!("CAST({:?} AS FLOAT[{DIMENSION}])", v)
-                        } else {
-                            "NULL".to_string()
+                        let embedding_sql = match sym.embedding.as_ref() {
+                            Some(v) if backend_is_pg => {
+                                match crate::postgres::vector::vector_literal(v) {
+                                    Ok(lit) => lit,
+                                    Err(e) => {
+                                        log::warn!(
+                                            "skipping Symbol embedding inline for {} under PG: {}",
+                                            symbol_id,
+                                            e
+                                        );
+                                        "NULL".to_string()
+                                    }
+                                }
+                            }
+                            Some(v) => format!("CAST({:?} AS FLOAT[{DIMENSION}])", v),
+                            None => "NULL".to_string(),
                         };
                         symbol_values.push(format!(
                             "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
@@ -1862,10 +1879,29 @@ impl GraphStore {
             return Ok(());
         }
         let mut queries = Vec::new();
+        // MIL-AXO-015 P4 4e: under PG, render the embedding via the
+        // pgvector text literal (`'[…]'::vector(N)`) instead of the
+        // DuckDB FLOAT[N] cast. Symbol.embedding column type is
+        // `vector(1024)` per CPT-AXO-043 multi-project tables.
+        let is_pg = self.is_postgres_backend();
 
         for chunk in updates.chunks(100) {
             for (id, vector) in chunk {
-                let embedding_sql = format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector);
+                let embedding_sql = if is_pg {
+                    match crate::postgres::vector::vector_literal(vector) {
+                        Ok(lit) => lit,
+                        Err(e) => {
+                            log::warn!(
+                                "skipping update_symbol_embeddings for {} under PG: {}",
+                                id,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector)
+                };
                 queries.push(format!(
                     "UPDATE Symbol SET embedding = {} WHERE id = '{}';",
                     embedding_sql,
