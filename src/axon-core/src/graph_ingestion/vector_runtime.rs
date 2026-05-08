@@ -242,21 +242,51 @@ impl GraphStore {
         let outbox_id = format!("outbox-{}", payload.batch_run.run_id);
         let payload_json = serde_json::to_string(payload)?;
         let now_ms = chrono::Utc::now().timestamp_millis();
-        self.execute(&format!(
-            "INSERT OR REPLACE INTO VectorPersistOutbox \
-             (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
-             VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}')",
-            Self::escape_sql(&outbox_id),
-            Self::escape_sql(&payload.batch_run.run_id),
-            Self::escape_sql(&payload.batch_run.model_id),
-            now_ms,
-            payload.batch_run.chunk_count,
-            payload.batch_run.file_count,
-            payload.batch_run.input_bytes,
-            payload.batch_run.fetch_ms,
-            payload.batch_run.embed_ms,
-            Self::escape_sql(&payload_json)
-        ))?;
+        // MIL-AXO-015 P4 4e: PG branch routes to axon_runtime.VectorPersistOutbox
+        // with ON CONFLICT (outbox_id) DO UPDATE refreshing every column.
+        let sql = if self.is_postgres_backend() {
+            format!(
+                "INSERT INTO axon_runtime.VectorPersistOutbox \
+                 (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+                 VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}') \
+                 ON CONFLICT (outbox_id) DO UPDATE SET \
+                    run_id = EXCLUDED.run_id, model_id = EXCLUDED.model_id, status = EXCLUDED.status, \
+                    attempts = EXCLUDED.attempts, queued_at_ms = EXCLUDED.queued_at_ms, \
+                    claimed_at_ms = EXCLUDED.claimed_at_ms, completed_at_ms = EXCLUDED.completed_at_ms, \
+                    last_error_reason = EXCLUDED.last_error_reason, claim_token = EXCLUDED.claim_token, \
+                    lease_heartbeat_at_ms = EXCLUDED.lease_heartbeat_at_ms, lease_owner = EXCLUDED.lease_owner, \
+                    lease_epoch = EXCLUDED.lease_epoch, chunk_count = EXCLUDED.chunk_count, \
+                    file_count = EXCLUDED.file_count, input_bytes = EXCLUDED.input_bytes, \
+                    fetch_ms = EXCLUDED.fetch_ms, embed_ms = EXCLUDED.embed_ms, payload_json = EXCLUDED.payload_json",
+                Self::escape_sql(&outbox_id),
+                Self::escape_sql(&payload.batch_run.run_id),
+                Self::escape_sql(&payload.batch_run.model_id),
+                now_ms,
+                payload.batch_run.chunk_count,
+                payload.batch_run.file_count,
+                payload.batch_run.input_bytes,
+                payload.batch_run.fetch_ms,
+                payload.batch_run.embed_ms,
+                Self::escape_sql(&payload_json)
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO VectorPersistOutbox \
+                 (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+                 VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}')",
+                Self::escape_sql(&outbox_id),
+                Self::escape_sql(&payload.batch_run.run_id),
+                Self::escape_sql(&payload.batch_run.model_id),
+                now_ms,
+                payload.batch_run.chunk_count,
+                payload.batch_run.file_count,
+                payload.batch_run.input_bytes,
+                payload.batch_run.fetch_ms,
+                payload.batch_run.embed_ms,
+                Self::escape_sql(&payload_json)
+            )
+        };
+        self.execute(&sql)?;
         service_guard::notify_vector_backlog_activity();
         Ok(outbox_id)
     }
@@ -581,6 +611,21 @@ mod tests {
             occurred_at_ms = EXCLUDED.occurred_at_ms, restart_attempt = EXCLUDED.restart_attempt".to_string()
     }
 
+    fn pg_outbox_sql() -> String {
+        "INSERT INTO axon_runtime.VectorPersistOutbox \
+         (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+         VALUES ('outbox-1', 'run-1', 'code-1024', 'queued', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, '{}') \
+         ON CONFLICT (outbox_id) DO UPDATE SET \
+            run_id = EXCLUDED.run_id, model_id = EXCLUDED.model_id, status = EXCLUDED.status, \
+            attempts = EXCLUDED.attempts, queued_at_ms = EXCLUDED.queued_at_ms, \
+            claimed_at_ms = EXCLUDED.claimed_at_ms, completed_at_ms = EXCLUDED.completed_at_ms, \
+            last_error_reason = EXCLUDED.last_error_reason, claim_token = EXCLUDED.claim_token, \
+            lease_heartbeat_at_ms = EXCLUDED.lease_heartbeat_at_ms, lease_owner = EXCLUDED.lease_owner, \
+            lease_epoch = EXCLUDED.lease_epoch, chunk_count = EXCLUDED.chunk_count, \
+            file_count = EXCLUDED.file_count, input_bytes = EXCLUDED.input_bytes, \
+            fetch_ms = EXCLUDED.fetch_ms, embed_ms = EXCLUDED.embed_ms, payload_json = EXCLUDED.payload_json".to_string()
+    }
+
     fn pg_lane_sql() -> String {
         "INSERT INTO axon_runtime.VectorLaneState \
          (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
@@ -626,11 +671,29 @@ mod tests {
     }
 
     #[test]
+    fn pg_outbox_sql_targets_axon_runtime_schema() {
+        let sql = pg_outbox_sql();
+        assert!(sql.contains("INSERT INTO axon_runtime.VectorPersistOutbox"));
+        assert!(sql.contains("ON CONFLICT (outbox_id) DO UPDATE"));
+        for col in [
+            "run_id", "model_id", "status", "attempts", "queued_at_ms", "claimed_at_ms",
+            "completed_at_ms", "last_error_reason", "claim_token", "lease_heartbeat_at_ms",
+            "lease_owner", "lease_epoch", "chunk_count", "file_count", "input_bytes",
+            "fetch_ms", "embed_ms", "payload_json",
+        ] {
+            assert!(
+                sql.contains(&format!("{col} = EXCLUDED.{col}")),
+                "ON CONFLICT update should refresh column `{col}`"
+            );
+        }
+    }
+
+    #[test]
     fn pg_branches_use_explicit_schema_qualifier() {
         // CPT-AXO-039 + axon_runtime invariant: every PG-branch SQL must
         // qualify the table with `axon_runtime.` so PG can resolve it
         // outside the per-project IST schemas.
-        for sql in [pg_fault_sql(), pg_lane_sql()] {
+        for sql in [pg_fault_sql(), pg_lane_sql(), pg_outbox_sql()] {
             assert!(
                 sql.contains("axon_runtime."),
                 "PG SQL missing axon_runtime schema qualifier"
