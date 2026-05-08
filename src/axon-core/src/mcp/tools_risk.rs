@@ -173,7 +173,22 @@ impl McpServer {
         };
         let params = json!({ "target_id": target_id });
 
-        match self.graph_store.query_json_param(&query, &params) {
+        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, try the
+        // AGE Cypher equivalent first. The AGE form returns the same
+        // 5-column shape so the downstream parsing is unchanged.
+        // Falls back to the SQL recursive form on empty / error.
+        let age_result = if self.graph_store.is_postgres_backend()
+            && crate::postgres::age::age_read_enabled()
+        {
+            self.impact_callers_via_age(&target_id, project, depth)
+                .map(Ok)
+        } else {
+            None
+        };
+        let query_outcome = age_result
+            .unwrap_or_else(|| self.graph_store.query_json_param(&query, &params));
+
+        match query_outcome {
             Ok(res) => {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 let mut impact_rows = BTreeMap::<String, (String, String, String)>::new();
@@ -817,5 +832,97 @@ impl McpServer {
                 }
             })),
         }
+    }
+
+    /// MIL-AXO-015 B.3: AGE Cypher implementation of axon_impact's
+    /// caller traversal. Returns the same 5-column JSON shape as the
+    /// SQL WITH RECURSIVE form: rows of `[caller_id, edge_type,
+    /// origin_path, name, kind]`.
+    ///
+    /// Three sub-patterns combined via UNION:
+    /// - CALLS variable-length traversal up to `depth`
+    /// - CALLS_NIF variable-length traversal up to `depth`
+    /// - bridge_name (same Symbol.name across project, NIF flag)
+    ///
+    /// Returns `None` on identifier validation failure, AGE query
+    /// error, or empty result so the caller falls back to SQL —
+    /// covers AGE empty (dual-write opt-in not enabled), schema gaps,
+    /// or AGE quirks we haven't covered yet.
+    fn impact_callers_via_age(
+        &self,
+        target_id: &str,
+        project: Option<&str>,
+        depth: u64,
+    ) -> Option<String> {
+        let depth_clamped = depth.clamp(1, 10);
+        // Permissive sanitization: target_id can contain `::`, `/`,
+        // `.` and other id-shape chars. Reject only the heredoc
+        // terminators / control chars.
+        if target_id
+            .chars()
+            .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
+        {
+            log::warn!("impact_callers_via_age: target_id rejected (escape char)");
+            return None;
+        }
+        let project_filter_calls = match project {
+            Some(p) => {
+                if crate::postgres::age::validate_identifier(p, "project_code").is_err() {
+                    log::warn!(
+                        "impact_callers_via_age: project '{}' fails AGE identifier validation; falling back",
+                        p
+                    );
+                    return None;
+                }
+                format!("WHERE caller.project_code = \"{p}\"")
+            }
+            None => String::new(),
+        };
+        let project_filter_bridge = match project {
+            Some(p) => format!(
+                "AND caller.project_code = \"{p}\"\n               "
+            ),
+            None => String::new(),
+        };
+        let cypher = format!(
+            "MATCH (caller:Symbol)-[:CALLS*1..{depth_clamped}]->(target:Symbol {{id: \"{target_id}\"}}) \
+             {project_filter_calls} \
+             OPTIONAL MATCH (file:File)-[:CONTAINS]->(caller) \
+             RETURN caller.id, 'calls' AS et, file.path AS origin, caller.name AS name, caller.kind AS kind \
+             UNION \
+             MATCH (caller:Symbol)-[:CALLS_NIF*1..{depth_clamped}]->(target:Symbol {{id: \"{target_id}\"}}) \
+             {project_filter_calls} \
+             OPTIONAL MATCH (file:File)-[:CONTAINS]->(caller) \
+             RETURN caller.id, 'calls_nif' AS et, file.path AS origin, caller.name AS name, caller.kind AS kind \
+             UNION \
+             MATCH (target:Symbol {{id: \"{target_id}\"}}) \
+             MATCH (caller:Symbol) \
+             WHERE caller.name = target.name AND caller.id <> target.id \
+               {project_filter_bridge}AND (caller.is_nif = true OR target.is_nif = true) \
+             OPTIONAL MATCH (file:File)-[:CONTAINS]->(caller) \
+             RETURN caller.id, 'bridge_name' AS et, file.path AS origin, caller.name AS name, caller.kind AS kind"
+        );
+        let sql = match crate::postgres::age::cypher_query(
+            "axon_graph",
+            &cypher,
+            &["caller_id", "edge_type", "origin", "name", "kind"],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("impact_callers_via_age: cypher_query build failed: {}", e);
+                return None;
+            }
+        };
+        let raw = match self.graph_store.query_json(&sql) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("impact_callers_via_age: AGE query failed: {}", e);
+                return None;
+            }
+        };
+        if raw.trim() == "[]" {
+            return None;
+        }
+        Some(raw)
     }
 }
