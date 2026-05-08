@@ -525,8 +525,18 @@ fn ist_ddl_global() -> Vec<String> {
 }
 
 /// Compose an idempotent AGE label-creation statement. AGE's
-/// `create_vlabel` / `create_elabel` raise on duplicate; we wrap in a
-/// PL/pgSQL DO block that catches the duplicate-relation exception.
+/// `create_vlabel` / `create_elabel` raise when the label already
+/// exists, but the exception they raise is `XX000` (internal_error)
+/// with a free-text message ("label 'X' already exists"), not the
+/// SQL-standard `42P07` (duplicate_table) or `42710`
+/// (duplicate_object) we would expect. The narrow handlers were
+/// silently letting the second-run schema bootstrap fail under
+/// `bootstrap_global_pg_schema`. The handler now also catches the
+/// catch-all `OTHERS` branch so the operation is fully idempotent —
+/// safe because the function only ever calls one PERFORM with a
+/// hardcoded label, so any thrown exception either means
+/// "already exists" (the desired no-op) or a real DDL bug that the
+/// upstream test suite + smoke tests will surface.
 fn age_idempotent_create(kind: &'static str, label: &str) -> String {
     let func = match kind {
         "vlabel" => "create_vlabel",
@@ -541,6 +551,12 @@ fn age_idempotent_create(kind: &'static str, label: &str) -> String {
            WHEN duplicate_table THEN NULL;\n\
            WHEN duplicate_object THEN NULL;\n\
            WHEN sqlstate '42P07' THEN NULL;\n\
+           WHEN OTHERS THEN \n\
+             IF SQLERRM LIKE '%already exists%' THEN \n\
+               NULL; \n\
+             ELSE \n\
+               RAISE; \n\
+             END IF;\n\
          END\n\
          $$"
     )
@@ -635,6 +651,25 @@ mod tests {
                 "expected SOLL schema to contain {tbl}"
             );
         }
+    }
+
+    #[test]
+    fn age_idempotent_create_catches_already_exists_message() {
+        // Regression for the bench-blocker discovered 2026-05-08:
+        // AGE's create_vlabel raises sqlstate 'XX000' (internal_error)
+        // with message 'label "File" already exists' — the narrow
+        // duplicate_table / duplicate_object handlers don't catch it,
+        // so a second-run bootstrap_global_pg_schema fails. The fix
+        // adds an OTHERS branch that no-ops only when SQLERRM matches
+        // 'already exists', re-raising every other error.
+        let stmt = age_idempotent_create("vlabel", "File");
+        assert!(stmt.contains("WHEN OTHERS THEN"));
+        assert!(stmt.contains("SQLERRM LIKE '%already exists%'"));
+        assert!(stmt.contains("RAISE"));
+        // Specific catches preserved so the common-case sqlstate match
+        // still hits the cheap path.
+        assert!(stmt.contains("WHEN duplicate_table THEN NULL"));
+        assert!(stmt.contains("WHEN duplicate_object THEN NULL"));
     }
 
     #[test]
