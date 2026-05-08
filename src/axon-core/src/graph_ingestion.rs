@@ -503,13 +503,15 @@ impl GraphStore {
         let mut seen_symbols = std::collections::HashSet::new();
         let mut seen_calls = std::collections::HashSet::new();
         let mut seen_calls_nif = std::collections::HashSet::new();
-        let mut symbol_values = Vec::new();
-        // E.7 (REQ-AXO-238): typed `ChunkRow` accumulator — replaces the
-        // legacy `Vec<String>` of pre-rendered SQL tuples. SQL emit moves
-        // to `WriteAccumulator::render_chunks_duckdb()` so a single
-        // renderer drives both the synchronous queries-Vec path and any
-        // future async dispatcher path. Format is bit-equivalent (parity
-        // gated by `render_chunks_duckdb_matches_legacy_producer_format`).
+        // E.7 (REQ-AXO-238): typed `SymbolRow` and `ChunkRow` accumulators
+        // — replace the legacy `Vec<String>` of pre-rendered SQL tuples.
+        // SQL emit moves to `WriteAccumulator::render_symbols_*()` and
+        // `render_chunks_*()` so a single renderer drives the synchronous
+        // queries-Vec path (DuckDB / PG branched). Format is bit-
+        // equivalent to the legacy producer (parity gated by
+        // `render_symbols_*_matches_legacy_producer_format` and the
+        // chunks parity tests).
+        let mut symbol_rows: Vec<self::async_writer::SymbolRow> = Vec::new();
         let mut chunk_rows: Vec<self::async_writer::ChunkRow> = Vec::new();
         // DEC-AXO-071 H.2: when inline mode is enabled, capture chunk
         // metadata so we can embed inline immediately after the chunk
@@ -603,35 +605,23 @@ impl GraphStore {
                                 "project_code": project_code,
                             }),
                         ));
-                        let embedding_sql = match sym.embedding.as_ref() {
-                            Some(v) if backend_is_pg => {
-                                match crate::postgres::vector::vector_literal(v) {
-                                    Ok(lit) => lit,
-                                    Err(e) => {
-                                        log::warn!(
-                                            "skipping Symbol embedding inline for {} under PG: {}",
-                                            symbol_id,
-                                            e
-                                        );
-                                        "NULL".to_string()
-                                    }
-                                }
-                            }
-                            Some(v) => format!("CAST({:?} AS FLOAT[{DIMENSION}])", v),
-                            None => "NULL".to_string(),
-                        };
-                        symbol_values.push(format!(
-                            "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
-                            Self::escape_sql(&symbol_id),
-                            Self::escape_sql(&sym.name),
-                            sym.kind,
-                            sym.tested,
-                            sym.is_public,
-                            sym.is_nif,
-                            sym.is_unsafe,
-                            Self::escape_sql(project_code),
-                            embedding_sql
-                        ));
+                        // E.7: push typed SymbolRow. Backend-specific
+                        // embedding literal formatting moves to the
+                        // renderer (`render_symbols_pg` /
+                        // `render_symbols_duckdb`) — both call sites
+                        // mirror the legacy CAST / vector_literal
+                        // branches with byte parity.
+                        symbol_rows.push(self::async_writer::SymbolRow {
+                            symbol_id: symbol_id.clone(),
+                            name: sym.name.clone(),
+                            kind: sym.kind.clone(),
+                            tested: sym.tested,
+                            is_public: sym.is_public,
+                            is_nif: sym.is_nif,
+                            is_unsafe: sym.is_unsafe,
+                            project_code: project_code.to_string(),
+                            embedding: sym.embedding.clone(),
+                        });
 
                         contains_triples.push((
                             path.clone(),
@@ -922,17 +912,25 @@ impl GraphStore {
         calls_triples.dedup();
         calls_nif_triples.sort_unstable();
         calls_nif_triples.dedup();
-        for chunk in symbol_values.chunks(500) {
-            queries.push(format!(
-                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;",
-                chunk.join(",")
-            ));
-        }
-        // E.7 (REQ-AXO-238): render typed `ChunkRow`s via the async-
-        // writer accumulator. The renderer chunks at 500 rows internally
-        // and emits the same INSERT…ON CONFLICT SQL the legacy producer
-        // produced byte-for-byte (parity gated by
+        // E.7 (REQ-AXO-238): render typed Symbol/Chunk rows via the
+        // async-writer accumulator. Backend-aware: under PG the renderer
+        // emits pgvector array literals for the embedding column; under
+        // DuckDB it emits CAST(...) AS FLOAT[N] literals. Both renderers
+        // chunk at 500 rows internally and produce SQL byte-equivalent
+        // to the legacy producer (parity gated by
+        // `render_symbols_*_matches_legacy_producer_format` +
         // `render_chunks_duckdb_matches_legacy_producer_format`).
+        if !symbol_rows.is_empty() {
+            let mut symbol_acc = self::async_writer::WriteAccumulator::new();
+            symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(std::mem::take(
+                &mut symbol_rows,
+            )));
+            if backend_is_pg {
+                queries.extend(symbol_acc.render_symbols_pg());
+            } else {
+                queries.extend(symbol_acc.render_symbols_duckdb());
+            }
+        }
         if !chunk_rows.is_empty() {
             let mut chunk_acc = self::async_writer::WriteAccumulator::new();
             chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(

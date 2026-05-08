@@ -203,6 +203,61 @@ impl WriteAccumulator {
         render_relations_replace("CALLS_NIF", &self.calls_nif, 200)
     }
 
+    /// Render accumulated `SymbolRow`s for the PostgreSQL backend. The
+    /// non-embedding tuple shape matches the DuckDB renderer; only the
+    /// embedding-column literal differs:
+    ///   - `None`             -> `NULL`
+    ///   - `Some(v)` valid    -> `pgvector::vector_literal(v)`
+    ///                          (yields `'[0.1,0.2,...]'`)
+    ///   - `Some(v)` invalid  -> `NULL` + warn (mirrors the legacy
+    ///                          producer's behavior at
+    ///                          graph_ingestion.rs:600-612)
+    pub fn render_symbols_pg(&self) -> Vec<String> {
+        if self.symbols.is_empty() {
+            return Vec::new();
+        }
+        use super::sql_helpers::escape_sql_text;
+        let mut queries = Vec::with_capacity(self.symbols.len() / 500 + 1);
+        for batch in self.symbols.chunks(500) {
+            let values: Vec<String> = batch
+                .iter()
+                .map(|s| {
+                    let embedding_sql = match s.embedding.as_ref() {
+                        Some(v) => match crate::postgres::vector::vector_literal(v) {
+                            Ok(lit) => lit,
+                            Err(e) => {
+                                log::warn!(
+                                    "skipping Symbol embedding inline for {} under PG (typed render): {}",
+                                    s.symbol_id,
+                                    e
+                                );
+                                "NULL".to_string()
+                            }
+                        },
+                        None => "NULL".to_string(),
+                    };
+                    format!(
+                        "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
+                        escape_sql_text(&s.symbol_id),
+                        escape_sql_text(&s.name),
+                        s.kind,
+                        s.tested,
+                        s.is_public,
+                        s.is_nif,
+                        s.is_unsafe,
+                        escape_sql_text(&s.project_code),
+                        embedding_sql,
+                    )
+                })
+                .collect();
+            queries.push(format!(
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;",
+                values.join(",")
+            ));
+        }
+        queries
+    }
+
     /// Render accumulated `SymbolRow`s into INSERT…ON CONFLICT
     /// statements chunked at 500 rows per query. Format matches
     /// `graph_ingestion.rs:617-628 + 920-923` byte-for-byte under the
@@ -833,6 +888,86 @@ mod tests {
         assert!(rendered[5].starts_with("DELETE FROM CALLS_NIF"));
         assert!(rendered[6].starts_with("INSERT INTO CALLS_NIF"));
         assert!(rendered[7].starts_with("UPDATE File"));
+    }
+
+    #[test]
+    fn render_symbols_pg_emits_vector_literal_when_dimension_matches() {
+        // PG renderer uses pgvector::vector_literal which requires
+        // exactly DIMENSION components. With a full-dimension vector,
+        // the rendered literal should be a quoted array '[v1,v2,...]'.
+        use crate::embedding_contract::DIMENSION;
+        let mut acc = WriteAccumulator::new();
+        let full_embed: Vec<f32> = (0..DIMENSION).map(|i| (i as f32) * 0.001).collect();
+        acc.absorb(WriteDiff::Symbols(vec![SymbolRow {
+            symbol_id: "AXO::path::sym".to_string(),
+            name: "alpha".to_string(),
+            kind: "function".to_string(),
+            tested: false,
+            is_public: false,
+            is_nif: false,
+            is_unsafe: false,
+            project_code: "AXO".to_string(),
+            embedding: Some(full_embed),
+        }]));
+        let rendered = acc.render_symbols_pg();
+        assert_eq!(rendered.len(), 1);
+        let q = &rendered[0];
+        // Same INSERT shape as DuckDB renderer.
+        assert!(q.starts_with("INSERT INTO Symbol"));
+        assert!(q.contains("ON CONFLICT(id) DO UPDATE"));
+        // PG embedding literal is the pgvector text format: quoted
+        // bracket-delimited array. Not the DuckDB CAST(...) form.
+        assert!(
+            q.contains("'[0.0000000,"),
+            "expected pgvector array literal, got: {}",
+            &q[..q.len().min(400)]
+        );
+        assert!(
+            !q.contains("CAST(") && !q.contains("FLOAT[1024]"),
+            "PG renderer must not emit DuckDB-style CAST/FLOAT[N]"
+        );
+    }
+
+    #[test]
+    fn render_symbols_pg_falls_back_to_null_on_wrong_dimension() {
+        // pgvector::vector_literal rejects mismatched dimensions. The
+        // renderer must mirror the legacy producer's warn-and-skip
+        // behavior (graph_ingestion.rs:603-611) by emitting NULL.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Symbols(vec![SymbolRow {
+            symbol_id: "AXO::path::wrong_dim".to_string(),
+            name: "alpha".to_string(),
+            kind: "function".to_string(),
+            tested: false,
+            is_public: false,
+            is_nif: false,
+            is_unsafe: false,
+            project_code: "AXO".to_string(),
+            // Wrong dimension on purpose (not 1024).
+            embedding: Some(vec![0.1_f32, 0.2_f32, 0.3_f32]),
+        }]));
+        let rendered = acc.render_symbols_pg();
+        assert_eq!(rendered.len(), 1);
+        assert!(
+            rendered[0].contains(", NULL)"),
+            "wrong-dim embedding should fall back to NULL: {}",
+            rendered[0]
+        );
+    }
+
+    #[test]
+    fn render_symbols_pg_none_embedding_emits_null() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Symbols(vec![sample_symbol("s1")]));
+        let rendered = acc.render_symbols_pg();
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains(", NULL)"));
+    }
+
+    #[test]
+    fn render_symbols_pg_empty_returns_empty() {
+        let acc = WriteAccumulator::new();
+        assert!(acc.render_symbols_pg().is_empty());
     }
 
     #[test]
