@@ -525,6 +525,13 @@ impl GraphStore {
         // stores FLOAT[1024]. Captured once per call to avoid the
         // is_postgres_backend probe per-symbol.
         let backend_is_pg = self.is_postgres_backend();
+        // MIL-AXO-015 B.2 vertex enrichment: dual-write Symbol / File
+        // vertex properties to AGE so future readers (B.3) can MATCH
+        // by name / kind / is_nif / project_code. Same lockstep as the
+        // relation edges — populated alongside the SQL writes and
+        // emitted post-execute_batch under PG + age_dual_write flag.
+        let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vectorization_paths = Vec::new();
         let mut vectorizable_paths = std::collections::HashSet::new();
 
@@ -564,11 +571,32 @@ impl GraphStore {
                         skipped_paths.push(format!("'{}'", Self::escape_sql(path)));
                         continue;
                     };
+                    // B.2 vertex enrichment: capture the File vertex
+                    // properties for later AGE dual-write. One row per
+                    // unique path; AGE MERGE deduplicates internally.
+                    file_vertices.push((
+                        path.clone(),
+                        serde_json::json!({"project_code": project_code}),
+                    ));
                     for sym in &extraction.symbols {
                         let symbol_id = Self::symbol_id(project_code, path, &sym.name);
                         if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
                             continue; // Prevent UNIQUE constraint violation in DuckDB ON CONFLICT batches
                         }
+                        // B.2 vertex enrichment: capture Symbol vertex
+                        // properties for later AGE dual-write. Mirrors
+                        // the SQL Symbol row's searchable columns.
+                        symbol_vertices.push((
+                            symbol_id.clone(),
+                            serde_json::json!({
+                                "name": sym.name,
+                                "kind": sym.kind,
+                                "is_public": sym.is_public,
+                                "is_nif": sym.is_nif,
+                                "is_unsafe": sym.is_unsafe,
+                                "project_code": project_code,
+                            }),
+                        ));
                         let embedding_sql = match sym.embedding.as_ref() {
                             Some(v) if backend_is_pg => {
                                 match crate::postgres::vector::vector_literal(v) {
@@ -971,6 +999,12 @@ impl GraphStore {
         // same typed triples that fed the SQL INSERTs are reused here
         // so the two graphs stay in lockstep without re-parsing SQL.
         if self.is_postgres_backend() && age_dual_write_enabled() {
+            // Vertex enrichment first so subsequent edge MERGEs hit
+            // already-populated vertices (idempotent either way, but
+            // a populated vertex carries `name`/`kind`/`project_code`
+            // ready for B.3 readers).
+            self.dual_write_vertices_age("File", "path", &file_vertices);
+            self.dual_write_vertices_age("Symbol", "id", &symbol_vertices);
             self.dual_write_relation_edges_age(
                 "File",
                 "path",
@@ -2043,6 +2077,52 @@ impl GraphStore {
             }
         }
         Ok(())
+    }
+
+    /// MIL-AXO-015 option B.2 batch dual-write: emit one Cypher MERGE
+    /// per typed (id, props) pair into the `axon_graph` AGE graph,
+    /// enriching the SQL writes' vertex shape with searchable
+    /// properties (name / kind / is_nif / project_code …) so future
+    /// readers (B.3) can MATCH on them. Each MERGE runs independently
+    /// — failures log at warn level and do not abort the SQL path.
+    /// Empty `vertices` is a no-op.
+    fn dual_write_vertices_age(
+        &self,
+        label: &str,
+        id_property: &str,
+        vertices: &[(String, serde_json::Value)],
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
+        let cyphers = match crate::postgres::age::cypher_merge_vertices_batch(
+            "axon_graph",
+            label,
+            id_property,
+            vertices,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "AGE dual-write skipped for {} vertex batch ({} entries): {}",
+                    label,
+                    vertices.len(),
+                    e
+                );
+                return;
+            }
+        };
+        for (i, sql) in cyphers.iter().enumerate() {
+            if let Err(e) = self.execute(sql) {
+                let id_value = &vertices[i].0;
+                log::warn!(
+                    "AGE dual-write {} vertex failed (SQL succeeded) {}: {}",
+                    label,
+                    id_value,
+                    e
+                );
+            }
+        }
     }
 
     /// MIL-AXO-015 option B.2 batch dual-write: emit one Cypher MERGE

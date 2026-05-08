@@ -243,6 +243,32 @@ pub fn cypher_merge_edges_batch(
     Ok(out)
 }
 
+/// Batch helper for option B.2 vertex enrichment: emit one Cypher
+/// MERGE statement per (id, props) pair so the AGE graph carries
+/// the same searchable fields as the SQL `Symbol` / `File` tables
+/// (name, kind, is_nif, project_code …). Vertices with the same id
+/// are deduplicated by AGE itself via the MERGE semantics; the
+/// helper does not pre-dedup.
+///
+/// Empty `vertices` returns `Ok(vec![])`. Identifier validation
+/// errors propagate from `cypher_merge_vertex`.
+pub fn cypher_merge_vertices_batch(
+    graph: &str,
+    label: &str,
+    id_property: &str,
+    vertices: &[(String, serde_json::Value)],
+) -> Result<Vec<String>> {
+    if vertices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(vertices.len());
+    for (id_value, props) in vertices {
+        let sql = cypher_merge_vertex(graph, label, id_property, id_value, props)?;
+        out.push(sql);
+    }
+    Ok(out)
+}
+
 /// Compose a SQL query that wraps a read-side Cypher MATCH. The
 /// caller passes the Cypher RETURN column names (in order) so the
 /// AS clause receives the right `(name agtype, …)` declarations.
@@ -493,6 +519,34 @@ mod tests {
             assert!(sql.contains("MERGE (a)-[r:CONTAINS]->(b)"));
             assert!(sql.contains("project_code: \"AXO\""));
         }
+    }
+
+    #[test]
+    fn merge_vertices_batch_empty_returns_empty_vec() {
+        let out = cypher_merge_vertices_batch("axon_graph", "Symbol", "id", &[]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_vertices_batch_emits_one_merge_per_vertex() {
+        let vertices = vec![
+            (
+                "AXO::main".to_string(),
+                serde_json::json!({"name": "main", "kind": "fn", "project_code": "AXO"}),
+            ),
+            (
+                "AXO::lib".to_string(),
+                serde_json::json!({"name": "lib", "kind": "mod", "project_code": "AXO"}),
+            ),
+        ];
+        let out =
+            cypher_merge_vertices_batch("axon_graph", "Symbol", "id", &vertices).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("MERGE (n:Symbol {id: \"AXO::main\"})"));
+        assert!(out[0].contains("name: \"main\""));
+        assert!(out[0].contains("kind: \"fn\""));
+        assert!(out[1].contains("MERGE (n:Symbol {id: \"AXO::lib\"})"));
+        assert!(out[1].contains("name: \"lib\""));
     }
 
     #[test]
