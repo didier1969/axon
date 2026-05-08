@@ -2033,6 +2033,51 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
 }
 
 #[test]
+fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
+    // REQ-AXO-245: archived Requirements are explicitly closed and must not
+    // appear in the "Requirements without criteria/evidence" list, otherwise
+    // operators are forced to backfill criteria on already-closed work and the
+    // violation count cannot reach zero by curation alone.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-900', 'Requirement', 'AXO', 'Active uncovered', 'No criteria', 'draft', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-901', 'Requirement', 'AXO', 'Closed and archived', 'No criteria, but archived', 'archived', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_validate",
+            "arguments": { "project_code": "AXO" }
+        })),
+        id: Some(json!(3245)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        content.contains("Requirements without criteria/evidence"),
+        "{content}"
+    );
+    assert!(content.contains("REQ-AXO-900"), "{content}");
+    assert!(
+        !content.contains("REQ-AXO-901"),
+        "archived requirement leaked into uncovered list: {content}"
+    );
+}
+
+#[test]
 fn test_axon_validate_soll_can_scope_by_project_code() {
     let server = create_test_server();
     server

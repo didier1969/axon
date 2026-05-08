@@ -136,6 +136,7 @@ impl McpServer {
         let orphan_requirements = self.query_single_column(&format!(
             "SELECT id FROM soll.Node r
              WHERE type = 'Requirement'
+               AND COALESCE(r.status, '') <> 'archived'
                AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
                {}
              ORDER BY id",
@@ -166,6 +167,7 @@ impl McpServer {
                ON lower(t.soll_entity_type) = lower(r.type)
               AND t.soll_entity_id = r.id
              WHERE r.type = 'Requirement'
+               AND COALESCE(r.status, '') <> 'archived'
                {}
              GROUP BY r.id, r.status, r.metadata
              HAVING COUNT(t.id) = 0
