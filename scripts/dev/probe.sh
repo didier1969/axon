@@ -137,18 +137,30 @@ while :; do
     T=$((NOW - START))
     [[ "$T" -ge "$DURATION" ]] && break
 
-    # Heartbeat extract via python3 for robustness against missing keys
+    # Heartbeat extract via python3 for robustness against missing keys.
+    # REQ-AXO-184 #3 / REQ-AXO-185 #3: provider column reads embedder_provider.effective
+    # from the heartbeat (top-level object) and surfaces "<requested>->fallback:<effective>"
+    # when the worker silently fell back from the requested provider, instead of "unknown".
     HB="$(python3 -c '
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
     rtt = d.get("runtime_telemetry", {})
+    embedder = d.get("embedder_provider") or {}
+    requested = embedder.get("requested")
+    effective = embedder.get("effective")
+    if effective is None:
+        provider = "unknown"
+    elif requested and requested != effective:
+        provider = f"{requested}->fallback:{effective}"
+    else:
+        provider = effective
     print(",".join([
         str(rtt.get("vector_chunks_embedded_total", 0)),
         str(rtt.get("chunk_embeddings_per_second", 0)),
         str(rtt.get("ready_queue_chunks_current", 0)),
         str(rtt.get("claim_mode", "unknown")),
-        str(rtt.get("embedding_provider_effective", "unknown")),
+        provider,
     ]))
 except Exception:
     print("0,0,0,err,err")
