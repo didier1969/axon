@@ -167,24 +167,64 @@ impl GraphStore {
         evaluation_window_start_ms: i64,
         evaluation_window_end_ms: i64,
     ) -> Result<()> {
-        self.execute(&format!(
-            "INSERT OR REPLACE INTO OptimizerDecisionLog (decision_id, at_ms, mode, host_snapshot_json, policy_snapshot_json, signal_snapshot_json, analytics_snapshot_json, action_profile_id, decision_json, constraints_triggered_json, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms) \
-             VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {});",
-            Self::escape_sql(decision_id),
-            at_ms,
-            Self::escape_sql(mode),
-            Self::escape_sql(host_snapshot_json),
-            Self::escape_sql(policy_snapshot_json),
-            Self::escape_sql(signal_snapshot_json),
-            Self::escape_sql(analytics_snapshot_json),
-            Self::escape_sql(action_profile_id),
-            Self::escape_sql(decision_json),
-            Self::escape_sql(constraints_triggered_json),
-            if would_apply { "TRUE" } else { "FALSE" },
-            if applied { "TRUE" } else { "FALSE" },
-            evaluation_window_start_ms,
-            evaluation_window_end_ms
-        ))
+        // MIL-AXO-015 P4 4e: PG branches `INSERT OR REPLACE` to
+        // `INSERT ... ON CONFLICT DO UPDATE` and routes the write to
+        // `axon_runtime.OptimizerDecisionLog` (unqualified table name
+        // is DuckDB-only since PG enforces schema resolution).
+        let sql = if self.is_postgres_backend() {
+            format!(
+                "INSERT INTO axon_runtime.OptimizerDecisionLog (decision_id, at_ms, mode, host_snapshot_json, policy_snapshot_json, signal_snapshot_json, analytics_snapshot_json, action_profile_id, decision_json, constraints_triggered_json, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms) \
+                 VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}) \
+                 ON CONFLICT (decision_id) DO UPDATE SET \
+                    at_ms = EXCLUDED.at_ms, \
+                    mode = EXCLUDED.mode, \
+                    host_snapshot_json = EXCLUDED.host_snapshot_json, \
+                    policy_snapshot_json = EXCLUDED.policy_snapshot_json, \
+                    signal_snapshot_json = EXCLUDED.signal_snapshot_json, \
+                    analytics_snapshot_json = EXCLUDED.analytics_snapshot_json, \
+                    action_profile_id = EXCLUDED.action_profile_id, \
+                    decision_json = EXCLUDED.decision_json, \
+                    constraints_triggered_json = EXCLUDED.constraints_triggered_json, \
+                    would_apply = EXCLUDED.would_apply, \
+                    applied = EXCLUDED.applied, \
+                    evaluation_window_start_ms = EXCLUDED.evaluation_window_start_ms, \
+                    evaluation_window_end_ms = EXCLUDED.evaluation_window_end_ms",
+                Self::escape_sql(decision_id),
+                at_ms,
+                Self::escape_sql(mode),
+                Self::escape_sql(host_snapshot_json),
+                Self::escape_sql(policy_snapshot_json),
+                Self::escape_sql(signal_snapshot_json),
+                Self::escape_sql(analytics_snapshot_json),
+                Self::escape_sql(action_profile_id),
+                Self::escape_sql(decision_json),
+                Self::escape_sql(constraints_triggered_json),
+                if would_apply { "TRUE" } else { "FALSE" },
+                if applied { "TRUE" } else { "FALSE" },
+                evaluation_window_start_ms,
+                evaluation_window_end_ms
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO OptimizerDecisionLog (decision_id, at_ms, mode, host_snapshot_json, policy_snapshot_json, signal_snapshot_json, analytics_snapshot_json, action_profile_id, decision_json, constraints_triggered_json, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms) \
+                 VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {});",
+                Self::escape_sql(decision_id),
+                at_ms,
+                Self::escape_sql(mode),
+                Self::escape_sql(host_snapshot_json),
+                Self::escape_sql(policy_snapshot_json),
+                Self::escape_sql(signal_snapshot_json),
+                Self::escape_sql(analytics_snapshot_json),
+                Self::escape_sql(action_profile_id),
+                Self::escape_sql(decision_json),
+                Self::escape_sql(constraints_triggered_json),
+                if would_apply { "TRUE" } else { "FALSE" },
+                if applied { "TRUE" } else { "FALSE" },
+                evaluation_window_start_ms,
+                evaluation_window_end_ms
+            )
+        };
+        self.execute(&sql)
     }
 
     pub fn log_reward_observation(
