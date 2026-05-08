@@ -90,60 +90,66 @@ pub fn parse_vector_text(text: &str) -> Result<Vec<f32>, VectorError> {
 }
 
 /// Build the upsert statement that vector_worker_loop will issue
-/// per-chunk under the PostgreSQL backend. Schema-qualified with the
-/// caller's per-project namespace (CPT-AXO-039); the rest of the row
-/// is inlined as quoted strings since pg_execute does not bind
-/// parameters.
+/// per-chunk under the PostgreSQL backend. The rest of the row is
+/// inlined as quoted strings since pg_execute does not bind parameters.
 ///
-/// `chunk_id`, `model_id`, `source_hash` are caller-provided strings —
-/// the function escapes single quotes before composing the SQL. None
-/// of the IDs in Axon contain SQL terminators today, but the escape
-/// keeps the helper safe against future format drift.
+/// Post-CPT-AXO-039 supersedure (2026-05-08): targets `public.ChunkEmbedding`
+/// with a `project_code` row column scoping the entry, instead of a
+/// per-project schema. Multi-project queries become a simple
+/// `WHERE project_code IN (...)` filter rather than UNION ALL.
+///
+/// `chunk_id`, `model_id`, `project_code`, `source_hash` are
+/// caller-provided strings — the function escapes single quotes before
+/// composing the SQL. None of the IDs in Axon contain SQL terminators
+/// today, but the escape keeps the helper safe against future format
+/// drift.
 pub fn upsert_chunk_embedding_sql(
-    schema: &str,
     chunk_id: &str,
     model_id: &str,
+    project_code: &str,
     source_hash: &str,
     embedding: &[f32],
     embedded_at_ms: i64,
 ) -> Result<String, VectorError> {
     let vec_lit = vector_literal(embedding)?;
     Ok(format!(
-        "INSERT INTO {schema}.ChunkEmbedding (chunk_id, model_id, source_hash, embedding, embedded_at_ms) \
-         VALUES ('{}', '{}', '{}', {}, {}) \
+        "INSERT INTO public.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+         VALUES ('{}', '{}', '{}', '{}', {}, {}) \
          ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+         project_code = EXCLUDED.project_code, \
          source_hash = EXCLUDED.source_hash, \
          embedding = EXCLUDED.embedding, \
          embedded_at_ms = EXCLUDED.embedded_at_ms",
         sql_escape(chunk_id),
         sql_escape(model_id),
+        sql_escape(project_code),
         sql_escape(source_hash),
         vec_lit,
         embedded_at_ms,
     ))
 }
 
-/// Build a HNSW-backed cosine similarity ANN query. Returns the top-k
-/// chunk_ids ordered by ascending cosine distance for a given model.
-/// `query` is the embedding to search against.
+/// Build a HNSW-backed cosine similarity ANN query body for the
+/// post-CPT-AXO-039 multi-project layout. Returns the
+/// `FROM public.ChunkEmbedding WHERE ... ORDER BY ... LIMIT ...`
+/// segment scoped to a single project.
 ///
 /// Caller composes the SELECT projection — typically `chunk_id` plus
-/// optional joins — and passes the WHERE / ORDER BY / LIMIT segment
-/// produced here. We expose only the distance-and-order body to keep
-/// the helper composable with project-specific projections.
+/// optional joins — and prepends it to the segment returned here.
 pub fn cosine_ann_where_order_limit(
-    schema: &str,
     model_id: &str,
+    project_code: &str,
     query: &[f32],
     limit: usize,
 ) -> Result<String, VectorError> {
     let vec_lit = vector_literal(query)?;
     Ok(format!(
-        "FROM {schema}.ChunkEmbedding \
-         WHERE model_id = '{}' \
+        "FROM public.ChunkEmbedding \
+         WHERE model_id = '{}' AND project_code = '{}' \
          ORDER BY embedding <=> {} \
          LIMIT {}",
         sql_escape(model_id),
+        sql_escape(project_code),
         vec_lit,
         limit,
     ))
@@ -260,35 +266,43 @@ mod tests {
     }
 
     #[test]
-    fn upsert_sql_includes_on_conflict_and_schema() {
+    fn upsert_sql_includes_on_conflict_and_project_code() {
         let v = sample_vector(0.25);
-        let sql =
-            upsert_chunk_embedding_sql("axo", "chunk-x", "code-1024", "hash-abc", &v, 1714999999000)
-                .unwrap();
-        assert!(sql.contains("INSERT INTO axo.ChunkEmbedding"));
+        let sql = upsert_chunk_embedding_sql(
+            "chunk-x",
+            "code-1024",
+            "AXO",
+            "hash-abc",
+            &v,
+            1714999999000,
+        )
+        .unwrap();
+        assert!(sql.contains("INSERT INTO public.ChunkEmbedding"));
         assert!(sql.contains("ON CONFLICT (chunk_id, model_id) DO UPDATE"));
         assert!(sql.contains("'chunk-x'"));
         assert!(sql.contains("'code-1024'"));
+        assert!(sql.contains("'AXO'"));
         assert!(sql.contains("'hash-abc'"));
         assert!(sql.contains("1714999999000"));
         assert!(sql.contains(&format!("::vector({DIMENSION})")));
+        assert!(sql.contains("project_code = EXCLUDED.project_code"));
     }
 
     #[test]
     fn upsert_sql_escapes_single_quotes_in_ids() {
         let v = sample_vector(0.0);
         let sql =
-            upsert_chunk_embedding_sql("axo", "id'with'quotes", "m", "h", &v, 0).unwrap();
+            upsert_chunk_embedding_sql("id'with'quotes", "m", "AXO", "h", &v, 0).unwrap();
         // The escaped sequence appears (single quotes doubled).
         assert!(sql.contains("'id''with''quotes'"));
     }
 
     #[test]
-    fn cosine_query_uses_pgvector_distance_operator() {
+    fn cosine_query_uses_pgvector_distance_operator_and_project_filter() {
         let v = sample_vector(1.0);
-        let body = cosine_ann_where_order_limit("axo", "code-1024", &v, 10).unwrap();
-        assert!(body.contains("FROM axo.ChunkEmbedding"));
-        assert!(body.contains("WHERE model_id = 'code-1024'"));
+        let body = cosine_ann_where_order_limit("code-1024", "AXO", &v, 10).unwrap();
+        assert!(body.contains("FROM public.ChunkEmbedding"));
+        assert!(body.contains("WHERE model_id = 'code-1024' AND project_code = 'AXO'"));
         assert!(body.contains("<=>"));
         assert!(body.ends_with("LIMIT 10"));
     }

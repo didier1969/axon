@@ -1857,6 +1857,11 @@ impl GraphStore {
         // the worker, which is already the indexer's natural batching
         // boundary.
         if self.is_postgres_backend() {
+            // MIL-AXO-015 P4 4c (post-CPT-AXO-039 supersedure): every
+            // chunk row carries `project_code` so we infer it from the
+            // chunk_id prefix and inline it into the upsert statement.
+            // Multi-project batches are handled per-project upstream by
+            // the indexer's natural batching boundary.
             let project_code = updates
                 .first()
                 .and_then(|(chunk_id, _, _)| chunk_id.split('-').next())
@@ -1864,15 +1869,14 @@ impl GraphStore {
                 .ok_or_else(|| anyhow!(
                     "update_chunk_embeddings under PG cannot infer project_code \
                      from empty/malformed chunk_id"
-                ))?;
-            let schema = crate::postgres::ddl::schema_name_for(project_code)
-                .map_err(|e| anyhow!("invalid project_code '{}': {}", project_code, e))?;
+                ))?
+                .to_string();
             let mut queries = Vec::with_capacity(updates.len());
             for (chunk_id, source_hash, vector) in updates {
                 let sql = crate::postgres::vector::upsert_chunk_embedding_sql(
-                    &schema,
                     chunk_id,
                     model_id,
+                    &project_code,
                     source_hash,
                     vector,
                     now_ms,

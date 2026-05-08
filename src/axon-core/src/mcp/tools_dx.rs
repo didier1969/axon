@@ -151,48 +151,27 @@ impl McpServer {
             return None;
         }
 
-        // MIL-AXO-015 P6: under PG every IST table lives in `<project>.X`
-        // (CPT-AXO-039). Schema-qualify the File queries; the project_code
-        // filter is redundant under that schema namespace.
-        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
-            crate::postgres::ddl::schema_name_for(project).ok()
-        } else {
-            None
-        };
-        let file_ref = pg_schema
-            .as_ref()
-            .map(|s| format!("{s}.File"))
-            .unwrap_or_else(|| "File".to_string());
-        let project_filter = if pg_schema.is_some() {
-            String::new()
-        } else {
-            " WHERE project_code = $project".to_string()
-        };
-        let project_and = if pg_schema.is_some() {
-            "WHERE".to_string()
-        } else {
-            "WHERE project_code = $project AND".to_string()
-        };
-
+        // Post-CPT-AXO-039 supersedure (2026-05-08): IST tables are
+        // multi-project under both backends — same SQL on PG and DuckDB.
         let params = json!({ "project": project });
         let total_files = self
             .graph_store
             .query_count_param(
-                &format!("SELECT count(*) FROM {file_ref}{project_filter}"),
+                "SELECT count(*) FROM File WHERE project_code = $project",
                 &params,
             )
             .unwrap_or(0);
         let pending_files = self
             .graph_store
             .query_count_param(
-                &format!("SELECT count(*) FROM {file_ref} {project_and} status = 'pending'"),
+                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'pending'",
                 &params,
             )
             .unwrap_or(0);
         let indexing_files = self
             .graph_store
             .query_count_param(
-                &format!("SELECT count(*) FROM {file_ref} {project_and} status = 'indexing'"),
+                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'indexing'",
                 &params,
             )
             .unwrap_or(0);
@@ -202,14 +181,12 @@ impl McpServer {
         let reasons_res = self
             .graph_store
             .query_json_param(
-                &format!(
-                    "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-                     FROM {file_ref} \
-                     {project_and} status IN ('pending', 'indexing') \
-                     GROUP BY 1 \
-                     ORDER BY count(*) DESC, 1 ASC \
-                     LIMIT 3"
-                ),
+                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+                 FROM File \
+                 WHERE project_code = $project AND status IN ('pending', 'indexing') \
+                 GROUP BY 1 \
+                 ORDER BY count(*) DESC, 1 ASC \
+                 LIMIT 3",
                 &params,
             )
             .unwrap_or_else(|_| "[]".to_string());
@@ -266,64 +243,28 @@ impl McpServer {
     }
 
     pub(crate) fn degraded_file_count(&self, project: Option<&str>) -> i64 {
-        // MIL-AXO-015 P6: under PG, project=None can't span schemas in a
-        // single query (UNION ALL across all schemas lands in P9).
-        // Return 0 to keep the truth-note suppressed rather than emitting
-        // an error; callers always pair this with a project_code path
-        // via `axon_init_project` or auto-resolve.
-        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
-            project.and_then(|p| crate::postgres::ddl::schema_name_for(p).ok())
-        } else {
-            None
-        };
-        let (query, params) = if let Some(schema) = pg_schema.as_ref() {
-            (
-                format!(
-                    "SELECT count(*) FROM {schema}.File WHERE status = 'indexed_degraded'"
-                ),
-                json!({}),
-            )
-        } else if self.graph_store.is_postgres_backend() {
-            return 0;
-        } else if let Some(project) = project {
+        // Post-CPT-AXO-039 supersedure (2026-05-08): same SQL on PG and
+        // DuckDB — multi-project tables filter via `project_code` row
+        // column, not a per-project schema namespace.
+        let (query, params) = if let Some(project) = project {
             (
                 "SELECT count(*) FROM File \
-                 WHERE project_code = $project AND status = 'indexed_degraded'"
-                    .to_string(),
+                 WHERE project_code = $project AND status = 'indexed_degraded'",
                 json!({ "project": project }),
             )
         } else {
             (
-                "SELECT count(*) FROM File WHERE status = 'indexed_degraded'".to_string(),
+                "SELECT count(*) FROM File WHERE status = 'indexed_degraded'",
                 json!({}),
             )
         };
         self.graph_store
-            .query_count_param(&query, &params)
+            .query_count_param(query, &params)
             .unwrap_or(0)
     }
 
     pub(crate) fn degraded_symbol_count(&self, symbol: &str, project: Option<&str>) -> i64 {
-        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
-            project.and_then(|p| crate::postgres::ddl::schema_name_for(p).ok())
-        } else {
-            None
-        };
-        let (query, params) = if let Some(schema) = pg_schema.as_ref() {
-            (
-                format!(
-                    "SELECT count(*) \
-                     FROM {schema}.File f \
-                     JOIN {schema}.CONTAINS c ON c.source_id = f.path \
-                     JOIN {schema}.Symbol s ON s.id = c.target_id \
-                     WHERE (s.name = $sym OR s.id = $sym) \
-                       AND f.status = 'indexed_degraded'"
-                ),
-                json!({ "sym": symbol }),
-            )
-        } else if self.graph_store.is_postgres_backend() {
-            return 0;
-        } else if let Some(project) = project {
+        let (query, params) = if let Some(project) = project {
             (
                 "SELECT count(*) \
                  FROM File f \
@@ -331,8 +272,7 @@ impl McpServer {
                  JOIN Symbol s ON s.id = c.target_id \
                  WHERE (s.name = $sym OR s.id = $sym) \
                    AND s.project_code = $project \
-                   AND f.status = 'indexed_degraded'"
-                    .to_string(),
+                   AND f.status = 'indexed_degraded'",
                 json!({ "sym": symbol, "project": project }),
             )
         } else {
@@ -342,13 +282,12 @@ impl McpServer {
                  JOIN CONTAINS c ON c.source_id = f.path \
                  JOIN Symbol s ON s.id = c.target_id \
                  WHERE (s.name = $sym OR s.id = $sym) \
-                   AND f.status = 'indexed_degraded'"
-                    .to_string(),
+                   AND f.status = 'indexed_degraded'",
                 json!({ "sym": symbol }),
             )
         };
         self.graph_store
-            .query_count_param(&query, &params)
+            .query_count_param(query, &params)
             .unwrap_or(0)
     }
 
@@ -664,88 +603,79 @@ impl McpServer {
             10
         };
 
-        // MIL-AXO-015 P6: under PG every IST table lives in
-        // `<project_code>.X` (CPT-AXO-039); `f.project_code` filters become
-        // schema selection. Cross-project Symbol search (`project="*"`)
-        // requires UNION ALL across schemas — deferred to P9.
-        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() && project != "*" {
-            crate::postgres::ddl::schema_name_for(project).ok()
-        } else {
-            None
-        };
+        // Post-CPT-AXO-039 supersedure (2026-05-08): IST tables are
+        // multi-project under both backends. Only the cosine-distance
+        // expression differs between PG and DuckDB — same table layout,
+        // same project_code filter clauses.
+        let is_pg = self.graph_store.is_postgres_backend();
 
         let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
-            if let Some(schema) = pg_schema.as_ref() {
+            // Build the cosine-distance expression in the right dialect.
+            let cosine_expr = if is_pg {
                 match crate::postgres::vector::vector_literal(&emb) {
-                    Ok(vec_lit) => {
-                        let cosine_expr = format!("(s.embedding <=> {vec_lit})");
-                        (
-                            format!(
-                                "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
-                                 FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
-                                 WHERE ({}) \
-                                    OR {cosine_expr} < 0.5 \
-                                 ORDER BY score ASC LIMIT {}",
-                                base_predicate, query_limit
-                            ),
-                            Self::build_symbol_search_params(query_text, project),
-                        )
-                    }
-                    Err(_) => {
-                        // Lexical-only fallback when embedding can't be
-                        // rendered as a pgvector literal (rare: dimension
-                        // mismatch from a stale model).
-                        (
-                            format!(
-                                "SELECT s.name, s.kind, f.path AS uri \
-                                 FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
-                                 WHERE ({}) LIMIT {}",
-                                base_predicate, query_limit
-                            ),
-                            Self::build_symbol_search_params(query_text, project),
-                        )
-                    }
+                    Ok(vec_lit) => Some(format!("(s.embedding <=> {vec_lit})")),
+                    Err(_) => None, // fall through to lexical-only
                 }
             } else {
                 let vec_str = format!("{:?}", emb);
+                Some(format!(
+                    "array_cosine_distance(s.embedding, {vec_str}::FLOAT[{DIMENSION}])"
+                ))
+            };
+
+            if let Some(cosine_expr) = cosine_expr.as_ref() {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
+                            "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
                              FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
                              WHERE {} \
-                                OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
+                                OR {cosine_expr} < 0.5 \
                              ORDER BY score ASC LIMIT {}",
-                            vec_str, base_predicate, vec_str, query_limit
+                            base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
+                            "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
                              FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
                              WHERE f.project_code = $proj AND ( {} \
-                                OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
+                                OR {cosine_expr} < 0.5 \
                              ) \
                              ORDER BY score ASC LIMIT {}",
-                            vec_str, base_predicate, vec_str, query_limit
+                            base_predicate, query_limit
+                        ),
+                        Self::build_symbol_search_params(query_text, project),
+                    )
+                }
+            } else {
+                // Lexical-only fallback (PG dimension mismatch from a
+                // stale model — extremely rare).
+                if project == "*" {
+                    (
+                        format!(
+                            "SELECT s.name, s.kind, f.path AS uri \
+                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                             WHERE {} LIMIT {}",
+                            base_predicate, query_limit
+                        ),
+                        Self::build_symbol_search_params(query_text, project),
+                    )
+                } else {
+                    (
+                        format!(
+                            "SELECT s.name, s.kind, f.path AS uri \
+                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                             WHERE f.project_code = $proj AND ( {} ) LIMIT {}",
+                            base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
                 }
             }
-        } else if let Some(schema) = pg_schema.as_ref() {
-            (
-                format!(
-                    "SELECT s.name, s.kind, f.path AS uri \
-                     FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
-                     WHERE ({}) LIMIT {}",
-                    base_predicate, query_limit
-                ),
-                Self::build_symbol_search_params(query_text, project),
-            )
         } else if project == "*" {
             (
                 format!(
@@ -902,52 +832,9 @@ impl McpServer {
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
-        // MIL-AXO-015 P6: under PG every IST table lives in `<project_code>.X`
-        // (CPT-AXO-039). Cross-project chunk search requires UNION ALL across
-        // schemas — deferred to P9.
-        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() && project != "*" {
-            crate::postgres::ddl::schema_name_for(project).ok()
-        } else {
-            None
-        };
-        let sql = if let Some(schema) = pg_schema.as_ref() {
-            format!(
-                "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, f.path AS uri, \
-                           CASE \
-                               WHEN {docstring_match} THEN 'docstring' \
-                               WHEN {body_match} THEN 'chunk body' \
-                               WHEN {path_match} THEN 'file path' \
-                               ELSE 'chunk metadata' \
-                           END AS match_reason, \
-                           CASE \
-                               WHEN {docstring_match} THEN 0 \
-                               WHEN {body_match} THEN 1 \
-                               WHEN {path_match} THEN 3 \
-                               ELSE 2 \
-                           END AS match_rank, \
-                           CASE \
-                               WHEN {path_match} THEN f.path \
-                               ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
-                           END AS evidence \
-                    FROM {schema}.Chunk c \
-                    JOIN {schema}.Symbol s ON s.id = c.source_id \
-                    JOIN {schema}.CONTAINS rel ON rel.target_id = s.id \
-                    JOIN {schema}.File f ON f.path = rel.source_id \
-                    WHERE ({predicate}) \
-                 ) \
-                 SELECT name, kind, uri, match_reason, evidence \
-                 FROM chunk_matches \
-                 ORDER BY match_rank ASC, uri ASC, name ASC \
-                 LIMIT {limit}",
-                schema = schema,
-                docstring_match = docstring_match,
-                body_match = body_match,
-                path_match = path_match,
-                predicate = predicate,
-                limit = if query_intent == QueryIntent::ConfigLookupExact { 25 } else { 10 },
-            )
-        } else if project == "*" {
+        // Post-CPT-AXO-039 supersedure (2026-05-08): same SQL on PG and
+        // DuckDB — multi-project tables, project_code as row column.
+        let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
                     SELECT s.name, s.kind, f.path AS uri, \

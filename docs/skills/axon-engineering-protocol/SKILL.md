@@ -33,9 +33,9 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 ## Tool routing
 | Task | Tool |
 |---|---|
-| Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 P6), Symbol semantic search, chunk-fallback search, and project-scope/degraded-file truth notes emit schema-qualified queries when a single project is supplied; pgvector `<=>` cosine distance powers Symbol semantic ANN; `project="*"` (or `project=None`) cross-schema search lands in P9 |
+| Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 / CPT-AXO-039 superseded by CPT-AXO-043 multi-project tables, 2026-05-08), the Symbol/Chunk/File queries are SQL-shape identical to the DuckDB path with `project_code` as a row-level filter; only the cosine-distance dialect differs (pgvector `<=>` vs DuckDB `array_cosine_distance`) |
 | Inspect detail (callers/callees survive synthetic target_id format via name-suffix join, REQ-AXO-134) | `inspect` |
-| Evidence packet | `retrieve_context` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 P4 slice 4d), semantic ANN reads ChunkEmbedding via pgvector `<=>` cosine distance against the per-project schema (CPT-AXO-039); pass `project` for the search to resolve a schema (cross-project semantic search lands in P9). Under DuckDB the existing DEC-AXO-073 L.3 `AXON_PARQUET_EMBEDDING_STORE_ENABLED` Parquet path is preserved. |
+| Evidence packet | `retrieve_context` — post-CPT-AXO-039 supersedure (CPT-AXO-043, 2026-05-08), semantic ANN runs against the multi-project `public.ChunkEmbedding` table with `project_code` as a row-level filter on both backends. Under PG the cosine-distance expression uses pgvector's `<=>` operator + `'[..]'::vector(N)` literal; under DuckDB the legacy `array_cosine_distance(... CAST(... AS FLOAT[N]))` form remains. |
 | Blast radius | `impact` |
 | Why it exists | `why` |
 | Source-sink flow | `path` |

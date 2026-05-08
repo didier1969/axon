@@ -97,33 +97,36 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("query_count on pg_extension should succeed under PG");
     assert_eq!(age_count, 1, "AGE extension should be installed");
 
-    // MIL-AXO-015 P3 slice 3f + P4 slice 4b: full per-project schema
-    // round-trip. The combined AGE+pgvector test image lets every
-    // statement apply cleanly, including vector(1024) tables and the
-    // HNSW index.
+    // Post-CPT-AXO-039 supersedure (2026-05-08) + option B: every IST
+    // table lives in `public` (provisioned by bootstrap_global_pg_schema)
+    // and AGE elabels are pre-declared for the writer migration. We
+    // verify the multi-project File table is readable, then round-trip
+    // a ChunkEmbedding via the project_code-aware upsert helper.
+    let public_files_count = store
+        .query_count("SELECT count(*)::BIGINT FROM public.File")
+        .expect("query against multi-project File table should succeed");
+    assert_eq!(public_files_count, 0);
+
+    // generate_project_schema is still exposed for API stability but
+    // emits zero DDL post-supersedure.
     let project_stmts = axon_core::postgres::ddl::generate_project_schema("TST")
         .expect("generate_project_schema('TST') should succeed");
-    for stmt in &project_stmts {
-        store
-            .execute(stmt)
-            .unwrap_or_else(|e| panic!("project schema stmt failed: {stmt}\n{e:?}"));
-    }
-    let project_files_count = store
-        .query_count("SELECT count(*)::BIGINT FROM tst.File")
-        .expect("query against per-project File table should succeed");
-    assert_eq!(project_files_count, 0);
+    assert!(
+        project_stmts.is_empty(),
+        "generate_project_schema must be a no-op post-CPT-AXO-039 supersedure"
+    );
 
-    // P4 slice 4b: round-trip a single ChunkEmbedding via the upsert
-    // helper from `crate::postgres::vector`. Validates pgvector text
+    // P4 slice 4c (refactored): round-trip a single ChunkEmbedding via
+    // the project_code-aware upsert helper. Validates pgvector text
     // serialisation + the HNSW-backed table accepts the row.
     use axon_core::postgres::vector::{upsert_chunk_embedding_sql, vector_literal};
     let mut sample = vec![0.0_f32; axon_core::embedding_contract::DIMENSION];
     sample[0] = 0.42;
     sample[1] = -0.13;
     let upsert = upsert_chunk_embedding_sql(
-        "tst",
         "chunk-x",
         "code-1024",
+        "TST",
         "hash-abc",
         &sample,
         1714999999000,
@@ -133,8 +136,10 @@ fn graphstore_boots_under_postgres_backend() {
         .execute(&upsert)
         .expect("pgvector upsert should succeed against combined image");
     let count = store
-        .query_count("SELECT count(*)::BIGINT FROM tst.ChunkEmbedding")
-        .expect("count ChunkEmbedding");
+        .query_count(
+            "SELECT count(*)::BIGINT FROM public.ChunkEmbedding WHERE project_code = 'TST'",
+        )
+        .expect("count ChunkEmbedding scoped by project_code");
     assert_eq!(count, 1, "upsert should land exactly one row");
     // Idempotence: re-issuing the same upsert under ON CONFLICT keeps
     // the row count at 1.
@@ -142,11 +147,34 @@ fn graphstore_boots_under_postgres_backend() {
         .execute(&upsert)
         .expect("pgvector upsert idempotent");
     let count_after_replay = store
-        .query_count("SELECT count(*)::BIGINT FROM tst.ChunkEmbedding")
+        .query_count(
+            "SELECT count(*)::BIGINT FROM public.ChunkEmbedding WHERE project_code = 'TST'",
+        )
         .expect("count after replay");
     assert_eq!(count_after_replay, 1);
     // Sanity: vector_literal parses back via the same helper.
     let _ = vector_literal(&sample).expect("literal builds for round-trip");
+
+    // Option B: AGE labels (vlabel + elabel) are declared by
+    // bootstrap_global_pg_schema for the writer migration that follows.
+    // Verify each label exists in ag_catalog so the migration plan has
+    // a stable foundation.
+    let graph_count = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM ag_catalog.ag_graph WHERE name = 'axon_graph'",
+        )
+        .expect("ag_catalog.ag_graph readable");
+    assert_eq!(graph_count, 1, "axon_graph must exist after bootstrap");
+    for label in ["File", "Symbol", "Chunk", "CONTAINS", "CALLS", "CALLS_NIF", "IMPACTS", "SUBSTANTIATES"] {
+        let label_count = store
+            .query_count(&format!(
+                "SELECT count(*)::BIGINT FROM ag_catalog.ag_label l \
+                 JOIN ag_catalog.ag_graph g ON g.graphid = l.graph \
+                 WHERE g.name = 'axon_graph' AND l.name = '{label}'"
+            ))
+            .unwrap_or_else(|e| panic!("ag_label query for '{label}': {e:?}"));
+        assert_eq!(label_count, 1, "AGE label '{label}' must be declared");
+    }
 
     // MIL-AXO-015 P5: seed loader round-trip. Apply a synthetic
     // SeedDocument with one node, one edge, one registry row, and one
