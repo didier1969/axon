@@ -324,9 +324,15 @@ impl McpServer {
         } else {
             String::new()
         };
+        // AGE doesn't support edge-label alternation `[r:CALLS|CALLS_NIF]`
+        // (verified via syntax error against pg17/age 1.6.0). Two
+        // MATCH clauses joined by UNION cover the same shape.
         let cypher = format!(
-            "MATCH (src:Symbol)-[r:CALLS|CALLS_NIF]->(dst:Symbol) {where_clause} \
-             RETURN src.id, src.name, dst.id, dst.name, type(r)"
+            "MATCH (src:Symbol)-[r:CALLS]->(dst:Symbol) {where_clause} \
+             RETURN src.id, src.name, dst.id, dst.name, 'CALLS' AS edge_type \
+             UNION \
+             MATCH (src:Symbol)-[r:CALLS_NIF]->(dst:Symbol) {where_clause} \
+             RETURN src.id, src.name, dst.id, dst.name, 'CALLS_NIF' AS edge_type"
         );
         let sql = match crate::postgres::age::cypher_query(
             "axon_graph",

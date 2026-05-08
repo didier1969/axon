@@ -832,18 +832,22 @@ impl McpServer {
             );
             return None;
         }
+        // AGE list comprehension `[n IN nodes(p) | n.id]` is not
+        // supported on pg17/age 1.6.0 — return raw nodes and parse
+        // the id property in Rust via
+        // parse_agtype_vertex_list_property.
         let cypher = format!(
             "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol), \
                    path = (s1)-[:CALLS*1..5]->(s2:Symbol), \
                    (s2)<-[:CONTAINS]-(f2:File) \
              WHERE f1.path CONTAINS \"{source_layer}\" AND f2.path CONTAINS \"{target_layer}\" \
-             RETURN [n IN nodes(path) | n.id] AS path_ids \
+             RETURN nodes(path) AS path_nodes \
              LIMIT 20"
         );
         let sql = match crate::postgres::age::cypher_query(
             "axon_graph",
             &cypher,
-            &["path_ids"],
+            &["path_nodes"],
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -874,7 +878,9 @@ impl McpServer {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            let ids = crate::postgres::age::parse_agtype_string_list(&raw_list)?;
+            let ids = crate::postgres::age::parse_agtype_vertex_list_property(
+                &raw_list, "id",
+            )?;
             let path_str = ids.join(" -> ");
             formatted_rows.push(vec![serde_json::Value::String(path_str)]);
         }

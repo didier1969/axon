@@ -41,33 +41,14 @@
 use anyhow::{anyhow, Result};
 
 /// Parse an agtype list-of-strings rendered by `pg_query_json` for
-/// readers that project paths as `[n IN nodes(p) | n.id]` or similar.
-/// AGE serialises lists as JSON arrays in the agtype text form; the
-/// pg_query_json layer surfaces each column verbatim. This helper
-/// accepts both the canonical JSON form (`["a", "b"]`) and the
-/// `agtype::path[N]`-suffixed form returned by some AGE versions
-/// (we strip the suffix before parsing). Quoted entries have their
-/// surrounding `"` stripped so callers don't double-unwrap.
-///
-/// Errors propagate as `None` so the caller can fall back to SQL
-/// instead of misinterpreting an unexpected agtype shape.
+/// readers that project simple string lists. Accepts the canonical
+/// JSON form (`["a", "b"]`) and forms with a trailing `::ident`
+/// suffix that some AGE versions append (e.g. `::path`, `::list`).
+/// Returns `None` on any unexpected shape so the caller can fall
+/// back to SQL instead of misinterpreting the result.
 pub fn parse_agtype_string_list(raw: &str) -> Option<Vec<String>> {
     let trimmed = raw.trim();
-    // AGE may suffix lists with `::path` / `::list`; strip a trailing
-    // ::ident segment if present.
-    let cleaned = if let Some(idx) = trimmed.rfind("::") {
-        let suffix = &trimmed[idx + 2..];
-        if suffix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            &trimmed[..idx]
-        } else {
-            trimmed
-        }
-    } else {
-        trimmed
-    };
+    let cleaned = strip_trailing_type_suffix(trimmed);
     let parsed: serde_json::Value = serde_json::from_str(cleaned).ok()?;
     let arr = parsed.as_array()?;
     let mut out = Vec::with_capacity(arr.len());
@@ -76,6 +57,78 @@ pub fn parse_agtype_string_list(raw: &str) -> Option<Vec<String>> {
         out.push(s.to_string());
     }
     Some(out)
+}
+
+/// Parse an agtype list-of-vertices and extract one property from
+/// each. AGE returns vertex lists from `nodes(path)` as
+/// `[{"id":<int>, "label":<str>, "properties":{…}}::vertex, …]`.
+/// We strip every `::vertex` (and other `::ident`) suffix, parse the
+/// cleaned JSON, and for each element pull `properties.<prop>` as a
+/// string. Returns `None` on unexpected shape so callers fall back
+/// to SQL.
+pub fn parse_agtype_vertex_list_property(raw: &str, prop: &str) -> Option<Vec<String>> {
+    let cleaned = strip_agtype_value_suffixes(raw.trim());
+    let parsed: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+    let arr = parsed.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let value = item
+            .get("properties")
+            .and_then(|p| p.get(prop))
+            .and_then(|v| v.as_str())?;
+        out.push(value.to_string());
+    }
+    Some(out)
+}
+
+/// Remove a trailing `::ident` suffix from an agtype scalar/list
+/// rendering (e.g. `"x"::string`, `["a","b"]::path`). No-op if the
+/// suffix is absent or the segment after `::` contains non-ident
+/// characters.
+fn strip_trailing_type_suffix(s: &str) -> &str {
+    if let Some(idx) = s.rfind("::") {
+        let suffix = &s[idx + 2..];
+        if !suffix.is_empty()
+            && suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return &s[..idx];
+        }
+    }
+    s
+}
+
+/// Strip every embedded `::ident` suffix that AGE injects into the
+/// JSON rendering of compound values. Used by
+/// `parse_agtype_vertex_list_property` to clean the
+/// `[{...}::vertex, {...}::vertex]` shape into parseable JSON.
+fn strip_agtype_value_suffixes(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        // Skip ::ident segments that appear after a `}` or `]` or `"`
+        // (i.e. directly after a JSON value's closing token).
+        if c == ':' && chars.peek() == Some(&':') {
+            // Peek the previous emitted char to decide if this is a
+            // type suffix or a normal substring (e.g. `AXO::main` in a
+            // string value, which would already be JSON-quoted and
+            // shouldn't reach this branch).
+            if matches!(out.chars().last(), Some('}') | Some(']') | Some('"')) {
+                chars.next(); // consume second ':'
+                while let Some(&peek) = chars.peek() {
+                    if peek.is_ascii_alphanumeric() || peek == '_' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Read-once env knob that gates the option B.3 AGE reader transition.
@@ -604,6 +657,48 @@ mod tests {
     fn parse_agtype_string_list_rejects_garbage() {
         assert!(parse_agtype_string_list("garbage").is_none());
         assert!(parse_agtype_string_list("").is_none());
+    }
+
+    #[test]
+    fn parse_agtype_vertex_list_property_extracts_name() {
+        // Real AGE output from `RETURN nodes(path)` (validated against
+        // axon-test/age-pgvector:pg17 container 2026-05-08).
+        let raw = r#"[{"id": 844424930131969, "label": "Symbol", "properties": {"id": "AXO::main", "kind": "fn", "name": "main", "is_nif": false, "project_code": "AXO"}}::vertex, {"id": 844424930131970, "label": "Symbol", "properties": {"id": "AXO::lib", "kind": "mod", "name": "lib", "is_nif": false, "project_code": "AXO"}}::vertex, {"id": 844424930131969, "label": "Symbol", "properties": {"id": "AXO::main", "kind": "fn", "name": "main", "is_nif": false, "project_code": "AXO"}}::vertex]"#;
+        let names = parse_agtype_vertex_list_property(raw, "name").unwrap();
+        assert_eq!(names, vec!["main", "lib", "main"]);
+    }
+
+    #[test]
+    fn parse_agtype_vertex_list_property_extracts_id() {
+        let raw = r#"[{"id": 1, "label": "Symbol", "properties": {"id": "AXO::a"}}::vertex, {"id": 2, "label": "Symbol", "properties": {"id": "AXO::b"}}::vertex]"#;
+        let ids = parse_agtype_vertex_list_property(raw, "id").unwrap();
+        assert_eq!(ids, vec!["AXO::a", "AXO::b"]);
+    }
+
+    #[test]
+    fn parse_agtype_vertex_list_property_missing_field_returns_none() {
+        let raw = r#"[{"id": 1, "label": "Symbol", "properties": {"id": "AXO::a"}}::vertex]"#;
+        assert!(parse_agtype_vertex_list_property(raw, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn parse_agtype_vertex_list_property_empty_array() {
+        let out = parse_agtype_vertex_list_property("[]", "name").unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn strip_agtype_value_suffixes_removes_vertex_markers() {
+        let cleaned = strip_agtype_value_suffixes(r#"[{"x":1}::vertex, {"y":2}::vertex]"#);
+        assert_eq!(cleaned, r#"[{"x":1}, {"y":2}]"#);
+    }
+
+    #[test]
+    fn strip_agtype_value_suffixes_preserves_string_double_colons() {
+        // Double-colon inside a JSON string literal must NOT be
+        // stripped (e.g. our symbol_id format `AXO::main`).
+        let cleaned = strip_agtype_value_suffixes(r#"{"id": "AXO::main"}::vertex"#);
+        assert_eq!(cleaned, r#"{"id": "AXO::main"}"#);
     }
 
     #[test]

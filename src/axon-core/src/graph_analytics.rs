@@ -832,15 +832,20 @@ impl GraphStore {
             }
             format!(" WHERE s.project_code = \"{project}\"")
         };
+        // AGE doesn't support `[n IN nodes(path) | n.name]` list
+        // comprehension reliably (errors with "could not find
+        // properties for n" against pg17/age 1.6.0). Return the raw
+        // vertex list and extract the name property in Rust via
+        // parse_agtype_vertex_list_property.
         let cypher = format!(
             "MATCH path = (s:Symbol)-[:CALLS*1..10]->(s){project_filter} \
-             RETURN [n IN nodes(path) | n.name] AS path_names \
+             RETURN nodes(path) AS path_nodes \
              LIMIT 50"
         );
         let sql = match crate::postgres::age::cypher_query(
             "axon_graph",
             &cypher,
-            &["path_names"],
+            &["path_nodes"],
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -866,7 +871,9 @@ impl GraphStore {
                 serde_json::Value::String(s) => s,
                 other => other.to_string(),
             };
-            let names = crate::postgres::age::parse_agtype_string_list(&raw_list)?;
+            let names = crate::postgres::age::parse_agtype_vertex_list_property(
+                &raw_list, "name",
+            )?;
             // SQL form closes the cycle by appending the source name
             // after the cycle path: `'a -> b -> c -> a'`. Cypher's
             // `nodes(path)` already includes the start node twice (it
