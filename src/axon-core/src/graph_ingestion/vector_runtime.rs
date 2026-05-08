@@ -11,6 +11,18 @@ use super::{
 };
 
 impl GraphStore {
+    /// Schema-qualify an `axon_runtime` table under the PG backend.
+    /// Returns the unqualified name under DuckDB. Used by every reader/
+    /// writer hot path that touches the indexer-runtime layer
+    /// (MIL-AXO-015 P4 4e + axon_runtime DDL).
+    fn axon_runtime_table_ref(&self, table: &'static str) -> String {
+        if self.is_postgres_backend() {
+            format!("axon_runtime.{table}")
+        } else {
+            table.to_string()
+        }
+    }
+
     pub fn record_vector_batch_run(&self, run: &VectorBatchRun) -> Result<()> {
         if let Err(error) = benchmark_store::mirror_vector_batch_run(self.db_path.as_deref(), run) {
             log::warn!(
@@ -135,12 +147,7 @@ impl GraphStore {
     }
 
     pub fn latest_vector_worker_fault(&self, lane: &str) -> Result<Option<VectorWorkerFault>> {
-        // MIL-AXO-015 P4 4e: under PG the runtime tables live in axon_runtime.
-        let table_ref = if self.is_postgres_backend() {
-            "axon_runtime.VectorWorkerFault"
-        } else {
-            "VectorWorkerFault"
-        };
+        let table_ref = self.axon_runtime_table_ref("VectorWorkerFault");
         let raw = self.query_json_writer(&format!(
             "SELECT fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt \
              FROM {table_ref} \
@@ -201,11 +208,7 @@ impl GraphStore {
     }
 
     pub fn vector_lane_state_record(&self, lane: &str) -> Result<Option<VectorLaneStateRecord>> {
-        let table_ref = if self.is_postgres_backend() {
-            "axon_runtime.VectorLaneState"
-        } else {
-            "VectorLaneState"
-        };
+        let table_ref = self.axon_runtime_table_ref("VectorLaneState");
         let raw = self.query_json_writer(&format!(
             "SELECT lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id \
              FROM {table_ref} \
@@ -392,8 +395,9 @@ impl GraphStore {
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let claim_token = next_vector_persist_outbox_claim_token(now_ms);
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
         self.execute(&format!(
-            "UPDATE VectorPersistOutbox \
+            "UPDATE {outbox_ref} \
              SET status = 'inflight', \
                  attempts = attempts + 1, \
                  claimed_at_ms = {}, \
@@ -402,7 +406,7 @@ impl GraphStore {
                  claim_token = '{}', \
                  last_error_reason = NULL \
              WHERE outbox_id IN ( \
-                 SELECT outbox_id FROM VectorPersistOutbox \
+                 SELECT outbox_id FROM {outbox_ref} \
                  WHERE status = 'queued' \
                  ORDER BY queued_at_ms, outbox_id \
                  LIMIT {} \
@@ -415,7 +419,7 @@ impl GraphStore {
 
         let raw = self.query_json_writer(&format!(
             "SELECT outbox_id, payload_json \
-             FROM VectorPersistOutbox \
+             FROM {outbox_ref} \
              WHERE claim_token = '{}' \
              ORDER BY queued_at_ms, outbox_id",
             Self::escape_sql(&claim_token)
@@ -437,12 +441,13 @@ impl GraphStore {
     }
 
     pub fn fetch_vector_persist_outbox_counts(&self) -> Result<(usize, usize)> {
-        let queued = self.query_count_writer(
-            "SELECT count(*) FROM VectorPersistOutbox WHERE status = 'queued'",
-        )?;
-        let inflight = self.query_count_writer(
-            "SELECT count(*) FROM VectorPersistOutbox WHERE status = 'inflight'",
-        )?;
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
+        let queued = self.query_count_writer(&format!(
+            "SELECT count(*) FROM {outbox_ref} WHERE status = 'queued'"
+        ))?;
+        let inflight = self.query_count_writer(&format!(
+            "SELECT count(*) FROM {outbox_ref} WHERE status = 'inflight'"
+        ))?;
         Ok((
             usize::try_from(queued).unwrap_or(0),
             usize::try_from(inflight).unwrap_or(0),
@@ -459,8 +464,9 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(" OR ");
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
         let refreshed = usize::try_from(self.query_count_writer(&format!(
-            "SELECT count(*) FROM VectorPersistOutbox \
+            "SELECT count(*) FROM {outbox_ref} \
              WHERE status = 'inflight' \
                AND COALESCE(lease_owner, '') = 'outbox' \
                AND ({})",
@@ -471,7 +477,7 @@ impl GraphStore {
             return Ok(0);
         }
         self.execute(&format!(
-            "UPDATE VectorPersistOutbox \
+            "UPDATE {outbox_ref} \
              SET claimed_at_ms = {}, \
                  lease_heartbeat_at_ms = {} \
              WHERE status = 'inflight' \
@@ -483,15 +489,17 @@ impl GraphStore {
     }
 
     pub fn mark_vector_persist_outbox_done(&self, outbox_id: &str) -> Result<()> {
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
         self.execute(&format!(
-            "DELETE FROM VectorPersistOutbox WHERE outbox_id = '{}'",
+            "DELETE FROM {outbox_ref} WHERE outbox_id = '{}'",
             Self::escape_sql(outbox_id)
         ))
     }
 
     pub fn mark_vector_persist_outbox_failed(&self, outbox_id: &str, reason: &str) -> Result<()> {
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
         self.execute(&format!(
-            "UPDATE VectorPersistOutbox \
+            "UPDATE {outbox_ref} \
              SET status = 'queued', \
                  last_error_reason = '{}', \
                  claim_token = NULL, \
@@ -510,8 +518,9 @@ impl GraphStore {
         &self,
         stale_before_ms: i64,
     ) -> Result<usize> {
+        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
         let recovered = usize::try_from(self.query_count(&format!(
-            "SELECT count(*) FROM VectorPersistOutbox \
+            "SELECT count(*) FROM {outbox_ref} \
              WHERE status = 'inflight' \
                AND COALESCE(lease_heartbeat_at_ms, 0) > 0 \
                AND COALESCE(lease_heartbeat_at_ms, 0) < {}",
@@ -522,7 +531,7 @@ impl GraphStore {
             return Ok(0);
         }
         self.execute(&format!(
-            "UPDATE VectorPersistOutbox \
+            "UPDATE {outbox_ref} \
              SET status = 'queued', \
                  claim_token = NULL, \
                  claimed_at_ms = NULL, \
