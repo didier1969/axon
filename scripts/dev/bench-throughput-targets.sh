@@ -2,6 +2,19 @@
 # REQ-AXO-221 / REQ-AXO-222 — Throughput target benchmark with env-var
 # opt-ins isolated and cumulative.
 #
+# ⚠️ Scope vs existing campaign infra:
+# - `scripts/benchmark-vector-token-matrix.sh` + `scripts/benchmark_vector_campaign.py`
+#   already exist and run an exhaustive matrix sweeping `AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS`,
+#   `AXON_EMBED_MICRO_BATCH_MAX_ITEMS`, `AXON_MAX_EMBED_BATCH_BYTES`,
+#   `AXON_OPT_MAX_VRAM_USED_MB` etc. Use that for parameter EXPLORATION.
+# - This script is purpose-built for the REQ-AXO-221 acceptance test:
+#   prove that the 4 priority env-vars from the expert report
+#   collectively reach the operator target (120 ch/s) without code
+#   refactor. It overlaps with the campaign on `AXON_MAX_EMBED_BATCH_BYTES`
+#   (1/5 vars) but adds CHUNK_BATCH_SIZE, CUDA_ALLOW_TF32,
+#   VECTOR_PERSIST_QUEUE_BOUND, PARQUET_EMBEDDING_STORE — none of which
+#   the campaign sweeps. Use this for the SPECIFIC acceptance test.
+#
 # Builds on `probe.sh` to sweep the 4 priority env-vars from the
 # 2026-05-08 expert report (`docs/working-notes/2026-05-08-expert-report-embedding-performance.md`):
 #   - AXON_CHUNK_BATCH_SIZE        (16 → 64, P2)
