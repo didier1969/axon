@@ -6,7 +6,9 @@ use std::{fs, path::PathBuf};
 
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
-use axon_core::embedder::current_embedding_provider_diagnostics;
+use axon_core::embedder::{
+    current_embedding_provider_diagnostics, embedder_provider_fallback_reason,
+};
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
@@ -118,6 +120,23 @@ fn write_runtime_heartbeat_export(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown-runtime".to_string());
     let embedder_provider = current_embedding_provider_diagnostics();
+    // REQ-AXO-184 #4 / REQ-AXO-185 #2: surface silent embedder fallback in
+    // heartbeat's degraded_reason so operators see "embedder_provider_fallback"
+    // within one tick instead of after a full probe window.
+    let embedder_fallback_reason = embedder_provider_fallback_reason(
+        &embedder_provider.provider_requested,
+        &embedder_provider.provider_effective,
+        embedder_provider.provider_init_error.as_deref(),
+    );
+    let merged_degraded_reason = match (
+        runtime_truth_feed.degraded_reason.as_deref(),
+        embedder_fallback_reason.as_deref(),
+    ) {
+        (Some(existing), Some(fb)) => Some(format!("{}; {}", existing, fb)),
+        (None, Some(fb)) => Some(fb.to_string()),
+        (Some(existing), None) => Some(existing.to_string()),
+        (None, None) => None,
+    };
     let payload = serde_json::json!({
         "process_role": process_role,
         "runtime_mode": runtime_mode.as_str(),
@@ -130,7 +149,7 @@ fn write_runtime_heartbeat_export(
         "observed_age_ms": runtime_truth_feed.observed_age_ms,
         "stale_after_ms": runtime_truth_feed.stale_after_ms,
         "stale": runtime_truth_feed.stale,
-        "degraded_reason": runtime_truth_feed.degraded_reason,
+        "degraded_reason": merged_degraded_reason,
         "runtime_truth_feed": runtime_truth_feed,
         "embedder_provider": {
             "requested": embedder_provider.provider_requested,

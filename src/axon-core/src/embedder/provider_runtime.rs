@@ -163,3 +163,91 @@ pub(crate) fn provider_resolution_for_label(
     }
     resolution
 }
+
+/// REQ-AXO-184 #4 / REQ-AXO-185 #2: detect a silent fallback from a requested
+/// GPU provider (cuda or tensorrt) to a non-matching effective provider so the
+/// heartbeat can surface it as a `degraded_reason` within one tick instead of
+/// after a full probe window. Returns `None` when the requested provider is
+/// CPU (no fallback expected) or when requested == effective.
+pub fn embedder_provider_fallback_reason(
+    provider_requested: &str,
+    provider_effective: &str,
+    provider_init_error: Option<&str>,
+) -> Option<String> {
+    let requested = provider_requested.trim().to_ascii_lowercase();
+    let effective = provider_effective.trim().to_ascii_lowercase();
+    let gpu_requested = requested == "cuda" || requested == "tensorrt";
+    if !gpu_requested {
+        return None;
+    }
+    if effective == requested {
+        return None;
+    }
+    let init_error = provider_init_error
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let detail = match init_error {
+        Some(err) => format!(
+            "embedder_provider_fallback: requested={} effective={} init_error={}",
+            requested, effective, err
+        ),
+        None => format!(
+            "embedder_provider_fallback: requested={} effective={}",
+            requested, effective
+        ),
+    };
+    Some(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embedder_provider_fallback_reason;
+
+    #[test]
+    fn fallback_reason_cuda_to_cpu_with_init_error_includes_error_detail() {
+        let reason = embedder_provider_fallback_reason("cuda", "cpu", Some("no_gpu_visible"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("embedder_provider_fallback: requested=cuda effective=cpu init_error=no_gpu_visible"),
+        );
+    }
+
+    #[test]
+    fn fallback_reason_tensorrt_to_cpu_without_init_error_omits_error_detail() {
+        let reason = embedder_provider_fallback_reason("tensorrt", "cpu", None);
+        assert_eq!(
+            reason.as_deref(),
+            Some("embedder_provider_fallback: requested=tensorrt effective=cpu"),
+        );
+    }
+
+    #[test]
+    fn fallback_reason_returns_none_when_requested_matches_effective() {
+        assert!(embedder_provider_fallback_reason("tensorrt", "tensorrt", None).is_none());
+        assert!(embedder_provider_fallback_reason("cuda", "cuda", Some("ignored")).is_none());
+    }
+
+    #[test]
+    fn fallback_reason_returns_none_when_cpu_was_requested() {
+        assert!(embedder_provider_fallback_reason("cpu", "cpu", None).is_none());
+        assert!(embedder_provider_fallback_reason("cpu", "cpu_missing_cuda_provider", None).is_none());
+    }
+
+    #[test]
+    fn fallback_reason_treats_empty_init_error_as_absent() {
+        let reason = embedder_provider_fallback_reason("cuda", "cpu", Some("   "));
+        assert_eq!(
+            reason.as_deref(),
+            Some("embedder_provider_fallback: requested=cuda effective=cpu"),
+        );
+    }
+
+    #[test]
+    fn fallback_reason_is_case_insensitive_on_provider_labels() {
+        let reason = embedder_provider_fallback_reason("CUDA", "CPU", None);
+        assert_eq!(
+            reason.as_deref(),
+            Some("embedder_provider_fallback: requested=cuda effective=cpu"),
+        );
+    }
+}

@@ -117,8 +117,8 @@ use provider_runtime::{
     set_embedding_provider_runtime_state,
 };
 pub use provider_runtime::{
-    current_embedding_provider_diagnostics, embedding_provider_diagnostics,
-    EmbeddingProviderDiagnostics,
+    current_embedding_provider_diagnostics, embedder_provider_fallback_reason,
+    embedding_provider_diagnostics, EmbeddingProviderDiagnostics,
 };
 use vector_executor::VectorEmbeddingBackend;
 
