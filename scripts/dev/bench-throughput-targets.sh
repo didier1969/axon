@@ -81,12 +81,19 @@ run_cell() {
     "$PROBE" --scope "$SCOPE" --duration "$DURATION" --fresh \
              --tag "throughput-$label" 2>&1 | tail -8
 
-    # Extract last chunks_per_sec from probe CSV
+    # Extract steady-state chunks_per_sec from probe CSV.
+    # CSV columns: ts, vector_chunks_total, inflight, queued, gp_queued,
+    #              delta_chunks, delta_seconds, chunks_per_sec
+    # Strategy: skip warmup zeros, average non-zero chunks_per_sec
+    # across all post-warmup samples for noise reduction.
     local csv
     csv=$(ls -t dev-probe-throughput-${label}-*.csv 2>/dev/null | head -1)
     local chps="0"
     if [[ -n "$csv" ]] && [[ -f "$csv" ]]; then
-        chps=$(awk -F',' 'NR>1 && $4!="" {v=$4} END{print v}' "$csv")
+        chps=$(awk -F',' '
+            NR>1 && $8!="" && $8>0 { sum += $8; n += 1 }
+            END { if (n > 0) printf "%.2f", sum / n; else print "0" }
+        ' "$csv")
     fi
     chps="${chps:-0}"
 
