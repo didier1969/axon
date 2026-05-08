@@ -723,6 +723,57 @@ impl McpServer {
         let source_layer = args.get("source_layer")?.as_str()?;
         let target_layer = args.get("target_layer")?.as_str()?;
 
+        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, run the
+        // layer-to-layer drift detection via AGE Cypher's variable-
+        // length path. Falls back to SQL on empty / error so existing
+        // PG installs without dual-write keep working.
+        let raw = if self.graph_store.is_postgres_backend()
+            && crate::postgres::age::age_read_enabled()
+        {
+            self.architectural_drift_via_age(source_layer, target_layer)
+                .unwrap_or_else(|| {
+                    self.architectural_drift_via_sql(source_layer, target_layer)
+                        .unwrap_or_else(|| "[]".to_string())
+                })
+        } else {
+            self.architectural_drift_via_sql(source_layer, target_layer)
+                .unwrap_or_else(|| "[]".to_string())
+        };
+
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let report = if !rows.is_empty() {
+            let paths_str = rows
+                .into_iter()
+                .filter_map(|r| {
+                    r.into_iter()
+                        .next()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                })
+                .map(|s| format!("* {}", s))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "⚠️ **ARCHITECTURE VIOLATION DETECTED**\n\nLayer '{}' calls directly or indirectly '{}':\n\n{}",
+                source_layer, target_layer, paths_str
+            )
+        } else {
+            format!(
+                "✅ No architectural drift detected between '{}' and '{}'.",
+                source_layer, target_layer
+            )
+        };
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    /// MIL-AXO-015 B.3: legacy SQL implementation of architectural
+    /// drift, factored out for the AGE-vs-SQL fallback chain. Returns
+    /// raw query_json string on success, `None` on error so the caller
+    /// can fall back further.
+    fn architectural_drift_via_sql(
+        &self,
+        source_layer: &str,
+        target_layer: &str,
+    ) -> Option<String> {
         let query = "
             WITH RECURSIVE call_paths(source_id, target_id, path) AS (
                 SELECT c.source_id, c.target_id, [c.source_id]
@@ -731,9 +782,9 @@ impl McpServer {
                 JOIN CONTAINS c1 ON s1.id = c1.target_id
                 JOIN File f1 ON f1.path = c1.source_id
                 WHERE f1.path LIKE '%' || $s_layer || '%'
-                
+
                 UNION ALL
-                
+
                 SELECT cp.source_id, c.target_id, list_append(cp.path, cp.target_id)
                 FROM call_paths cp
                 JOIN CALLS c ON cp.target_id = c.source_id
@@ -748,56 +799,86 @@ impl McpServer {
             LIMIT 20
         "
         .to_string();
+        let params = json!({"s_layer": source_layer, "t_layer": target_layer});
+        self.graph_store.query_json_param(&query, &params).ok()
+    }
 
-        let params = json!({
-            "s_layer": source_layer,
-            "t_layer": target_layer
-        });
-
-        match self.graph_store.query_json_param(&query, &params) {
-            Ok(res) => {
-                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-                let report = if !rows.is_empty() {
-                    let paths_str = rows
-                        .into_iter()
-                        .filter_map(|r| {
-                            r.into_iter()
-                                .next()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        })
-                        .map(|s| format!("* {}", s))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!(
-                        "⚠️ **ARCHITECTURE VIOLATION DETECTED**\n\nLayer '{}' calls directly or indirectly '{}':\n\n{}",
-                        source_layer,
-                        target_layer,
-                        paths_str
-                    )
-                } else {
-                    format!(
-                        "✅ No architectural drift detected between '{}' and '{}'.",
-                        source_layer, target_layer
-                    )
-                };
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
-            }
-            Err(e) => Some(json!({
-                "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }],
-                "isError": true,
-                "data": {
-                    "status": "internal_error",
-                    "parameter_repair": {
-                        "invalid_field": "source_layer|target_layer",
-                        "supplied_source_layer": source_layer,
-                        "supplied_target_layer": target_layer,
-                        "follow_up_tools": ["status", "list_labels_tables"],
-                        "hint": "drift analysis query failed; verify both layer substrings match indexed File paths and runtime is healthy"
-                    },
-                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
-                }
-            })),
+    /// MIL-AXO-015 B.3: AGE Cypher implementation of architectural
+    /// drift. Uses variable-length pattern `[:CALLS*1..5]` and projects
+    /// the path's symbol ids through `nodes(p)`. Each row is a JSON
+    /// array of strings (parsed by `parse_agtype_string_list`) that we
+    /// re-format as `'a -> b -> c'` to match the SQL output shape.
+    /// Returns `None` on identifier validation failure, AGE query
+    /// error, empty result, or agtype parse failure so the caller
+    /// falls back to SQL.
+    fn architectural_drift_via_age(
+        &self,
+        source_layer: &str,
+        target_layer: &str,
+    ) -> Option<String> {
+        // Layers are inlined into a Cypher string literal (CONTAINS).
+        // Reject any value containing `"` or `\\` so the heredoc stays
+        // safe; rely on a permissive validator since layer names can
+        // contain `/` and `-` which validate_identifier rejects.
+        if source_layer
+            .chars()
+            .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
+            || target_layer
+                .chars()
+                .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
+        {
+            log::warn!(
+                "architectural_drift_via_age: layer literal rejected (contains escape char)"
+            );
+            return None;
         }
+        let cypher = format!(
+            "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol), \
+                   path = (s1)-[:CALLS*1..5]->(s2:Symbol), \
+                   (s2)<-[:CONTAINS]-(f2:File) \
+             WHERE f1.path CONTAINS \"{source_layer}\" AND f2.path CONTAINS \"{target_layer}\" \
+             RETURN [n IN nodes(path) | n.id] AS path_ids \
+             LIMIT 20"
+        );
+        let sql = match crate::postgres::age::cypher_query(
+            "axon_graph",
+            &cypher,
+            &["path_ids"],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "architectural_drift_via_age: cypher_query build failed: {}",
+                    e
+                );
+                return None;
+            }
+        };
+        let raw = match self.graph_store.query_json(&sql) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("architectural_drift_via_age: AGE query failed: {}", e);
+                return None;
+            }
+        };
+        if raw.trim() == "[]" {
+            return None;
+        }
+        // pg_query_json renders rows as arrays-of-columns. Each row's
+        // first column is the agtype list (rendered as a JSON string).
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
+        let mut formatted_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cell = row.first()?;
+            let raw_list = match cell {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let ids = crate::postgres::age::parse_agtype_string_list(&raw_list)?;
+            let path_str = ids.join(" -> ");
+            formatted_rows.push(vec![serde_json::Value::String(path_str)]);
+        }
+        Some(serde_json::to_string(&formatted_rows).ok()?)
     }
 }
 

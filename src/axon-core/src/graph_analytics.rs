@@ -642,6 +642,13 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
+        // MIL-AXO-015 B.3: AGE Cypher path with variable-length cycle.
+        // Falls back to SQL on empty / error.
+        if self.is_postgres_backend() && crate::postgres::age::age_read_enabled() {
+            if let Some(findings) = self.circular_dependencies_via_age(project) {
+                return Ok(findings);
+            }
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
@@ -801,6 +808,86 @@ impl GraphStore {
             // parse via string trimming.
             count_val.as_str().and_then(|s| s.trim().parse::<i64>().ok())
         })
+    }
+
+    /// MIL-AXO-015 B.3: deep-cycle detection via AGE variable-length
+    /// pattern. Mirrors `get_circular_dependencies`'s SQL WITH RECURSIVE
+    /// shape:
+    ///   MATCH path = (s:Symbol)-[:CALLS*1..10]->(s)
+    ///   WHERE s.project_code = '<project>'
+    ///   RETURN [n IN nodes(path) | n.name] AS path_names
+    /// Each row is then formatted in Rust as `'a -> b -> c -> a'` to
+    /// match the legacy SQL output. Returns `None` on any failure so
+    /// the caller falls back to SQL.
+    fn circular_dependencies_via_age(&self, project: &str) -> Option<Vec<String>> {
+        let project_filter = if project == "*" {
+            String::new()
+        } else {
+            if crate::postgres::age::validate_identifier(project, "project_code").is_err() {
+                log::warn!(
+                    "circular_dependencies_via_age: project '{}' fails AGE identifier validation; falling back",
+                    project
+                );
+                return None;
+            }
+            format!(" WHERE s.project_code = \"{project}\"")
+        };
+        let cypher = format!(
+            "MATCH path = (s:Symbol)-[:CALLS*1..10]->(s){project_filter} \
+             RETURN [n IN nodes(path) | n.name] AS path_names \
+             LIMIT 50"
+        );
+        let sql = match crate::postgres::age::cypher_query(
+            "axon_graph",
+            &cypher,
+            &["path_names"],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("circular_dependencies_via_age: cypher_query build failed: {}", e);
+                return None;
+            }
+        };
+        let raw = match self.query_json(&sql) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("circular_dependencies_via_age: AGE query failed: {}", e);
+                return None;
+            }
+        };
+        if raw.trim() == "[]" {
+            return None;
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
+        let mut findings = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cell = row.into_iter().next()?;
+            let raw_list = match cell {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            let names = crate::postgres::age::parse_agtype_string_list(&raw_list)?;
+            // SQL form closes the cycle by appending the source name
+            // after the cycle path: `'a -> b -> c -> a'`. Cypher's
+            // `nodes(path)` already includes the start node twice (it
+            // appears as both the cycle origin and the closing step
+            // since path = (s)-[*]->(s) means s appears as nodes[0]
+            // and is reached again at the end). We honour this by
+            // appending nodes[0] once more if not already trailing.
+            let formatted = if names.last().is_some_and(|last| names.first().is_some_and(|first| first == last)) {
+                names.join(" -> ")
+            } else if !names.is_empty() {
+                let mut closed = names.clone();
+                if let Some(first) = closed.first().cloned() {
+                    closed.push(first);
+                }
+                closed.join(" -> ")
+            } else {
+                continue;
+            };
+            findings.push(formatted);
+        }
+        Some(findings)
     }
 
     pub fn get_domain_leakage(

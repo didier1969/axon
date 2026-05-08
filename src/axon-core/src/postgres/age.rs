@@ -40,6 +40,44 @@
 
 use anyhow::{anyhow, Result};
 
+/// Parse an agtype list-of-strings rendered by `pg_query_json` for
+/// readers that project paths as `[n IN nodes(p) | n.id]` or similar.
+/// AGE serialises lists as JSON arrays in the agtype text form; the
+/// pg_query_json layer surfaces each column verbatim. This helper
+/// accepts both the canonical JSON form (`["a", "b"]`) and the
+/// `agtype::path[N]`-suffixed form returned by some AGE versions
+/// (we strip the suffix before parsing). Quoted entries have their
+/// surrounding `"` stripped so callers don't double-unwrap.
+///
+/// Errors propagate as `None` so the caller can fall back to SQL
+/// instead of misinterpreting an unexpected agtype shape.
+pub fn parse_agtype_string_list(raw: &str) -> Option<Vec<String>> {
+    let trimmed = raw.trim();
+    // AGE may suffix lists with `::path` / `::list`; strip a trailing
+    // ::ident segment if present.
+    let cleaned = if let Some(idx) = trimmed.rfind("::") {
+        let suffix = &trimmed[idx + 2..];
+        if suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            &trimmed[..idx]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let parsed: serde_json::Value = serde_json::from_str(cleaned).ok()?;
+    let arr = parsed.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let s = item.as_str()?;
+        out.push(s.to_string());
+    }
+    Some(out)
+}
+
 /// Read-once env knob that gates the option B.3 AGE reader transition.
 /// Default: OFF. When ON, MCP graph-traversal readers (`path`,
 /// `impact`, `bidi_trace`, `anomalies`, `architectural_drift` call-graph
@@ -533,6 +571,39 @@ mod tests {
             assert!(sql.contains("MERGE (a)-[r:CONTAINS]->(b)"));
             assert!(sql.contains("project_code: \"AXO\""));
         }
+    }
+
+    #[test]
+    fn parse_agtype_string_list_canonical_json() {
+        let raw = r#"["AXO::main", "AXO::lib", "AXO::util"]"#;
+        let out = parse_agtype_string_list(raw).unwrap();
+        assert_eq!(out, vec!["AXO::main", "AXO::lib", "AXO::util"]);
+    }
+
+    #[test]
+    fn parse_agtype_string_list_with_suffix_strip() {
+        // AGE may append `::path` or similar.
+        let raw = r#"["a", "b"]::path"#;
+        let out = parse_agtype_string_list(raw).unwrap();
+        assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_agtype_string_list_empty_array() {
+        let out = parse_agtype_string_list("[]").unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_agtype_string_list_rejects_non_string_items() {
+        let out = parse_agtype_string_list(r#"[1, 2, 3]"#);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn parse_agtype_string_list_rejects_garbage() {
+        assert!(parse_agtype_string_list("garbage").is_none());
+        assert!(parse_agtype_string_list("").is_none());
     }
 
     #[test]
