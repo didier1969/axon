@@ -598,35 +598,88 @@ impl McpServer {
             10
         };
 
+        // MIL-AXO-015 P6: under PG every IST table lives in
+        // `<project_code>.X` (CPT-AXO-039); `f.project_code` filters become
+        // schema selection. Cross-project Symbol search (`project="*"`)
+        // requires UNION ALL across schemas — deferred to P9.
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() && project != "*" {
+            crate::postgres::ddl::schema_name_for(project).ok()
+        } else {
+            None
+        };
+
         let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
-            let vec_str = format!("{:?}", emb);
-            if project == "*" {
-                (
-                    format!(
-                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
-                         FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                         WHERE {} \
-                            OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
-                         ORDER BY score ASC LIMIT {}",
-                        vec_str, base_predicate, vec_str, query_limit
-                    ),
-                    Self::build_symbol_search_params(query_text, project),
-                )
+            if let Some(schema) = pg_schema.as_ref() {
+                match crate::postgres::vector::vector_literal(&emb) {
+                    Ok(vec_lit) => {
+                        let cosine_expr = format!("(s.embedding <=> {vec_lit})");
+                        (
+                            format!(
+                                "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
+                                 FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
+                                 WHERE ({}) \
+                                    OR {cosine_expr} < 0.5 \
+                                 ORDER BY score ASC LIMIT {}",
+                                base_predicate, query_limit
+                            ),
+                            Self::build_symbol_search_params(query_text, project),
+                        )
+                    }
+                    Err(_) => {
+                        // Lexical-only fallback when embedding can't be
+                        // rendered as a pgvector literal (rare: dimension
+                        // mismatch from a stale model).
+                        (
+                            format!(
+                                "SELECT s.name, s.kind, f.path AS uri \
+                                 FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
+                                 WHERE ({}) LIMIT {}",
+                                base_predicate, query_limit
+                            ),
+                            Self::build_symbol_search_params(query_text, project),
+                        )
+                    }
+                }
             } else {
-                (
-                    format!(
-                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
-                         FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                         WHERE f.project_code = $proj AND ( {} \
-                            OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
-                         ) \
-                         ORDER BY score ASC LIMIT {}",
-                        vec_str, base_predicate, vec_str, query_limit
-                    ),
-                    Self::build_symbol_search_params(query_text, project),
-                )
+                let vec_str = format!("{:?}", emb);
+                if project == "*" {
+                    (
+                        format!(
+                            "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
+                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                             WHERE {} \
+                                OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
+                             ORDER BY score ASC LIMIT {}",
+                            vec_str, base_predicate, vec_str, query_limit
+                        ),
+                        Self::build_symbol_search_params(query_text, project),
+                    )
+                } else {
+                    (
+                        format!(
+                            "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
+                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                             WHERE f.project_code = $proj AND ( {} \
+                                OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
+                             ) \
+                             ORDER BY score ASC LIMIT {}",
+                            vec_str, base_predicate, vec_str, query_limit
+                        ),
+                        Self::build_symbol_search_params(query_text, project),
+                    )
+                }
             }
+        } else if let Some(schema) = pg_schema.as_ref() {
+            (
+                format!(
+                    "SELECT s.name, s.kind, f.path AS uri \
+                     FROM {schema}.Symbol s JOIN {schema}.CONTAINS c ON s.id = c.target_id JOIN {schema}.File f ON f.path = c.source_id \
+                     WHERE ({}) LIMIT {}",
+                    base_predicate, query_limit
+                ),
+                Self::build_symbol_search_params(query_text, project),
+            )
         } else if project == "*" {
             (
                 format!(

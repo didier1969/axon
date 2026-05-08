@@ -33,7 +33,7 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 ## Tool routing
 | Task | Tool |
 |---|---|
-| Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` |
+| Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 P6), Symbol semantic search emits schema-qualified pgvector ANN (`<=>` cosine distance) when a single project is supplied; `project="*"` cross-schema search lands in P9 |
 | Inspect detail (callers/callees survive synthetic target_id format via name-suffix join, REQ-AXO-134) | `inspect` |
 | Evidence packet | `retrieve_context` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 P4 slice 4d), semantic ANN reads ChunkEmbedding via pgvector `<=>` cosine distance against the per-project schema (CPT-AXO-039); pass `project` for the search to resolve a schema (cross-project semantic search lands in P9). Under DuckDB the existing DEC-AXO-073 L.3 `AXON_PARQUET_EMBEDDING_STORE_ENABLED` Parquet path is preserved. |
 | Blast radius | `impact` |
