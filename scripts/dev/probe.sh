@@ -96,16 +96,17 @@ if [[ -z "$DEV_PID" ]]; then
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
     fi
-    # Forward --tensorrt to axon-dev start when the parent env explicitly
-    # opts into TensorRT EP. Required to trigger the TensorRT-aware
-    # manifest selection in scripts/lib/axon-ort-runtime.sh; without this
-    # flag, dev defaults to the CUDA EP path which has a stale local
-    # manifest and falls back to a 30+ min nixpkgs CUDA build.
+    # Default to --tensorrt: the CUDA EP path falls back to a 30+ min
+    # nixpkgs build if the local manifest is stale, which silently kills
+    # bench runs (operator burned a session on this 2026-05-08). The
+    # TensorRT artifact is materialised once via scripts/lib/axon-ort-runtime.sh
+    # and reused. Set AXON_GPU_EMBED_SERVICE_TENSORRT=0 explicitly to
+    # opt out (e.g. to compare CUDA EP vs TensorRT EP).
     # Skip the Elixir prewarm + dashboard for indexer-only throughput
     # benches: nothing in probe.sh consumes them, and prewarm/dashboard
     # boot can take minutes that count against the 90s heartbeat wait.
     START_FLAGS=("--indexer-full" "--skip-elixir-prewarm" "--no-dashboard")
-    if [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    if [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-1}" =~ ^(1|true|yes|on)$ ]]; then
         START_FLAGS+=("--tensorrt")
     fi
     echo "🚀 Starting dev with scope=$SCOPE${WORKERS:+ workers=$WORKERS} flags=${START_FLAGS[*]}..."
