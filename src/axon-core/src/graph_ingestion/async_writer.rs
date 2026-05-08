@@ -305,6 +305,43 @@ impl WriteAccumulator {
     /// size in `graph_ingestion.rs:925`). Format matches the legacy
     /// emitter at `graph_ingestion.rs:927-930` byte-for-byte under the
     /// DuckDB backend.
+    /// Render accumulated `ChunkRow`s for the PostgreSQL backend. Today
+    /// produces SQL byte-equivalent to `render_chunks_duckdb` because the
+    /// `Chunk` table has no embedding column or other backend-divergent
+    /// types — `INSERT … ON CONFLICT(id) DO UPDATE SET …` is supported
+    /// identically by both DuckDB and PG. The PG-specific fast path
+    /// (COPY BINARY via `crate::postgres::bulk_writer`) lands in
+    /// REQ-AXO-238 once the read-after-write audit is closed; until
+    /// then this PG renderer keeps the producer's backend pick
+    /// symmetric with `render_symbols_pg` (commit `50b980b`).
+    pub fn render_chunks_pg(&self) -> Vec<String> {
+        self.render_chunks_duckdb()
+    }
+
+    /// Render accumulated CONTAINS rows for the PostgreSQL backend.
+    /// Today delegates to `render_contains_duckdb`: the legacy
+    /// `INSERT … ON CONFLICT DO NOTHING` is portable to PG, and the
+    /// CONTAINS table carries no backend-divergent types. PG-specific
+    /// path (AGE Cypher UNWIND / COPY BINARY) lands in REQ-AXO-238.
+    pub fn render_contains_pg(&self) -> Vec<String> {
+        self.render_contains_duckdb()
+    }
+
+    /// Render accumulated CALLS rows for the PostgreSQL backend.
+    /// Today delegates to `render_calls_duckdb`: the
+    /// `DELETE … USING (VALUES …) AS incoming(…)` shape is supported
+    /// by both backends. PG-specific path lands in REQ-AXO-238.
+    pub fn render_calls_pg(&self) -> Vec<String> {
+        self.render_calls_duckdb()
+    }
+
+    /// Render accumulated CALLS_NIF rows for the PostgreSQL backend.
+    /// Today delegates to `render_calls_nif_duckdb`. PG-specific path
+    /// lands in REQ-AXO-238.
+    pub fn render_calls_nif_pg(&self) -> Vec<String> {
+        self.render_calls_nif_duckdb()
+    }
+
     pub fn render_chunks_duckdb(&self) -> Vec<String> {
         if self.chunks.is_empty() {
             return Vec::new();
@@ -914,6 +951,42 @@ mod tests {
             "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
              ('AXO::path::caller', 'AXO::path::call''ee', 'AXO');"
         );
+    }
+
+    #[test]
+    fn render_chunks_pg_matches_duckdb_renderer_today() {
+        // PG renderer for Chunk is a delegation to the DuckDB renderer
+        // until REQ-AXO-238 ships the COPY BINARY fast path. This gate
+        // protects the producer's backend pick: any future PG-specific
+        // divergence must be intentional and either keep the SQL output
+        // identical or update this test.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Chunks(vec![sample_chunk("AXO::p::s::0::1")]));
+        assert_eq!(acc.render_chunks_pg(), acc.render_chunks_duckdb());
+    }
+
+    #[test]
+    fn render_contains_pg_matches_duckdb_renderer_today() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("a", "b")]));
+        assert_eq!(acc.render_contains_pg(), acc.render_contains_duckdb());
+    }
+
+    #[test]
+    fn render_calls_pg_matches_duckdb_renderer_today() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Calls(vec![
+            sample_relation("a", "b"),
+            sample_relation("c", "d"),
+        ]));
+        assert_eq!(acc.render_calls_pg(), acc.render_calls_duckdb());
+    }
+
+    #[test]
+    fn render_calls_nif_pg_matches_duckdb_renderer_today() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("a", "b")]));
+        assert_eq!(acc.render_calls_nif_pg(), acc.render_calls_nif_duckdb());
     }
 
     #[test]

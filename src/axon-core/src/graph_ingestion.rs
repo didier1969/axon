@@ -943,7 +943,15 @@ impl GraphStore {
             chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(
                 &mut chunk_rows,
             )));
-            queries.extend(chunk_acc.render_chunks_duckdb());
+            // Backend-aware renderer pick (mirrors the Symbol path at
+            // commit `50b980b`). Today the PG and DuckDB renderers emit
+            // identical SQL for Chunk; the divergence point is the
+            // REQ-AXO-238 bulk_writer COPY BINARY fast path.
+            if backend_is_pg {
+                queries.extend(chunk_acc.render_chunks_pg());
+            } else {
+                queries.extend(chunk_acc.render_chunks_duckdb());
+            }
         }
         // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
         // the SQL relation writes — AGE dual-write below remains the
@@ -973,9 +981,19 @@ impl GraphStore {
                     calls_nif_rows.clone(),
                 ));
             }
-            queries.extend(relation_acc.render_contains_duckdb());
-            queries.extend(relation_acc.render_calls_duckdb());
-            queries.extend(relation_acc.render_calls_nif_duckdb());
+            // Backend-aware renderer pick. Today PG and DuckDB renderers
+            // emit identical SQL for the relation tables; the divergence
+            // point is the REQ-AXO-238 bulk_writer (COPY BINARY for SQL
+            // sites + AGE Cypher UNWIND for the graph sites).
+            if backend_is_pg {
+                queries.extend(relation_acc.render_contains_pg());
+                queries.extend(relation_acc.render_calls_pg());
+                queries.extend(relation_acc.render_calls_nif_pg());
+            } else {
+                queries.extend(relation_acc.render_contains_duckdb());
+                queries.extend(relation_acc.render_calls_duckdb());
+                queries.extend(relation_acc.render_calls_nif_duckdb());
+            }
         }
         let mut enqueued_vectorization = false;
         // DEC-AXO-071 H.2: paths that will skip the queue and be embedded
