@@ -203,6 +203,34 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("re-apply should be a no-op");
     assert_eq!(inserted_again, 0);
 
+    // MIL-AXO-015 P4 4e seed: assert the axon_runtime schema + tables
+    // were created by bootstrap_global_pg_schema. Indexer hot-path
+    // writes (slice 4e steps 1-4) go through these.
+    let runtime_schema_present = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM information_schema.schemata WHERE schema_name = 'axon_runtime'",
+        )
+        .expect("axon_runtime schema check");
+    assert_eq!(runtime_schema_present, 1, "axon_runtime schema should exist");
+    for table in [
+        "OptimizerDecisionLog",
+        "VectorWorkerFault",
+        "VectorLaneState",
+        "VectorPersistOutbox",
+        "vector_batch_run",
+    ] {
+        let exists = store
+            .query_count(&format!(
+                "SELECT count(*)::BIGINT FROM information_schema.tables \
+                 WHERE table_schema = 'axon_runtime' AND lower(table_name) = lower('{table}')",
+            ))
+            .unwrap_or_else(|e| panic!("table existence check for axon_runtime.{table}: {e:?}"));
+        assert_eq!(
+            exists, 1,
+            "axon_runtime.{table} should be present after bootstrap"
+        );
+    }
+
     drop(store);
 
     // Reset env so subsequent test runs in the same `cargo test`
