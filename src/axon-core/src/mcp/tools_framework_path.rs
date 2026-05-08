@@ -73,37 +73,23 @@ impl McpServer {
             }));
         };
 
-        let edge_query = if let Some(project) = project {
-            format!(
-                "WITH all_edges AS (
-                    SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                    UNION ALL
-                    SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                )
-                SELECT src.id, src.name, dst.id, dst.name, e.edge_type
-                FROM all_edges e
-                JOIN Symbol src ON src.id = e.source_id
-                JOIN Symbol dst ON dst.id = e.target_id
-                WHERE src.project_code = '{project}'
-                  AND dst.project_code = '{project}'",
-                project = project.replace('\'', "''")
-            )
+        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, dump
+        // adjacency from the AGE graph (populated by B.2 dual-write).
+        // Vertex enrichment (commit 0f3828b) put name/project_code
+        // on each Symbol so the same RETURN shape as the SQL path is
+        // achievable without a JOIN. Falls back to SQL on empty /
+        // error so existing PG installs without dual-write still work.
+        let raw = if self.graph_store.is_postgres_backend()
+            && crate::postgres::age::age_read_enabled()
+        {
+            self.path_edges_via_age(project).unwrap_or_else(|| {
+                self.path_edges_via_sql(project)
+                    .unwrap_or_else(|| "[]".to_string())
+            })
         } else {
-            "WITH all_edges AS (
-                SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                UNION ALL
-                SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-            )
-            SELECT src.id, src.name, dst.id, dst.name, e.edge_type
-            FROM all_edges e
-            JOIN Symbol src ON src.id = e.source_id
-            JOIN Symbol dst ON dst.id = e.target_id"
-                .to_string()
+            self.path_edges_via_sql(project)
+                .unwrap_or_else(|| "[]".to_string())
         };
-        let raw = self
-            .graph_store
-            .query_json(&edge_query)
-            .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut adjacency: std::collections::HashMap<String, Vec<(String, String, String)>> =
             std::collections::HashMap::new();
@@ -273,5 +259,98 @@ impl McpServer {
                 "canonical_sources": Self::canonical_sources_snapshot()
             }
         }))
+    }
+
+    /// MIL-AXO-015 B.3: dump CALLS / CALLS_NIF adjacency from the SQL
+    /// relation tables. Returns the same JSON shape consumed by the
+    /// in-memory BFS in `axon_path_impl`: rows of `[src.id, src.name,
+    /// dst.id, dst.name, edge_type]`. Returns `None` on query error
+    /// so the caller can fall back to AGE / empty / etc.
+    fn path_edges_via_sql(&self, project: Option<&str>) -> Option<String> {
+        let edge_query = if let Some(project) = project {
+            format!(
+                "WITH all_edges AS (
+                    SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
+                    UNION ALL
+                    SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+                )
+                SELECT src.id, src.name, dst.id, dst.name, e.edge_type
+                FROM all_edges e
+                JOIN Symbol src ON src.id = e.source_id
+                JOIN Symbol dst ON dst.id = e.target_id
+                WHERE src.project_code = '{project}'
+                  AND dst.project_code = '{project}'",
+                project = project.replace('\'', "''")
+            )
+        } else {
+            "WITH all_edges AS (
+                SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
+                UNION ALL
+                SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+            )
+            SELECT src.id, src.name, dst.id, dst.name, e.edge_type
+            FROM all_edges e
+            JOIN Symbol src ON src.id = e.source_id
+            JOIN Symbol dst ON dst.id = e.target_id"
+                .to_string()
+        };
+        self.graph_store.query_json(&edge_query).ok()
+    }
+
+    /// MIL-AXO-015 B.3: dump the same adjacency from the AGE graph
+    /// via Cypher MATCH. Relies on B.2 vertex enrichment (commit
+    /// 0f3828b) so `s.name` / `s.project_code` are searchable. Returns
+    /// `None` on:
+    /// - identifier validation failure (invalid project literal)
+    /// - cypher_query SQL build failure
+    /// - graph_store.query_json error (AGE empty, schema missing, …)
+    /// - empty result (caller falls back to SQL — safer than serving
+    ///   an empty path response when the AGE graph is unpopulated).
+    fn path_edges_via_age(&self, project: Option<&str>) -> Option<String> {
+        // AGE doesn't bind params; inline the project filter after
+        // single-quote escaping. validate_identifier rejects values
+        // that contain `$$` / `\n` / `;` / quotes.
+        let where_clause = if let Some(project_code) = project {
+            if crate::postgres::age::validate_identifier(project_code, "project_code").is_err() {
+                log::warn!(
+                    "path_edges_via_age: project_code '{}' fails AGE identifier validation; falling back",
+                    project_code
+                );
+                return None;
+            }
+            format!(
+                "WHERE src.project_code = \"{project_code}\" AND dst.project_code = \"{project_code}\""
+            )
+        } else {
+            String::new()
+        };
+        let cypher = format!(
+            "MATCH (src:Symbol)-[r:CALLS|CALLS_NIF]->(dst:Symbol) {where_clause} \
+             RETURN src.id, src.name, dst.id, dst.name, type(r)"
+        );
+        let sql = match crate::postgres::age::cypher_query(
+            "axon_graph",
+            &cypher,
+            &["src_id", "src_name", "dst_id", "dst_name", "edge_type"],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("path_edges_via_age: cypher_query build failed: {}", e);
+                return None;
+            }
+        };
+        let raw = match self.graph_store.query_json(&sql) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("path_edges_via_age: AGE query failed: {}", e);
+                return None;
+            }
+        };
+        // Empty result -> fall back to SQL. AGE may not have been
+        // populated yet (dual-write opt-in or fresh deployment).
+        if raw.trim() == "[]" {
+            return None;
+        }
+        Some(raw)
     }
 }

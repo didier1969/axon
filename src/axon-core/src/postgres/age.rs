@@ -40,6 +40,20 @@
 
 use anyhow::{anyhow, Result};
 
+/// Read-once env knob that gates the option B.3 AGE reader transition.
+/// Default: OFF. When ON, MCP graph-traversal readers (`path`,
+/// `impact`, `bidi_trace`, `anomalies`, `architectural_drift` call-graph
+/// section) try the AGE Cypher MATCH first under PG, falling back to
+/// the legacy SQL relation-table read on empty result or error. Once
+/// the readers are validated against a populated AGE graph, the env
+/// defaults to ON; once B.4 drops the SQL relation tables, the gate
+/// disappears entirely.
+pub fn age_read_enabled() -> bool {
+    std::env::var("AXON_AGE_READ")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Validate that an identifier (graph / label / vertex id) is safe to
 /// inline in a Cypher heredoc. Accepts ASCII alphanumerics, underscore,
 /// `:` and `-` (the chunk_id format used elsewhere in Axon contains
