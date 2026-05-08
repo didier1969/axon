@@ -154,7 +154,12 @@ fn bulk_writer_copy_binary_round_trip() {
         1,
     )
     .expect("ann query builds");
-    let select = format!("SELECT count(*)::BIGINT {where_segment}");
+    // The helper returns the FROM/WHERE/ORDER BY/LIMIT segment;
+    // wrap in a sub-select so count(*) is well-formed (count + ORDER
+    // BY without GROUP BY is invalid SQL and would surface as a
+    // -1 sentinel from the FFI). The expected count is exactly 1
+    // (LIMIT 1) once the bulk-loaded rows are queryable.
+    let select = format!("SELECT count(*)::BIGINT FROM (SELECT 1 {where_segment}) AS sub");
     let nearest = store
         .query_count(&select)
         .expect("ANN count should return 1 (limit 1)");

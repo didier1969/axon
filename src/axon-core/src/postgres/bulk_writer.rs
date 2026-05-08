@@ -157,22 +157,66 @@ async fn flush_chunk_embeddings_async(
     rows: &[ChunkEmbeddingPersistRow],
     embedded_at_ms: i64,
 ) -> Result<()> {
+    // Idempotent guard: ensure pgvector's `vector` type is reachable
+    // for this session. The bulk_writer pool is independent from the
+    // FFI plugin pool. We run CREATE EXTENSION + the type lookup +
+    // the search_path adjustment OUTSIDE the bulk transaction.
+    client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
+        .await
+        .context("bulk_writer ensure pgvector extension")?;
+
+    // Diagnostic: confirm the extension is actually registered before
+    // we issue any DDL that references the `vector` type. Some test
+    // environments have pgvector available in pg_available_extensions
+    // but unable to install due to permission or path issues; without
+    // this check the failure surfaces as a confusing
+    // "type vector does not exist" inside the TEMP TABLE create.
+    let ext_check = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM pg_extension WHERE extname='vector'",
+            &[],
+        )
+        .await
+        .context("bulk_writer pg_extension probe")?;
+    let ext_count: i64 = ext_check.get(0);
+    if ext_count == 0 {
+        return Err(anyhow!(
+            "bulk_writer: CREATE EXTENSION vector reported success but \
+             pg_extension table shows 0 rows for extname='vector'. \
+             Verify pgvector is installed in the running image \
+             (combined axon-test/age-pgvector should ship it). \
+             current_database / current_user can be checked via \
+             AXON_LIVE_DATABASE_URL."
+        ));
+    }
+
     let vec_type = vector_type(client).await?;
+    let vec_schema = vec_type.schema();
 
     // Stage in a TEMP table mirroring public.ChunkEmbedding so we can
     // ON CONFLICT-merge after COPY BINARY. COPY itself doesn't accept
     // ON CONFLICT semantics. The temp is dropped on tx commit so
     // there's no cross-call visibility / clean-up concern.
+    //
+    // Schema-qualify the `vector(...)` type with the schema returned
+    // by `pg_namespace` so the parser resolves it regardless of the
+    // session's `search_path`. tokio_postgres / deadpool may reset
+    // SET locals at transaction boundaries, and the combined
+    // axon-test/age-pgvector image installs pgvector in `public` —
+    // grabbing the schema dynamically keeps this resilient if a
+    // future image moves it to `extensions` (PG14+ default).
     let stage_ddl = format!(
         "CREATE TEMP TABLE _bulk_chunk_embedding_stage (\
             chunk_id TEXT NOT NULL,\
             model_id TEXT NOT NULL,\
             project_code TEXT NOT NULL,\
             source_hash TEXT NOT NULL,\
-            embedding {vec_oid},\
+            embedding {schema}.vector({dim}),\
             embedded_at_ms BIGINT NOT NULL\
          ) ON COMMIT DROP",
-        vec_oid = format!("vector({dim})", dim = crate::embedding_contract::DIMENSION),
+        schema = vec_schema,
+        dim = crate::embedding_contract::DIMENSION,
     );
 
     // Single transaction so the stage table, COPY, and merge are
