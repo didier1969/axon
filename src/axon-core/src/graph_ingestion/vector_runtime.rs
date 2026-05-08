@@ -23,53 +23,115 @@ impl GraphStore {
     }
 
     pub fn record_vector_worker_fault(&self, fault: &VectorWorkerFault) -> Result<()> {
-        self.execute(&format!(
-            "INSERT OR REPLACE INTO VectorWorkerFault \
-             (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
-             VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {})",
-            Self::escape_sql(&fault.fault_id),
-            Self::escape_sql(&fault.lane),
-            fault.worker_id,
-            Self::escape_sql(&fault.fatal_stage),
-            Self::escape_sql(&fault.fatal_reason_raw),
-            Self::escape_sql(&fault.fatal_class),
-            Self::escape_sql(&fault.provider),
-            fault.batch_id
-                .as_ref()
-                .map(|batch_id| format!("'{}'", Self::escape_sql(batch_id)))
-                .unwrap_or_else(|| "NULL".to_string()),
-            fault.texts_count,
-            fault.input_bytes,
-            fault.vram_used_mb,
-            fault.occurred_at_ms,
-            fault.restart_attempt,
-        ))
+        // MIL-AXO-015 P4 4e: PG branch — schema-qualified INSERT with
+        // ON CONFLICT DO UPDATE on the fault_id PK; DuckDB keeps
+        // INSERT OR REPLACE on the unqualified table.
+        let batch_id_lit = fault
+            .batch_id
+            .as_ref()
+            .map(|batch_id| format!("'{}'", Self::escape_sql(batch_id)))
+            .unwrap_or_else(|| "NULL".to_string());
+        let sql = if self.is_postgres_backend() {
+            format!(
+                "INSERT INTO axon_runtime.VectorWorkerFault \
+                 (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
+                 VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}) \
+                 ON CONFLICT (fault_id) DO UPDATE SET \
+                    lane = EXCLUDED.lane, worker_id = EXCLUDED.worker_id, fatal_stage = EXCLUDED.fatal_stage, \
+                    fatal_reason_raw = EXCLUDED.fatal_reason_raw, fatal_class = EXCLUDED.fatal_class, \
+                    provider = EXCLUDED.provider, batch_id = EXCLUDED.batch_id, texts_count = EXCLUDED.texts_count, \
+                    input_bytes = EXCLUDED.input_bytes, vram_used_mb = EXCLUDED.vram_used_mb, \
+                    occurred_at_ms = EXCLUDED.occurred_at_ms, restart_attempt = EXCLUDED.restart_attempt",
+                Self::escape_sql(&fault.fault_id),
+                Self::escape_sql(&fault.lane),
+                fault.worker_id,
+                Self::escape_sql(&fault.fatal_stage),
+                Self::escape_sql(&fault.fatal_reason_raw),
+                Self::escape_sql(&fault.fatal_class),
+                Self::escape_sql(&fault.provider),
+                batch_id_lit,
+                fault.texts_count,
+                fault.input_bytes,
+                fault.vram_used_mb,
+                fault.occurred_at_ms,
+                fault.restart_attempt,
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO VectorWorkerFault \
+                 (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
+                 VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {})",
+                Self::escape_sql(&fault.fault_id),
+                Self::escape_sql(&fault.lane),
+                fault.worker_id,
+                Self::escape_sql(&fault.fatal_stage),
+                Self::escape_sql(&fault.fatal_reason_raw),
+                Self::escape_sql(&fault.fatal_class),
+                Self::escape_sql(&fault.provider),
+                batch_id_lit,
+                fault.texts_count,
+                fault.input_bytes,
+                fault.vram_used_mb,
+                fault.occurred_at_ms,
+                fault.restart_attempt,
+            )
+        };
+        self.execute(&sql)
     }
 
     pub fn upsert_vector_lane_state(&self, state: &VectorLaneStateRecord) -> Result<()> {
-        self.execute(&format!(
-            "INSERT OR REPLACE INTO VectorLaneState \
-             (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
-             VALUES ('{}', '{}', {}, {}, {}, {}, {}, {})",
-            Self::escape_sql(&state.lane),
-            Self::escape_sql(&state.state),
-            state.reason
-                .as_ref()
-                .map(|reason| format!("'{}'", Self::escape_sql(reason)))
-                .unwrap_or_else(|| "NULL".to_string()),
-            state.updated_at_ms,
-            state.worker_id
-                .map(|worker_id| worker_id.to_string())
-                .unwrap_or_else(|| "NULL".to_string()),
-            state.restart_attempt,
-            state.last_success_at_ms
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "NULL".to_string()),
-            state.last_fault_id
-                .as_ref()
-                .map(|fault_id| format!("'{}'", Self::escape_sql(fault_id)))
-                .unwrap_or_else(|| "NULL".to_string()),
-        ))
+        let reason_lit = state
+            .reason
+            .as_ref()
+            .map(|reason| format!("'{}'", Self::escape_sql(reason)))
+            .unwrap_or_else(|| "NULL".to_string());
+        let worker_id_lit = state
+            .worker_id
+            .map(|worker_id| worker_id.to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+        let last_success_lit = state
+            .last_success_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+        let last_fault_lit = state
+            .last_fault_id
+            .as_ref()
+            .map(|fault_id| format!("'{}'", Self::escape_sql(fault_id)))
+            .unwrap_or_else(|| "NULL".to_string());
+        let sql = if self.is_postgres_backend() {
+            format!(
+                "INSERT INTO axon_runtime.VectorLaneState \
+                 (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
+                 VALUES ('{}', '{}', {}, {}, {}, {}, {}, {}) \
+                 ON CONFLICT (lane) DO UPDATE SET \
+                    state = EXCLUDED.state, reason = EXCLUDED.reason, updated_at_ms = EXCLUDED.updated_at_ms, \
+                    worker_id = EXCLUDED.worker_id, restart_attempt = EXCLUDED.restart_attempt, \
+                    last_success_at_ms = EXCLUDED.last_success_at_ms, last_fault_id = EXCLUDED.last_fault_id",
+                Self::escape_sql(&state.lane),
+                Self::escape_sql(&state.state),
+                reason_lit,
+                state.updated_at_ms,
+                worker_id_lit,
+                state.restart_attempt,
+                last_success_lit,
+                last_fault_lit,
+            )
+        } else {
+            format!(
+                "INSERT OR REPLACE INTO VectorLaneState \
+                 (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
+                 VALUES ('{}', '{}', {}, {}, {}, {}, {}, {})",
+                Self::escape_sql(&state.lane),
+                Self::escape_sql(&state.state),
+                reason_lit,
+                state.updated_at_ms,
+                worker_id_lit,
+                state.restart_attempt,
+                last_success_lit,
+                last_fault_lit,
+            )
+        };
+        self.execute(&sql)
     }
 
     pub fn latest_vector_worker_fault(&self, lane: &str) -> Result<Option<VectorWorkerFault>> {
@@ -497,5 +559,82 @@ impl GraphStore {
             bucket_start_ms,
             model_id
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // MIL-AXO-015 P4 4e: SQL-shape contract tests for the writer
+    // branches that route to `axon_runtime.X` under PG. The methods
+    // themselves require a live GraphStore; these tests mirror the
+    // string composition so the dual-backend invariant is locked in.
+
+    fn pg_fault_sql() -> String {
+        "INSERT INTO axon_runtime.VectorWorkerFault \
+         (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
+         VALUES ('f-1', 'vector', 1, 'init', 'reason', 'class', 'cuda', NULL, 0, 0, 0, 0, 0) \
+         ON CONFLICT (fault_id) DO UPDATE SET \
+            lane = EXCLUDED.lane, worker_id = EXCLUDED.worker_id, fatal_stage = EXCLUDED.fatal_stage, \
+            fatal_reason_raw = EXCLUDED.fatal_reason_raw, fatal_class = EXCLUDED.fatal_class, \
+            provider = EXCLUDED.provider, batch_id = EXCLUDED.batch_id, texts_count = EXCLUDED.texts_count, \
+            input_bytes = EXCLUDED.input_bytes, vram_used_mb = EXCLUDED.vram_used_mb, \
+            occurred_at_ms = EXCLUDED.occurred_at_ms, restart_attempt = EXCLUDED.restart_attempt".to_string()
+    }
+
+    fn pg_lane_sql() -> String {
+        "INSERT INTO axon_runtime.VectorLaneState \
+         (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
+         VALUES ('vector', 'running', NULL, 0, NULL, 0, NULL, NULL) \
+         ON CONFLICT (lane) DO UPDATE SET \
+            state = EXCLUDED.state, reason = EXCLUDED.reason, updated_at_ms = EXCLUDED.updated_at_ms, \
+            worker_id = EXCLUDED.worker_id, restart_attempt = EXCLUDED.restart_attempt, \
+            last_success_at_ms = EXCLUDED.last_success_at_ms, last_fault_id = EXCLUDED.last_fault_id".to_string()
+    }
+
+    #[test]
+    fn pg_fault_sql_targets_axon_runtime_schema() {
+        let sql = pg_fault_sql();
+        assert!(sql.contains("INSERT INTO axon_runtime.VectorWorkerFault"));
+        assert!(sql.contains("ON CONFLICT (fault_id) DO UPDATE"));
+        // Must update every non-key column on conflict.
+        for col in [
+            "lane", "worker_id", "fatal_stage", "fatal_reason_raw", "fatal_class",
+            "provider", "batch_id", "texts_count", "input_bytes", "vram_used_mb",
+            "occurred_at_ms", "restart_attempt",
+        ] {
+            assert!(
+                sql.contains(&format!("{col} = EXCLUDED.{col}")),
+                "ON CONFLICT update should refresh column `{col}`"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_lane_sql_targets_axon_runtime_schema() {
+        let sql = pg_lane_sql();
+        assert!(sql.contains("INSERT INTO axon_runtime.VectorLaneState"));
+        assert!(sql.contains("ON CONFLICT (lane) DO UPDATE"));
+        for col in [
+            "state", "reason", "updated_at_ms", "worker_id", "restart_attempt",
+            "last_success_at_ms", "last_fault_id",
+        ] {
+            assert!(
+                sql.contains(&format!("{col} = EXCLUDED.{col}")),
+                "ON CONFLICT update should refresh column `{col}`"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_branches_use_explicit_schema_qualifier() {
+        // CPT-AXO-039 + axon_runtime invariant: every PG-branch SQL must
+        // qualify the table with `axon_runtime.` so PG can resolve it
+        // outside the per-project IST schemas.
+        for sql in [pg_fault_sql(), pg_lane_sql()] {
+            assert!(
+                sql.contains("axon_runtime."),
+                "PG SQL missing axon_runtime schema qualifier"
+            );
+        }
     }
 }
