@@ -927,30 +927,51 @@ impl GraphStore {
         // to the legacy producer (parity gated by
         // `render_symbols_*_matches_legacy_producer_format` +
         // `render_chunks_duckdb_matches_legacy_producer_format`).
+        //
+        // REQ-AXO-238 bulk_writer COPY BINARY fast path: when both
+        // backend_is_pg and AXON_BULK_WRITER_ENABLED are set, route
+        // typed rows directly to `crate::postgres::bulk_writer` which
+        // performs a single COPY BINARY into a temp staging table +
+        // `INSERT … SELECT … ON CONFLICT DO UPDATE` per call. Each
+        // call opens its own transaction (atomic-per-table); cross-
+        // table atomicity is the next slice. Default OFF preserves
+        // the legacy SQL-string path bit-for-bit.
+        let use_bulk_writer =
+            backend_is_pg && crate::postgres::bulk_writer::bulk_writer_enabled();
         if !symbol_rows.is_empty() {
-            let mut symbol_acc = self::async_writer::WriteAccumulator::new();
-            symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(std::mem::take(
-                &mut symbol_rows,
-            )));
-            if backend_is_pg {
-                queries.extend(symbol_acc.render_symbols_pg());
+            let rows = std::mem::take(&mut symbol_rows);
+            if use_bulk_writer {
+                crate::postgres::bulk_writer::flush_symbols(&rows).map_err(|e| {
+                    anyhow!("bulk_writer flush_symbols failed: {}", e)
+                })?;
             } else {
-                queries.extend(symbol_acc.render_symbols_duckdb());
+                let mut symbol_acc = self::async_writer::WriteAccumulator::new();
+                symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(rows));
+                if backend_is_pg {
+                    queries.extend(symbol_acc.render_symbols_pg());
+                } else {
+                    queries.extend(symbol_acc.render_symbols_duckdb());
+                }
             }
         }
         if !chunk_rows.is_empty() {
-            let mut chunk_acc = self::async_writer::WriteAccumulator::new();
-            chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(
-                &mut chunk_rows,
-            )));
-            // Backend-aware renderer pick (mirrors the Symbol path at
-            // commit `50b980b`). Today the PG and DuckDB renderers emit
-            // identical SQL for Chunk; the divergence point is the
-            // REQ-AXO-238 bulk_writer COPY BINARY fast path.
-            if backend_is_pg {
-                queries.extend(chunk_acc.render_chunks_pg());
+            let rows = std::mem::take(&mut chunk_rows);
+            if use_bulk_writer {
+                crate::postgres::bulk_writer::flush_chunks(&rows).map_err(|e| {
+                    anyhow!("bulk_writer flush_chunks failed: {}", e)
+                })?;
             } else {
-                queries.extend(chunk_acc.render_chunks_duckdb());
+                let mut chunk_acc = self::async_writer::WriteAccumulator::new();
+                chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(rows));
+                // Backend-aware renderer pick (mirrors the Symbol path at
+                // commit `50b980b`). Today the PG and DuckDB renderers emit
+                // identical SQL for Chunk; the divergence point is the
+                // REQ-AXO-238 bulk_writer COPY BINARY fast path.
+                if backend_is_pg {
+                    queries.extend(chunk_acc.render_chunks_pg());
+                } else {
+                    queries.extend(chunk_acc.render_chunks_duckdb());
+                }
             }
         }
         // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
@@ -966,33 +987,52 @@ impl GraphStore {
             // are compatible without CAST literals). SQL byte-equivalent
             // to the legacy producer (parity gated by
             // `render_*_duckdb_matches_legacy_producer_format`).
-            let mut relation_acc = self::async_writer::WriteAccumulator::new();
-            if !contains_rows.is_empty() {
-                relation_acc.absorb(self::async_writer::WriteDiff::Contains(
-                    contains_rows.clone(),
-                ));
-            }
-            if !calls_rows.is_empty() {
-                relation_acc
-                    .absorb(self::async_writer::WriteDiff::Calls(calls_rows.clone()));
-            }
-            if !calls_nif_rows.is_empty() {
-                relation_acc.absorb(self::async_writer::WriteDiff::CallsNif(
-                    calls_nif_rows.clone(),
-                ));
-            }
-            // Backend-aware renderer pick. Today PG and DuckDB renderers
-            // emit identical SQL for the relation tables; the divergence
-            // point is the REQ-AXO-238 bulk_writer (COPY BINARY for SQL
-            // sites + AGE Cypher UNWIND for the graph sites).
-            if backend_is_pg {
-                queries.extend(relation_acc.render_contains_pg());
-                queries.extend(relation_acc.render_calls_pg());
-                queries.extend(relation_acc.render_calls_nif_pg());
+            if use_bulk_writer {
+                use crate::postgres::bulk_writer::{flush_relations, RelationTable};
+                if !contains_rows.is_empty() {
+                    flush_relations(RelationTable::Contains, &contains_rows).map_err(
+                        |e| anyhow!("bulk_writer flush_relations(CONTAINS) failed: {}", e),
+                    )?;
+                }
+                if !calls_rows.is_empty() {
+                    flush_relations(RelationTable::Calls, &calls_rows).map_err(|e| {
+                        anyhow!("bulk_writer flush_relations(CALLS) failed: {}", e)
+                    })?;
+                }
+                if !calls_nif_rows.is_empty() {
+                    flush_relations(RelationTable::CallsNif, &calls_nif_rows).map_err(
+                        |e| anyhow!("bulk_writer flush_relations(CALLS_NIF) failed: {}", e),
+                    )?;
+                }
             } else {
-                queries.extend(relation_acc.render_contains_duckdb());
-                queries.extend(relation_acc.render_calls_duckdb());
-                queries.extend(relation_acc.render_calls_nif_duckdb());
+                let mut relation_acc = self::async_writer::WriteAccumulator::new();
+                if !contains_rows.is_empty() {
+                    relation_acc.absorb(self::async_writer::WriteDiff::Contains(
+                        contains_rows.clone(),
+                    ));
+                }
+                if !calls_rows.is_empty() {
+                    relation_acc
+                        .absorb(self::async_writer::WriteDiff::Calls(calls_rows.clone()));
+                }
+                if !calls_nif_rows.is_empty() {
+                    relation_acc.absorb(self::async_writer::WriteDiff::CallsNif(
+                        calls_nif_rows.clone(),
+                    ));
+                }
+                // Backend-aware renderer pick. Today PG and DuckDB renderers
+                // emit identical SQL for the relation tables; the divergence
+                // point is the REQ-AXO-238 bulk_writer (COPY BINARY for SQL
+                // sites + AGE Cypher UNWIND for the graph sites).
+                if backend_is_pg {
+                    queries.extend(relation_acc.render_contains_pg());
+                    queries.extend(relation_acc.render_calls_pg());
+                    queries.extend(relation_acc.render_calls_nif_pg());
+                } else {
+                    queries.extend(relation_acc.render_contains_duckdb());
+                    queries.extend(relation_acc.render_calls_duckdb());
+                    queries.extend(relation_acc.render_calls_nif_duckdb());
+                }
             }
         }
         let mut enqueued_vectorization = false;

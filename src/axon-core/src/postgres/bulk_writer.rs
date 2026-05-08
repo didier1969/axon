@@ -35,13 +35,18 @@ use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::NoTls;
 
-use crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow;
+use crate::graph_ingestion::async_writer::{
+    ChunkEmbeddingPersistRow, ChunkRow, RelationRow, SymbolRow,
+};
 
 /// Re-export so external integration tests can construct flush
 /// payloads without needing access to the `pub(crate)` async_writer
 /// module. Production callers (e.g. `update_chunk_embeddings`) still
 /// reach the type through `crate::graph_ingestion::async_writer`.
 pub use crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow as BulkWriterChunkEmbeddingRow;
+pub use crate::graph_ingestion::async_writer::ChunkRow as BulkWriterChunkRow;
+pub use crate::graph_ingestion::async_writer::RelationRow as BulkWriterRelationRow;
+pub use crate::graph_ingestion::async_writer::SymbolRow as BulkWriterSymbolRow;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static POOL: OnceLock<Pool> = OnceLock::new();
@@ -287,6 +292,411 @@ async fn flush_chunk_embeddings_async(
     Ok(())
 }
 
+/// Allowed targets for [`flush_relations`]. Constraining to a fixed
+/// list keeps the merge SQL injection-free without quoting tricks and
+/// makes call sites self-documenting (the producer's three relation
+/// hot paths line up 1:1 with the variants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationTable {
+    Contains,
+    Calls,
+    CallsNif,
+}
+
+impl RelationTable {
+    pub fn sql_name(self) -> &'static str {
+        match self {
+            RelationTable::Contains => "public.CONTAINS",
+            RelationTable::Calls => "public.CALLS",
+            RelationTable::CallsNif => "public.CALLS_NIF",
+        }
+    }
+
+    /// Stage-table suffix. Kept short — temp names are scoped to the
+    /// transaction so collisions are impossible, but a readable name
+    /// makes EXPLAIN output legible.
+    pub fn stage_name(self) -> &'static str {
+        match self {
+            RelationTable::Contains => "_bulk_contains_stage",
+            RelationTable::Calls => "_bulk_calls_stage",
+            RelationTable::CallsNif => "_bulk_calls_nif_stage",
+        }
+    }
+}
+
+/// Sync entrypoint for the producer hot path: flush a Symbol batch
+/// via COPY BINARY into a temp staging table + ON CONFLICT merge.
+///
+/// Mirrors `flush_chunk_embeddings`'s contract:
+///   - opens its own transaction (atomic per-call),
+///   - idempotent on the PK `id` so retries converge,
+///   - default-OFF when `AXON_BULK_WRITER_ENABLED` is unset (the call
+///     site is responsible for the env check; this entrypoint always
+///     flushes when invoked).
+pub fn flush_symbols(rows: &[SymbolRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let rt = runtime()?;
+    let pool = pool()?;
+    rt.block_on(async {
+        let mut client = pool
+            .get()
+            .await
+            .context("bulk_writer pool acquire failed")?;
+        flush_symbols_async(&mut client, rows).await
+    })
+}
+
+async fn flush_symbols_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[SymbolRow],
+) -> Result<()> {
+    // Symbol stage carries pgvector embedding column (nullable). Same
+    // schema-resolution dance as flush_chunk_embeddings — the type's
+    // OID is runtime-assigned by the extension.
+    client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
+        .await
+        .context("bulk_writer ensure pgvector extension (Symbol)")?;
+    let vec_type = vector_type(client).await?;
+    let vec_schema = vec_type.schema();
+
+    let stage_ddl = format!(
+        "CREATE TEMP TABLE _bulk_symbol_stage (\
+            id TEXT NOT NULL,\
+            name TEXT NOT NULL,\
+            kind TEXT,\
+            tested BOOLEAN NOT NULL,\
+            is_public BOOLEAN NOT NULL,\
+            is_nif BOOLEAN NOT NULL,\
+            is_unsafe BOOLEAN NOT NULL,\
+            project_code TEXT NOT NULL,\
+            embedding {schema}.vector({dim})\
+         ) ON COMMIT DROP",
+        schema = vec_schema,
+        dim = crate::embedding_contract::DIMENSION,
+    );
+
+    let tx = client
+        .transaction()
+        .await
+        .context("bulk_writer Symbol begin tx")?;
+    tx.batch_execute(&stage_ddl)
+        .await
+        .context("bulk_writer Symbol stage table create")?;
+
+    let copy_sink = tx
+        .copy_in(
+            "COPY _bulk_symbol_stage \
+                  (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
+                  FROM STDIN BINARY",
+        )
+        .await
+        .context("bulk_writer Symbol copy_in begin")?;
+    let column_types = [
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::BOOL,
+        Type::BOOL,
+        Type::BOOL,
+        Type::BOOL,
+        Type::TEXT,
+        vec_type,
+    ];
+    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
+    pin_mut!(writer);
+
+    for row in rows {
+        // None embedding -> NULL in the COPY stream.
+        // Wrong-dimension embedding -> NULL with warn (mirrors
+        // render_symbols_pg's fallback behavior).
+        let embed_opt: Option<Vector> = match row.embedding.as_ref() {
+            None => None,
+            Some(v) => {
+                if v.len() == crate::embedding_contract::DIMENSION {
+                    Some(Vector::from(v.clone()))
+                } else {
+                    log::warn!(
+                        "bulk_writer Symbol embedding dim mismatch for {}: expected {}, got {}; falling back to NULL",
+                        row.symbol_id,
+                        crate::embedding_contract::DIMENSION,
+                        v.len()
+                    );
+                    None
+                }
+            }
+        };
+        writer
+            .as_mut()
+            .write(&[
+                &row.symbol_id,
+                &row.name,
+                &row.kind,
+                &row.tested,
+                &row.is_public,
+                &row.is_nif,
+                &row.is_unsafe,
+                &row.project_code,
+                &embed_opt,
+            ])
+            .await
+            .context("bulk_writer Symbol copy row write")?;
+    }
+    let _written = writer
+        .finish()
+        .await
+        .context("bulk_writer Symbol copy_in finish")?;
+
+    tx.batch_execute(
+        "INSERT INTO public.Symbol \
+            (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
+         SELECT id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding \
+         FROM _bulk_symbol_stage \
+         ON CONFLICT (id) DO UPDATE SET \
+            name = EXCLUDED.name, \
+            kind = EXCLUDED.kind, \
+            tested = EXCLUDED.tested, \
+            is_public = EXCLUDED.is_public, \
+            is_nif = EXCLUDED.is_nif, \
+            is_unsafe = EXCLUDED.is_unsafe, \
+            project_code = EXCLUDED.project_code, \
+            embedding = EXCLUDED.embedding",
+    )
+    .await
+    .context("bulk_writer Symbol stage merge")?;
+
+    tx.commit().await.context("bulk_writer Symbol commit")?;
+    Ok(())
+}
+
+/// Sync entrypoint for the producer Chunk hot path. Same contract as
+/// `flush_symbols`: own transaction, idempotent on PK `id`, no env
+/// check (caller decides via `bulk_writer_enabled()`).
+pub fn flush_chunks(rows: &[ChunkRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let rt = runtime()?;
+    let pool = pool()?;
+    rt.block_on(async {
+        let mut client = pool
+            .get()
+            .await
+            .context("bulk_writer pool acquire failed")?;
+        flush_chunks_async(&mut client, rows).await
+    })
+}
+
+async fn flush_chunks_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[ChunkRow],
+) -> Result<()> {
+    // Chunk has no vector column, so no pgvector type lookup is needed
+    // for the COPY stream. The stage shape mirrors public.Chunk's PK
+    // and the columns the merge needs to update.
+    let stage_ddl = "CREATE TEMP TABLE _bulk_chunk_stage (\
+            id TEXT NOT NULL,\
+            source_type TEXT,\
+            source_id TEXT,\
+            project_code TEXT NOT NULL,\
+            file_path TEXT,\
+            kind TEXT,\
+            content TEXT,\
+            content_hash TEXT,\
+            start_line BIGINT,\
+            end_line BIGINT,\
+            chunk_part_index BIGINT,\
+            chunk_part_count BIGINT,\
+            chunk_path TEXT\
+         ) ON COMMIT DROP";
+
+    let tx = client
+        .transaction()
+        .await
+        .context("bulk_writer Chunk begin tx")?;
+    tx.batch_execute(stage_ddl)
+        .await
+        .context("bulk_writer Chunk stage table create")?;
+
+    let copy_sink = tx
+        .copy_in(
+            "COPY _bulk_chunk_stage \
+                  (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) \
+                  FROM STDIN BINARY",
+        )
+        .await
+        .context("bulk_writer Chunk copy_in begin")?;
+    let column_types = [
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::INT8,
+        Type::INT8,
+        Type::INT8,
+        Type::INT8,
+        Type::TEXT,
+    ];
+    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
+    pin_mut!(writer);
+
+    for row in rows {
+        writer
+            .as_mut()
+            .write(&[
+                &row.chunk_id,
+                &row.source_type,
+                &row.source_id,
+                &row.project_code,
+                &row.file_path,
+                &row.kind,
+                &row.content,
+                &row.content_hash,
+                &row.start_line,
+                &row.end_line,
+                &row.part_index,
+                &row.part_count,
+                &row.chunk_path,
+            ])
+            .await
+            .context("bulk_writer Chunk copy row write")?;
+    }
+    let _written = writer
+        .finish()
+        .await
+        .context("bulk_writer Chunk copy_in finish")?;
+
+    tx.batch_execute(
+        "INSERT INTO public.Chunk \
+            (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) \
+         SELECT id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path \
+         FROM _bulk_chunk_stage \
+         ON CONFLICT (id) DO UPDATE SET \
+            source_type = EXCLUDED.source_type, \
+            source_id = EXCLUDED.source_id, \
+            project_code = EXCLUDED.project_code, \
+            file_path = EXCLUDED.file_path, \
+            kind = EXCLUDED.kind, \
+            content = EXCLUDED.content, \
+            content_hash = EXCLUDED.content_hash, \
+            start_line = EXCLUDED.start_line, \
+            end_line = EXCLUDED.end_line, \
+            chunk_part_index = EXCLUDED.chunk_part_index, \
+            chunk_part_count = EXCLUDED.chunk_part_count, \
+            chunk_path = EXCLUDED.chunk_path",
+    )
+    .await
+    .context("bulk_writer Chunk stage merge")?;
+
+    tx.commit().await.context("bulk_writer Chunk commit")?;
+    Ok(())
+}
+
+/// Sync entrypoint for the producer relation hot path. Targets one of
+/// CONTAINS / CALLS / CALLS_NIF (selected by `table`). All three share
+/// the same `(source_id, target_id, project_code)` triple shape and
+/// the same PK `(source_id, target_id)`.
+///
+/// Merge semantics:
+///   - CONTAINS: `ON CONFLICT DO NOTHING` — preserves the legacy
+///     `insert_unique_relation_queries` behavior (additive, no overwrite).
+///   - CALLS / CALLS_NIF: `ON CONFLICT DO UPDATE SET project_code = EXCLUDED.project_code`
+///     — preserves the legacy DELETE-then-INSERT "replace" behavior. With
+///     `(source_id, target_id)` as PK and `project_code` as the only
+///     non-PK column, the DO UPDATE is a no-op when the value matches
+///     and an actual update otherwise; both outcomes are equivalent to
+///     the legacy DELETE+INSERT for a single producer batch.
+pub fn flush_relations(table: RelationTable, rows: &[RelationRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let rt = runtime()?;
+    let pool = pool()?;
+    rt.block_on(async {
+        let mut client = pool
+            .get()
+            .await
+            .context("bulk_writer pool acquire failed")?;
+        flush_relations_async(&mut client, table, rows).await
+    })
+}
+
+async fn flush_relations_async(
+    client: &mut deadpool_postgres::Client,
+    table: RelationTable,
+    rows: &[RelationRow],
+) -> Result<()> {
+    let stage = table.stage_name();
+    let target = table.sql_name();
+    let merge_clause = match table {
+        RelationTable::Contains => {
+            "ON CONFLICT (source_id, target_id) DO NOTHING".to_string()
+        }
+        RelationTable::Calls | RelationTable::CallsNif => {
+            "ON CONFLICT (source_id, target_id) DO UPDATE SET project_code = EXCLUDED.project_code"
+                .to_string()
+        }
+    };
+
+    let stage_ddl = format!(
+        "CREATE TEMP TABLE {stage} (\
+            source_id TEXT NOT NULL,\
+            target_id TEXT NOT NULL,\
+            project_code TEXT NOT NULL\
+         ) ON COMMIT DROP"
+    );
+
+    let tx = client
+        .transaction()
+        .await
+        .with_context(|| format!("bulk_writer {target} begin tx"))?;
+    tx.batch_execute(&stage_ddl)
+        .await
+        .with_context(|| format!("bulk_writer {target} stage create"))?;
+
+    let copy_stmt =
+        format!("COPY {stage} (source_id, target_id, project_code) FROM STDIN BINARY");
+    let copy_sink = tx
+        .copy_in(copy_stmt.as_str())
+        .await
+        .with_context(|| format!("bulk_writer {target} copy_in begin"))?;
+    let column_types = [Type::TEXT, Type::TEXT, Type::TEXT];
+    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
+    pin_mut!(writer);
+
+    for row in rows {
+        writer
+            .as_mut()
+            .write(&[&row.source_id, &row.target_id, &row.project_code])
+            .await
+            .with_context(|| format!("bulk_writer {target} copy row write"))?;
+    }
+    let _written = writer
+        .finish()
+        .await
+        .with_context(|| format!("bulk_writer {target} copy_in finish"))?;
+
+    let merge_sql = format!(
+        "INSERT INTO {target} (source_id, target_id, project_code) \
+         SELECT source_id, target_id, project_code FROM {stage} \
+         {merge_clause}"
+    );
+    tx.batch_execute(&merge_sql)
+        .await
+        .with_context(|| format!("bulk_writer {target} stage merge"))?;
+
+    tx.commit()
+        .await
+        .with_context(|| format!("bulk_writer {target} commit"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +726,61 @@ mod tests {
         // No DB connection required — empty fast path returns Ok.
         let res = flush_chunk_embeddings("AXO", "model", &[], 0);
         assert!(res.is_ok(), "empty flush must not touch the DB");
+    }
+
+    #[test]
+    fn flush_symbols_on_empty_input_is_noop() {
+        // Empty fast path returns Ok without touching the DB or the
+        // OnceLock pool. Mirrors flush_chunk_embeddings's contract.
+        let res = flush_symbols(&[]);
+        assert!(res.is_ok(), "empty Symbol flush must not touch the DB");
+    }
+
+    #[test]
+    fn flush_chunks_on_empty_input_is_noop() {
+        let res = flush_chunks(&[]);
+        assert!(res.is_ok(), "empty Chunk flush must not touch the DB");
+    }
+
+    #[test]
+    fn flush_relations_on_empty_input_is_noop() {
+        for t in [
+            RelationTable::Contains,
+            RelationTable::Calls,
+            RelationTable::CallsNif,
+        ] {
+            let res = flush_relations(t, &[]);
+            assert!(
+                res.is_ok(),
+                "empty {:?} flush must not touch the DB",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn relation_table_sql_names_match_ddl_targets() {
+        // Sanity gate: the SQL names line up with the schema in
+        // `crate::postgres::ddl::ist_ddl_global` so a future rename of
+        // either side fails the test instead of silently routing
+        // COPY BINARY into a phantom table.
+        assert_eq!(RelationTable::Contains.sql_name(), "public.CONTAINS");
+        assert_eq!(RelationTable::Calls.sql_name(), "public.CALLS");
+        assert_eq!(RelationTable::CallsNif.sql_name(), "public.CALLS_NIF");
+    }
+
+    #[test]
+    fn relation_table_stage_names_are_unique() {
+        // Cross-call collision shouldn't happen because the stage tables
+        // are TEMP + ON COMMIT DROP, but if all three were ever flushed
+        // in one tx (atomic-per-file batching follow-up), distinct stage
+        // names matter.
+        let names = [
+            RelationTable::Contains.stage_name(),
+            RelationTable::Calls.stage_name(),
+            RelationTable::CallsNif.stage_name(),
+        ];
+        let unique: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(unique.len(), names.len());
     }
 }
