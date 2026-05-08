@@ -165,18 +165,42 @@ impl WriteAccumulator {
     /// the producer's legacy output bit-for-bit, then chain the
     /// E.3a RawQueries passthrough.
     ///
-    /// Order matters: Symbols → Chunks → RawQueries. Symbols come
-    /// before Chunks because Chunk.source_id may reference a freshly-
-    /// inserted Symbol.id; the legacy producer emits them in that
-    /// order at graph_ingestion.rs:920/927. RawQueries land last
-    /// because they typically carry trailing UPDATE/DELETE that
-    /// depend on the typed INSERTs already taking effect.
+    /// Order: Symbols → Chunks → Contains → Calls → CallsNif →
+    /// RawQueries. Mirrors the legacy producer emit at
+    /// graph_ingestion.rs:920 (Symbols), :927 (Chunks), :953-959
+    /// (relations), and trailing RawQueries from
+    /// `route_writer_batch` callers (vector-lane mark-done, etc.).
+    /// RawQueries land last because they typically carry UPDATE/DELETE
+    /// that depend on the typed INSERTs already taking effect within
+    /// the same writer transaction.
     pub fn render_bulk_queries(&self) -> Vec<String> {
         let mut out = Vec::new();
         out.extend(self.render_symbols_duckdb());
         out.extend(self.render_chunks_duckdb());
+        out.extend(self.render_contains_duckdb());
+        out.extend(self.render_calls_duckdb());
+        out.extend(self.render_calls_nif_duckdb());
         out.extend(self.raw_queries.iter().cloned());
         out
+    }
+
+    /// Render accumulated CONTAINS rows. Mirrors the legacy producer
+    /// path at graph_ingestion.rs:953 — single-row INSERT … ON CONFLICT
+    /// DO NOTHING per relation.
+    pub fn render_contains_duckdb(&self) -> Vec<String> {
+        render_relations_insert_unique("CONTAINS", &self.contains)
+    }
+
+    /// Render accumulated CALLS rows. Mirrors graph_ingestion.rs:954
+    /// — DELETE-then-INSERT chunked at 200 rows per query.
+    pub fn render_calls_duckdb(&self) -> Vec<String> {
+        render_relations_replace("CALLS", &self.calls, 200)
+    }
+
+    /// Render accumulated CALLS_NIF rows. Mirrors graph_ingestion.rs:
+    /// 955-959 — same DELETE-then-INSERT pattern as CALLS.
+    pub fn render_calls_nif_duckdb(&self) -> Vec<String> {
+        render_relations_replace("CALLS_NIF", &self.calls_nif, 200)
     }
 
     /// Render accumulated `SymbolRow`s into INSERT…ON CONFLICT
@@ -274,6 +298,32 @@ impl WriteAccumulator {
         self.embedding_persist.clear();
         self.raw_queries.clear();
     }
+}
+
+fn relation_value_tuple(row: &RelationRow) -> String {
+    use super::sql_helpers::escape_sql_text;
+    format!(
+        "('{}', '{}', '{}')",
+        escape_sql_text(&row.source_id),
+        escape_sql_text(&row.target_id),
+        escape_sql_text(&row.project_code),
+    )
+}
+
+fn render_relations_insert_unique(table: &str, rows: &[RelationRow]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let values: Vec<String> = rows.iter().map(relation_value_tuple).collect();
+    super::sql_helpers::insert_unique_relation_queries(table, &values)
+}
+
+fn render_relations_replace(table: &str, rows: &[RelationRow], chunk_size: usize) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let values: Vec<String> = rows.iter().map(relation_value_tuple).collect();
+    super::sql_helpers::replace_relation_queries(table, &values, chunk_size)
 }
 
 /// Send a pre-rendered batch of writer queries through the async writer
@@ -695,6 +745,94 @@ mod tests {
     fn render_symbols_duckdb_empty_returns_empty() {
         let acc = WriteAccumulator::new();
         assert!(acc.render_symbols_duckdb().is_empty());
+    }
+
+    #[test]
+    fn render_contains_duckdb_emits_per_row_insert_on_conflict_do_nothing() {
+        // Mirrors graph_ingestion.rs:953 via insert_unique_relation_queries.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![
+            sample_relation("/tmp/a.rs", "AXO::path::sym1"),
+            sample_relation("/tmp/a.rs", "AXO::path::sym2"),
+        ]));
+        let rendered = acc.render_contains_duckdb();
+        // insert_unique_relation_queries: one INSERT per row.
+        assert_eq!(rendered.len(), 2);
+        for q in &rendered {
+            assert!(q.starts_with("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES "));
+            assert!(q.contains("ON CONFLICT DO NOTHING;"));
+        }
+        // Quote escaping reaches the value tuple.
+        assert!(rendered[0].contains("('/tmp/a.rs', 'AXO::path::sym1', 'AXO')"));
+    }
+
+    #[test]
+    fn render_calls_duckdb_emits_delete_then_insert_chunked_at_200() {
+        // Mirrors graph_ingestion.rs:954 via replace_relation_queries.
+        // 450 rows -> ceil(450 / 200) = 3 chunks -> 6 statements
+        // (DELETE + INSERT per chunk).
+        let mut acc = WriteAccumulator::new();
+        let rows: Vec<RelationRow> = (0..450)
+            .map(|i| sample_relation(&format!("src{i}"), &format!("tgt{i}")))
+            .collect();
+        acc.absorb(WriteDiff::Calls(rows));
+        let rendered = acc.render_calls_duckdb();
+        assert_eq!(rendered.len(), 6, "3 chunks * 2 statements (DELETE+INSERT)");
+        // Statements alternate: DELETE, INSERT, DELETE, INSERT, DELETE, INSERT.
+        for (i, q) in rendered.iter().enumerate() {
+            if i % 2 == 0 {
+                assert!(q.starts_with("DELETE FROM CALLS"), "stmt {i}: {q}");
+            } else {
+                assert!(q.starts_with("INSERT INTO CALLS"), "stmt {i}: {q}");
+            }
+        }
+    }
+
+    #[test]
+    fn render_calls_nif_uses_separate_table_name() {
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("a", "b")]));
+        let rendered = acc.render_calls_nif_duckdb();
+        // 1 row -> 1 chunk -> 2 statements (DELETE + INSERT) on CALLS_NIF.
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].starts_with("DELETE FROM CALLS_NIF"));
+        assert!(rendered[1].starts_with("INSERT INTO CALLS_NIF"));
+    }
+
+    #[test]
+    fn render_relations_empty_returns_empty() {
+        let acc = WriteAccumulator::new();
+        assert!(acc.render_contains_duckdb().is_empty());
+        assert!(acc.render_calls_duckdb().is_empty());
+        assert!(acc.render_calls_nif_duckdb().is_empty());
+    }
+
+    #[test]
+    fn render_bulk_queries_orders_symbols_chunks_relations_raw() {
+        // Full ordering contract. Non-empty buckets in every variant
+        // — verifies render_bulk_queries chains in the legacy producer
+        // order (graph_ingestion.rs:920 → 927 → 953 → 954 → 955).
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Symbols(vec![sample_symbol("s1")]));
+        acc.absorb(WriteDiff::Chunks(vec![sample_chunk("c1")]));
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("a", "b")]));
+        acc.absorb(WriteDiff::Calls(vec![sample_relation("c", "d")]));
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("e", "f")]));
+        acc.absorb(WriteDiff::RawQueries(vec![
+            "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+        ]));
+        let rendered = acc.render_bulk_queries();
+        // 1 Symbol INSERT + 1 Chunk INSERT + 1 CONTAINS INSERT + 2 CALLS
+        // (DELETE+INSERT) + 2 CALLS_NIF (DELETE+INSERT) + 1 RawQuery = 8.
+        assert_eq!(rendered.len(), 8);
+        assert!(rendered[0].starts_with("INSERT INTO Symbol"));
+        assert!(rendered[1].starts_with("INSERT INTO Chunk"));
+        assert!(rendered[2].starts_with("INSERT INTO CONTAINS"));
+        assert!(rendered[3].starts_with("DELETE FROM CALLS"));
+        assert!(rendered[4].starts_with("INSERT INTO CALLS"));
+        assert!(rendered[5].starts_with("DELETE FROM CALLS_NIF"));
+        assert!(rendered[6].starts_with("INSERT INTO CALLS_NIF"));
+        assert!(rendered[7].starts_with("UPDATE File"));
     }
 
     #[test]
