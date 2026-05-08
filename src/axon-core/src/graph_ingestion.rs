@@ -931,80 +931,73 @@ impl GraphStore {
         // REQ-AXO-238 bulk_writer COPY BINARY fast path: when both
         // backend_is_pg and AXON_BULK_WRITER_ENABLED are set, route
         // typed rows directly to `crate::postgres::bulk_writer` which
-        // performs a single COPY BINARY into a temp staging table +
-        // `INSERT … SELECT … ON CONFLICT DO UPDATE` per call. Each
-        // call opens its own transaction (atomic-per-table); cross-
-        // table atomicity is the next slice. Default OFF preserves
-        // the legacy SQL-string path bit-for-bit.
+        // performs a single COPY BINARY per table inside one shared
+        // transaction (atomic-per-batch). A crash mid-flush rolls back
+        // every table cleanly; the FVQ retry contract restores the
+        // file. Default OFF preserves the legacy SQL-string path
+        // bit-for-bit.
         let use_bulk_writer =
             backend_is_pg && crate::postgres::bulk_writer::bulk_writer_enabled();
-        if !symbol_rows.is_empty() {
-            let rows = std::mem::take(&mut symbol_rows);
-            if use_bulk_writer {
-                crate::postgres::bulk_writer::flush_symbols(&rows).map_err(|e| {
-                    anyhow!("bulk_writer flush_symbols failed: {}", e)
-                })?;
-            } else {
+        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
+        // the SQL relation writes — AGE dual-write below remains the
+        // sole writer. Only fires under PG.
+        let skip_sql_relations =
+            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+
+        if use_bulk_writer {
+            // Build the atomic batch in one go, then flush. Empty
+            // buckets short-circuit inside flush_batch so this is safe
+            // when only some tables have rows.
+            let bulk_batch = crate::postgres::bulk_writer::PgBulkBatch {
+                symbols: std::mem::take(&mut symbol_rows),
+                chunks: std::mem::take(&mut chunk_rows),
+                contains: if skip_sql_relations {
+                    Vec::new()
+                } else {
+                    contains_rows.clone()
+                },
+                calls: if skip_sql_relations {
+                    Vec::new()
+                } else {
+                    calls_rows.clone()
+                },
+                calls_nif: if skip_sql_relations {
+                    Vec::new()
+                } else {
+                    calls_nif_rows.clone()
+                },
+            };
+            crate::postgres::bulk_writer::flush_batch(&bulk_batch)
+                .map_err(|e| anyhow!("bulk_writer flush_batch failed: {}", e))?;
+        } else {
+            if !symbol_rows.is_empty() {
                 let mut symbol_acc = self::async_writer::WriteAccumulator::new();
-                symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(rows));
+                symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(std::mem::take(
+                    &mut symbol_rows,
+                )));
                 if backend_is_pg {
                     queries.extend(symbol_acc.render_symbols_pg());
                 } else {
                     queries.extend(symbol_acc.render_symbols_duckdb());
                 }
             }
-        }
-        if !chunk_rows.is_empty() {
-            let rows = std::mem::take(&mut chunk_rows);
-            if use_bulk_writer {
-                crate::postgres::bulk_writer::flush_chunks(&rows).map_err(|e| {
-                    anyhow!("bulk_writer flush_chunks failed: {}", e)
-                })?;
-            } else {
+            if !chunk_rows.is_empty() {
                 let mut chunk_acc = self::async_writer::WriteAccumulator::new();
-                chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(rows));
-                // Backend-aware renderer pick (mirrors the Symbol path at
-                // commit `50b980b`). Today the PG and DuckDB renderers emit
-                // identical SQL for Chunk; the divergence point is the
-                // REQ-AXO-238 bulk_writer COPY BINARY fast path.
+                chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(
+                    &mut chunk_rows,
+                )));
+                // Backend-aware renderer pick (mirrors the Symbol path
+                // at commit `50b980b`). Today the PG and DuckDB
+                // renderers emit identical SQL for Chunk; the
+                // divergence point is the REQ-AXO-238 bulk_writer COPY
+                // BINARY fast path above.
                 if backend_is_pg {
                     queries.extend(chunk_acc.render_chunks_pg());
                 } else {
                     queries.extend(chunk_acc.render_chunks_duckdb());
                 }
             }
-        }
-        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
-        // the SQL relation writes — AGE dual-write below remains the
-        // sole writer. Only fires under PG.
-        let skip_sql_relations =
-            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
-        if !skip_sql_relations {
-            // E.7 (REQ-AXO-238): render typed RelationRows via the
-            // async-writer accumulator. Backend-aware variants land in
-            // a follow-up slice (PG renderer); today both backends use
-            // the DuckDB renderer (CONTAINS / CALLS / CALLS_NIF schemas
-            // are compatible without CAST literals). SQL byte-equivalent
-            // to the legacy producer (parity gated by
-            // `render_*_duckdb_matches_legacy_producer_format`).
-            if use_bulk_writer {
-                use crate::postgres::bulk_writer::{flush_relations, RelationTable};
-                if !contains_rows.is_empty() {
-                    flush_relations(RelationTable::Contains, &contains_rows).map_err(
-                        |e| anyhow!("bulk_writer flush_relations(CONTAINS) failed: {}", e),
-                    )?;
-                }
-                if !calls_rows.is_empty() {
-                    flush_relations(RelationTable::Calls, &calls_rows).map_err(|e| {
-                        anyhow!("bulk_writer flush_relations(CALLS) failed: {}", e)
-                    })?;
-                }
-                if !calls_nif_rows.is_empty() {
-                    flush_relations(RelationTable::CallsNif, &calls_nif_rows).map_err(
-                        |e| anyhow!("bulk_writer flush_relations(CALLS_NIF) failed: {}", e),
-                    )?;
-                }
-            } else {
+            if !skip_sql_relations {
                 let mut relation_acc = self::async_writer::WriteAccumulator::new();
                 if !contains_rows.is_empty() {
                     relation_acc.absorb(self::async_writer::WriteDiff::Contains(
@@ -1020,10 +1013,6 @@ impl GraphStore {
                         calls_nif_rows.clone(),
                     ));
                 }
-                // Backend-aware renderer pick. Today PG and DuckDB renderers
-                // emit identical SQL for the relation tables; the divergence
-                // point is the REQ-AXO-238 bulk_writer (COPY BINARY for SQL
-                // sites + AGE Cypher UNWIND for the graph sites).
                 if backend_is_pg {
                     queries.extend(relation_acc.render_contains_pg());
                     queries.extend(relation_acc.render_calls_pg());
