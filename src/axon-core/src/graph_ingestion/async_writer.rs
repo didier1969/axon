@@ -160,11 +160,62 @@ impl WriteAccumulator {
         self.row_count() == 0
     }
 
-    // E.3a: emits the RawQueries passthrough (vector-lane mark-done
-    // path). E.3 / E.7 will additionally render the typed buckets
-    // (Symbols / Chunks / etc.) into INSERT…ON CONFLICT statements.
+    /// REQ-AXO-238 / REQ-AXO-193 E.7: render the accumulator's typed
+    /// buckets into bulk INSERT…ON CONFLICT SQL statements that match
+    /// the producer's legacy output bit-for-bit, then chain the
+    /// E.3a RawQueries passthrough.
+    ///
+    /// Order matters: typed buckets render INSERTs first, then
+    /// RawQueries (which may carry trailing UPDATE/DELETE on the same
+    /// rows). The writer thread executes them as a single
+    /// `execute_batch`, so the SQL transactional ordering is preserved.
     pub fn render_bulk_queries(&self) -> Vec<String> {
-        self.raw_queries.clone()
+        let mut out = Vec::new();
+        out.extend(self.render_chunks_duckdb());
+        out.extend(self.raw_queries.iter().cloned());
+        out
+    }
+
+    /// Render accumulated `ChunkRow`s into INSERT…ON CONFLICT statements
+    /// chunked at 500 rows per query (mirrors the legacy producer batch
+    /// size in `graph_ingestion.rs:925`). Format matches the legacy
+    /// emitter at `graph_ingestion.rs:927-930` byte-for-byte under the
+    /// DuckDB backend.
+    pub fn render_chunks_duckdb(&self) -> Vec<String> {
+        if self.chunks.is_empty() {
+            return Vec::new();
+        }
+        use super::sql_helpers::escape_sql_text;
+        let mut queries = Vec::with_capacity(self.chunks.len() / 500 + 1);
+        for batch in self.chunks.chunks(500) {
+            let values: Vec<String> = batch
+                .iter()
+                .map(|c| {
+                    format!(
+                        "('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
+                        escape_sql_text(&c.chunk_id),
+                        escape_sql_text(&c.source_type),
+                        escape_sql_text(&c.source_id),
+                        escape_sql_text(&c.project_code),
+                        escape_sql_text(&c.file_path),
+                        escape_sql_text(&c.kind),
+                        escape_sql_text(&c.content),
+                        escape_sql_text(&c.content_hash),
+                        c.start_line,
+                        c.end_line,
+                        c.part_index,
+                        c.part_count,
+                        escape_sql_text(&c.chunk_path),
+                    )
+                })
+                .collect();
+            queries.push(format!(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES {} \
+                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path;",
+                values.join(",")
+            ));
+        }
+        queries
     }
 
     pub fn reset(&mut self) {
@@ -507,24 +558,109 @@ mod tests {
     }
 
     #[test]
-    fn render_emits_raw_queries_passthrough_only() {
-        // E.3a emits the RawQueries passthrough variant. Typed buckets
-        // (Symbols / Chunks / etc.) still render to nothing; E.3 / E.7
-        // will replace this assertion with shape checks once the typed
-        // INSERT/UPDATE templates land.
+    fn render_emits_chunks_then_raw_queries_passthrough() {
+        // E.7 (REQ-AXO-238): the typed `Chunks` bucket now renders into
+        // bulk INSERT…ON CONFLICT statements. The Symbols bucket is
+        // still pending its own renderer (next slice), so absorbing
+        // only a Symbol leaves render_bulk_queries empty.
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::Symbols(vec![sample_symbol("s1")]));
+        assert!(
+            acc.render_bulk_queries().is_empty(),
+            "Symbols renderer not yet wired (next E.7 slice)"
+        );
+
         acc.absorb(WriteDiff::Chunks(vec![sample_chunk("c1")]));
-        assert!(acc.render_bulk_queries().is_empty());
+        let rendered = acc.render_bulk_queries();
+        assert_eq!(rendered.len(), 1, "single Chunk batch -> single query");
+        assert!(rendered[0].starts_with("INSERT INTO Chunk"));
+        assert!(rendered[0].contains("ON CONFLICT(id) DO UPDATE"));
 
         acc.absorb(WriteDiff::RawQueries(vec![
             "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
             "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
         ]));
         let rendered = acc.render_bulk_queries();
-        assert_eq!(rendered.len(), 2);
-        assert!(rendered[0].starts_with("DELETE FROM FileVectorizationQueue"));
-        assert!(rendered[1].starts_with("UPDATE File"));
+        // Order: typed INSERTs first, then RawQueries.
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[0].starts_with("INSERT INTO Chunk"));
+        assert!(rendered[1].starts_with("DELETE FROM FileVectorizationQueue"));
+        assert!(rendered[2].starts_with("UPDATE File"));
+    }
+
+    #[test]
+    fn render_chunks_duckdb_matches_legacy_producer_format() {
+        // Parity gate for E.7: the rendered INSERT must be byte-for-byte
+        // equivalent to what graph_ingestion.rs:925-930 produces today.
+        // Any drift here = silent regression on the writer-side path.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Chunks(vec![ChunkRow {
+            chunk_id: "AXO::path::sym::0::1".to_string(),
+            source_type: "symbol".to_string(),
+            source_id: "AXO::path::sym".to_string(),
+            project_code: "AXO".to_string(),
+            file_path: "/tmp/a.rs".to_string(),
+            kind: "function".to_string(),
+            content: "fn alpha() {\n  println!(\"hi 'world'\");\n}".to_string(),
+            content_hash: "deadbeef".to_string(),
+            start_line: 1,
+            end_line: 3,
+            part_index: 0,
+            part_count: 1,
+            chunk_path: "/tmp/a.rs#alpha".to_string(),
+        }]));
+        let rendered = acc.render_chunks_duckdb();
+        assert_eq!(rendered.len(), 1);
+        let q = &rendered[0];
+
+        // Header + ON CONFLICT clause shape (verbatim from legacy emit).
+        assert!(q.starts_with(
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES "
+        ));
+        assert!(q.contains(
+            "ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path;"
+        ));
+
+        // Single-quote escape: the apostrophe inside `"hi 'world'"` must
+        // become two single quotes per ANSI SQL (and per legacy
+        // `escape_sql`). Asserting the rendered tuple contains the
+        // doubled single quote ensures the helper is wired.
+        assert!(
+            q.contains("''world''"),
+            "expected single-quote doubling, got: {q}"
+        );
+        // start_line, end_line, part_index, part_count must be unquoted
+        // integers (i64 literals), not '1' / '0'.
+        assert!(q.contains(", 1, 3, 0, 1, "), "integer columns must be unquoted: {q}");
+    }
+
+    #[test]
+    fn render_chunks_duckdb_batches_at_500_rows() {
+        // Mirrors `chunk_values.chunks(500)` in graph_ingestion.rs:925
+        // so that one accumulator flush of 1200 chunks yields exactly
+        // ceil(1200 / 500) = 3 INSERT statements.
+        let mut acc = WriteAccumulator::new();
+        let rows: Vec<ChunkRow> = (0..1200)
+            .map(|i| {
+                let mut c = sample_chunk(&format!("c{i}"));
+                c.start_line = i as i64;
+                c.end_line = i as i64;
+                c
+            })
+            .collect();
+        acc.absorb(WriteDiff::Chunks(rows));
+        let rendered = acc.render_chunks_duckdb();
+        assert_eq!(rendered.len(), 3, "1200 chunks split into 500/500/200 batches");
+        for q in &rendered {
+            assert!(q.starts_with("INSERT INTO Chunk"));
+            assert!(q.ends_with("chunk_path=EXCLUDED.chunk_path;"));
+        }
+    }
+
+    #[test]
+    fn render_chunks_duckdb_empty_returns_empty() {
+        let acc = WriteAccumulator::new();
+        assert!(acc.render_chunks_duckdb().is_empty());
     }
 
     #[test]
@@ -606,9 +742,13 @@ mod tests {
         assert_eq!(dispatcher.stats().diffs_dropped(), 0);
         assert_eq!(dispatcher.stats().flush_failures(), 0);
         assert!(dispatcher.stats().flushes() >= 1);
-        // render_bulk_queries returns empty Vec until E.3, so the sink
-        // never sees a non-empty query batch even though rows drained.
-        assert!(sink.batches().is_empty());
+        // E.7 (REQ-AXO-238): typed Chunks now render to a single bulk
+        // INSERT batch. Sink sees exactly one execute_batch call with
+        // exactly one query (the INSERT for the two chunks).
+        let batches = sink.batches();
+        assert_eq!(batches.len(), 1, "one flush -> one execute_batch call");
+        assert_eq!(batches[0].len(), 1, "two Chunks fit in a single 500-row batch");
+        assert!(batches[0][0].starts_with("INSERT INTO Chunk"));
 
         drop(dispatcher);
         handle
@@ -632,11 +772,10 @@ mod tests {
         sink.fail_next.store(3, Ordering::Relaxed);
         let (dispatcher, handle) = spawn(Arc::clone(&sink));
 
-        // render_bulk_queries returns empty until E.3, so the sink path
-        // is never exercised today — confirm the counter stays at zero
-        // after the rows drain. Once E.3 lands and renders real queries,
-        // flush failures will start incrementing on real DB errors. Test
-        // acts as a regression sentinel for the wiring.
+        // E.7 (REQ-AXO-238): typed Chunks now render to a real INSERT
+        // statement, so the sink IS called. With fail_next=3, the next
+        // 3 sink calls fail; subsequent flushes succeed. We wait until
+        // the failure counter has incremented before asserting.
         for _ in 0..5 {
             dispatcher
                 .dispatch(WriteDiff::Chunks(vec![sample_chunk("c1")]))
@@ -646,10 +785,18 @@ mod tests {
             || dispatcher.stats().rows_drained() >= 5,
             Duration::from_secs(2),
         ));
-        assert_eq!(dispatcher.stats().flush_failures(), 0);
-        // Sink's fail_next was primed but render returned no queries, so
-        // the sink wasn't called — leaving fail_next untouched.
-        assert_eq!(sink.fail_next.load(Ordering::Relaxed), 3);
+        // At least one flush hit the failing sink, so flush_failures > 0.
+        assert!(
+            dispatcher.stats().flush_failures() >= 1,
+            "expected >=1 flush failure once sink was primed, got {:?}",
+            dispatcher.stats(),
+        );
+        // The sink's fail_next was decremented by each failed call, so
+        // it's strictly below the seeded 3.
+        assert!(
+            sink.fail_next.load(Ordering::Relaxed) < 3,
+            "sink.fail_next should have been consumed by failed flushes",
+        );
         drop(dispatcher);
         handle.join().expect("writer thread joined");
     }

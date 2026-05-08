@@ -6,6 +6,14 @@ use crate::graph::{GraphStore, PendingFile};
 
 use super::{FileUpsertSource, DEFAULT_GRAPH_EMBEDDING_RADIUS, FILE_VECTORIZATION_CLAIM_SEQ};
 
+/// REQ-AXO-238 / REQ-AXO-193 E.7: shared SQL string escape used by the
+/// async_writer typed-row renderers. Mirrors `GraphStore::escape_sql` so
+/// the rendered INSERT statements are bit-for-bit identical to the
+/// producer's legacy output.
+pub(super) fn escape_sql_text(value: &str) -> String {
+    value.replace('\0', " ").replace('\'', "''")
+}
+
 pub(super) fn parse_i64_field(value: &serde_json::Value) -> Option<i64> {
     value
         .as_i64()
