@@ -55,6 +55,21 @@ pub fn duckdb_storage_snapshot(store: &GraphStore) -> DuckDbStorageSnapshot {
 }
 
 pub fn duckdb_memory_snapshot(store: &GraphStore) -> DuckDbMemorySnapshot {
+    // REQ-AXO-242: `duckdb_memory()` is a DuckDB-specific table function;
+    // running it under PG raises `function duckdb_memory() does not exist`
+    // and — because some plugin connections aren't auto-rolled-back on
+    // error — leaves the connection in an aborted-transaction state that
+    // poisons the next AGE `LOAD 'age'; SET search_path …` setup. Skip
+    // the snapshot under the PG backend; PG memory observability lives
+    // in `pg_stat_activity` / `pg_buffercache` which the optimiser will
+    // adopt in a follow-up slice.
+    if matches!(
+        crate::graph::PluginBackend::current(),
+        crate::graph::PluginBackend::Postgres
+    ) {
+        return DuckDbMemorySnapshot::default();
+    }
+
     let raw = match store.query_json(
         "SELECT COALESCE(sum(memory_usage_bytes), 0), \
                 COALESCE(sum(temporary_storage_bytes), 0) \

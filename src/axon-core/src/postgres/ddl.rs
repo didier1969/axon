@@ -427,6 +427,84 @@ fn ist_ddl_global() -> Vec<String> {
             PRIMARY KEY (anchor_type, anchor_id, radius)\
          )"
         .to_string(),
+        // ── Tables consumed by the indexer hot path that the
+        //    DuckDB schema also creates. Listed here so the PG-backed
+        //    indexer (REQ-AXO-242) can boot without DDL gaps.
+        // ──────────────────────────────────────────────────────────
+        // Project: ingress promoter writes one row per project_code
+        // (`INSERT INTO Project (name) ... ON CONFLICT DO NOTHING`).
+        // Mirrors the DuckDB shape `Project (name VARCHAR PRIMARY KEY)`.
+        "CREATE TABLE IF NOT EXISTS public.Project (\
+            name TEXT PRIMARY KEY\
+         )"
+        .to_string(),
+        // EmbeddingModel: one row per (id, kind) registered embedding
+        // model. Indexer writes on first vector-lane init.
+        "CREATE TABLE IF NOT EXISTS public.EmbeddingModel (\
+            id TEXT PRIMARY KEY,\
+            kind TEXT,\
+            model_name TEXT,\
+            dimension BIGINT,\
+            version TEXT,\
+            created_at BIGINT\
+         )"
+        .to_string(),
+        // GraphProjection / GraphProjectionState: cache of derived
+        // graph traversals keyed by (anchor_type, anchor_id, radius).
+        "CREATE TABLE IF NOT EXISTS public.GraphProjection (\
+            anchor_type TEXT NOT NULL,\
+            anchor_id TEXT NOT NULL,\
+            target_type TEXT,\
+            target_id TEXT,\
+            edge_kind TEXT,\
+            distance BIGINT,\
+            radius BIGINT NOT NULL,\
+            project_code TEXT NOT NULL,\
+            projection_version TEXT,\
+            created_at BIGINT\
+         )"
+        .to_string(),
+        "CREATE TABLE IF NOT EXISTS public.GraphProjectionState (\
+            anchor_type TEXT NOT NULL,\
+            anchor_id TEXT NOT NULL,\
+            radius BIGINT NOT NULL,\
+            project_code TEXT NOT NULL,\
+            source_signature TEXT,\
+            projection_version TEXT,\
+            updated_at BIGINT,\
+            PRIMARY KEY (anchor_type, anchor_id, radius, project_code)\
+         )"
+        .to_string(),
+        // GraphEmbedding: vectorised cache of graph traversals. Same
+        // dimension as ChunkEmbedding because both use the BGE model.
+        format!(
+            "CREATE TABLE IF NOT EXISTS public.GraphEmbedding (\
+                anchor_type TEXT NOT NULL,\
+                anchor_id TEXT NOT NULL,\
+                radius BIGINT NOT NULL,\
+                model_id TEXT NOT NULL,\
+                project_code TEXT NOT NULL,\
+                source_signature TEXT,\
+                projection_version TEXT,\
+                embedding vector({dim}),\
+                updated_at BIGINT,\
+                PRIMARY KEY (anchor_type, anchor_id, radius, model_id, project_code)\
+             )"
+        ),
+        // RewardObservationLog: throughput-vs-decision telemetry,
+        // written by the optimiser feedback loop.
+        "CREATE TABLE IF NOT EXISTS public.RewardObservationLog (\
+            decision_id TEXT NOT NULL,\
+            observed_at_ms BIGINT,\
+            window_start_ms BIGINT,\
+            window_end_ms BIGINT,\
+            reward_json TEXT,\
+            throughput_chunks_per_hour DOUBLE PRECISION,\
+            throughput_files_per_hour DOUBLE PRECISION,\
+            constraint_violations_json TEXT,\
+            pressure_summary_json TEXT\
+         )"
+        .to_string(),
         // ── Telemetry / lifecycle ─────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.FileLifecycleEvent (\
             file_path TEXT NOT NULL,\
@@ -716,6 +794,14 @@ mod tests {
             "public.GraphProjectionQueue",
             "public.FileLifecycleEvent",
             "public.HourlyVectorizationRollup",
+            // REQ-AXO-242: indexer hot-path tables added to close the
+            // P9 DDL gap so axon-indexer can boot under PG.
+            "public.Project",
+            "public.EmbeddingModel",
+            "public.GraphProjection",
+            "public.GraphProjectionState",
+            "public.GraphEmbedding",
+            "public.RewardObservationLog",
         ] {
             assert!(
                 joined.contains(tbl),
