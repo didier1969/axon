@@ -423,20 +423,36 @@ pub fn cypher_merge_relation_edges_unwind(
     validate_identifier(dst_label, "destination label")?;
     validate_identifier(dst_id_property, "destination id property")?;
 
-    let mut out = Vec::with_capacity(rows.len().div_ceil(chunk_size));
-    for chunk in rows.chunks(chunk_size) {
-        // Build the inline list of {src, dst, project_code} maps. Each
-        // value is identifier-validated so the heredoc cannot be
-        // terminated by a malicious id.
+    // Skip-row contract (REQ-AXO-244 follow-up): rows with invalid src
+    // or dst id values are dropped from the batch with a warn instead
+    // of aborting the whole batch. Markdown symbol_ids regularly
+    // contain characters outside the strict identifier shape (e.g.
+    // spaces in "::SOLL Extraction"). Without skip-row, one bad row
+    // killed every other valid edge in the batch.
+    let mut filtered: Vec<&(String, String, String)> = Vec::with_capacity(rows.len());
+    for triple in rows {
+        let (src_id, dst_id, _) = triple;
+        if let Err(e) = validate_identifier(src_id, "source id value") {
+            log::warn!("AGE UNWIND batch: skipping row with invalid src id: {e}");
+            continue;
+        }
+        if let Err(e) = validate_identifier(dst_id, "destination id value") {
+            log::warn!("AGE UNWIND batch: skipping row with invalid dst id: {e}");
+            continue;
+        }
+        filtered.push(triple);
+    }
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(filtered.len().div_ceil(chunk_size));
+    for chunk in filtered.chunks(chunk_size) {
+        // Build the inline list of {src, dst, project_code} maps.
         let mut list_lit = String::with_capacity(chunk.len() * 64);
         list_lit.push('[');
         for (i, (src_id, dst_id, project_code)) in chunk.iter().enumerate() {
-            validate_identifier(src_id, "source id value")?;
-            validate_identifier(dst_id, "destination id value")?;
-            // project_code is a string property — let cypher_props_literal
-            // do the escaping (already covers "/", "\", control chars).
-            // We rebuild the JSON object manually to keep the loop tight,
-            // but reuse the same string-escape rules.
+            // ids already validated above; project_code escaping below.
             if i > 0 {
                 list_lit.push(',');
             }
@@ -446,13 +462,9 @@ pub fn cypher_merge_relation_edges_unwind(
             list_lit.push_str("\", dst: \"");
             list_lit.push_str(dst_id);
             list_lit.push_str("\", project_code: ");
-            // Reuse cypher_props_literal for the string-escape rules so
-            // a project_code containing `"` or `\` round-trips safely.
             let pc_lit = cypher_props_literal(
                 &serde_json::json!({"project_code": project_code}),
             )?;
-            // pc_lit looks like `{project_code: "AXO"}` — extract the
-            // value side after the colon to inline only the string lit.
             let after_colon = pc_lit
                 .split_once(": ")
                 .map(|(_, v)| v.trim_end_matches('}'))
@@ -468,6 +480,119 @@ pub fn cypher_merge_relation_edges_unwind(
              MERGE (b:{dst_label} {{{dst_id_property}: row.dst}}) \
              MERGE (a)-[r:{edge_label}]->(b) \
              SET r.project_code = row.project_code"
+        );
+        out.push(cypher_void_wrapper(graph, &body));
+    }
+    Ok(out)
+}
+
+/// REQ-AXO-244 follow-up: vertex UNWIND batch helper. Equivalent of
+/// `cypher_merge_relation_edges_unwind` for vertex MERGE: one Cypher
+/// statement per chunk, each containing N vertices with their property
+/// maps inlined as a list of objects, and a single `MERGE (n:Label
+/// {id_property: row.id_property}) SET n += row` clause. Replaces the
+/// per-vertex MERGE loop in `dual_write_vertices_age` (legacy emitted
+/// one PG round-trip per vertex; on AXO repo with ~46 symbols/file ×
+/// ~700 files = ~32k MERGEs that's a measurable share of producer
+/// time).
+///
+/// Vertices with invalid id_value are skipped with a warn (skip-row
+/// contract — same rationale as the relation unwind helper).
+pub fn cypher_merge_vertices_unwind(
+    graph: &str,
+    label: &str,
+    id_property: &str,
+    vertices: &[(String, serde_json::Value)],
+    chunk_size: usize,
+) -> Result<Vec<String>> {
+    if vertices.is_empty() {
+        return Ok(Vec::new());
+    }
+    if chunk_size == 0 {
+        return Err(anyhow!("chunk_size must be > 0"));
+    }
+    validate_identifier(graph, "graph")?;
+    validate_identifier(label, "vertex label")?;
+    validate_identifier(id_property, "id property")?;
+
+    // Skip-row: drop vertices with invalid id; preserve the rest.
+    let mut filtered: Vec<(&String, &serde_json::Value)> =
+        Vec::with_capacity(vertices.len());
+    for (id_value, props) in vertices {
+        if let Err(e) = validate_identifier(id_value, "vertex id value") {
+            log::warn!(
+                "AGE vertex UNWIND batch: skipping vertex with invalid id: {e}"
+            );
+            continue;
+        }
+        // Validate property keys eagerly so a bad row is dropped here
+        // instead of producing malformed Cypher downstream.
+        if let Some(map) = props.as_object() {
+            let mut bad_key = None;
+            for k in map.keys() {
+                if validate_identifier(k, "property key").is_err() {
+                    bad_key = Some(k.clone());
+                    break;
+                }
+            }
+            if let Some(k) = bad_key {
+                log::warn!(
+                    "AGE vertex UNWIND batch: skipping vertex {id_value} with invalid property key '{k}'"
+                );
+                continue;
+            }
+        } else {
+            log::warn!(
+                "AGE vertex UNWIND batch: skipping vertex {id_value} with non-object props"
+            );
+            continue;
+        }
+        filtered.push((id_value, props));
+    }
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(filtered.len().div_ceil(chunk_size));
+    for chunk in filtered.chunks(chunk_size) {
+        // Build inline list of {id_property: "...", k1: v1, ...} maps.
+        let mut list_lit = String::with_capacity(chunk.len() * 96);
+        list_lit.push('[');
+        for (i, (id_value, props)) in chunk.iter().enumerate() {
+            if i > 0 {
+                list_lit.push(',');
+            }
+            // Render the props as a Cypher map literal, then prepend
+            // the id_property entry so the MERGE's id-keyed lookup
+            // hits a known key.
+            let props_lit = cypher_props_literal(props)?;
+            // props_lit is `{k1: v1, k2: v2}`. Insert id_property at
+            // the start so the final shape is
+            // `{id_property: "<id>", k1: v1, ...}`.
+            let inner = props_lit
+                .strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .ok_or_else(|| {
+                    anyhow!("unexpected cypher_props_literal output: {props_lit}")
+                })?
+                .trim();
+            list_lit.push('{');
+            list_lit.push_str(id_property);
+            list_lit.push_str(": \"");
+            list_lit.push_str(id_value);
+            list_lit.push('"');
+            if !inner.is_empty() {
+                list_lit.push_str(", ");
+                list_lit.push_str(inner);
+            }
+            list_lit.push('}');
+        }
+        list_lit.push(']');
+
+        let body = format!(
+            "UNWIND {list_lit} AS row \
+             MERGE (n:{label} {{{id_property}: row.{id_property}}}) \
+             SET n += row"
         );
         out.push(cypher_void_wrapper(graph, &body));
     }
@@ -864,15 +989,23 @@ mod tests {
     }
 
     #[test]
-    fn unwind_rejects_invalid_endpoint_id() {
-        // src_id with a `;` would let a malicious caller terminate the
-        // heredoc body. validate_identifier rejects it.
-        let rows = vec![(
-            "AXO::a;DROP".to_string(),
-            "AXO::b".to_string(),
-            "AXO".to_string(),
-        )];
-        let bad = cypher_merge_relation_edges_unwind(
+    fn unwind_skips_rows_with_invalid_endpoint_id_instead_of_aborting() {
+        // REQ-AXO-244: skip-row contract. Mixed batch with one bad src
+        // id and one valid edge: the valid edge must still produce a
+        // statement; the bad row gets logged at warn level and dropped.
+        let rows = vec![
+            (
+                "AXO::a;DROP".to_string(),
+                "AXO::b".to_string(),
+                "AXO".to_string(),
+            ),
+            (
+                "AXO::valid_src".to_string(),
+                "AXO::valid_dst".to_string(),
+                "AXO".to_string(),
+            ),
+        ];
+        let out = cypher_merge_relation_edges_unwind(
             "axon_graph",
             "Symbol",
             "id",
@@ -881,8 +1014,128 @@ mod tests {
             "id",
             &rows,
             500,
-        );
-        assert!(bad.is_err());
+        )
+        .expect("skip-row contract: a valid row survives the bad neighbour");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("AXO::valid_src"));
+        assert!(out[0].contains("AXO::valid_dst"));
+        assert!(!out[0].contains("AXO::a;DROP"));
+    }
+
+    #[test]
+    fn unwind_returns_empty_when_all_rows_invalid() {
+        // Skip-row degrades to empty Vec when every row is invalid.
+        // Caller treats that the same as an empty input — no statement
+        // emitted, no DB hit, no warn-cascade in the dispatch loop.
+        let rows = vec![
+            (
+                "bad space".to_string(),
+                "AXO::b".to_string(),
+                "AXO".to_string(),
+            ),
+        ];
+        let out = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &rows,
+            500,
+        )
+        .expect("all-invalid yields Ok(empty)");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn vertex_unwind_emits_single_statement_with_props() {
+        let vertices = vec![
+            (
+                "AXO::sym1".to_string(),
+                serde_json::json!({"name": "alpha", "kind": "fn", "project_code": "AXO"}),
+            ),
+            (
+                "AXO::sym2".to_string(),
+                serde_json::json!({"name": "beta", "kind": "struct", "project_code": "AXO"}),
+            ),
+        ];
+        let out = cypher_merge_vertices_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            &vertices,
+            500,
+        )
+        .expect("two vertices in one chunk");
+        assert_eq!(out.len(), 1);
+        let q = &out[0];
+        assert!(q.contains("UNWIND ["));
+        assert!(q.contains("MERGE (n:Symbol {id: row.id})"));
+        assert!(q.contains("SET n += row"));
+        assert!(q.contains("id: \"AXO::sym1\""));
+        assert!(q.contains("name: \"alpha\""));
+        assert!(q.contains("id: \"AXO::sym2\""));
+        assert!(q.contains("name: \"beta\""));
+    }
+
+    #[test]
+    fn vertex_unwind_chunks_at_specified_size() {
+        let vertices: Vec<(String, serde_json::Value)> = (0..7)
+            .map(|i| {
+                (
+                    format!("AXO::sym{i}"),
+                    serde_json::json!({"name": format!("n{i}"), "project_code": "AXO"}),
+                )
+            })
+            .collect();
+        let out = cypher_merge_vertices_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            &vertices,
+            3,
+        )
+        .expect("7 vertices, chunk_size=3 -> 3 statements");
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn vertex_unwind_skips_rows_with_invalid_id_instead_of_aborting() {
+        let vertices = vec![
+            (
+                "AXO::sym with space".to_string(),
+                serde_json::json!({"name": "bad", "project_code": "AXO"}),
+            ),
+            (
+                "AXO::valid_sym".to_string(),
+                serde_json::json!({"name": "good", "project_code": "AXO"}),
+            ),
+        ];
+        let out = cypher_merge_vertices_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            &vertices,
+            500,
+        )
+        .expect("skip-row preserves the valid vertex");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("AXO::valid_sym"));
+        assert!(!out[0].contains("AXO::sym with space"));
+    }
+
+    #[test]
+    fn vertex_unwind_empty_returns_empty_vec() {
+        let out = cypher_merge_vertices_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            &[],
+            500,
+        )
+        .expect("empty input -> empty output");
+        assert!(out.is_empty());
     }
 
     #[test]

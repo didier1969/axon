@@ -2192,13 +2192,14 @@ impl GraphStore {
         Ok(())
     }
 
-    /// MIL-AXO-015 option B.2 batch dual-write: emit one Cypher MERGE
-    /// per typed (id, props) pair into the `axon_graph` AGE graph,
-    /// enriching the SQL writes' vertex shape with searchable
-    /// properties (name / kind / is_nif / project_code …) so future
-    /// readers (B.3) can MATCH on them. Each MERGE runs independently
-    /// — failures log at warn level and do not abort the SQL path.
-    /// Empty `vertices` is a no-op.
+    /// MIL-AXO-015 option B.2 + REQ-AXO-244 follow-up batch dual-write:
+    /// emit chunked UNWIND statements that fold N vertices into one
+    /// Cypher MERGE per chunk via `cypher_merge_vertices_unwind`. One
+    /// PG round-trip per chunk vs. N — typical AXO workloads see
+    /// ~46 symbols/file × 700 files = ~32k vertex MERGEs that the
+    /// legacy per-vertex loop turned into ~32k round-trips. Failures
+    /// log at warn level and do not abort the SQL path. Empty
+    /// `vertices` is a no-op.
     fn dual_write_vertices_age(
         &self,
         label: &str,
@@ -2208,11 +2209,17 @@ impl GraphStore {
         if vertices.is_empty() {
             return;
         }
-        let cyphers = match crate::postgres::age::cypher_merge_vertices_batch(
+        // Same chunk size as the relation UNWIND batch (200) so AGE
+        // sees batches of comparable shape. The skip-row contract
+        // inside the helper drops malformed-id vertices with a per-row
+        // warn instead of aborting the whole batch.
+        const UNWIND_CHUNK: usize = 200;
+        let cyphers = match crate::postgres::age::cypher_merge_vertices_unwind(
             "axon_graph",
             label,
             id_property,
             vertices,
+            UNWIND_CHUNK,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -2225,13 +2232,19 @@ impl GraphStore {
                 return;
             }
         };
-        for (i, sql) in cyphers.iter().enumerate() {
+        for (chunk_idx, sql) in cyphers.iter().enumerate() {
             if let Err(e) = self.execute(sql) {
-                let id_value = &vertices[i].0;
+                let chunk_size = if chunk_idx + 1 == cyphers.len() {
+                    vertices.len() - chunk_idx * UNWIND_CHUNK
+                } else {
+                    UNWIND_CHUNK
+                };
                 log::warn!(
-                    "AGE dual-write {} vertex failed (SQL succeeded) {}: {}",
+                    "AGE dual-write {} vertex UNWIND chunk {}/{} (size {}) failed: {}",
                     label,
-                    id_value,
+                    chunk_idx + 1,
+                    cyphers.len(),
+                    chunk_size,
                     e
                 );
             }
