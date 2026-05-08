@@ -2445,19 +2445,39 @@ impl GraphStore {
         }
 
         let now = chrono::Utc::now().timestamp_millis();
+        // MIL-AXO-015 P4 4e: under PG, GraphEmbedding.embedding column
+        // is `vector(N)` (pgvector); render as `'[…]'::vector(N)` text
+        // literal. DuckDB path keeps the legacy FLOAT[N] cast.
+        let backend_is_pg = self.is_postgres_backend();
         let values: Vec<String> = updates
             .iter()
             .map(
                 |(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
+                    let embedding_lit = if backend_is_pg {
+                        match crate::postgres::vector::vector_literal(vector) {
+                            Ok(lit) => lit,
+                            Err(e) => {
+                                log::warn!(
+                                    "skipping GraphEmbedding upsert for {}/{} under PG: {}",
+                                    anchor_type,
+                                    anchor_id,
+                                    e
+                                );
+                                "NULL".to_string()
+                            }
+                        }
+                    } else {
+                        format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector)
+                    };
                     format!(
-                        "('{}', '{}', {}, '{}', '{}', '{}', CAST({:?} AS FLOAT[{DIMENSION}]), {})",
+                        "('{}', '{}', {}, '{}', '{}', '{}', {}, {})",
                         Self::escape_embedding_sql(anchor_type),
                         Self::escape_embedding_sql(anchor_id),
                         radius,
                         Self::escape_embedding_sql(model_id),
                         Self::escape_embedding_sql(source_signature),
                         Self::escape_embedding_sql(projection_version),
-                        vector,
+                        embedding_lit,
                         now
                     )
                 },
