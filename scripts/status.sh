@@ -147,6 +147,24 @@ violations = data.get("role_contract_violations", [])
 for v in violations:
     print(f"FAIL    role contract: {v}")
 
+# REQ-AXO-185 #5 — surface heartbeat degraded_reason so operators see silent
+# fallbacks (e.g. embedder_provider_fallback: requested=cuda effective=cpu) at
+# `axon status` time instead of after a probe window. Heartbeat path comes
+# from AXON_RUN_ROOT exported by axon_apply_runtime_role_layout.
+run_root = os.environ.get("AXON_RUN_ROOT", "").strip()
+if run_root:
+    heartbeat_path = os.path.join(run_root, "runtime-heartbeat.json")
+    try:
+        with open(heartbeat_path, "r", encoding="utf-8") as fh:
+            heartbeat = json.load(fh)
+        degraded_reason = heartbeat.get("degraded_reason")
+        if isinstance(degraded_reason, str) and degraded_reason.strip():
+            print(f"WARN    heartbeat degraded_reason: {degraded_reason.strip()}")
+    except (OSError, json.JSONDecodeError):
+        # Heartbeat absent or malformed: silent — the process-state lines
+        # above already convey liveness; this surface is additive.
+        pass
+
 print()
 print(f"STATUS  {overall.upper()}")
 
