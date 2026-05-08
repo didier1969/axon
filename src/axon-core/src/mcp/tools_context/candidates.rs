@@ -340,22 +340,52 @@ impl McpServer {
         };
 
         let query = if let Some(embedding) = semantic {
-            let vector = format!("{embedding:?}");
-            let (embed_join, embed_col) = if parquet_active {
-                (
+            // MIL-AXO-015 P6 read-side: cosine dialect swap. Under PG,
+            // ChunkEmbedding.embedding is `vector(N)` (pgvector) and the
+            // distance operator is `<=>`. Under DuckDB the legacy
+            // `array_cosine_distance(... CAST(... AS FLOAT[N]))` form is
+            // kept. Parquet side-store (DEC-AXO-073) only fires on
+            // DuckDB — under PG the canonical ChunkEmbedding JOIN is
+            // always used.
+            let is_pg = self.graph_store.is_postgres_backend();
+            let (embed_join, cosine_expr) = if is_pg {
+                let join = format!(
+                    "JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash",
+                    model_id = CHUNK_MODEL_ID
+                );
+                let vec_lit = match crate::postgres::vector::vector_literal(&embedding) {
+                    Ok(lit) => lit,
+                    Err(e) => {
+                        // Dimension mismatch / non-finite: extremely
+                        // rare. Drop semantic candidates and let the
+                        // caller fall back to entry / lexical paths.
+                        log::warn!(
+                            "find_chunk_candidates: skipping pgvector literal under PG: {}",
+                            e
+                        );
+                        excluded_because.push(format!("pgvector_literal_unavailable:{e}"));
+                        return Vec::new();
+                    }
+                };
+                (join, format!("(ce.embedding <=> {vec_lit})"))
+            } else {
+                let vector = format!("{embedding:?}");
+                let join = if parquet_active {
                     format!(
                         "JOIN parquet_scan('{glob}') ce ON ce.chunk_id = c.id AND ce.source_hash = c.content_hash",
                         glob = parquet_glob
-                    ),
-                    "ce.embedding",
-                )
-            } else {
-                (
+                    )
+                } else {
                     format!(
                         "JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash",
                         model_id = CHUNK_MODEL_ID
+                    )
+                };
+                (
+                    join,
+                    format!(
+                        "array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}]))"
                     ),
-                    "ce.embedding",
                 )
             };
             format!(
@@ -364,13 +394,13 @@ impl McpServer {
                         CASE WHEN ({entry_id_match}) THEN 'entry_anchor' WHEN ({entry_uri_match}) THEN 'same_file' \
                              WHEN ({path_match}) THEN 'file_path' WHEN ({lexical_predicate}) THEN 'lexical+semantic' \
                              ELSE 'semantic' END, \
-                        array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) \
+                        {cosine_expr} \
                  FROM Chunk c \
                  {embed_join} \
                  LEFT JOIN CONTAINS rel ON rel.target_id = c.source_id LEFT JOIN File f ON f.path = rel.source_id \
                  WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match}) \
-                        OR array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) < 0.55){project_filter} \
-                 ORDER BY array_cosine_distance({embed_col}, CAST({vector} AS FLOAT[{DIMENSION}])) ASC LIMIT {limit}",
+                        OR {cosine_expr} < 0.55){project_filter} \
+                 ORDER BY {cosine_expr} ASC LIMIT {limit}",
                 project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]))
         } else {
             format!(
