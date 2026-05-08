@@ -2238,11 +2238,14 @@ impl GraphStore {
         }
     }
 
-    /// MIL-AXO-015 option B.2 batch dual-write: emit one Cypher MERGE
-    /// per typed (src_id, dst_id, project_code) triple into the
-    /// `axon_graph` AGE graph. Each MERGE is executed independently
-    /// — failures are logged at warn level and do not abort the SQL
-    /// path that ran upstream. Empty triples is a no-op.
+    /// MIL-AXO-015 option B.2 batch dual-write: emit one or more Cypher
+    /// `UNWIND $rows AS row MERGE …` statements that fold the entire
+    /// edge batch into AGE in a single round-trip per chunk. REQ-AXO-238
+    /// replaces the legacy per-edge MERGE loop (one PG round-trip per
+    /// edge) with the chunked UNWIND helper — typical AXO workloads
+    /// see 100-2000 edges per producer batch, so the saving is
+    /// proportional. Failures are logged at warn level and do not
+    /// abort the SQL path that ran upstream. Empty rows is a no-op.
     fn dual_write_relation_edges_age(
         &self,
         src_label: &str,
@@ -2255,27 +2258,33 @@ impl GraphStore {
         if rows.is_empty() {
             return;
         }
-        // Each row's (source_id, target_id) drives a Cypher MERGE; the
-        // project_code rides as an edge property so MATCH queries can
-        // filter on it without touching the vertex catalog.
-        let edges: Vec<(String, String, serde_json::Value)> = rows
+        // Each row's (source_id, target_id, project_code) feeds the
+        // UNWIND list; project_code rides as an edge property so MATCH
+        // queries can filter on it without touching the vertex catalog.
+        let triples: Vec<(String, String, String)> = rows
             .iter()
             .map(|r| {
                 (
                     r.source_id.clone(),
                     r.target_id.clone(),
-                    serde_json::json!({"project_code": r.project_code}),
+                    r.project_code.clone(),
                 )
             })
             .collect();
-        let cyphers = match crate::postgres::age::cypher_merge_edges_batch(
+        // Chunk size matches the SQL-side `replace_relation_queries`
+        // chunk size (200) so AGE and SQL see batches of comparable
+        // shape under EXPLAIN. Empirically this stays well within
+        // AGE's parser limits on the combined image.
+        const UNWIND_CHUNK: usize = 200;
+        let cyphers = match crate::postgres::age::cypher_merge_relation_edges_unwind(
             "axon_graph",
             src_label,
             src_id_property,
             edge_label,
             dst_label,
             dst_id_property,
-            &edges,
+            &triples,
+            UNWIND_CHUNK,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -2288,14 +2297,23 @@ impl GraphStore {
                 return;
             }
         };
-        for (i, sql) in cyphers.iter().enumerate() {
+        for (chunk_idx, sql) in cyphers.iter().enumerate() {
             if let Err(e) = self.execute(sql) {
-                let row = &rows[i];
+                // We can't pinpoint the exact offending row from a
+                // chunk-level failure, but we log the chunk index +
+                // size so the operator can correlate with batch_run
+                // telemetry.
+                let chunk_size = if chunk_idx + 1 == cyphers.len() {
+                    rows.len() - chunk_idx * UNWIND_CHUNK
+                } else {
+                    UNWIND_CHUNK
+                };
                 log::warn!(
-                    "AGE dual-write {} edge failed (SQL succeeded) {} -> {}: {}",
+                    "AGE dual-write {} UNWIND chunk {}/{} (size {}) failed: {}",
                     edge_label,
-                    row.source_id,
-                    row.target_id,
+                    chunk_idx + 1,
+                    cyphers.len(),
+                    chunk_size,
                     e
                 );
             }

@@ -379,6 +379,101 @@ pub fn cypher_merge_edges_batch(
     Ok(out)
 }
 
+/// REQ-AXO-238 UNWIND batch: emit ONE Cypher statement that MERGEs N
+/// edges via an inlined list, instead of N separate per-edge
+/// statements (`cypher_merge_edges_batch` above). One round-trip
+/// through `pg_execute` per chunk vs. N — typical AXO workloads see
+/// 100-2000 edges per producer batch, so the saving is large.
+///
+/// Specialised to the relation shape used by Axon's writer surface
+/// (`source_id`, `target_id`, `project_code` triple — the only edge
+/// property today is `project_code`). Generic per-edge dual-write
+/// continues to flow through `cypher_merge_edge` for callers that
+/// need arbitrary property maps (e.g. project dependencies).
+///
+/// Chunking: each output statement holds at most `chunk_size` edges so
+/// the heredoc body stays within AGE's parser limits. Empty `rows`
+/// yields `Ok(vec![])` so the helper composes with empty batches.
+///
+/// Identifier validation runs once per fixed argument and once per
+/// edge endpoint; the `project_code` value is escaped via
+/// `cypher_props_literal` semantics so a malicious project code can't
+/// terminate the heredoc.
+#[allow(clippy::too_many_arguments)]
+pub fn cypher_merge_relation_edges_unwind(
+    graph: &str,
+    src_label: &str,
+    src_id_property: &str,
+    edge_label: &str,
+    dst_label: &str,
+    dst_id_property: &str,
+    rows: &[(String, String, String)],
+    chunk_size: usize,
+) -> Result<Vec<String>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    if chunk_size == 0 {
+        return Err(anyhow!("chunk_size must be > 0"));
+    }
+    validate_identifier(graph, "graph")?;
+    validate_identifier(src_label, "source label")?;
+    validate_identifier(src_id_property, "source id property")?;
+    validate_identifier(edge_label, "edge label")?;
+    validate_identifier(dst_label, "destination label")?;
+    validate_identifier(dst_id_property, "destination id property")?;
+
+    let mut out = Vec::with_capacity(rows.len().div_ceil(chunk_size));
+    for chunk in rows.chunks(chunk_size) {
+        // Build the inline list of {src, dst, project_code} maps. Each
+        // value is identifier-validated so the heredoc cannot be
+        // terminated by a malicious id.
+        let mut list_lit = String::with_capacity(chunk.len() * 64);
+        list_lit.push('[');
+        for (i, (src_id, dst_id, project_code)) in chunk.iter().enumerate() {
+            validate_identifier(src_id, "source id value")?;
+            validate_identifier(dst_id, "destination id value")?;
+            // project_code is a string property — let cypher_props_literal
+            // do the escaping (already covers "/", "\", control chars).
+            // We rebuild the JSON object manually to keep the loop tight,
+            // but reuse the same string-escape rules.
+            if i > 0 {
+                list_lit.push(',');
+            }
+            list_lit.push('{');
+            list_lit.push_str("src: \"");
+            list_lit.push_str(src_id);
+            list_lit.push_str("\", dst: \"");
+            list_lit.push_str(dst_id);
+            list_lit.push_str("\", project_code: ");
+            // Reuse cypher_props_literal for the string-escape rules so
+            // a project_code containing `"` or `\` round-trips safely.
+            let pc_lit = cypher_props_literal(
+                &serde_json::json!({"project_code": project_code}),
+            )?;
+            // pc_lit looks like `{project_code: "AXO"}` — extract the
+            // value side after the colon to inline only the string lit.
+            let after_colon = pc_lit
+                .split_once(": ")
+                .map(|(_, v)| v.trim_end_matches('}'))
+                .ok_or_else(|| anyhow!("unexpected cypher_props_literal output: {pc_lit}"))?;
+            list_lit.push_str(after_colon);
+            list_lit.push('}');
+        }
+        list_lit.push(']');
+
+        let body = format!(
+            "UNWIND {list_lit} AS row \
+             MERGE (a:{src_label} {{{src_id_property}: row.src}}) \
+             MERGE (b:{dst_label} {{{dst_id_property}: row.dst}}) \
+             MERGE (a)-[r:{edge_label}]->(b) \
+             SET r.project_code = row.project_code"
+        );
+        out.push(cypher_void_wrapper(graph, &body));
+    }
+    Ok(out)
+}
+
 /// Batch helper for option B.2 vertex enrichment: emit one Cypher
 /// MERGE statement per (id, props) pair so the AGE graph carries
 /// the same searchable fields as the SQL `Symbol` / `File` tables
@@ -655,6 +750,164 @@ mod tests {
             assert!(sql.contains("MERGE (a)-[r:CONTAINS]->(b)"));
             assert!(sql.contains("project_code: \"AXO\""));
         }
+    }
+
+    #[test]
+    fn unwind_emits_single_statement_with_all_edges_inlined() {
+        let rows = vec![
+            (
+                "AXO::a".to_string(),
+                "AXO::b".to_string(),
+                "AXO".to_string(),
+            ),
+            (
+                "AXO::c".to_string(),
+                "AXO::d".to_string(),
+                "AXO".to_string(),
+            ),
+        ];
+        let out = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &rows,
+            500,
+        )
+        .unwrap();
+        // Two edges, one chunk -> one statement.
+        assert_eq!(out.len(), 1);
+        let q = &out[0];
+        assert!(q.contains("SELECT * FROM cypher('axon_graph'"));
+        assert!(q.contains("UNWIND ["));
+        // Both edges' src/dst values appear in the inlined list.
+        assert!(q.contains("src: \"AXO::a\""));
+        assert!(q.contains("dst: \"AXO::b\""));
+        assert!(q.contains("src: \"AXO::c\""));
+        assert!(q.contains("dst: \"AXO::d\""));
+        // Single MERGE-edge clause + property assignment.
+        assert!(q.contains("MERGE (a:Symbol {id: row.src})"));
+        assert!(q.contains("MERGE (b:Symbol {id: row.dst})"));
+        assert!(q.contains("MERGE (a)-[r:CALLS]->(b)"));
+        assert!(q.contains("SET r.project_code = row.project_code"));
+        // Trailing void wrapper.
+        assert!(q.contains("RETURN 1"));
+        assert!(q.contains("AS (_ag_void agtype)"));
+    }
+
+    #[test]
+    fn unwind_chunks_at_specified_size() {
+        // 7 rows with chunk_size 3 -> ceil(7/3) = 3 statements.
+        let rows: Vec<(String, String, String)> = (0..7)
+            .map(|i| {
+                (
+                    format!("AXO::s{i}"),
+                    format!("AXO::t{i}"),
+                    "AXO".to_string(),
+                )
+            })
+            .collect();
+        let out = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS_NIF",
+            "Symbol",
+            "id",
+            &rows,
+            3,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 3);
+        for q in &out {
+            assert!(q.contains("UNWIND ["));
+            assert!(q.contains("MERGE (a)-[r:CALLS_NIF]->(b)"));
+        }
+    }
+
+    #[test]
+    fn unwind_empty_returns_empty_vec() {
+        let out = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &[],
+            500,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn unwind_rejects_zero_chunk_size() {
+        let rows = vec![(
+            "a".to_string(),
+            "b".to_string(),
+            "AXO".to_string(),
+        )];
+        let bad = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &rows,
+            0,
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn unwind_rejects_invalid_endpoint_id() {
+        // src_id with a `;` would let a malicious caller terminate the
+        // heredoc body. validate_identifier rejects it.
+        let rows = vec![(
+            "AXO::a;DROP".to_string(),
+            "AXO::b".to_string(),
+            "AXO".to_string(),
+        )];
+        let bad = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &rows,
+            500,
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn unwind_escapes_project_code_quotes() {
+        // project_code with embedded `"` must round-trip through the
+        // string-escape rules so the heredoc is closure-safe.
+        let rows = vec![(
+            "AXO::a".to_string(),
+            "AXO::b".to_string(),
+            "AXO\\quoted".to_string(),
+        )];
+        let out = cypher_merge_relation_edges_unwind(
+            "axon_graph",
+            "Symbol",
+            "id",
+            "CALLS",
+            "Symbol",
+            "id",
+            &rows,
+            500,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        // Backslash gets doubled per the string-escape contract.
+        assert!(out[0].contains("AXO\\\\quoted"), "got: {}", out[0]);
     }
 
     #[test]
