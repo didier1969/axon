@@ -151,25 +151,48 @@ impl McpServer {
             return None;
         }
 
+        // MIL-AXO-015 P6: under PG every IST table lives in `<project>.X`
+        // (CPT-AXO-039). Schema-qualify the File queries; the project_code
+        // filter is redundant under that schema namespace.
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
+            crate::postgres::ddl::schema_name_for(project).ok()
+        } else {
+            None
+        };
+        let file_ref = pg_schema
+            .as_ref()
+            .map(|s| format!("{s}.File"))
+            .unwrap_or_else(|| "File".to_string());
+        let project_filter = if pg_schema.is_some() {
+            String::new()
+        } else {
+            " WHERE project_code = $project".to_string()
+        };
+        let project_and = if pg_schema.is_some() {
+            "WHERE".to_string()
+        } else {
+            "WHERE project_code = $project AND".to_string()
+        };
+
         let params = json!({ "project": project });
         let total_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project",
+                &format!("SELECT count(*) FROM {file_ref}{project_filter}"),
                 &params,
             )
             .unwrap_or(0);
         let pending_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'pending'",
+                &format!("SELECT count(*) FROM {file_ref} {project_and} status = 'pending'"),
                 &params,
             )
             .unwrap_or(0);
         let indexing_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'indexing'",
+                &format!("SELECT count(*) FROM {file_ref} {project_and} status = 'indexing'"),
                 &params,
             )
             .unwrap_or(0);
@@ -179,12 +202,14 @@ impl McpServer {
         let reasons_res = self
             .graph_store
             .query_json_param(
-                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-                 FROM File \
-                 WHERE project_code = $project AND status IN ('pending', 'indexing') \
-                 GROUP BY 1 \
-                 ORDER BY count(*) DESC, 1 ASC \
-                 LIMIT 3",
+                &format!(
+                    "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+                     FROM {file_ref} \
+                     {project_and} status IN ('pending', 'indexing') \
+                     GROUP BY 1 \
+                     ORDER BY count(*) DESC, 1 ASC \
+                     LIMIT 3"
+                ),
                 &params,
             )
             .unwrap_or_else(|_| "[]".to_string());
@@ -241,25 +266,64 @@ impl McpServer {
     }
 
     pub(crate) fn degraded_file_count(&self, project: Option<&str>) -> i64 {
-        let (query, params) = if let Some(project) = project {
+        // MIL-AXO-015 P6: under PG, project=None can't span schemas in a
+        // single query (UNION ALL across all schemas lands in P9).
+        // Return 0 to keep the truth-note suppressed rather than emitting
+        // an error; callers always pair this with a project_code path
+        // via `axon_init_project` or auto-resolve.
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
+            project.and_then(|p| crate::postgres::ddl::schema_name_for(p).ok())
+        } else {
+            None
+        };
+        let (query, params) = if let Some(schema) = pg_schema.as_ref() {
+            (
+                format!(
+                    "SELECT count(*) FROM {schema}.File WHERE status = 'indexed_degraded'"
+                ),
+                json!({}),
+            )
+        } else if self.graph_store.is_postgres_backend() {
+            return 0;
+        } else if let Some(project) = project {
             (
                 "SELECT count(*) FROM File \
-                 WHERE project_code = $project AND status = 'indexed_degraded'",
+                 WHERE project_code = $project AND status = 'indexed_degraded'"
+                    .to_string(),
                 json!({ "project": project }),
             )
         } else {
             (
-                "SELECT count(*) FROM File WHERE status = 'indexed_degraded'",
+                "SELECT count(*) FROM File WHERE status = 'indexed_degraded'".to_string(),
                 json!({}),
             )
         };
         self.graph_store
-            .query_count_param(query, &params)
+            .query_count_param(&query, &params)
             .unwrap_or(0)
     }
 
     pub(crate) fn degraded_symbol_count(&self, symbol: &str, project: Option<&str>) -> i64 {
-        let (query, params) = if let Some(project) = project {
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
+            project.and_then(|p| crate::postgres::ddl::schema_name_for(p).ok())
+        } else {
+            None
+        };
+        let (query, params) = if let Some(schema) = pg_schema.as_ref() {
+            (
+                format!(
+                    "SELECT count(*) \
+                     FROM {schema}.File f \
+                     JOIN {schema}.CONTAINS c ON c.source_id = f.path \
+                     JOIN {schema}.Symbol s ON s.id = c.target_id \
+                     WHERE (s.name = $sym OR s.id = $sym) \
+                       AND f.status = 'indexed_degraded'"
+                ),
+                json!({ "sym": symbol }),
+            )
+        } else if self.graph_store.is_postgres_backend() {
+            return 0;
+        } else if let Some(project) = project {
             (
                 "SELECT count(*) \
                  FROM File f \
@@ -267,7 +331,8 @@ impl McpServer {
                  JOIN Symbol s ON s.id = c.target_id \
                  WHERE (s.name = $sym OR s.id = $sym) \
                    AND s.project_code = $project \
-                   AND f.status = 'indexed_degraded'",
+                   AND f.status = 'indexed_degraded'"
+                    .to_string(),
                 json!({ "sym": symbol, "project": project }),
             )
         } else {
@@ -277,12 +342,13 @@ impl McpServer {
                  JOIN CONTAINS c ON c.source_id = f.path \
                  JOIN Symbol s ON s.id = c.target_id \
                  WHERE (s.name = $sym OR s.id = $sym) \
-                   AND f.status = 'indexed_degraded'",
+                   AND f.status = 'indexed_degraded'"
+                    .to_string(),
                 json!({ "sym": symbol }),
             )
         };
         self.graph_store
-            .query_count_param(query, &params)
+            .query_count_param(&query, &params)
             .unwrap_or(0)
     }
 
