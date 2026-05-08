@@ -98,9 +98,11 @@ in
     # DATABASE_URLs (CPT-AXO-042).
     AXON_LIVE_DATABASE_URL = "postgres://localhost:44144/axon_live";
     AXON_DEV_DATABASE_URL = "postgres://localhost:44144/axon_dev";
-    # PGHOST/PGPORT used by psql CLI and sqlx-cli for hand operations.
+    # PGHOST used by psql CLI and sqlx-cli for hand operations.
+    # PGPORT is auto-exported by the devenv postgres module from
+    # services.postgres.port (int). Declaring it again here as a string
+    # triggers `option `env.PGPORT' has conflicting option types`.
     PGHOST = "localhost";
-    PGPORT = "44144";
 
     # devenv-nix-best-practices: Isolation Patterns
     RELEASE_COOKIE = "axon_v1_isolated_cookie";

@@ -78,7 +78,12 @@ fi
 if [[ "$FRESH" == "1" ]]; then
     ./scripts/axon-dev stop --hard >/dev/null 2>&1 || true
     rm -rf .axon-dev/graph_v2
-    echo "🧹 Wiped dev IST"
+    # Also wipe the run-indexer dir so the heartbeat and traces from a
+    # previous probe don't pollute the early-window samples (chunks_total
+    # would otherwise read the previous run's accumulator until the new
+    # indexer overwrites the heartbeat file).
+    rm -rf .axon-dev/run-indexer
+    echo "🧹 Wiped dev IST and run-indexer"
 fi
 
 # Start dev only if not already running with the desired scope
@@ -91,8 +96,20 @@ if [[ -z "$DEV_PID" ]]; then
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
     fi
-    echo "🚀 Starting dev with scope=$SCOPE${WORKERS:+ workers=$WORKERS}..."
-    env "${EXPORTS[@]}" ./scripts/axon-dev start --indexer-full \
+    # Forward --tensorrt to axon-dev start when the parent env explicitly
+    # opts into TensorRT EP. Required to trigger the TensorRT-aware
+    # manifest selection in scripts/lib/axon-ort-runtime.sh; without this
+    # flag, dev defaults to the CUDA EP path which has a stale local
+    # manifest and falls back to a 30+ min nixpkgs CUDA build.
+    # Skip the Elixir prewarm + dashboard for indexer-only throughput
+    # benches: nothing in probe.sh consumes them, and prewarm/dashboard
+    # boot can take minutes that count against the 90s heartbeat wait.
+    START_FLAGS=("--indexer-full" "--skip-elixir-prewarm" "--no-dashboard")
+    if [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-0}" =~ ^(1|true|yes|on)$ ]]; then
+        START_FLAGS+=("--tensorrt")
+    fi
+    echo "🚀 Starting dev with scope=$SCOPE${WORKERS:+ workers=$WORKERS} flags=${START_FLAGS[*]}..."
+    env "${EXPORTS[@]}" ./scripts/axon-dev start "${START_FLAGS[@]}" \
         > /tmp/probe-start.log 2>&1
 fi
 

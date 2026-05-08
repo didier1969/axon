@@ -99,12 +99,14 @@ run_cell() {
     #              delta_chunks, delta_seconds, chunks_per_sec
     # Strategy: skip warmup zeros, average non-zero chunks_per_sec
     # across all post-warmup samples for noise reduction.
+    # CSV column 4 is chunks_per_sec; column 8 is zombies (always 0).
+    # An earlier commit (ddc2a97) regressed this from 4 to 8 — fixed back.
     local csv
     csv=$(ls -t dev-probe-throughput-${label}-*.csv 2>/dev/null | head -1)
     local chps="0"
     if [[ -n "$csv" ]] && [[ -f "$csv" ]]; then
         chps=$(awk -F',' '
-            NR>1 && $8!="" && $8>0 { sum += $8; n += 1 }
+            NR>1 && $4!="" && $4>0 { sum += $4; n += 1 }
             END { if (n > 0) printf "%.2f", sum / n; else print "0" }
         ' "$csv")
     fi
