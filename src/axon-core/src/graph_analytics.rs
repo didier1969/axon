@@ -704,6 +704,15 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
+        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, count
+        // 2-cycles via the AGE graph. Falls back to the SQL self-join
+        // on empty / error so existing PG installs without dual-write
+        // still return correct counts from the relation tables.
+        if self.is_postgres_backend() && crate::postgres::age::age_read_enabled() {
+            if let Some(count) = self.circular_dependency_count_via_age(project) {
+                return Ok(count);
+            }
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -732,6 +741,66 @@ impl GraphStore {
             }
         );
         Ok(self.query_count(&query).unwrap_or(0))
+    }
+
+    /// MIL-AXO-015 B.3: 2-cycle count via AGE Cypher. Each reciprocal
+    /// pair (a→b→a) is counted once thanks to `a.id < b.id`. Returns
+    /// `None` on any failure so the caller can fall back to SQL —
+    /// covers AGE empty (dual-write opt-in not enabled) and identifier
+    /// validation failure on the project literal.
+    fn circular_dependency_count_via_age(&self, project: &str) -> Option<i64> {
+        let project_filter = if project == "*" {
+            String::new()
+        } else {
+            if crate::postgres::age::validate_identifier(project, "project_code").is_err() {
+                log::warn!(
+                    "circular_dependency_count_via_age: project '{}' fails AGE identifier validation; falling back",
+                    project
+                );
+                return None;
+            }
+            format!(" AND a.project_code = \"{project}\"")
+        };
+        let cypher = format!(
+            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol)-[:CALLS]->(a) \
+             WHERE a.id < b.id{project_filter} \
+             RETURN count(*) AS cycle_count"
+        );
+        let sql = match crate::postgres::age::cypher_query(
+            "axon_graph",
+            &cypher,
+            &["cycle_count"],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "circular_dependency_count_via_age: cypher_query build failed: {}",
+                    e
+                );
+                return None;
+            }
+        };
+        let raw = match self.query_json(&sql) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("circular_dependency_count_via_age: AGE query failed: {}", e);
+                return None;
+            }
+        };
+        // AGE returns agtype, which we parse as JSON. Empty result
+        // means "0 cycles" only if the graph has any Symbol with CALLS;
+        // otherwise (graph empty) we fall back to SQL to avoid serving
+        // a misleading zero.
+        if raw.trim() == "[]" {
+            return None;
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
+        let count_val = rows.first()?.first()?;
+        count_val.as_i64().or_else(|| {
+            // agtype renders integers sometimes as strings — robust
+            // parse via string trimming.
+            count_val.as_str().and_then(|s| s.trim().parse::<i64>().ok())
+        })
     }
 
     pub fn get_domain_leakage(
