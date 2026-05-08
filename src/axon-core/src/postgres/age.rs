@@ -201,6 +201,48 @@ pub fn cypher_merge_edge(
     Ok(cypher_void_wrapper(graph, &body))
 }
 
+/// Batch helper for option B.2 wire-up: emit one Cypher MERGE
+/// statement per edge triple. Each edge is materialised as a
+/// separate Cypher statement (one heredoc per edge) so failures
+/// stay isolated and the SQL row-per-edge semantics of the
+/// existing relation tables are preserved one-for-one. Empty
+/// `edges` returns `Ok(vec![])` rather than erroring — callers
+/// can compose this with empty batches without special-casing.
+///
+/// Identifier validation runs once per fixed argument (graph /
+/// label / property) and once per edge endpoint (src_id /
+/// dst_id). Property maps are validated and serialised by
+/// [`cypher_props_literal`] inside [`cypher_merge_edge`].
+pub fn cypher_merge_edges_batch(
+    graph: &str,
+    src_label: &str,
+    src_id_property: &str,
+    edge_label: &str,
+    dst_label: &str,
+    dst_id_property: &str,
+    edges: &[(String, String, serde_json::Value)],
+) -> Result<Vec<String>> {
+    if edges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(edges.len());
+    for (src_id, dst_id, props) in edges {
+        let sql = cypher_merge_edge(
+            graph,
+            src_label,
+            src_id_property,
+            src_id,
+            edge_label,
+            props,
+            dst_label,
+            dst_id_property,
+            dst_id,
+        )?;
+        out.push(sql);
+    }
+    Ok(out)
+}
+
 /// Compose a SQL query that wraps a read-side Cypher MATCH. The
 /// caller passes the Cypher RETURN column names (in order) so the
 /// AS clause receives the right `(name agtype, …)` declarations.
@@ -396,6 +438,81 @@ mod tests {
     #[test]
     fn cypher_query_rejects_empty_return_cols() {
         let bad = cypher_query("axon_graph", "MATCH (n) RETURN n", &[]);
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn merge_edges_batch_empty_returns_empty_vec() {
+        let out = cypher_merge_edges_batch(
+            "axon_graph",
+            "File",
+            "path",
+            "CONTAINS",
+            "Symbol",
+            "id",
+            &[],
+        )
+        .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_edges_batch_emits_one_merge_per_edge() {
+        let edges = vec![
+            (
+                "src/main.rs".to_string(),
+                "AXO::main".to_string(),
+                serde_json::json!({"project_code": "AXO"}),
+            ),
+            (
+                "src/lib.rs".to_string(),
+                "AXO::lib".to_string(),
+                serde_json::json!({"project_code": "AXO"}),
+            ),
+            (
+                "src/util.rs".to_string(),
+                "AXO::util".to_string(),
+                serde_json::json!({"project_code": "AXO"}),
+            ),
+        ];
+        let out = cypher_merge_edges_batch(
+            "axon_graph",
+            "File",
+            "path",
+            "CONTAINS",
+            "Symbol",
+            "id",
+            &edges,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 3);
+        for (i, sql) in out.iter().enumerate() {
+            let (src, dst, _) = &edges[i];
+            assert!(sql.contains(&format!("MERGE (a:File {{path: \"{src}\"}})")));
+            assert!(sql.contains(&format!("MERGE (b:Symbol {{id: \"{dst}\"}})")));
+            assert!(sql.contains("MERGE (a)-[r:CONTAINS]->(b)"));
+            assert!(sql.contains("project_code: \"AXO\""));
+        }
+    }
+
+    #[test]
+    fn merge_edges_batch_propagates_validation_error() {
+        let edges = vec![
+            (
+                "ok-src".to_string(),
+                "ok-dst".to_string(),
+                serde_json::json!({}),
+            ),
+        ];
+        let bad = cypher_merge_edges_batch(
+            "axon_graph",
+            "File",
+            "path",
+            "CONTAINS;DROP TABLE",
+            "Symbol",
+            "id",
+            &edges,
+        );
         assert!(bad.is_err());
     }
 }
