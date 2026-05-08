@@ -34,10 +34,9 @@ mod vectorization_queue;
 use sql_helpers::{
     dedup_file_batch_rows, file_vectorization_queue_upsert_if_needed,
     graph_projection_queue_upsert, graph_projection_queue_upsert_if_needed_for_file,
-    hourly_bucket_start_ms, insert_unique_relation_queries, next_vector_persist_outbox_claim_token,
+    hourly_bucket_start_ms, next_vector_persist_outbox_claim_token,
     orphaned_file_vectorization_candidates_query, orphaned_file_vectorization_requeue_sql,
     parse_file_ingress_row, parse_i64_field, parse_pending_file_row, parse_u64_field,
-    replace_relation_queries,
 };
 pub use types::{
     FileLifecycleEvent, FileVectorizationLeaseSnapshot, FileVectorizationWork, GraphProjectionWork,
@@ -501,8 +500,10 @@ impl GraphStore {
         let mut degraded_paths_raw = Vec::new();
         let mut skipped_paths = Vec::new();
         let mut seen_symbols = std::collections::HashSet::new();
-        let mut seen_calls = std::collections::HashSet::new();
-        let mut seen_calls_nif = std::collections::HashSet::new();
+        let mut seen_calls: std::collections::HashSet<self::async_writer::RelationRow> =
+            std::collections::HashSet::new();
+        let mut seen_calls_nif: std::collections::HashSet<self::async_writer::RelationRow> =
+            std::collections::HashSet::new();
         // E.7 (REQ-AXO-238): typed `SymbolRow` and `ChunkRow` accumulators
         // — replace the legacy `Vec<String>` of pre-rendered SQL tuples.
         // SQL emit moves to `WriteAccumulator::render_symbols_*()` and
@@ -521,13 +522,16 @@ impl GraphStore {
         let inline_enabled = enqueue_vectorization
             && crate::embedder::inline_embed::inline_pipeline_enabled();
         let mut inline_chunks: Vec<(String, String, String, String)> = Vec::new();
-        // MIL-AXO-015 option B.2: typed triples are the source of
-        // truth — SQL string tuples are derived at the helper call
-        // site below, and the same triples feed the AGE Cypher
-        // dual-write pass after execute_batch.
-        let mut contains_triples: Vec<(String, String, String)> = Vec::new();
-        let mut calls_triples: Vec<(String, String, String)> = Vec::new();
-        let mut calls_nif_triples: Vec<(String, String, String)> = Vec::new();
+        // MIL-AXO-015 option B.2 + REQ-AXO-238 E.7: typed `RelationRow`
+        // is the source of truth for both the SQL writer path
+        // (rendered via `WriteAccumulator::render_{contains,calls,calls_nif}_duckdb`)
+        // and the AGE Cypher dual-write below. SQL string tuples are no
+        // longer materialised at the producer — the renderer owns that
+        // conversion. Format is bit-equivalent to the legacy producer
+        // (parity gated by `render_*_duckdb_matches_legacy_producer_format`).
+        let mut contains_rows: Vec<self::async_writer::RelationRow> = Vec::new();
+        let mut calls_rows: Vec<self::async_writer::RelationRow> = Vec::new();
+        let mut calls_nif_rows: Vec<self::async_writer::RelationRow> = Vec::new();
         // MIL-AXO-015 P4 4e: backend selector for the Symbol.embedding
         // inline render. PG stores `vector(1024)` (pgvector); DuckDB
         // stores FLOAT[1024]. Captured once per call to avoid the
@@ -623,11 +627,11 @@ impl GraphStore {
                             embedding: sym.embedding.clone(),
                         });
 
-                        contains_triples.push((
-                            path.clone(),
-                            symbol_id.clone(),
-                            project_code.to_string(),
-                        ));
+                        contains_rows.push(self::async_writer::RelationRow {
+                            source_id: path.clone(),
+                            target_id: symbol_id.clone(),
+                            project_code: project_code.to_string(),
+                        });
 
                         if matches!(processing_mode, ProcessingMode::Full) {
                             for derived_chunk in Self::build_chunk_content(
@@ -675,18 +679,21 @@ impl GraphStore {
 
                         let source_id = Self::symbol_id(project_code, path, &relation.from);
                         let target_id = Self::symbol_id(project_code, path, &relation.to);
-                        let relation_triple =
-                            (source_id, target_id, project_code.to_string());
+                        let relation_row = self::async_writer::RelationRow {
+                            source_id,
+                            target_id,
+                            project_code: project_code.to_string(),
+                        };
 
                         match table {
                             "CALLS" => {
-                                if seen_calls.insert(relation_triple.clone()) {
-                                    calls_triples.push(relation_triple);
+                                if seen_calls.insert(relation_row.clone()) {
+                                    calls_rows.push(relation_row);
                                 }
                             }
                             "CALLS_NIF" => {
-                                if seen_calls_nif.insert(relation_triple.clone()) {
-                                    calls_nif_triples.push(relation_triple);
+                                if seen_calls_nif.insert(relation_row.clone()) {
+                                    calls_nif_rows.push(relation_row);
                                 }
                             }
                             _ => {}
@@ -906,12 +913,12 @@ impl GraphStore {
                 skipped_paths.join(",")
             ));
         }
-        contains_triples.sort_unstable();
-        contains_triples.dedup();
-        calls_triples.sort_unstable();
-        calls_triples.dedup();
-        calls_nif_triples.sort_unstable();
-        calls_nif_triples.dedup();
+        contains_rows.sort_unstable();
+        contains_rows.dedup();
+        calls_rows.sort_unstable();
+        calls_rows.dedup();
+        calls_nif_rows.sort_unstable();
+        calls_nif_rows.dedup();
         // E.7 (REQ-AXO-238): render typed Symbol/Chunk rows via the
         // async-writer accumulator. Backend-aware: under PG the renderer
         // emits pgvector array literals for the embedding column; under
@@ -938,34 +945,37 @@ impl GraphStore {
             )));
             queries.extend(chunk_acc.render_chunks_duckdb());
         }
-        // MIL-AXO-015 B.2: derive SQL tuples from typed triples just-
-        // in-time so the helpers stay backend-agnostic. The same
-        // triples feed the AGE Cypher dual-write below.
-        let triple_to_sql = |(a, b, c): &(String, String, String)| -> String {
-            format!(
-                "('{}', '{}', '{}')",
-                Self::escape_sql(a),
-                Self::escape_sql(b),
-                Self::escape_sql(c)
-            )
-        };
-        let contains_values: Vec<String> = contains_triples.iter().map(triple_to_sql).collect();
-        let calls_values: Vec<String> = calls_triples.iter().map(triple_to_sql).collect();
-        let calls_nif_values: Vec<String> =
-            calls_nif_triples.iter().map(triple_to_sql).collect();
         // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
         // the SQL relation writes — AGE dual-write below remains the
         // sole writer. Only fires under PG.
         let skip_sql_relations =
             backend_is_pg && crate::postgres::age::age_only_relations_enabled();
         if !skip_sql_relations {
-            queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
-            queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
-            queries.extend(replace_relation_queries(
-                "CALLS_NIF",
-                &calls_nif_values,
-                200,
-            ));
+            // E.7 (REQ-AXO-238): render typed RelationRows via the
+            // async-writer accumulator. Backend-aware variants land in
+            // a follow-up slice (PG renderer); today both backends use
+            // the DuckDB renderer (CONTAINS / CALLS / CALLS_NIF schemas
+            // are compatible without CAST literals). SQL byte-equivalent
+            // to the legacy producer (parity gated by
+            // `render_*_duckdb_matches_legacy_producer_format`).
+            let mut relation_acc = self::async_writer::WriteAccumulator::new();
+            if !contains_rows.is_empty() {
+                relation_acc.absorb(self::async_writer::WriteDiff::Contains(
+                    contains_rows.clone(),
+                ));
+            }
+            if !calls_rows.is_empty() {
+                relation_acc
+                    .absorb(self::async_writer::WriteDiff::Calls(calls_rows.clone()));
+            }
+            if !calls_nif_rows.is_empty() {
+                relation_acc.absorb(self::async_writer::WriteDiff::CallsNif(
+                    calls_nif_rows.clone(),
+                ));
+            }
+            queries.extend(relation_acc.render_contains_duckdb());
+            queries.extend(relation_acc.render_calls_duckdb());
+            queries.extend(relation_acc.render_calls_nif_duckdb());
         }
         let mut enqueued_vectorization = false;
         // DEC-AXO-071 H.2: paths that will skip the queue and be embedded
@@ -1029,7 +1039,7 @@ impl GraphStore {
                 "Symbol",
                 "id",
                 "CONTAINS",
-                &contains_triples,
+                &contains_rows,
             );
             self.dual_write_relation_edges_age(
                 "Symbol",
@@ -1037,7 +1047,7 @@ impl GraphStore {
                 "Symbol",
                 "id",
                 "CALLS",
-                &calls_triples,
+                &calls_rows,
             );
             self.dual_write_relation_edges_age(
                 "Symbol",
@@ -1045,7 +1055,7 @@ impl GraphStore {
                 "Symbol",
                 "id",
                 "CALLS_NIF",
-                &calls_nif_triples,
+                &calls_nif_rows,
             );
         }
 
@@ -2164,21 +2174,21 @@ impl GraphStore {
         dst_label: &str,
         dst_id_property: &str,
         edge_label: &str,
-        triples: &[(String, String, String)],
+        rows: &[self::async_writer::RelationRow],
     ) {
-        if triples.is_empty() {
+        if rows.is_empty() {
             return;
         }
-        // Each triple's (src_id, dst_id) drives a Cypher MERGE; the
+        // Each row's (source_id, target_id) drives a Cypher MERGE; the
         // project_code rides as an edge property so MATCH queries can
         // filter on it without touching the vertex catalog.
-        let edges: Vec<(String, String, serde_json::Value)> = triples
+        let edges: Vec<(String, String, serde_json::Value)> = rows
             .iter()
-            .map(|(s, t, p)| {
+            .map(|r| {
                 (
-                    s.clone(),
-                    t.clone(),
-                    serde_json::json!({"project_code": p}),
+                    r.source_id.clone(),
+                    r.target_id.clone(),
+                    serde_json::json!({"project_code": r.project_code}),
                 )
             })
             .collect();
@@ -2196,7 +2206,7 @@ impl GraphStore {
                 log::warn!(
                     "AGE dual-write skipped for {} batch ({} edges): {}",
                     edge_label,
-                    triples.len(),
+                    rows.len(),
                     e
                 );
                 return;
@@ -2204,12 +2214,12 @@ impl GraphStore {
         };
         for (i, sql) in cyphers.iter().enumerate() {
             if let Err(e) = self.execute(sql) {
-                let (s, t, _) = &triples[i];
+                let row = &rows[i];
                 log::warn!(
                     "AGE dual-write {} edge failed (SQL succeeded) {} -> {}: {}",
                     edge_label,
-                    s,
-                    t,
+                    row.source_id,
+                    row.target_id,
                     e
                 );
             }
@@ -2231,12 +2241,12 @@ fn age_dual_write_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::sql_helpers::{insert_unique_relation_queries, replace_relation_queries};
     use super::{
-        dedup_file_batch_rows, insert_unique_relation_queries, parse_i64_field,
-        replace_relation_queries, FileUpsertSource, FileVectorizationLeaseSnapshot,
-        FileVectorizationWork, VectorBatchRun, VectorLaneStateRecord,
-        VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorWorkerFault,
-        CHUNK_EMBEDDING_MODEL_ID,
+        dedup_file_batch_rows, parse_i64_field, FileUpsertSource,
+        FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun,
+        VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
+        VectorWorkerFault, CHUNK_EMBEDDING_MODEL_ID,
     };
     use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
     use crate::parser::{ExtractionResult, Relation, Symbol};

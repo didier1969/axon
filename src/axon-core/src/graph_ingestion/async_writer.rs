@@ -65,7 +65,7 @@ pub struct ChunkRow {
     pub chunk_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelationRow {
     pub source_id: String,
     pub target_id: String,
@@ -860,6 +860,86 @@ mod tests {
         assert!(acc.render_contains_duckdb().is_empty());
         assert!(acc.render_calls_duckdb().is_empty());
         assert!(acc.render_calls_nif_duckdb().is_empty());
+    }
+
+    #[test]
+    fn render_contains_duckdb_matches_legacy_producer_format() {
+        // Parity gate for E.7 relation producer refactor: the rendered
+        // INSERT must be byte-for-byte equivalent to what
+        // graph_ingestion.rs emitted via `triple_to_sql` +
+        // `insert_unique_relation_queries("CONTAINS", ...)`. Any drift
+        // here = silent regression on the writer-side path.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![RelationRow {
+            source_id: "/tmp/a.rs".to_string(),
+            // Embedded apostrophe must round-trip via single-quote
+            // doubling (escape_sql_text mirrors GraphStore::escape_sql).
+            target_id: "AXO::path::sym'with'quote".to_string(),
+            project_code: "AXO".to_string(),
+        }]));
+        let rendered = acc.render_contains_duckdb();
+        assert_eq!(rendered.len(), 1);
+        let q = &rendered[0];
+        assert_eq!(
+            q,
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+             ('/tmp/a.rs', 'AXO::path::sym''with''quote', 'AXO') \
+             ON CONFLICT DO NOTHING;"
+        );
+    }
+
+    #[test]
+    fn render_calls_duckdb_matches_legacy_producer_format() {
+        // Parity gate: exact match against the legacy
+        // `replace_relation_queries("CALLS", ..., 200)` output for a
+        // single CALLS row, including the DELETE-then-INSERT shape.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Calls(vec![RelationRow {
+            source_id: "AXO::path::caller".to_string(),
+            target_id: "AXO::path::call'ee".to_string(),
+            project_code: "AXO".to_string(),
+        }]));
+        let rendered = acc.render_calls_duckdb();
+        assert_eq!(rendered.len(), 2, "1 row -> 1 chunk -> DELETE+INSERT");
+        assert_eq!(
+            rendered[0],
+            "DELETE FROM CALLS USING (VALUES ('AXO::path::caller', 'AXO::path::call''ee', 'AXO')) \
+             AS incoming(source_id, target_id, project_code) \
+             WHERE CALLS.source_id = incoming.source_id \
+               AND CALLS.target_id = incoming.target_id \
+               AND CALLS.project_code = incoming.project_code;"
+        );
+        assert_eq!(
+            rendered[1],
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
+             ('AXO::path::caller', 'AXO::path::call''ee', 'AXO');"
+        );
+    }
+
+    #[test]
+    fn render_calls_nif_duckdb_matches_legacy_producer_format() {
+        // Parity gate: same shape as CALLS but on the CALLS_NIF table.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::CallsNif(vec![RelationRow {
+            source_id: "AXO::nif::a".to_string(),
+            target_id: "AXO::nif::b".to_string(),
+            project_code: "AXO".to_string(),
+        }]));
+        let rendered = acc.render_calls_nif_duckdb();
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(
+            rendered[0],
+            "DELETE FROM CALLS_NIF USING (VALUES ('AXO::nif::a', 'AXO::nif::b', 'AXO')) \
+             AS incoming(source_id, target_id, project_code) \
+             WHERE CALLS_NIF.source_id = incoming.source_id \
+               AND CALLS_NIF.target_id = incoming.target_id \
+               AND CALLS_NIF.project_code = incoming.project_code;"
+        );
+        assert_eq!(
+            rendered[1],
+            "INSERT INTO CALLS_NIF (source_id, target_id, project_code) VALUES \
+             ('AXO::nif::a', 'AXO::nif::b', 'AXO');"
+        );
     }
 
     #[test]
