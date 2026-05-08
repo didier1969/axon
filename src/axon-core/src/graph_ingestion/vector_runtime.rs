@@ -135,9 +135,15 @@ impl GraphStore {
     }
 
     pub fn latest_vector_worker_fault(&self, lane: &str) -> Result<Option<VectorWorkerFault>> {
+        // MIL-AXO-015 P4 4e: under PG the runtime tables live in axon_runtime.
+        let table_ref = if self.is_postgres_backend() {
+            "axon_runtime.VectorWorkerFault"
+        } else {
+            "VectorWorkerFault"
+        };
         let raw = self.query_json_writer(&format!(
             "SELECT fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt \
-             FROM VectorWorkerFault \
+             FROM {table_ref} \
              WHERE lane = '{}' \
              ORDER BY occurred_at_ms DESC, fault_id DESC \
              LIMIT 1",
@@ -195,9 +201,14 @@ impl GraphStore {
     }
 
     pub fn vector_lane_state_record(&self, lane: &str) -> Result<Option<VectorLaneStateRecord>> {
+        let table_ref = if self.is_postgres_backend() {
+            "axon_runtime.VectorLaneState"
+        } else {
+            "VectorLaneState"
+        };
         let raw = self.query_json_writer(&format!(
             "SELECT lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id \
-             FROM VectorLaneState \
+             FROM {table_ref} \
              WHERE lane = '{}' \
              LIMIT 1",
             Self::escape_sql(lane)
