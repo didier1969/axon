@@ -709,37 +709,57 @@ impl GraphStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
+        // REQ-AXO-244 / FFI connection-pinning fix: under the PG plugin
+        // each `pg_execute` call gets a fresh connection from the
+        // deadpool pool, which breaks the BEGIN/…/COMMIT pairing —
+        // BEGIN ends up on connection A, COMMIT on connection D, and
+        // connection A stays "idle in transaction" indefinitely
+        // holding row locks. The fix joins the entire batch into a
+        // single `BEGIN; <q1>; <q2>; …; COMMIT;` string and dispatches
+        // it via one `pg_execute` call so the whole sequence runs on
+        // one pinned connection. tokio_postgres' `batch_execute` is
+        // happy with a multi-statement string and DuckDB's plugin
+        // batch_execute behaves identically — same shape on both
+        // backends, so the join is unconditional.
+        let mut combined = String::with_capacity(
+            queries.iter().map(|q| q.len() + 2).sum::<usize>() + 32,
+        );
+        combined.push_str("BEGIN;\n");
+        for q in queries {
+            let normalized = self.normalize_attached_soll_query(q);
+            combined.push_str(normalized.as_ref());
+            // Many of our queries already end with `;`. Add a guard
+            // separator if not — the parser is forgiving with extra
+            // semicolons but rejects two adjacent statements without
+            // one.
+            if !normalized.as_ref().trim_end().ends_with(';') {
+                combined.push(';');
+            }
+            combined.push('\n');
+        }
+        combined.push_str("COMMIT;");
+
+
         unsafe {
             let exec_fn = self.pool.symbols.exec_fn;
-
-            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
-                return Err(anyhow!("Batch Writer Error: BEGIN TRANSACTION failed"));
-            }
-
-            for q in queries {
-                let normalized = self.normalize_attached_soll_query(q);
-                let c_query = match CString::new(normalized.as_ref()) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        if let Ok(rb) = CString::new("ROLLBACK;") {
-                            let _ = exec_fn(*guard, rb.as_ptr());
-                        }
-                        return Err(anyhow!("Batch Writer Error (CString): {:?}", e));
-                    }
-                };
-                if !exec_fn(*guard, c_query.as_ptr()) {
-                    if let Ok(rb) = CString::new("ROLLBACK;") {
-                        let _ = exec_fn(*guard, rb.as_ptr());
-                    }
-                    return Err(anyhow!(
-                        "Batch Writer Error on query: {}",
-                        normalized.as_ref()
-                    ));
+            let c_query = match CString::new(combined) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(anyhow!("Batch Writer Error (CString): {:?}", e));
                 }
-            }
-
-            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
-                return Err(anyhow!("Batch Writer Error: COMMIT failed"));
+            };
+            if !exec_fn(*guard, c_query.as_ptr()) {
+                // Note: we don't issue an explicit ROLLBACK here. The
+                // joined batch failed inside the pg_execute call, and
+                // `batch_execute` already aborts the transaction on
+                // any statement error. No further state cleanup needed
+                // — the connection returns to the pool with the
+                // implicit rollback already in effect (and DuckDB's
+                // batch_execute behaves the same way).
+                return Err(anyhow!(
+                    "Batch Writer Error on batch (size={})",
+                    queries.len()
+                ));
             }
         }
         if !self.reader_only_ist_mode {

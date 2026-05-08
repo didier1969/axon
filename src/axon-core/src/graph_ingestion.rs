@@ -944,31 +944,46 @@ impl GraphStore {
         let skip_sql_relations =
             backend_is_pg && crate::postgres::age::age_only_relations_enabled();
 
-        if use_bulk_writer {
-            // Build the atomic batch in one go, then flush. Empty
-            // buckets short-circuit inside flush_batch so this is safe
-            // when only some tables have rows.
-            let bulk_batch = crate::postgres::bulk_writer::PgBulkBatch {
-                symbols: std::mem::take(&mut symbol_rows),
-                chunks: std::mem::take(&mut chunk_rows),
-                contains: if skip_sql_relations {
-                    Vec::new()
-                } else {
-                    contains_rows.clone()
-                },
-                calls: if skip_sql_relations {
-                    Vec::new()
-                } else {
-                    calls_rows.clone()
-                },
-                calls_nif: if skip_sql_relations {
-                    Vec::new()
-                } else {
-                    calls_nif_rows.clone()
-                },
+        // REQ-AXO-244 follow-up: under bulk_writer, the typed Symbol /
+        // Chunk / relation rows go through `flush_batch` (own tx) AFTER
+        // `execute_batch(&queries)` so the DELETE-then-INSERT ordering
+        // is preserved. The legacy DELETEs upstream of this block
+        // (lines 733-758) match Symbol/Chunk/CONTAINS rows by the OLD
+        // CONTAINS table; running flush_batch BEFORE those DELETEs
+        // would let the DELETE eat the just-inserted rows from this
+        // batch (the new CONTAINS rows already point Symbol back to
+        // the same paths). The fix: build the bulk_batch here, but
+        // defer its `flush_batch` call until after execute_batch so
+        // the DELETEs run against pre-batch state.
+        let bulk_batch_opt: Option<crate::postgres::bulk_writer::PgBulkBatch> =
+            if use_bulk_writer {
+                Some(crate::postgres::bulk_writer::PgBulkBatch {
+                    symbols: std::mem::take(&mut symbol_rows),
+                    chunks: std::mem::take(&mut chunk_rows),
+                    contains: if skip_sql_relations {
+                        Vec::new()
+                    } else {
+                        contains_rows.clone()
+                    },
+                    calls: if skip_sql_relations {
+                        Vec::new()
+                    } else {
+                        calls_rows.clone()
+                    },
+                    calls_nif: if skip_sql_relations {
+                        Vec::new()
+                    } else {
+                        calls_nif_rows.clone()
+                    },
+                })
+            } else {
+                None
             };
-            crate::postgres::bulk_writer::flush_batch(&bulk_batch)
-                .map_err(|e| anyhow!("bulk_writer flush_batch failed: {}", e))?;
+
+        if use_bulk_writer {
+            // bulk_batch is staged above; flush happens after
+            // execute_batch (see below) to preserve DELETE-then-INSERT
+            // ordering against the OLD CONTAINS table.
         } else {
             if !symbol_rows.is_empty() {
                 let mut symbol_acc = self::async_writer::WriteAccumulator::new();
@@ -1065,6 +1080,21 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
+
+        // REQ-AXO-244 follow-up: flush the staged bulk_batch AFTER
+        // execute_batch so the DELETEs upstream (lines 733-758, which
+        // match Symbol / Chunk / CONTAINS rows by the OLD CONTAINS
+        // table) run against the pre-batch state. Running flush_batch
+        // before would let the DELETEs eat the just-inserted rows
+        // (the new CONTAINS rows already point back to the same
+        // file paths). The bulk_writer's flush_batch is its own
+        // transaction; partial-commit semantics with execute_batch are
+        // acceptable because every COPY BINARY merge uses ON CONFLICT
+        // DO UPDATE so a retry converges.
+        if let Some(bulk_batch) = bulk_batch_opt {
+            crate::postgres::bulk_writer::flush_batch(&bulk_batch)
+                .map_err(|e| anyhow!("bulk_writer flush_batch failed: {}", e))?;
+        }
 
         // MIL-AXO-015 option B.2 / B.4: write edges into the AGE
         // graph under PG when AXON_AGE_DUAL_WRITE=true (B.2) OR
@@ -1256,12 +1286,18 @@ impl GraphStore {
             .timestamp_nanos_opt()
             .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
 
+        // REQ-AXO-244 / FFI connection-pinning fix: dropping the
+        // explicit BEGIN/COMMIT pair. Each `pg_execute` call gets a
+        // fresh connection from the FFI plugin's deadpool pool, so
+        // BEGIN ends up on a different connection than COMMIT and the
+        // first connection stays "idle in transaction" indefinitely
+        // holding row locks. Auto-commit is correct here: the UPDATE
+        // tags claimed rows with this call's unique `worker_id`; the
+        // SELECT below filters on that same `worker_id` so no other
+        // claim race can return our rows. DuckDB's plugin behaves
+        // identically (each statement implicitly commits).
         unsafe {
             let exec_fn = self.pool.symbols.exec_fn;
-
-            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
-                return Err(anyhow!("Pending Fetch Error: BEGIN TRANSACTION failed"));
-            }
 
             let claim_query = format!(
                 "UPDATE File
@@ -1278,17 +1314,11 @@ impl GraphStore {
             let c_query = match CString::new(claim_query) {
                 Ok(c) => c,
                 Err(e) => {
-                    if let Ok(rb) = CString::new("ROLLBACK;") {
-                        let _ = exec_fn(*guard, rb.as_ptr());
-                    }
                     return Err(anyhow!("Pending Fetch Error (CString): {:?}", e));
                 }
             };
 
             if !exec_fn(*guard, c_query.as_ptr()) {
-                if let Ok(rb) = CString::new("ROLLBACK;") {
-                    let _ = exec_fn(*guard, rb.as_ptr());
-                }
                 return Err(anyhow!("Pending Fetch Error: claim update failed"));
             }
         }
@@ -1300,25 +1330,7 @@ impl GraphStore {
              ORDER BY priority DESC",
             claim_id
         );
-        let res = match self.query_on_ctx(&fetch_query, *guard) {
-            Ok(r) => r,
-            Err(e) => {
-                unsafe {
-                    let exec_fn = self.pool.symbols.exec_fn;
-                    if let Ok(rb_query) = CString::new("ROLLBACK;") {
-                        let _ = exec_fn(*guard, rb_query.as_ptr());
-                    }
-                }
-                return Err(e);
-            }
-        };
-
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
-                return Err(anyhow!("Pending Fetch Error: COMMIT failed"));
-            }
-        }
+        let res = self.query_on_ctx(&fetch_query, *guard)?;
         self.mark_writer_commit_visible();
         drop(guard);
 
@@ -1370,12 +1382,14 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(",");
 
+        // REQ-AXO-244 / FFI connection-pinning fix: same rationale as
+        // `fetch_pending_batch`. UPDATE auto-commits and tags the
+        // claimed rows with this call's unique `worker_id`; the SELECT
+        // filters on the same id so no other claim race can return
+        // ours. Dropping BEGIN/COMMIT prevents the cross-connection
+        // "idle in transaction" deadlock under PG.
         unsafe {
             let exec_fn = self.pool.symbols.exec_fn;
-
-            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
-                return Err(anyhow!("Claim Paths Error: BEGIN TRANSACTION failed"));
-            }
 
             let claim_query = format!(
                 "UPDATE File
@@ -1387,17 +1401,11 @@ impl GraphStore {
             let c_query = match CString::new(claim_query) {
                 Ok(c) => c,
                 Err(e) => {
-                    if let Ok(rb) = CString::new("ROLLBACK;") {
-                        let _ = exec_fn(*guard, rb.as_ptr());
-                    }
                     return Err(anyhow!("Claim Paths Error (CString): {:?}", e));
                 }
             };
 
             if !exec_fn(*guard, c_query.as_ptr()) {
-                if let Ok(rb) = CString::new("ROLLBACK;") {
-                    let _ = exec_fn(*guard, rb.as_ptr());
-                }
                 return Err(anyhow!("Claim Paths Error: claim update failed"));
             }
         }
@@ -1409,25 +1417,7 @@ impl GraphStore {
              ORDER BY priority DESC, size ASC",
             claim_id
         );
-        let res = match self.query_on_ctx(&fetch_query, *guard) {
-            Ok(r) => r,
-            Err(e) => {
-                unsafe {
-                    let exec_fn = self.pool.symbols.exec_fn;
-                    if let Ok(rb_query) = CString::new("ROLLBACK;") {
-                        let _ = exec_fn(*guard, rb_query.as_ptr());
-                    }
-                }
-                return Err(e);
-            }
-        };
-
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
-                return Err(anyhow!("Claim Paths Error: COMMIT failed"));
-            }
-        }
+        let res = self.query_on_ctx(&fetch_query, *guard)?;
         self.mark_writer_commit_visible();
         drop(guard);
 
