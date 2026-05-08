@@ -155,6 +155,27 @@ pub fn age_read_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// MIL-AXO-015 B.4 prep: when ON, skip the SQL writes to the relation
+/// tables (`CALLS`, `CALLS_NIF`, `CONTAINS`) — AGE becomes the sole
+/// writer for graph edges. Default OFF for backward compatibility:
+/// existing PG installs continue dual-writing both surfaces. Once the
+/// operator validates AGE-only reads on production traffic with
+/// `AXON_AGE_READ=true`, flipping this to ON prepares the way for
+/// `DROP TABLE` on the SQL relation tables (REQ-AXO-216 final step).
+///
+/// Pre-requisites for safely flipping ON:
+/// - `AXON_AGE_DUAL_WRITE=true` must have been active long enough
+///   for the AGE graph to be fully populated.
+/// - `AXON_AGE_READ=true` (default since session 4 phase 11) so
+///   readers consume from AGE — otherwise readers fall back to SQL
+///   which would now be stale.
+/// - Empirical parity check between AGE and SQL relation counts.
+pub fn age_only_relations_enabled() -> bool {
+    std::env::var("AXON_AGE_ONLY_RELATIONS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Validate that an identifier (graph / label / vertex id) is safe to
 /// inline in a Cypher heredoc. Accepts ASCII alphanumerics, underscore,
 /// `:` and `-` (the chunk_id format used elsewhere in Axon contains

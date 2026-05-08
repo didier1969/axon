@@ -944,13 +944,20 @@ impl GraphStore {
         let calls_values: Vec<String> = calls_triples.iter().map(triple_to_sql).collect();
         let calls_nif_values: Vec<String> =
             calls_nif_triples.iter().map(triple_to_sql).collect();
-        queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
-        queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
-        queries.extend(replace_relation_queries(
-            "CALLS_NIF",
-            &calls_nif_values,
-            200,
-        ));
+        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
+        // the SQL relation writes — AGE dual-write below remains the
+        // sole writer. Only fires under PG.
+        let skip_sql_relations =
+            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+        if !skip_sql_relations {
+            queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
+            queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
+            queries.extend(replace_relation_queries(
+                "CALLS_NIF",
+                &calls_nif_values,
+                200,
+            ));
+        }
         let mut enqueued_vectorization = false;
         // DEC-AXO-071 H.2: paths that will skip the queue and be embedded
         // inline below. Failures fall back to the queue in the inline
@@ -993,12 +1000,14 @@ impl GraphStore {
         }
         self.execute_batch(&queries)?;
 
-        // MIL-AXO-015 option B.2: dual-write the same edges into the
-        // AGE graph under PG when AXON_AGE_DUAL_WRITE=true. Best-effort
-        // — failures log a warning but never abort the SQL path. The
-        // same typed triples that fed the SQL INSERTs are reused here
-        // so the two graphs stay in lockstep without re-parsing SQL.
-        if self.is_postgres_backend() && age_dual_write_enabled() {
+        // MIL-AXO-015 option B.2 / B.4: write edges into the AGE
+        // graph under PG when AXON_AGE_DUAL_WRITE=true (B.2) OR
+        // AXON_AGE_ONLY_RELATIONS=true (B.4 — SQL relation writes
+        // were skipped above so AGE must run). Best-effort under
+        // dual-write; mandatory under AGE-only.
+        if self.is_postgres_backend()
+            && (age_dual_write_enabled() || crate::postgres::age::age_only_relations_enabled())
+        {
             // Vertex enrichment first so subsequent edge MERGEs hit
             // already-populated vertices (idempotent either way, but
             // a populated vertex carries `name`/`kind`/`project_code`
@@ -2035,17 +2044,26 @@ impl GraphStore {
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
         // SQL relation table — authoritative on both backends today.
-        self.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
-            from, to, from
-        ))?;
+        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
+        // the SQL write so AGE becomes the sole writer (final step
+        // before DROP TABLE on the relation tables).
+        let skip_sql_relations =
+            self.is_postgres_backend() && crate::postgres::age::age_only_relations_enabled();
+        if !skip_sql_relations {
+            self.execute(&format!(
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
+                from, to, from
+            ))?;
+        }
 
-        // MIL-AXO-015 option B.2: dual-write the same edge into the
-        // AGE graph under PG when `AXON_AGE_DUAL_WRITE=true`. The SQL
-        // table remains authoritative until B.3 ships AGE-native
-        // readers; for now Cypher writes happen alongside, validating
-        // the helpers + warming up the index.
-        if self.is_postgres_backend() && age_dual_write_enabled() {
+        // MIL-AXO-015 option B.2 / B.4: write the edge into the AGE
+        // graph under PG when `AXON_AGE_DUAL_WRITE=true` (B.2 dual-
+        // write phase) OR when `AXON_AGE_ONLY_RELATIONS=true` (B.4
+        // AGE-only writes — SQL above was skipped). When neither
+        // flag is set, we're in the legacy SQL-only mode.
+        if self.is_postgres_backend()
+            && (age_dual_write_enabled() || crate::postgres::age::age_only_relations_enabled())
+        {
             let cypher = match crate::postgres::age::cypher_merge_edge(
                 "axon_graph",
                 "Project",
