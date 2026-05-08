@@ -1918,11 +1918,62 @@ impl GraphStore {
     }
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
+        // SQL relation table — authoritative on both backends today.
         self.execute(&format!(
             "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
             from, to, from
-        ))
+        ))?;
+
+        // MIL-AXO-015 option B.2: dual-write the same edge into the
+        // AGE graph under PG when `AXON_AGE_DUAL_WRITE=true`. The SQL
+        // table remains authoritative until B.3 ships AGE-native
+        // readers; for now Cypher writes happen alongside, validating
+        // the helpers + warming up the index.
+        if self.is_postgres_backend() && age_dual_write_enabled() {
+            let cypher = match crate::postgres::age::cypher_merge_edge(
+                "axon_graph",
+                "Project",
+                "id",
+                from,
+                "CONTAINS",
+                &serde_json::json!({"project_code": from}),
+                "Project",
+                "id",
+                to,
+            ) {
+                Ok(sql) => sql,
+                Err(e) => {
+                    log::warn!(
+                        "AGE dual-write skipped for project dependency {} -> {}: {}",
+                        from,
+                        to,
+                        e
+                    );
+                    return Ok(());
+                }
+            };
+            if let Err(e) = self.execute(&cypher) {
+                // Dual-write is best-effort — SQL is still authoritative.
+                log::warn!(
+                    "AGE dual-write CONTAINS edge failed (SQL succeeded): {}",
+                    e
+                );
+            }
+        }
+        Ok(())
     }
+}
+
+/// Read-once env knob that gates the option B.2 dual-write transition.
+/// Default: OFF. When ON, every relation writer that has a Cypher
+/// equivalent emits both the SQL INSERT (authoritative) and the
+/// Cypher MERGE (validation + index warm-up). Once B.3 readers ship
+/// against the AGE graph, the env defaults to ON; once B.4 drops the
+/// SQL relation tables, the gate disappears entirely.
+fn age_dual_write_enabled() -> bool {
+    std::env::var("AXON_AGE_DUAL_WRITE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
