@@ -25,6 +25,7 @@
 //     SOLL bootstrap loader for empty PG instances.
 
 pub mod age;
+pub mod bulk_writer;
 pub mod ddl;
 pub mod seed;
 pub mod vector;

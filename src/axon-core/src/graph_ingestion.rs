@@ -2033,6 +2033,35 @@ impl GraphStore {
                      from empty/malformed chunk_id"
                 ))?
                 .to_string();
+
+            // REQ-AXO-238: when AXON_BULK_WRITER_ENABLED, route the
+            // entire batch through `crate::postgres::bulk_writer` which
+            // performs a single COPY BINARY into a temp staging table
+            // followed by `INSERT … SELECT … ON CONFLICT DO UPDATE`.
+            // Default OFF preserves the legacy per-row INSERT path
+            // bit-for-bit so the existing test suite stays green.
+            if crate::postgres::bulk_writer::bulk_writer_enabled() {
+                let rows: Vec<crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow> =
+                    updates
+                        .iter()
+                        .map(|(chunk_id, source_hash, vector)| {
+                            crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow {
+                                chunk_id: chunk_id.clone(),
+                                source_hash: source_hash.clone(),
+                                embedding: vector.clone(),
+                            }
+                        })
+                        .collect();
+                crate::postgres::bulk_writer::flush_chunk_embeddings(
+                    &project_code,
+                    model_id,
+                    &rows,
+                    now_ms,
+                )
+                .map_err(|e| anyhow!("bulk_writer flush failed: {}", e))?;
+                return Ok(());
+            }
+
             let mut queries = Vec::with_capacity(updates.len());
             for (chunk_id, source_hash, vector) in updates {
                 let sql = crate::postgres::vector::upsert_chunk_embedding_sql(
