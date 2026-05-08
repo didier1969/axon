@@ -4219,6 +4219,107 @@ fn test_axon_soll_manager_link_concept_belongs_to_pillar() {
 }
 
 #[test]
+fn test_axon_soll_manager_link_decision_refines_concept() {
+    // REQ-AXO-188 #1+#2: DEC -> CPT must accept REFINES (and SUPERSEDES) so
+    // architecture-state Concepts can record which Decision governs or
+    // retires them. Without this canonical edge, the linkage stays text-only
+    // inside the description body and is not queryable via the graph.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Architecture decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'Architecture-state CPT', 'Concept desc', '', '{\"tags\":\"architecture-state\"}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "CPT-AXO-001",
+                    "relation_type": "REFINES"
+                }
+            }
+        })),
+        id: Some(json!(4188)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Link created"), "{content}");
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='REFINES' AND source_id='DEC-AXO-001' AND target_id='CPT-AXO-001'")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_link_decision_supersedes_concept() {
+    // REQ-AXO-188 #1+#2: DEC -> CPT also accepts SUPERSEDES for the case
+    // where a decision retires or wholly replaces an architecture concept.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Replacement decision', '', 'accepted', '{\"context\":\"ctx\",\"rationale\":\"why\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-002', 'Concept', 'AXO', 'Retired concept', 'desc', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-002",
+                    "target_id": "CPT-AXO-002",
+                    "relation_type": "SUPERSEDES"
+                }
+            }
+        })),
+        id: Some(json!(4189)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Link created"), "{content}");
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='SUPERSEDES' AND source_id='DEC-AXO-002' AND target_id='CPT-AXO-002'")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn test_soll_relation_schema_resolves_pair_by_ids() {
     let server = create_test_server();
     server

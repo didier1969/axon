@@ -202,6 +202,27 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 999,
             },
         }),
+        // REQ-AXO-188 — A Decision can REFINE or SUPERSEDE the Concept it
+        // governs. CPTs that document architecture-state (e.g. CPT-AXO-030..035)
+        // need this canonical edge so:
+        //   - soll_work_plan can weight CPTs by recent DECs that refined them,
+        //   - soll_validate can detect architecture-state CPTs whose
+        //     governing DEC committed >7 days ago without the CPT being
+        //     refreshed (drift signal),
+        //   - kickoff_bundle can surface "architecture_state CPTs touched by
+        //     recent DECs" as a session-start orientation slice.
+        // Default=None forces the caller to be explicit (REFINES vs SUPERSEDES
+        // carries different semantics; refusing to default avoids miscoding).
+        ("DEC", "CPT") => Some(RelationPolicy {
+            allowed: &["REFINES", "SUPERSEDES"],
+            default: None,
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
+        }),
         ("REQ", "REQ") => Some(RelationPolicy {
             allowed: &["REFINES", "BELONGS_TO"],
             default: Some("REFINES"),

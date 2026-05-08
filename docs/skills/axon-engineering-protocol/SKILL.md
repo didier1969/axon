@@ -92,6 +92,7 @@ Canonical relations (from `Edge.relation_type`):
 |---|---|
 | DEC → REQ | SOLVES |
 | DEC → DEC | REFINES, SUPERSEDES |
+| DEC → CPT | REFINES, SUPERSEDES (REQ-AXO-188 — architecture-state CPTs governed/retired by Decisions) |
 | CPT → REQ | EXPLAINS |
 | CPT → PIL | BELONGS_TO |
 | REQ → PIL | BELONGS_TO |
