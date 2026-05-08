@@ -836,7 +836,52 @@ impl McpServer {
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
-        let sql = if project == "*" {
+        // MIL-AXO-015 P6: under PG every IST table lives in `<project_code>.X`
+        // (CPT-AXO-039). Cross-project chunk search requires UNION ALL across
+        // schemas — deferred to P9.
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() && project != "*" {
+            crate::postgres::ddl::schema_name_for(project).ok()
+        } else {
+            None
+        };
+        let sql = if let Some(schema) = pg_schema.as_ref() {
+            format!(
+                "WITH chunk_matches AS ( \
+                    SELECT s.name, s.kind, f.path AS uri, \
+                           CASE \
+                               WHEN {docstring_match} THEN 'docstring' \
+                               WHEN {body_match} THEN 'chunk body' \
+                               WHEN {path_match} THEN 'file path' \
+                               ELSE 'chunk metadata' \
+                           END AS match_reason, \
+                           CASE \
+                               WHEN {docstring_match} THEN 0 \
+                               WHEN {body_match} THEN 1 \
+                               WHEN {path_match} THEN 3 \
+                               ELSE 2 \
+                           END AS match_rank, \
+                           CASE \
+                               WHEN {path_match} THEN f.path \
+                               ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
+                           END AS evidence \
+                    FROM {schema}.Chunk c \
+                    JOIN {schema}.Symbol s ON s.id = c.source_id \
+                    JOIN {schema}.CONTAINS rel ON rel.target_id = s.id \
+                    JOIN {schema}.File f ON f.path = rel.source_id \
+                    WHERE ({predicate}) \
+                 ) \
+                 SELECT name, kind, uri, match_reason, evidence \
+                 FROM chunk_matches \
+                 ORDER BY match_rank ASC, uri ASC, name ASC \
+                 LIMIT {limit}",
+                schema = schema,
+                docstring_match = docstring_match,
+                body_match = body_match,
+                path_match = path_match,
+                predicate = predicate,
+                limit = if query_intent == QueryIntent::ConfigLookupExact { 25 } else { 10 },
+            )
+        } else if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
                     SELECT s.name, s.kind, f.path AS uri, \
