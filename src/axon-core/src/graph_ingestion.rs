@@ -504,7 +504,13 @@ impl GraphStore {
         let mut seen_calls = std::collections::HashSet::new();
         let mut seen_calls_nif = std::collections::HashSet::new();
         let mut symbol_values = Vec::new();
-        let mut chunk_values = Vec::new();
+        // E.7 (REQ-AXO-238): typed `ChunkRow` accumulator — replaces the
+        // legacy `Vec<String>` of pre-rendered SQL tuples. SQL emit moves
+        // to `WriteAccumulator::render_chunks_duckdb()` so a single
+        // renderer drives both the synchronous queries-Vec path and any
+        // future async dispatcher path. Format is bit-equivalent (parity
+        // gated by `render_chunks_duckdb_matches_legacy_producer_format`).
+        let mut chunk_rows: Vec<self::async_writer::ChunkRow> = Vec::new();
         // DEC-AXO-071 H.2: when inline mode is enabled, capture chunk
         // metadata so we can embed inline immediately after the chunk
         // INSERT execute_batch returns. Empty when
@@ -644,21 +650,21 @@ impl GraphStore {
                                     derived_chunk.part_count,
                                 );
                                 let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
-                                chunk_values.push(format!(
-                                    "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
-                                    Self::escape_sql(&chunk_id),
-                                    Self::escape_sql(&symbol_id),
-                                    Self::escape_sql(project_code),
-                                    Self::escape_sql(path),
-                                    Self::escape_sql(&sym.kind),
-                                    Self::escape_sql(&derived_chunk.content),
-                                    Self::escape_sql(&chunk_hash),
-                                    derived_chunk.start_line,
-                                    derived_chunk.end_line,
-                                    derived_chunk.part_index,
-                                    derived_chunk.part_count,
-                                    Self::escape_sql(&derived_chunk.chunk_path)
-                                ));
+                                chunk_rows.push(self::async_writer::ChunkRow {
+                                    chunk_id: chunk_id.clone(),
+                                    source_type: "symbol".to_string(),
+                                    source_id: symbol_id.clone(),
+                                    project_code: project_code.to_string(),
+                                    file_path: path.to_string(),
+                                    kind: sym.kind.clone(),
+                                    content: derived_chunk.content.clone(),
+                                    content_hash: chunk_hash.clone(),
+                                    start_line: derived_chunk.start_line as i64,
+                                    end_line: derived_chunk.end_line as i64,
+                                    part_index: derived_chunk.part_index as i64,
+                                    part_count: derived_chunk.part_count as i64,
+                                    chunk_path: derived_chunk.chunk_path.clone(),
+                                });
                                 if inline_enabled {
                                     inline_chunks.push((
                                         path.clone(),
@@ -922,12 +928,17 @@ impl GraphStore {
                 chunk.join(",")
             ));
         }
-        for chunk in chunk_values.chunks(500) {
-            queries.push(format!(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES {} \
-                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path;",
-                chunk.join(",")
-            ));
+        // E.7 (REQ-AXO-238): render typed `ChunkRow`s via the async-
+        // writer accumulator. The renderer chunks at 500 rows internally
+        // and emits the same INSERT…ON CONFLICT SQL the legacy producer
+        // produced byte-for-byte (parity gated by
+        // `render_chunks_duckdb_matches_legacy_producer_format`).
+        if !chunk_rows.is_empty() {
+            let mut chunk_acc = self::async_writer::WriteAccumulator::new();
+            chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(
+                &mut chunk_rows,
+            )));
+            queries.extend(chunk_acc.render_chunks_duckdb());
         }
         // MIL-AXO-015 B.2: derive SQL tuples from typed triples just-
         // in-time so the helpers stay backend-agnostic. The same
