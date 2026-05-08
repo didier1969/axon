@@ -1445,6 +1445,22 @@ impl McpServer {
         semantic_allowed: bool,
         runtime: &mut RetrievalRuntimeState,
     ) -> Vec<ChunkCandidate> {
+        // MIL-AXO-015 P4 slice 4d — under PG every IST table lives in
+        // `<project_code>.X` (CPT-AXO-039); `c.project_code` filters become
+        // schema selection. Cross-project semantic search lands in P9 via
+        // UNION ALL across schemas; for now skip when no project resolves.
+        let pg_schema: Option<String> = if self.graph_store.is_postgres_backend() {
+            match project.and_then(|p| crate::postgres::ddl::schema_name_for(p).ok()) {
+                Some(s) => Some(s),
+                None => {
+                    excluded_because.push("pg_chunk_search_skipped_no_project".to_string());
+                    return Vec::new();
+                }
+            }
+        } else {
+            None
+        };
+
         let entry_ids = entry_candidates
             .iter()
             .map(|candidate| candidate.id.clone())
@@ -1529,19 +1545,35 @@ impl McpServer {
                     .join(", ");
                 format!("c.source_id IN ({values})")
             };
-            let anchored_query = format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), c.content, \
-                        COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
-                 CASE \
-                            WHEN ({entry_id_match}) THEN 'entry_anchor' \
-                            ELSE 'same_file' \
-                        END \
-                 FROM Chunk c \
-                 WHERE ({fast_path_filter}){project_filter} \
-                 LIMIT {limit}",
-                project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]),
-                limit = limit.min(12),
-            );
+            let anchored_query = if let Some(schema) = pg_schema.as_ref() {
+                format!(
+                    "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), c.content, \
+                            COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
+                     CASE \
+                                WHEN ({entry_id_match}) THEN 'entry_anchor' \
+                                ELSE 'same_file' \
+                            END \
+                     FROM {schema}.Chunk c \
+                     WHERE ({fast_path_filter}) \
+                     LIMIT {limit}",
+                    schema = schema,
+                    limit = limit.min(12),
+                )
+            } else {
+                format!(
+                    "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), c.content, \
+                            COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
+                     CASE \
+                                WHEN ({entry_id_match}) THEN 'entry_anchor' \
+                                ELSE 'same_file' \
+                            END \
+                     FROM Chunk c \
+                     WHERE ({fast_path_filter}){project_filter} \
+                     LIMIT {limit}",
+                    project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]),
+                    limit = limit.min(12),
+                )
+            };
             let anchored_raw = self
                 .graph_store
                 .query_json(&anchored_query)
@@ -1603,7 +1635,64 @@ impl McpServer {
             }
         }
 
-        let query = if let Some(embedding) = semantic {
+        let query = if let Some(schema) = pg_schema.as_ref() {
+            // PG branch (MIL-AXO-015 P4 4d): schema-qualified joins,
+            // pgvector `<=>` cosine distance, vector literal
+            // `'[..]'::vector(N)` instead of DuckDB's
+            // `array_cosine_distance(..., CAST(... AS FLOAT[N]))`.
+            // No project_code filter — schema selection scopes the query
+            // (CPT-AXO-039).
+            if let Some(embedding) = semantic.as_ref() {
+                let vec_lit = match crate::postgres::vector::vector_literal(embedding) {
+                    Ok(lit) => lit,
+                    Err(err) => {
+                        excluded_because.push(format!(
+                            "pg_semantic_vector_literal_error:{}",
+                            Self::truncate(&err.to_string(), 120)
+                        ));
+                        return Vec::new();
+                    }
+                };
+                let cosine_expr = format!("(ce.embedding <=> {vec_lit})");
+                format!(
+                    "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                            COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
+                            CASE \
+                                WHEN ({entry_id_match}) THEN 'entry_anchor' \
+                                WHEN ({entry_uri_match}) THEN 'same_file' \
+                                WHEN ({path_match}) THEN 'file_path' \
+                                WHEN ({lexical_predicate}) THEN 'lexical+semantic' \
+                            ELSE 'semantic' \
+                            END, \
+                            {cosine_expr} \
+                     FROM {schema}.Chunk c \
+                     JOIN {schema}.ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash \
+                     LEFT JOIN {schema}.CONTAINS rel ON rel.target_id = c.source_id \
+                     LEFT JOIN {schema}.File f ON f.path = rel.source_id \
+                     WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match}) OR {cosine_expr} < 0.55) \
+                     ORDER BY {cosine_expr} ASC \
+                     LIMIT {limit}",
+                    model_id = CHUNK_MODEL_ID,
+                )
+            } else {
+                format!(
+                    "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                            COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
+                            CASE \
+                                WHEN ({entry_id_match}) THEN 'entry_anchor' \
+                                WHEN ({entry_uri_match}) THEN 'same_file' \
+                                WHEN ({path_match}) THEN 'file_path' \
+                                ELSE 'lexical' \
+                            END, \
+                            NULL \
+                     FROM {schema}.Chunk c \
+                     LEFT JOIN {schema}.CONTAINS rel ON rel.target_id = c.source_id \
+                     LEFT JOIN {schema}.File f ON f.path = rel.source_id \
+                     WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match})) \
+                     LIMIT {limit}",
+                )
+            }
+        } else if let Some(embedding) = semantic {
             let vector = format!("{embedding:?}");
             format!(
                 "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
@@ -1651,7 +1740,11 @@ impl McpServer {
             .query_json(&query)
             .unwrap_or_else(|_| "[]".to_string());
         let mut rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        if rows.is_empty() {
+        if rows.is_empty() && pg_schema.is_none() {
+            // DuckDB-only fallback: drop project_code filter, post-filter
+            // by repo_root prefix. Under PG the schema namespace already
+            // scopes the query — the same trick requires UNION ALL across
+            // schemas and lands in P9.
             if let Some(repo_root) = Self::project_repo_root(project) {
                 let fallback_query = query.replacen(
                     &Self::sql_project_filter_for_fields(
