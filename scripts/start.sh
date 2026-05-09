@@ -569,7 +569,16 @@ if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/s
     -newer "$SELECTED_DEBUG_RUNTIME_BIN" -print -quit | grep -q .; then
     axon_log_warn "Detected newer axon-core sources than $SELECTED_DEBUG_RUNTIME_BIN"
     echo "   Rebuilding selected runtime role binary..."
-    if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-core' && cargo build --bin $RUNTIME_EXECUTABLE_NAME --release"; then
+    # REQ-AXO-174: dev launches the debug binary at .axon/cargo-target/debug/,
+    # but the rebuild used to always pass --release — producing a fresh
+    # release binary while leaving the debug binary stale. Match the build
+    # profile to the binary the script is about to launch.
+    if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
+        BUILD_PROFILE_FLAG="--release"
+    else
+        BUILD_PROFILE_FLAG=""
+    fi
+    if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-core' && cargo build --bin $RUNTIME_EXECUTABLE_NAME $BUILD_PROFILE_FLAG"; then
         echo "❌ Failed to rebuild $RUNTIME_EXECUTABLE_NAME"
         exit 1
     fi
