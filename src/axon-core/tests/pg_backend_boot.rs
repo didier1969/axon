@@ -85,11 +85,45 @@ fn graphstore_boots_under_postgres_backend() {
         "fresh PG database should have zero SOLL nodes"
     );
 
-    // ProjectCodeRegistry should also exist (extensions + global tables).
+    // ProjectCodeRegistry should also exist in the soll schema (REQ-AXO-247:
+    // PCR moved from public to soll to match the consumer code path that the
+    // DuckDB-era init_schema established).
     let registry_count = store
-        .query_count("SELECT count(*)::BIGINT FROM public.ProjectCodeRegistry")
-        .expect("query_count on ProjectCodeRegistry should succeed under PG");
+        .query_count("SELECT count(*)::BIGINT FROM soll.ProjectCodeRegistry")
+        .expect("query_count on soll.ProjectCodeRegistry should succeed under PG");
     assert_eq!(registry_count, 0);
+    // Negative assertion: the legacy public.ProjectCodeRegistry must NOT exist —
+    // had it been dual-created the registry sync paths would silently fork.
+    let public_pcr_exists = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM information_schema.tables \
+             WHERE table_schema = 'public' AND lower(table_name) = lower('ProjectCodeRegistry')",
+        )
+        .expect("information_schema lookup for legacy public.ProjectCodeRegistry");
+    assert_eq!(
+        public_pcr_exists, 0,
+        "legacy public.ProjectCodeRegistry must not be created by bootstrap_global_pg_schema"
+    );
+
+    // soll.McpJob: REQ-AXO-247 also added the async-job mirror so
+    // axon_commit_work + soll_apply_plan persist state under PG. Verify the
+    // table + its two covering indexes are in place.
+    let mcp_job_count = store
+        .query_count("SELECT count(*)::BIGINT FROM soll.McpJob")
+        .expect("query_count on soll.McpJob should succeed");
+    assert_eq!(mcp_job_count, 0);
+    let mcp_job_idx_count = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM pg_indexes \
+             WHERE schemaname = 'soll' \
+               AND lower(indexname) IN (lower('soll_mcp_job_status_idx'), \
+                                        lower('soll_mcp_job_project_idx'))",
+        )
+        .expect("pg_indexes lookup for soll.McpJob");
+    assert_eq!(
+        mcp_job_idx_count, 2,
+        "soll.McpJob covering indexes should be created"
+    );
 
     // AGE extension should be loaded — confirm via pg_extension.
     let age_count = store
@@ -258,6 +292,112 @@ fn graphstore_boots_under_postgres_backend() {
             "axon_runtime.{table} should be present after bootstrap"
         );
     }
+
+    // ── REQ-AXO-247 AC #4 + REQ-AXO-249 closure: end-to-end MCP workflow
+    // ── smoke. Mirrors the failing flip-rehearsal that surfaced both gaps:
+    //
+    //  - soll.ProjectCodeRegistry write (mirrors axon_init_project's
+    //    sync_project_registry_entry path).
+    //  - JSON helper rewrite for soll_validate (DuckDB-style
+    //    `json_extract(metadata, '$.acceptance_criteria')` must rewrite
+    //    to `metadata->'acceptance_criteria'` under PG; the JSON-encoded
+    //    string fixup must yield a JSONB object so the `IN ('', '[]')`
+    //    completeness check evaluates correctly).
+    let synthetic_pcr = "INSERT INTO soll.ProjectCodeRegistry \
+        (project_code, project_name, project_path) \
+        VALUES ('AXO', 'axon', '/tmp/test-axo') \
+        ON CONFLICT (project_code) DO UPDATE \
+            SET project_name = EXCLUDED.project_name, \
+                project_path = EXCLUDED.project_path";
+    store
+        .execute(synthetic_pcr)
+        .expect("INSERT INTO soll.ProjectCodeRegistry should succeed (REQ-AXO-247)");
+    let pcr_count = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM soll.ProjectCodeRegistry WHERE project_code = 'AXO'",
+        )
+        .expect("read back soll.ProjectCodeRegistry");
+    assert_eq!(pcr_count, 1, "registry sync should land exactly one row");
+
+    // soll.Node with metadata containing a JSON-encoded acceptance_criteria
+    // value (mirroring soll-export-seed's to_json output before REQ-AXO-249's
+    // unwrapping fix). After REQ-AXO-249 the seed loader unwraps the encoded
+    // string into a real JSONB object, so completeness queries see arrays/
+    // strings via metadata->>'acceptance_criteria' rather than JSONB string
+    // scalars that always return NULL.
+    let req_with_ac = serde_json::json!({
+        "version": 1,
+        "generated_at_ms": 1714999999000_i64,
+        "nodes": [
+            {"id": "REQ-AXO-9999", "type": "Requirement", "project_code": "AXO",
+             "title": "Smoke req", "description": "REQ-247/249 smoke",
+             "status": "open",
+             // NB: metadata is a JSON OBJECT here. The seed-loader path that
+             // gets exercised by load_seed_if_needed parses inner JSON-encoded
+             // strings into objects before insert (REQ-AXO-249 fix), so this
+             // shape covers the post-fix contract.
+             "metadata": {"acceptance_criteria": ["x", "y"], "priority": "P1"}}
+        ],
+        "edges": [],
+        "registry": [],
+        "revisions": []
+    });
+    let doc_ac: axon_core::postgres::seed::SeedDocument =
+        serde_json::from_value(req_with_ac).unwrap();
+    let inserted_ac = axon_core::postgres::seed::apply_seed(&store, &doc_ac)
+        .expect("apply_seed for REQ-247/249 smoke should succeed");
+    assert_eq!(inserted_ac, 1, "expected exactly one new node from smoke seed");
+
+    // Sanity probe: jsonb_typeof confirms metadata is stored as an OBJECT
+    // (not a JSONB string scalar — that would mean the pre-REQ-249
+    // double-encoding leaked through).
+    let metadata_typeof = store
+        .query_json(
+            "SELECT jsonb_typeof(metadata) FROM soll.Node WHERE id = 'REQ-AXO-9999'",
+        )
+        .expect("jsonb_typeof on soll.Node.metadata");
+    assert!(
+        metadata_typeof.contains("object"),
+        "metadata must be a JSONB object (not a JSONB string scalar); got {metadata_typeof}"
+    );
+
+    // DuckDB-flavoured query rewritten by normalize_attached_soll_query
+    // (REQ-AXO-249). The MCP tool surface emits this exact shape from
+    // completeness_coverage.rs:174 — must round-trip cleanly under PG.
+    let dbduck_style = store
+        .query_count(
+            "SELECT COUNT(*)::BIGINT FROM soll.Node r \
+             WHERE r.id = 'REQ-AXO-9999' \
+               AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') NOT IN ('', '[]')",
+        )
+        .expect("DuckDB-style json_extract should be rewritten to JSONB operator under PG");
+    assert_eq!(
+        dbduck_style, 1,
+        "REQ-AXO-9999 has acceptance_criteria=['x','y'] so the query should match it"
+    );
+    let dbduck_style_zero = store
+        .query_count(
+            "SELECT COUNT(*)::BIGINT FROM soll.Node r \
+             WHERE r.id = 'REQ-AXO-9999' \
+               AND COALESCE(CAST(json_extract(r.metadata, '$.nonexistent_key') AS VARCHAR), '') IN ('', '[]')",
+        )
+        .expect("rewriter should also handle the negative case");
+    assert_eq!(
+        dbduck_style_zero, 1,
+        "missing key should fall through the COALESCE empty-string check"
+    );
+
+    // ── REQ-AXO-247 AC #4 final: sync_project_registry_entry must be
+    // ── idempotent under conflict (mirrors axon_init_project re-runs).
+    store
+        .execute(synthetic_pcr)
+        .expect("re-running registry insert under ON CONFLICT must be a no-op");
+    let pcr_count_after = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM soll.ProjectCodeRegistry WHERE project_code = 'AXO'",
+        )
+        .expect("read back soll.ProjectCodeRegistry after replay");
+    assert_eq!(pcr_count_after, 1, "registry replay must remain idempotent");
 
     drop(store);
 
