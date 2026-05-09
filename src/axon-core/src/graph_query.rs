@@ -33,8 +33,15 @@ impl GraphStore {
         // statements like `CREATE TABLE soll.Registry` get mangled to
         // `CREATE TABLE soll.main.Registry` which has no parser
         // meaning under PG.
+        //
+        // REQ-AXO-249: under PG, also translate the DuckDB-only JSON
+        // helpers MCP tools embed in their queries to native Postgres
+        // operators on JSONB columns (soll.Node.metadata is JSONB per
+        // postgres/ddl.rs). Without this, `json_extract_string`,
+        // `CAST(json_extract(...) AS VARCHAR)`, etc. fail at runtime,
+        // breaking soll_validate / soll_work_plan / completeness reads.
         if self.pool.symbols.backend == crate::graph::PluginBackend::Postgres {
-            return Cow::Borrowed(query);
+            return rewrite_duckdb_json_helpers_for_pg(query);
         }
         if !self.soll_attached || !query.contains("soll.") {
             return Cow::Borrowed(query);
@@ -74,7 +81,70 @@ impl GraphStore {
         rewritten.push_str(&query[cursor..]);
         Cow::Owned(rewritten)
     }
+}
 
+/// REQ-AXO-249 — translate the small set of DuckDB-only JSON helpers
+/// MCP tools embed in their SQL into native Postgres JSONB operators.
+///
+/// soll.Node.metadata is `JSONB` under PG (postgres/ddl.rs). DuckDB
+/// stores the same column as VARCHAR-of-JSON but exposes
+/// `json_extract` / `json_extract_string` regardless of column type.
+/// Postgres has the operators `->` (returns json/jsonb) and `->>`
+/// (returns text). The translator below covers the patterns the
+/// existing MCP tools use:
+///
+///   • `json_extract_string(col, '$.path')`             → `(col->>'path')`
+///   • `CAST(json_extract(col, '$.path') AS VARCHAR)`    → `(col->>'path')`
+///   • bare `json_extract(col, '$.path')` (rare here)    → `(col->'path')`
+///
+/// Limitations:
+///   • Only `$.<key>` paths (single-level) are translated. Multi-level
+///     `$.a.b` would need `(col->'a'->>'b')`. Today no MCP tool uses
+///     deeper paths; if one appears, extend the regex.
+///   • Operates on whitespace-tolerant input but assumes the column
+///     reference matches `[A-Za-z_][A-Za-z0-9_.]*` (e.g. `metadata`,
+///     `r.metadata`).
+fn rewrite_duckdb_json_helpers_for_pg(query: &str) -> Cow<'_, str> {
+    if !query.contains("json_extract") {
+        return Cow::Borrowed(query);
+    }
+    use std::sync::OnceLock;
+    use regex::Regex;
+    static CAST_VARCHAR: OnceLock<Regex> = OnceLock::new();
+    static EXTRACT_STRING: OnceLock<Regex> = OnceLock::new();
+    static EXTRACT_PLAIN: OnceLock<Regex> = OnceLock::new();
+    let cast_varchar = CAST_VARCHAR.get_or_init(|| {
+        Regex::new(
+            r"(?i)CAST\s*\(\s*json_extract\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*'\$\.([A-Za-z_][A-Za-z0-9_]*)'\s*\)\s*AS\s+(?:VARCHAR|TEXT)\s*\)",
+        )
+        .expect("cast_varchar regex")
+    });
+    let extract_string = EXTRACT_STRING.get_or_init(|| {
+        Regex::new(
+            r"(?i)json_extract_string\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*'\$\.([A-Za-z_][A-Za-z0-9_]*)'\s*\)",
+        )
+        .expect("extract_string regex")
+    });
+    let extract_plain = EXTRACT_PLAIN.get_or_init(|| {
+        Regex::new(
+            r"(?i)json_extract\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*'\$\.([A-Za-z_][A-Za-z0-9_]*)'\s*\)",
+        )
+        .expect("extract_plain regex")
+    });
+
+    // ORDER MATTERS: longer / outer patterns first so CAST(...) is
+    // collapsed before the inner json_extract gets rewritten.
+    let pass1 = cast_varchar.replace_all(query, "($1->>'$2')");
+    let pass2 = extract_string.replace_all(&pass1, "($1->>'$2')");
+    let pass3 = extract_plain.replace_all(&pass2, "($1->'$2')");
+    if pass3 == query {
+        Cow::Borrowed(query)
+    } else {
+        Cow::Owned(pass3.into_owned())
+    }
+}
+
+impl GraphStore {
     fn reader_only_ist_unavailable_error(&self) -> anyhow::Error {
         let contract = self.reader_snapshot_freshness_contract();
         let reason = contract
@@ -968,6 +1038,50 @@ mod tests {
         assert_eq!(
             normalized.as_ref(),
             "SELECT * FROM soll.main.Registry WHERE id = 'AXON_GLOBAL'"
+        );
+    }
+
+    #[test]
+    fn rewrite_duckdb_json_helpers_collapses_cast_varchar_pattern() {
+        // REQ-AXO-249 — completeness_coverage.rs:174 emits this exact
+        // shape to filter requirements without acceptance_criteria.
+        let input = "AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')";
+        let expected = "AND COALESCE((r.metadata->>'acceptance_criteria'), '') IN ('', '[]')";
+        assert_eq!(
+            super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rewrite_duckdb_json_helpers_translates_extract_string() {
+        // REQ-AXO-249 — workflow_project.rs:489 / 531 priority + updated_at.
+        let input = "SELECT id, COALESCE(json_extract_string(metadata, '$.priority'), '') FROM soll.Node";
+        let expected = "SELECT id, COALESCE((metadata->>'priority'), '') FROM soll.Node";
+        assert_eq!(
+            super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rewrite_duckdb_json_helpers_passthrough_when_no_match() {
+        let input = "SELECT 1";
+        let out = super::rewrite_duckdb_json_helpers_for_pg(input);
+        assert_eq!(out.as_ref(), input);
+        // Cow::Borrowed when no rewrite needed (no allocation cost on
+        // the common path).
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn rewrite_duckdb_json_helpers_handles_qualified_column_reference() {
+        // r.metadata vs metadata — both must work.
+        let input = "json_extract_string(r.metadata, '$.tag')";
+        let expected = "(r.metadata->>'tag')";
+        assert_eq!(
+            super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
+            expected
         );
     }
 
