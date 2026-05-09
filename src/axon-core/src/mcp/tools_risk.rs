@@ -177,6 +177,12 @@ impl McpServer {
         // AGE Cypher equivalent first. The AGE form returns the same
         // 5-column shape so the downstream parsing is unchanged.
         // Falls back to the SQL recursive form on empty / error.
+        //
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+        // / CONTAINS tables are empty/dropped — bypass the SQL fallback so
+        // an empty AGE result yields an empty caller set instead of querying
+        // a missing relation table.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
         let age_result = if self.graph_store.is_postgres_backend()
             && crate::postgres::age::age_read_enabled()
         {
@@ -185,8 +191,13 @@ impl McpServer {
         } else {
             None
         };
-        let query_outcome = age_result
-            .unwrap_or_else(|| self.graph_store.query_json_param(&query, &params));
+        let query_outcome = age_result.unwrap_or_else(|| {
+            if skip_sql_relations {
+                Ok("[]".to_string())
+            } else {
+                self.graph_store.query_json_param(&query, &params)
+            }
+        });
 
         match query_outcome {
             Ok(res) => {
@@ -549,10 +560,22 @@ impl McpServer {
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
-        let calls_count = self
-            .graph_store
-            .query_count("SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)")
-            .unwrap_or(0);
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+        // tables are empty/dropped — treat as 0 (the structure-empty branch
+        // below produces the right LLM response: "call graph not yet
+        // available, run path/inspect"). The AGE call graph is queried by
+        // `axon_impact` proper higher up in this same tool; this fallthrough
+        // is only reached when the symbol resolves but no impact rows came
+        // back — same outcome under either backend.
+        let calls_count = if self.graph_store.skip_sql_relations() {
+            0
+        } else {
+            self.graph_store
+                .query_count(
+                    "SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
+                )
+                .unwrap_or(0)
+        };
         if calls_count > 0 {
             return Some(json!({
                 "content": [{
@@ -785,6 +808,34 @@ impl McpServer {
                 }));
             }
         };
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
+        // empty/dropped — `simulate_mutation` is a quick blast-radius probe
+        // that degrades to "0 components" gracefully. Operators wanting a
+        // real estimate use `axon_impact` (already AGE-aware above) /
+        // `axon_path` for the full traversal.
+        if self.graph_store.skip_sql_relations() {
+            let report = format!(
+                "## 🔮 Dry-Run Mutation: {}\n\n{}",
+                symbol,
+                format_standard_contract(
+                    "ok",
+                    "mutation blast-radius estimated",
+                    &project
+                        .map(|p| format!("project:{}", p))
+                        .unwrap_or_else(|| "workspace:*".to_string()),
+                    &evidence_by_mode(
+                        &format!(
+                            "Modifying '{}' will cascade-impact ~0 components in the SQL relation tables (PG age-only mode). Run `impact` for the AGE-backed traversal.",
+                            symbol
+                        ),
+                        mode,
+                    ),
+                    &["run `impact` for the AGE-backed blast-radius estimate"],
+                    "medium",
+                )
+            );
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+        }
         let query = format!(
             "WITH RECURSIVE traverse(caller, callee, depth) AS ( \
                 SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id \

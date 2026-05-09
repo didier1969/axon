@@ -231,6 +231,10 @@ impl McpServer {
     }
 
     pub(crate) fn axon_truth_check(&self, _args: &Value) -> Option<Value> {
+        // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
+        // (CALLS / CALLS_NIF / CONTAINS) are empty/dropped — skip those
+        // checks so drift is reported only on canonical surfaces.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
         let canonical_count = |query: &str| -> i64 {
             self.graph_store
                 .execute_raw_sql_gateway(query)
@@ -242,13 +246,17 @@ impl McpServer {
         let reader_count =
             |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
 
-        let checks = vec![
+        let mut checks: Vec<(&str, &str)> = vec![
             ("File", "SELECT count(*) FROM File"),
             ("Symbol", "SELECT count(*) FROM Symbol"),
-            ("CALLS", "SELECT count(*) FROM CALLS"),
-            ("CALLS_NIF", "SELECT count(*) FROM CALLS_NIF"),
-            ("CONTAINS", "SELECT count(*) FROM CONTAINS"),
         ];
+        if !skip_sql_relations {
+            checks.extend([
+                ("CALLS", "SELECT count(*) FROM CALLS"),
+                ("CALLS_NIF", "SELECT count(*) FROM CALLS_NIF"),
+                ("CONTAINS", "SELECT count(*) FROM CONTAINS"),
+            ]);
+        }
 
         let mut rows = Vec::new();
         let mut drift_count = 0_i64;
@@ -287,8 +295,16 @@ impl McpServer {
         let q = cypher.trim();
         let ql = q.to_ascii_lowercase();
 
+        // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
+        // (CALLS / CALLS_NIF) are empty/dropped — bypass the SQL translation
+        // and let the AGE Cypher path handle the query natively.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
         // Minimal robust support for common multi-hop CALLS checks.
-        if ql.contains("match") && ql.contains("[:calls") && ql.contains("return count(*)") {
+        if !skip_sql_relations
+            && ql.contains("match")
+            && ql.contains("[:calls")
+            && ql.contains("return count(*)")
+        {
             if ql.contains("[:calls*1..3]") {
                 let sql = "WITH RECURSIVE hops(source_id, target_id, depth) AS (
                              SELECT source_id, target_id, 1 FROM CALLS
@@ -325,10 +341,13 @@ impl McpServer {
         match self.graph_store.query_json(q) {
             Ok(result) => {
                 if result.trim() == "[]" && ql.contains("match") {
-                    let calls_count = self
-                        .graph_store
-                        .query_count("SELECT count(*) FROM CALLS")
-                        .unwrap_or(0);
+                    let calls_count = if skip_sql_relations {
+                        0
+                    } else {
+                        self.graph_store
+                            .query_count("SELECT count(*) FROM CALLS")
+                            .unwrap_or(0)
+                    };
                     let note = format!(
                         "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use `MATCH ... [:CALLS*1..3] ... RETURN count(*)` or `query_examples`.\nCALLS_count={}",
                         calls_count

@@ -49,6 +49,8 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 
 Default `mode=brief`. `query` brain semantic search works under `brain_only` profile (REQ-AXO-128).
 
+PG age-only mode (REQ-AXO-251, `AXON_AGE_ONLY_RELATIONS=true`): SQL relation tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES) are empty/dropped — `impact` / `path` / `bidi_trace` / `architectural_drift` use AGE Cypher primary; diagnostic surfaces (`truth_check`, `simulate_mutation`, `diagnose_indexing`, `axon_anomalies` analytics, `inspect` callers/callees) return neutral defaults instead of querying missing tables. Tool args/output schema unchanged.
+
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
 2. Follow `operator_guidance.follow_up_tools`

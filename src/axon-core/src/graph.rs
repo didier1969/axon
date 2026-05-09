@@ -213,6 +213,16 @@ impl GraphStore {
     pub fn is_postgres_backend(&self) -> bool {
         self.pool.symbols.backend == PluginBackend::Postgres
     }
+
+    /// REQ-AXO-251: when true, the SQL relation tables (CALLS, CALLS_NIF,
+    /// CONTAINS, IMPACTS, SUBSTANTIATES) are no longer the canonical edge
+    /// store. Readers must short-circuit to AGE Cypher (preferred) or
+    /// graceful-empty (diagnostic counts) instead of querying the SQL
+    /// tables — those are slated for `DROP TABLE` once Stop A flips.
+    /// Equivalent to `is_postgres_backend() && AXON_AGE_ONLY_RELATIONS=true`.
+    pub fn skip_sql_relations(&self) -> bool {
+        self.is_postgres_backend() && crate::postgres::age::age_only_relations_enabled()
+    }
 }
 
 pub struct GraphStore {

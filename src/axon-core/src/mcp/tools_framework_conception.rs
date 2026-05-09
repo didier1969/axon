@@ -95,10 +95,17 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
-        let flows_raw = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT src.name, src_rel.source_id, dst.name, dst_rel.source_id
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
+        // tables are empty/dropped — degrade conception-view flows to empty
+        // gracefully (the LLM still gets module + contract context). An
+        // AGE-native equivalent is tracked for the fuller migration.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let flows_raw = if skip_sql_relations {
+            "[]".to_string()
+        } else {
+            self.graph_store
+                .query_json(&format!(
+                    "SELECT src.name, src_rel.source_id, dst.name, dst_rel.source_id
                  FROM CALLS c
                  JOIN Symbol src ON src.id = c.source_id
                  JOIN Symbol dst ON dst.id = c.target_id
@@ -114,9 +121,10 @@ impl McpServer {
                    AND src_rel.source_id != dst_rel.source_id
                  ORDER BY src.name ASC, dst.name ASC
                  LIMIT 5",
-                project = escaped_project
-            ))
-            .unwrap_or_else(|_| "[]".to_string());
+                    project = escaped_project
+                ))
+                .unwrap_or_else(|_| "[]".to_string())
+        };
         let flow_rows: Vec<Vec<Value>> = serde_json::from_str(&flows_raw).unwrap_or_default();
         let flows = flow_rows
             .iter()
@@ -147,10 +155,12 @@ impl McpServer {
                 escaped_project
             ))
             .unwrap_or(0);
-        let flow_count = self
-            .graph_store
-            .query_count(&format!(
-                "SELECT count(*)
+        let flow_count = if skip_sql_relations {
+            0
+        } else {
+            self.graph_store
+                .query_count(&format!(
+                    "SELECT count(*)
                  FROM CALLS c
                  JOIN CONTAINS src_rel
                    ON src_rel.target_id = c.source_id
@@ -164,9 +174,10 @@ impl McpServer {
                    AND dst.project_code = '{project}'
                    AND c.project_code = '{project}'
                    AND src_rel.source_id != dst_rel.source_id",
-                project = escaped_project
-            ))
-            .unwrap_or(0);
+                    project = escaped_project
+                ))
+                .unwrap_or(0)
+        };
 
         json!({
             "module_count": modules.len(),

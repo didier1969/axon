@@ -464,6 +464,17 @@ impl GraphStore {
             return Ok(None);
         };
 
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+        // tables are empty/dropped — the GraphProjection cache cannot be
+        // refreshed via SQL. Skip the refresh; downstream consumers either
+        // (a) still see the previously-cached projection or (b) get an empty
+        // projection (acceptable because authoritative call-graph reads now
+        // go through AGE primary tools). An AGE Cypher equivalent for the
+        // projection refresh is tracked separately on REQ-AXO-251.
+        if self.skip_sql_relations() {
+            return Ok(Some(anchor_id));
+        }
+
         let radius = radius.max(1) as i64;
         let params = serde_json::json!({
             "anchor": anchor_id,
@@ -561,6 +572,13 @@ impl GraphStore {
     }
 
     pub fn refresh_file_projection(&self, file_path: &str, radius: u64) -> Result<()> {
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
+        // tables are empty/dropped — skip the projection refresh (mirrors
+        // refresh_symbol_projection). Authoritative file-call traversal goes
+        // through AGE primary tools (axon_path / axon_impact).
+        if self.skip_sql_relations() {
+            return Ok(());
+        }
         let radius = radius.max(1) as i64;
         let params = serde_json::json!({
             "file": file_path,

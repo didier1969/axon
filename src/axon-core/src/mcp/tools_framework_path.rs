@@ -266,7 +266,15 @@ impl McpServer {
     /// in-memory BFS in `axon_path_impl`: rows of `[src.id, src.name,
     /// dst.id, dst.name, edge_type]`. Returns `None` on query error
     /// so the caller can fall back to AGE / empty / etc.
+    ///
+    /// REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+    /// tables are empty/dropped — return `None` immediately so the AGE
+    /// primary path handles the lookup. The caller's BFS gets a clean empty
+    /// edge set rather than a stale / errored SQL response.
     fn path_edges_via_sql(&self, project: Option<&str>) -> Option<String> {
+        if self.graph_store.skip_sql_relations() {
+            return None;
+        }
         let edge_query = if let Some(project) = project {
             format!(
                 "WITH all_edges AS (

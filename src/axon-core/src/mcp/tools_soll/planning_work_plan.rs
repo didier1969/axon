@@ -432,6 +432,15 @@ impl McpServer {
     }
 
     fn count_degraded_links_for_node(&self, node_id: &str) -> usize {
+        // REQ-AXO-251: under PG age-only-relations, the SQL SUBSTANTIATES /
+        // IMPACTS / CONTAINS relation tables are empty/dropped — return 0
+        // gracefully (no degraded-link signal). The authoritative
+        // SUBSTANTIATES/IMPACTS edges live on soll.main.Edge.relation_type;
+        // an AGE/SOLL-Edge-native equivalent for this query is a follow-up
+        // (tracked on REQ-AXO-251 closure notes).
+        if self.graph_store.skip_sql_relations() {
+            return 0;
+        }
         let degraded_file_query = format!(
             "SELECT count(*) FROM (
                 SELECT DISTINCT f.path

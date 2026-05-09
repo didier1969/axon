@@ -1303,6 +1303,13 @@ impl McpServer {
         if file_paths.is_empty() {
             return Vec::new();
         }
+        // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
+        // empty/dropped — return no bindings gracefully (the candidate set
+        // simply lacks file→symbol enrichment until an AGE Cypher equivalent
+        // lands). Other context surfaces (vector retrieve, query) keep working.
+        if self.graph_store.skip_sql_relations() {
+            return Vec::new();
+        }
         let values = file_paths
             .iter()
             .map(|path| format!("'{}'", Self::escape_sql(path)))

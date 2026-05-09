@@ -74,14 +74,27 @@ impl McpServer {
             "SELECT count(*) FROM Symbol WHERE {}",
             symbol_filter
         ));
-        let calls_direct = self.sql_scalar(&format!(
-            "SELECT count(*) FROM CALLS c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-            Self::project_filter(project, "s.project_code")
-        ));
-        let calls_nif = self.sql_scalar(&format!(
-            "SELECT count(*) FROM CALLS_NIF c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-            Self::project_filter(project, "s.project_code")
-        ));
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+        // tables are empty/dropped — these governance counts return 0 cleanly
+        // (canonical edge counts live in AGE post-Stop A; this diagnostic is
+        // a SQL-storage health probe).
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let calls_direct = if skip_sql_relations {
+            0
+        } else {
+            self.sql_scalar(&format!(
+                "SELECT count(*) FROM CALLS c JOIN Symbol s ON c.source_id = s.id WHERE {}",
+                Self::project_filter(project, "s.project_code")
+            ))
+        };
+        let calls_nif = if skip_sql_relations {
+            0
+        } else {
+            self.sql_scalar(&format!(
+                "SELECT count(*) FROM CALLS_NIF c JOIN Symbol s ON c.source_id = s.id WHERE {}",
+                Self::project_filter(project, "s.project_code")
+            ))
+        };
         let top_reasons = self.sql_rows(&format!(
             "SELECT COALESCE(status_reason, 'unknown'), count(*) \
              FROM File \
@@ -769,11 +782,18 @@ impl McpServer {
     /// drift, factored out for the AGE-vs-SQL fallback chain. Returns
     /// raw query_json string on success, `None` on error so the caller
     /// can fall back further.
+    ///
+    /// REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
+    /// tables are empty/dropped — return `None` immediately so the caller's
+    /// AGE primary path handles the request without a stale SQL fallback.
     fn architectural_drift_via_sql(
         &self,
         source_layer: &str,
         target_layer: &str,
     ) -> Option<String> {
+        if self.graph_store.skip_sql_relations() {
+            return None;
+        }
         let query = "
             WITH RECURSIVE call_paths(source_id, target_id, path) AS (
                 SELECT c.source_id, c.target_id, [c.source_id]

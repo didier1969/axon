@@ -246,7 +246,14 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0
     };
-    let edge_count = if graph_runtime_enabled || vector_runtime_enabled {
+    // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
+    // (CONTAINS / CALLS / CALLS_NIF) are empty/dropped. Edge counts in this
+    // diagnostic surface are SQL-only — return 0 gracefully (the canonical
+    // edge-count surface lives on AGE post-Stop A; this diagnostic block is
+    // a SQL-storage health probe, not an authoritative edge-graph reading).
+    let edge_count = if (graph_runtime_enabled || vector_runtime_enabled)
+        && !server.graph_store.skip_sql_relations()
+    {
         snapshot_count(
             "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
         )

@@ -14,6 +14,11 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok((100, "[]".to_string()));
         }
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
+        // tables are empty/dropped — degrade audit to neutral (no findings).
+        if self.skip_sql_relations() {
+            return Ok((100, "[]".to_string()));
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -105,6 +110,10 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
+        // REQ-AXO-251: SQL CONTAINS / CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
+            return Ok(serde_json::Map::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -151,6 +160,10 @@ impl GraphStore {
         project: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
         if !structural_graph_analytics_available() {
+            return Ok(serde_json::Map::new());
+        }
+        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(serde_json::Map::new());
         }
         let scoped = project != "*";
@@ -200,6 +213,10 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(100);
         }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
+            return Ok(100);
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -222,6 +239,10 @@ impl GraphStore {
 
     pub fn get_dead_code_count(&self, project: &str) -> Result<i64> {
         if !structural_graph_analytics_available() {
+            return Ok(0);
+        }
+        // REQ-AXO-251: SQL CONTAINS / CALLS / CALLS_NIF empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(0);
         }
         let scoped = project != "*";
@@ -250,6 +271,10 @@ impl GraphStore {
 
     pub fn get_wrapper_candidates(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -318,6 +343,10 @@ impl GraphStore {
 
     pub fn get_feature_envy_candidates(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -394,6 +423,10 @@ impl GraphStore {
 
     pub fn get_detour_candidates(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -483,6 +516,10 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -543,6 +580,10 @@ impl GraphStore {
 
     pub fn get_orphan_code_symbols(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CONTAINS / SUBSTANTIATES / IMPACTS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -642,6 +683,10 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
+            return Ok(Vec::new());
+        }
         // MIL-AXO-015 B.3: AGE Cypher path with variable-length cycle.
         // Falls back to SQL on empty / error.
         if self.is_postgres_backend() && crate::postgres::age::age_read_enabled() {
@@ -709,6 +754,10 @@ impl GraphStore {
 
     pub fn get_circular_dependency_count_fast(&self, project: &str) -> Result<i64> {
         if !structural_graph_analytics_available() {
+            return Ok(0);
+        }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(0);
         }
         // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, count
@@ -906,6 +955,10 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
+        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
+        if self.skip_sql_relations() {
+            return Ok(Vec::new());
+        }
         let scoped = project != "*";
         let escaped_project = project.replace('\'', "''");
         let escaped_domain = domain_path.replace('\'', "''");
@@ -949,6 +1002,10 @@ impl GraphStore {
 
     pub fn get_unsafe_exposure(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -1003,6 +1060,10 @@ impl GraphStore {
 
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-251: SQL CALLS_NIF empty/dropped under age-only.
+        if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";

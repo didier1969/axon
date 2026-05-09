@@ -980,10 +980,16 @@ impl McpServer {
         let degraded_files = self.degraded_file_count((project != "*").then_some(project));
         let degraded_note = self.degraded_truth_note(degraded_files);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
-        let contains_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM CONTAINS")
-            .unwrap_or(0);
+        // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
+        // empty/dropped. Treat as zero so the structure-only-empty branch is
+        // taken (canonical edge facts live in AGE post-Stop A).
+        let contains_count = if self.graph_store.skip_sql_relations() {
+            0
+        } else {
+            self.graph_store
+                .query_count("SELECT count(*) FROM CONTAINS")
+                .unwrap_or(0)
+        };
         println!(
             "axon_query_without_contains: contains_count={} in DB {:?}",
             contains_count, self.graph_store.db_path
@@ -1300,7 +1306,26 @@ impl McpServer {
         // resolves to canonical IDs (see REQ-AXO-134 follow-up), inspect
         // augments the join so callers/callees counts surface the real
         // dependency graph instead of always reporting zero.
-        let query = if project.is_some() {
+        //
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
+        // empty/dropped — the callers/callees subqueries return 0 cleanly
+        // (canonical caller/callee facts live in AGE; this tool falls back to
+        // the AGE-aware path/impact tools for full traversal). Skip the join
+        // shape entirely so the query stays valid against both backends.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let query = if skip_sql_relations {
+            if project.is_some() {
+                format!(
+                    "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
+                     FROM Symbol s WHERE s.id = $sym OR s.name = $sym{}",
+                    Self::sql_project_filter_for_fields(project, &["s.project_code"])
+                )
+            } else {
+                "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
+                 FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
+                    .to_string()
+            }
+        } else if project.is_some() {
             format!(
                 "SELECT s.name, s.kind, s.tested, \
                  (SELECT count(*) FROM CALLS c1 \
@@ -1615,23 +1640,38 @@ impl McpServer {
         // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, run the
         // up/down traversals via AGE Cypher (same `[name, kind,
         // project_code]` shape). Falls back to SQL on empty / error.
+        //
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
+        // empty/dropped — bypass the SQL fallback so AGE empty returns "[]"
+        // directly instead of querying a missing relation table.
+        let skip_sql_relations = self.graph_store.skip_sql_relations();
         let (up_res, down_res) = if self.graph_store.is_postgres_backend()
             && crate::postgres::age::age_read_enabled()
         {
-            let up = self
-                .bidi_trace_via_age(&target_id, project, depth, true)
-                .unwrap_or_else(|| {
+            let sql_or_empty_up = || {
+                if skip_sql_relations {
+                    "[]".to_string()
+                } else {
                     self.graph_store
                         .query_json_param(&up_query, &params)
                         .unwrap_or_else(|_| "[]".to_string())
-                });
-            let down = self
-                .bidi_trace_via_age(&target_id, project, depth, false)
-                .unwrap_or_else(|| {
+                }
+            };
+            let sql_or_empty_down = || {
+                if skip_sql_relations {
+                    "[]".to_string()
+                } else {
                     self.graph_store
                         .query_json_param(&down_query, &params)
                         .unwrap_or_else(|_| "[]".to_string())
-                });
+                }
+            };
+            let up = self
+                .bidi_trace_via_age(&target_id, project, depth, true)
+                .unwrap_or_else(sql_or_empty_up);
+            let down = self
+                .bidi_trace_via_age(&target_id, project, depth, false)
+                .unwrap_or_else(sql_or_empty_down);
             (up, down)
         } else {
             let up = self
@@ -1760,7 +1800,19 @@ impl McpServer {
             json!({ "target_id": target_id })
         };
 
-        match self.graph_store.query_json_param(query, &params) {
+        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
+        // tables are empty/dropped — return the no-consumers branch directly
+        // so we don't issue a SQL query against a missing relation table.
+        // Authoritative consumer-traversal lives on AGE; api_break_check is a
+        // diagnostic surface that degrades gracefully here until it gains an
+        // AGE-native equivalent.
+        let sql_result = if self.graph_store.skip_sql_relations() {
+            Ok::<String, anyhow::Error>("[]".to_string())
+        } else {
+            self.graph_store.query_json_param(query, &params)
+        };
+
+        match sql_result {
             Ok(res) => {
                 let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
                 let mut evidence = String::new();
