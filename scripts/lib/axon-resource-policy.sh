@@ -249,10 +249,10 @@ axon_resolve_resource_policy() {
         export AXON_POLICY_SOURCE_AXON_WATCHER_SUBTREE_HINT_BUDGET="policy_default"
     fi
 
-    if [[ "$AXON_GPU_ACCESS_POLICY" == "avoid" && -z "${AXON_EMBEDDING_PROVIDER:-}" ]]; then
-        export AXON_EMBEDDING_PROVIDER="cpu"
-        export AXON_POLICY_SOURCE_AXON_EMBEDDING_PROVIDER="policy_default"
-    fi
+    # REQ-AXO-184 #1: avoid → cpu auto-coercion deleted. AXON_EMBEDDING_PROVIDER
+    # is the canonical knob; the runtime (canonical_embedding_provider_request)
+    # decides cpu vs cuda vs tensorrt based on detected GPU + runtime mode.
+    # Operators wanting cpu must export AXON_EMBEDDING_PROVIDER=cpu explicitly.
 
     export AXON_RESOURCE_POLICY_COMPUTED_INSTANCE="$instance_kind"
 }

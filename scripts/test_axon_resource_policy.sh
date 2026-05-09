@@ -70,10 +70,25 @@ axon_resolve_resource_policy dev
 
 assert_eq "$AXON_RESOURCE_PRIORITY" "best_effort" "default dev priority"
 assert_eq "$AXON_BACKGROUND_BUDGET_CLASS" "conservative" "default dev budget class"
-assert_eq "$AXON_GPU_ACCESS_POLICY" "avoid" "default dev gpu policy"
+assert_eq "$AXON_GPU_ACCESS_POLICY" "preferred" "default dev gpu policy aligns with REQ-AXO-221 GPU baseline"
 assert_eq "$AXON_WATCHER_POLICY" "bounded" "default dev watcher policy"
-assert_eq "$AXON_EMBEDDING_PROVIDER" "cpu" "dev gpu avoidance forces cpu provider"
+assert_eq "${AXON_EMBEDDING_PROVIDER:-<unset>}" "<unset>" "REQ-AXO-184 #1: no avoid→cpu auto-coercion; canonical knob is AXON_EMBEDDING_PROVIDER, runtime decides default"
 assert_eq "$MAX_AXON_WORKERS" "2" "default dev worker cap on 8 cores"
+
+# REQ-AXO-184 #1 regression: AXON_GPU_ACCESS_POLICY=avoid must NOT silently
+# coerce AXON_EMBEDDING_PROVIDER to cpu. Operators wanting cpu set the
+# canonical knob explicitly.
+unset AXON_RESOURCE_PRIORITY AXON_BACKGROUND_BUDGET_CLASS AXON_GPU_ACCESS_POLICY AXON_WATCHER_POLICY
+unset MAX_AXON_WORKERS AXON_QUEUE_MEMORY_BUDGET_BYTES AXON_WATCHER_SUBTREE_HINT_BUDGET AXON_EMBEDDING_PROVIDER
+unset AXON_RESOURCE_POLICY_COMPUTED_INSTANCE
+unset AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY AXON_POLICY_SOURCE_AXON_BACKGROUND_BUDGET_CLASS
+unset AXON_POLICY_SOURCE_AXON_GPU_ACCESS_POLICY AXON_POLICY_SOURCE_AXON_WATCHER_POLICY
+unset AXON_POLICY_SOURCE_MAX_AXON_WORKERS AXON_POLICY_SOURCE_AXON_QUEUE_MEMORY_BUDGET_BYTES
+unset AXON_POLICY_SOURCE_AXON_WATCHER_SUBTREE_HINT_BUDGET AXON_POLICY_SOURCE_AXON_EMBEDDING_PROVIDER
+AXON_GPU_ACCESS_POLICY="avoid"
+axon_resolve_resource_policy dev
+assert_eq "$AXON_GPU_ACCESS_POLICY" "avoid" "explicit avoid policy preserved"
+assert_eq "${AXON_EMBEDDING_PROVIDER:-<unset>}" "<unset>" "REQ-AXO-184 #1 regression: avoid does NOT coerce provider to cpu"
 
 AXON_RESOURCE_PRIORITY="critical"
 MAX_AXON_WORKERS="9"
