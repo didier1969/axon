@@ -390,42 +390,16 @@ fn ist_ddl_global() -> Vec<String> {
                 PRIMARY KEY (chunk_id, model_id)\
              )"
         ),
-        // ── Relation tables ───────────────────────────────────────
-        "CREATE TABLE IF NOT EXISTS public.CONTAINS (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL DEFAULT '',\
-            PRIMARY KEY (source_id, target_id)\
-         )"
-        .to_string(),
-        "CREATE TABLE IF NOT EXISTS public.CALLS (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL DEFAULT '',\
-            PRIMARY KEY (source_id, target_id)\
-         )"
-        .to_string(),
-        "CREATE TABLE IF NOT EXISTS public.CALLS_NIF (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL DEFAULT '',\
-            PRIMARY KEY (source_id, target_id)\
-         )"
-        .to_string(),
-        "CREATE TABLE IF NOT EXISTS public.IMPACTS (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL DEFAULT '',\
-            PRIMARY KEY (source_id, target_id)\
-         )"
-        .to_string(),
-        "CREATE TABLE IF NOT EXISTS public.SUBSTANTIATES (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL DEFAULT '',\
-            PRIMARY KEY (source_id, target_id)\
-         )"
-        .to_string(),
+        // ── Relation tables — REMOVED (REQ-AXO-216 / Stop A) ──────
+        // The 5 SQL relation tables (CALLS / CALLS_NIF / CONTAINS /
+        // IMPACTS / SUBSTANTIATES) are dropped. Canonical edge storage
+        // lives on Apache AGE elabels (axon_graph). Readers gate on
+        // skip_sql_relations() (REQ-AXO-251 wave 9, ships in build
+        // v0.8.0-320-gc84900d+); writers go through async_writer's
+        // emit_age path under PG (REQ-AXO-250 wave 9).
+        // Bootstrap no longer recreates these tables. Schema-only
+        // backup preserved at /home/dstadel/backups/pg/relations-
+        // schema-pre-stopA-20260509T215841Z.sql for rollback.
         // ── Queues ────────────────────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.FileVectorizationQueue (\
             file_path TEXT PRIMARY KEY,\
@@ -580,14 +554,9 @@ fn ist_ddl_global() -> Vec<String> {
             .to_string(),
         "CREATE INDEX IF NOT EXISTS chunk_embedding_project_idx ON public.ChunkEmbedding (project_code)"
             .to_string(),
-        "CREATE INDEX IF NOT EXISTS contains_project_target_idx ON public.CONTAINS (project_code, target_id)"
-            .to_string(),
-        "CREATE INDEX IF NOT EXISTS calls_project_target_idx ON public.CALLS (project_code, target_id)"
-            .to_string(),
-        "CREATE INDEX IF NOT EXISTS calls_nif_project_target_idx ON public.CALLS_NIF (project_code, target_id)"
-            .to_string(),
-        "CREATE INDEX IF NOT EXISTS impacts_project_target_idx ON public.IMPACTS (project_code, target_id)"
-            .to_string(),
+        // REQ-AXO-216 / Stop A: relation table indexes removed alongside
+        // the tables themselves (CONTAINS / CALLS / CALLS_NIF / IMPACTS).
+        // AGE elabels carry their own internal indexing.
         "CREATE INDEX IF NOT EXISTS file_vec_queue_project_status_idx ON public.FileVectorizationQueue (project_code, status, queued_at)"
             .to_string(),
         "CREATE INDEX IF NOT EXISTS gp_queue_project_status_idx ON public.GraphProjectionQueue (project_code, status, queued_at)"
@@ -818,17 +787,15 @@ mod tests {
     fn global_schema_includes_multi_project_ist_tables() {
         // Post-CPT-AXO-039 supersedure: every IST table lives in
         // `public` with project_code as a row-level discriminator.
+        // REQ-AXO-216 / Stop A: the 5 relation tables (CONTAINS /
+        // CALLS / CALLS_NIF / IMPACTS / SUBSTANTIATES) were dropped
+        // wave 9; AGE elabels are now canonical for edges.
         let joined = generate_global_schema().join("\n");
         for tbl in [
             "public.File",
             "public.Symbol",
             "public.Chunk",
             "public.ChunkEmbedding",
-            "public.CONTAINS",
-            "public.CALLS",
-            "public.CALLS_NIF",
-            "public.IMPACTS",
-            "public.SUBSTANTIATES",
             "public.FileVectorizationQueue",
             "public.GraphProjectionQueue",
             "public.FileLifecycleEvent",

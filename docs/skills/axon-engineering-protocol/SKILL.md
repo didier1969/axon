@@ -5,7 +5,7 @@ description: Use when working in the Axon repository and choosing MCP tools, run
 
 # Axon Engineering Protocol — LLM contract
 
-LLM-only doc per CPT-AXO-024. For full prose see archived `docs/archive/2026-05-02/SKILL.md.bak`. For canonical concepts use `cypher SELECT description FROM soll.main.Node WHERE id='<ID>'`.
+LLM-only doc per CPT-AXO-024. For full prose see archived `docs/archive/2026-05-02/SKILL.md.bak`. For canonical concepts use `cypher SELECT description FROM soll.Node WHERE id='<ID>'`.
 
 ## Boot
 On user phrase "Axon init" / "init Axon" / "Axon démarre" / "go" / "continue" / "reprends" → first call MUST be `mcp__axon__axon_init_project project_path=<cwd>`. Read `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes). REQ-AXO-143: `session_pointer = {kind, value, label?}` is the canonical workflow-agnostic onboarding pointer (`kind ∈ file|url|soll_node|none`); persist via `axon_init_project.session_pointer` arg. Apply the pointed artefact before anything else (file path, Linear ticket URL, SOLL node, …). `active_handoff` is preserved as a backward-compat alias mirroring `session_pointer.value` only when kind=file. REQ-AXO-176: the four recent-activity arrays (`in_progress_requirements`, `wave_1_unblockers` from `soll_work_plan top=3`, `recent_req_commits` matching `REQ-XXX-NNN`, `recent_soll_writes` top-8 by `metadata.updated_at`) collapse what was previously 4 separate calls into the single init response — no Session entity type was added; CPT-AXO-027-style Concept summaries remain an opt-in pattern.
@@ -50,6 +50,8 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 Default `mode=brief`. `query` brain semantic search works under `brain_only` profile (REQ-AXO-128).
 
 PG age-only mode (REQ-AXO-251, `AXON_AGE_ONLY_RELATIONS=true`): SQL relation tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES) are empty/dropped — `impact` / `path` / `bidi_trace` / `architectural_drift` use AGE Cypher primary; diagnostic surfaces (`truth_check`, `simulate_mutation`, `diagnose_indexing`, `axon_anomalies` analytics, `inspect` callers/callees) return neutral defaults instead of querying missing tables. Tool args/output schema unchanged.
+
+PG schema contract (REQ-AXO-216 Stop A, 2026-05-09): under `AXON_DB_BACKEND=postgres`, the cypher MCP escape uses PG-native namespacing — `SELECT … FROM soll.Node` (DuckDB-attached `soll.main.*` was a DuckDB-only convention). MCP tools internal to the brain (soll_validate, soll_verify_requirements, soll_query_context, soll_manager) automatically rewrite via `normalize_attached_soll_query` (REQ-AXO-249); only direct `mcp__axon__cypher` callers must adjust. The 5 SQL relation tables no longer exist post-Stop A — every edge query goes through AGE Cypher (`SELECT * FROM cypher('axon_graph', $$ MATCH … $$) AS …`).
 
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
@@ -100,7 +102,7 @@ Canonical relations (from `Edge.relation_type`):
 | REQ → PIL | BELONGS_TO |
 | REQ → REQ | REFINES |
 
-Always use `soll_relation_schema` before unfamiliar pairs. Forbidden pair → `error: forbidden_relation` (no `did_you_mean`). Cypher canonical SOLL row: `SELECT id, type, project_code, title, description, status, metadata FROM soll.main.Node WHERE …`. Filters on metadata via `json_extract_string(metadata, '$.priority')`.
+Always use `soll_relation_schema` before unfamiliar pairs. Forbidden pair → `error: forbidden_relation` (no `did_you_mean`). Cypher canonical SOLL row: `SELECT id, type, project_code, title, description, status, metadata FROM soll.Node WHERE …`. Filters on metadata via `json_extract_string(metadata, '$.priority')`.
 
 ## Vision rule
 North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive thing] into [accessible/durable/multiplied value] for [humans/teams/enterprises].` No technologies (those go in Decisions). Changes 1-2x/year.
@@ -180,7 +182,7 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 - `soll_validate` exempts `status='archived'` Requirements from `Orphan requirements` and `Requirements without criteria/evidence` reports (REQ-AXO-245). Archived = closed work; the violation list must be reachable to zero by curation alone. `status='completed'` Requirements still surface if no Traceability evidence is attached — attach a commit/test ref via `soll_attach_evidence` to clear them
 
 ## Architecture-state CPTs (load these at session start for perf work)
-Each CPT below names a load-bearing structural fact discovered the hard way. Fetch via `cypher SELECT description FROM soll.main.Node WHERE id='<CPT-ID>'` (IDs assigned when entries are created in SOLL).
+Each CPT below names a load-bearing structural fact discovered the hard way. Fetch via `cypher SELECT description FROM soll.Node WHERE id='<CPT-ID>'` (IDs assigned when entries are created in SOLL).
 
 | CPT | Anchor | When to load |
 |---|---|---|

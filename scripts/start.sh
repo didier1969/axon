@@ -122,6 +122,27 @@ case "${AXON_INSTANCE_KIND:-live}" in
     dev)  AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon-dev/instance-state.json" ;;
     *)    AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon/instance-state.json" ;;
 esac
+
+# MIL-AXO-015 Stop C persistence (REQ-AXO-216 prep): per-instance env-var
+# overrides loaded from a sourced config file. Holds the AXON_DB_BACKEND /
+# AXON_LIVE_DATABASE_URL / AXON_SOLL_SEED_PATH triple that flips the brain
+# from DuckDB to PostgreSQL — and any future runtime-flag persistence.
+# Files are .gitignore'd because AXON_LIVE_DATABASE_URL contains
+# credentials. Operator writes them once via the canonical wrapper or
+# manually; start.sh propagates them to the brain process automatically
+# on every start, so the flip survives reboot / promote / manual restart.
+case "${AXON_INSTANCE_KIND:-live}" in
+    live) AXON_RUNTIME_CONFIG_FILE="$PROJECT_ROOT/.axon/runtime-config.live.env" ;;
+    dev)  AXON_RUNTIME_CONFIG_FILE="$PROJECT_ROOT/.axon-dev/runtime-config.dev.env" ;;
+    *)    AXON_RUNTIME_CONFIG_FILE="" ;;
+esac
+if [[ -n "$AXON_RUNTIME_CONFIG_FILE" && -f "$AXON_RUNTIME_CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    set -o allexport
+    . "$AXON_RUNTIME_CONFIG_FILE"
+    set +o allexport
+    echo "🔧 Loaded runtime config from $AXON_RUNTIME_CONFIG_FILE"
+fi
 AXON_LAST_RUNTIME_MODE=""
 if [[ -f "$AXON_INSTANCE_STATE_FILE" ]]; then
     AXON_LAST_RUNTIME_MODE="$(python3 -c 'import json,sys
