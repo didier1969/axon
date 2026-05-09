@@ -136,7 +136,26 @@ pub(super) fn requirement_state_from(
     // metadata cross-check is required for the terminal path — closing a
     // REQ via `soll_manager update status=completed` is the canonical "I'm
     // done" signal an LLM emits, and the verifier must mirror it.
-    if matches!(status, "completed" | "delivered") {
+    //
+    // MIL-AXO-016 wave 9 closure pass: the LLM-driven triage emits
+    // `closed` (work shipped + evidence in acceptance_criteria),
+    // `archived` (no longer relevant, irreversible), `superseded`
+    // (replaced by another REQ), `done`, `complete`,
+    // `partially_closed` (REQ-AXO-248 shape: writers shipped, readers
+    // tracked separately). All of these are terminal — the verifier
+    // mirrors the closure semantics so soll_verify_requirements
+    // tracks the operator-visible decline of partial/missing counts.
+    if matches!(
+        status,
+        "completed"
+            | "delivered"
+            | "closed"
+            | "archived"
+            | "superseded"
+            | "done"
+            | "complete"
+            | "partially_closed"
+    ) {
         return "done";
     }
     let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
@@ -164,7 +183,22 @@ pub(super) fn requirement_missing_dimensions(
     // REQ-AXO-136: terminal statuses count as the strongest "status" signal,
     // not as a missing-status gap. Active statuses (current/accepted) also
     // pass; everything else flags the status dimension.
-    if !matches!(status, "current" | "accepted" | "completed" | "delivered") {
+    // MIL-AXO-016 wave 9: closed / archived / superseded / done / complete /
+    // partially_closed are terminal from the verifier's contract (mirror of
+    // requirement_state_from above).
+    if !matches!(
+        status,
+        "current"
+            | "accepted"
+            | "completed"
+            | "delivered"
+            | "closed"
+            | "archived"
+            | "superseded"
+            | "done"
+            | "complete"
+            | "partially_closed"
+    ) {
         missing.push("status".to_string());
     }
     if !has_criteria {
@@ -432,6 +466,96 @@ pub(crate) fn scoped_query_filter(project_code: Option<&str>, column_prefix: &st
     }
     let escaped = trimmed.replace('\'', "''");
     format!(" AND {column_prefix}project_code = '{escaped}'")
+}
+
+#[cfg(test)]
+mod requirement_state_tests {
+    use super::{requirement_missing_dimensions, requirement_state_from};
+
+    /// MIL-AXO-016 wave 9: every status emitted by the closure pass
+    /// (closed / archived / superseded / partially_closed / done /
+    /// complete) must short-circuit the verifier into the terminal
+    /// "done" state, mirroring the historical `completed` / `delivered`
+    /// path. Otherwise soll_verify_requirements stays inflated long
+    /// after the operator has finished closing work.
+    #[test]
+    fn terminal_statuses_count_as_done() {
+        for status in [
+            "completed",
+            "delivered",
+            "closed",
+            "archived",
+            "superseded",
+            "done",
+            "complete",
+            "partially_closed",
+        ] {
+            assert_eq!(
+                requirement_state_from(status, "", 0, 0),
+                "done",
+                "status={status} should map to done"
+            );
+        }
+    }
+
+    /// Active statuses still need evidence + criteria + zero broken
+    /// file evidence to be "done"; otherwise they degrade to partial.
+    #[test]
+    fn active_statuses_need_full_coverage_to_be_done() {
+        for status in ["current", "accepted"] {
+            assert_eq!(
+                requirement_state_from(status, "AC1: foo", 1, 0),
+                "done"
+            );
+            // Missing evidence → partial, not done.
+            assert_eq!(
+                requirement_state_from(status, "AC1: foo", 0, 0),
+                "partial"
+            );
+            // Broken file evidence → partial.
+            assert_eq!(
+                requirement_state_from(status, "AC1: foo", 1, 1),
+                "partial"
+            );
+        }
+    }
+
+    /// Empty status with no signals stays missing — no closure marker
+    /// short-circuits us out of the missing branch.
+    #[test]
+    fn empty_status_with_no_signals_is_missing() {
+        assert_eq!(requirement_state_from("", "", 0, 0), "missing");
+        assert_eq!(requirement_state_from("planned", "", 0, 0), "missing");
+    }
+
+    /// Terminal statuses also clear the "status" missing-dimension flag.
+    #[test]
+    fn terminal_statuses_do_not_flag_status_dimension() {
+        for status in [
+            "completed",
+            "delivered",
+            "closed",
+            "archived",
+            "superseded",
+            "done",
+            "complete",
+            "partially_closed",
+            "current",
+            "accepted",
+        ] {
+            let dims = requirement_missing_dimensions(status, true, 1, 1, 0);
+            assert!(
+                !dims.iter().any(|d| d == "status"),
+                "status={status} should not flag the status dimension; got {dims:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_terminal_status_flags_status_dimension() {
+        let dims = requirement_missing_dimensions("planned", true, 1, 1, 0);
+        assert!(dims.iter().any(|d| d == "status"));
+    }
 }
 
 #[cfg(test)]
