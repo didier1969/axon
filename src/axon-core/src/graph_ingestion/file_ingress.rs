@@ -5,9 +5,68 @@ use anyhow::Result;
 use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::GraphStore;
 use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
+use crate::postgres::age::cypher_cascade_delete_symbols_for_files;
 use crate::watcher_probe;
 
 use super::{parse_file_ingress_row, FileUpsertSource, IgnoreReconcileStats};
+
+/// REQ-AXO-248 / MIL-AXO-015 B.2: under PG, mirror the SQL cascade in
+/// Apache AGE so the relation edges (CONTAINS, CALLS, CALLS_NIF) are
+/// removed from the canonical graph store. The cascade is paired with
+/// the existing SQL chain — both fire under PG so AGE installs that
+/// are still being seeded retain a working SQL fallback (REQ-AXO-216
+/// drops the SQL relation tables only after the writers + readers
+/// are end-to-end on AGE).
+///
+/// Empty `paths` is a no-op. AGE errors are downgraded to a warning
+/// rather than aborting the SQL cascade — the caller's invariant is
+/// "the file is gone from the SQL graph"; AGE drift is corrected on
+/// the next ingest cycle.
+fn run_age_symbol_cascade_under_pg(store: &GraphStore, paths: &[&str]) {
+    if !store.is_postgres_backend() || paths.is_empty() {
+        return;
+    }
+    let cypher = match cypher_cascade_delete_symbols_for_files("axon_graph", paths) {
+        Ok(Some(sql)) => sql,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!(
+                "file_ingress AGE cascade build failed (paths={}): {}",
+                paths.len(),
+                e
+            );
+            return;
+        }
+    };
+    if let Err(e) = store.execute(&cypher) {
+        log::warn!(
+            "file_ingress AGE cascade execute failed (paths={}): {}",
+            paths.len(),
+            e
+        );
+    }
+}
+
+/// Resolve a SQL `SELECT path FROM ...` selector to the list of
+/// matching file paths. Used to feed the AGE cascade above which
+/// requires concrete path values for the `f.path IN [...]` filter.
+fn resolve_paths_from_selector(store: &GraphStore, selector: &str) -> Vec<String> {
+    let raw = match store.query_json(selector) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("file_ingress: selector resolve failed: {}", e);
+            return Vec::new();
+        }
+    };
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    rows.into_iter()
+        .filter_map(|row| {
+            row.into_iter()
+                .next()
+                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+        })
+        .collect()
+}
 
 impl GraphStore {
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
@@ -111,6 +170,14 @@ impl GraphStore {
         if affected == 0 {
             return Ok(0);
         }
+
+        // REQ-AXO-248 / MIL-AXO-015 B.2: mirror the cascade in Apache AGE
+        // under PG so the canonical graph store loses these symbols + their
+        // edges. Runs BEFORE the SQL chain so a partial failure leaves the
+        // SQL DELETE chain to resolve the rest atomically via execute_batch.
+        let cascading_paths = resolve_paths_from_selector(self, &selector);
+        let cascading_path_refs: Vec<&str> = cascading_paths.iter().map(String::as_str).collect();
+        run_age_symbol_cascade_under_pg(self, &cascading_path_refs);
 
         let mut queries = Self::derived_cleanup_queries(&selector);
         queries.push(format!(
@@ -224,6 +291,10 @@ impl GraphStore {
 
         if !newly_ignored.is_empty() {
             for chunk in newly_ignored.chunks(300) {
+                // REQ-AXO-248 / MIL-AXO-015 B.2: mirror cascade in AGE
+                // under PG. Same chunk slice feeds the SQL chain below.
+                let chunk_refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                run_age_symbol_cascade_under_pg(self, &chunk_refs);
                 let selector = chunk
                     .iter()
                     .map(|p| format!("'{}'", Self::escape_sql(p)))

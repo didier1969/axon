@@ -625,6 +625,55 @@ pub fn cypher_merge_vertices_batch(
     Ok(out)
 }
 
+/// REQ-AXO-248 / MIL-AXO-015 B.2: cascade-delete every Symbol whose
+/// containing File is in `file_paths`. Uses `DETACH DELETE` so AGE
+/// removes both the Symbol vertices AND every incident edge
+/// (CONTAINS, CALLS, CALLS_NIF) in a single pass — equivalent to the
+/// hand-rolled SQL chain that file_ingress.rs runs against the
+/// DuckDB-era relation tables.
+///
+/// Empty `file_paths` returns `Ok(None)` so callers compose with
+/// empty batches without special-casing. The wrapper only emits a
+/// statement when there is at least one path to cascade.
+pub fn cypher_cascade_delete_symbols_for_files(
+    graph: &str,
+    file_paths: &[&str],
+) -> Result<Option<String>> {
+    if file_paths.is_empty() {
+        return Ok(None);
+    }
+    validate_identifier(graph, "graph")?;
+    let mut path_list = String::with_capacity(file_paths.len() * 64);
+    let mut first = true;
+    for path in file_paths {
+        if !first {
+            path_list.push_str(", ");
+        }
+        first = false;
+        path_list.push('"');
+        for ch in path.chars() {
+            match ch {
+                '"' => path_list.push_str("\\\""),
+                '\\' => path_list.push_str("\\\\"),
+                c if c.is_control() => {
+                    return Err(anyhow!(
+                        "file path contains a control character (U+{:04X})",
+                        c as u32
+                    ));
+                }
+                c => path_list.push(c),
+            }
+        }
+        path_list.push('"');
+    }
+    let body = format!(
+        "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
+         WHERE f.path IN [{path_list}] \
+         DETACH DELETE s"
+    );
+    Ok(Some(cypher_void_wrapper(graph, &body)))
+}
+
 /// Compose a SQL query that wraps a read-side Cypher MATCH. The
 /// caller passes the Cypher RETURN column names (in order) so the
 /// AS clause receives the right `(name agtype, …)` declarations.
@@ -809,6 +858,39 @@ mod tests {
         assert!(sql.contains("SELECT * FROM cypher('axon_graph'"));
         assert!(sql.contains("MATCH (f:File)-[:CONTAINS]->(s:Symbol)"));
         assert!(sql.contains("AS (fpath agtype, sname agtype)"));
+    }
+
+    #[test]
+    fn cascade_delete_empty_paths_returns_none() {
+        let out = cypher_cascade_delete_symbols_for_files("axon_graph", &[]).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn cascade_delete_wraps_match_detach_delete_with_path_list() {
+        let out =
+            cypher_cascade_delete_symbols_for_files("axon_graph", &["/a.rs", "/b/c.rs"]).unwrap();
+        let sql = out.unwrap();
+        assert!(sql.contains("SELECT * FROM cypher('axon_graph'"));
+        assert!(sql.contains("MATCH (f:File)-[:CONTAINS]->(s:Symbol)"));
+        assert!(sql.contains("WHERE f.path IN [\"/a.rs\", \"/b/c.rs\"]"));
+        assert!(sql.contains("DETACH DELETE s"));
+    }
+
+    #[test]
+    fn cascade_delete_escapes_quote_and_backslash_in_paths() {
+        let out =
+            cypher_cascade_delete_symbols_for_files("axon_graph", &["/with\"quote", "/back\\slash"])
+                .unwrap();
+        let sql = out.unwrap();
+        assert!(sql.contains("\"/with\\\"quote\""));
+        assert!(sql.contains("\"/back\\\\slash\""));
+    }
+
+    #[test]
+    fn cascade_delete_rejects_control_chars_in_paths() {
+        let out = cypher_cascade_delete_symbols_for_files("axon_graph", &["/a\nb.rs"]);
+        assert!(out.is_err());
     }
 
     #[test]

@@ -399,6 +399,93 @@ fn graphstore_boots_under_postgres_backend() {
         .expect("read back soll.ProjectCodeRegistry after replay");
     assert_eq!(pcr_count_after, 1, "registry replay must remain idempotent");
 
+    // ── REQ-AXO-248 / MIL-AXO-015 B.2 — slice S1 cascade smoke.
+    // ── Populate AGE with a (File)-[:CONTAINS]->(Symbol)-[:CALLS]->(Symbol)
+    // ── pattern, then run cypher_cascade_delete_symbols_for_files and
+    // ── assert the Symbol vertex + every incident edge is gone. Mirrors
+    // ── what file_ingress.rs::tombstone_missing_path now triggers under
+    // ── PG.
+    use axon_core::postgres::age::{
+        cypher_cascade_delete_symbols_for_files, cypher_merge_edge,
+    };
+    let merge_contains = cypher_merge_edge(
+        "axon_graph",
+        "File",
+        "path",
+        "/cascade/test/a.rs",
+        "CONTAINS",
+        &serde_json::json!({"project_code": "TST"}),
+        "Symbol",
+        "id",
+        "TST::cascade::a",
+    )
+    .expect("build CONTAINS merge");
+    store.execute(&merge_contains).expect("seed CONTAINS edge");
+    let merge_calls = cypher_merge_edge(
+        "axon_graph",
+        "Symbol",
+        "id",
+        "TST::cascade::a",
+        "CALLS",
+        &serde_json::json!({"project_code": "TST"}),
+        "Symbol",
+        "id",
+        "TST::cascade::b",
+    )
+    .expect("build CALLS merge");
+    store.execute(&merge_calls).expect("seed CALLS edge");
+    // Confirm the AGE seed landed: enumerate edges incident on the Symbol
+    // (avoiding count() because AGE returns agtype which the pg-plugin
+    // renderer cannot serialise — list shape composes with row-counting
+    // in Rust instead).
+    let seed_sql = axon_core::postgres::age::cypher_query(
+        "axon_graph",
+        "MATCH (s:Symbol {id: \"TST::cascade::a\"})-[r]-(other) RETURN s.id AS sid",
+        &["sid"],
+    )
+    .unwrap();
+    let raw_seed = store.query_json(&seed_sql).unwrap();
+    let seed_rows: Vec<Vec<String>> = serde_json::from_str(&raw_seed).unwrap_or_default();
+    assert_eq!(
+        seed_rows.len(),
+        2,
+        "AGE seed should leave Symbol with 2 incident edges; got rows={seed_rows:?}"
+    );
+    // Cascade: this is what file_ingress now invokes under PG.
+    let cascade_sql = cypher_cascade_delete_symbols_for_files(
+        "axon_graph",
+        &["/cascade/test/a.rs"],
+    )
+    .unwrap()
+    .expect("cascade should emit a statement for a non-empty path list");
+    store.execute(&cascade_sql).expect("AGE DETACH DELETE");
+    // Verify the Symbol vertex itself is gone — empty rowset.
+    let after_sql = axon_core::postgres::age::cypher_query(
+        "axon_graph",
+        "MATCH (s:Symbol {id: \"TST::cascade::a\"}) RETURN s.id AS sid",
+        &["sid"],
+    )
+    .unwrap();
+    let raw_after = store.query_json(&after_sql).unwrap();
+    let after_rows: Vec<Vec<String>> = serde_json::from_str(&raw_after).unwrap_or_default();
+    assert!(
+        after_rows.is_empty(),
+        "Symbol vertex should be gone post-cascade; got rows={after_rows:?}"
+    );
+    // Verify the (File)-[:CONTAINS]->(Symbol) edge is gone too.
+    let contains_sql = axon_core::postgres::age::cypher_query(
+        "axon_graph",
+        "MATCH (f:File {path: \"/cascade/test/a.rs\"})-[r:CONTAINS]->(s:Symbol) RETURN s.id AS sid",
+        &["sid"],
+    )
+    .unwrap();
+    let raw_contains = store.query_json(&contains_sql).unwrap();
+    let contains_rows: Vec<Vec<String>> = serde_json::from_str(&raw_contains).unwrap_or_default();
+    assert!(
+        contains_rows.is_empty(),
+        "CONTAINS edge from File should be gone post-cascade; got rows={contains_rows:?}"
+    );
+
     drop(store);
 
     // Reset env so subsequent test runs in the same `cargo test`
