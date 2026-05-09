@@ -493,3 +493,190 @@ fn graphstore_boots_under_postgres_backend() {
     std::env::remove_var("AXON_DB_BACKEND");
     std::env::remove_var("AXON_LIVE_DATABASE_URL");
 }
+
+/// REQ-AXO-251 closure smoke: with `AXON_AGE_ONLY_RELATIONS=true`, every
+/// gated reader path must complete without touching the 5 SQL relation
+/// tables. We exercise that by physically `DROP TABLE`-ing them after
+/// bootstrap (mimicking the post-Stop A state) and confirming the
+/// readers still return their neutral defaults instead of erroring on
+/// missing relations.
+#[test]
+#[ignore = "requires docker; opt-in via `cargo test -- --ignored`"]
+fn readers_age_only_relations_smoke() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let container = GenericImage::new("axon-test/age-pgvector", "pg17")
+        .with_exposed_port(ContainerPort::Tcp(5432))
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_PASSWORD", "axon_test_pw")
+        .with_env_var("POSTGRES_DB", "axon_test_db")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .start()
+        .expect("start container");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .expect("ephemeral host port");
+    let url = format!("postgres://postgres:axon_test_pw@127.0.0.1:{port}/axon_test_db");
+
+    std::env::set_var("AXON_DB_BACKEND", "postgres");
+    std::env::set_var("AXON_LIVE_DATABASE_URL", &url);
+    std::env::remove_var("AXON_DEV_DATABASE_URL");
+    // The flag under test — readers must short-circuit when it is set.
+    std::env::set_var("AXON_AGE_ONLY_RELATIONS", "true");
+
+    let mut last_err = None;
+    let mut store = None;
+    for _ in 0..10 {
+        match GraphStore::new("/tmp/axon-pg-age-only-smoke") {
+            Ok(s) => {
+                store = Some(s);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    let store = store.unwrap_or_else(|| {
+        panic!(
+            "GraphStore::new under PG age-only failed after retries: {:?}",
+            last_err
+        )
+    });
+
+    // Helper plumbing must agree with the env: PG backend + age-only flag.
+    assert!(
+        store.is_postgres_backend(),
+        "GraphStore should report PG backend"
+    );
+    assert!(
+        store.skip_sql_relations(),
+        "skip_sql_relations() must be true under PG + AXON_AGE_ONLY_RELATIONS"
+    );
+
+    // Mimic REQ-AXO-216 (Stop A) post-flip state: the 5 SQL relation
+    // tables are physically dropped. Any reader that still references
+    // them will fail with `relation "..." does not exist`.
+    store
+        .execute(
+            "DROP TABLE IF EXISTS public.CALLS, public.CALLS_NIF, public.CONTAINS, \
+             public.IMPACTS, public.SUBSTANTIATES CASCADE",
+        )
+        .expect("DROP TABLE on the 5 SQL relation tables should succeed");
+
+    // Confirm the tables are actually gone (information_schema is
+    // authoritative).
+    let dropped_tables_remaining = store
+        .query_count(
+            "SELECT count(*)::BIGINT FROM information_schema.tables \
+             WHERE table_schema = 'public' \
+               AND lower(table_name) IN ('calls', 'calls_nif', 'contains', 'impacts', 'substantiates')",
+        )
+        .expect("information_schema lookup should succeed");
+    assert_eq!(
+        dropped_tables_remaining, 0,
+        "all 5 SQL relation tables must be dropped before the smoke probe"
+    );
+
+    // ── Analytics gate: every method that previously queried CALLS /
+    // ── CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES must early-return
+    // ── its neutral default. If gating is missing the query reaches PG
+    // ── and fails — the assertions below would surface that as an Err.
+    let (audit_score, audit_findings) = store
+        .get_security_audit("*")
+        .expect("get_security_audit must early-return under skip_sql_relations");
+    assert_eq!(audit_score, 100);
+    assert_eq!(audit_findings, "[]");
+
+    assert!(store
+        .get_technical_debt("*")
+        .expect("get_technical_debt must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_god_objects("*")
+        .expect("get_god_objects must early-return")
+        .is_empty());
+
+    assert_eq!(
+        store
+            .get_telemetry_score("*")
+            .expect("get_telemetry_score must early-return"),
+        100
+    );
+
+    assert_eq!(
+        store
+            .get_dead_code_count("*")
+            .expect("get_dead_code_count must early-return"),
+        0
+    );
+
+    assert!(store
+        .get_wrapper_candidates("*")
+        .expect("get_wrapper_candidates must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_feature_envy_candidates("*")
+        .expect("get_feature_envy_candidates must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_detour_candidates("*")
+        .expect("get_detour_candidates must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_abstraction_detour_candidates("*")
+        .expect("get_abstraction_detour_candidates must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_orphan_code_symbols("*")
+        .expect("get_orphan_code_symbols must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_circular_dependencies("*")
+        .expect("get_circular_dependencies must early-return")
+        .is_empty());
+
+    assert_eq!(
+        store
+            .get_circular_dependency_count_fast("*")
+            .expect("get_circular_dependency_count_fast must early-return"),
+        0
+    );
+
+    assert!(store
+        .get_domain_leakage("*", "/dom/", "/infra/")
+        .expect("get_domain_leakage must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_unsafe_exposure("*")
+        .expect("get_unsafe_exposure must early-return")
+        .is_empty());
+
+    assert!(store
+        .get_nif_blocking_risks("*")
+        .expect("get_nif_blocking_risks must early-return")
+        .is_empty());
+
+    // ── Projection refreshes must skip-with-empty under skip_sql_relations.
+    // ── refresh_file_projection has no anchor lookup and runs straight
+    // ── into the gate — the most direct read-path proof.
+    store
+        .refresh_file_projection("/no/such/file.rs", 1)
+        .expect("refresh_file_projection must skip without error under skip_sql_relations");
+
+    drop(store);
+
+    std::env::remove_var("AXON_DB_BACKEND");
+    std::env::remove_var("AXON_LIVE_DATABASE_URL");
+    std::env::remove_var("AXON_AGE_ONLY_RELATIONS");
+}
