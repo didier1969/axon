@@ -2566,16 +2566,43 @@ impl GraphStore {
     }
 
     fn reset_ist_state(&self) -> Result<()> {
-        let cleanup_queries = [
-            "DELETE FROM CALLS_NIF",
-            "DELETE FROM CALLS",
-            "DELETE FROM CONTAINS",
-            "DELETE FROM IMPACTS",
-            "DELETE FROM SUBSTANTIATES",
+        // REQ-AXO-248 / MIL-AXO-015 B.2 slice S4: under PG, also clear
+        // the Apache AGE graph so post-reset reads return empty rather
+        // than the pre-reset shadow. `MATCH (n) DETACH DELETE n` removes
+        // every vertex + edge in axon_graph in one statement. Best-
+        // effort under dual-write: failure logs at warn but does not
+        // abort the SQL reset (reset is the operator's nuclear option).
+        if self.is_postgres_backend() {
+            let clear = "SELECT * FROM cypher('axon_graph', $$ MATCH (n) DETACH DELETE n RETURN 1 $$) AS (_ag_void agtype)";
+            if let Err(e) = self.execute(clear) {
+                log::warn!(
+                    "AGE graph clear failed during reset_ist_state (SQL reset will still proceed): {}",
+                    e
+                );
+            }
+        }
+
+        let mut cleanup_queries: Vec<&str> = Vec::with_capacity(8);
+        // SQL relation tables — always under DuckDB; gated under PG
+        // (skipped when the operator has flipped AXON_AGE_ONLY_RELATIONS
+        // before running a reset, which is the post-Stop A state).
+        let skip_sql_relations = self.is_postgres_backend()
+            && crate::postgres::age::age_only_relations_enabled();
+        if !skip_sql_relations {
+            cleanup_queries.extend([
+                "DELETE FROM CALLS_NIF",
+                "DELETE FROM CALLS",
+                "DELETE FROM CONTAINS",
+                "DELETE FROM IMPACTS",
+                "DELETE FROM SUBSTANTIATES",
+            ]);
+        }
+        // IST tables (Symbol/Chunk/Project) always SQL on both backends.
+        cleanup_queries.extend([
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
             "DELETE FROM Project",
-        ];
+        ]);
 
         for query in cleanup_queries {
             self.execute(query)?;
@@ -2603,16 +2630,37 @@ impl GraphStore {
     }
 
     fn soft_invalidate_derived_state(&self) -> Result<()> {
-        let cleanup_queries = [
-            "DELETE FROM CALLS_NIF",
-            "DELETE FROM CALLS",
-            "DELETE FROM CONTAINS",
-            "DELETE FROM IMPACTS",
-            "DELETE FROM SUBSTANTIATES",
+        // REQ-AXO-248 / MIL-AXO-015 B.2 slice S4: same AGE clear as
+        // reset_ist_state (above). Soft-invalidate keeps the File
+        // backlog so post-clear ingestion replays everything against
+        // a fresh AGE graph.
+        if self.is_postgres_backend() {
+            let clear = "SELECT * FROM cypher('axon_graph', $$ MATCH (n) DETACH DELETE n RETURN 1 $$) AS (_ag_void agtype)";
+            if let Err(e) = self.execute(clear) {
+                log::warn!(
+                    "AGE graph clear failed during soft_invalidate_derived_state (SQL clear will still proceed): {}",
+                    e
+                );
+            }
+        }
+
+        let skip_sql_relations = self.is_postgres_backend()
+            && crate::postgres::age::age_only_relations_enabled();
+        let mut cleanup_queries: Vec<&str> = Vec::with_capacity(8);
+        if !skip_sql_relations {
+            cleanup_queries.extend([
+                "DELETE FROM CALLS_NIF",
+                "DELETE FROM CALLS",
+                "DELETE FROM CONTAINS",
+                "DELETE FROM IMPACTS",
+                "DELETE FROM SUBSTANTIATES",
+            ]);
+        }
+        cleanup_queries.extend([
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
             "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated', file_stage = 'promoted', graph_ready = FALSE, vector_ready = FALSE",
-        ];
+        ]);
 
         for query in cleanup_queries {
             self.execute(query)?;
