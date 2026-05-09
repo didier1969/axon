@@ -232,7 +232,24 @@ fn sql_quote_opt(o: &Option<String>) -> String {
 
 fn jsonb_or_null(v: &Option<serde_json::Value>) -> String {
     match v {
-        Some(value) => format!("{}::jsonb", sql_quote(&value.to_string())),
+        Some(value) => {
+            // REQ-AXO-249 / soll-export-seed gap: DuckDB's to_json(t)
+            // emits VARCHAR metadata columns as JSON-encoded STRINGS
+            // (e.g. "metadata": "{\"acceptance_criteria\":\"...\"}").
+            // Round-tripping that into PG verbatim casts a JSONB SCALAR
+            // STRING, breaking `metadata->>'key'` lookups (returns
+            // NULL instead of the value). Detect that case here and
+            // parse the inner JSON so the column lands as a JSONB
+            // OBJECT — what every consumer expects.
+            let canonical = match value {
+                serde_json::Value::String(s) => match serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(parsed) if !parsed.is_string() => parsed,
+                    _ => value.clone(),
+                },
+                _ => value.clone(),
+            };
+            format!("{}::jsonb", sql_quote(&canonical.to_string()))
+        }
         None => "NULL".to_string(),
     }
 }
@@ -353,6 +370,36 @@ mod tests {
         let out = jsonb_or_null(&Some(json));
         assert!(out.contains("::jsonb"));
         assert!(out.contains("\"k\""));
+    }
+
+    #[test]
+    fn jsonb_or_null_parses_json_encoded_string_into_object() {
+        // REQ-AXO-249 — soll-export-seed emits metadata as a JSON-
+        // encoded STRING (DuckDB to_json on VARCHAR). Without this
+        // unwrap, ::jsonb casts a string scalar and metadata->>'key'
+        // returns NULL, breaking soll_validate / completeness reads.
+        let encoded =
+            serde_json::Value::String(r#"{"acceptance_criteria":"items 1-3"}"#.to_string());
+        let out = jsonb_or_null(&Some(encoded));
+        assert!(out.contains("::jsonb"));
+        assert!(out.contains("\"acceptance_criteria\""));
+        assert!(out.contains("\"items 1-3\""));
+        // Critical: the OUTER quotes around the object must be gone —
+        // we want a JSONB object, not a JSONB string scalar.
+        assert!(
+            !out.contains(r#""{\"acceptance_criteria\""#),
+            "unparsed string-of-json leaked through: {out}"
+        );
+    }
+
+    #[test]
+    fn jsonb_or_null_keeps_plain_strings_intact() {
+        // A non-JSON string must NOT be unwrapped; metadata columns
+        // sometimes hold plain text values.
+        let plain = serde_json::Value::String("just a string".to_string());
+        let out = jsonb_or_null(&Some(plain));
+        assert!(out.contains("::jsonb"));
+        assert!(out.contains("just a string"));
     }
 
     #[test]
