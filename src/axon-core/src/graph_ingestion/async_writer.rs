@@ -174,14 +174,134 @@ impl WriteAccumulator {
     /// that depend on the typed INSERTs already taking effect within
     /// the same writer transaction.
     pub fn render_bulk_queries(&self) -> Vec<String> {
+        // Backwards-compatible default: DuckDB-only path (no SQL relation
+        // skip, no AGE dual-write). Writer-thread callers should prefer
+        // `render_bulk_queries_with` so they can flip the gates from the
+        // sink + env at flush time.
+        self.render_bulk_queries_with(false, false, "axon_graph")
+    }
+
+    /// REQ-AXO-250: render the accumulator under a PG-aware backend
+    /// gate.
+    /// - `skip_sql_relations` (= `is_postgres_backend && AXON_AGE_ONLY_RELATIONS=true`)
+    ///   omits the SQL CONTAINS/CALLS/CALLS_NIF emissions so the writer
+    ///   never queries the dropped relation tables (REQ-AXO-216).
+    /// - `emit_age` (= `is_postgres_backend && (skip_sql_relations || AXON_AGE_DUAL_WRITE=true)`)
+    ///   appends AGE Cypher MERGE statements for the same relation rows.
+    /// - `age_graph` is the AGE graph name (always `axon_graph` today).
+    ///
+    /// Order: Symbols → Chunks → SQL relations (gated) → AGE Cypher
+    /// (gated) → RawQueries. Sequencing keeps the producer's existing
+    /// transactional semantics intact: typed INSERTs land before any
+    /// RawQueries that depend on them.
+    pub fn render_bulk_queries_with(
+        &self,
+        skip_sql_relations: bool,
+        emit_age: bool,
+        age_graph: &str,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         out.extend(self.render_symbols_duckdb());
         out.extend(self.render_chunks_duckdb());
-        out.extend(self.render_contains_duckdb());
-        out.extend(self.render_calls_duckdb());
-        out.extend(self.render_calls_nif_duckdb());
+        if !skip_sql_relations {
+            out.extend(self.render_contains_duckdb());
+            out.extend(self.render_calls_duckdb());
+            out.extend(self.render_calls_nif_duckdb());
+        }
+        if emit_age {
+            out.extend(self.render_contains_age_cypher(age_graph));
+            out.extend(self.render_calls_age_cypher(age_graph));
+            out.extend(self.render_calls_nif_age_cypher(age_graph));
+        }
         out.extend(self.raw_queries.iter().cloned());
         out
+    }
+
+    /// REQ-AXO-250: render accumulated CONTAINS rows as AGE Cypher
+    /// `UNWIND ... MERGE` statements. Mirrors the synchronous producer
+    /// path at `graph_ingestion.rs:1148-1181` so AGE stays in lockstep
+    /// with SQL writes whether the writer thread is enabled or not.
+    /// Returns the same `cypher_void_wrapper`-shaped SQL strings the
+    /// writer pipeline already feeds to `execute_batch`.
+    pub fn render_contains_age_cypher(&self, age_graph: &str) -> Vec<String> {
+        Self::render_relation_age_cypher(
+            age_graph,
+            "CONTAINS",
+            "File",
+            "path",
+            "Symbol",
+            "id",
+            &self.contains,
+        )
+    }
+
+    pub fn render_calls_age_cypher(&self, age_graph: &str) -> Vec<String> {
+        Self::render_relation_age_cypher(
+            age_graph,
+            "CALLS",
+            "Symbol",
+            "id",
+            "Symbol",
+            "id",
+            &self.calls,
+        )
+    }
+
+    pub fn render_calls_nif_age_cypher(&self, age_graph: &str) -> Vec<String> {
+        Self::render_relation_age_cypher(
+            age_graph,
+            "CALLS_NIF",
+            "Symbol",
+            "id",
+            "Symbol",
+            "id",
+            &self.calls_nif,
+        )
+    }
+
+    fn render_relation_age_cypher(
+        age_graph: &str,
+        edge_label: &str,
+        src_label: &str,
+        src_id_property: &str,
+        dst_label: &str,
+        dst_id_property: &str,
+        rows: &[RelationRow],
+    ) -> Vec<String> {
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let triples: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.source_id.clone(),
+                    r.target_id.clone(),
+                    r.project_code.clone(),
+                )
+            })
+            .collect();
+        match crate::postgres::age::cypher_merge_relation_edges_unwind(
+            age_graph,
+            src_label,
+            src_id_property,
+            edge_label,
+            dst_label,
+            dst_id_property,
+            &triples,
+            200,
+        ) {
+            Ok(stmts) => stmts,
+            Err(e) => {
+                log::warn!(
+                    "async_writer: failed to render AGE Cypher batch for {} ({} rows): {}",
+                    edge_label,
+                    rows.len(),
+                    e
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Render accumulated CONTAINS rows. Mirrors the legacy producer
@@ -471,11 +591,23 @@ impl WriterStats {
 
 pub trait WriterSink: Send + Sync + 'static {
     fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()>;
+
+    /// REQ-AXO-250: lets the writer thread know whether the sink runs
+    /// against PostgreSQL (where AGE Cypher dual-write applies) or
+    /// DuckDB (relation SQL only). Default `false` keeps test sinks
+    /// trivial — only `GraphStore` overrides.
+    fn is_postgres_backend(&self) -> bool {
+        false
+    }
 }
 
 impl WriterSink for GraphStore {
     fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()> {
         GraphStore::execute_batch(self, queries)
+    }
+
+    fn is_postgres_backend(&self) -> bool {
+        GraphStore::is_postgres_backend(self)
     }
 }
 
@@ -592,7 +724,21 @@ fn flush<S: WriterSink>(
     stats: &Arc<WriterStats>,
 ) {
     let drained = accumulator.row_count();
-    let queries = accumulator.render_bulk_queries();
+    // REQ-AXO-250: compute the PG-aware gates at flush time so the
+    // writer stays in lockstep with the synchronous producer's
+    // dual-write contract (graph_ingestion.rs:1148-1181). Under DuckDB
+    // both gates collapse to false and the rendered SQL is identical
+    // to the legacy path.
+    let backend_is_pg = sink.is_postgres_backend();
+    let skip_sql_relations =
+        backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+    let emit_age = backend_is_pg
+        && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
+    let queries = accumulator.render_bulk_queries_with(
+        skip_sql_relations,
+        emit_age,
+        "axon_graph",
+    );
     if !queries.is_empty() {
         if let Err(e) = sink.execute_batch(&queries) {
             stats.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -1391,6 +1537,166 @@ mod tests {
         match prior {
             Some(v) => std::env::set_var(ENV_FLAG, v),
             None => std::env::remove_var(ENV_FLAG),
+        }
+    }
+
+    // REQ-AXO-250 — render_bulk_queries_with gates ----------------------
+
+    #[test]
+    fn render_bulk_queries_with_default_gates_matches_legacy() {
+        // skip_sql_relations=false + emit_age=false reproduces the legacy
+        // DuckDB shape exactly. Sanity for backwards-compatibility on
+        // every existing caller that hits render_bulk_queries().
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
+        acc.absorb(WriteDiff::Calls(vec![sample_relation("sym1", "sym2")]));
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("sym1", "sym3")]));
+
+        let legacy = acc.render_bulk_queries();
+        let parametrised = acc.render_bulk_queries_with(false, false, "axon_graph");
+        assert_eq!(legacy, parametrised);
+        // Sanity: the rendered output mentions every SQL relation table.
+        let joined = parametrised.join("\n");
+        assert!(joined.contains("INSERT INTO CONTAINS"));
+        assert!(joined.contains("INSERT INTO CALLS_NIF "));
+        assert!(joined.contains("INSERT INTO CALLS "));
+    }
+
+    #[test]
+    fn render_bulk_queries_with_skip_sql_relations_omits_relation_inserts() {
+        // skip_sql_relations=true (PG age-only mode, REQ-AXO-216 prep)
+        // drops every SQL CONTAINS / CALLS / CALLS_NIF emission.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
+        acc.absorb(WriteDiff::Calls(vec![sample_relation("sym1", "sym2")]));
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("sym1", "sym3")]));
+        acc.absorb(WriteDiff::Symbols(vec![sample_symbol("sym1")]));
+
+        let rendered = acc.render_bulk_queries_with(true, false, "axon_graph");
+        let joined = rendered.join("\n");
+        assert!(
+            !joined.contains("INSERT INTO CONTAINS"),
+            "CONTAINS SQL emission must be gated under skip_sql_relations: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("INSERT INTO CALLS "),
+            "CALLS SQL emission must be gated under skip_sql_relations"
+        );
+        assert!(
+            !joined.contains("INSERT INTO CALLS_NIF "),
+            "CALLS_NIF SQL emission must be gated under skip_sql_relations"
+        );
+        // Symbol IST writes always fire (IST table, not relation table).
+        assert!(joined.contains("INSERT INTO Symbol"));
+    }
+
+    #[test]
+    fn render_bulk_queries_with_emit_age_appends_cypher_merge() {
+        // emit_age=true (PG dual-write OR age-only mode) appends a
+        // Cypher MERGE per relation bucket. Asserts the heredoc
+        // wrapper + MERGE shape so a regression in the AGE renderer
+        // surfaces without an integration test container.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
+        acc.absorb(WriteDiff::Calls(vec![sample_relation("sym1", "sym2")]));
+        acc.absorb(WriteDiff::CallsNif(vec![sample_relation("sym1", "sym3")]));
+
+        let rendered = acc.render_bulk_queries_with(false, true, "axon_graph");
+        let joined = rendered.join("\n");
+        // SQL still fires (dual-write).
+        assert!(joined.contains("INSERT INTO CONTAINS"));
+        assert!(joined.contains("INSERT INTO CALLS "));
+        assert!(joined.contains("INSERT INTO CALLS_NIF "));
+        // AGE Cypher MERGE for each edge label.
+        assert!(joined.contains("cypher('axon_graph'"), "expected AGE wrapper");
+        assert!(joined.contains("[r:CONTAINS]"));
+        assert!(joined.contains("[r:CALLS]"));
+        assert!(joined.contains("[r:CALLS_NIF]"));
+    }
+
+    #[test]
+    fn render_bulk_queries_with_age_only_emits_cypher_without_sql_relations() {
+        // skip_sql_relations=true + emit_age=true is the operator's
+        // post-Stop A target state: AGE-only, SQL relation tables
+        // dropped. The accumulator must still produce the AGE writes
+        // (canonical edge persistence) without ever issuing the
+        // legacy SQL INSERT.
+        let mut acc = WriteAccumulator::new();
+        acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
+        acc.absorb(WriteDiff::Symbols(vec![sample_symbol("sym1")]));
+
+        let rendered = acc.render_bulk_queries_with(true, true, "axon_graph");
+        let joined = rendered.join("\n");
+        assert!(!joined.contains("INSERT INTO CONTAINS"));
+        assert!(joined.contains("[r:CONTAINS]"));
+        assert!(joined.contains("INSERT INTO Symbol"));
+    }
+
+    #[test]
+    fn flush_under_pg_dual_write_emits_age_cypher() {
+        // End-to-end through the writer thread: a postgres-flavoured
+        // sink + AXON_AGE_DUAL_WRITE=true must result in both SQL and
+        // AGE statements landing in the recorded batch. This protects
+        // the gating computed in flush() from drifting away from the
+        // synchronous producer's contract.
+        let prior_dual = std::env::var("AXON_AGE_DUAL_WRITE").ok();
+        let prior_only = std::env::var("AXON_AGE_ONLY_RELATIONS").ok();
+        std::env::remove_var("AXON_AGE_ONLY_RELATIONS");
+        std::env::set_var("AXON_AGE_DUAL_WRITE", "true");
+
+        let sink = Arc::new(PgRecordingSink::default());
+        let (dispatcher, handle) = spawn(Arc::clone(&sink));
+
+        dispatcher
+            .dispatch(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]))
+            .expect("dispatch ok");
+
+        assert!(
+            wait_for(|| !sink.batches().is_empty(), Duration::from_secs(2)),
+            "PG sink should receive flushed batch: stats={:?}",
+            dispatcher.stats()
+        );
+        let batches = sink.batches();
+        assert!(!batches.is_empty());
+        let joined = batches[0].join("\n");
+        assert!(joined.contains("INSERT INTO CONTAINS"), "SQL must fire");
+        assert!(joined.contains("[r:CONTAINS]"), "AGE Cypher must fire under dual-write");
+
+        drop(dispatcher);
+        handle.join().expect("writer thread joined");
+
+        match prior_dual {
+            Some(v) => std::env::set_var("AXON_AGE_DUAL_WRITE", v),
+            None => std::env::remove_var("AXON_AGE_DUAL_WRITE"),
+        }
+        match prior_only {
+            Some(v) => std::env::set_var("AXON_AGE_ONLY_RELATIONS", v),
+            None => std::env::remove_var("AXON_AGE_ONLY_RELATIONS"),
+        }
+    }
+
+    /// Recording sink that reports as PG-backed so flush() takes the
+    /// dual-write/age-only paths. Mirrors RecordingSink otherwise.
+    #[derive(Default)]
+    struct PgRecordingSink {
+        recorded: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl PgRecordingSink {
+        fn batches(&self) -> Vec<Vec<String>> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl WriterSink for PgRecordingSink {
+        fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()> {
+            self.recorded.lock().unwrap().push(queries.to_vec());
+            Ok(())
+        }
+
+        fn is_postgres_backend(&self) -> bool {
+            true
         }
     }
 }

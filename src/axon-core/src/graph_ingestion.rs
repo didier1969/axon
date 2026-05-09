@@ -21,7 +21,7 @@ pub const INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT: i64 = 2;
 static FILE_VECTORIZATION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
 const CHUNK_EMBEDDING_UPSERT_BATCH_ROWS: usize = 500;
 
-pub(crate) mod async_writer;
+pub mod async_writer;
 pub(crate) mod chunk_content_archiver;
 mod file_ingress;
 mod graph_projection_queue;
@@ -2368,16 +2368,12 @@ impl GraphStore {
     }
 }
 
-/// Read-once env knob that gates the option B.2 dual-write transition.
-/// Default: OFF. When ON, every relation writer that has a Cypher
-/// equivalent emits both the SQL INSERT (authoritative) and the
-/// Cypher MERGE (validation + index warm-up). Once B.3 readers ship
-/// against the AGE graph, the env defaults to ON; once B.4 drops the
-/// SQL relation tables, the gate disappears entirely.
+/// REQ-AXO-250: thin re-export of the public helper in `postgres::age`
+/// so existing call-sites in this module keep their bare `age_dual_write_enabled()`
+/// shape. The canonical source-of-truth lives in `postgres::age` so the
+/// async-writer path reads the same env-flag semantics.
 fn age_dual_write_enabled() -> bool {
-    std::env::var("AXON_AGE_DUAL_WRITE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+    crate::postgres::age::age_dual_write_enabled()
 }
 
 #[cfg(test)]

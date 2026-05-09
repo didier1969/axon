@@ -176,6 +176,22 @@ pub fn age_only_relations_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// REQ-AXO-244 / REQ-AXO-250: read-once env knob gating the option B.2
+/// dual-write transition. Default: OFF. When ON, every relation writer
+/// that has a Cypher equivalent emits both the SQL INSERT (authoritative)
+/// and the Cypher MERGE (validation + index warm-up). Once B.3 readers
+/// ship against the AGE graph, the env defaults to ON; once B.4 drops
+/// the SQL relation tables (REQ-AXO-216), the gate disappears entirely.
+///
+/// Public so producers (graph_ingestion synchronous path + async_writer
+/// path) share a single source-of-truth helper instead of duplicating
+/// the env-read.
+pub fn age_dual_write_enabled() -> bool {
+    std::env::var("AXON_AGE_DUAL_WRITE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Validate that an identifier (graph / label / vertex id) is safe to
 /// inline in a Cypher heredoc. Accepts ASCII alphanumerics, underscore,
 /// `:` and `-` (the chunk_id format used elsewhere in Axon contains

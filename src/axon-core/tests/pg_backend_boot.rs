@@ -680,3 +680,129 @@ fn readers_age_only_relations_smoke() {
     std::env::remove_var("AXON_LIVE_DATABASE_URL");
     std::env::remove_var("AXON_AGE_ONLY_RELATIONS");
 }
+
+/// REQ-AXO-250 integration smoke: with `AXON_ASYNC_WRITER_ENABLED=true` +
+/// `AXON_DB_BACKEND=postgres` + `AXON_AGE_DUAL_WRITE=true`, a CONTAINS
+/// `WriteDiff` dispatched through the async writer must hit the live PG
+/// brain and write to BOTH the SQL CONTAINS table AND the AGE graph.
+/// Mirrors REQ-AXO-250's regression-test acceptance criterion.
+#[test]
+#[ignore = "requires docker; opt-in via `cargo test -- --ignored`"]
+fn async_writer_age_dual_write_smoke() {
+    use axon_core::graph_ingestion::async_writer::{
+        spawn, RelationRow, WriteDiff,
+    };
+    use std::sync::Arc;
+
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let container = GenericImage::new("axon-test/age-pgvector", "pg17")
+        .with_exposed_port(ContainerPort::Tcp(5432))
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_PASSWORD", "axon_test_pw")
+        .with_env_var("POSTGRES_DB", "axon_test_db")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .start()
+        .expect("start container");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .expect("ephemeral host port");
+    let url = format!("postgres://postgres:axon_test_pw@127.0.0.1:{port}/axon_test_db");
+
+    std::env::set_var("AXON_DB_BACKEND", "postgres");
+    std::env::set_var("AXON_LIVE_DATABASE_URL", &url);
+    std::env::remove_var("AXON_DEV_DATABASE_URL");
+    // Activate the dual-write path. age-only stays unset so the SQL
+    // table also receives the row (REQ-AXO-250 acceptance #3).
+    std::env::set_var("AXON_AGE_DUAL_WRITE", "true");
+    std::env::remove_var("AXON_AGE_ONLY_RELATIONS");
+
+    let mut last_err = None;
+    let mut store = None;
+    for _ in 0..10 {
+        match GraphStore::new("/tmp/axon-pg-async-dualwrite-smoke") {
+            Ok(s) => {
+                store = Some(s);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    let store = store.unwrap_or_else(|| {
+        panic!(
+            "GraphStore::new under PG async-dual-write failed after retries: {:?}",
+            last_err
+        )
+    });
+
+    // Seed the source File + target Symbol vertices/rows so the relation
+    // INSERT and AGE MERGE both have valid endpoints.
+    store
+        .execute(
+            "INSERT INTO public.File (path, status, mtime, project_code) \
+             VALUES ('/dual/test/a.rs', 'indexed', 1, 'TST') \
+             ON CONFLICT (path) DO NOTHING",
+        )
+        .expect("seed File row");
+    store
+        .execute(
+            "INSERT INTO public.Symbol (id, name, kind, tested, is_public, \
+             is_nif, is_unsafe, project_code) \
+             VALUES ('TST::dual::a', 'a', 'function', false, false, false, \
+                     false, 'TST') ON CONFLICT (id) DO NOTHING",
+        )
+        .expect("seed Symbol row");
+
+    // Spawn an isolated async-writer dispatcher so the test stays
+    // hermetic (no cross-talk with any global writer that might be
+    // installed by another test).
+    let sink: Arc<GraphStore> = Arc::new(store);
+    let (dispatcher, handle) = spawn(Arc::clone(&sink));
+    dispatcher
+        .dispatch(WriteDiff::Contains(vec![RelationRow {
+            source_id: "/dual/test/a.rs".to_string(),
+            target_id: "TST::dual::a".to_string(),
+            project_code: "TST".to_string(),
+        }]))
+        .expect("dispatch ok");
+
+    // Drop the dispatcher to flush + tear down the writer thread, then
+    // wait for it to finish so the assertions below see committed rows.
+    drop(dispatcher);
+    handle.join().expect("writer thread joined");
+
+    // Assertion 1 — SQL relation row landed (dual-write).
+    let sql_count = sink
+        .query_count(
+            "SELECT count(*)::BIGINT FROM public.CONTAINS \
+             WHERE source_id = '/dual/test/a.rs' AND target_id = 'TST::dual::a'",
+        )
+        .expect("read public.CONTAINS");
+    assert_eq!(sql_count, 1, "SQL CONTAINS row must be present (dual-write)");
+
+    // Assertion 2 — AGE Cypher MERGE landed.
+    let age_sql = axon_core::postgres::age::cypher_query(
+        "axon_graph",
+        "MATCH (f:File {path: \"/dual/test/a.rs\"})-[r:CONTAINS]->(s:Symbol {id: \"TST::dual::a\"}) RETURN s.id AS sid",
+        &["sid"],
+    )
+    .expect("build AGE probe cypher");
+    let raw = sink.query_json(&age_sql).expect("AGE probe query");
+    let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        1,
+        "AGE CONTAINS edge must be present under dual-write; got rows={:?}",
+        rows
+    );
+
+    drop(sink);
+    std::env::remove_var("AXON_DB_BACKEND");
+    std::env::remove_var("AXON_LIVE_DATABASE_URL");
+    std::env::remove_var("AXON_AGE_DUAL_WRITE");
+}
