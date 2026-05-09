@@ -62,17 +62,28 @@ pub fn generate_global_schema() -> Vec<String> {
         // Extensions. Must come first; both are required for the rest.
         "CREATE EXTENSION IF NOT EXISTS age".to_string(),
         "CREATE EXTENSION IF NOT EXISTS vector".to_string(),
-        // Project registry. CPT-AXO-038: client owns this — Axon just
+        // SOLL schema: shared intent layer across all projects.
+        // Created BEFORE soll.ProjectCodeRegistry so the table can land in
+        // its canonical schema. CPT-AXO-038: client owns this — Axon just
         // populates it via axon_init_project.
-        "CREATE TABLE IF NOT EXISTS public.ProjectCodeRegistry (\
+        "CREATE SCHEMA IF NOT EXISTS soll".to_string(),
+        // Project registry — REQ-AXO-247: must live in `soll` (not
+        // `public`) to match the consumer code path that the DuckDB-era
+        // init_schema established (graph_bootstrap.rs:1368). Columns
+        // mirror the DuckDB ALTER chain (project_name, project_path,
+        // project_slug, session_pointer_json) so axon_init_project +
+        // soll_validate + axon_commit_work all round-trip on PG.
+        "CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (\
             project_code TEXT PRIMARY KEY,\
-            project_name TEXT NOT NULL,\
-            project_path TEXT NOT NULL,\
+            project_name TEXT,\
+            project_path TEXT,\
+            project_slug TEXT,\
+            session_pointer_json TEXT,\
             registered_at_ms BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::BIGINT\
          )"
         .to_string(),
-        // SOLL schema: shared intent layer across all projects.
-        "CREATE SCHEMA IF NOT EXISTS soll".to_string(),
+        "CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)"
+            .to_string(),
         "CREATE TABLE IF NOT EXISTS soll.Registry (\
             project_code TEXT PRIMARY KEY DEFAULT 'AXON_GLOBAL',\
             id TEXT NOT NULL DEFAULT 'AXON_GLOBAL',\
@@ -149,6 +160,27 @@ pub fn generate_global_schema() -> Vec<String> {
             created_at BIGINT\
          )"
         .to_string(),
+        // REQ-AXO-247 — McpJob mirror of DuckDB-era init_schema:1385.
+        // axon_commit_work + soll_apply_plan persist async-job state
+        // here; without it those tools fail under PG.
+        "CREATE TABLE IF NOT EXISTS soll.McpJob (\
+            job_id TEXT PRIMARY KEY,\
+            tool_name TEXT,\
+            status TEXT,\
+            submitted_at BIGINT,\
+            started_at BIGINT,\
+            finished_at BIGINT,\
+            request_json JSONB,\
+            reserved_ids_json JSONB,\
+            result_json JSONB,\
+            error_text TEXT,\
+            project_code TEXT\
+         )"
+        .to_string(),
+        "CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx ON soll.McpJob (status, submitted_at)"
+            .to_string(),
+        "CREATE INDEX IF NOT EXISTS soll_mcp_job_project_idx ON soll.McpJob (project_code, status)"
+            .to_string(),
         // Indexes for hot SOLL multi-tenant lookups.
         "CREATE INDEX IF NOT EXISTS soll_node_project_idx ON soll.Node (project_code, type)"
             .to_string(),
@@ -713,8 +745,14 @@ mod tests {
         let joined = stmts.join("\n");
         assert!(joined.contains("CREATE EXTENSION IF NOT EXISTS age"));
         assert!(joined.contains("CREATE EXTENSION IF NOT EXISTS vector"));
-        assert!(joined.contains("public.ProjectCodeRegistry"));
         assert!(joined.contains("CREATE SCHEMA IF NOT EXISTS soll"));
+        // REQ-AXO-247: ProjectCodeRegistry now lives in `soll`, not
+        // `public`, so the consumer code path (axon_init_project,
+        // soll_validate, axon_commit_work) finds it under PG.
+        assert!(joined.contains("soll.ProjectCodeRegistry"));
+        assert!(!joined.contains("public.ProjectCodeRegistry"),
+            "PCR should no longer be in public; consumers query soll.*");
+        assert!(joined.contains("soll_project_code_registry_code_idx"));
         for tbl in [
             "soll.Registry",
             "soll.Node",
@@ -723,6 +761,7 @@ mod tests {
             "soll.RevisionChange",
             "soll.RevisionPreview",
             "soll.Traceability",
+            "soll.McpJob",
         ] {
             assert!(
                 joined.contains(tbl),
