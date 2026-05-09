@@ -12,6 +12,7 @@
 # Usage:
 #   scripts/dev/probe.sh --scope <path> --duration <sec> [--fresh]
 #                        [--workers <n>] [--tag <name>] [--no-stop]
+#                        [--postgres]
 #
 # Output: dev-probe-<tag>-<UTC>.csv with columns
 #   t_seconds,files,chunks_total,chunks_per_sec,ready_queue,
@@ -26,6 +27,7 @@ WORKERS=""
 TAG=""
 NO_STOP=0
 SAMPLE_INTERVAL=5
+POSTGRES=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -36,6 +38,11 @@ while [[ $# -gt 0 ]]; do
         --tag) TAG="$2"; shift 2 ;;
         --no-stop) NO_STOP=1; shift ;;
         --interval) SAMPLE_INTERVAL="$2"; shift 2 ;;
+        # REQ-AXO-237: --postgres opts the dev indexer onto AXON_DB_BACKEND=postgres
+        # for benchmarking the PG path against the DuckDB baseline. Requires
+        # AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL already exported in
+        # the shell so the indexer can connect.
+        --postgres) POSTGRES=1; shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -25
             exit 0
@@ -95,6 +102,13 @@ if [[ -z "$DEV_PID" ]]; then
     )
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
+    fi
+    if [[ "$POSTGRES" == "1" ]]; then
+        EXPORTS+=("AXON_DB_BACKEND=postgres")
+        if [[ -z "${AXON_LIVE_DATABASE_URL:-}" && -z "${AXON_DEV_DATABASE_URL:-}" ]]; then
+            echo "❌ --postgres requires AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL exported" >&2
+            exit 2
+        fi
     fi
     # Default to --tensorrt: the CUDA EP path falls back to a 30+ min
     # nixpkgs build if the local manifest is stale, which silently kills
