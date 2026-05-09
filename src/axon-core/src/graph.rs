@@ -219,9 +219,26 @@ impl GraphStore {
     /// store. Readers must short-circuit to AGE Cypher (preferred) or
     /// graceful-empty (diagnostic counts) instead of querying the SQL
     /// tables — those are slated for `DROP TABLE` once Stop A flips.
-    /// Equivalent to `is_postgres_backend() && AXON_AGE_ONLY_RELATIONS=true`.
+    ///
+    /// Post-A.5 (REQ-AXO-216): once the SQL relation tables are physically
+    /// dropped, ANY query against them errors. Callers MUST short-circuit
+    /// under PG even when the env knob is unset. Hence: PG ⇒ skip
+    /// (regardless of AXON_AGE_ONLY_RELATIONS). DuckDB ⇒ unchanged.
     pub fn skip_sql_relations(&self) -> bool {
-        self.is_postgres_backend() && crate::postgres::age::age_only_relations_enabled()
+        self.is_postgres_backend()
+    }
+
+    /// MIL-AXO-015 post-promote helper: 3-part name `soll.main.X` is
+    /// DuckDB-only (catalog.schema.table). PostgreSQL parses it as
+    /// cross-database `db.schema.table` and rejects it. Use this helper
+    /// to qualify SOLL tables in SQL strings that must work on both
+    /// backends.
+    pub fn soll_table(&self, name: &str) -> String {
+        if self.is_postgres_backend() {
+            format!("soll.{name}")
+        } else {
+            format!("soll.main.{name}")
+        }
     }
 }
 

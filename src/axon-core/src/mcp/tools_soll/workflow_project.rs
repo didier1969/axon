@@ -312,7 +312,8 @@ impl McpServer {
         let raw = self
             .graph_store
             .query_json(&format!(
-                "SELECT project_path FROM soll.main.ProjectCodeRegistry WHERE project_code = '{}'",
+                "SELECT project_path FROM {} WHERE project_code = '{}'",
+                self.graph_store.soll_table("ProjectCodeRegistry"),
                 escaped
             ))
             .ok()?;
@@ -330,7 +331,8 @@ impl McpServer {
         let raw = self
             .graph_store
             .query_json(&format!(
-                "SELECT description FROM soll.main.Node WHERE id = '{}'",
+                "SELECT description FROM {} WHERE id = '{}'",
+                self.graph_store.soll_table("Node"),
                 escaped
             ))
             .ok()?;
@@ -485,13 +487,23 @@ impl McpServer {
         limit: usize,
     ) -> serde_json::Value {
         let escaped = escape_sql(project_code);
+        let table = self.graph_store.soll_table("Node");
+        let priority_expr = if self.graph_store.is_postgres_backend() {
+            "(metadata->>'priority')"
+        } else {
+            "json_extract_string(metadata, '$.priority')"
+        };
+        let updated_expr = if self.graph_store.is_postgres_backend() {
+            "(metadata->>'updated_at')"
+        } else {
+            "json_extract_string(metadata, '$.updated_at')"
+        };
         let raw = match self.graph_store.query_json(&format!(
-            "SELECT id, title, COALESCE(json_extract_string(metadata, '$.priority'), '') \
-             FROM soll.main.Node \
-             WHERE project_code = '{}' AND type = 'Requirement' AND status = 'in_progress' \
-             ORDER BY CAST(NULLIF(json_extract_string(metadata, '$.updated_at'), '') AS BIGINT) DESC NULLS LAST \
-             LIMIT {}",
-            escaped, limit
+            "SELECT id, title, COALESCE({priority_expr}, '') \
+             FROM {table} \
+             WHERE project_code = '{escaped}' AND type = 'Requirement' AND status = 'in_progress' \
+             ORDER BY CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
+             LIMIT {limit}"
         )) {
             Ok(s) => s,
             Err(_) => return serde_json::json!([]),
@@ -527,13 +539,18 @@ impl McpServer {
         limit: usize,
     ) -> serde_json::Value {
         let escaped = escape_sql(project_code);
+        let table = self.graph_store.soll_table("Node");
+        let updated_expr = if self.graph_store.is_postgres_backend() {
+            "(metadata->>'updated_at')"
+        } else {
+            "json_extract_string(metadata, '$.updated_at')"
+        };
         let raw = match self.graph_store.query_json(&format!(
-            "SELECT id, type, title, COALESCE(json_extract_string(metadata, '$.updated_at'), '') \
-             FROM soll.main.Node \
-             WHERE project_code = '{}' \
-             ORDER BY CAST(NULLIF(json_extract_string(metadata, '$.updated_at'), '') AS BIGINT) DESC NULLS LAST \
-             LIMIT {}",
-            escaped, limit
+            "SELECT id, type, title, COALESCE({updated_expr}, '') \
+             FROM {table} \
+             WHERE project_code = '{escaped}' \
+             ORDER BY CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
+             LIMIT {limit}"
         )) {
             Ok(s) => s,
             Err(_) => return serde_json::json!([]),

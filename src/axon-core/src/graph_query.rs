@@ -83,36 +83,50 @@ impl GraphStore {
     }
 }
 
-/// REQ-AXO-249 — translate the small set of DuckDB-only JSON helpers
-/// MCP tools embed in their SQL into native Postgres JSONB operators.
+/// REQ-AXO-249 / MIL-AXO-015 post-promote: translate DuckDB-only SQL
+/// patterns embedded in MCP tool queries into PostgreSQL-compatible
+/// equivalents.
 ///
-/// soll.Node.metadata is `JSONB` under PG (postgres/ddl.rs). DuckDB
-/// stores the same column as VARCHAR-of-JSON but exposes
-/// `json_extract` / `json_extract_string` regardless of column type.
-/// Postgres has the operators `->` (returns json/jsonb) and `->>`
-/// (returns text). The translator below covers the patterns the
-/// existing MCP tools use:
+/// **JSONB helpers.** soll.Node.metadata is `JSONB` under PG
+/// (postgres/ddl.rs). DuckDB stores the same column as VARCHAR-of-JSON
+/// but exposes `json_extract` / `json_extract_string` regardless of
+/// column type. Postgres has the operators `->` (returns json/jsonb)
+/// and `->>` (returns text):
 ///
 ///   • `json_extract_string(col, '$.path')`             → `(col->>'path')`
 ///   • `CAST(json_extract(col, '$.path') AS VARCHAR)`    → `(col->>'path')`
 ///   • bare `json_extract(col, '$.path')` (rare here)    → `(col->'path')`
 ///
+/// **3-part SOLL identifiers.** DuckDB's ATTACH'd database exposes the
+/// SOLL layer as `soll.main.X` (catalog.schema.table). Postgres has no
+/// `main` schema — it's a single `soll` schema, so MCP tools that emit
+/// the legacy 3-part name are rewritten to 2-part `soll.X`.
+///
+/// **Schema-qualified runtime tables.** Tables that DuckDB hosted in
+/// the default `main` schema live in `axon_runtime` under PG (per
+/// postgres/ddl.rs). The rewriter prepends the schema for the small
+/// set of unqualified runtime tables MCP tools still query.
+///
 /// Limitations:
-///   • Only `$.<key>` paths (single-level) are translated. Multi-level
-///     `$.a.b` would need `(col->'a'->>'b')`. Today no MCP tool uses
-///     deeper paths; if one appears, extend the regex.
-///   • Operates on whitespace-tolerant input but assumes the column
-///     reference matches `[A-Za-z_][A-Za-z0-9_.]*` (e.g. `metadata`,
-///     `r.metadata`).
+///   • Only `$.<key>` paths (single-level) are translated for json_extract.
+///     Multi-level `$.a.b` would need `(col->'a'->>'b')`. Today no MCP
+///     tool uses deeper paths; if one appears, extend the regex.
 fn rewrite_duckdb_json_helpers_for_pg(query: &str) -> Cow<'_, str> {
-    if !query.contains("json_extract") {
+    let touches_json = query.contains("json_extract");
+    let touches_soll_main = query.contains("soll.main.");
+    let touches_optimizer = query.contains("OptimizerDecisionLog")
+        && !query.contains("axon_runtime.OptimizerDecisionLog");
+    if !touches_json && !touches_soll_main && !touches_optimizer {
         return Cow::Borrowed(query);
     }
+
     use std::sync::OnceLock;
     use regex::Regex;
     static CAST_VARCHAR: OnceLock<Regex> = OnceLock::new();
     static EXTRACT_STRING: OnceLock<Regex> = OnceLock::new();
     static EXTRACT_PLAIN: OnceLock<Regex> = OnceLock::new();
+    static SOLL_MAIN: OnceLock<Regex> = OnceLock::new();
+    static OPTIMIZER_LOG: OnceLock<Regex> = OnceLock::new();
     let cast_varchar = CAST_VARCHAR.get_or_init(|| {
         Regex::new(
             r"(?i)CAST\s*\(\s*json_extract\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*'\$\.([A-Za-z_][A-Za-z0-9_]*)'\s*\)\s*AS\s+(?:VARCHAR|TEXT)\s*\)",
@@ -131,16 +145,25 @@ fn rewrite_duckdb_json_helpers_for_pg(query: &str) -> Cow<'_, str> {
         )
         .expect("extract_plain regex")
     });
+    let soll_main = SOLL_MAIN.get_or_init(|| {
+        Regex::new(r"(?i)\bsoll\.main\.").expect("soll_main regex")
+    });
+    let optimizer_log = OPTIMIZER_LOG.get_or_init(|| {
+        Regex::new(r"(?i)(?P<lead>(?:^|[^.\w]))OptimizerDecisionLog\b")
+            .expect("optimizer_log regex")
+    });
 
     // ORDER MATTERS: longer / outer patterns first so CAST(...) is
     // collapsed before the inner json_extract gets rewritten.
     let pass1 = cast_varchar.replace_all(query, "($1->>'$2')");
     let pass2 = extract_string.replace_all(&pass1, "($1->>'$2')");
     let pass3 = extract_plain.replace_all(&pass2, "($1->'$2')");
-    if pass3 == query {
+    let pass4 = soll_main.replace_all(&pass3, "soll.");
+    let pass5 = optimizer_log.replace_all(&pass4, "${lead}axon_runtime.OptimizerDecisionLog");
+    if pass5 == query {
         Cow::Borrowed(query)
     } else {
-        Cow::Owned(pass3.into_owned())
+        Cow::Owned(pass5.into_owned())
     }
 }
 
@@ -1101,6 +1124,39 @@ mod tests {
             super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
             expected
         );
+    }
+
+    #[test]
+    fn rewrite_duckdb_collapses_3part_soll_main_to_2part() {
+        // REQ-AXO-254 — DuckDB-only `soll.main.X` 3-part identifiers must
+        // collapse to `soll.X` for PostgreSQL.
+        let input = "SELECT description FROM soll.main.Node WHERE id = 'DEC-PRO-001'";
+        let expected = "SELECT description FROM soll.Node WHERE id = 'DEC-PRO-001'";
+        assert_eq!(
+            super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rewrite_duckdb_qualifies_optimizerdecisionlog_with_axon_runtime_schema() {
+        // REQ-AXO-254 — bare `OptimizerDecisionLog` must be qualified with
+        // `axon_runtime.` under PG (postgres/ddl.rs:204).
+        let input = "SELECT decision_id FROM OptimizerDecisionLog ORDER BY at_ms DESC LIMIT 1";
+        let expected =
+            "SELECT decision_id FROM axon_runtime.OptimizerDecisionLog ORDER BY at_ms DESC LIMIT 1";
+        assert_eq!(
+            super::rewrite_duckdb_json_helpers_for_pg(input).as_ref(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rewrite_duckdb_optimizerdecisionlog_idempotent_when_already_qualified() {
+        let input = "INSERT INTO axon_runtime.OptimizerDecisionLog (decision_id) VALUES ('x')";
+        let out = super::rewrite_duckdb_json_helpers_for_pg(input);
+        assert_eq!(out.as_ref(), input);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

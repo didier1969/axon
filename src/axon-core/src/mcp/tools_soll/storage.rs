@@ -160,12 +160,21 @@ impl McpServer {
     ) -> Option<String> {
         let node_type = Self::soll_node_type_for_entity(entity)?;
 
-        let by_metadata = format!(
-            "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
-            escape_sql(node_type),
-            escape_sql(project_code),
-            escape_sql(logical_key)
-        );
+        let by_metadata = if self.graph_store.is_postgres_backend() {
+            format!(
+                "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata->>'logical_key' = '{}' ORDER BY id DESC LIMIT 1",
+                escape_sql(node_type),
+                escape_sql(project_code),
+                escape_sql(logical_key)
+            )
+        } else {
+            format!(
+                "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
+                escape_sql(node_type),
+                escape_sql(project_code),
+                escape_sql(logical_key)
+            )
+        };
         if let Some(found) = query_first_sql_cell(self, &by_metadata) {
             return Some(found);
         }

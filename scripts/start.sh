@@ -673,9 +673,21 @@ rebuild_tunnel_release() {
 
 verify_sql_gateway() {
     local response
+    # MIL-AXO-015 post-promote: SHOW TABLES is DuckDB syntax. Under PG
+    # the gateway's normalize_attached_soll_query rewrites legacy
+    # statements but SHOW TABLES has no PG analogue (PG reads
+    # `SHOW <param>` and returns "unrecognized configuration parameter").
+    # The IST schema reads `axon` schema (or public when DuckDB), and
+    # information_schema is portable across both backends.
+    local probe_query
+    if [[ "${AXON_DB_BACKEND:-duckdb}" == "postgres" ]]; then
+        probe_query="SELECT table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema','soll','axon_runtime','ag_catalog')"
+    else
+        probe_query="SHOW TABLES"
+    fi
     response="$(curl -sS -X POST http://127.0.0.1:$HYDRA_HTTP_PORT/sql \
         -H 'content-type: application/json' \
-        -d '{"query":"SHOW TABLES"}' 2>/dev/null || true)"
+        -d "{\"query\":\"$probe_query\"}" 2>/dev/null || true)"
 
     if [[ -z "$response" ]]; then
         echo "❌ SQL Gateway did not answer the schema probe."
