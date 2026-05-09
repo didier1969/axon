@@ -830,86 +830,29 @@ if [[ -n "${EMBEDDING_PROVIDER_REQUEST:-}" ]]; then
     EMBEDDING_PROVIDER_EXPORT="export AXON_EMBEDDING_PROVIDER=\"$EMBEDDING_PROVIDER_REQUEST\"; "
 fi
 PASS_THROUGH_EXPORTS=""
-append_pass_through_export() {
-    local var_name="$1"
-    local value="${!var_name-}"
-    if [[ -n "${value:-}" ]]; then
-        local escaped=""
-        printf -v escaped '%q' "$value"
-        PASS_THROUGH_EXPORTS+="export ${var_name}=${escaped}; "
+# REQ-AXO-241 — single source of truth for env var lifecycle. Iterate
+# the parent shell env, propagating any var that matches the prefix
+# allowlist (AXON_*/HYDRA_* + a narrow set of OMP_* knobs) AND is NOT a
+# derived per-instance var (denylist in scripts/lib/axon-env-vars.sh).
+# Vars set inline by start.sh on the supervisor command line (AXON_DB_ROOT,
+# AXON_PID_FILE, etc.) are on the denylist so they are not re-exported
+# here on top of their canonical inline values.
+#
+# Adding a new tunable knob now requires zero changes here: if the
+# operator exports `AXON_FOO=bar`, the prefix match propagates it to the
+# supervised process. Only NEW per-instance derived vars need the
+# denylist updated.
+while IFS='=' read -r _pass_through_var _; do
+    if axon_env_var_in_prefix_allowlist "$_pass_through_var" \
+        && ! axon_env_var_is_derived "$_pass_through_var"; then
+        _pass_through_value="${!_pass_through_var-}"
+        if [[ -n "${_pass_through_value:-}" ]]; then
+            printf -v _pass_through_escaped '%q' "$_pass_through_value"
+            PASS_THROUGH_EXPORTS+="export ${_pass_through_var}=${_pass_through_escaped}; "
+        fi
     fi
-}
-for pass_through_var in \
-    AXON_RESOURCE_PRIORITY \
-    AXON_BACKGROUND_BUDGET_CLASS \
-    AXON_GPU_ACCESS_POLICY \
-    AXON_WATCHER_POLICY \
-    AXON_ENABLE_FEDERATION_ORCHESTRATOR \
-    AXON_QUEUE_MEMORY_BUDGET_BYTES \
-    AXON_WATCHER_SUBTREE_HINT_BUDGET \
-    AXON_SPLIT_BRAIN_IST_READER_ONLY \
-    AXON_DUCKDB_MEMORY_LIMIT_GB \
-    AXON_VECTOR_WORKERS \
-    AXON_GRAPH_WORKERS \
-    AXON_GRAPH_EMBEDDINGS_ENABLED \
-    AXON_VECTOR_PIPELINE_INLINE \
-    AXON_HOT_STATUS_CACHE_ENABLED \
-    AXON_DIAG_SKIP_CHUNKEMBED \
-    AXON_DUCKDB_SYNC_MODE \
-    AXON_PARQUET_EMBEDDING_STORE_ENABLED \
-    AXON_PARQUET_CHUNK_CONTENT_ENABLED \
-    AXON_ASYNC_WRITER_ENABLED \
-    AXON_CHUNK_BATCH_SIZE \
-    AXON_FILE_VECTORIZATION_BATCH_SIZE \
-    AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR \
-    AXON_VECTOR_PREPARE_QUEUE_BOUND \
-    AXON_VECTOR_PREPARE_PIPELINE_DEPTH \
-    AXON_VECTOR_READY_QUEUE_DEPTH \
-    AXON_VECTOR_PERSIST_QUEUE_BOUND \
-    AXON_VECTOR_MAX_INFLIGHT_PERSISTS \
-    AXON_EMBED_MICRO_BATCH_MAX_ITEMS \
-    AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS \
-    AXON_MAX_EMBED_BATCH_BYTES \
-    AXON_GPU_EMBED_SERVICE_ENABLED \
-    AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH \
-    AXON_GPU_RECYCLE_ON_VRAM_SUMMIT \
-    AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT \
-    AXON_GPU_STUCK_RECOVERY_ENABLED \
-    AXON_GPU_EMBED_SERVICE_TENSORRT \
-    AXON_GPU_TELEMETRY_BACKEND \
-    AXON_NVML_LIBRARY_PATH \
-    AXON_ORT_ARTIFACT_MANIFEST \
-    AXON_OPT_MAX_VRAM_USED_MB \
-    AXON_CUDA_MEMORY_SOFT_LIMIT_MB \
-    AXON_CUDA_MEMORY_LIMIT_MB \
-    AXON_GPU_PRIMARY_WORKER_MAX_USED_MB \
-    AXON_GPU_TELEMETRY_CACHE_TTL_MS \
-    AXON_TENSORRT_OVERSHOOT_MB \
-    AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT \
-    AXON_DB_BACKEND \
-    AXON_LIVE_DATABASE_URL \
-    AXON_DEV_DATABASE_URL \
-    AXON_INDEXER_PG_OPT_IN \
-    AXON_BULK_WRITER_ENABLED \
-    AXON_AGE_DUAL_WRITE \
-    AXON_AGE_READ \
-    AXON_AGE_ONLY_RELATIONS \
-    AXON_SOLL_SEED_PATH \
-    AXON_RELEASE_VERSION \
-    AXON_BUILD_ID \
-    AXON_PACKAGE_VERSION \
-    AXON_INSTALL_GENERATION \
-    AXON_PUBLIC_HOST \
-    AXON_PUBLIC_HOST_SOURCE \
-    AXON_PUBLIC_ENDPOINTS_AVAILABLE \
-    AXON_MCP_PUBLIC_URL \
-    AXON_SQL_PUBLIC_URL \
-    AXON_DASHBOARD_PUBLIC_URL \
-    OMP_NUM_THREADS \
-    OMP_WAIT_POLICY
-do
-    append_pass_through_export "$pass_through_var"
-done
+done < <(env)
+unset _pass_through_var _pass_through_value _pass_through_escaped
 PROFILE_EXPORT=""
 if [[ "$RUNTIME_MODE" == "indexer_full" ]]; then
     PROFILE_EXPORT="export AXON_ENABLE_AUTONOMOUS_INGESTOR=true; export AXON_RUNTIME_PROFILE=full_autonomous; "
