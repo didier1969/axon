@@ -6473,8 +6473,13 @@ fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
 // in the retention design). The response must contain only the git
 // commit status and must NOT contain any "Exported to" / "Export
 // Report" markers.
+//
+// REQ-AXO-246 — must run in an isolated tempdir + ephemeral git repo,
+// never against AXON_REPO. Pass project_path explicitly so the tool
+// routes git commands via Command::current_dir to the sandbox.
 fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
     let server = create_test_server();
+    let sandbox = init_commit_work_sandbox();
 
     // Insert a dummy Guideline that passes trivially
     server.graph_store.execute(
@@ -6489,7 +6494,8 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
             "name": "axon_commit_work",
             "arguments": {
                 "diff_paths": ["Cargo.toml"],
-                "message": "test: dummy commit from mcp tests",
+                "project_path": sandbox.path().to_str().unwrap(),
+                "message": "test: REQ-AXO-246 isolated commit (sandbox, never reaches AXON_REPO)",
                 "dry_run": false
             }
         },
@@ -6516,11 +6522,10 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
         content
     );
 
-    // Git commit happened (success or failure depending on git state in CI).
+    // Git commit must have succeeded inside the sandbox.
     assert!(
-        content.contains("Commit succeeded") || content.contains("Commit failed"),
-        "{}",
-        content
+        content.contains("Commit succeeded"),
+        "expected sandbox commit to succeed: {content}"
     );
     // REQ-AXO-126 — no auto-export markers must appear on the
     // commit-work response surface.
@@ -6532,6 +6537,52 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
         !content.contains("Export Report"),
         "Export Report block must not be emitted from commit_work: {content}"
     );
+
+    // REQ-AXO-246 regression assertion: the new commit landed in the
+    // sandbox repo, not anywhere else. HEAD should reference our message.
+    let head_subject = std::process::Command::new("git")
+        .current_dir(sandbox.path())
+        .args(["log", "-1", "--pretty=%s"])
+        .output()
+        .expect("git log");
+    let subject = String::from_utf8_lossy(&head_subject.stdout);
+    assert!(
+        subject.contains("REQ-AXO-246 isolated commit"),
+        "sandbox HEAD must hold the test commit; got: {subject}"
+    );
+}
+
+// REQ-AXO-246 — set up an ephemeral git repo for axon_commit_work tests.
+// Returns a TempDir whose drop cleans the sandbox at end of test.
+fn init_commit_work_sandbox() -> tempfile::TempDir {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path();
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .status()
+            .expect("git invocation");
+        assert!(status.success(), "git {:?} failed in sandbox", args);
+    };
+    run_git(&["init", "--initial-branch=main"]);
+    run_git(&["config", "user.email", "axon-test@example.invalid"]);
+    run_git(&["config", "user.name", "axon-test"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname = \"sandbox\"\nversion = \"0.0.1\"\n",
+    )
+    .expect("seed Cargo.toml");
+    run_git(&["add", "Cargo.toml"]);
+    run_git(&["commit", "-m", "initial sandbox commit"]);
+    // Stage a real change so axon_commit_work has something to commit.
+    std::fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname = \"sandbox\"\nversion = \"0.0.2\"\n",
+    )
+    .expect("modify Cargo.toml");
+    dir
 }
 
 #[test]
