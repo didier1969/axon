@@ -537,6 +537,12 @@ impl GraphStore {
         // stores FLOAT[1024]. Captured once per call to avoid the
         // is_postgres_backend probe per-symbol.
         let backend_is_pg = self.is_postgres_backend();
+        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
+        // the SQL relation writes — AGE dual-write remains the sole
+        // writer. Hoisted from later in the function so the cascade
+        // DELETE chain (REQ-AXO-248 / S2) can also gate on it.
+        let skip_sql_relations =
+            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
         // MIL-AXO-015 B.2 vertex enrichment: dual-write Symbol / File
         // vertex properties to AGE so future readers (B.3) can MATCH
         // by name / kind / is_nif / project_code. Same lockstep as the
@@ -731,16 +737,58 @@ impl GraphStore {
         processed_paths.extend(degraded_paths.clone());
 
         if !processed_paths.is_empty() {
+            // REQ-AXO-248 / MIL-AXO-015 B.2 slice S2: under PG, cascade
+            // the OLD relation edges (CONTAINS / CALLS / CALLS_NIF
+            // incident on Symbols of these files) through Apache AGE
+            // BEFORE the SQL chain — DETACH DELETE removes the AGE
+            // Symbol vertices + their edges in a single statement.
+            // Falls back to a warning on AGE failure so the SQL chain
+            // still tombstones the rows under both backends.
+            if backend_is_pg {
+                let raw_paths: Vec<&str> = indexed_paths_raw
+                    .iter()
+                    .chain(degraded_paths_raw.iter())
+                    .map(String::as_str)
+                    .collect();
+                if let Ok(Some(cypher)) =
+                    crate::postgres::age::cypher_cascade_delete_symbols_for_files(
+                        "axon_graph",
+                        &raw_paths,
+                    )
+                {
+                    if let Err(e) = self.execute(&cypher) {
+                        log::warn!(
+                            "AGE cascade DETACH DELETE failed for {} processed paths (SQL chain will still tombstone): {}",
+                            raw_paths.len(),
+                            e
+                        );
+                    }
+                }
+            }
+
             let indexed_filter = processed_paths.join(",");
             queries.extend(Self::derived_cleanup_queries(&indexed_filter));
-            queries.push(format!(
-                "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
-                indexed_filter, indexed_filter
-            ));
-            queries.push(format!(
-                "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
-                indexed_filter, indexed_filter
-            ));
+            // SQL relation tables (CALLS / CALLS_NIF / CONTAINS) ar
+            // co-authoritative under dual-write, but become legacy under
+            // AXON_AGE_ONLY_RELATIONS=true (B.4 prep). Skip the SQL
+            // writes so AGE remains the sole writer when the operator
+            // flips that flag — ready for REQ-AXO-216 to DROP TABLE.
+            // Symbol / Chunk / ChunkEmbedding DELETEs always fire (IST
+            // tables, NOT relation tables). Their `SELECT FROM CONTAINS`
+            // subqueries continue to work under dual-write (CONTAINS
+            // populated). Under AGE-only the subquery returns empty so
+            // those DELETEs become no-ops — addressed in a follow-up
+            // slice that pre-resolves cascading symbol IDs from AGE.
+            if !skip_sql_relations {
+                queries.push(format!(
+                    "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    indexed_filter, indexed_filter
+                ));
+                queries.push(format!(
+                    "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    indexed_filter, indexed_filter
+                ));
+            }
             queries.push(format!(
                 "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
                 indexed_filter
@@ -753,10 +801,12 @@ impl GraphStore {
                 "DELETE FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter
             ));
-            queries.push(format!(
-                "DELETE FROM CONTAINS WHERE source_id IN ({});",
-                indexed_filter
-            ));
+            if !skip_sql_relations {
+                queries.push(format!(
+                    "DELETE FROM CONTAINS WHERE source_id IN ({});",
+                    indexed_filter
+                ));
+            }
         }
         let indexed_vectorizable_paths = indexed_paths_raw
             .iter()
@@ -938,12 +988,6 @@ impl GraphStore {
         // bit-for-bit.
         let use_bulk_writer =
             backend_is_pg && crate::postgres::bulk_writer::bulk_writer_enabled();
-        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
-        // the SQL relation writes — AGE dual-write below remains the
-        // sole writer. Only fires under PG.
-        let skip_sql_relations =
-            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
-
         // REQ-AXO-244 follow-up: under bulk_writer, the typed Symbol /
         // Chunk / relation rows go through `flush_batch` (own tx) AFTER
         // `execute_batch(&queries)` so the DELETE-then-INSERT ordering
