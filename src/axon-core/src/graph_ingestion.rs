@@ -1056,31 +1056,52 @@ impl GraphStore {
                     queries.extend(chunk_acc.render_chunks_duckdb());
                 }
             }
-            if !skip_sql_relations {
-                let mut relation_acc = self::async_writer::WriteAccumulator::new();
-                if !contains_rows.is_empty() {
-                    relation_acc.absorb(self::async_writer::WriteDiff::Contains(
-                        contains_rows.clone(),
-                    ));
-                }
-                if !calls_rows.is_empty() {
-                    relation_acc
-                        .absorb(self::async_writer::WriteDiff::Calls(calls_rows.clone()));
-                }
-                if !calls_nif_rows.is_empty() {
-                    relation_acc.absorb(self::async_writer::WriteDiff::CallsNif(
-                        calls_nif_rows.clone(),
-                    ));
-                }
-                if backend_is_pg {
-                    queries.extend(relation_acc.render_contains_pg());
-                    queries.extend(relation_acc.render_calls_pg());
-                    queries.extend(relation_acc.render_calls_nif_pg());
-                } else {
-                    queries.extend(relation_acc.render_contains_duckdb());
-                    queries.extend(relation_acc.render_calls_duckdb());
-                    queries.extend(relation_acc.render_calls_nif_duckdb());
-                }
+            // (relation inserts intentionally split out below — see
+            // `relation_queries` block — so they can route through
+            // async_writer::route_writer_batch when the env flag is on.
+            // REQ-AXO-268 producer-hot-path coverage for the relation
+            // INSERTs that have no read-after-write contract within this
+            // function.)
+        }
+        // REQ-AXO-268 (E.7): build relation INSERT queries SEPARATELY from
+        // the symbol/chunk/FVQ batch above. Relations have no
+        // read-after-write contract within this function (the inline
+        // embedding pass below only references in-memory `inline_chunks`
+        // and persists ChunkEmbedding rows that FK to Chunk, not to
+        // CALLS / CONTAINS / CALLS_NIF). Routing them through
+        // `async_writer::route_writer_batch` lets producers proceed
+        // without waiting for the writer mutex when
+        // AXON_ASYNC_WRITER_ENABLED=true. Falls through to sync
+        // `execute_batch` otherwise.
+        //
+        // Under skip_sql_relations=true (PG-AGE-only mode,
+        // AXON_AGE_ONLY_RELATIONS=true) the SQL relation tables are
+        // empty/dropped and AGE Cypher is canonical — relation_queries
+        // ends up empty and the route call is a no-op.
+        let mut relation_queries: Vec<String> = Vec::new();
+        if !use_bulk_writer && !skip_sql_relations {
+            let mut relation_acc = self::async_writer::WriteAccumulator::new();
+            if !contains_rows.is_empty() {
+                relation_acc.absorb(self::async_writer::WriteDiff::Contains(
+                    contains_rows.clone(),
+                ));
+            }
+            if !calls_rows.is_empty() {
+                relation_acc.absorb(self::async_writer::WriteDiff::Calls(calls_rows.clone()));
+            }
+            if !calls_nif_rows.is_empty() {
+                relation_acc.absorb(self::async_writer::WriteDiff::CallsNif(
+                    calls_nif_rows.clone(),
+                ));
+            }
+            if backend_is_pg {
+                relation_queries.extend(relation_acc.render_contains_pg());
+                relation_queries.extend(relation_acc.render_calls_pg());
+                relation_queries.extend(relation_acc.render_calls_nif_pg());
+            } else {
+                relation_queries.extend(relation_acc.render_contains_duckdb());
+                relation_queries.extend(relation_acc.render_calls_duckdb());
+                relation_queries.extend(relation_acc.render_calls_nif_duckdb());
             }
         }
         let mut enqueued_vectorization = false;
@@ -1124,6 +1145,16 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
+
+        // REQ-AXO-268 (E.7): route relation INSERTs through async_writer
+        // when AXON_ASYNC_WRITER_ENABLED=true (default OFF — falls back
+        // to sync execute_batch). Decoupled from `queries` above so the
+        // symbol/chunk/FVQ writes that the inline embedding pass below
+        // depends on remain synchronously committed before
+        // update_chunk_embeddings runs.
+        if !relation_queries.is_empty() {
+            self::async_writer::route_writer_batch(self, &relation_queries)?;
+        }
 
         // REQ-AXO-244 follow-up: flush the staged bulk_batch AFTER
         // execute_batch so the DELETEs upstream (lines 733-758, which
