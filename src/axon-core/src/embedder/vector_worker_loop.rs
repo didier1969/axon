@@ -13,6 +13,9 @@
 use std::collections::HashSet;
 use std::io::Write as _;
 
+use super::vector_pipeline_3stages::{
+    run_vector_pipeline_3stages, vector_pipeline_mode_from_env, VectorPipelineMode,
+};
 use super::*;
 
 /// Write a single trace line to `<AXON_RUN_ROOT>/vector-lane.trace`.
@@ -34,6 +37,19 @@ fn vector_trace(line: &str) {
 
 pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>) {
     let _liveness = VectorWorkerLivenessGuard::new();
+
+    // REQ-AXO-270 AC1.3 — factory dispatch. AXON_VECTOR_PIPELINE_STAGES=3
+    // routes to the 3-stage pipeline (Phase 1 = stubs only). Default and
+    // any other value keep DEC-AXO-070 single-loop behavior below.
+    if vector_pipeline_mode_from_env() == VectorPipelineMode::ThreeStages {
+        vector_trace(&format!(
+            "[{}] dispatch=3stages (REQ-AXO-270 Phase 1 skeleton)",
+            worker_idx
+        ));
+        run_vector_pipeline_3stages(worker_idx, graph_store);
+        return;
+    }
+
     let lane_config = embedding_lane_config_from_env();
     vector_trace(&format!("[{}] worker_entry", worker_idx));
 

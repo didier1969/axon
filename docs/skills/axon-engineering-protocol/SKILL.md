@@ -58,6 +58,8 @@ PG transaction handling (REQ-AXO-254 workaround, 2026-05-10): under `AXON_DB_BAC
 
 Broken evidence cleanup (REQ-AXO-254 closure of MIL-AXO-015 wave G followup, 2026-05-10): `soll_remove_evidence` is the canonical verb to prune `soll.Traceability` rows when refactors leave behind file/document references that no longer resolve. Default mode `broken_only=true` removes ONLY rows whose `artifact_ref` does not exist on disk (project-root-relative or absolute, same path-resolution as `broken_file_evidence_count_for_requirement`). Idempotent — running twice returns `removed_count=0`. Set `broken_only=false` and supply explicit `artifact_refs` to surgically drop a stale row whose target still exists (e.g. file moved). Use after audit confirms the broken rows are residue, not legitimate traceability targets.
 
+Vector lane pipeline mode (REQ-AXO-270 Phase 1, 2026-05-10): `AXON_VECTOR_PIPELINE_STAGES` selects the embedder lane shape — unset / `1` (default) keeps DEC-AXO-070 single-loop; `3` activates the Phase 1 skeleton (Producer / Embedder / Persister stage stubs that warn + heartbeat only — NO chunks are embedded, runtime parks in a 5s sleep). Use `3` only for Phase 2 wiring tests and Phase 3 benches; production keeps the default. Phase 2 fills the stages; Phase 2 AC2.7 mandates the Persister bulk-writes ≥1000 rows per DB transaction (one multi-row INSERT/COPY per tick rather than per-chunk inserts) — operator directive 2026-05-10, aligns with REQ-AXO-244 `execute_batch` path.
+
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
 2. Follow `operator_guidance.follow_up_tools`

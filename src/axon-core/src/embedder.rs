@@ -69,6 +69,8 @@ mod provider_runtime;
 mod vector_executor;
 #[path = "embedder/vector_maintenance_loop.rs"]
 mod vector_maintenance_loop;
+#[path = "embedder/vector_pipeline_3stages.rs"]
+mod vector_pipeline_3stages;
 #[path = "embedder/vector_worker_loop.rs"]
 mod vector_worker_loop;
 

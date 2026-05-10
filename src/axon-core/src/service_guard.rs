@@ -106,6 +106,12 @@ static VECTOR_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_RESTARTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+// REQ-AXO-270 AC1.5 — per-stage heartbeats for the 3-stage vector pipeline.
+// Phase 1: only writers (skeleton stage stubs + Phase 2 producer/embedder/persister loops).
+// Readers and snapshot exposure land with Phase 2 telemetry.
+static VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static GRAPH_WORKERS_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static GRAPH_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static GRAPH_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
@@ -1013,6 +1019,36 @@ pub fn record_vector_worker_restart() {
     VECTOR_WORKER_RESTARTS_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+// REQ-AXO-270 AC1.5 — per-stage heartbeat writers for the 3-stage pipeline.
+pub fn record_vector_pipeline_producer_heartbeat() {
+    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_vector_pipeline_embedder_heartbeat() {
+    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_vector_pipeline_persister_heartbeat() {
+    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+// Read accessors — Phase 1 only used by tests; Phase 2 wires them into
+// the runtime snapshot surface for axon_debug / status views.
+#[allow(dead_code)]
+pub fn vector_pipeline_producer_heartbeat_at_ms() -> u64 {
+    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.load(Ordering::Relaxed)
+}
+
+#[allow(dead_code)]
+pub fn vector_pipeline_embedder_heartbeat_at_ms() -> u64 {
+    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.load(Ordering::Relaxed)
+}
+
+#[allow(dead_code)]
+pub fn vector_pipeline_persister_heartbeat_at_ms() -> u64 {
+    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.load(Ordering::Relaxed)
+}
+
 pub fn record_graph_worker_started() {
     GRAPH_WORKERS_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
     GRAPH_WORKERS_ACTIVE_CURRENT.fetch_add(1, Ordering::Relaxed);
@@ -1599,6 +1635,9 @@ pub fn reset_for_tests() {
     VECTOR_WORKERS_ACTIVE_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_WORKER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_WORKER_RESTARTS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
     GRAPH_WORKERS_STARTED_TOTAL.store(0, Ordering::Relaxed);
     GRAPH_WORKERS_STOPPED_TOTAL.store(0, Ordering::Relaxed);
     GRAPH_WORKERS_ACTIVE_CURRENT.store(0, Ordering::Relaxed);
