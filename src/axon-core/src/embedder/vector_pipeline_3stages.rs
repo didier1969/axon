@@ -10,11 +10,14 @@
 //! Activated by `AXON_VECTOR_PIPELINE_STAGES=3`. Default and any other
 //! value keep the DEC-AXO-070 single-loop behavior unchanged.
 //!
-//! Phase 2 implements the real stages. Phase 3 will bench against the
+//! Phase 2 implements the real stages. Phase 3 benches against the
 //! single-loop path. AC2.7 mandates the Persister bulk-write ≥1000 rows
-//! per DB transaction (one multi-row INSERT or Parquet append per tick),
-//! aligning with REQ-AXO-244 `execute_batch` and reducing the FFI /
-//! connection-pinning overhead documented under REQ-AXO-254.
+//! per DB transaction (one COPY BINARY + INSERT…SELECT…ON CONFLICT under
+//! `AXON_BULK_WRITER_ENABLED=true`, REQ-AXO-238). Persister calls
+//! `graph_store.update_chunk_embeddings` directly; pgvector handles the
+//! native vector storage, so the legacy DuckDB-era Parquet side-store
+//! workaround (DEC-AXO-073) is gone from this path (operator directive
+//! 2026-05-10).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -653,11 +656,19 @@ fn run_persister_stage(
     }
 }
 
-/// AC2.7 — single multi-row INSERT (DuckDB) or Parquet append. Either
-/// path writes the entire `buffer` in one DB transaction, then clears
-/// it. On failure the rows are dropped and the originating files will
-/// be re-processed on the next FVQ cycle (their FVQ rows remain unmark
-/// _done since `pending_completed` only collapses after this returns).
+/// AC2.7 — single bulk write of the entire `buffer` then clear it. Routes
+/// through `graph_store.update_chunk_embeddings`, which under
+/// `AXON_BULK_WRITER_ENABLED=true` (REQ-AXO-238) performs one COPY BINARY
+/// into a staging table + `INSERT … SELECT … ON CONFLICT DO UPDATE` — the
+/// canonical PG bulk-write path. On failure the rows are dropped and the
+/// originating files will be re-claimed on the next FVQ cycle (their FVQ
+/// rows stay unmarked-done because `pending_completed` only collapses
+/// after this returns).
+///
+/// Operator directive 2026-05-10: the legacy DuckDB-era Parquet
+/// side-store branch (DEC-AXO-073) was removed from this path — pgvector
+/// stores embeddings natively, so the column-store-penalty workaround
+/// the side-store mitigated no longer applies.
 fn flush_buffer(
     worker_idx: usize,
     graph_store: &Arc<GraphStore>,
@@ -669,23 +680,7 @@ fn flush_buffer(
     let row_count = buffer.len();
     let started = Instant::now();
 
-    let result = if parquet_embedding_store::parquet_store_enabled() {
-        match parquet_embedding_store::store() {
-            Some(parquet) => match parquet.append_batch(buffer) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    warn!(
-                        "Vector pipeline [{}/persister]: parquet append failed ({} rows): {:?}; falling back to DuckDB",
-                        worker_idx, row_count, e
-                    );
-                    graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, buffer)
-                }
-            },
-            None => graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, buffer),
-        }
-    } else {
-        graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, buffer)
-    };
+    let result = graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, buffer);
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     service_guard::record_vector_stage_ms(service_guard::VectorStageKind::DbWrite, elapsed_ms);
