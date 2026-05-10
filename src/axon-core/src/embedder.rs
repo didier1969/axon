@@ -2875,6 +2875,15 @@ pub struct EmbeddingSustainedBench {
     /// of variance hypotheses. Length = number of sustained iterations.
     pub iter_ch_per_s: Vec<f64>,
     pub embedding_dim: usize,
+    /// REQ-AXO-257 / VAL-AXO-053 follow-up — mean wall time between
+    /// consecutive iter_start anchors, minus the iter_ms itself.
+    /// Surfaces the dispatch / marshalling / pre-batch overhead that
+    /// dominates wall-time when sustained_mean << peak iter ch/s.
+    /// Computed only when sustained iterations >= 2.
+    pub mean_inter_iter_gap_ms: f64,
+    /// REQ-AXO-257 — mean iter_ms across sustained iterations (the
+    /// embed call itself, excludes prep_batch + dispatch overhead).
+    pub mean_iter_ms: f64,
 }
 
 /// REQ-AXO-257 — Sustained sweep entry point. Loads the model once, runs
@@ -3072,6 +3081,29 @@ fn sustained_bench_with_loaded_model(
 
     iter_ch_per_s.shrink_to_fit();
 
+    // REQ-AXO-257 / VAL-AXO-053 — inter-iteration gap analysis.
+    // For consecutive (start_i, start_{i+1}) anchors, gap = (start_{i+1} - start_i) - iter_ms_i.
+    let mut gaps_ms: Vec<u64> = Vec::with_capacity(iter_observations.len());
+    for w in iter_observations.windows(2) {
+        let prev = &w[0];
+        let next = &w[1];
+        let delta = next.0.duration_since(prev.0).as_millis() as u64;
+        let gap = delta.saturating_sub(prev.2);
+        gaps_ms.push(gap);
+    }
+    let mean_inter_iter_gap_ms = if gaps_ms.is_empty() {
+        0.0
+    } else {
+        let sum: u64 = gaps_ms.iter().sum();
+        (sum as f64) / (gaps_ms.len() as f64)
+    };
+    let total_iter_ms: u64 = iter_observations.iter().map(|(_, _, ms)| *ms).sum();
+    let mean_iter_ms = if iter_observations.is_empty() {
+        0.0
+    } else {
+        (total_iter_ms as f64) / (iter_observations.len() as f64)
+    };
+
     Ok(EmbeddingSustainedBench {
         label: label.to_string(),
         batch_size,
@@ -3084,6 +3116,8 @@ fn sustained_bench_with_loaded_model(
         p95_ch_per_s: p95,
         iter_ch_per_s,
         embedding_dim,
+        mean_inter_iter_gap_ms,
+        mean_iter_ms,
     })
 }
 

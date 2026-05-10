@@ -343,11 +343,11 @@ fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
     match args.output {
         OutputMode::Csv => {
             eprintln!(
-                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim"
+                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim,mean_iter_ms,mean_inter_iter_gap_ms"
             );
             for bench in results {
                 println!(
-                    "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{}",
+                    "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{},{:.2},{:.2}",
                     bench.label,
                     bench.batch_size,
                     bench.warmup_secs,
@@ -358,6 +358,8 @@ fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
                     bench.p50_ch_per_s,
                     bench.p95_ch_per_s,
                     bench.embedding_dim,
+                    bench.mean_iter_ms,
+                    bench.mean_inter_iter_gap_ms,
                 );
             }
         }
@@ -368,6 +370,7 @@ fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
                 println!("     mean_ch_per_s   {:.2}", bench.mean_ch_per_s);
                 println!("     rolling_10s_min {:.2}", bench.rolling_10s_min);
                 println!("     p50 / p95       {:.2} / {:.2}", bench.p50_ch_per_s, bench.p95_ch_per_s);
+                println!("     iter_ms / gap   {:.2} / {:.2}", bench.mean_iter_ms, bench.mean_inter_iter_gap_ms);
                 println!("     total_chunks    {}", bench.total_chunks);
             }
         }
@@ -406,10 +409,10 @@ fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
     match args.output {
         OutputMode::Csv => {
             eprintln!(
-                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim"
+                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim,mean_iter_ms,mean_inter_iter_gap_ms"
             );
             println!(
-                "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{}",
+                "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{},{:.2},{:.2}",
                 bench.label,
                 bench.batch_size,
                 bench.warmup_secs,
@@ -420,6 +423,8 @@ fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
                 bench.p50_ch_per_s,
                 bench.p95_ch_per_s,
                 bench.embedding_dim,
+                bench.mean_iter_ms,
+                bench.mean_inter_iter_gap_ms,
             );
         }
         OutputMode::Human => {
@@ -432,7 +437,14 @@ fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
             println!("   rolling_10s_min {:.2}", bench.rolling_10s_min);
             println!("   p50_ch_per_s   {:.2}", bench.p50_ch_per_s);
             println!("   p95_ch_per_s   {:.2}", bench.p95_ch_per_s);
+            println!("   mean_iter_ms   {:.2}", bench.mean_iter_ms);
+            println!("   mean_inter_iter_gap_ms {:.2}  (← REQ-AXO-262 dispatch overhead)", bench.mean_inter_iter_gap_ms);
             println!("   dim            {}", bench.embedding_dim);
+            // REQ-AXO-262 — iter-by-iter trace to expose bimodal distribution.
+            println!("   iter_ch_per_s trace (first 30):");
+            for (i, v) in bench.iter_ch_per_s.iter().take(30).enumerate() {
+                println!("     [{:3}] {:8.2} ch/s", i, v);
+            }
         }
     }
     Ok(())
