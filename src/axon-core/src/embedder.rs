@@ -1401,6 +1401,36 @@ impl SemanticWorkerPool {
                         Vec::new();
                     let mut failed: HashMap<String, Vec<GraphProjectionWork>> = HashMap::new();
 
+                    // REQ-AXO-269 v1: under PG (`skip_sql_relations() = true`,
+                    // REQ-AXO-251 / MIL-AXO-015 Stop A), `refresh_file_projection`
+                    // and `refresh_symbol_projection` early-return Ok without
+                    // writing GraphProjectionState. Without this short-circuit,
+                    // every work item flows through refresh→fetch_state(None)
+                    // →failed→mark_failed→re-queued, an infinite loop that
+                    // never drains the queue (VAL-AXO-057 saw 14146 stuck).
+                    //
+                    // Mark every pending work item done immediately and skip
+                    // the embed pass — graph projection cache is meaningless
+                    // under AGE-only mode (authoritative call-graph reads go
+                    // through AGE Cypher primary tools per REQ-AXO-251).
+                    if graph_store.skip_sql_relations() {
+                        let drained = pending.len();
+                        if let Err(err) = graph_store
+                            .mark_graph_projection_work_done(&pending)
+                        {
+                            error!(
+                                "Semantic Graph Worker [{}]: failed to mark {} projection jobs done under skip_sql_relations: {:?}",
+                                worker_idx, drained, err
+                            );
+                        } else {
+                            debug!(
+                                "Semantic Graph Worker [{}]: drained {} projection jobs under skip_sql_relations (AGE-only authoritative)",
+                                worker_idx, drained
+                            );
+                        }
+                        continue;
+                    }
+
                     for work in pending {
                         let maybe_state = match work.anchor_type.as_str() {
                             "file" => {
