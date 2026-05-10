@@ -247,12 +247,19 @@ impl GraphStore {
     }
 
     fn query_json_on_writer(&self, query: &str) -> Result<String> {
+        // REQ-AXO-254: under PG, the rewriter must run on writer-routed
+        // reads too — `query_on_ctx` is the raw FFI call. Without this
+        // path, queries that hit the writer (read-only SQL gateway,
+        // SOLL-targeted reads, OptimizerDecisionLog probes, etc.) skip
+        // the DuckDB→PG translations and emit unqualified table names
+        // that PG rejects.
+        let normalized = self.normalize_attached_soll_query(query);
         let writer = self
             .pool
             .writer_ctx
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        self.query_on_ctx(query, *writer)
+        self.query_on_ctx(normalized.as_ref(), *writer)
     }
 
     fn query_count_on_writer(&self, query: &str) -> Result<i64> {
@@ -329,8 +336,12 @@ impl GraphStore {
         query: &str,
         freshness: ReadFreshness,
     ) -> Result<String> {
+        // REQ-AXO-254: rewriter must run on the reader-routed read too.
+        // `query_on_ctx` (line 348) calls the raw FFI directly, so the
+        // PG translations must happen before we hand off the SQL string.
+        let normalized = self.normalize_attached_soll_query(query);
         match self.select_read_route(query, freshness) {
-            ReadRoute::Writer => self.query_json_on_writer(query),
+            ReadRoute::Writer => self.query_json_on_writer(normalized.as_ref()),
             ReadRoute::Reader => {
                 let guard = self
                     .pool
@@ -343,9 +354,9 @@ impl GraphStore {
                         return Err(self.reader_only_ist_unavailable_error());
                     }
                     self.record_writer_read(freshness);
-                    return self.query_json_on_writer(query);
+                    return self.query_json_on_writer(normalized.as_ref());
                 }
-                let result = self.query_on_ctx(query, *guard);
+                let result = self.query_on_ctx(normalized.as_ref(), *guard);
                 drop(guard);
                 result
             }
