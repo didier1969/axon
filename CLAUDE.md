@@ -22,7 +22,7 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Component | Path | Note |
 |---|---|---|
 | Runtime | `src/axon-core/` | Rust |
-| DB | embedded DuckDB | canonical IST + SOLL |
+| DB | PostgreSQL 17 + AGE + pgvector | canonical IST + SOLL (post-MIL-AXO-015 ; REQ-AXO-271 retires the legacy embedded-DuckDB path) |
 | GPU | `src/axon-core/src/embedder/` | ONNX Runtime, CUDA/TensorRT EP, subprocess IPC |
 | MCP server | `src/axon-core/src/mcp/` | 60 public tools |
 | Visualization | Memgraph | human-only, non-canonical |
