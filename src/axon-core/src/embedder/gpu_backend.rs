@@ -34,6 +34,12 @@ pub(super) struct OrtGpuFirstTextEmbedding {
     pub(super) input_ids_buffer: Vec<i64>,
     pub(super) attention_mask_buffer: Vec<i64>,
     pub(super) token_type_ids_buffer: Vec<i64>,
+    /// REQ-AXO-262 / VAL-AXO-054 — when false (default), the output
+    /// is bound once at session init and reused across runs (avoids
+    /// per-iter `clear_outputs` + `bind_output_to_device` which
+    /// appears to trigger periodic allocator scrub). Toggle via
+    /// `AXON_ORT_BIND_OUTPUT_PER_ITER=1` for A/B comparison.
+    pub(super) bind_output_per_iter: bool,
 }
 
 
@@ -107,7 +113,7 @@ impl OrtGpuFirstTextEmbedding {
                     })
             })
             .ok_or_else(|| anyhow!("failed to determine ORT embedding output name"))?;
-        let io_binding = session
+        let mut io_binding = session
             .create_binding()
             .map_err(|err| anyhow!("failed to create ORT I/O binding: {err}"))?;
         let run_options =
@@ -129,11 +135,28 @@ impl OrtGpuFirstTextEmbedding {
             )
             .map_err(|err| anyhow!("failed to create CPU output memory info: {err}"))?
         };
+        // REQ-AXO-262 / VAL-AXO-054 follow-up — bind output ONCE at
+        // session init. Per ORT IoBinding doc: "the same output buffer
+        // will be reused across runs". Previously rebound per-iter
+        // (clear_outputs + bind_output_to_device), which appears to
+        // trigger the periodic slow-iter pattern via allocator scrub.
+        // Set AXON_ORT_BIND_OUTPUT_PER_ITER=1 to revert to the legacy
+        // behavior for A/B comparison.
+        let bind_output_per_iter = ort_bind_output_per_iter_from_env(
+            std::env::var("AXON_ORT_BIND_OUTPUT_PER_ITER").ok().as_deref(),
+        );
+        if !bind_output_per_iter {
+            io_binding
+                .bind_output_to_device(output_name.clone(), &output_memory_info)
+                .map_err(|err| anyhow!("failed to pre-bind output {}: {err}", output_name))?;
+        }
+
         info!(
-            "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded successfully (provider={})",
+            "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded successfully (provider={}, bind_output_per_iter={})",
             lane,
             worker_idx,
-            if use_cuda { "cuda" } else { "cpu" }
+            if use_cuda { "cuda" } else { "cpu" },
+            bind_output_per_iter
         );
 
         Ok(Self {
@@ -148,6 +171,7 @@ impl OrtGpuFirstTextEmbedding {
             input_ids_buffer: Vec::new(),
             attention_mask_buffer: Vec::new(),
             token_type_ids_buffer: Vec::new(),
+            bind_output_per_iter,
         })
     }
 
@@ -268,10 +292,14 @@ impl OrtGpuFirstTextEmbedding {
             host_fill_ms,
             input_copy_ms,
         ) = self.encode_and_bind_inputs(encodings)?;
-        self.io_binding.clear_outputs();
-        self.io_binding
-            .bind_output_to_device(self.output_name.clone(), &self.output_memory_info)
-            .map_err(|err| anyhow!("failed to bind output {}: {err}", self.output_name))?;
+        // REQ-AXO-262 — skip per-iter clear+rebind by default;
+        // output was bound once at session init.
+        if self.bind_output_per_iter {
+            self.io_binding.clear_outputs();
+            self.io_binding
+                .bind_output_to_device(self.output_name.clone(), &self.output_memory_info)
+                .map_err(|err| anyhow!("failed to bind output {}: {err}", self.output_name))?;
+        }
 
         let run_started = Instant::now();
         let outputs = self
@@ -310,6 +338,21 @@ impl OrtGpuFirstTextEmbedding {
 
 
 
+
+/// REQ-AXO-262 — pure helper to parse
+/// `AXON_ORT_BIND_OUTPUT_PER_ITER` env override. Default = false
+/// (output bound ONCE at session init, reused across runs). Accepts
+/// `1`, `true`, `True` (any case) as the explicit-enable marker.
+/// Other values map to default false.
+pub(super) fn ort_bind_output_per_iter_from_env(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let trimmed = v.trim();
+            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
 
 /// REQ-AXO-262 — pure helper to parse `AXON_ORT_MEMORY_PATTERN` env
 /// override. Default = true (memory pattern enabled). Accepts `0`,
