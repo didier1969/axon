@@ -311,6 +311,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_remove_evidence",
+                "description": "[SOLL] Removes Traceability rows linking a SOLL entity to evidence artifacts. REQ-AXO-254 closure of MIL-AXO-015 wave G followup (broken_file_evidence cleanup). Two modes: (1) `broken_only=true` (default) removes ONLY rows whose `artifact_ref` no longer resolves to an existing file/document on disk — safe maintenance; (2) `broken_only=false` removes the explicit `artifact_refs` regardless of disk state — exact match required. Returns count + list of removed rows for audit. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": { "type": "string", "description": "Canonical SOLL entity id (e.g. REQ-AXO-013) whose Traceability rows are candidates for removal." },
+                        "broken_only": { "type": "boolean", "description": "When true (default), only remove rows whose artifact_ref does NOT exist on disk. When false, remove the explicit `artifact_refs` exactly." },
+                        "artifact_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional explicit list of artifact_ref values to remove (only consulted when `broken_only=false`)." }
+                    },
+                    "required": ["entity_id"]
+                }
+            },
+            {
                 "name": "document_intent",
                 "description": "[DX/SOLL] Records an LLM-observed intent (requirement/decision/concept/guideline) into SOLL with auto-classification. Universal entry point for 'document this' / 'documente' / 'save observation' workflows; discoverable via tools_catalog so a fresh LLM can log to SOLL without per-client prompt configuration. Server-side classifier picks `requirement` (problem/gap/friction), `decision` (choice/picks/we will), `concept` (mental model / how this works), or `guideline` (rule/method/style) when `suggest_type` is omitted. Returns canonical SOLL ID + entity_type chosen + classification reason.",
                 "inputSchema": {

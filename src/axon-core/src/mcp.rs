@@ -71,6 +71,7 @@ impl McpServer {
         "soll_apply_plan",
         "soll_commit_revision",
         "soll_attach_evidence",
+        "soll_remove_evidence",
         "soll_rollback_revision",
         "soll_manager",
         "entrench_nuance",
@@ -122,6 +123,7 @@ impl McpServer {
             "soll_commit_revision" => &["soll_query_context", "soll_export"],
             "soll_rollback_revision" => &["soll_query_context", "soll_validate"],
             "soll_attach_evidence" => &["soll_verify_requirements", "soll_query_context"],
+            "soll_remove_evidence" => &["soll_verify_requirements", "soll_validate"],
             "init_project" | "apply_guidelines" => &["project_status", "soll_query_context"],
             "commit_work" => &["pre_flight_check", "project_status"],
             "pre_flight_check" => &["commit_work", "project_status"],
@@ -216,6 +218,7 @@ impl McpServer {
             | "entrench_nuance"
             | "soll_manager"
             | "soll_attach_evidence"
+            | "soll_remove_evidence"
             | "soll_commit_revision"
             | "soll_rollback_revision"
             | "soll_apply_plan"
@@ -261,6 +264,7 @@ impl McpServer {
             "entrench_nuance" => "apply a bounded intent clarification",
             "soll_manager" => "perform an exact SOLL create/update/link operation",
             "soll_attach_evidence" => "attach proof to canonical intent",
+            "soll_remove_evidence" => "prune broken evidence rows so completeness reflects current code state",
             "soll_apply_plan" => "apply a larger SOLL batch transaction safely",
             "restore_soll" => "restore canonical intent from an export",
             "commit_work" => "commit work only after SOLL-aware validation",
@@ -786,7 +790,7 @@ impl McpServer {
         }
 
         match normalized_name {
-            "soll_attach_evidence" => arguments
+            "soll_attach_evidence" | "soll_remove_evidence" => arguments
                 .get("entity_id")
                 .and_then(|value| value.as_str())
                 .and_then(Self::project_code_from_soll_entity_id)
@@ -1122,6 +1126,7 @@ impl McpServer {
                 | "soll_apply_plan"
                 | "soll_commit_revision"
                 | "soll_attach_evidence"
+                | "soll_remove_evidence"
                 | "soll_rollback_revision"
                 | "soll_export"
                 | "soll_generate_docs"
@@ -1151,6 +1156,7 @@ impl McpServer {
             "soll_query_context" => self.axon_soll_query_context(arguments),
             "soll_work_plan" => self.axon_soll_work_plan(arguments),
             "soll_attach_evidence" => self.axon_soll_attach_evidence(arguments),
+            "soll_remove_evidence" => self.axon_soll_remove_evidence(arguments),
             "document_intent" => self.axon_document_intent(arguments),
             "soll_verify_requirements" => self.axon_soll_verify_requirements(arguments),
             "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),

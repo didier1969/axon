@@ -470,3 +470,157 @@ fn first_rejected_repair(
     }
     None
 }
+
+impl McpServer {
+    /// REQ-AXO-254 — close MIL-AXO-015 wave G followup ("33 broken_file_evidence
+    /// cleanup via soll_remove_evidence MCP verb"). Removes Traceability rows
+    /// linking a SOLL entity to evidence artifacts. Two modes:
+    ///
+    /// 1. `broken_only=true` (default): removes only rows whose `artifact_ref`
+    ///    no longer resolves to an existing file/document on disk, using the
+    ///    same path-resolution logic as `broken_file_evidence_count_for_requirement`
+    ///    (project-root-relative or absolute). Safe maintenance.
+    ///
+    /// 2. `broken_only=false`: removes the explicit `artifact_refs` regardless
+    ///    of disk state. Intended for surgical correction (e.g. a renamed
+    ///    file that still exists at the new path — operator wants to drop the
+    ///    stale row without waiting for the file to actually disappear).
+    ///
+    /// Returns: `removed_count`, `removed[]` (id + artifact_ref), `kept[]`
+    /// (entries that did NOT match the removal criterion, for audit).
+    pub(crate) fn axon_soll_remove_evidence(&self, args: &Value) -> Option<Value> {
+        let entity_id = match args.get("entity_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => {
+                return Some(json!({
+                    "content": [{"type":"text","text":"Missing required argument: entity_id"}],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "parameter_repair": {
+                            "invalid_field": "entity_id",
+                            "missing_required_fields": ["entity_id"],
+                            "hint": "supply a canonical SOLL entity id (e.g. REQ-AXO-013)"
+                        }
+                    }
+                }));
+            }
+        };
+        let broken_only = args
+            .get("broken_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let explicit_refs: Vec<String> = args
+            .get("artifact_refs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Resolve project root for relative-path checks (matches
+        // `broken_file_evidence_count_for_requirement`).
+        let project_root = self.canonical_project_root_for_entity(&entity_id);
+        let escaped = escape_sql(&entity_id);
+        let query = format!(
+            "SELECT id, COALESCE(artifact_ref, ''), COALESCE(artifact_type, '') \
+             FROM soll.Traceability \
+             WHERE soll_entity_id = '{escaped}' \
+               AND lower(artifact_type) IN ('file', 'document') \
+             ORDER BY id"
+        );
+        let raw = match self.graph_store.query_json(&query) {
+            Ok(s) => s,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{"type":"text","text": format!("soll_remove_evidence read error: {e}")}],
+                    "isError": true,
+                    "data": { "status": "internal_error" }
+                }));
+            }
+        };
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+
+        let mut removed: Vec<Value> = Vec::new();
+        let mut kept: Vec<Value> = Vec::new();
+        for row in rows {
+            if row.len() < 2 {
+                continue;
+            }
+            let id = row[0].clone();
+            let artifact_ref = row[1].clone();
+            let artifact_type = row.get(2).cloned().unwrap_or_default();
+            let should_remove = if broken_only {
+                let trimmed = artifact_ref.trim();
+                if trimmed.is_empty() {
+                    true
+                } else {
+                    let p = std::path::Path::new(trimmed);
+                    let candidate = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else if let Some(root) = project_root.as_ref() {
+                        root.join(p)
+                    } else {
+                        p.to_path_buf()
+                    };
+                    !candidate.exists()
+                }
+            } else {
+                explicit_refs.iter().any(|r| r == &artifact_ref)
+            };
+            if should_remove {
+                if let Err(e) = self.graph_store.execute_param(
+                    "DELETE FROM soll.Traceability WHERE id = ?",
+                    &json!([id]),
+                ) {
+                    kept.push(json!({
+                        "id": id,
+                        "artifact_ref": artifact_ref,
+                        "artifact_type": artifact_type,
+                        "status": "delete_failed",
+                        "error": e.to_string()
+                    }));
+                } else {
+                    removed.push(json!({
+                        "id": id,
+                        "artifact_ref": artifact_ref,
+                        "artifact_type": artifact_type
+                    }));
+                }
+            } else {
+                kept.push(json!({
+                    "id": id,
+                    "artifact_ref": artifact_ref,
+                    "artifact_type": artifact_type,
+                    "status": "preserved"
+                }));
+            }
+        }
+
+        let removed_count = removed.len();
+        let kept_count = kept.len();
+        let mode_label = if broken_only {
+            "broken_only"
+        } else {
+            "explicit_refs"
+        };
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "soll_remove_evidence({entity_id}, mode={mode_label}): removed {removed_count}, kept {kept_count}"
+                )
+            }],
+            "data": {
+                "entity_id": entity_id,
+                "mode": mode_label,
+                "removed_count": removed_count,
+                "removed": removed,
+                "kept": kept,
+                "follow_up_tools": ["soll_verify_requirements", "soll_validate"]
+            }
+        }))
+    }
+}

@@ -7633,3 +7633,97 @@ fn test_axon_impact_traces_through_soll_architecture() {
         "Should list vision title"
     );
 }
+
+#[test]
+fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
+    // REQ-AXO-254 — close MIL-AXO-015 wave G followup. Verify the new
+    // soll_remove_evidence tool only removes Traceability rows whose
+    // artifact_ref does NOT exist on disk by default (broken_only=true).
+    let server = create_test_server();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-254-test', 'Requirement', 'AXO', 'soll_remove_evidence smoke', 'broken_only mode', 'current', '{\"acceptance_criteria\":\"a\"}')")
+        .unwrap();
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root");
+    let valid = repo_root.join("README.md");
+    let valid_path = valid.to_string_lossy().to_string();
+
+    // Seed: 1 valid + 2 broken artifact refs.
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!(["TRC-VALID-1", "Requirement", "REQ-AXO-254-test", "file", valid_path, 1.0, "{}", 1u64]),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!(["TRC-BROKEN-1", "Requirement", "REQ-AXO-254-test", "file", "/tmp/does-not-exist-axo-254-1.rs", 1.0, "{}", 2u64]),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!(["TRC-BROKEN-2", "Requirement", "REQ-AXO-254-test", "document", "/tmp/does-not-exist-axo-254-2.md", 1.0, "{}", 3u64]),
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {"entity_id": "REQ-AXO-254-test"}
+            })),
+            id: Some(json!(254001)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let data = response["data"].clone();
+    assert_eq!(data["mode"].as_str(), Some("broken_only"));
+    assert_eq!(data["removed_count"].as_u64(), Some(2));
+    let removed_refs: Vec<&str> = data["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("artifact_ref").and_then(|v| v.as_str()))
+        .collect();
+    assert!(removed_refs.contains(&"/tmp/does-not-exist-axo-254-1.rs"));
+    assert!(removed_refs.contains(&"/tmp/does-not-exist-axo-254-2.md"));
+    let kept = data["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        kept[0].get("artifact_ref").and_then(|v| v.as_str()),
+        Some(valid_path.as_str())
+    );
+
+    // Idempotent: second call returns 0 removed, 1 kept.
+    let response2 = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {"entity_id": "REQ-AXO-254-test"}
+            })),
+            id: Some(json!(254002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response2["data"]["removed_count"].as_u64(), Some(0));
+    assert_eq!(
+        response2["data"]["kept"].as_array().unwrap().len(),
+        1
+    );
+}

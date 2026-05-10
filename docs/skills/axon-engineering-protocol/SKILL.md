@@ -55,6 +55,8 @@ PG schema contract (REQ-AXO-216 Stop A, 2026-05-09 + REQ-AXO-254 post-promote re
 
 PG transaction handling (REQ-AXO-254 workaround, 2026-05-10): under `AXON_DB_BACKEND=postgres`, `axon_soll_commit_revision` and `axon_soll_rollback_revision` SKIP the explicit `BEGIN/COMMIT` wrapper because the PG plugin's deadpool fresh-connection-per-call breaks the BEGIN/COMMIT pairing (BEGIN ends on conn A, INSERTs on conns B/C/…, leaving conn A "idle in transaction" with row locks held). Each INSERT auto-commits; partial failures leave the soll.Revision row in place and the operator can clean up via `soll_rollback_revision`. DuckDB keeps the explicit transaction (single-connection, no pool). The proper architectural fix (`with_pinned_connection` primitive) is tracked under REQ-AXO-254.
 
+Broken evidence cleanup (REQ-AXO-254 closure of MIL-AXO-015 wave G followup, 2026-05-10): `soll_remove_evidence` is the canonical verb to prune `soll.Traceability` rows when refactors leave behind file/document references that no longer resolve. Default mode `broken_only=true` removes ONLY rows whose `artifact_ref` does not exist on disk (project-root-relative or absolute, same path-resolution as `broken_file_evidence_count_for_requirement`). Idempotent — running twice returns `removed_count=0`. Set `broken_only=false` and supply explicit `artifact_refs` to surgically drop a stale row whose target still exists (e.g. file moved). Use after audit confirms the broken rows are residue, not legitimate traceability targets.
+
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
 2. Follow `operator_guidance.follow_up_tools`
