@@ -24,6 +24,12 @@ path = "src/bin/axonctl.rs"
 name = "embedder-bench"
 path = "src/bin/embedder-bench.rs"
 
+# REQ-AXO-257: pipeline throughput bench (N producers / bounded channel /
+# 1 consumer). Reconstructed after VAL-AXO-050 worktree loss.
+[[bin]]
+name = "axon-bench-pipeline"
+path = "src/bin/axon-bench-pipeline.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"

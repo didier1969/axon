@@ -2806,6 +2806,365 @@ impl EmbeddingThroughputBench {
     }
 }
 
+// =========================================================================
+// REQ-AXO-257 — Sustained throughput bench (reconstructed from VAL-AXO-050
+// proto/gpu-saturation-probe worktree, lost before commit).
+// =========================================================================
+
+/// REQ-AXO-257 — Walk the per-iteration `(start, chunks, ms)` log,
+/// computing aggregate ch/s for every rolling `window` ending at each
+/// observation, and return the minimum. None when `observations` is
+/// empty. Pure function — extracted from sustained + pipeline benches
+/// (GUI-PRO-013 DRY) so the algorithm is unit-testable without ORT.
+pub(crate) fn rolling_window_min_ch_per_s(
+    observations: &[(std::time::Instant, usize, u64)],
+    window: std::time::Duration,
+) -> Option<f64> {
+    if observations.is_empty() {
+        return None;
+    }
+    let mut min: f64 = f64::INFINITY;
+    for (anchor_idx, (anchor_t, _, _)) in observations.iter().enumerate() {
+        let window_start = anchor_t.checked_sub(window);
+        let mut chunks_in_window: usize = 0;
+        let mut window_ms: u64 = 0;
+        for (back_idx, (t, n, ms)) in observations.iter().enumerate().rev() {
+            if back_idx > anchor_idx {
+                continue;
+            }
+            let in_window = match window_start {
+                Some(ws) => *t >= ws,
+                None => true,
+            };
+            if !in_window {
+                break;
+            }
+            chunks_in_window += *n;
+            window_ms = window_ms.saturating_add(*ms);
+        }
+        if window_ms == 0 {
+            continue;
+        }
+        let window_chs = (chunks_in_window as f64) * 1000.0 / (window_ms as f64);
+        if window_chs < min {
+            min = window_chs;
+        }
+    }
+    if min.is_finite() {
+        Some(min)
+    } else {
+        None
+    }
+}
+
+/// REQ-AXO-257 — Outcome of a sustained-window throughput run. Captures
+/// mean and rolling-10s minimum so dips during VRAM recycle / TRT JIT
+/// stalls do not get smoothed away by averaging.
+#[derive(Debug, Clone)]
+pub struct EmbeddingSustainedBench {
+    pub label: String,
+    pub batch_size: usize,
+    pub warmup_secs: u64,
+    pub sustained_secs: u64,
+    pub total_chunks: usize,
+    pub mean_ch_per_s: f64,
+    pub rolling_10s_min: f64,
+    pub p50_ch_per_s: f64,
+    pub p95_ch_per_s: f64,
+    /// Per-iteration ch/s series — kept for CSV export and debugging
+    /// of variance hypotheses. Length = number of sustained iterations.
+    pub iter_ch_per_s: Vec<f64>,
+    pub embedding_dim: usize,
+}
+
+/// REQ-AXO-257 — Sustained sweep entry point. Loads the model once, runs
+/// `warmup_secs` of throwaway iterations to settle TRT JIT + VRAM
+/// allocator, then loops `sustained_secs` worth of fixed-`batch_size`
+/// embed cycles drawn from `source_pool` (cycled with idx-prepended
+/// uniqueness so the tokenizer cannot cache hits).
+///
+/// `source_pool` SHOULD be at least `batch_size` long; if shorter the
+/// pool is repeated. Each iteration measures wall time around
+/// `embed_texts_with_breakdown_ort` to compute its ch/s contribution.
+pub fn run_embedder_sustained_bench(
+    label: &str,
+    source_pool: Vec<String>,
+    batch_size: usize,
+    warmup_secs: u64,
+    sustained_secs: u64,
+    force_gpu: bool,
+) -> anyhow::Result<EmbeddingSustainedBench> {
+    if source_pool.is_empty() {
+        anyhow::bail!("sustained bench requires at least one source text");
+    }
+    if batch_size == 0 {
+        anyhow::bail!("sustained bench requires batch_size >= 1");
+    }
+    if sustained_secs == 0 {
+        anyhow::bail!("sustained bench requires sustained_secs >= 1");
+    }
+
+    let mut model = OrtGpuFirstTextEmbedding::try_new(label, 0, force_gpu)?;
+    let mut cycle_idx: usize = 0;
+    let mut prep_batch = |size: usize| -> Vec<String> {
+        let mut out = Vec::with_capacity(size);
+        for _ in 0..size {
+            let base = &source_pool[cycle_idx % source_pool.len()];
+            out.push(format!("// iter {cycle_idx}\n{base}"));
+            cycle_idx += 1;
+        }
+        out
+    };
+
+    // Warmup — discard timings.
+    if warmup_secs > 0 {
+        let warmup_until = std::time::Instant::now()
+            + std::time::Duration::from_secs(warmup_secs);
+        while std::time::Instant::now() < warmup_until {
+            let texts = prep_batch(batch_size);
+            let _ = embed_texts_with_breakdown_ort(&mut model, &texts)?;
+        }
+    }
+
+    // Sustained — measure each iteration.
+    let sustained_until = std::time::Instant::now()
+        + std::time::Duration::from_secs(sustained_secs);
+    let mut iter_observations: Vec<(std::time::Instant, usize, u64)> = Vec::new();
+    let mut total_chunks: usize = 0;
+    let mut embedding_dim: usize = 0;
+
+    while std::time::Instant::now() < sustained_until {
+        let texts = prep_batch(batch_size);
+        let iter_start = std::time::Instant::now();
+        let (embeddings, _t, _hp, _ic, _inf, _oe) =
+            embed_texts_with_breakdown_ort(&mut model, &texts)?;
+        let iter_ms = iter_start.elapsed().as_millis() as u64;
+        if embedding_dim == 0 {
+            embedding_dim = embeddings.first().map(|v| v.len()).unwrap_or(0);
+        }
+        total_chunks += batch_size;
+        iter_observations.push((iter_start, batch_size, iter_ms.max(1)));
+    }
+
+    if iter_observations.is_empty() {
+        anyhow::bail!("sustained loop produced zero iterations — sustained_secs too small?");
+    }
+
+    let mut iter_ch_per_s: Vec<f64> = iter_observations
+        .iter()
+        .map(|(_, n, ms)| (*n as f64) * 1000.0 / (*ms as f64))
+        .collect();
+
+    let actual_sustained_secs = sustained_secs as f64;
+    let mean_ch_per_s = (total_chunks as f64) / actual_sustained_secs;
+
+    let rolling_min = rolling_window_min_ch_per_s(
+        &iter_observations,
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap_or(mean_ch_per_s);
+
+    // p50/p95 from per-iteration chunks/sec.
+    let mut sorted = iter_ch_per_s.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct_at = |percentile: f64| -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = ((sorted.len() as f64 - 1.0) * percentile).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    };
+    let p50 = pct_at(0.5);
+    let p95 = pct_at(0.95);
+
+    iter_ch_per_s.shrink_to_fit();
+
+    Ok(EmbeddingSustainedBench {
+        label: label.to_string(),
+        batch_size,
+        warmup_secs,
+        sustained_secs,
+        total_chunks,
+        mean_ch_per_s,
+        rolling_10s_min: rolling_min,
+        p50_ch_per_s: p50,
+        p95_ch_per_s: p95,
+        iter_ch_per_s,
+        embedding_dim,
+    })
+}
+
+/// REQ-AXO-257 — Pipeline bench result. Adds `queue_high_water` to
+/// surface whether N producers are saturating the GPU consumer or
+/// merely keeping pace.
+#[derive(Debug, Clone)]
+pub struct PipelineBench {
+    pub label: String,
+    pub batch_size: usize,
+    pub producers: usize,
+    pub channel_capacity: usize,
+    pub warmup_secs: u64,
+    pub sustained_secs: u64,
+    pub total_chunks: usize,
+    pub mean_ch_per_s: f64,
+    pub rolling_10s_min: f64,
+    pub queue_high_water: usize,
+    pub embedding_dim: usize,
+}
+
+/// REQ-AXO-257 — N-producer / bounded-channel / single-consumer pipeline
+/// bench. Producers cycle through `source_pool` slices, push batches of
+/// `batch_size` into a `crossbeam-channel::bounded(channel_capacity)`,
+/// the single consumer thread runs the embedder and counts chunks.
+///
+/// `queue_high_water` = max channel.len() observed by the consumer
+/// after each receive. It tells you whether producers can outrun the
+/// GPU (>1 = yes; 1 = exactly keeping pace; 0 = consumer waited).
+pub fn run_embedder_pipeline_bench(
+    label: &str,
+    source_pool: Vec<String>,
+    producers: usize,
+    channel_capacity: usize,
+    batch_size: usize,
+    warmup_secs: u64,
+    sustained_secs: u64,
+    force_gpu: bool,
+) -> anyhow::Result<PipelineBench> {
+    if source_pool.is_empty() {
+        anyhow::bail!("pipeline bench requires at least one source text");
+    }
+    if batch_size == 0 {
+        anyhow::bail!("pipeline bench requires batch_size >= 1");
+    }
+    if sustained_secs == 0 {
+        anyhow::bail!("pipeline bench requires sustained_secs >= 1");
+    }
+    if producers == 0 {
+        anyhow::bail!("pipeline bench requires producers >= 1");
+    }
+    if channel_capacity == 0 {
+        anyhow::bail!("pipeline bench requires channel_capacity >= 1");
+    }
+
+    use crossbeam_channel::bounded;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let queue_high_water = Arc::new(AtomicUsize::new(0));
+    let (tx, rx) = bounded::<Vec<String>>(channel_capacity);
+
+    let pool = Arc::new(source_pool);
+    let mut producer_handles = Vec::with_capacity(producers);
+
+    for prod_idx in 0..producers {
+        let stop_p = stop.clone();
+        let pool_p = pool.clone();
+        let tx_p = tx.clone();
+        let label_p = label.to_string();
+        producer_handles.push(std::thread::spawn(move || {
+            let mut cycle: usize = prod_idx;
+            while !stop_p.load(Ordering::Relaxed) {
+                let mut batch = Vec::with_capacity(batch_size);
+                for _ in 0..batch_size {
+                    let base = &pool_p[cycle % pool_p.len()];
+                    batch.push(format!("// p{prod_idx} iter {cycle}\n{base}"));
+                    cycle = cycle.wrapping_add(producers);
+                }
+                if tx_p.send(batch).is_err() {
+                    break;
+                }
+            }
+            let _ = label_p;
+        }));
+    }
+    drop(tx);
+
+    let mut model = OrtGpuFirstTextEmbedding::try_new(label, 0, force_gpu)?;
+
+    // Warmup — discard timings.
+    if warmup_secs > 0 {
+        let warmup_until = std::time::Instant::now()
+            + std::time::Duration::from_secs(warmup_secs);
+        while std::time::Instant::now() < warmup_until {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(texts) => {
+                    let len_after_recv = rx.len();
+                    let prev = queue_high_water.load(Ordering::Relaxed);
+                    if len_after_recv > prev {
+                        queue_high_water.store(len_after_recv, Ordering::Relaxed);
+                    }
+                    let _ = embed_texts_with_breakdown_ort(&mut model, &texts)?;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    // Sustained — measure each iteration.
+    let sustained_until = std::time::Instant::now()
+        + std::time::Duration::from_secs(sustained_secs);
+    let mut iter_observations: Vec<(std::time::Instant, usize, u64)> = Vec::new();
+    let mut total_chunks: usize = 0;
+    let mut embedding_dim: usize = 0;
+
+    while std::time::Instant::now() < sustained_until {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(texts) => {
+                let len_after_recv = rx.len();
+                let prev = queue_high_water.load(Ordering::Relaxed);
+                if len_after_recv > prev {
+                    queue_high_water.store(len_after_recv, Ordering::Relaxed);
+                }
+                let iter_start = std::time::Instant::now();
+                let n = texts.len();
+                let (embeddings, _t, _hp, _ic, _inf, _oe) =
+                    embed_texts_with_breakdown_ort(&mut model, &texts)?;
+                let iter_ms = iter_start.elapsed().as_millis() as u64;
+                if embedding_dim == 0 {
+                    embedding_dim = embeddings.first().map(|v| v.len()).unwrap_or(0);
+                }
+                total_chunks += n;
+                iter_observations.push((iter_start, n, iter_ms.max(1)));
+            }
+            Err(_) => continue,
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    drop(rx);
+    for h in producer_handles {
+        let _ = h.join();
+    }
+
+    if iter_observations.is_empty() {
+        anyhow::bail!("pipeline sustained loop produced zero iterations");
+    }
+
+    let actual_sustained_secs = sustained_secs as f64;
+    let mean_ch_per_s = (total_chunks as f64) / actual_sustained_secs;
+
+    let rolling_min = rolling_window_min_ch_per_s(
+        &iter_observations,
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap_or(mean_ch_per_s);
+
+    Ok(PipelineBench {
+        label: label.to_string(),
+        batch_size,
+        producers,
+        channel_capacity,
+        warmup_secs,
+        sustained_secs,
+        total_chunks,
+        mean_ch_per_s,
+        rolling_10s_min: rolling_min,
+        queue_high_water: queue_high_water.load(Ordering::Relaxed),
+        embedding_dim,
+    })
+}
+
 // REQ-AXO-087 — sibling tests file (the TDD checker GUI-PRO-001 expects
 // a `_tests.rs` companion path on diffs touching `src/axon-core/src/*`;
 // inline `#[cfg(test)] mod tests` modules are not recognized by the

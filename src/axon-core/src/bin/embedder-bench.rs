@@ -16,9 +16,15 @@
 //! Usage:
 //!   embedder-bench [--n N] [--source PATH] [--no-force-gpu]
 //!                  [--label LABEL] [--csv | --human]
+//!                  [--sustained-secs N] [--warmup-secs N] [--batch N]
 //!
 //! Defaults: --n 256, --source src/axon-core/src/embedder.rs,
 //! force_gpu=true, --csv (single-line CSV row).
+//!
+//! REQ-AXO-257 — when `--sustained-secs N` is passed (N > 0) the bench
+//! switches to sustained-window mode: ignore --n, run `--warmup-secs`
+//! warmup then `--sustained-secs` measurement, report mean +
+//! rolling-10s-min + p50/p95.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -41,6 +47,10 @@ struct Args {
     label: String,
     output: OutputMode,
     workers: usize,
+    // REQ-AXO-257
+    sustained_secs: u64,
+    warmup_secs: u64,
+    batch: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,9 +68,34 @@ impl Args {
         let mut label = "bench".to_string();
         let mut output = OutputMode::Csv;
         let mut workers: usize = 1;
+        // REQ-AXO-257 sustained-mode defaults
+        let mut sustained_secs: u64 = 0;
+        let mut warmup_secs: u64 = 30;
+        let mut batch: usize = 64;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--sustained-secs" => {
+                    sustained_secs = args
+                        .get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--sustained-secs requires value"))?
+                        .parse()?;
+                    i += 2;
+                }
+                "--warmup-secs" => {
+                    warmup_secs = args
+                        .get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--warmup-secs requires value"))?
+                        .parse()?;
+                    i += 2;
+                }
+                "--batch" => {
+                    batch = args
+                        .get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--batch requires value"))?
+                        .parse()?;
+                    i += 2;
+                }
                 "--n" => {
                     n = args
                         .get(i + 1)
@@ -121,6 +156,9 @@ impl Args {
             label,
             output,
             workers,
+            sustained_secs,
+            warmup_secs,
+            batch,
         })
     }
 }
@@ -129,7 +167,8 @@ fn print_help() {
     println!(
         "embedder-bench [--n N] [--source PATH] [--no-force-gpu] [--label L] [--csv|--human] [--workers N]"
     );
-    println!("  --n N            number of texts to embed (default 256)");
+    println!("               [--sustained-secs N] [--warmup-secs N] [--batch N]");
+    println!("  --n N            number of texts to embed (default 256, single-shot mode only)");
     println!("  --source PATH    real source file to read embedding texts from");
     println!("                   (default src/axon-core/src/embedder.rs)");
     println!("  --no-force-gpu   pass force_gpu=false to OrtGpuFirstTextEmbedding");
@@ -138,6 +177,11 @@ fn print_help() {
     println!("  --human          multi-line summary");
     println!("  --workers N      spawn N parallel embedder instances (REQ-AXO-176)");
     println!("                   each instance ≈ 680 MB VRAM; default 1");
+    println!();
+    println!("REQ-AXO-257 sustained-window mode (set --sustained-secs > 0):");
+    println!("  --sustained-secs N   measure for N seconds after warmup (default 0 = single-shot)");
+    println!("  --warmup-secs N      warmup phase length in seconds (default 30)");
+    println!("  --batch N            batch size per embed iteration (default 64)");
 }
 
 fn run() -> anyhow::Result<()> {
@@ -155,6 +199,10 @@ fn run() -> anyhow::Result<()> {
             args.n,
             texts.len()
         );
+    }
+
+    if args.sustained_secs > 0 {
+        return run_sustained(args, texts);
     }
 
     eprintln!(
@@ -243,6 +291,69 @@ fn pct(part: u64, total: u64) -> u64 {
     } else {
         (part * 100) / total
     }
+}
+
+/// REQ-AXO-257 — sustained-window dispatch: feeds all available source
+/// texts as a cycling pool to `run_embedder_sustained_bench`.
+fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
+    eprintln!(
+        "📊 embedder-bench (sustained): batch={} warmup={}s sustained={}s force_gpu={} pool={} label={}",
+        args.batch,
+        args.warmup_secs,
+        args.sustained_secs,
+        args.force_gpu,
+        texts.len(),
+        args.label
+    );
+    eprintln!("   ORT_DYLIB_PATH={}",
+        std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "<unset>".into())
+    );
+    eprintln!("   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
+        std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap_or_else(|_| "<unset>".into())
+    );
+
+    let bench = axon_core::embedder::run_embedder_sustained_bench(
+        &args.label,
+        texts,
+        args.batch,
+        args.warmup_secs,
+        args.sustained_secs,
+        args.force_gpu,
+    )?;
+
+    match args.output {
+        OutputMode::Csv => {
+            eprintln!(
+                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim"
+            );
+            println!(
+                "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{}",
+                bench.label,
+                bench.batch_size,
+                bench.warmup_secs,
+                bench.sustained_secs,
+                bench.total_chunks,
+                bench.mean_ch_per_s,
+                bench.rolling_10s_min,
+                bench.p50_ch_per_s,
+                bench.p95_ch_per_s,
+                bench.embedding_dim,
+            );
+        }
+        OutputMode::Human => {
+            println!("📊 embedder-bench [sustained: {}]", bench.label);
+            println!("   batch          {}", bench.batch_size);
+            println!("   warmup_secs    {}", bench.warmup_secs);
+            println!("   sustained_secs {}", bench.sustained_secs);
+            println!("   total_chunks   {}", bench.total_chunks);
+            println!("   mean_ch_per_s  {:.2}", bench.mean_ch_per_s);
+            println!("   rolling_10s_min {:.2}", bench.rolling_10s_min);
+            println!("   p50_ch_per_s   {:.2}", bench.p50_ch_per_s);
+            println!("   p95_ch_per_s   {:.2}", bench.p95_ch_per_s);
+            println!("   dim            {}", bench.embedding_dim);
+        }
+    }
+    Ok(())
 }
 
 /// Split the source file into roughly-512-char chunks, tagged with
