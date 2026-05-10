@@ -2905,7 +2905,100 @@ pub fn run_embedder_sustained_bench(
     }
 
     let mut model = OrtGpuFirstTextEmbedding::try_new(label, 0, force_gpu)?;
-    let mut cycle_idx: usize = 0;
+    sustained_bench_with_loaded_model(
+        label,
+        &mut model,
+        &source_pool,
+        batch_size,
+        warmup_secs,
+        sustained_secs,
+        0,
+    )
+}
+
+/// REQ-AXO-257 / operator 2026-05-10 — Sweep variant that **loads the
+/// model once** and runs sustained measurements at each batch size in
+/// `batch_sizes`, sequentially. Saves the ~1-min process-boot model-load
+/// cost across N hypotheses (e.g. {128, 160, 180, 220} = ~3-5 min saved
+/// vs separate runs).
+///
+/// TensorRT engine recompile per shape is intrinsic to the EP and is
+/// not avoided here — but warmup_secs is still honoured per-batch so
+/// the per-shape compile cost is absorbed before measurement.
+///
+/// `cycle_idx` is carried across batches so identical sustained loops
+/// don't tokenize the same text twice (defeats tokenizer cache).
+pub fn run_embedder_sustained_sweep(
+    label: &str,
+    source_pool: Vec<String>,
+    batch_sizes: &[usize],
+    warmup_secs: u64,
+    sustained_secs: u64,
+    force_gpu: bool,
+) -> anyhow::Result<Vec<EmbeddingSustainedBench>> {
+    if source_pool.is_empty() {
+        anyhow::bail!("sweep bench requires at least one source text");
+    }
+    if batch_sizes.is_empty() {
+        anyhow::bail!("sweep bench requires at least one batch size");
+    }
+    for (i, &b) in batch_sizes.iter().enumerate() {
+        if b == 0 {
+            anyhow::bail!("sweep batch_sizes[{i}] must be >= 1");
+        }
+    }
+    if sustained_secs == 0 {
+        anyhow::bail!("sweep sustained_secs must be >= 1");
+    }
+
+    let mut model = OrtGpuFirstTextEmbedding::try_new(label, 0, force_gpu)?;
+    let mut results = Vec::with_capacity(batch_sizes.len());
+    let mut cycle_idx_carry: usize = 0;
+
+    for &batch_size in batch_sizes {
+        let one = sustained_bench_with_loaded_model(
+            label,
+            &mut model,
+            &source_pool,
+            batch_size,
+            warmup_secs,
+            sustained_secs,
+            cycle_idx_carry,
+        )?;
+        // Estimate cycle advance: warmup iterations ~ unknown, but
+        // sustained iterations = total_chunks. Carry the running
+        // counter forward so subsequent batches don't repeat the
+        // same texts.
+        cycle_idx_carry = cycle_idx_carry.saturating_add(one.total_chunks);
+        results.push(one);
+    }
+    Ok(results)
+}
+
+/// REQ-AXO-257 / operator 2026-05-10 — Internal helper: run one
+/// sustained measurement against a model that's already loaded.
+/// Pulled out of `run_embedder_sustained_bench` so the sweep variant
+/// can amortize the load cost.
+fn sustained_bench_with_loaded_model(
+    label: &str,
+    model: &mut OrtGpuFirstTextEmbedding,
+    source_pool: &[String],
+    batch_size: usize,
+    warmup_secs: u64,
+    sustained_secs: u64,
+    cycle_idx_start: usize,
+) -> anyhow::Result<EmbeddingSustainedBench> {
+    if source_pool.is_empty() {
+        anyhow::bail!("sustained bench requires at least one source text");
+    }
+    if batch_size == 0 {
+        anyhow::bail!("sustained bench requires batch_size >= 1");
+    }
+    if sustained_secs == 0 {
+        anyhow::bail!("sustained bench requires sustained_secs >= 1");
+    }
+
+    let mut cycle_idx: usize = cycle_idx_start;
     let mut prep_batch = |size: usize| -> Vec<String> {
         let mut out = Vec::with_capacity(size);
         for _ in 0..size {
@@ -2916,13 +3009,13 @@ pub fn run_embedder_sustained_bench(
         out
     };
 
-    // Warmup — discard timings.
+    // Warmup — discard timings (per-shape TRT compile absorption).
     if warmup_secs > 0 {
         let warmup_until = std::time::Instant::now()
             + std::time::Duration::from_secs(warmup_secs);
         while std::time::Instant::now() < warmup_until {
             let texts = prep_batch(batch_size);
-            let _ = embed_texts_with_breakdown_ort(&mut model, &texts)?;
+            let _ = embed_texts_with_breakdown_ort(model, &texts)?;
         }
     }
 
@@ -2937,7 +3030,7 @@ pub fn run_embedder_sustained_bench(
         let texts = prep_batch(batch_size);
         let iter_start = std::time::Instant::now();
         let (embeddings, _t, _hp, _ic, _inf, _oe) =
-            embed_texts_with_breakdown_ort(&mut model, &texts)?;
+            embed_texts_with_breakdown_ort(model, &texts)?;
         let iter_ms = iter_start.elapsed().as_millis() as u64;
         if embedding_dim == 0 {
             embedding_dim = embeddings.first().map(|v| v.len()).unwrap_or(0);

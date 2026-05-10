@@ -51,6 +51,9 @@ struct Args {
     sustained_secs: u64,
     warmup_secs: u64,
     batch: usize,
+    /// REQ-AXO-257 sweep — comma-separated batch sizes; loads model
+    /// once and runs sustained measurements at each. Empty = single-batch.
+    sweep_batches: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,9 +75,20 @@ impl Args {
         let mut sustained_secs: u64 = 0;
         let mut warmup_secs: u64 = 30;
         let mut batch: usize = 64;
+        let mut sweep_batches: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--sweep-batches" => {
+                    let raw = args
+                        .get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--sweep-batches requires comma-separated list"))?;
+                    sweep_batches = raw
+                        .split(',')
+                        .map(|s| s.trim().parse::<usize>())
+                        .collect::<Result<Vec<_>, _>>()?;
+                    i += 2;
+                }
                 "--sustained-secs" => {
                     sustained_secs = args
                         .get(i + 1)
@@ -159,6 +173,7 @@ impl Args {
             sustained_secs,
             warmup_secs,
             batch,
+            sweep_batches,
         })
     }
 }
@@ -182,6 +197,9 @@ fn print_help() {
     println!("  --sustained-secs N   measure for N seconds after warmup (default 0 = single-shot)");
     println!("  --warmup-secs N      warmup phase length in seconds (default 30)");
     println!("  --batch N            batch size per embed iteration (default 64)");
+    println!("  --sweep-batches LIST comma-separated batch sizes (e.g. 128,160,180,220).");
+    println!("                       Loads model ONCE, runs sustained at each — saves ~1min");
+    println!("                       process-boot per batch on cold runs (operator 2026-05-10).");
 }
 
 fn run() -> anyhow::Result<()> {
@@ -202,6 +220,9 @@ fn run() -> anyhow::Result<()> {
     }
 
     if args.sustained_secs > 0 {
+        if !args.sweep_batches.is_empty() {
+            return run_sustained_sweep(args, texts);
+        }
         return run_sustained(args, texts);
     }
 
@@ -291,6 +312,67 @@ fn pct(part: u64, total: u64) -> u64 {
     } else {
         (part * 100) / total
     }
+}
+
+/// REQ-AXO-257 / operator 2026-05-10 — sweep dispatch. Loads model
+/// once, runs sustained at each batch size, emits CSV row per batch.
+fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
+    eprintln!(
+        "📊 embedder-bench (sweep): batches={:?} warmup={}s sustained={}s force_gpu={} pool={} label={}",
+        args.sweep_batches,
+        args.warmup_secs,
+        args.sustained_secs,
+        args.force_gpu,
+        texts.len(),
+        args.label
+    );
+    eprintln!(
+        "   Model loaded once — saves ~{}s vs separate runs.",
+        args.sweep_batches.len().saturating_sub(1) * 60
+    );
+
+    let results = axon_core::embedder::run_embedder_sustained_sweep(
+        &args.label,
+        texts,
+        &args.sweep_batches,
+        args.warmup_secs,
+        args.sustained_secs,
+        args.force_gpu,
+    )?;
+
+    match args.output {
+        OutputMode::Csv => {
+            eprintln!(
+                "label,batch,warmup_secs,sustained_secs,total_chunks,mean_ch_per_s,rolling_10s_min,p50,p95,dim"
+            );
+            for bench in results {
+                println!(
+                    "{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{}",
+                    bench.label,
+                    bench.batch_size,
+                    bench.warmup_secs,
+                    bench.sustained_secs,
+                    bench.total_chunks,
+                    bench.mean_ch_per_s,
+                    bench.rolling_10s_min,
+                    bench.p50_ch_per_s,
+                    bench.p95_ch_per_s,
+                    bench.embedding_dim,
+                );
+            }
+        }
+        OutputMode::Human => {
+            println!("📊 embedder-bench [sweep: {}]", args.label);
+            for bench in &results {
+                println!("  ── batch={} ──", bench.batch_size);
+                println!("     mean_ch_per_s   {:.2}", bench.mean_ch_per_s);
+                println!("     rolling_10s_min {:.2}", bench.rolling_10s_min);
+                println!("     p50 / p95       {:.2} / {:.2}", bench.p50_ch_per_s, bench.p95_ch_per_s);
+                println!("     total_chunks    {}", bench.total_chunks);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// REQ-AXO-257 — sustained-window dispatch: feeds all available source

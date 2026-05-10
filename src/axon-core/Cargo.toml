@@ -30,6 +30,11 @@ path = "src/bin/embedder-bench.rs"
 name = "axon-bench-pipeline"
 path = "src/bin/axon-bench-pipeline.rs"
 
+# REQ-AXO-259: Bench 1 (graph projection — watcher → parse → chunk).
+[[bin]]
+name = "axon-bench-graph-projection"
+path = "src/bin/axon-bench-graph-projection.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"
