@@ -35,6 +35,11 @@ path = "src/bin/axon-bench-pipeline.rs"
 name = "axon-bench-graph-projection"
 path = "src/bin/axon-bench-graph-projection.rs"
 
+# REQ-AXO-260: Bench 3 (writer — synthetic chunks → DB persist).
+[[bin]]
+name = "axon-bench-writer"
+path = "src/bin/axon-bench-writer.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"
