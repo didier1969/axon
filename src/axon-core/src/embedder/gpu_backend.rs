@@ -385,6 +385,32 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     })?;
 
     let workspace_size = cuda_memory_limit_bytes();
+    // REQ-AXO-262 (operator 2026-05-10) — explicit dynamic-shape
+    // profile so a single TRT engine covers the full bench / production
+    // range. Without these, every batch-size or seq-len change triggers
+    // an engine rebuild (observed: bench stalls 20+ min on first
+    // batch-size transition during sweep).
+    //
+    // Format per ORT TRT EP docs: `"name:DxD,name:DxD,..."`.
+    // BGE-Large inputs: input_ids[batch, seq], attention_mask[batch, seq],
+    // token_type_ids[batch, seq] (when present in the model graph).
+    //
+    // Range chosen 2026-05-10:
+    //   min  = (1, 1)        // smallest legal shape
+    //   opt  = (128, 256)    // current production sweet spot (VAL-AXO-053)
+    //   max  = (256, 512)    // batch headroom + BGE-Large max_length
+    //
+    // Override via AXON_TRT_PROFILE_{MIN,OPT,MAX}_SHAPES if a different
+    // range is required (e.g. for a smaller VRAM budget).
+    let trt_profile_min = std::env::var("AXON_TRT_PROFILE_MIN_SHAPES").unwrap_or_else(|_| {
+        "input_ids:1x1,attention_mask:1x1,token_type_ids:1x1".to_string()
+    });
+    let trt_profile_opt = std::env::var("AXON_TRT_PROFILE_OPT_SHAPES").unwrap_or_else(|_| {
+        "input_ids:128x256,attention_mask:128x256,token_type_ids:128x256".to_string()
+    });
+    let trt_profile_max = std::env::var("AXON_TRT_PROFILE_MAX_SHAPES").unwrap_or_else(|_| {
+        "input_ids:256x512,attention_mask:256x512,token_type_ids:256x512".to_string()
+    });
     let provider = ep::TensorRT::default()
         .with_device_id(0)
         .with_max_workspace_size(workspace_size)
@@ -398,6 +424,9 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
         .with_builder_optimization_level(5)
         .with_build_heuristics(true)
         .with_auxiliary_streams(1)
+        .with_profile_min_shapes(trt_profile_min)
+        .with_profile_opt_shapes(trt_profile_opt)
+        .with_profile_max_shapes(trt_profile_max)
         .build();
 
     Ok(ExecutionProviderDispatch::from(provider).error_on_failure())

@@ -54,6 +54,11 @@ struct Args {
     /// REQ-AXO-257 sweep — comma-separated batch sizes; loads model
     /// once and runs sustained measurements at each. Empty = single-batch.
     sweep_batches: Vec<usize>,
+    /// REQ-AXO-262 / operator 2026-05-10 — when true (default), the
+    /// internal `embed_micro_batch_max_items` is aligned to each
+    /// sweep batch size so the bench truly measures the requested
+    /// batch (not the contaminated default 8-32 micro-batch slicing).
+    align_microbatch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +81,7 @@ impl Args {
         let mut warmup_secs: u64 = 30;
         let mut batch: usize = 64;
         let mut sweep_batches: Vec<usize> = Vec::new();
+        let mut align_microbatch: bool = true;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -88,6 +94,14 @@ impl Args {
                         .map(|s| s.trim().parse::<usize>())
                         .collect::<Result<Vec<_>, _>>()?;
                     i += 2;
+                }
+                "--no-align-microbatch" => {
+                    align_microbatch = false;
+                    i += 1;
+                }
+                "--align-microbatch" => {
+                    align_microbatch = true;
+                    i += 1;
                 }
                 "--sustained-secs" => {
                     sustained_secs = args
@@ -174,6 +188,7 @@ impl Args {
             warmup_secs,
             batch,
             sweep_batches,
+            align_microbatch,
         })
     }
 }
@@ -200,6 +215,13 @@ fn print_help() {
     println!("  --sweep-batches LIST comma-separated batch sizes (e.g. 128,160,180,220).");
     println!("                       Loads model ONCE, runs sustained at each — saves ~1min");
     println!("                       process-boot per batch on cold runs (operator 2026-05-10).");
+    println!("  --no-align-microbatch  REQ-AXO-262 escape hatch. By default the internal");
+    println!("                       embed_micro_batch_max_items is aligned to the external");
+    println!("                       --batch / --sweep-batches value so the bench actually");
+    println!("                       runs the requested batch size on the GPU. Disabling this");
+    println!("                       reverts to the contaminated default (each external batch");
+    println!("                       resliced into 8-32 micro-batches). Use only for legacy");
+    println!("                       comparisons or to demonstrate the contamination.");
 }
 
 fn run() -> anyhow::Result<()> {
@@ -318,26 +340,28 @@ fn pct(part: u64, total: u64) -> u64 {
 /// once, runs sustained at each batch size, emits CSV row per batch.
 fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
     eprintln!(
-        "📊 embedder-bench (sweep): batches={:?} warmup={}s sustained={}s force_gpu={} pool={} label={}",
+        "📊 embedder-bench (sweep): batches={:?} warmup={}s sustained={}s force_gpu={} pool={} label={} align_microbatch={}",
         args.sweep_batches,
         args.warmup_secs,
         args.sustained_secs,
         args.force_gpu,
         texts.len(),
-        args.label
+        args.label,
+        args.align_microbatch
     );
     eprintln!(
         "   Model loaded once — saves ~{}s vs separate runs.",
         args.sweep_batches.len().saturating_sub(1) * 60
     );
 
-    let results = axon_core::embedder::run_embedder_sustained_sweep(
+    let results = axon_core::embedder::run_embedder_sustained_sweep_aligned(
         &args.label,
         texts,
         &args.sweep_batches,
         args.warmup_secs,
         args.sustained_secs,
         args.force_gpu,
+        args.align_microbatch,
     )?;
 
     match args.output {

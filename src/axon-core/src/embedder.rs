@@ -2945,6 +2945,44 @@ pub fn run_embedder_sustained_sweep(
     sustained_secs: u64,
     force_gpu: bool,
 ) -> anyhow::Result<Vec<EmbeddingSustainedBench>> {
+    run_embedder_sustained_sweep_aligned(
+        label,
+        source_pool,
+        batch_sizes,
+        warmup_secs,
+        sustained_secs,
+        force_gpu,
+        true, // REQ-AXO-262 / operator 2026-05-10 — align micro-batch by default.
+    )
+}
+
+/// REQ-AXO-262 / operator 2026-05-10 — Sweep variant with explicit
+/// control over micro-batch alignment.
+///
+/// **Why this matters** : the legacy default of
+/// `AXON_EMBED_MICRO_BATCH_MAX_ITEMS = chunk_batch_size` (8-32) means
+/// that an external batch of 128 gets resliced into 4-16 micro-batches
+/// before reaching the embedder. Each micro-batch has its own
+/// padded seq_len, which triggers TensorRT engine recompile or
+/// kernel re-tuning per shape. The headline "batch=128 throughput"
+/// metric was therefore measuring ~8-32 chunks per actual GPU call,
+/// not 128. Forcing alignment lets us compare batch sizes meaningfully.
+///
+/// `align_microbatch=true` (default) sets
+/// `embed_micro_batch_max_items = batch_size` and
+/// `embed_micro_batch_max_total_tokens = batch_size * max_length`
+/// for each sweep step, then calls
+/// `runtime_tuning::reset_runtime_tuning_snapshot` so the embedder
+/// sees the new values. Restores the prior snapshot on exit.
+pub fn run_embedder_sustained_sweep_aligned(
+    label: &str,
+    source_pool: Vec<String>,
+    batch_sizes: &[usize],
+    warmup_secs: u64,
+    sustained_secs: u64,
+    force_gpu: bool,
+    align_microbatch: bool,
+) -> anyhow::Result<Vec<EmbeddingSustainedBench>> {
     if source_pool.is_empty() {
         anyhow::bail!("sweep bench requires at least one source text");
     }
@@ -2964,7 +3002,46 @@ pub fn run_embedder_sustained_sweep(
     let mut results = Vec::with_capacity(batch_sizes.len());
     let mut cycle_idx_carry: usize = 0;
 
+    let saved_microbatch_items = if align_microbatch {
+        Some(
+            current_runtime_tuning_snapshot()
+                .state
+                .embed_micro_batch_max_items,
+        )
+    } else {
+        None
+    };
+    let saved_microbatch_tokens = if align_microbatch {
+        Some(
+            current_runtime_tuning_snapshot()
+                .state
+                .embed_micro_batch_max_total_tokens,
+        )
+    } else {
+        None
+    };
+
     for &batch_size in batch_sizes {
+        if align_microbatch {
+            let max_length = configured_embedding_max_length();
+            let target_total_tokens =
+                batch_size.saturating_mul(max_length).max(max_length);
+            crate::runtime_tuning::update_runtime_tuning_state(
+                bootstrap_runtime_tuning_state_from_env(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(batch_size),
+                Some(target_total_tokens),
+                None,
+                None,
+            );
+        }
+
         let one = sustained_bench_with_loaded_model(
             label,
             &mut model,
@@ -2981,6 +3058,26 @@ pub fn run_embedder_sustained_sweep(
         cycle_idx_carry = cycle_idx_carry.saturating_add(one.total_chunks);
         results.push(one);
     }
+
+    // Restore the prior tuning values so we don't leak the override
+    // into other consumers of the singleton.
+    if let (Some(items), Some(tokens)) = (saved_microbatch_items, saved_microbatch_tokens) {
+        crate::runtime_tuning::update_runtime_tuning_state(
+            bootstrap_runtime_tuning_state_from_env(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(items),
+            Some(tokens),
+            None,
+            None,
+        );
+    }
+
     Ok(results)
 }
 
