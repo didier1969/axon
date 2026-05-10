@@ -50,12 +50,22 @@ impl OrtGpuFirstTextEmbedding {
         let snapshot_dir = runtime_embedding_snapshot_dir()?;
         let model_path = snapshot_dir.join("onnx").join("model.onnx");
         let tokenizer = load_runtime_embedding_tokenizer()?;
+        // REQ-AXO-262 trial — operator authorized 2026-05-10. Memory
+        // pattern previously disabled (likely workaround for dynamic
+        // batch sizes that pre-dated the IoBinding-with-fixed-shape
+        // path). Sustained bench shows periodic slow iterations
+        // every 3-5 fast iters (allocator scrub hypothesis). Enable
+        // memory pattern to let ORT pre-allocate output buffers and
+        // reduce allocator churn.
+        let memory_pattern_enabled = ort_memory_pattern_enabled_from_env(
+            std::env::var("AXON_ORT_MEMORY_PATTERN").ok().as_deref(),
+        );
         let mut builder = Session::builder()
             .map_err(|err| anyhow!("failed to create ORT session builder: {err}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|err| anyhow!("failed to set ORT optimization level: {err}"))?
-            .with_memory_pattern(false)
-            .map_err(|err| anyhow!("failed to disable ORT memory pattern: {err}"))?;
+            .with_memory_pattern(memory_pattern_enabled)
+            .map_err(|err| anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}"))?;
 
         if use_cuda {
             // Default: TensorRT EP first, fall back to CUDA EP if TensorRT init fails.
@@ -300,6 +310,24 @@ impl OrtGpuFirstTextEmbedding {
 
 
 
+
+/// REQ-AXO-262 — pure helper to parse `AXON_ORT_MEMORY_PATTERN` env
+/// override. Default = true (memory pattern enabled). Accepts `0`,
+/// `false`, `False`, `FALSE` (any case) as the disabled marker.
+/// Sibling-tested in `gpu_backend_tests.rs` per GUI-PRO-001.
+pub(super) fn ort_memory_pattern_enabled_from_env(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let trimmed = v.trim();
+            !(trimmed == "0" || trimmed.eq_ignore_ascii_case("false"))
+        }
+        None => true,
+    }
+}
+
+#[cfg(test)]
+#[path = "gpu_backend_tests.rs"]
+mod gpu_backend_tests;
 
 pub(super) fn abort_gpu_embed_if_vram_summit_reached() -> AnyhowResult<()> {
     if gpu_recycle_immediate_required(current_gpu_memory_snapshot(), 0) {
