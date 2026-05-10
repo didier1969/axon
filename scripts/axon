@@ -36,6 +36,7 @@ Commands:
   reindex-project [args...] Reindex one project with before/after noise evaluation
   publish-memgraph [args...] Publish human-only IST/SOLL graph projection as versioned Parquet
   memgraph [args...]         Manage human-only Memgraph projection runtime/import
+  clean-tmp [args...]      Sweep leaked /tmp test fixtures (REQ-AXO-255). Auto-runs before `start`.
 
 Examples:
   ./scripts/axon-live status
@@ -166,6 +167,14 @@ case "$cmd" in
     exec bash "$SCRIPT_DIR/setup-tensorrt.sh" "$@"
     ;;
   start)
+    # REQ-AXO-255 / DEC-AXO-076: cleanup hook — sweep leaked /tmp fixtures
+    # before launching runtime. Non-blocking (axon_cleanup_tmp_fixtures_safe
+    # never returns non-zero). Skipped when AXON_SKIP_TMP_CLEANUP=1.
+    if [[ "${AXON_SKIP_TMP_CLEANUP:-0}" != "1" ]]; then
+      # shellcheck source=lib/cleanup-tmp-fixtures.sh
+      source "$SCRIPT_DIR/lib/cleanup-tmp-fixtures.sh"
+      axon_cleanup_tmp_fixtures_safe --quiet || true
+    fi
     exec bash "$SCRIPT_DIR/start.sh" "$@"
     ;;
   stop)
@@ -263,6 +272,13 @@ EOF
     ;;
   memgraph)
     exec bash "$SCRIPT_DIR/memgraph-projection.sh" "$@"
+    ;;
+  clean-tmp)
+    # REQ-AXO-255 standalone verb — direct invocation with options forwarded.
+    # shellcheck source=lib/cleanup-tmp-fixtures.sh
+    source "$SCRIPT_DIR/lib/cleanup-tmp-fixtures.sh"
+    axon_cleanup_tmp_fixtures "$@"
+    exit $?
     ;;
   -h|--help|help)
     usage
