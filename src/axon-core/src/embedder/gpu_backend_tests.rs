@@ -40,37 +40,38 @@ fn ort_memory_pattern_empty_string_enables() {
     assert!(ort_memory_pattern_enabled_from_env(Some("")));
 }
 
-// REQ-AXO-262 — bind_output_per_iter parser tests.
+// REQ-AXO-262 / VAL-AXO-055 — bind_output_per_iter parser tests.
+// Default flipped to TRUE after empirical regression (see VAL-AXO-055).
 
 #[test]
-fn ort_bind_output_per_iter_default_is_false() {
-    assert!(!ort_bind_output_per_iter_from_env(None));
+fn ort_bind_output_per_iter_default_is_true() {
+    assert!(ort_bind_output_per_iter_from_env(None));
 }
 
 #[test]
-fn ort_bind_output_per_iter_one_enables() {
-    assert!(ort_bind_output_per_iter_from_env(Some("1")));
-}
-
-#[test]
-fn ort_bind_output_per_iter_true_case_insensitive() {
-    assert!(ort_bind_output_per_iter_from_env(Some("true")));
-    assert!(ort_bind_output_per_iter_from_env(Some("True")));
-    assert!(ort_bind_output_per_iter_from_env(Some("TRUE")));
-}
-
-#[test]
-fn ort_bind_output_per_iter_other_values_disable() {
+fn ort_bind_output_per_iter_zero_disables() {
     assert!(!ort_bind_output_per_iter_from_env(Some("0")));
+}
+
+#[test]
+fn ort_bind_output_per_iter_false_case_insensitive() {
     assert!(!ort_bind_output_per_iter_from_env(Some("false")));
-    assert!(!ort_bind_output_per_iter_from_env(Some("yes")));
-    assert!(!ort_bind_output_per_iter_from_env(Some("on")));
-    assert!(!ort_bind_output_per_iter_from_env(Some("")));
+    assert!(!ort_bind_output_per_iter_from_env(Some("False")));
+    assert!(!ort_bind_output_per_iter_from_env(Some("FALSE")));
+}
+
+#[test]
+fn ort_bind_output_per_iter_other_values_enable() {
+    assert!(ort_bind_output_per_iter_from_env(Some("1")));
+    assert!(ort_bind_output_per_iter_from_env(Some("true")));
+    assert!(ort_bind_output_per_iter_from_env(Some("yes")));
+    assert!(ort_bind_output_per_iter_from_env(Some("on")));
+    assert!(ort_bind_output_per_iter_from_env(Some("")));
 }
 
 #[test]
 fn ort_bind_output_per_iter_trims_whitespace() {
-    assert!(ort_bind_output_per_iter_from_env(Some(" 1 ")));
-    assert!(ort_bind_output_per_iter_from_env(Some(" true ")));
     assert!(!ort_bind_output_per_iter_from_env(Some(" 0 ")));
+    assert!(!ort_bind_output_per_iter_from_env(Some(" false ")));
+    assert!(ort_bind_output_per_iter_from_env(Some(" 1 ")));
 }

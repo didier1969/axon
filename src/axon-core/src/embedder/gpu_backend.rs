@@ -135,13 +135,12 @@ impl OrtGpuFirstTextEmbedding {
             )
             .map_err(|err| anyhow!("failed to create CPU output memory info: {err}"))?
         };
-        // REQ-AXO-262 / VAL-AXO-054 follow-up — bind output ONCE at
-        // session init. Per ORT IoBinding doc: "the same output buffer
-        // will be reused across runs". Previously rebound per-iter
-        // (clear_outputs + bind_output_to_device), which appears to
-        // trigger the periodic slow-iter pattern via allocator scrub.
-        // Set AXON_ORT_BIND_OUTPUT_PER_ITER=1 to revert to the legacy
-        // behavior for A/B comparison.
+        // REQ-AXO-262 / VAL-AXO-054 follow-up — keep the per-iter
+        // re-bind by default (proven baseline 118-134 ch/s @ batch=64).
+        // The bind-once experiment regressed throughput (78 ch/s) by
+        // aggregating allocator stress into bigger slow-iter bursts.
+        // Path retained behind AXON_ORT_BIND_OUTPUT_PER_ITER=0 for
+        // future A/B work. See VAL-AXO-055.
         let bind_output_per_iter = ort_bind_output_per_iter_from_env(
             std::env::var("AXON_ORT_BIND_OUTPUT_PER_ITER").ok().as_deref(),
         );
@@ -340,17 +339,27 @@ impl OrtGpuFirstTextEmbedding {
 
 
 /// REQ-AXO-262 — pure helper to parse
-/// `AXON_ORT_BIND_OUTPUT_PER_ITER` env override. Default = false
-/// (output bound ONCE at session init, reused across runs). Accepts
-/// `1`, `true`, `True` (any case) as the explicit-enable marker.
-/// Other values map to default false.
+/// `AXON_ORT_BIND_OUTPUT_PER_ITER` env override.
+///
+/// **Default = true** (re-bind output per iteration, the legacy
+/// behaviour). Empirical measurement 2026-05-10 (test-bind-once-b64)
+/// showed that binding-once **regressed** throughput from 118-134 ch/s
+/// to 78 ch/s @ batch=64: slow-iter frequency dropped (1/8-15 vs
+/// 1/3-5) but each slow iter became 2-3x more expensive (~5-7s vs ~3s).
+/// Net: aggregated allocator stress hurts more than it helps. Path
+/// kept behind the env knob for further A/B experimentation but the
+/// default reverts to the proven baseline.
+///
+/// Accepts `0`, `false`, `False`, `FALSE` (case-insensitive) as the
+/// explicit-disable marker (i.e. opt-in to bind-once). All other
+/// values keep the default true (re-bind per iter).
 pub(super) fn ort_bind_output_per_iter_from_env(raw: Option<&str>) -> bool {
     match raw {
         Some(v) => {
             let trimmed = v.trim();
-            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            !(trimmed == "0" || trimmed.eq_ignore_ascii_case("false"))
         }
-        None => false,
+        None => true,
     }
 }
 
