@@ -326,30 +326,13 @@ impl McpServer {
             if !anchored_candidates.is_empty() { return anchored_candidates; }
         }
 
-        // DEC-AXO-073 L.3: when the Parquet side-store is active, semantic
-        // candidates pull the embedding column from the Parquet partition
-        // tree rather than the DuckDB ChunkEmbedding column. The JOIN
-        // shape is preserved (same predicate columns, same source_hash
-        // freshness check) so all downstream scoring logic is unchanged.
-        // Cache disabled => existing DuckDB column path (commit G + H.2).
-        let parquet_active = crate::embedder::parquet_embedding_store::parquet_store_enabled();
-        let parquet_glob = if parquet_active {
-            crate::embedder::parquet_embedding_store::default_base_dir()
-                .join("**/*.parquet")
-                .to_string_lossy()
-                .replace('\'', "''")
-        } else {
-            String::new()
-        };
-
         let query = if let Some(embedding) = semantic {
             // MIL-AXO-015 P6 read-side: cosine dialect swap. Under PG,
             // ChunkEmbedding.embedding is `vector(N)` (pgvector) and the
             // distance operator is `<=>`. Under DuckDB the legacy
             // `array_cosine_distance(... CAST(... AS FLOAT[N]))` form is
-            // kept. Parquet side-store (DEC-AXO-073) only fires on
-            // DuckDB — under PG the canonical ChunkEmbedding JOIN is
-            // always used.
+            // kept. (REQ-AXO-271 slice 1, 2026-05-10: the Parquet
+            // side-store DuckDB-only fast path was removed.)
             let is_pg = self.graph_store.is_postgres_backend();
             let (embed_join, cosine_expr) = if is_pg {
                 let join = format!(
@@ -373,17 +356,10 @@ impl McpServer {
                 (join, format!("(ce.embedding <=> {vec_lit})"))
             } else {
                 let vector = format!("{embedding:?}");
-                let join = if parquet_active {
-                    format!(
-                        "JOIN parquet_scan('{glob}') ce ON ce.chunk_id = c.id AND ce.source_hash = c.content_hash",
-                        glob = parquet_glob
-                    )
-                } else {
-                    format!(
-                        "JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash",
-                        model_id = CHUNK_MODEL_ID
-                    )
-                };
+                let join = format!(
+                    "JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash",
+                    model_id = CHUNK_MODEL_ID
+                );
                 (
                     join,
                     format!(

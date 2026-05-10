@@ -60,6 +60,8 @@ Broken evidence cleanup (REQ-AXO-254 closure of MIL-AXO-015 wave G followup, 202
 
 Vector lane pipeline mode (REQ-AXO-270 Phase 1, 2026-05-10): `AXON_VECTOR_PIPELINE_STAGES` selects the embedder lane shape — unset / `1` (default) keeps DEC-AXO-070 single-loop; `3` activates the Phase 1 skeleton (Producer / Embedder / Persister stage stubs that warn + heartbeat only — NO chunks are embedded, runtime parks in a 5s sleep). Use `3` only for Phase 2 wiring tests and Phase 3 benches; production keeps the default. Phase 2 fills the stages; Phase 2 AC2.7 mandates the Persister bulk-writes ≥1000 rows per DB transaction (one multi-row INSERT/COPY per tick rather than per-chunk inserts) — operator directive 2026-05-10, aligns with REQ-AXO-244 `execute_batch` path.
 
+DuckDB excision (REQ-AXO-271, 2026-05-10): operator directive "supprime tous ces éléments de DuckDB". Slice 1 removed the DuckDB-era Parquet side-stores — `embedder/parquet_embedding_store.rs` (DEC-AXO-073), `graph_ingestion/parquet_chunk_content_store.rs` + `graph_ingestion/chunk_content_archiver.rs` (DEC-AXO-074). `AXON_PARQUET_EMBEDDING_STORE_ENABLED` and `AXON_PARQUET_CHUNK_CONTENT_ENABLED` env vars are now no-ops. `mcp__retrieve_context` semantic candidate JOIN goes through `ChunkEmbedding` directly on both backends (PG = pgvector `<=>`, DuckDB = `array_cosine_distance`). Future slices collapse `is_postgres_backend()` branches → PG-only.
+
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
 2. Follow `operator_guidance.follow_up_tools`

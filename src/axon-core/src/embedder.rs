@@ -59,8 +59,6 @@ mod gpu_policy;
 mod gpu_telemetry;
 #[path = "embedder/inline_embed.rs"]
 pub(crate) mod inline_embed;
-#[path = "embedder/parquet_embedding_store.rs"]
-pub(crate) mod parquet_embedding_store;
 #[path = "embedder/provider_contract.rs"]
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]
@@ -1157,35 +1155,11 @@ impl SemanticWorkerPool {
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
 
-        // DEC-AXO-073 L.1: install Parquet embedding side-store singleton.
-        // Disabled by default; vector_lane falls through to DuckDB INSERT.
-        // Activated via AXON_PARQUET_EMBEDDING_STORE_ENABLED=true.
-        let _ = parquet_embedding_store::install(Arc::new(
-            parquet_embedding_store::ParquetEmbeddingStore::new(
-                parquet_embedding_store::default_base_dir(),
-            ),
-        ));
-
-        // DEC-AXO-074 Direction A: install Parquet chunk-content side-store
-        // singleton + spawn background archiver. Archiver is a no-op when
-        // env disabled — it sleeps every 30s and finds nothing to archive
-        // because writes still go to DuckDB.content (no migration is
-        // initiated unless the operator opts in via
-        // AXON_PARQUET_CHUNK_CONTENT_ENABLED=true).
-        let chunk_content_store = Arc::new(
-            crate::graph_ingestion::parquet_chunk_content_store::ParquetChunkContentStore::new(
-                crate::graph_ingestion::parquet_chunk_content_store::default_base_dir(),
-            ),
-        );
-        let _ = crate::graph_ingestion::parquet_chunk_content_store::install(
-            Arc::clone(&chunk_content_store),
-        );
-        if crate::graph_ingestion::parquet_chunk_content_store::parquet_chunk_content_enabled() {
-            crate::graph_ingestion::chunk_content_archiver::spawn(
-                Arc::clone(&graph_store),
-                chunk_content_store,
-            );
-        }
+        // REQ-AXO-271 slice 1 (2026-05-10): the DEC-AXO-073 Parquet
+        // embedding side-store + DEC-AXO-074 Parquet chunk-content
+        // archiver were removed. Both were DuckDB column-store-cost
+        // workarounds, redundant under the post-MIL-AXO-015 PG +
+        // pgvector stack.
 
         // REQ-AXO-193 direction E (E.2): install async-writer dispatcher
         // singleton. Disabled by default; producers fall through to the
