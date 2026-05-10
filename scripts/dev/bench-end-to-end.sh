@@ -29,19 +29,22 @@ usage() {
 bench-end-to-end.sh — REQ-AXO-261 (Bench 4 of the 4-bench framework)
 
 Usage:
-  bench-end-to-end.sh --run --scope <path> [--duration N] [--label L] [--postgres]
+  bench-end-to-end.sh --run --scope <path> [--duration N] [--label L]
   bench-end-to-end.sh --csv <existing-probe-csv> [--label L]
 
 Run mode:
   --run                Run a fresh probe via scripts/dev/probe.sh
   --scope PATH         Watch dir for the probe (forwarded to probe.sh)
   --duration N         Probe duration in seconds (default 90)
-  --postgres           Use PG backend (forwarded as --postgres)
   --label L            Run label (default 'end-to-end')
 
 Summarize-only mode:
   --csv PATH           Existing probe CSV to summarize
   --label L            Run label
+
+REQ-AXO-271 slice 6 (2026-05-10): PG is the only supported backend.
+The --postgres flag is accepted as a no-op for backwards compatibility
+and will be deleted once existing CI invocations stop passing it.
 
 Output:
   - dev-bench-end-to-end-<UTC>.summary.csv
@@ -53,7 +56,6 @@ MODE=""
 SCOPE=""
 DURATION=90
 LABEL="end-to-end"
-POSTGRES_ARG=()
 EXISTING_CSV=""
 
 while [[ $# -gt 0 ]]; do
@@ -63,7 +65,7 @@ while [[ $# -gt 0 ]]; do
         --scope) SCOPE="$2"; shift 2 ;;
         --duration) DURATION="$2"; shift 2 ;;
         --label) LABEL="$2"; shift 2 ;;
-        --postgres) POSTGRES_ARG+=("--postgres"); shift ;;
+        --postgres) shift ;;  # REQ-AXO-271 slice 6: accepted as no-op.
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
     esac
@@ -86,8 +88,7 @@ if [[ "$MODE" == "run" ]]; then
     bash "$SCRIPT_DIR/probe.sh" \
         --scope "$SCOPE" \
         --duration "$DURATION" \
-        --tag "${LABEL}-${TS_PROBE}" \
-        ${POSTGRES_ARG[@]+"${POSTGRES_ARG[@]}"}
+        --tag "${LABEL}-${TS_PROBE}"
     EXISTING_CSV="$ROOT_DIR/dev-probe-${LABEL}-${TS_PROBE}-${TS_PROBE}.csv"
     # probe.sh names file dev-probe-<TAG>-<TS>.csv where TAG already
     # carries our timestamp; locate the most recent matching file.

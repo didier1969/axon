@@ -12,7 +12,10 @@
 # Usage:
 #   scripts/dev/probe.sh --scope <path> --duration <sec> [--fresh]
 #                        [--workers <n>] [--tag <name>] [--no-stop]
-#                        [--postgres]
+#
+# REQ-AXO-271 slice 6 (2026-05-10): PG is the only supported backend.
+# --postgres flag is accepted as a no-op for backwards compatibility
+# and will be deleted once existing CI invocations stop passing it.
 #
 # Output: dev-probe-<tag>-<UTC>.csv with columns
 #   t_seconds,files,chunks_total,chunks_per_sec,ready_queue,
@@ -27,7 +30,6 @@ WORKERS=""
 TAG=""
 NO_STOP=0
 SAMPLE_INTERVAL=5
-POSTGRES=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,11 +40,11 @@ while [[ $# -gt 0 ]]; do
         --tag) TAG="$2"; shift 2 ;;
         --no-stop) NO_STOP=1; shift ;;
         --interval) SAMPLE_INTERVAL="$2"; shift 2 ;;
-        # REQ-AXO-237: --postgres opts the dev indexer onto AXON_DB_BACKEND=postgres
-        # for benchmarking the PG path against the DuckDB baseline. Requires
-        # AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL already exported in
-        # the shell so the indexer can connect.
-        --postgres) POSTGRES=1; shift ;;
+        # REQ-AXO-271 slice 6 (2026-05-10): --postgres flag retired —
+        # PG is the only supported backend. The flag is accepted as a
+        # no-op for one release window so existing CI invocations don't
+        # break; it will be deleted entirely once that window closes.
+        --postgres) shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -25
             exit 0
@@ -96,19 +98,21 @@ fi
 # Start dev only if not already running with the desired scope
 DEV_PID="$(pgrep -f '[c]argo-target/debug/axon-indexer' | head -1 || true)"
 if [[ -z "$DEV_PID" ]]; then
+    # REQ-AXO-271 slice 6 (2026-05-10): PG is the only supported backend.
+    # AXON_DB_BACKEND=postgres is always set; AXON_LIVE_DATABASE_URL
+    # (or AXON_DEV_DATABASE_URL) must be exported by the shell — devenv
+    # exports both by default.
+    if [[ -z "${AXON_LIVE_DATABASE_URL:-}" && -z "${AXON_DEV_DATABASE_URL:-}" ]]; then
+        echo "❌ probe.sh requires AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL exported (run inside devenv shell)" >&2
+        exit 2
+    fi
     EXPORTS=(
         "AXON_WATCH_DIR=$SCOPE"
         "AXON_PROJECTS_ROOT=$SCOPE"
+        "AXON_DB_BACKEND=postgres"
     )
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
-    fi
-    if [[ "$POSTGRES" == "1" ]]; then
-        EXPORTS+=("AXON_DB_BACKEND=postgres")
-        if [[ -z "${AXON_LIVE_DATABASE_URL:-}" && -z "${AXON_DEV_DATABASE_URL:-}" ]]; then
-            echo "❌ --postgres requires AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL exported" >&2
-            exit 2
-        fi
     fi
     # Default to --tensorrt: the CUDA EP path falls back to a 30+ min
     # nixpkgs build if the local manifest is stale, which silently kills
