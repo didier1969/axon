@@ -96,8 +96,12 @@ in
     # Live and dev share the dev devenv-managed PG (single instance, two
     # DBs). Production deployments override these via client-supplied
     # DATABASE_URLs (CPT-AXO-042).
-    AXON_LIVE_DATABASE_URL = "postgres://localhost:44144/axon_live";
-    AXON_DEV_DATABASE_URL = "postgres://localhost:44144/axon_dev";
+    # REQ-AXO-271 slice 6 follow-up (2026-05-10): URLs explicitly carry
+    # the `axon` user — PostgreSQL rejects user-less URLs because the OS
+    # user `dstadel` is not a PG role. The live brain already runs with
+    # this exact form (env captured from a live process).
+    AXON_LIVE_DATABASE_URL = "postgres://axon@127.0.0.1:44144/axon_live";
+    AXON_DEV_DATABASE_URL = "postgres://axon@127.0.0.1:44144/axon_dev";
     # PGHOST used by psql CLI and sqlx-cli for hand operations.
     # PGPORT is auto-exported by the devenv postgres module from
     # services.postgres.port (int). Declaring it again here as a string

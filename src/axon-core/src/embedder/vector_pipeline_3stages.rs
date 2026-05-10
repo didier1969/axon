@@ -46,9 +46,12 @@ const ENV_FLAG: &str = "AXON_VECTOR_PIPELINE_STAGES";
 const PERSISTER_BULK_FLUSH_MIN_ROWS: usize = 1024;
 
 /// Maximum time the Persister will sit on a partial buffer before
-/// flushing anyway. Bounded so we never starve the file finalize step
-/// when the embed queue is briefly empty.
-const PERSISTER_BULK_FLUSH_MAX_LINGER: Duration = Duration::from_millis(500);
+/// flushing anyway. REQ-AXO-270 Phase 4 (2026-05-10): reduced from
+/// 500ms to 100ms to eliminate the dead windows observed in the Phase
+/// 3 bench. Combined with the EndOfClaimCycle-barrier removal, the
+/// pipeline now flushes 10×/s on partial buffers instead of waiting
+/// for cycle boundaries.
+const PERSISTER_BULK_FLUSH_MAX_LINGER: Duration = Duration::from_millis(100);
 
 /// Bounded depth for inter-stage channels. Small (4) so a stalled
 /// downstream stage applies backpressure quickly rather than buffering
@@ -69,22 +72,16 @@ pub(crate) fn vector_pipeline_mode_from_env() -> VectorPipelineMode {
     }
 }
 
-/// AC1.1 — Producer→Embedder payload. A real prepared batch carrying
-/// pre-tokenised texts plus the file-level work units to mark done at
-/// the end of the claim cycle. Variants fold the cycle boundary into
-/// the channel so we never need a side-channel ack.
-pub(crate) enum PreparedMsg {
-    /// One prepared chunk batch ready to embed. May carry zero work
-    /// items (no chunks left after fetch) — in that case the persister
-    /// still needs to learn about the immediate_completed files.
-    Work {
-        prepared: PreparedVectorEmbedBatch,
-        completed_immediate: Vec<FileVectorizationWork>,
-    },
-    /// The producer is about to fetch a fresh file batch. Tells the
-    /// downstream stages "flush whatever is in flight and finalize the
-    /// completed files for the claim cycle just ended".
-    EndOfClaimCycle,
+/// AC1.1 — Producer→Embedder payload. A prepared batch carrying
+/// pre-tokenised texts plus the file-level work units to mark done.
+///
+/// REQ-AXO-270 Phase 4 (2026-05-10): the prior `EndOfClaimCycle` variant
+/// was removed. The persister no longer waits for cycle boundaries to
+/// finalize files — it marks done on every successful flush. Channel
+/// disconnect handles shutdown drain.
+pub(crate) struct PreparedMsg {
+    pub(crate) prepared: PreparedVectorEmbedBatch,
+    pub(crate) completed_immediate: Vec<FileVectorizationWork>,
 }
 
 /// AC1.1 — Embedder→Persister payload.
@@ -102,9 +99,6 @@ pub(crate) enum EmbeddedMsg {
         reason: String,
         completed_immediate: Vec<FileVectorizationWork>,
     },
-    /// Marker: claim cycle boundary. The persister flushes its buffer
-    /// and finalizes the accumulated completed files.
-    EndOfClaimCycle,
 }
 
 /// AC1.1 — internal accounting only; the persister never sends one
@@ -262,15 +256,11 @@ fn run_producer_stage(
             return;
         }
 
-        // Boundary: tells the persister to flush + mark_done for files
-        // accumulated during this claim cycle.
-        if try_send_or_disconnect(&prepared_tx, PreparedMsg::EndOfClaimCycle).is_err() {
-            warn!(
-                "Vector pipeline [{}/producer]: downstream gone before end-of-cycle marker, exiting",
-                worker_idx
-            );
-            return;
-        }
+        // REQ-AXO-270 Phase 4 (2026-05-10): no EndOfClaimCycle barrier.
+        // The producer immediately loops back to fetch the next claim;
+        // the persister flushes on its size + LINGER triggers and
+        // finalizes files on every successful flush. Channel disconnect
+        // (above) handles shutdown drain.
     }
 }
 
@@ -365,7 +355,7 @@ fn run_producer_inner_loop(
             let completed_immediate = prepared.immediate_completed.clone();
             if try_send_or_disconnect(
                 prepared_tx,
-                PreparedMsg::Work {
+                PreparedMsg {
                     prepared,
                     completed_immediate,
                 },
@@ -378,15 +368,14 @@ fn run_producer_inner_loop(
             || !prepared.finalize_after_success.is_empty()
         {
             // No texts to embed but file-level finalize work pending.
-            // finalize_after_success is empty when texts is empty in
-            // practice, but fold it in defensively — the persister will
-            // mark these files done once the EndOfClaimCycle marker
-            // flushes.
+            // The persister will mark these files done on the next
+            // flush (or directly if updates is empty — REQ-AXO-270
+            // Phase 4 short-circuit).
             let mut completed_immediate = std::mem::take(&mut prepared.immediate_completed);
             completed_immediate.extend(std::mem::take(&mut prepared.finalize_after_success));
             if try_send_or_disconnect(
                 prepared_tx,
-                PreparedMsg::Work {
+                PreparedMsg {
                     prepared: empty_prepared_marker(),
                     completed_immediate,
                 },
@@ -475,71 +464,63 @@ fn run_embedder_stage(
             }
         };
 
-        match msg {
-            PreparedMsg::Work {
-                prepared,
-                completed_immediate,
-            } => {
-                if prepared.work_items.is_empty() {
-                    // Forward completed_immediate as a no-op embed batch.
-                    if embedded_tx
-                        .send(EmbeddedMsg::Ok {
-                            updates: Vec::new(),
-                            completed_immediate,
-                            completed_after_success: Vec::new(),
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                    continue;
-                }
+        let PreparedMsg {
+            prepared,
+            completed_immediate,
+        } = msg;
+        if prepared.work_items.is_empty() {
+            // Forward completed_immediate as a no-op embed batch.
+            if embedded_tx
+                .send(EmbeddedMsg::Ok {
+                    updates: Vec::new(),
+                    completed_immediate,
+                    completed_after_success: Vec::new(),
+                })
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
 
-                let touched = prepared.touched_works.clone();
-                let completed_after_success = prepared.finalize_after_success.clone();
+        let touched = prepared.touched_works.clone();
+        let completed_after_success = prepared.finalize_after_success.clone();
 
-                match model.embed_prepared_batch_with_breakdown(&prepared) {
-                    Ok((embeddings, _, _, _, _)) => {
-                        service_guard::record_vector_lane_success();
-                        let updates: Vec<(String, String, Vec<f32>)> = prepared
-                            .work_items
-                            .iter()
-                            .zip(embeddings.iter())
-                            .map(|(item, emb)| {
-                                (item.chunk_id.clone(), item.content_hash.clone(), emb.clone())
-                            })
-                            .collect();
-                        if embedded_tx
-                            .send(EmbeddedMsg::Ok {
-                                updates,
-                                completed_immediate,
-                                completed_after_success,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Vector pipeline [{}/embedder]: embed failed: {:?}",
-                            worker_idx, e
-                        );
-                        if embedded_tx
-                            .send(EmbeddedMsg::Failed {
-                                touched,
-                                reason: format!("embed: {:?}", e),
-                                completed_immediate,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
+        match model.embed_prepared_batch_with_breakdown(&prepared) {
+            Ok((embeddings, _, _, _, _)) => {
+                service_guard::record_vector_lane_success();
+                let updates: Vec<(String, String, Vec<f32>)> = prepared
+                    .work_items
+                    .iter()
+                    .zip(embeddings.iter())
+                    .map(|(item, emb)| {
+                        (item.chunk_id.clone(), item.content_hash.clone(), emb.clone())
+                    })
+                    .collect();
+                if embedded_tx
+                    .send(EmbeddedMsg::Ok {
+                        updates,
+                        completed_immediate,
+                        completed_after_success,
+                    })
+                    .is_err()
+                {
+                    return;
                 }
             }
-            PreparedMsg::EndOfClaimCycle => {
-                if embedded_tx.send(EmbeddedMsg::EndOfClaimCycle).is_err() {
+            Err(e) => {
+                error!(
+                    "Vector pipeline [{}/embedder]: embed failed: {:?}",
+                    worker_idx, e
+                );
+                if embedded_tx
+                    .send(EmbeddedMsg::Failed {
+                        touched,
+                        reason: format!("embed: {:?}", e),
+                        completed_immediate,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -560,7 +541,15 @@ fn run_persister_stage(
     );
 
     let mut buffer: Vec<(String, String, Vec<f32>)> = Vec::with_capacity(PERSISTER_BULK_FLUSH_MIN_ROWS);
-    let mut pending_completed: Vec<FileVectorizationWork> = Vec::new();
+    // REQ-AXO-270 Phase 4: two-tier finalize queue.
+    //   `ready_to_finalize` = files whose chunks are already persisted
+    //     (immediate-completed or post-flush) — safe to mark_done at any
+    //     time.
+    //   `waiting_on_flush` = files whose last chunks are still in
+    //     `buffer` — will move to ready_to_finalize the next time
+    //     `buffer` is flushed.
+    let mut ready_to_finalize: Vec<FileVectorizationWork> = Vec::new();
+    let mut waiting_on_flush: Vec<FileVectorizationWork> = Vec::new();
     let mut last_flush = Instant::now();
 
     loop {
@@ -585,9 +574,10 @@ fn run_persister_stage(
                 );
                 if !buffer.is_empty() {
                     flush_buffer(worker_idx, &graph_store, &mut buffer);
+                    ready_to_finalize.extend(waiting_on_flush.drain(..));
                 }
-                if !pending_completed.is_empty() {
-                    finalize_completed(worker_idx, &graph_store, &mut pending_completed);
+                if !ready_to_finalize.is_empty() {
+                    finalize_completed(worker_idx, &graph_store, &mut ready_to_finalize);
                 }
                 return;
             }
@@ -600,22 +590,15 @@ fn run_persister_stage(
                     completed_immediate,
                     completed_after_success,
                 } => {
-                    pending_completed.extend(completed_immediate);
-                    if !updates.is_empty() {
-                        buffer.extend(updates);
-                        // The completed_after_success files are only
-                        // safe to mark done after THEIR rows have been
-                        // persisted. With per-batch ordering the rows
-                        // entering the buffer in this iteration are
-                        // exactly the ones to await — accumulate the
-                        // files into pending_completed only after the
-                        // next flush.
-                        pending_completed.extend(completed_after_success);
+                    ready_to_finalize.extend(completed_immediate);
+                    if updates.is_empty() {
+                        // No rows to persist — completed_after_success
+                        // files have no chunks pending, finalize them
+                        // on the next loop iteration.
+                        ready_to_finalize.extend(completed_after_success);
                     } else {
-                        // No rows to persist — nothing depends on a
-                        // future flush, finalize immediately on next
-                        // cycle.
-                        pending_completed.extend(completed_after_success);
+                        buffer.extend(updates);
+                        waiting_on_flush.extend(completed_after_success);
                     }
                 }
                 EmbeddedMsg::Failed {
@@ -631,16 +614,7 @@ fn run_persister_stage(
                             worker_idx, e
                         );
                     }
-                    pending_completed.extend(completed_immediate);
-                }
-                EmbeddedMsg::EndOfClaimCycle => {
-                    if !buffer.is_empty() {
-                        flush_buffer(worker_idx, &graph_store, &mut buffer);
-                        last_flush = Instant::now();
-                    }
-                    if !pending_completed.is_empty() {
-                        finalize_completed(worker_idx, &graph_store, &mut pending_completed);
-                    }
+                    ready_to_finalize.extend(completed_immediate);
                 }
             }
         }
@@ -652,6 +626,16 @@ fn run_persister_stage(
         if should_flush_size || should_flush_linger {
             flush_buffer(worker_idx, &graph_store, &mut buffer);
             last_flush = Instant::now();
+            // Phase 4 — every successful flush promotes waiting files
+            // to the ready set so the producer/embedder don't stall on
+            // a cycle barrier.
+            ready_to_finalize.extend(waiting_on_flush.drain(..));
+        }
+
+        // Phase 4 — finalize on EVERY iteration where the ready set
+        // is non-empty. No EndOfClaimCycle barrier.
+        if !ready_to_finalize.is_empty() {
+            finalize_completed(worker_idx, &graph_store, &mut ready_to_finalize);
         }
     }
 }

@@ -99,9 +99,11 @@ fi
 DEV_PID="$(pgrep -f '[c]argo-target/debug/axon-indexer' | head -1 || true)"
 if [[ -z "$DEV_PID" ]]; then
     # REQ-AXO-271 slice 6 (2026-05-10): PG is the only supported backend.
-    # AXON_DB_BACKEND=postgres is always set; AXON_LIVE_DATABASE_URL
-    # (or AXON_DEV_DATABASE_URL) must be exported by the shell — devenv
-    # exports both by default.
+    # AXON_DB_BACKEND=postgres is always set. devenv.nix sets URLs as
+    # `postgres://localhost:44144/axon_{dev,live}` (no user), which PG
+    # rejects because the OS user `dstadel` is not a PG role — the
+    # production stack uses `axon` user. Override the URL here so the
+    # bench connects without depending on devenv-side user injection.
     if [[ -z "${AXON_LIVE_DATABASE_URL:-}" && -z "${AXON_DEV_DATABASE_URL:-}" ]]; then
         echo "❌ probe.sh requires AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL exported (run inside devenv shell)" >&2
         exit 2
@@ -110,6 +112,13 @@ if [[ -z "$DEV_PID" ]]; then
         "AXON_WATCH_DIR=$SCOPE"
         "AXON_PROJECTS_ROOT=$SCOPE"
         "AXON_DB_BACKEND=postgres"
+        "AXON_DEV_DATABASE_URL=postgres://axon@127.0.0.1:44144/axon_dev"
+        # REQ-AXO-271 slice 6 (2026-05-10): PG indexer is gated by
+        # AXON_INDEXER_PG_OPT_IN=1 pending the integration smoke test
+        # (IST count parity vs DuckDB baseline + clean shutdown). Bench
+        # scripts opt in so we can measure the PG indexer end-to-end;
+        # the bench corpus is a fresh ./src scope, not production data.
+        "AXON_INDEXER_PG_OPT_IN=1"
     )
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
