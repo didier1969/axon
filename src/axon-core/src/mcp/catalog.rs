@@ -591,6 +591,29 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "retrieve_context_layered",
+                "description": "[DX/Phase-A] Multi-resolution retrieval (REQ-AXO-264, CPT-AXO-050). Returns three bands in one call: intent_band (SOLL concepts/decisions/requirements), code_band (chunks via pgvector ANN), recent_band (git log + cwd, v0 stub). Backward-compat: existing `retrieve_context` unchanged.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string" },
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] },
+                        "token_budget": { "type": "integer" },
+                        "top_k": { "type": "integer" },
+                        "bands": {
+                            "type": "object",
+                            "properties": {
+                                "intent": { "type": "object" },
+                                "code": { "type": "object" },
+                                "recent": { "type": "object" }
+                            }
+                        }
+                    },
+                    "required": ["question"]
+                }
+            },
+            {
                 "name": "query",
                 "description": "[DX] Search symbols by name/kind/path. Returns ranked matches. Use first for code discovery.",
                 "inputSchema": {

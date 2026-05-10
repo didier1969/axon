@@ -5289,3 +5289,298 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
     assert!(!content.contains("GodClass"));
     assert!(!content.contains("seems unindexed"));
 }
+
+// REQ-AXO-264 Phase A — layered envelope contract.
+//
+// Backward-compat first: the existing `retrieve_context` tool remains
+// unchanged. The new `retrieve_context_layered` tool wraps it and
+// returns the three bands (intent / code / recent) in a single
+// machine-actionable response. v0 stub: code_band reuses the existing
+// packet; recent_band is empty + tagged `not_yet_implemented`.
+#[test]
+fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::checkout', 'checkout', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/payment.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'axo::checkout', 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-layered', 'symbol', 'axo::checkout', 'AXO', 'body', 'checkout orchestrates payment capture', 'hash-checkout-layered', 1, 4)").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-264-T', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-LAYERED', 'Requirement', 'REQ-AXO-264-T', 'Symbol', 'checkout', 1.0, 0)").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context_layered",
+                "arguments": {
+                    "question": "how does checkout orchestrate payment capture?",
+                    "project": "AXO",
+                    "mode": "brief",
+                }
+            })),
+            id: Some(json!(2640)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    // Bands present in data
+    assert!(
+        response["data"]["intent_band"].is_object(),
+        "intent_band missing: {response}"
+    );
+    assert!(
+        response["data"]["code_band"].is_object(),
+        "code_band missing: {response}"
+    );
+    assert!(
+        response["data"]["recent_band"].is_object(),
+        "recent_band missing: {response}"
+    );
+    assert!(
+        response["data"]["metadata"].is_object(),
+        "metadata missing: {response}"
+    );
+
+    // Each band reports its token usage
+    assert!(response["data"]["intent_band"]["tokens_used"].is_number());
+    assert!(response["data"]["code_band"]["tokens_used"].is_number());
+    assert!(response["data"]["recent_band"]["tokens_used"].is_number());
+
+    // Metadata exposes retrieval path + total tokens + elapsed
+    assert!(response["data"]["metadata"]["retrieval_path"].is_string());
+    assert!(response["data"]["metadata"]["total_tokens"].is_number());
+    assert!(response["data"]["metadata"]["elapsed_ms"].is_number());
+
+    // v1 contract: recent_band reports a `status` so LLM clients know
+    // whether the git lookup succeeded or fell back. Acceptable values:
+    //   - "ok": git log ran (entries may still be empty if no recent commits)
+    //   - "no_project_root": no AXON_PROJECT_ROOT/cwd resolvable
+    //   - "git_error": git invocation failed (e.g. not a repo, git missing)
+    let recent_status = response["data"]["recent_band"]["status"].as_str().unwrap_or("");
+    assert!(
+        matches!(recent_status, "ok" | "no_project_root" | "git_error"),
+        "recent_band.status must be one of {{ok, no_project_root, git_error}}, got {recent_status:?}",
+    );
+
+    // intent_band should surface the SOLL Requirement we inserted
+    let intent_reqs = response["data"]["intent_band"]["requirements"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        intent_reqs.iter().any(|row| row["id"].as_str() == Some("REQ-AXO-264-T")),
+        "intent_band.requirements should contain REQ-AXO-264-T, got {:?}",
+        intent_reqs
+    );
+
+    // code_band carries chunks (reuse of existing packet evidence)
+    let code_chunks = response["data"]["code_band"]["chunks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !code_chunks.is_empty(),
+        "code_band.chunks should not be empty for a question with code evidence (got {:?})",
+        code_chunks
+    );
+}
+
+// REQ-AXO-264 backward compat — the original `retrieve_context` tool
+// must remain unchanged in shape (no `intent_band`, no `code_band`,
+// no `recent_band`, no `metadata.retrieval_path` at the top of `data`).
+#[test]
+fn test_retrieve_context_legacy_shape_unchanged_after_layered_addition() {
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::cl', 'cl', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/cl.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/cl.rs', 'axo::cl', 'AXO')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": {
+                    "question": "where is cl defined?",
+                    "project": "AXO",
+                    "mode": "brief",
+                }
+            })),
+            id: Some(json!(2641)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(response["data"]["packet"].is_object(),
+        "legacy retrieve_context must still expose `data.packet`");
+    assert!(response["data"]["intent_band"].is_null(),
+        "legacy retrieve_context must NOT expose intent_band");
+    assert!(response["data"]["code_band"].is_null(),
+        "legacy retrieve_context must NOT expose code_band");
+    assert!(response["data"]["recent_band"].is_null(),
+        "legacy retrieve_context must NOT expose recent_band");
+}
+
+// REQ-AXO-264 A6 v1 — recent_band must surface git log entries from
+// the last 24h on the resolved project root, deduped per file with the
+// most recent commit winning.
+#[test]
+fn test_recent_band_collects_git_log_within_24h_window() {
+    use std::process::Command;
+    let tempdir = tempdir().unwrap();
+    let repo = tempdir.path();
+
+    // Init a fresh git repo and produce one commit touching two files.
+    let must_run = |cmd: &mut Command| {
+        let status = cmd.status().unwrap_or_else(|err| panic!("command failed to start: {err}"));
+        assert!(status.success(), "command failed: {:?}", cmd);
+    };
+    must_run(Command::new("git").arg("-C").arg(repo).arg("init").arg("-q"));
+    must_run(Command::new("git").arg("-C").arg(repo).arg("config").arg("user.email").arg("test@axon.local"));
+    must_run(Command::new("git").arg("-C").arg(repo).arg("config").arg("user.name").arg("Axon Test"));
+    std::fs::write(repo.join("alpha.rs"), b"// alpha\n").unwrap();
+    std::fs::write(repo.join("beta.rs"), b"// beta\n").unwrap();
+    must_run(Command::new("git").arg("-C").arg(repo).arg("add").arg("alpha.rs").arg("beta.rs"));
+    must_run(Command::new("git").arg("-C").arg(repo).arg("commit").arg("-q").arg("-m").arg("layered-test seed commit"));
+
+    let band = McpServer::collect_recent_band(Some(repo.to_string_lossy().as_ref()));
+    assert_eq!(band["status"].as_str(), Some("ok"), "band: {band}");
+    let edits = band["git_recent_edits"].as_array().cloned().unwrap_or_default();
+    let files: Vec<&str> = edits.iter()
+        .filter_map(|e| e["file"].as_str())
+        .collect();
+    assert!(files.contains(&"alpha.rs"), "alpha.rs missing from {files:?}");
+    assert!(files.contains(&"beta.rs"), "beta.rs missing from {files:?}");
+    let first = &edits[0];
+    assert!(first["last_commit_subject"].as_str().unwrap_or("").contains("layered-test seed commit"));
+    assert!(band["tokens_used"].as_u64().unwrap_or(0) > 0);
+}
+
+// REQ-AXO-264 A6 v1 — recent_band returns a stable structured response
+// when the project root is missing or invalid, instead of crashing or
+// returning a bare error.
+#[test]
+fn test_recent_band_returns_stable_contract_when_no_project_root() {
+    let none_band = McpServer::collect_recent_band(None);
+    assert_eq!(none_band["status"].as_str(), Some("no_project_root"));
+    assert!(none_band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+    assert_eq!(none_band["tokens_used"].as_u64(), Some(0));
+
+    let bogus_band = McpServer::collect_recent_band(Some("/nonexistent/axon/test/path/does-not-exist"));
+    assert_eq!(bogus_band["status"].as_str(), Some("no_project_root"));
+    assert!(bogus_band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+}
+
+// REQ-AXO-264 A6 v1 — non-git directory must return git_error contract,
+// not panic, not ok-with-empty.
+#[test]
+fn test_recent_band_returns_git_error_when_not_a_repo() {
+    let tempdir = tempdir().unwrap();
+    let band = McpServer::collect_recent_band(Some(tempdir.path().to_string_lossy().as_ref()));
+    assert_eq!(band["status"].as_str(), Some("git_error"), "band: {band}");
+    assert!(band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+}
+
+// REQ-AXO-264 A3 v2 — default budgets surfaced when caller omits `bands`.
+#[test]
+fn test_retrieve_context_layered_surfaces_default_budgets() {
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::small', 'small', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/small.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/small.rs', 'axo::small', 'AXO')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context_layered",
+                "arguments": {
+                    "question": "where is small defined?",
+                    "project": "AXO",
+                    "mode": "brief",
+                }
+            })),
+            id: Some(json!(2642)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(response["data"]["intent_band"]["tokens_budget"].as_u64(), Some(2000));
+    assert_eq!(response["data"]["code_band"]["tokens_budget"].as_u64(), Some(6000));
+    // recent_band budget enforcement is internal — not surfaced as a field
+    // on recent_band itself but counted in tokens_overflowed.
+    assert!(response["data"]["intent_band"]["tokens_overflowed"].is_number());
+    assert!(response["data"]["code_band"]["tokens_overflowed"].is_number());
+    assert!(response["data"]["metadata"]["tokens_pre_truncation"].is_object());
+    assert!(response["data"]["metadata"]["total_tokens_overflowed"].is_number());
+    assert_eq!(
+        response["data"]["metadata"]["phase_a_version"].as_str(),
+        Some("v2"),
+    );
+}
+
+// REQ-AXO-264 A3 v2 — caller-supplied `bands.code.max_tokens` truncates
+// the chunks band; tokens_overflowed counts dropped rows.
+#[test]
+fn test_retrieve_context_layered_truncates_code_band_under_budget() {
+    let server = create_test_server();
+    // Many chunks so the unrestricted code_band exceeds a small budget.
+    for i in 0..30 {
+        let sym_id = format!("axo::big_{i}");
+        let chunk_id = format!("chunk-big-{i}");
+        let chunk_content = format!("function big_{i} repeats long text for token budgeting tests, repeated to grow tokens above the budget; lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua, ut enim ad minim veniam quis nostrud exercitation");
+        server.graph_store.execute(&format!(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_id}', 'big_{i}', 'function', true, true, false, 'AXO')"
+        )).unwrap();
+        server.graph_store.execute(&format!(
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('{chunk_id}', 'symbol', '{sym_id}', 'AXO', 'body', '{chunk_content}', 'hash-big-{i}', 1, 30)"
+        )).unwrap();
+    }
+    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/big.rs', 'AXO', 'indexed')").unwrap();
+    for i in 0..30 {
+        server.graph_store.execute(&format!(
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/big.rs', 'axo::big_{i}', 'AXO')"
+        )).unwrap();
+    }
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context_layered",
+                "arguments": {
+                    "question": "where is big defined?",
+                    "project": "AXO",
+                    "mode": "brief",
+                    "top_k": 20,
+                    "bands": {
+                        "code": {"max_tokens": 200},
+                    },
+                }
+            })),
+            id: Some(json!(2643)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let kept = response["data"]["code_band"]["chunks"].as_array().cloned().unwrap_or_default();
+    let used = response["data"]["code_band"]["tokens_used"].as_u64().unwrap_or(0);
+    let budget = response["data"]["code_band"]["tokens_budget"].as_u64().unwrap_or(0);
+    let overflowed = response["data"]["code_band"]["tokens_overflowed"].as_u64().unwrap_or(0);
+
+    assert_eq!(budget, 200, "explicit budget should be surfaced");
+    assert!(used <= budget, "tokens_used ({used}) must be <= budget ({budget})");
+    assert!(
+        overflowed > 0 || kept.is_empty(),
+        "with a 200-token budget on 30 fat chunks we expect either truncation overflow > 0 or empty kept set; got kept={} overflowed={}",
+        kept.len(), overflowed
+    );
+}

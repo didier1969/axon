@@ -1161,6 +1161,10 @@ impl McpServer {
             "soll_verify_requirements" => self.axon_soll_verify_requirements(arguments),
             "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),
             "retrieve_context" => self.axon_retrieve_context(arguments),
+            // REQ-AXO-264 Phase A — layered envelope (intent + code + recent
+            // bands in one MCP call). v0 wraps `axon_retrieve_context`; future
+            // iterations will harden each band per CPT-AXO-050 philosophy.
+            "retrieve_context_layered" => self.axon_retrieve_context_layered(arguments),
             "query" => self.axon_query(arguments),
             "soll_manager" => self.axon_soll_manager(arguments),
             "init_project" => self.axon_init_project(arguments),
