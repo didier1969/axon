@@ -478,7 +478,7 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
     }
 }
 
-fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBackend> {
+pub(super) fn build_vector_embedding_model(worker_idx: usize) -> Option<VectorEmbeddingBackend> {
     let provider_requested = effective_provider_request_for_lane("vector");
     let cuda_requested = provider_requested.eq_ignore_ascii_case("cuda");
 
