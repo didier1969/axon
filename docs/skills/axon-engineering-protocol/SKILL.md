@@ -110,8 +110,12 @@ Canonical relations (from `Edge.relation_type`):
 | DEC → REQ | SOLVES |
 | DEC → DEC | REFINES, SUPERSEDES |
 | DEC → CPT | REFINES, SUPERSEDES (REQ-AXO-188 — architecture-state CPTs governed/retired by Decisions) |
+| CPT → CPT | INHERITS_FROM (default), REFINES (REQ-AXO-274 phase 2 — project-internal CPT specializes cross-project methodology CPT-PRO-*) |
+| CPT → DEC | INHERITS_FROM (REQ-AXO-274 phase 2 — project-internal CPT inherits from cross-project Decision, e.g. CPT-AXO-021 → DEC-PRO-001 bootstrap prompt) |
 | CPT → REQ | EXPLAINS |
 | CPT → PIL | BELONGS_TO |
+| GUI → GUI | INHERITS_FROM (cross-project methodology propagation, e.g. GUI-AXO-001 → GUI-PRO-001) |
+| GUI → PIL | BELONGS_TO (REQ-AXO-274 phase 2 — methodology guideline theming under a Pillar, supporting role) |
 | REQ → PIL | BELONGS_TO |
 | REQ → REQ | REFINES |
 

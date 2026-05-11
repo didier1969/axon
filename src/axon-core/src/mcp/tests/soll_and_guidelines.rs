@@ -7765,6 +7765,124 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
     );
 }
 
+// REQ-AXO-274 phase 2 — canonical relation policy extensions
+#[test]
+fn test_relation_policy_accepts_cpt_to_cpt_inherits_from() {
+    let server = create_test_server();
+    // CPT-PRO sibling (universal)
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-PRO-099', 'Concept', 'PRO', 'Universal concept', 'cross-project mental model', 'active', '{}')")
+        .unwrap();
+    // CPT-AXO project-specific specialization
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-099', 'Concept', 'AXO', 'Axon-specific concept', 'Axon-specific specialization', 'active', '{}')")
+        .unwrap();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "concept",
+                "data": {
+                    "source_id": "CPT-AXO-099",
+                    "target_id": "CPT-PRO-099",
+                    "relation_type": "INHERITS_FROM"
+                }
+            }
+        })),
+        id: Some(json!(27401)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("Link created"),
+        "CPT->CPT INHERITS_FROM must be canonical post REQ-AXO-274 phase 2: {content}"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE source_id='CPT-AXO-099' AND target_id='CPT-PRO-099' AND relation_type='INHERITS_FROM'")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_relation_policy_accepts_gui_to_pil_belongs_to() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-PRO-099', 'Pillar', 'PRO', 'Test methodology pillar', 'theming axis', 'active', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-PRO-099', 'Guideline', 'PRO', 'Test guideline', 'rule', 'active', '{}')")
+        .unwrap();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "guideline",
+                "data": {
+                    "source_id": "GUI-PRO-099",
+                    "target_id": "PIL-PRO-099",
+                    "relation_type": "BELONGS_TO"
+                }
+            }
+        })),
+        id: Some(json!(27402)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("Link created"),
+        "GUI->PIL BELONGS_TO must be canonical post REQ-AXO-274 phase 2: {content}"
+    );
+}
+
+#[test]
+fn test_relation_policy_accepts_cpt_to_dec_inherits_from() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-PRO-099', 'Decision', 'PRO', 'Cross-project canonical decision', 'body', 'accepted', '{\"rationale\":\"R\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-098', 'Concept', 'AXO', 'Axon mirror concept', 'specialization of DEC-PRO-099', 'active', '{}')")
+        .unwrap();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "concept",
+                "data": {
+                    "source_id": "CPT-AXO-098",
+                    "target_id": "DEC-PRO-099",
+                    "relation_type": "INHERITS_FROM"
+                }
+            }
+        })),
+        id: Some(json!(27403)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("Link created"),
+        "CPT->DEC INHERITS_FROM must be canonical post REQ-AXO-274 phase 2: {content}"
+    );
+}
+
 // REQ-AXO-276 — axon_apply_methodology_bundle MCP tool
 #[test]
 fn test_axon_apply_methodology_bundle_rejects_missing_bundle_path() {

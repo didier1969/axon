@@ -122,6 +122,52 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 50,
             },
         }),
+        // REQ-AXO-274 phase 2 — A project-internal Concept can specialize a
+        // cross-project methodology Concept (e.g. CPT-AXO-019 INHERITS_FROM
+        // CPT-PRO-004 — "SOLL Operational Protocol" generalized). REFINES is
+        // accepted as an alias when the specialization adds material; default
+        // INHERITS_FROM matches the GUI→GUI inheritance pattern used to
+        // propagate cross-project guidelines (project_code='PRO' parent).
+        ("CPT", "CPT") => Some(RelationPolicy {
+            allowed: &["INHERITS_FROM", "REFINES"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 80,
+                child_order_rank: 60,
+            },
+        }),
+        // REQ-AXO-274 phase 2 — A project-internal Concept can inherit from a
+        // cross-project Decision when the canonical body lives in DEC-PRO
+        // (e.g. CPT-AXO-021 INHERITS_FROM DEC-PRO-001 — bootstrap prompt
+        // canonical lives in the Decision under PRO).
+        ("CPT", "DEC") => Some(RelationPolicy {
+            allowed: &["INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 80,
+                child_order_rank: 65,
+            },
+        }),
+        // REQ-AXO-274 phase 2 — Methodology Guidelines (GUI-PRO-*) belong to
+        // a Pillar (PIL-PRO-*) for theming, queryability via
+        // `soll_query_context project_code=PRO`, and `soll_work_plan` scoring.
+        // Same semantic as REQ→PIL and CPT→PIL. Supporting role (lower than
+        // Concept-level Primary) so a Pillar's primary children remain
+        // requirements/concepts; guidelines appear after them in projection.
+        ("GUI", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 50,
+                child_order_rank: 100,
+            },
+        }),
         ("DEC", "REQ") => Some(RelationPolicy {
             allowed: &["SOLVES", "REFINES"],
             default: Some("SOLVES"),
