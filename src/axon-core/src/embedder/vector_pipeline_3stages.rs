@@ -20,6 +20,9 @@
 //! 2026-05-10).
 
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -295,7 +298,14 @@ fn run_producer_inner_loop(
     let mut active = initial_active;
     let mut reserved_chunk_ids: HashSet<String> = HashSet::new();
 
+    // REQ-AXO-262 diagnostic probe (operator 2026-05-11). Producer trace —
+    // see open_pipeline_trace_writer doc above for column semantics.
+    let mut trace = open_pipeline_trace_writer("producer", worker_idx);
+    let trace_start = Instant::now();
+    let mut iter_n: u64 = 0;
+
     while !active.is_empty() {
+        let fetch_started = Instant::now();
         let mut prepared = prepare_vector_embed_batch(
             graph_store,
             &active,
@@ -304,6 +314,7 @@ fn run_producer_inner_loop(
             batch_max_bytes,
             &reserved_chunk_ids,
         );
+        let fetch_ms = fetch_started.elapsed().as_millis() as u64;
 
         for item in &prepared.work_items {
             reserved_chunk_ids.insert(item.chunk_id.clone());
@@ -339,6 +350,7 @@ fn run_producer_inner_loop(
         let next_active = std::mem::take(&mut prepared.next_active_after_success);
 
         if !prepared.texts.is_empty() {
+            let tokenize_started = Instant::now();
             if let Err(e) = attach_preencoded_micro_batches(&tokenizer, &mut prepared) {
                 error!(
                     "Vector pipeline [{}/producer]: tokenize failed: {:?}",
@@ -351,8 +363,11 @@ fn run_producer_inner_loop(
                 active = std::mem::take(&mut prepared.next_active_after_failure);
                 continue;
             }
+            let tokenize_ms = tokenize_started.elapsed().as_millis() as u64;
 
+            let chunks_in_batch = prepared.work_items.len();
             let completed_immediate = prepared.immediate_completed.clone();
+            let send_started = Instant::now();
             if try_send_or_disconnect(
                 prepared_tx,
                 PreparedMsg {
@@ -364,6 +379,19 @@ fn run_producer_inner_loop(
             {
                 return false;
             }
+            let send_block_ms = send_started.elapsed().as_millis() as u64;
+            let prepared_tx_len_after_send = prepared_tx.len();
+            if let Some(writer) = trace.as_mut() {
+                let ts_ms = trace_start.elapsed().as_millis() as u64;
+                let _ = writeln!(
+                    writer,
+                    "{ts_ms},{iter_n},{fetch_ms},{tokenize_ms},{chunks_in_batch},{prepared_tx_len_after_send},{send_block_ms},{rc},{af}",
+                    rc = reserved_chunk_ids.len(),
+                    af = active.len()
+                );
+                let _ = writer.flush();
+            }
+            iter_n += 1;
         } else if !prepared.immediate_completed.is_empty()
             || !prepared.finalize_after_success.is_empty()
         {
@@ -373,6 +401,7 @@ fn run_producer_inner_loop(
             // Phase 4 short-circuit).
             let mut completed_immediate = std::mem::take(&mut prepared.immediate_completed);
             completed_immediate.extend(std::mem::take(&mut prepared.finalize_after_success));
+            let send_started = Instant::now();
             if try_send_or_disconnect(
                 prepared_tx,
                 PreparedMsg {
@@ -384,6 +413,19 @@ fn run_producer_inner_loop(
             {
                 return false;
             }
+            let send_block_ms = send_started.elapsed().as_millis() as u64;
+            let prepared_tx_len_after_send = prepared_tx.len();
+            if let Some(writer) = trace.as_mut() {
+                let ts_ms = trace_start.elapsed().as_millis() as u64;
+                let _ = writeln!(
+                    writer,
+                    "{ts_ms},{iter_n},{fetch_ms},0,0,{prepared_tx_len_after_send},{send_block_ms},{rc},{af}",
+                    rc = reserved_chunk_ids.len(),
+                    af = active.len()
+                );
+                let _ = writer.flush();
+            }
+            iter_n += 1;
         }
 
         active = next_active;
@@ -424,6 +466,86 @@ fn empty_prepared_marker() -> PreparedVectorEmbedBatch {
     }
 }
 
+// ─────────────────────────── Pipeline trace ──────────────────────────────
+//
+// REQ-AXO-262 diagnostic probe (operator 2026-05-11). Opt-in via
+// `AXON_PIPELINE_TRACE_CSV=<prefix>`: each pipeline stage appends to
+// `<prefix>.<stage>.w<worker_idx>.csv` with one row per processed batch.
+//
+// Columns (embedder stage):
+//   ts_ms                  monotonic ms since stage start
+//   iter                   iteration number (0-based)
+//   prepared_rx_len_pre    `prepared_rx.len()` BEFORE recv (0 = producer
+//                          starved; >0 = backlog from upstream)
+//   embedded_tx_len_pre    `embedded_tx.len()` BEFORE send (4 = persister
+//                          backpressuring; <4 = persister keeps up)
+//   embedded_tx_len_post   `embedded_tx.len()` AFTER send
+//   batch_chunks           number of embeddings produced
+//   recv_wait_ms           wall time waiting for input (producer-side stall)
+//   host_prepare_ms        encode + bind on host
+//   input_copy_ms          H→D copy (0 when bind takes care of it)
+//   inference_ms           GPU run_binding + synchronize
+//   output_extract_ms      D→H + pool + normalize
+//   send_block_ms          wall time blocked on `embedded_tx.send` (persister
+//                          backpressure when >0)
+//
+// Diagnostic rules:
+//   - prepared_rx_len_pre = 0 AND recv_wait_ms > 0 → SCENARIO 2 (producer
+//     starvation: embedder had to wait for input)
+//   - embedded_tx_len_pre = 4 AND send_block_ms > 0 → SCENARIO 3 (persister
+//     saturation: embedder blocked trying to hand off output)
+//   - both queues non-empty/non-full AND inference_ms >> p50 → SCENARIO 1
+//     (GPU internal pause; producer + persister both keep up)
+
+fn open_pipeline_trace_writer(
+    stage: &str,
+    worker_idx: usize,
+) -> Option<BufWriter<std::fs::File>> {
+    let prefix = std::env::var("AXON_PIPELINE_TRACE_CSV").ok()?;
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+    let path = format!("{}.{}.w{}.csv", prefix, stage, worker_idx);
+    let existed = Path::new(&path).exists();
+    let file = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(
+                "Pipeline trace [{}/w{}]: failed to open {} : {} — tracing disabled",
+                stage, worker_idx, path, e
+            );
+            return None;
+        }
+    };
+    let mut writer = BufWriter::new(file);
+    if !existed {
+        let header = match stage {
+            "embedder" => "ts_ms,iter,prepared_rx_len_pre,embedded_tx_len_pre,embedded_tx_len_post,batch_chunks,recv_wait_ms,host_prepare_ms,input_copy_ms,inference_ms,output_extract_ms,send_block_ms",
+            "producer" => "ts_ms,iter,fetch_ms,tokenize_ms,chunks_in_batch,prepared_tx_len_after_send,send_block_ms,reserved_chunks,active_files",
+            other => {
+                warn!(
+                    "Pipeline trace [{}/w{}]: unknown stage label",
+                    other, worker_idx
+                );
+                "ts_ms,iter"
+            }
+        };
+        if let Err(e) = writeln!(writer, "{}", header) {
+            warn!(
+                "Pipeline trace [{}/w{}]: failed to write header: {} — tracing disabled",
+                stage, worker_idx, e
+            );
+            return None;
+        }
+    }
+    info!(
+        "Pipeline trace [{}/w{}]: appending iter records to {}",
+        stage, worker_idx, path
+    );
+    Some(writer)
+}
+
 // ─────────────────────────────── Embedder ───────────────────────────────
 
 fn run_embedder_stage(
@@ -450,8 +572,14 @@ fn run_embedder_stage(
         worker_idx
     );
 
+    let mut trace = open_pipeline_trace_writer("embedder", worker_idx);
+    let trace_start = Instant::now();
+    let mut iter_n: u64 = 0;
+
     loop {
         service_guard::record_vector_pipeline_embedder_heartbeat();
+        let prepared_rx_len_pre = prepared_rx.len();
+        let recv_started = Instant::now();
         let msg = match prepared_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(msg) => msg,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -463,6 +591,7 @@ fn run_embedder_stage(
                 return;
             }
         };
+        let recv_wait_ms = recv_started.elapsed().as_millis() as u64;
 
         let PreparedMsg {
             prepared,
@@ -470,6 +599,8 @@ fn run_embedder_stage(
         } = msg;
         if prepared.work_items.is_empty() {
             // Forward completed_immediate as a no-op embed batch.
+            let embedded_tx_len_pre = embedded_tx.len();
+            let send_started = Instant::now();
             if embedded_tx
                 .send(EmbeddedMsg::Ok {
                     updates: Vec::new(),
@@ -480,6 +611,17 @@ fn run_embedder_stage(
             {
                 return;
             }
+            let send_block_ms = send_started.elapsed().as_millis() as u64;
+            let embedded_tx_len_post = embedded_tx.len();
+            if let Some(writer) = trace.as_mut() {
+                let ts_ms = trace_start.elapsed().as_millis() as u64;
+                let _ = writeln!(
+                    writer,
+                    "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms}"
+                );
+                let _ = writer.flush();
+            }
+            iter_n += 1;
             continue;
         }
 
@@ -487,8 +629,15 @@ fn run_embedder_stage(
         let completed_after_success = prepared.finalize_after_success.clone();
 
         match model.embed_prepared_batch_with_breakdown(&prepared) {
-            Ok((embeddings, _, _, _, _)) => {
+            Ok((
+                embeddings,
+                host_prepare_ms,
+                input_copy_ms,
+                inference_ms,
+                output_extract_ms,
+            )) => {
                 service_guard::record_vector_lane_success();
+                let batch_chunks = embeddings.len();
                 let updates: Vec<(String, String, Vec<f32>)> = prepared
                     .work_items
                     .iter()
@@ -497,6 +646,8 @@ fn run_embedder_stage(
                         (item.chunk_id.clone(), item.content_hash.clone(), emb.clone())
                     })
                     .collect();
+                let embedded_tx_len_pre = embedded_tx.len();
+                let send_started = Instant::now();
                 if embedded_tx
                     .send(EmbeddedMsg::Ok {
                         updates,
@@ -507,12 +658,25 @@ fn run_embedder_stage(
                 {
                     return;
                 }
+                let send_block_ms = send_started.elapsed().as_millis() as u64;
+                let embedded_tx_len_post = embedded_tx.len();
+                if let Some(writer) = trace.as_mut() {
+                    let ts_ms = trace_start.elapsed().as_millis() as u64;
+                    let _ = writeln!(
+                        writer,
+                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},{batch_chunks},{recv_wait_ms},{host_prepare_ms},{input_copy_ms},{inference_ms},{output_extract_ms},{send_block_ms}"
+                    );
+                    let _ = writer.flush();
+                }
+                iter_n += 1;
             }
             Err(e) => {
                 error!(
                     "Vector pipeline [{}/embedder]: embed failed: {:?}",
                     worker_idx, e
                 );
+                let embedded_tx_len_pre = embedded_tx.len();
+                let send_started = Instant::now();
                 if embedded_tx
                     .send(EmbeddedMsg::Failed {
                         touched,
@@ -523,6 +687,17 @@ fn run_embedder_stage(
                 {
                     return;
                 }
+                let send_block_ms = send_started.elapsed().as_millis() as u64;
+                let embedded_tx_len_post = embedded_tx.len();
+                if let Some(writer) = trace.as_mut() {
+                    let ts_ms = trace_start.elapsed().as_millis() as u64;
+                    let _ = writeln!(
+                        writer,
+                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms}"
+                    );
+                    let _ = writer.flush();
+                }
+                iter_n += 1;
             }
         }
     }
