@@ -7764,3 +7764,138 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
         1
     );
 }
+
+// REQ-AXO-276 — axon_apply_methodology_bundle MCP tool
+#[test]
+fn test_axon_apply_methodology_bundle_rejects_missing_bundle_path() {
+    let server = create_test_server();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": { "name": "axon_apply_methodology_bundle", "arguments": {} },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let data = &result["data"];
+    assert_eq!(
+        data["status"].as_str().unwrap(),
+        "input_invalid",
+        "missing bundle_path must return input_invalid"
+    );
+    assert_eq!(
+        data["parameter_repair"]["invalid_field"].as_str().unwrap(),
+        "bundle_path"
+    );
+}
+
+#[test]
+fn test_axon_apply_methodology_bundle_rejects_unsupported_schema() {
+    let server = create_test_server();
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "axon_methodology_bundle_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let bundle_path = tmp_dir.join("bad-schema.json");
+    std::fs::write(&bundle_path, r#"{"schema":"wrong-schema-v0","version":"0.1","project_code":"AXO"}"#)
+        .unwrap();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_methodology_bundle",
+            "arguments": { "bundle_path": bundle_path.to_string_lossy() }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["data"]["status"].as_str().unwrap(), "input_invalid");
+    assert_eq!(
+        result["data"]["parameter_repair"]["invalid_field"]
+            .as_str()
+            .unwrap(),
+        "schema"
+    );
+    std::fs::remove_dir_all(&tmp_dir).ok();
+}
+
+#[test]
+fn test_axon_apply_methodology_bundle_dry_run_returns_summary() {
+    let server = create_test_server();
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "axon_methodology_bundle_dryrun_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let bundle_path = tmp_dir.join("minimal-bundle.json");
+    let body = serde_json::json!({
+        "schema": "axon-methodology-bundle-v1",
+        "version": "1.0.0-test",
+        "axon_min_version": "0.8.0",
+        "project_code": "AXO",
+        "pillars": [],
+        "concepts": [],
+        "guidelines": [
+            {
+                "logical_key": "gui_test_new",
+                "title": "Test methodology guideline",
+                "description": "Test body",
+                "status": "active"
+            },
+            {
+                "logical_key": "gui_test_regularization",
+                "canonical_id_hint": "GUI-PRO-001",
+                "title": "TDD Obligatoire",
+                "regularization": true
+            }
+        ],
+        "decisions": [],
+        "requirements": [],
+        "relations": []
+    });
+    std::fs::write(&bundle_path, serde_json::to_string(&body).unwrap()).unwrap();
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_methodology_bundle",
+            "arguments": {
+                "bundle_path": bundle_path.to_string_lossy(),
+                "dry_run": true
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let data = &result["data"];
+    assert_eq!(data["status"].as_str().unwrap(), "ok");
+    assert_eq!(data["dry_run"].as_bool().unwrap(), true);
+    assert_eq!(data["bundle_version"].as_str().unwrap(), "1.0.0-test");
+    assert_eq!(data["project_code"].as_str().unwrap(), "AXO");
+    assert_eq!(
+        data["guidelines_applied"].as_u64().unwrap(),
+        1,
+        "1 non-regularization guideline counted under dry_run"
+    );
+    assert_eq!(
+        data["guidelines_skipped_regularization"].as_u64().unwrap(),
+        1,
+        "1 regularization stanza skipped"
+    );
+    std::fs::remove_dir_all(&tmp_dir).ok();
+}

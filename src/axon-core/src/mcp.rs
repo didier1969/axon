@@ -1169,6 +1169,7 @@ impl McpServer {
             "soll_manager" => self.axon_soll_manager(arguments),
             "init_project" => self.axon_init_project(arguments),
             "apply_guidelines" => self.axon_apply_guidelines(arguments),
+            "apply_methodology_bundle" => self.axon_apply_methodology_bundle(arguments),
             "commit_work" => self.axon_commit_work(arguments),
             "pre_flight_check" => self.axon_pre_flight_check(arguments),
             "soll_export" => self.axon_export_soll(arguments),

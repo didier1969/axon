@@ -131,6 +131,7 @@ North Star, NOT technical. Format: `[Project] transforms [trapped/lost/expensive
 | `entrench_nuance` | bounded update of canonical entities |
 | `soll_attach_evidence` | proof (file/test/metric/diff); `data.status` ∈ ok\|partial\|rejected_all\|no_artifacts |
 | `soll_commit_revision` | atomic checkpoint per `preview_id` |
+| `axon_apply_methodology_bundle` (REQ-AXO-276) | one-shot apply of a versioned methodology bundle JSON (`methodology-{semver}.json`). Reads file, validates `schema=axon-methodology-bundle-v1`, composes `soll_apply_plan` + iterated `soll_manager create entity=guideline`. Skips stanzas with `regularization=true`. Relations NOT auto-applied (canonical relation policy gaps, REQ-AXO-274) — apply manually post-tool via `soll_manager(action=link)`. Customer onboarding path : `axon_apply_methodology_bundle bundle_path=… dry_run=…`. |
 
 Async: response with `job_id` → `job_status(job_id)` until terminal (`succeeded` / `failed`). REQ-AXO-146: pass `wait: true` (with optional `timeout_ms` default 30000, `poll_interval_ms` default 250) to block until terminal in a single round-trip; on timeout the snapshot keeps `next_action.kind = continue_polling_until_terminal_state`. `data.wait_metadata` reports polls/elapsed_ms/timed_out/reached_terminal.
 

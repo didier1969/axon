@@ -186,6 +186,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "axon_apply_methodology_bundle",
+                "description": "[DX/SOLL] REQ-AXO-276 — Apply a versioned methodology bundle (methodology-{semver}.json) to live SOLL. Reads bundle file, validates schema (`axon-methodology-bundle-v1`), then composes soll_apply_plan + soll_manager calls to seed pillars/concepts/decisions/requirements/guidelines for the bundle's target project_code (typically PRO). Idempotent : regularization stanzas (`regularization=true`) are skipped to avoid duplicating existing canonical nodes. Relations are NOT auto-applied in v1.0 (canonical relation policy gaps tracked in REQ-AXO-274) — apply manually via soll_manager(action=link) after.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "bundle_path": { "type": "string", "description": "Absolute path to the methodology bundle JSON file (e.g. /home/user/projects/axon-methodology/methodology-1.0.0.json)." },
+                        "dry_run": { "type": "boolean", "description": "If true, no SOLL writes; returns the would-be apply summary." },
+                        "force": { "type": "boolean", "description": "If true, bypasses axon_min_version compatibility check. Admin/migration use." }
+                    },
+                    "required": ["bundle_path"]
+                }
+            },
+            {
                 "name": "axon_commit_work",
                 "description": "[DX/SOLL] MANDATORY tool to validate and commit work. Evaluates modified files against SOLL Guidelines. NEVER use git commit via shell.",
                 "inputSchema": {

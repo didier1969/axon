@@ -20,6 +20,7 @@ mod document_intent;
 mod evidence;
 mod inference;
 mod manager;
+mod methodology_bundle;
 mod operations;
 mod planning;
 mod project_registry;
