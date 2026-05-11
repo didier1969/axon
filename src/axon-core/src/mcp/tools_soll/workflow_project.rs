@@ -663,6 +663,17 @@ impl McpServer {
         let wave_1_unblockers = self.read_wave_1_unblockers(project_code);
         let recent_req_commits = Self::read_recent_req_commits(project_path, 5);
         let recent_soll_writes = self.read_recent_soll_writes(project_code, 8);
+        // REQ-AXO-278 — Bootstrap-vs-Continuation phase detection (GUI-PRO-026).
+        // When VIS-{project_code}-001 is absent, a Vision-less project is in
+        // Bootstrap phase: the consumer-side LLM (via /axon-driven-development
+        // skill) must invoke /bootstrap-soll to derive macro structure from
+        // input_documents[]. When VIS exists, project is in Continuation phase.
+        let bootstrap_required = self.bootstrap_required(project_code);
+        let input_documents = if bootstrap_required {
+            Self::scan_input_documents(project_path)
+        } else {
+            serde_json::json!([])
+        };
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -675,7 +686,86 @@ impl McpServer {
             "wave_1_unblockers": wave_1_unblockers,
             "recent_req_commits": recent_req_commits,
             "recent_soll_writes": recent_soll_writes,
+            "bootstrap_required": bootstrap_required,
+            "input_documents": input_documents,
         })
+    }
+
+    fn bootstrap_required(&self, project_code: &str) -> bool {
+        let escaped = escape_sql(project_code);
+        let q = format!(
+            "SELECT 1 FROM {} WHERE project_code = '{}' AND type = 'Vision' LIMIT 1",
+            self.graph_store.soll_table("Node"),
+            escaped
+        );
+        match self.graph_store.query_json(&q) {
+            Ok(raw) => {
+                let rows: Vec<Vec<serde_json::Value>> =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                rows.is_empty()
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn scan_input_documents(project_path: &str) -> serde_json::Value {
+        let root = std::path::Path::new(project_path);
+        if !root.is_dir() {
+            return serde_json::json!([]);
+        }
+        let patterns = [
+            "README",
+            "vision",
+            "brief",
+            "PRD",
+            "CONTEXT",
+        ];
+        let mut hits: Vec<serde_json::Value> = Vec::new();
+        let read_dir = match std::fs::read_dir(root) {
+            Ok(rd) => rd,
+            Err(_) => return serde_json::json!([]),
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let lower = name.to_lowercase();
+            let is_md = lower.ends_with(".md");
+            let matches_pattern = patterns
+                .iter()
+                .any(|p| lower.starts_with(&p.to_lowercase()));
+            if !(is_md || matches_pattern) {
+                continue;
+            }
+            let metadata = match path.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let mtime_unix = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            hits.push(serde_json::json!({
+                "path": path.to_string_lossy(),
+                "size_bytes": metadata.len(),
+                "mtime_unix_secs": mtime_unix,
+            }));
+        }
+        // stable order: by path
+        hits.sort_by(|a, b| {
+            a.get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("path").and_then(|v| v.as_str()).unwrap_or(""))
+        });
+        serde_json::Value::Array(hits)
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {

@@ -5936,6 +5936,43 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
     assert!(bundle.contains_key("methodology_summary"));
     assert!(bundle.contains_key("entry_points"));
     assert!(bundle.contains_key("active_handoff"));
+    // REQ-AXO-278: Bootstrap-vs-Continuation phase detection (GUI-PRO-026)
+    assert!(
+        bundle.contains_key("bootstrap_required"),
+        "kickoff_bundle must include bootstrap_required boolean per REQ-AXO-278"
+    );
+    assert!(
+        bundle["bootstrap_required"].is_boolean(),
+        "bootstrap_required must be boolean, got {:?}",
+        bundle["bootstrap_required"]
+    );
+    assert!(
+        bundle.contains_key("input_documents"),
+        "kickoff_bundle must include input_documents[] array per REQ-AXO-278"
+    );
+    assert!(
+        bundle["input_documents"].is_array(),
+        "input_documents must be an array, got {:?}",
+        bundle["input_documents"]
+    );
+    // Fresh project (no VIS-{code}-001) => bootstrap_required=true
+    let bootstrap_required = bundle["bootstrap_required"].as_bool().unwrap();
+    let input_documents = bundle["input_documents"].as_array().unwrap();
+    if bootstrap_required {
+        // input_documents[] may be empty if path doesn't exist on disk, but
+        // shape must hold (array of objects with path/size_bytes/mtime_unix_secs)
+        for doc in input_documents {
+            let obj = doc.as_object().expect("input_documents entries must be objects");
+            assert!(obj.contains_key("path"));
+            assert!(obj.contains_key("size_bytes"));
+            assert!(obj.contains_key("mtime_unix_secs"));
+        }
+    } else {
+        assert!(
+            input_documents.is_empty(),
+            "input_documents must be empty when bootstrap_required=false (Continuation phase)"
+        );
+    }
     let entry_points = bundle["entry_points"]
         .as_array()
         .expect("entry_points must be an array");
