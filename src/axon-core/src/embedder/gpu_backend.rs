@@ -40,6 +40,40 @@ pub(super) struct OrtGpuFirstTextEmbedding {
     /// appears to trigger periodic allocator scrub). Toggle via
     /// `AXON_ORT_BIND_OUTPUT_PER_ITER=1` for A/B comparison.
     pub(super) bind_output_per_iter: bool,
+    /// REQ-AXO-262 — sequence-length buckets the embedder pads to before
+    /// inference. With `PaddingStrategy::BatchLongest` upstream, each batch
+    /// arrives with an arbitrary `seq_len` (1..=512) which causes TRT to
+    /// pick a different optimized kernel per shape and the cudaMallocAsync
+    /// allocator to churn. Padding up to a small fixed set of buckets
+    /// {128,256,384,512} collapses production into ≤4 stable shapes while
+    /// keeping wasted compute bounded.
+    /// Override via `AXON_EMBEDDER_SEQ_BUCKETS=128,256,384,512`. Empty list
+    /// disables bucketing (legacy BatchLongest-only behavior).
+    pub(super) seq_buckets: Vec<usize>,
+}
+
+/// REQ-AXO-262 — batch-level stats emitted alongside timings so the
+/// pipeline trace can correlate slow iters with shape variance.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct EmbeddingBatchStats {
+    /// Max raw sequence length across encodings in the micro-batch
+    /// (= BatchLongest pad length BEFORE bucket-up).
+    pub seq_len_raw_max: usize,
+    /// Padded sequence length after bucket-up (= shape fed to the GPU).
+    pub seq_len_padded_max: usize,
+    /// Total NON-PAD tokens in the batch (sum of encoding lengths).
+    pub tokens_total: usize,
+    /// Total batch size = sum of micro-batch sizes.
+    pub batch_size_total: usize,
+}
+
+impl EmbeddingBatchStats {
+    pub(super) fn merge(&mut self, other: EmbeddingBatchStats) {
+        self.seq_len_raw_max = self.seq_len_raw_max.max(other.seq_len_raw_max);
+        self.seq_len_padded_max = self.seq_len_padded_max.max(other.seq_len_padded_max);
+        self.tokens_total = self.tokens_total.saturating_add(other.tokens_total);
+        self.batch_size_total = self.batch_size_total.saturating_add(other.batch_size_total);
+    }
 }
 
 
@@ -150,12 +184,17 @@ impl OrtGpuFirstTextEmbedding {
                 .map_err(|err| anyhow!("failed to pre-bind output {}: {err}", output_name))?;
         }
 
+        let seq_buckets = parse_seq_buckets_from_env(
+            std::env::var("AXON_EMBEDDER_SEQ_BUCKETS").ok().as_deref(),
+        );
+
         info!(
-            "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded successfully (provider={}, bind_output_per_iter={})",
+            "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded (provider={}, bind_output_per_iter={}, seq_buckets={:?})",
             lane,
             worker_idx,
             if use_cuda { "cuda" } else { "cpu" },
-            bind_output_per_iter
+            bind_output_per_iter,
+            seq_buckets
         );
 
         Ok(Self {
@@ -171,19 +210,34 @@ impl OrtGpuFirstTextEmbedding {
             attention_mask_buffer: Vec::new(),
             token_type_ids_buffer: Vec::new(),
             bind_output_per_iter,
+            seq_buckets,
         })
     }
 
     fn encode_and_bind_inputs(
         &mut self,
         encodings: &[Encoding],
-    ) -> AnyhowResult<(Vec<i64>, usize, usize, u64, u64, u64)> {
+    ) -> AnyhowResult<(Vec<i64>, usize, usize, u64, u64, u64, EmbeddingBatchStats)> {
         let input_prepare_started = Instant::now();
         let batch_size = encodings.len();
-        let sequence_len = encodings
-            .first()
-            .map(|encoding| encoding.len())
-            .ok_or_else(|| anyhow!("expected at least one encoding"))?;
+        // BatchLongest upstream guarantees all encodings have equal length,
+        // but we conservatively scan to compute the true max and total tokens.
+        let mut raw_seq = 0usize;
+        let mut tokens_total = 0usize;
+        for enc in encodings {
+            let len = enc.len();
+            if len > raw_seq {
+                raw_seq = len;
+            }
+            tokens_total = tokens_total.saturating_add(len);
+        }
+        if raw_seq == 0 {
+            return Err(anyhow!("expected at least one non-empty encoding"));
+        }
+        // REQ-AXO-262 — pad the batch up to a fixed bucket so the GPU sees a
+        // small set of stable shapes. Eliminates TRT kernel reselection and
+        // cudaMallocAsync churn observed under BatchLongest variance.
+        let sequence_len = bucket_up(raw_seq, &self.seq_buckets);
         let element_count = batch_size.saturating_mul(sequence_len);
         self.input_ids_buffer.resize(element_count, 0);
         self.attention_mask_buffer.resize(element_count, 0);
@@ -199,17 +253,34 @@ impl OrtGpuFirstTextEmbedding {
             let mask = encoding.get_attention_mask();
             let type_ids = encoding.get_type_ids();
             let row_offset = row * sequence_len;
-            for col in 0..sequence_len {
+            let real_len = ids.len().min(sequence_len);
+            for col in 0..real_len {
                 self.input_ids_buffer[row_offset + col] = ids[col] as i64;
-                let mask_value = mask[col] as i64;
-                self.attention_mask_buffer[row_offset + col] = mask_value;
+                self.attention_mask_buffer[row_offset + col] = mask[col] as i64;
                 if self.need_token_type_ids {
                     self.token_type_ids_buffer[row_offset + col] = type_ids[col] as i64;
+                }
+            }
+            // Pad tail (PAD_ID=0, mask=0, type=0). Resize already zeroed
+            // freshly-grown positions but stale data may remain when batch
+            // size shrunk and grew within the same buffer, so explicitly
+            // zero the tail every iter.
+            for col in real_len..sequence_len {
+                self.input_ids_buffer[row_offset + col] = 0;
+                self.attention_mask_buffer[row_offset + col] = 0;
+                if self.need_token_type_ids {
+                    self.token_type_ids_buffer[row_offset + col] = 0;
                 }
             }
         }
         let host_prepare_ms = input_prepare_started.elapsed().as_millis() as u64;
         let host_fill_ms = fill_started.elapsed().as_millis() as u64;
+        let stats = EmbeddingBatchStats {
+            seq_len_raw_max: raw_seq,
+            seq_len_padded_max: sequence_len,
+            tokens_total,
+            batch_size_total: batch_size,
+        };
         let shape = [batch_size, sequence_len];
         let input_ids = TensorRef::from_array_view((shape, self.input_ids_buffer.as_slice()))
             .map_err(|err| anyhow!("failed to create input_ids tensor view: {err}"))?;
@@ -245,6 +316,7 @@ impl OrtGpuFirstTextEmbedding {
             host_prepare_ms,
             host_fill_ms,
             0,
+            stats,
         ))
     }
 
@@ -278,9 +350,9 @@ impl OrtGpuFirstTextEmbedding {
     pub(super) fn transform_encoded_with_breakdown(
         &mut self,
         encodings: &[Encoding],
-    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
+    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64, EmbeddingBatchStats)> {
         if encodings.is_empty() {
-            return Ok((Vec::new(), 0, 0, 0, 0));
+            return Ok((Vec::new(), 0, 0, 0, 0, EmbeddingBatchStats::default()));
         }
 
         let (
@@ -290,6 +362,7 @@ impl OrtGpuFirstTextEmbedding {
             host_prepare_ms,
             host_fill_ms,
             input_copy_ms,
+            stats,
         ) = self.encode_and_bind_inputs(encodings)?;
         // REQ-AXO-262 — skip per-iter clear+rebind by default;
         // output was bound once at session init.
@@ -329,6 +402,7 @@ impl OrtGpuFirstTextEmbedding {
             input_copy_ms,
             inference_ms,
             output_extract_ms,
+            stats,
         ))
     }
 }
@@ -375,6 +449,59 @@ pub(super) fn ort_memory_pattern_enabled_from_env(raw: Option<&str>) -> bool {
         }
         None => true,
     }
+}
+
+/// REQ-AXO-262 — default sequence-length buckets for the GPU embedder.
+/// Choices reflect BGE-Large `max_length=512`:
+/// `128, 256, 384, 512` keep wasted compute bounded (≤4× for small chunks)
+/// while collapsing production into 4 stable GPU shapes.
+pub(crate) const DEFAULT_SEQ_BUCKETS: &[usize] = &[128, 256, 384, 512];
+
+/// REQ-AXO-262 — parse a comma-separated bucket list. Empty input
+/// (None, empty string, "0", or "off") disables bucketing (legacy
+/// BatchLongest-only behavior). Buckets are deduplicated and sorted
+/// ascending; non-numeric entries are skipped.
+pub(super) fn parse_seq_buckets_from_env(raw: Option<&str>) -> Vec<usize> {
+    let raw = match raw {
+        Some(v) => v.trim(),
+        None => return DEFAULT_SEQ_BUCKETS.to_vec(),
+    };
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+    {
+        return Vec::new();
+    }
+    let mut out: Vec<usize> = raw
+        .split(',')
+        .filter_map(|tok| tok.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    if out.is_empty() {
+        DEFAULT_SEQ_BUCKETS.to_vec()
+    } else {
+        out
+    }
+}
+
+/// REQ-AXO-262 — round `raw` up to the next bucket. When the input
+/// exceeds the largest bucket, the largest bucket is returned (callers
+/// should ensure their model max_length and TRT max profile cover that
+/// value). When the bucket list is empty, returns `raw` unchanged
+/// (bucketing disabled, falls back to BatchLongest seq_len).
+pub(crate) fn bucket_up(raw: usize, buckets: &[usize]) -> usize {
+    if buckets.is_empty() {
+        return raw;
+    }
+    for &b in buckets {
+        if raw <= b {
+            return b;
+        }
+    }
+    *buckets.last().unwrap()
 }
 
 #[cfg(test)]
@@ -447,10 +574,15 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     // BGE-Large inputs: input_ids[batch, seq], attention_mask[batch, seq],
     // token_type_ids[batch, seq] (when present in the model graph).
     //
-    // Range chosen 2026-05-10:
+    // Range chosen 2026-05-11 (REQ-AXO-262 follow-up):
     //   min  = (1, 1)        // smallest legal shape
-    //   opt  = (128, 256)    // current production sweet spot (VAL-AXO-053)
+    //   opt  = (64, 256)     // matches AXON_CHUNK_BATCH_SIZE=64 production point
     //   max  = (256, 512)    // batch headroom + BGE-Large max_length
+    //
+    // The opt point now matches the production batch size (64) so TRT
+    // tunes layers for the shape actually executed at runtime. seq=256 is
+    // the median of the {128,256,384,512} bucketed shapes that the
+    // embedder now feeds (see `parse_seq_buckets_from_env`).
     //
     // Override via AXON_TRT_PROFILE_{MIN,OPT,MAX}_SHAPES if a different
     // range is required (e.g. for a smaller VRAM budget).
@@ -458,7 +590,7 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
         "input_ids:1x1,attention_mask:1x1,token_type_ids:1x1".to_string()
     });
     let trt_profile_opt = std::env::var("AXON_TRT_PROFILE_OPT_SHAPES").unwrap_or_else(|_| {
-        "input_ids:128x256,attention_mask:128x256,token_type_ids:128x256".to_string()
+        "input_ids:64x256,attention_mask:64x256,token_type_ids:64x256".to_string()
     });
     let trt_profile_max = std::env::var("AXON_TRT_PROFILE_MAX_SHAPES").unwrap_or_else(|_| {
         "input_ids:256x512,attention_mask:256x512,token_type_ids:256x512".to_string()
@@ -497,15 +629,26 @@ pub(crate) fn cuda_memory_limit_bytes() -> usize {
 }
 
 pub(super) fn cuda_tf32_enabled() -> bool {
-    std::env::var("AXON_CUDA_ALLOW_TF32")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    // REQ-AXO-262 — default ON for Ampere+ GPUs. TF32 matmul gives a
+    // 1.5–2× speedup vs FP32 on tensor cores with negligible accuracy loss
+    // for embedding inference. Set AXON_CUDA_ALLOW_TF32=0 (or false) to
+    // disable for accuracy-sensitive experiments.
+    cuda_tf32_enabled_from_env(std::env::var("AXON_CUDA_ALLOW_TF32").ok().as_deref())
+}
+
+/// REQ-AXO-262 — pure helper for the TF32 env parser. Default = true.
+/// Accepts `0`, `false`, `no`, `off` (case-insensitive) as explicit disable.
+pub(super) fn cuda_tf32_enabled_from_env(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let trimmed = v.trim();
+            !(trimmed == "0"
+                || trimmed.eq_ignore_ascii_case("false")
+                || trimmed.eq_ignore_ascii_case("no")
+                || trimmed.eq_ignore_ascii_case("off"))
+        }
+        None => true,
+    }
 }
 
 pub(crate) fn ort_cuda_provider_library_path() -> Option<PathBuf> {

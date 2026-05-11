@@ -602,7 +602,7 @@ fn open_pipeline_trace_writer(
     let mut writer = BufWriter::new(file);
     if !existed {
         let header = match stage {
-            "embedder" => "ts_ms,iter,prepared_rx_len_pre,embedded_tx_len_pre,embedded_tx_len_post,batch_chunks,recv_wait_ms,host_prepare_ms,input_copy_ms,inference_ms,output_extract_ms,send_block_ms",
+            "embedder" => "ts_ms,iter,prepared_rx_len_pre,embedded_tx_len_pre,embedded_tx_len_post,batch_chunks,recv_wait_ms,host_prepare_ms,input_copy_ms,inference_ms,output_extract_ms,send_block_ms,seq_len_raw,seq_len_padded,tokens_total",
             "producer" => "ts_ms,iter,fetch_ms,tokenize_ms,chunks_in_batch,prepared_tx_len_after_send,send_block_ms,reserved_chunks,active_files",
             other => {
                 warn!(
@@ -698,7 +698,7 @@ fn run_embedder_stage(
                 let ts_ms = trace_start.elapsed().as_millis() as u64;
                 let _ = writeln!(
                     writer,
-                    "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms}"
+                    "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms},0,0,0"
                 );
                 let _ = writer.flush();
             }
@@ -716,6 +716,7 @@ fn run_embedder_stage(
                 input_copy_ms,
                 inference_ms,
                 output_extract_ms,
+                stats,
             )) => {
                 service_guard::record_vector_lane_success();
                 let batch_chunks = embeddings.len();
@@ -743,9 +744,12 @@ fn run_embedder_stage(
                 let embedded_tx_len_post = embedded_tx.len();
                 if let Some(writer) = trace.as_mut() {
                     let ts_ms = trace_start.elapsed().as_millis() as u64;
+                    let seq_len_raw = stats.seq_len_raw_max;
+                    let seq_len_padded = stats.seq_len_padded_max;
+                    let tokens_total = stats.tokens_total;
                     let _ = writeln!(
                         writer,
-                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},{batch_chunks},{recv_wait_ms},{host_prepare_ms},{input_copy_ms},{inference_ms},{output_extract_ms},{send_block_ms}"
+                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},{batch_chunks},{recv_wait_ms},{host_prepare_ms},{input_copy_ms},{inference_ms},{output_extract_ms},{send_block_ms},{seq_len_raw},{seq_len_padded},{tokens_total}"
                     );
                     let _ = writer.flush();
                 }
@@ -774,7 +778,7 @@ fn run_embedder_stage(
                     let ts_ms = trace_start.elapsed().as_millis() as u64;
                     let _ = writeln!(
                         writer,
-                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms}"
+                        "{ts_ms},{iter_n},{prepared_rx_len_pre},{embedded_tx_len_pre},{embedded_tx_len_post},0,{recv_wait_ms},0,0,0,0,{send_block_ms},0,0,0"
                     );
                     let _ = writer.flush();
                 }

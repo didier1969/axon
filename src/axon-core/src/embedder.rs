@@ -698,7 +698,14 @@ fn attach_preencoded_micro_batches(
 fn embed_prepared_batch_with_breakdown_ort(
     model: &mut OrtGpuFirstTextEmbedding,
     prepared: &PreparedVectorEmbedBatch,
-) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
+) -> AnyhowResult<(
+    Vec<Vec<f32>>,
+    u64,
+    u64,
+    u64,
+    u64,
+    crate::embedder::gpu_backend::EmbeddingBatchStats,
+)> {
     if !prepared.encoded_micro_batches.is_empty() {
         let total_started = Instant::now();
         let mut ordered_embeddings = vec![None; prepared.texts.len()];
@@ -706,6 +713,7 @@ fn embed_prepared_batch_with_breakdown_ort(
         let mut input_copy_ms = 0u64;
         let mut inference_ms = 0u64;
         let mut output_extract_ms = 0u64;
+        let mut stats = crate::embedder::gpu_backend::EmbeddingBatchStats::default();
 
         for micro_batch in &prepared.encoded_micro_batches {
             let (
@@ -714,11 +722,13 @@ fn embed_prepared_batch_with_breakdown_ort(
                 batch_input_copy_ms,
                 batch_inference_ms,
                 batch_output_extract_ms,
+                batch_stats,
             ) = model.transform_encoded_with_breakdown(&micro_batch.encodings)?;
             host_prepare_ms = host_prepare_ms.saturating_add(batch_host_prepare_ms);
             input_copy_ms = input_copy_ms.saturating_add(batch_input_copy_ms);
             inference_ms = inference_ms.saturating_add(batch_inference_ms);
             output_extract_ms = output_extract_ms.saturating_add(batch_output_extract_ms);
+            stats.merge(batch_stats);
             for (index, embedding) in micro_batch
                 .item_indices
                 .iter()
@@ -742,11 +752,19 @@ fn embed_prepared_batch_with_breakdown_ort(
             input_copy_ms,
             inference_ms,
             output_extract_ms,
+            stats,
         ));
     }
 
     if prepared.texts.is_empty() {
-        return Ok((Vec::new(), 0, 0, 0, 0));
+        return Ok((
+            Vec::new(),
+            0,
+            0,
+            0,
+            0,
+            crate::embedder::gpu_backend::EmbeddingBatchStats::default(),
+        ));
     }
 
     Err(anyhow!(
@@ -802,6 +820,7 @@ fn embed_texts_with_breakdown_ort(
             batch_input_copy_ms,
             batch_inference_ms,
             batch_output_extract_ms,
+            _batch_stats,
         ) = model.transform_encoded_with_breakdown(&batch_encodings)?;
         host_prepare_ms = host_prepare_ms.saturating_add(batch_host_prepare_ms);
         input_copy_ms = input_copy_ms.saturating_add(batch_input_copy_ms);
@@ -4885,13 +4904,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cuda_tf32_enabled_defaults_to_false() {
+    fn test_cuda_tf32_enabled_defaults_to_true() {
+        // REQ-AXO-262 — TF32 default flipped ON 2026-05-11. Ampere+ tensor
+        // cores deliver 1.5–2× speedup on matmul with negligible accuracy
+        // loss for embedding inference.
         let _guard = lock_env_guard();
         unsafe {
             std::env::remove_var("AXON_CUDA_ALLOW_TF32");
         }
 
-        assert!(!super::cuda_tf32_enabled());
+        assert!(super::cuda_tf32_enabled());
     }
 
     #[test]

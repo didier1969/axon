@@ -2,7 +2,8 @@ use anyhow::Result as AnyhowResult;
 
 use super::{
     embed_prepared_batch_with_breakdown_ort, embed_texts_with_breakdown_ort,
-    gpu_backend::OrtGpuFirstTextEmbedding, PreparedVectorEmbedBatch,
+    gpu_backend::{EmbeddingBatchStats, OrtGpuFirstTextEmbedding},
+    PreparedVectorEmbedBatch,
 };
 
 pub(super) enum VectorEmbeddingBackend {
@@ -22,7 +23,7 @@ impl VectorEmbeddingBackend {
     pub(super) fn embed_prepared_batch_with_breakdown(
         &mut self,
         prepared: &PreparedVectorEmbedBatch,
-    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64)> {
+    ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64, EmbeddingBatchStats)> {
         match self {
             Self::CpuInProcess(model) | Self::CudaInProcess(model) => {
                 embed_prepared_batch_with_breakdown_ort(model, prepared)

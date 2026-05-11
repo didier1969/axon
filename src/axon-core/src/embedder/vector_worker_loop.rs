@@ -307,7 +307,7 @@ pub(super) fn vector_lane_worker(worker_idx: usize, graph_store: Arc<GraphStore>
 
                 let embed_started = Instant::now();
                 let embeddings = match model.embed_prepared_batch_with_breakdown(&prepared) {
-                    Ok((embeddings, _, _, _, _)) => {
+                    Ok((embeddings, _, _, _, _, _)) => {
                         let embed_elapsed = embed_started.elapsed().as_millis();
                         total_embed_ms += embed_elapsed;
                         service_guard::record_vector_lane_success();
