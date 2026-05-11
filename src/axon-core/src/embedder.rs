@@ -306,7 +306,7 @@ fn runtime_embedding_snapshot_dir() -> AnyhowResult<PathBuf> {
     profile_runtime_embedding_snapshot_dir()
 }
 
-fn gpu_total_vram_hint_mb() -> Option<u64> {
+pub(super) fn gpu_total_vram_hint_mb() -> Option<u64> {
     if let Some(total_mb) = std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -322,7 +322,7 @@ fn gpu_total_vram_hint_mb() -> Option<u64> {
     None
 }
 
-fn gpu_bootstrap_vector_worker_cap(
+pub(super) fn gpu_bootstrap_vector_worker_cap(
     requested_vector_workers: usize,
     total_vram_mb: Option<u64>,
 ) -> usize {
@@ -1935,7 +1935,7 @@ fn register_query_embedding_sender(sender: Sender<QueryEmbeddingRequest>) {
     *slot = Some(sender);
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
+pub(super) fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())

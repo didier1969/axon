@@ -113,15 +113,45 @@ pub(crate) struct PersistedBatch {
     pub(crate) files_finalized: usize,
 }
 
-/// AC1.3 — factory dispatch entry. Spawns the embedder and persister
-/// threads, runs the producer on the calling thread (= the vector
-/// worker thread that `vector_lane_worker` already supervises), then
-/// joins the spawned threads on exit so axonctl can restart the
-/// whole worker as a unit.
+/// DEC-AXO-079 / REQ-AXO-272 — per-stage worker topology resolved from env.
+///
+/// Returns `(producers, embedders, persisters)`. Defaults all to 1 to
+/// preserve legacy single-pipeline behaviour. GPU VRAM cap applies to
+/// the embedder count only (CPU+IO stages do not contend on VRAM).
+/// Override the cap via `AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION=true`.
+pub(crate) fn pipeline_topology_from_env() -> (usize, usize, usize) {
+    let producers = super::env_usize("AXON_VECTOR_PRODUCERS", 1).max(1);
+    let embedders_requested = super::env_usize("AXON_VECTOR_EMBEDDERS", 1).max(1);
+    let persisters = super::env_usize("AXON_VECTOR_PERSISTERS", 1).max(1);
+    let oversubscription_allowed = std::env::var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION")
+        .ok()
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let embedders = if oversubscription_allowed {
+        embedders_requested
+    } else {
+        super::gpu_bootstrap_vector_worker_cap(embedders_requested, super::gpu_total_vram_hint_mb())
+    };
+    (producers, embedders, persisters)
+}
+
+/// AC1.3 — factory dispatch entry. Spawns the per-stage worker
+/// topology (M producers / N embedders / K persisters) connected by
+/// two MPMC bounded channels. Defaults preserve legacy 1+1+1 behaviour
+/// when the new env vars are unset. Per DEC-AXO-079.
+///
+/// Producer 0 runs on the calling thread (this is the `vector_lane_worker`
+/// thread that axonctl already supervises). Producers 1..M, all
+/// embedders, and all persisters are spawned as named threads. When
+/// producer 0 returns and all spawned producers exit, the embedders
+/// drain on channel disconnect; when embedders exit the persisters
+/// drain in turn. The whole topology returns as a unit so axonctl can
+/// restart the worker.
 pub(crate) fn run_vector_pipeline_3stages(worker_idx: usize, graph_store: Arc<GraphStore>) {
+    let (num_producers, num_embedders, num_persisters) = pipeline_topology_from_env();
     info!(
-        "Vector pipeline [{}]: REQ-AXO-270 3-stage pipeline starting (AXON_VECTOR_PIPELINE_STAGES=3)",
-        worker_idx
+        "Vector pipeline [{}]: REQ-AXO-270 3-stage pipeline starting (topology P={} E={} K={}, AXON_VECTOR_PIPELINE_STAGES=3)",
+        worker_idx, num_producers, num_embedders, num_persisters
     );
 
     if let Err(e) = graph_store.ensure_embedding_model(
@@ -152,43 +182,94 @@ pub(crate) fn run_vector_pipeline_3stages(worker_idx: usize, graph_store: Arc<Gr
     let (prepared_tx, prepared_rx) = bounded::<PreparedMsg>(STAGE_CHANNEL_DEPTH);
     let (embedded_tx, embedded_rx) = bounded::<EmbeddedMsg>(STAGE_CHANNEL_DEPTH);
 
-    // Embedder thread — holds the ORT model exclusively. Owns the
-    // model so axonctl-restart-on-crash leaves no dangling GPU
-    // allocation: panic → thread unwinds → model dropped.
-    let embedder_handle = {
-        let _ = worker_idx;
-        thread::Builder::new()
-            .name(format!("axon-vec-pipeline-embedder-{}", worker_idx))
-            .spawn(move || run_embedder_stage(worker_idx, prepared_rx, embedded_tx))
-            .expect("vector pipeline: failed to spawn embedder thread")
-    };
-
-    // Persister thread — owns the graph_store handle for the bulk
-    // INSERT path. Uses a clone (Arc) so the producer keeps its own.
-    let persister_handle = {
-        let graph_store = Arc::clone(&graph_store);
-        thread::Builder::new()
-            .name(format!("axon-vec-pipeline-persister-{}", worker_idx))
-            .spawn(move || run_persister_stage(worker_idx, graph_store, embedded_rx))
-            .expect("vector pipeline: failed to spawn persister thread")
-    };
-
-    // Producer runs on this thread.
-    run_producer_stage(worker_idx, graph_store, prepared_tx);
-
-    // Producer returned → its sender is dropped → embedder will drain
-    // and exit → embedder's sender drops → persister drains and exits.
-    if let Err(e) = embedder_handle.join() {
-        error!(
-            "Vector pipeline [{}]: embedder thread panicked: {:?}",
-            worker_idx, e
+    // Embedder threads — each holds its own ORT model. Multi-embedder
+    // is gated by the GPU VRAM cap (see pipeline_topology_from_env);
+    // typical config N=1 on consumer GPUs.
+    let mut embedder_handles = Vec::with_capacity(num_embedders);
+    for embedder_idx in 0..num_embedders {
+        let rx = prepared_rx.clone();
+        let tx = embedded_tx.clone();
+        embedder_handles.push(
+            thread::Builder::new()
+                .name(format!(
+                    "axon-vec-pipeline-embedder-{}-{}",
+                    worker_idx, embedder_idx
+                ))
+                .spawn(move || run_embedder_stage(embedder_idx, rx, tx))
+                .expect("vector pipeline: failed to spawn embedder thread"),
         );
     }
-    if let Err(e) = persister_handle.join() {
-        error!(
-            "Vector pipeline [{}]: persister thread panicked: {:?}",
-            worker_idx, e
+    // Drop the original receiver — embedders hold the only clones now.
+    drop(prepared_rx);
+
+    // Persister threads — share the graph_store handle via Arc clones.
+    let mut persister_handles = Vec::with_capacity(num_persisters);
+    for persister_idx in 0..num_persisters {
+        let rx = embedded_rx.clone();
+        let gs = Arc::clone(&graph_store);
+        persister_handles.push(
+            thread::Builder::new()
+                .name(format!(
+                    "axon-vec-pipeline-persister-{}-{}",
+                    worker_idx, persister_idx
+                ))
+                .spawn(move || run_persister_stage(persister_idx, gs, rx))
+                .expect("vector pipeline: failed to spawn persister thread"),
         );
+    }
+    drop(embedded_rx);
+    // Drop the main thread's clone of the embedded_tx so that when all
+    // embedders exit, the persisters see a clean disconnect.
+    drop(embedded_tx);
+
+    // Spawn producers 1..M; producer 0 runs inline below. All share a
+    // cloned prepared_tx sender into the same MPMC channel; concurrent
+    // FVQ claims are serialised by PG row-level locks (each claim
+    // generates a unique claim_token under UPDATE WHERE status='queued').
+    let mut producer_handles = Vec::with_capacity(num_producers.saturating_sub(1));
+    for producer_idx in 1..num_producers {
+        let tx = prepared_tx.clone();
+        let gs = Arc::clone(&graph_store);
+        producer_handles.push(
+            thread::Builder::new()
+                .name(format!(
+                    "axon-vec-pipeline-producer-{}-{}",
+                    worker_idx, producer_idx
+                ))
+                .spawn(move || run_producer_stage(producer_idx, gs, tx))
+                .expect("vector pipeline: failed to spawn producer thread"),
+        );
+    }
+
+    // Producer 0 runs on this thread (owns the original prepared_tx).
+    run_producer_stage(0, Arc::clone(&graph_store), prepared_tx);
+
+    // Producer 0 returned → its prepared_tx is dropped. Wait for the
+    // other producers; once all senders are dropped, embedders see
+    // disconnect and drain.
+    for handle in producer_handles {
+        if let Err(e) = handle.join() {
+            error!(
+                "Vector pipeline [{}]: producer thread panicked: {:?}",
+                worker_idx, e
+            );
+        }
+    }
+    for handle in embedder_handles {
+        if let Err(e) = handle.join() {
+            error!(
+                "Vector pipeline [{}]: embedder thread panicked: {:?}",
+                worker_idx, e
+            );
+        }
+    }
+    for handle in persister_handles {
+        if let Err(e) = handle.join() {
+            error!(
+                "Vector pipeline [{}]: persister thread panicked: {:?}",
+                worker_idx, e
+            );
+        }
     }
 
     info!(
@@ -1076,5 +1157,85 @@ mod tests {
             buffer.is_empty(),
             "flush_buffer must clear the buffer regardless of write outcome"
         );
+    }
+
+    // ─── DEC-AXO-079 / REQ-AXO-272 — pipeline_topology_from_env ────────────
+
+    #[test]
+    fn pipeline_topology_defaults_to_one_one_one_when_env_unset() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::unset("AXON_VECTOR_PRODUCERS");
+        let _ge = EnvVarGuard::unset("AXON_VECTOR_EMBEDDERS");
+        let _gk = EnvVarGuard::unset("AXON_VECTOR_PERSISTERS");
+        let _gov = EnvVarGuard::unset("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "32768");
+        assert_eq!(pipeline_topology_from_env(), (1, 1, 1));
+    }
+
+    #[test]
+    fn pipeline_topology_reads_producers_from_env() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::set("AXON_VECTOR_PRODUCERS", "4");
+        let _ge = EnvVarGuard::unset("AXON_VECTOR_EMBEDDERS");
+        let _gk = EnvVarGuard::unset("AXON_VECTOR_PERSISTERS");
+        let _gov = EnvVarGuard::unset("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "32768");
+        let (p, e, k) = pipeline_topology_from_env();
+        assert_eq!(p, 4);
+        assert_eq!(e, 1);
+        assert_eq!(k, 1);
+    }
+
+    #[test]
+    fn pipeline_topology_reads_persisters_from_env() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::unset("AXON_VECTOR_PRODUCERS");
+        let _ge = EnvVarGuard::unset("AXON_VECTOR_EMBEDDERS");
+        let _gk = EnvVarGuard::set("AXON_VECTOR_PERSISTERS", "2");
+        let _gov = EnvVarGuard::unset("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "32768");
+        let (p, e, k) = pipeline_topology_from_env();
+        assert_eq!(p, 1);
+        assert_eq!(e, 1);
+        assert_eq!(k, 2);
+    }
+
+    #[test]
+    fn pipeline_topology_caps_embedders_on_8gb_vram_when_oversubscription_disabled() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::unset("AXON_VECTOR_PRODUCERS");
+        let _ge = EnvVarGuard::set("AXON_VECTOR_EMBEDDERS", "4");
+        let _gk = EnvVarGuard::unset("AXON_VECTOR_PERSISTERS");
+        let _gov = EnvVarGuard::unset("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
+        let (_, e, _) = pipeline_topology_from_env();
+        assert_eq!(e, 1, "8 GB VRAM caps embedders to 1 without oversubscription");
+    }
+
+    #[test]
+    fn pipeline_topology_honors_oversubscription_for_embedders() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::unset("AXON_VECTOR_PRODUCERS");
+        let _ge = EnvVarGuard::set("AXON_VECTOR_EMBEDDERS", "4");
+        let _gk = EnvVarGuard::unset("AXON_VECTOR_PERSISTERS");
+        let _gov = EnvVarGuard::set("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION", "true");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
+        let (_, e, _) = pipeline_topology_from_env();
+        assert_eq!(e, 4, "AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION=true bypasses cap");
+    }
+
+    #[test]
+    fn pipeline_topology_clamps_zero_to_one() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _gp = EnvVarGuard::set("AXON_VECTOR_PRODUCERS", "0");
+        let _ge = EnvVarGuard::set("AXON_VECTOR_EMBEDDERS", "0");
+        let _gk = EnvVarGuard::set("AXON_VECTOR_PERSISTERS", "0");
+        let _gov = EnvVarGuard::unset("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        let _gvram = EnvVarGuard::set("AXON_GPU_TOTAL_VRAM_MB_HINT", "32768");
+        // env_usize treats 0 as "use default" → falls back to 1; .max(1) is belt-and-suspenders.
+        let (p, e, k) = pipeline_topology_from_env();
+        assert_eq!(p, 1);
+        assert_eq!(e, 1);
+        assert_eq!(k, 1);
     }
 }
