@@ -14,6 +14,7 @@ MANIFEST_PATH=""
 RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
+FINALIZE_ONLY=0
 
 assert_live_stopped() {
   if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
@@ -24,7 +25,14 @@ assert_live_stopped() {
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run]
+Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run] [--finalize-only]
+
+  --finalize-only   REQ-AXO-286: assume the live brain already serves the target
+                    manifest (started via env-override AXON_LIVE_RELEASE_MANIFEST=
+                    <pending>). Verify build_id via MCP, then archive current and
+                    promote pending → current without any service restart. Skips
+                    staging copy, indexer rise, and the strict authority contract
+                    (which requires indexer_ready=true and breaks brain_only ops).
 EOF
 }
 
@@ -34,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --restart-live) RESTART_LIVE=1; shift ;;
     --skip-postcheck) SKIP_POSTCHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --finalize-only) FINALIZE_ONLY=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -41,14 +50,20 @@ done
 
 [[ -n "$MANIFEST_PATH" ]] || { echo "--manifest is required" >&2; exit 1; }
 
+if [[ "$FINALIZE_ONLY" -eq 1 && "$RESTART_LIVE" -eq 1 ]]; then
+  echo "--finalize-only and --restart-live are mutually exclusive" >&2
+  exit 1
+fi
+
 MANIFEST_PATH="$(realpath "$MANIFEST_PATH")"
 export RELEASE_MANIFEST="$MANIFEST_PATH"
 
-if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" ]]; then
+if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" && "$FINALIZE_ONLY" -ne 1 ]]; then
   echo "Stale pending live release exists; clear .axon/live-release/pending.json before promoting." >&2
   exit 1
 fi
 
+export FINALIZE_ONLY
 python3 - <<'PY'
 import hashlib, json, os, pathlib
 manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
@@ -61,8 +76,14 @@ with artifact.open("rb") as handle:
         h.update(chunk)
 if h.hexdigest() != manifest["artifact"]["sha256"]:
     raise SystemExit("Artifact checksum mismatch")
-if manifest.get("state") != "qualified":
-    raise SystemExit("Only qualified manifests may be promoted")
+finalize_only = os.environ.get("FINALIZE_ONLY", "0") == "1"
+allowed_states = {"qualified", "staged"} if finalize_only else {"qualified"}
+if manifest.get("state") not in allowed_states:
+    raise SystemExit(
+        "Only qualified manifests may be promoted"
+        if not finalize_only
+        else "Finalize-only accepts state in {qualified, staged}; got " + repr(manifest.get("state"))
+    )
 artifacts = manifest.get("artifacts")
 if isinstance(artifacts, dict):
     for name, entry in artifacts.items():
@@ -92,10 +113,24 @@ export MANIFEST_FIELD="artifact.path"; artifact_path="$(read_manifest_field)"
 export MANIFEST_FIELD="artifact.sha256"; artifact_digest="$(read_manifest_field)"
 export ROOT_DIR RELEASE_VERSION="$release_version" PACKAGE_VERSION="$package_version" BUILD_ID="$build_id"
 
-bash "$ROOT_DIR/scripts/release/preflight.sh" \
-  --check-pending
+if [[ "$FINALIZE_ONLY" -ne 1 ]]; then
+  bash "$ROOT_DIR/scripts/release/preflight.sh" \
+    --check-pending
+fi
 
-install_generation="live-$(date -u +%Y%m%dT%H%M%SZ)"
+# REQ-AXO-286: under --finalize-only the manifest already carries its own
+# install_generation (set during the original staging attempt). Reuse it so
+# the live brain (started with AXON_LIVE_RELEASE_MANIFEST pointing at this
+# manifest) keeps reporting a generation that matches current.json.
+if [[ "$FINALIZE_ONLY" -eq 1 ]]; then
+  export MANIFEST_FIELD="runtime_version.install_generation"
+  install_generation="$(read_manifest_field)"
+  if [[ -z "$install_generation" || "$install_generation" == "None" ]]; then
+    install_generation="live-$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
+else
+  install_generation="live-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 release_root="$ROOT_DIR/.axon/live-release"
 history_root="$release_root/history"
 current_manifest="$release_root/current.json"
@@ -110,6 +145,102 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would promote manifest $MANIFEST_PATH"
   echo "DRY RUN: runtime_contract=brain_mcp_indexer_ist release_version=$release_version build_id=$build_id install_generation=$install_generation"
   echo "DRY RUN: artifact=$artifact_path sha256=$artifact_digest"
+  [[ "$FINALIZE_ONLY" -eq 1 ]] && echo "DRY RUN: finalize-only — no staging, no restart, file labels only"
+  exit 0
+fi
+
+# REQ-AXO-286 --finalize-only fast path: brain is already serving the
+# manifest via AXON_LIVE_RELEASE_MANIFEST env-override; verify MCP reports
+# the expected build_id (lightweight check, doesn't require indexer_ready),
+# then perform file-label transition + build-info refresh without restart.
+if [[ "$FINALIZE_ONLY" -eq 1 ]]; then
+  # Light MCP check: build_id match. Probes the configured live MCP URL.
+  live_mcp_url="${AXON_MCP_URL:-http://127.0.0.1:44129/mcp}"
+  observed_build_id="$(python3 - <<'PY' 2>/dev/null || true
+import json, os, urllib.request
+url = os.environ.get("LIVE_MCP_URL", "http://127.0.0.1:44129/mcp")
+body = json.dumps({"jsonrpc":"2.0","method":"tools/call","id":1,
+    "params":{"name":"status","arguments":{"mode":"brief"}}}).encode()
+req = urllib.request.Request(url, data=body,
+    headers={"Content-Type":"application/json"})
+with urllib.request.urlopen(req, timeout=5) as r:
+    payload = json.loads(r.read())
+data = payload.get("result", {}).get("data") or {}
+rv = data.get("runtime_version") or {}
+print(rv.get("build_id", ""))
+PY
+)"
+  LIVE_MCP_URL="$live_mcp_url" observed_build_id="${observed_build_id:-}"
+  if [[ -z "$observed_build_id" ]]; then
+    echo "--finalize-only: could not probe live MCP at $live_mcp_url for runtime_version.build_id" >&2
+    echo "Bring the live brain up first (e.g. AXON_LIVE_RELEASE_MANIFEST=$MANIFEST_PATH AXON_SKIP_BIN_SYNC=1 ./scripts/axon-live start --brain-only) and retry." >&2
+    exit 1
+  fi
+  if [[ "$observed_build_id" != "$build_id" ]]; then
+    echo "--finalize-only: live MCP build_id mismatch — expected $build_id, observed $observed_build_id" >&2
+    exit 1
+  fi
+  echo "--finalize-only: live MCP reports build_id=$build_id ✓"
+
+  # Refresh bin/<artifact>.build-info AXON_INSTALL_GENERATION to match
+  python3 - <<'PY'
+import json, os, pathlib, shlex
+root = pathlib.Path(os.environ["ROOT_DIR"])
+manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
+release_version = os.environ["RELEASE_VERSION"]
+build_id = os.environ["BUILD_ID"]
+package_version = os.environ["PACKAGE_VERSION"]
+install_generation = os.environ["INSTALL_GENERATION"]
+artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+if not artifacts:
+    artifacts = {"axon-core": manifest["artifact"]}
+for name, entry in artifacts.items():
+    build_info_target = root / "bin" / f"{name}.build-info"
+    if not build_info_target.parent.exists():
+        continue
+    payload = {
+        "AXON_RELEASE_VERSION": release_version,
+        "AXON_BUILD_ID": build_id,
+        "AXON_PACKAGE_VERSION": package_version,
+        "AXON_INSTALL_GENERATION": install_generation,
+    }
+    extra = entry.get("build_info_path")
+    if isinstance(extra, str):
+        payload["AXON_ARTIFACT_BUILD_INFO_PATH"] = extra
+    sha = entry.get("sha256")
+    if isinstance(sha, str):
+        payload["AXON_ARTIFACT_SHA256"] = sha
+    artifact_source = entry.get("path")
+    if isinstance(artifact_source, str):
+        payload["AXON_ARTIFACT_SOURCE"] = artifact_source
+    with build_info_target.open("w") as handle:
+        for key, value in payload.items():
+            handle.write(f"{key}={shlex.quote(value)}\n")
+PY
+
+  # Archive existing current.json then write new current.json with state=promoted
+  python3 - <<'PY'
+import json, os, pathlib
+current = pathlib.Path(os.environ["CURRENT_MANIFEST"])
+history_root = pathlib.Path(os.environ["HISTORY_ROOT"])
+history_root.mkdir(parents=True, exist_ok=True)
+if current.exists():
+    prev = json.loads(current.read_text())
+    prev_gen = prev.get("runtime_version", {}).get("install_generation", "previous")
+    (history_root / f"{prev_gen}.json").write_text(json.dumps(prev, indent=2, sort_keys=True) + "\n")
+
+manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
+manifest["state"] = "promoted"
+manifest["runtime_version"]["install_generation"] = os.environ["INSTALL_GENERATION"]
+payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+current.write_text(payload)
+(history_root / f"{os.environ['INSTALL_GENERATION']}.json").write_text(payload)
+
+pending = pathlib.Path(os.environ["PENDING_MANIFEST"])
+if pending.exists():
+    pending.unlink()
+PY
+  echo "Finalized live promotion: $RELEASE_VERSION ($build_id) generation=$install_generation"
   exit 0
 fi
 
