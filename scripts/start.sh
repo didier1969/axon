@@ -22,6 +22,8 @@ source "$PROJECT_ROOT/scripts/lib/axon-ort-runtime.sh"
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 # shellcheck source=scripts/lib/socket-lifecycle.sh
 source "$PROJECT_ROOT/scripts/lib/socket-lifecycle.sh"
+# shellcheck source=scripts/lib/ensure-runtime.sh
+source "$PROJECT_ROOT/scripts/lib/ensure-runtime.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
@@ -142,6 +144,22 @@ if [[ -n "$AXON_RUNTIME_CONFIG_FILE" && -f "$AXON_RUNTIME_CONFIG_FILE" ]]; then
     . "$AXON_RUNTIME_CONFIG_FILE"
     set +o allexport
     echo "🔧 Loaded runtime config from $AXON_RUNTIME_CONFIG_FILE"
+fi
+
+# REQ-AXO-XXX — auto-bootstrap PG / role / DB before any binary check.
+# Without this, a fresh WSL, a wiped .devenv/state, or a competing
+# Docker container holding :44144 forces operator into a 5-step manual
+# recovery. ensure_runtime_ready is idempotent — safe to call on every
+# start. Skipped only when the backend is explicitly not Postgres.
+if [[ "${AXON_DB_BACKEND:-postgres}" == "postgres" \
+      && "${AXON_SKIP_RUNTIME_BOOTSTRAP:-0}" != "1" ]]; then
+    if ! devenv shell --no-reload --no-tui -- bash -lc \
+            "PROJECT_ROOT='$PROJECT_ROOT'; \
+             source '$PROJECT_ROOT/scripts/lib/ensure-runtime.sh'; \
+             ensure_runtime_ready '$AXON_INSTANCE_KIND'"; then
+        echo "❌ Runtime bootstrap (ensure_runtime_ready) failed; refusing to start." >&2
+        exit 1
+    fi
 fi
 AXON_LAST_RUNTIME_MODE=""
 if [[ -f "$AXON_INSTANCE_STATE_FILE" ]]; then
