@@ -57,7 +57,13 @@ struct Args {
 impl Args {
     fn parse() -> Result<Self> {
         let mut source: PathBuf = std::env::current_dir()?;
-        let mut max_files: usize = 200;
+        // REQ-AXO-289 S4b' / S6a tuning : operator northstar ≥250 ch/s
+        // needs ≥3 000 chunks of material to amortise TensorRT compile
+        // (~5 s cold start) and to keep B2's GPU saturated through the
+        // full sustained-throughput plateau. At ~20 chunks per source
+        // file, --max-files 3000 yields ~60 000 chunks total — way past
+        // saturation, lets the operator pick a useful slice.
+        let mut max_files: usize = 3000;
         let mut duration_secs: u64 = 0;
         let mut project = String::from("AXO");
         let mut embedder_mode = EmbedderMode::Gpu;
@@ -208,10 +214,24 @@ async fn run() -> Result<()> {
     let embedder = build_embedder(args.embedder_mode)?;
     let store = Arc::new(build_store(args.embedder_mode)?);
     let caps = PipelineChannelCaps::from_env();
-    let counts_a = PipelineAWorkerCounts::from_env();
+    // Bench-specific minimum production rate (operator north-star 2026-05-12) :
+    // ≥6 A3 workers writing chunks so B2's GPU stays saturated. Env
+    // AXON_A3_WORKERS=N still overrides if higher.
+    let counts_a = {
+        let env_counts = PipelineAWorkerCounts::from_env();
+        PipelineAWorkerCounts {
+            a1: env_counts.a1,
+            a2: env_counts.a2,
+            a3: env_counts.a3.max(6),
+        }
+    };
     let counts_b = PipelineBWorkerCounts::from_env();
 
-    eprintln!("axon-bench-pipeline-v2: caps={caps:?} a={counts_a:?} b={counts_b:?}");
+    eprintln!(
+        "axon-bench-pipeline-v2: caps={caps:?} a={counts_a:?} b={counts_b:?} \
+         b2_batch_size={} b2_batch_timeout_ms={}",
+        caps.b2_batch_size, caps.b2_batch_timeout_ms
+    );
 
     let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), args.project.clone());
     let b1_inbox_rx = std::mem::replace(

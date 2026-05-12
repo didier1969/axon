@@ -23,7 +23,7 @@ use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::{a3_enroll, EnrolledFile};
 use super::stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
-use super::stage_b2::{b2_embed, B2Embedder, EmbeddedChunk};
+use super::stage_b2::{B2Embedder, EmbeddedChunk};
 use super::stage_b3::{b3_persist_embedding, PersistedEmbedding};
 use super::worker_pool::spawn_stage_workers;
 
@@ -341,17 +341,23 @@ pub fn spawn_pipeline_b_full(
         metrics_b1.clone(),
     );
 
-    let embedder_for_b2 = embedder.clone();
-    spawn_stage_workers(
-        counts.b2,
+    // REQ-AXO-289 S4b' — B2 runs a dedicated batched worker, not the
+    // generic spawn_stage_workers competing-consumers loop. ORT /
+    // TensorRT BGE-Large hits peak throughput around batch=64-128; at
+    // batch=1 the GPU is idle ~99% of the time. The batched worker
+    // accumulates up to `caps.b2_batch_size` payloads or waits
+    // `caps.b2_batch_timeout_ms` ms before flushing, then issues one
+    // `embed_batch` call to the embedder.
+    super::stage_b2::spawn_b2_batched_worker(
         b1_to_b2_rx,
         b2_to_b3_tx,
-        move |payload: ChunkForEmbedding| {
-            let embedder = embedder_for_b2.clone();
-            async move { b2_embed(payload, embedder).await }
-        },
+        embedder.clone(),
         metrics_b2.clone(),
+        caps.b2_batch_size,
+        std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
     );
+    let _ = counts.b2; // CPT-AXO-054 sizes B2 at 1 worker per GPU; the
+                      // batched-worker spawn above is implicitly singular.
 
     let store_for_b3 = store.clone();
     let pc_for_b3 = project_code.clone();

@@ -32,6 +32,20 @@ pub const A3_TO_B1_BUFFER_CAP_DEFAULT: usize = 10_000;
 /// override: `AXON_B1_COLDSTART_BATCH_SIZE`.
 pub const B1_COLDSTART_BATCH_SIZE_DEFAULT: usize = 256;
 
+/// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
+/// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
+/// batch=64-128. At batch=1 the GPU is essentially idle (~10 ch/s vs
+/// ~280 ch/s peak). The B2 worker accumulates up to this many chunks
+/// per `embed_batch` call before flushing to the GPU. Operator
+/// override: `AXON_B2_BATCH_SIZE`.
+pub const B2_BATCH_SIZE_DEFAULT: usize = 64;
+
+/// REQ-AXO-289 S4b' — Maximum time the B2 worker waits before
+/// flushing a partial batch. Bounds latency under low-traffic regimes
+/// (cold start, post-pause warmup, end-of-walk tail). Operator
+/// override: `AXON_B2_BATCH_TIMEOUT_MS`.
+pub const B2_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
+
 /// Effective pipeline channel capacities after env-var resolution.
 ///
 /// Use [`PipelineChannelCaps::from_env`] to derive a single owned value at
@@ -41,6 +55,8 @@ pub struct PipelineChannelCaps {
     pub internal: usize,
     pub a3_to_b1: usize,
     pub b1_coldstart_batch_size: usize,
+    pub b2_batch_size: usize,
+    pub b2_batch_timeout_ms: u64,
 }
 
 impl Default for PipelineChannelCaps {
@@ -49,6 +65,8 @@ impl Default for PipelineChannelCaps {
             internal: INTERNAL_CHANNEL_CAP_DEFAULT,
             a3_to_b1: A3_TO_B1_BUFFER_CAP_DEFAULT,
             b1_coldstart_batch_size: B1_COLDSTART_BATCH_SIZE_DEFAULT,
+            b2_batch_size: B2_BATCH_SIZE_DEFAULT,
+            b2_batch_timeout_ms: B2_BATCH_TIMEOUT_MS_DEFAULT,
         }
     }
 }
@@ -79,6 +97,20 @@ impl PipelineChannelCaps {
                 }
             }
         }
+        if let Ok(raw) = std::env::var("AXON_B2_BATCH_SIZE") {
+            if let Ok(parsed) = raw.trim().parse::<usize>() {
+                if parsed > 0 {
+                    caps.b2_batch_size = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_B2_BATCH_TIMEOUT_MS") {
+            if let Ok(parsed) = raw.trim().parse::<u64>() {
+                if parsed > 0 {
+                    caps.b2_batch_timeout_ms = parsed;
+                }
+            }
+        }
         caps
     }
 }
@@ -88,10 +120,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_canonical_session_17_decisions() {
+    fn defaults_match_canonical_session_19_decisions() {
         let caps = PipelineChannelCaps::default();
         assert_eq!(caps.internal, 1024);
         assert_eq!(caps.a3_to_b1, 10_000);
         assert_eq!(caps.b1_coldstart_batch_size, 256);
+        assert_eq!(caps.b2_batch_size, 64);
+        assert_eq!(caps.b2_batch_timeout_ms, 200);
     }
 }

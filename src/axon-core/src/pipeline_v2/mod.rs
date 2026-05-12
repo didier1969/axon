@@ -75,7 +75,7 @@ pub use stage_a2::a2_transform;
 pub use stage_a3::{a3_enroll, EnrolledFile};
 pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, ChunkForEmbedding};
 pub use embedder_gpu::GpuB2Embedder;
-pub use stage_b2::{b2_embed, B2Embedder, EmbeddedChunk, NoOpEmbedder};
+pub use stage_b2::{b2_embed, spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::{b3_persist_embedding, PersistedEmbedding};
 pub use types::{ParsedFile, PreparedFile};
 pub use worker_pool::spawn_stage_workers;
@@ -111,5 +111,7 @@ mod doc_invariants {
         assert_eq!(super::INTERNAL_CHANNEL_CAP_DEFAULT, 1024);
         assert_eq!(super::A3_TO_B1_BUFFER_CAP_DEFAULT, 10_000);
         assert_eq!(super::B1_COLDSTART_BATCH_SIZE_DEFAULT, 256);
+        assert_eq!(super::channels::B2_BATCH_SIZE_DEFAULT, 64);
+        assert_eq!(super::channels::B2_BATCH_TIMEOUT_MS_DEFAULT, 200);
     }
 }
