@@ -11,6 +11,7 @@
 pub mod channels;
 pub mod indexed_file_cache;
 pub mod metrics;
+pub mod orchestrator;
 pub mod stage_a1;
 pub mod stage_a2;
 pub mod stage_a3;
@@ -23,6 +24,7 @@ pub use channels::{
 };
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
+pub use orchestrator::{spawn_pipeline_a, PipelineAHandles, PipelineAWorkerCounts};
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::{a3_enroll, EnrolledFile};
