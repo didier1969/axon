@@ -21,10 +21,11 @@ use super::channels::PipelineChannelCaps;
 use super::metrics::StageMetrics;
 use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
-use super::stage_a3::{a3_enroll, EnrolledFile};
+use super::stage_a3::EnrolledFile;
 use super::stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
 use super::stage_b2::{B2Embedder, EmbeddedChunk};
-use super::stage_b3::{b3_persist_embedding, PersistedEmbedding};
+use super::stage_b3::PersistedEmbedding;
+use super::types::ParsedFile;
 use super::worker_pool::spawn_stage_workers;
 
 /// Tunable per-stage worker counts. Operator-overridable through env vars
@@ -198,30 +199,63 @@ pub fn spawn_pipeline_a(
         metrics_a2.clone(),
     );
 
-    let store_for_a3 = store.clone();
-    let pc_for_a3 = project_code.clone();
-    let b1_tx_for_a3 = b1_inbox_tx.clone();
-    spawn_stage_workers(
-        counts.a3,
-        a2_to_a3_rx,
-        output_tx,
-        move |parsed| {
-            let store = store_for_a3.clone();
-            let pc = pc_for_a3.clone();
-            let b1_tx = b1_tx_for_a3.clone();
-            async move {
-                let enrolled = a3_enroll(parsed, store, pc).await?;
-                // Best-effort fan-out to B1's inbox. Graph priority:
-                // drop silently on full — B1's cold-start poll DB
-                // pathway (slice S4c) catches the leakage.
-                for cid in &enrolled.chunk_ids {
-                    let _ = b1_tx.try_send(cid.clone());
-                }
-                Ok(enrolled)
+    // REQ-AXO-295 — A3 runs a dedicated batched worker. Per-file
+    // BEGIN/COMMIT is the upstream throughput cliff: at A3=6 workers
+    // PG locks contend so badly that sustained throughput is 2.7× LESS
+    // than at A3=2 (NoOp bench 2026-05-12: 22 ch/s vs 57 ch/s). The
+    // batched worker amortizes the transaction cost — N files written
+    // in one execute_batch call. AXON_A3_BATCH_SIZE /
+    // AXON_A3_BATCH_TIMEOUT_MS configure the lever. `counts.a3` is
+    // honored: when > 1, we spawn N batched workers each with their
+    // own intake channel, and a round-robin dispatcher fans the
+    // upstream `a2_to_a3_rx` across them.
+    {
+        let bs = caps.a3_batch_size;
+        let bto = std::time::Duration::from_millis(caps.a3_batch_timeout_ms);
+        let n_workers = counts.a3.max(1);
+        if n_workers == 1 {
+            super::stage_a3::spawn_a3_batched_worker(
+                a2_to_a3_rx,
+                output_tx,
+                b1_inbox_tx.clone(),
+                store.clone(),
+                project_code.clone(),
+                metrics_a3.clone(),
+                bs,
+                bto,
+            );
+        } else {
+            let mut worker_txs: Vec<mpsc::Sender<ParsedFile>> = Vec::with_capacity(n_workers);
+            for _ in 0..n_workers {
+                let (wtx, wrx) = mpsc::channel::<ParsedFile>(caps.internal);
+                worker_txs.push(wtx);
+                super::stage_a3::spawn_a3_batched_worker(
+                    wrx,
+                    output_tx.clone(),
+                    b1_inbox_tx.clone(),
+                    store.clone(),
+                    project_code.clone(),
+                    metrics_a3.clone(),
+                    bs,
+                    bto,
+                );
             }
-        },
-        metrics_a3.clone(),
-    );
+            // Drop the orchestrator-held tx so when all workers exit
+            // the output channel actually closes.
+            drop(output_tx);
+            let mut a2_to_a3_rx_for_dispatch = a2_to_a3_rx;
+            tokio::spawn(async move {
+                let mut next = 0usize;
+                while let Some(item) = a2_to_a3_rx_for_dispatch.recv().await {
+                    let target = next % worker_txs.len();
+                    next = next.wrapping_add(1);
+                    if worker_txs[target].send(item).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    }
 
     PipelineAHandles {
         input_tx,
@@ -359,19 +393,55 @@ pub fn spawn_pipeline_b_full(
     let _ = counts.b2; // CPT-AXO-054 sizes B2 at 1 worker per GPU; the
                       // batched-worker spawn above is implicitly singular.
 
-    let store_for_b3 = store.clone();
-    let pc_for_b3 = project_code.clone();
-    spawn_stage_workers(
-        counts.b3,
-        b2_to_b3_rx,
-        output_tx,
-        move |embedded: EmbeddedChunk| {
-            let store = store_for_b3.clone();
-            let pc = pc_for_b3.clone();
-            async move { b3_persist_embedding(embedded, store, pc).await }
-        },
-        metrics_b3.clone(),
-    );
+    // REQ-AXO-295 — B3 mirrors A3: multi-row UPSERT amortizes
+    // pgvector HNSW contention. AXON_B3_BATCH_SIZE /
+    // AXON_B3_BATCH_TIMEOUT_MS expose the lever. `counts.b3 > 1` fans
+    // out via a round-robin dispatcher so multiple batched B3 workers
+    // can compete on the same upstream EmbeddedChunk stream.
+    {
+        let bs = caps.b3_batch_size;
+        let bto = std::time::Duration::from_millis(caps.b3_batch_timeout_ms);
+        let n_workers = counts.b3.max(1);
+        if n_workers == 1 {
+            super::stage_b3::spawn_b3_batched_worker(
+                b2_to_b3_rx,
+                output_tx,
+                store.clone(),
+                project_code.clone(),
+                metrics_b3.clone(),
+                bs,
+                bto,
+            );
+        } else {
+            let mut worker_txs: Vec<mpsc::Sender<EmbeddedChunk>> =
+                Vec::with_capacity(n_workers);
+            for _ in 0..n_workers {
+                let (wtx, wrx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
+                worker_txs.push(wtx);
+                super::stage_b3::spawn_b3_batched_worker(
+                    wrx,
+                    output_tx.clone(),
+                    store.clone(),
+                    project_code.clone(),
+                    metrics_b3.clone(),
+                    bs,
+                    bto,
+                );
+            }
+            drop(output_tx);
+            let mut b2_to_b3_rx_for_dispatch = b2_to_b3_rx;
+            tokio::spawn(async move {
+                let mut next = 0usize;
+                while let Some(item) = b2_to_b3_rx_for_dispatch.recv().await {
+                    let target = next % worker_txs.len();
+                    next = next.wrapping_add(1);
+                    if worker_txs[target].send(item).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    }
 
     PipelineBFullHandles {
         output_rx,

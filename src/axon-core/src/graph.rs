@@ -28,49 +28,29 @@ pub(crate) type QueryCountFunc =
 pub(crate) type FreeStrFunc = unsafe extern "C" fn(ptr: *mut std::os::raw::c_char);
 pub(crate) type CloseDbFunc = unsafe extern "C" fn(ctx: *mut c_void);
 
-/// MIL-AXO-015 P3 slice 3b: backend selector consumed by
-/// `PluginSymbols::resolve` and `find_plugin_path`. Defaults to
-/// `Duckdb` so existing deployments keep their current behaviour;
-/// callers opt into PostgreSQL via `AXON_DB_BACKEND=postgres`
-/// (DEC-AXO-075).
+/// PostgreSQL is the canonical (and only) storage backend (REQ-AXO-271,
+/// operator directive 2026-05-12 — purge of DuckDB). The
+/// `PluginBackend` enum is retained as a single-variant marker so the
+/// existing FFI plumbing keeps compiling while the deeper refactor
+/// lands in a follow-up sweep.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PluginBackend {
-    Duckdb,
     Postgres,
 }
 
 impl PluginBackend {
-    /// Read `AXON_DB_BACKEND` once. Recognised values: `postgres`,
-    /// `postgresql`, `pg` → `Postgres`. Anything else (including unset
-    /// or empty) → `Duckdb`. Case-insensitive.
+    /// PostgreSQL is the only backend. `AXON_DB_BACKEND` is ignored
+    /// and may be removed entirely once every reference is purged.
     pub(crate) fn current() -> Self {
-        match std::env::var("AXON_DB_BACKEND")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("postgres") | Some("postgresql") | Some("pg") => PluginBackend::Postgres,
-            _ => PluginBackend::Duckdb,
-        }
+        PluginBackend::Postgres
     }
 
-    /// Filename of the plugin shared object as built by the matching
-    /// crate's `cargo build`. `find_plugin_path` searches the per-crate
-    /// `target/{release,debug}` paths for this file.
     pub(crate) fn plugin_filename(self) -> &'static str {
-        match self {
-            PluginBackend::Duckdb => "libaxon_plugin_duckdb.so",
-            PluginBackend::Postgres => "libaxon_plugin_postgres.so",
-        }
+        "libaxon_plugin_postgres.so"
     }
 
-    /// Per-backend `src/<crate>/` path segment used by
-    /// `find_plugin_path` to locate the .so under the repo tree.
     pub(crate) fn crate_dir(self) -> &'static str {
-        match self {
-            PluginBackend::Duckdb => "src/axon-plugin-duckdb",
-            PluginBackend::Postgres => "src/axon-plugin-postgres",
-        }
+        "src/axon-plugin-postgres"
     }
 }
 
@@ -101,35 +81,14 @@ impl PluginSymbols {
     /// `PluginSymbols` because the cached fn pointers reference
     /// addresses inside the loaded image. `LatticePool` enforces this
     /// by owning the `Arc<Library>` alongside the symbols.
-    pub(crate) unsafe fn resolve(lib: &Library, backend: PluginBackend) -> anyhow::Result<Self> {
-        match backend {
-            PluginBackend::Duckdb => Self::resolve_duckdb(lib),
-            PluginBackend::Postgres => Self::resolve_postgres(lib),
-        }
+    pub(crate) unsafe fn resolve(lib: &Library, _backend: PluginBackend) -> anyhow::Result<Self> {
+        Self::resolve_postgres(lib)
     }
 
-    /// Resolve the duckdb_* C symbols.
-    ///
-    /// # Safety
-    ///
-    /// See `PluginSymbols::resolve`.
-    pub(crate) unsafe fn resolve_duckdb(lib: &Library) -> anyhow::Result<Self> {
-        Ok(Self {
-            backend: PluginBackend::Duckdb,
-            init_fn: *lib.get::<InitDbFunc>(b"duckdb_init_db\0")?,
-            close_fn: *lib.get::<CloseDbFunc>(b"duckdb_close_db\0")?,
-            exec_fn: *lib.get::<ExecFunc>(b"duckdb_execute\0")?,
-            query_count_fn: *lib.get::<QueryCountFunc>(b"duckdb_query_count\0")?,
-            query_json_fn: *lib.get::<QueryJsonFunc>(b"duckdb_query_json\0")?,
-            free_str_fn: *lib.get::<FreeStrFunc>(b"duckdb_free_string\0")?,
-        })
-    }
-
-    /// Resolve the pg_* C symbols. `init_fn` resolves to the
-    /// `pg_init_db_compat` shim defined in axon-plugin-postgres so the
-    /// signature stays identical to the duckdb plugin's `duckdb_init_db`.
-    /// The first argument is reinterpreted as a `DATABASE_URL`; the
-    /// `read_only` flag is ignored (PG handles concurrency server-side).
+    /// Resolve the pg_* C symbols. `init_fn` is the `pg_init_db_compat`
+    /// shim defined in axon-plugin-postgres; the first argument is
+    /// reinterpreted as a `DATABASE_URL`; the `read_only` flag is
+    /// ignored (PG handles concurrency server-side).
     ///
     /// # Safety
     ///

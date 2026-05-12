@@ -46,6 +46,32 @@ pub const B2_BATCH_SIZE_DEFAULT: usize = 64;
 /// override: `AXON_B2_BATCH_TIMEOUT_MS`.
 pub const B2_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
 
+/// REQ-AXO-295 — Default batch size for the A3 PG writer. A3 per-file
+/// transactions saturate at single-digit concurrent workers because
+/// every file is a `BEGIN/INSERT…/COMMIT` round-trip on the same DB,
+/// so adding workers thrashes pg_locks rather than scaling throughput
+/// (measured 2026-05-12: A3=2 → 57 ch/s, A3=6 → 22 ch/s in NoOp). The
+/// batched worker accumulates N parsed files and writes them all in
+/// a single `execute_batch`, amortizing transaction overhead.
+/// Operator override: `AXON_A3_BATCH_SIZE`.
+pub const A3_BATCH_SIZE_DEFAULT: usize = 32;
+
+/// REQ-AXO-295 — Maximum time the A3 worker waits before flushing a
+/// partial batch. Operator-requested 10 ms floor (2026-05-12):
+/// "envoyer ce qu'on a toutes les 10 ms, jamais en dessous". Operator
+/// override: `AXON_A3_BATCH_TIMEOUT_MS`.
+pub const A3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
+
+/// REQ-AXO-295 — Default batch size for the B3 ChunkEmbedding UPSERT
+/// writer. Mirror of A3: single-row UPSERTs to pgvector contend on
+/// HNSW index updates; multi-row UPSERT amortizes the contention.
+/// Operator override: `AXON_B3_BATCH_SIZE`.
+pub const B3_BATCH_SIZE_DEFAULT: usize = 64;
+
+/// REQ-AXO-295 — B3 partial-batch flush timeout. Operator override:
+/// `AXON_B3_BATCH_TIMEOUT_MS`.
+pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
+
 /// Effective pipeline channel capacities after env-var resolution.
 ///
 /// Use [`PipelineChannelCaps::from_env`] to derive a single owned value at
@@ -55,8 +81,12 @@ pub struct PipelineChannelCaps {
     pub internal: usize,
     pub a3_to_b1: usize,
     pub b1_coldstart_batch_size: usize,
+    pub a3_batch_size: usize,
+    pub a3_batch_timeout_ms: u64,
     pub b2_batch_size: usize,
     pub b2_batch_timeout_ms: u64,
+    pub b3_batch_size: usize,
+    pub b3_batch_timeout_ms: u64,
 }
 
 impl Default for PipelineChannelCaps {
@@ -65,8 +95,12 @@ impl Default for PipelineChannelCaps {
             internal: INTERNAL_CHANNEL_CAP_DEFAULT,
             a3_to_b1: A3_TO_B1_BUFFER_CAP_DEFAULT,
             b1_coldstart_batch_size: B1_COLDSTART_BATCH_SIZE_DEFAULT,
+            a3_batch_size: A3_BATCH_SIZE_DEFAULT,
+            a3_batch_timeout_ms: A3_BATCH_TIMEOUT_MS_DEFAULT,
             b2_batch_size: B2_BATCH_SIZE_DEFAULT,
             b2_batch_timeout_ms: B2_BATCH_TIMEOUT_MS_DEFAULT,
+            b3_batch_size: B3_BATCH_SIZE_DEFAULT,
+            b3_batch_timeout_ms: B3_BATCH_TIMEOUT_MS_DEFAULT,
         }
     }
 }
@@ -111,6 +145,34 @@ impl PipelineChannelCaps {
                 }
             }
         }
+        if let Ok(raw) = std::env::var("AXON_A3_BATCH_SIZE") {
+            if let Ok(parsed) = raw.trim().parse::<usize>() {
+                if parsed > 0 {
+                    caps.a3_batch_size = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_A3_BATCH_TIMEOUT_MS") {
+            if let Ok(parsed) = raw.trim().parse::<u64>() {
+                if parsed > 0 {
+                    caps.a3_batch_timeout_ms = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_B3_BATCH_SIZE") {
+            if let Ok(parsed) = raw.trim().parse::<usize>() {
+                if parsed > 0 {
+                    caps.b3_batch_size = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_B3_BATCH_TIMEOUT_MS") {
+            if let Ok(parsed) = raw.trim().parse::<u64>() {
+                if parsed > 0 {
+                    caps.b3_batch_timeout_ms = parsed;
+                }
+            }
+        }
         caps
     }
 }
@@ -127,5 +189,14 @@ mod tests {
         assert_eq!(caps.b1_coldstart_batch_size, 256);
         assert_eq!(caps.b2_batch_size, 64);
         assert_eq!(caps.b2_batch_timeout_ms, 200);
+    }
+
+    #[test]
+    fn defaults_match_req_axo_295_batching_decisions() {
+        let caps = PipelineChannelCaps::default();
+        assert_eq!(caps.a3_batch_size, 32);
+        assert_eq!(caps.a3_batch_timeout_ms, 10);
+        assert_eq!(caps.b3_batch_size, 64);
+        assert_eq!(caps.b3_batch_timeout_ms, 10);
     }
 }

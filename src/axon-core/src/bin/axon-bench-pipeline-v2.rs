@@ -183,26 +183,16 @@ fn build_embedder(mode: EmbedderMode) -> Result<Arc<dyn B2Embedder>> {
     }
 }
 
-fn build_store(mode: EmbedderMode) -> Result<GraphStore> {
-    match mode {
-        EmbedderMode::NoOp => {
-            // Temp DuckDB store — smoke-test friendly, no PG required.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos();
-            let path = format!("/tmp/axon_v2_bench_{}_{}", std::process::id(), now);
-            GraphStore::new(&path)
-        }
-        EmbedderMode::Gpu | EmbedderMode::Cpu => {
-            // Real PG store. URL resolution is delegated to GraphStore::new
-            // which reads AXON_DB_BACKEND + AXON_*_DATABASE_URL env vars.
-            std::env::set_var("AXON_DB_BACKEND", "postgres");
-            let url = std::env::var("AXON_DEV_DATABASE_URL")
-                .or_else(|_| std::env::var("DATABASE_URL"))
-                .context("set AXON_DEV_DATABASE_URL or DATABASE_URL for non-NoOp bench")?;
-            GraphStore::new(&url)
-        }
-    }
+fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
+    // PostgreSQL is the only supported backend (REQ-AXO-271 / operator
+    // directive 2026-05-12). Every embedder mode — including --noop —
+    // writes through real PG so the bench characterises production
+    // behaviour, never a phantom embedded-store ceiling.
+    std::env::set_var("AXON_DB_BACKEND", "postgres");
+    let url = std::env::var("AXON_DEV_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("set AXON_DEV_DATABASE_URL or DATABASE_URL — PG is the canonical store")?;
+    GraphStore::new(&url)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]

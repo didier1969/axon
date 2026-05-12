@@ -12,12 +12,16 @@
 //! catches the chunk on next boot.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::warn;
 
 use crate::graph::GraphStore;
 
+use super::metrics::StageMetrics;
 use super::stage_b2::EmbeddedChunk;
 
 /// Receipt emitted by B3 once the embedding committed.
@@ -64,6 +68,126 @@ pub async fn b3_persist_embedding(
         source_hash,
         embedded_at_ms: now_ms,
     })
+}
+
+/// REQ-AXO-295 — Spawn the canonical batched B3 worker.
+///
+/// Same shape as [`super::stage_a3::spawn_a3_batched_worker`]:
+/// accumulate [`EmbeddedChunk`] payloads up to `batch_size` or wait
+/// `batch_timeout`, then UPSERT all rows in one
+/// `GraphStore::upsert_chunk_embedding_v2_batch` call. Amortizes the
+/// per-row pgvector HNSW contention paid by `spawn_stage_workers` +
+/// `b3_persist_embedding`.
+pub fn spawn_b3_batched_worker(
+    mut rx: Receiver<EmbeddedChunk>,
+    tx: Sender<PersistedEmbedding>,
+    store: Arc<GraphStore>,
+    project_code: Arc<str>,
+    metrics: Arc<StageMetrics>,
+    batch_size: usize,
+    batch_timeout: Duration,
+) {
+    let batch_size = batch_size.max(1);
+    tokio::spawn(async move {
+        // REQ-AXO-295 — tick-based batching (see
+        // stage_a3::spawn_a3_batched_worker for the canonical comment).
+        let mut tick = tokio::time::interval(batch_timeout);
+        tick.tick().await;
+        let mut buffer: Vec<EmbeddedChunk> = Vec::with_capacity(batch_size);
+
+        loop {
+            let flush_now = tokio::select! {
+                biased;
+                received = rx.recv() => {
+                    match received {
+                        Some(item) => {
+                            buffer.push(item);
+                            buffer.len() >= batch_size
+                        }
+                        None => {
+                            if buffer.is_empty() {
+                                return;
+                            }
+                            true
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    !buffer.is_empty()
+                }
+            };
+
+            if !flush_now {
+                continue;
+            }
+
+            let upstream_closed_after_drain = rx.is_closed() && buffer.len() < batch_size;
+            let batch: Vec<EmbeddedChunk> = std::mem::take(&mut buffer);
+            for _ in &batch {
+                metrics.record_started();
+            }
+
+            let now_ms = Utc::now().timestamp_millis();
+            let items: Vec<(String, String, Vec<f32>, i64)> = batch
+                .iter()
+                .map(|e| {
+                    (
+                        e.chunk_id.clone(),
+                        e.source_hash.clone(),
+                        e.embedding.clone(),
+                        now_ms,
+                    )
+                })
+                .collect();
+
+            let store_clone = store.clone();
+            let pc_str = project_code.to_string();
+            let started = Instant::now();
+            let join_result = tokio::task::spawn_blocking(move || {
+                store_clone.upsert_chunk_embedding_v2_batch(&pc_str, &items)
+            })
+            .await;
+
+            match join_result {
+                Ok(Ok(())) => {
+                    let elapsed_us =
+                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                    for embedded in batch {
+                        metrics.record_finished(per_item_us);
+                        let receipt = PersistedEmbedding {
+                            chunk_id: embedded.chunk_id,
+                            source_hash: embedded.source_hash,
+                            embedded_at_ms: now_ms,
+                        };
+                        if tx.send(receipt).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(Err(err)) => {
+                    warn!(stage = "B3", error = ?err, "upsert_chunk_embedding_v2_batch failed");
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+                Err(join_err) => {
+                    warn!(
+                        stage = "B3",
+                        error = ?join_err,
+                        "spawn_blocking joined with error"
+                    );
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+            }
+
+            if upstream_closed_after_drain {
+                return;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -4485,6 +4485,219 @@ impl GraphStore {
         Ok(chunk_ids_emitted)
     }
 
+    /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph_v2`].
+    ///
+    /// Aggregates Symbol/Chunk/relation rows across `files` into a single
+    /// [`WriteAccumulator`], renders them in one shot, appends N
+    /// IndexedFile UPSERT statements, and dispatches the whole payload
+    /// through `execute_batch` — one `BEGIN/COMMIT` for the entire batch
+    /// instead of one per file. Empirically removes the lock-contention
+    /// cliff measured 2026-05-12 (A3=2 → 57 ch/s, A3=6 → 22 ch/s in
+    /// NoOp).
+    ///
+    /// Idempotent: every INSERT inherits the existing
+    /// `ON CONFLICT DO UPDATE` / `DO NOTHING` semantics.
+    ///
+    /// Returns `Vec<Vec<String>>` aligned with the input slice — entry
+    /// `i` is the chunk_ids persisted for `files[i]`. The order matches
+    /// the order of insertion into the accumulator (stable across runs
+    /// given identical inputs).
+    pub fn upsert_graph_v2_batch(
+        &self,
+        files: &[crate::pipeline_v2::types::ParsedFile],
+        project_code: &str,
+    ) -> Result<Vec<Vec<String>>> {
+        use crate::graph_ingestion::async_writer::{
+            ChunkRow, RelationRow, SymbolRow, WriteAccumulator,
+        };
+        use std::collections::HashSet;
+
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let backend_is_pg = self.is_postgres_backend();
+        let skip_sql_relations =
+            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+        let emit_age = backend_is_pg
+            && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
+
+        // Per-file chunk_ids preserved for the return value.
+        let mut chunk_ids_per_file: Vec<Vec<String>> = Vec::with_capacity(files.len());
+
+        // Cross-file deduplication: a Symbol id is uniquely keyed by
+        // (project_code, path, name); a Chunk id by symbol+part_index.
+        // Within ONE batch the same file may appear once, but across
+        // files we still dedupe on (symbol_id, project_code) tuples so
+        // that two parser runs that resolved the same symbol id (very
+        // rare cross-file) do not emit duplicate INSERT rows in the
+        // same statement string.
+        let mut symbol_rows: Vec<SymbolRow> = Vec::new();
+        let mut chunk_rows: Vec<ChunkRow> = Vec::new();
+        let mut contains_rows: Vec<RelationRow> = Vec::new();
+        let mut calls_rows: Vec<RelationRow> = Vec::new();
+        let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
+        let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
+        let mut seen_calls: HashSet<RelationRow> = HashSet::new();
+        let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
+        let mut indexed_file_inserts: Vec<String> = Vec::with_capacity(files.len());
+
+        for parsed in files {
+            let path_str = parsed.path.to_string_lossy().into_owned();
+            let mut chunk_ids_emitted: Vec<String> = Vec::new();
+            for sym in &parsed.symbols {
+                let symbol_id = Self::symbol_id(project_code, &path_str, &sym.name);
+                if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
+                    continue;
+                }
+                symbol_vertices.push((
+                    symbol_id.clone(),
+                    serde_json::json!({
+                        "name": sym.name,
+                        "kind": sym.kind,
+                        "is_public": sym.is_public,
+                        "is_nif": sym.is_nif,
+                        "is_unsafe": sym.is_unsafe,
+                        "project_code": project_code,
+                    }),
+                ));
+                symbol_rows.push(SymbolRow {
+                    symbol_id: symbol_id.clone(),
+                    name: sym.name.clone(),
+                    kind: sym.kind.clone(),
+                    tested: sym.tested,
+                    is_public: sym.is_public,
+                    is_nif: sym.is_nif,
+                    is_unsafe: sym.is_unsafe,
+                    project_code: project_code.to_string(),
+                    embedding: sym.embedding.clone(),
+                });
+                contains_rows.push(RelationRow {
+                    source_id: path_str.clone(),
+                    target_id: symbol_id.clone(),
+                    project_code: project_code.to_string(),
+                });
+                for derived_chunk in Self::build_chunk_content(sym, &parsed.content) {
+                    let chunk_id = Self::chunk_part_id(
+                        &symbol_id,
+                        derived_chunk.part_index,
+                        derived_chunk.part_count,
+                    );
+                    let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
+                    chunk_rows.push(ChunkRow {
+                        chunk_id: chunk_id.clone(),
+                        source_type: "symbol".to_string(),
+                        source_id: symbol_id.clone(),
+                        project_code: project_code.to_string(),
+                        file_path: path_str.clone(),
+                        kind: sym.kind.clone(),
+                        content: derived_chunk.content.clone(),
+                        content_hash: chunk_hash,
+                        start_line: derived_chunk.start_line as i64,
+                        end_line: derived_chunk.end_line as i64,
+                        part_index: derived_chunk.part_index as i64,
+                        part_count: derived_chunk.part_count as i64,
+                        chunk_path: derived_chunk.chunk_path.clone(),
+                    });
+                    chunk_ids_emitted.push(chunk_id);
+                }
+            }
+            for relation in &parsed.relations {
+                let Some(table) = Self::relation_table(&relation.rel_type) else {
+                    continue;
+                };
+                let source_id = Self::symbol_id(project_code, &path_str, &relation.from);
+                let target_id = Self::symbol_id(project_code, &path_str, &relation.to);
+                let row = RelationRow {
+                    source_id,
+                    target_id,
+                    project_code: project_code.to_string(),
+                };
+                match table {
+                    "CALLS" => {
+                        if seen_calls.insert(row.clone()) {
+                            calls_rows.push(row);
+                        }
+                    }
+                    "CALLS_NIF" => {
+                        if seen_calls_nif.insert(row.clone()) {
+                            calls_nif_rows.push(row);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let safe_path = Self::escape_sql(&path_str);
+            let safe_hash = Self::escape_sql(&parsed.content_hash);
+            indexed_file_inserts.push(format!(
+                "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
+                 VALUES ('{path}', '{hash}', {ts}) \
+                 ON CONFLICT (path) DO UPDATE SET \
+                     content_hash = EXCLUDED.content_hash, \
+                     last_seen_ms = EXCLUDED.last_seen_ms;",
+                path = safe_path,
+                hash = safe_hash,
+                ts = now_ms,
+            ));
+            chunk_ids_per_file.push(chunk_ids_emitted);
+        }
+
+        contains_rows.sort_unstable();
+        contains_rows.dedup();
+
+        let mut acc = WriteAccumulator::new();
+        acc.symbols = symbol_rows;
+        acc.chunks = chunk_rows;
+        acc.contains = contains_rows;
+        acc.calls = calls_rows;
+        acc.calls_nif = calls_nif_rows;
+
+        let mut queries: Vec<String> = Vec::new();
+        queries.extend(acc.render_symbols_pg());
+        queries.extend(acc.render_chunks_pg());
+        if !skip_sql_relations {
+            queries.extend(acc.render_contains_pg());
+            queries.extend(acc.render_calls_pg());
+            queries.extend(acc.render_calls_nif_pg());
+        }
+        if emit_age {
+            queries.extend(acc.render_contains_age_cypher("axon_graph"));
+            queries.extend(acc.render_calls_age_cypher("axon_graph"));
+            queries.extend(acc.render_calls_nif_age_cypher("axon_graph"));
+            // File vertices for AGE — one MERGE per file (rare path on
+            // the bench critical loop, fine to emit individually).
+            for parsed in files {
+                let path_str = parsed.path.to_string_lossy().into_owned();
+                let file_props = serde_json::json!({ "project_code": project_code });
+                if let Ok(cypher) = crate::postgres::age::cypher_merge_vertex(
+                    "axon_graph",
+                    "File",
+                    "path",
+                    &path_str,
+                    &file_props,
+                ) {
+                    queries.push(cypher);
+                }
+            }
+            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
+                "axon_graph",
+                "Symbol",
+                "id",
+                &symbol_vertices,
+                500,
+            ) {
+                queries.extend(cypher_list);
+            }
+        }
+        let _ = backend_is_pg;
+        queries.extend(indexed_file_inserts);
+
+        self.execute_batch(&queries)?;
+        Ok(chunk_ids_per_file)
+    }
+
     /// REQ-AXO-289 S4b — Pipeline-v2 stage B3 UPSERT a ChunkEmbedding
     /// row produced by the GPU embedder (B2).
     ///
@@ -4557,6 +4770,74 @@ impl GraphStore {
         };
         let _ = safe_project; // silence unused under non-PG branch
         self.execute(&sql)
+    }
+
+    /// REQ-AXO-295 — Batched variant of [`Self::upsert_chunk_embedding_v2`].
+    ///
+    /// Each item is `(chunk_id, source_hash, embedding, embedded_at_ms)`.
+    /// All rows are written through a single multi-statement
+    /// `execute_batch` call, amortizing the BEGIN/COMMIT + HNSW
+    /// contention cost the per-row variant pays once per embedding.
+    pub fn upsert_chunk_embedding_v2_batch(
+        &self,
+        project_code: &str,
+        items: &[(String, String, Vec<f32>, i64)],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
+        let safe_project = Self::escape_sql(project_code);
+        let safe_model_id = Self::escape_sql(model_id);
+        let backend_is_pg = self.is_postgres_backend();
+
+        let mut queries: Vec<String> = Vec::with_capacity(items.len());
+        for (chunk_id, source_hash, embedding, embedded_at_ms) in items {
+            let safe_chunk_id = Self::escape_sql(chunk_id);
+            let safe_source_hash = Self::escape_sql(source_hash);
+            let embedding_literal = if backend_is_pg {
+                crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+                    anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
+                })?
+            } else {
+                use crate::embedding_contract::DIMENSION;
+                format!("CAST({embedding:?} AS FLOAT[{DIMENSION}])")
+            };
+            let sql = if backend_is_pg {
+                format!(
+                    "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+                     VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
+                     ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                         source_hash = EXCLUDED.source_hash, \
+                         embedding = EXCLUDED.embedding, \
+                         project_code = EXCLUDED.project_code, \
+                         embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                    cid = safe_chunk_id,
+                    mid = safe_model_id,
+                    pc = safe_project,
+                    sh = safe_source_hash,
+                    emb = embedding_literal,
+                    ts = embedded_at_ms,
+                )
+            } else {
+                format!(
+                    "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash, embedding, embedded_at_ms) \
+                     VALUES ('{cid}', '{mid}', '{sh}', {emb}, {ts}) \
+                     ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                         source_hash = EXCLUDED.source_hash, \
+                         embedding = EXCLUDED.embedding, \
+                         embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                    cid = safe_chunk_id,
+                    mid = safe_model_id,
+                    sh = safe_source_hash,
+                    emb = embedding_literal,
+                    ts = embedded_at_ms,
+                )
+            };
+            queries.push(sql);
+        }
+        let _ = safe_project;
+        self.execute_batch(&queries)
     }
 
     /// REQ-AXO-289 S4c — Pipeline-v2 B1 cold-start poll: return up to

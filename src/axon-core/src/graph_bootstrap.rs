@@ -196,65 +196,28 @@ impl GraphStore {
         let init_fn = symbols.init_fn;
         let close_fn = symbols.close_fn;
         let is_memory = db_root == ":memory:";
-        // MIL-AXO-015 P3 slice 3b: split-brain is a duckdb-specific
-        // file-isolation pattern. PostgreSQL's MVCC handles
-        // reader/writer concurrency natively, so we collapse to a
-        // single context regardless of caller intent.
-        let split_brain_mode = !is_memory
-            && split_brain_mode
-            && backend == crate::graph::PluginBackend::Duckdb;
+        // PostgreSQL's MVCC handles reader/writer concurrency natively;
+        // split-brain file-isolation is obsolete with the PG-only
+        // backend.
+        let split_brain_mode = false;
         info!(
             "GraphStore init modes: backend={:?}, db_root={}, split_brain_mode={}, soll_access_mode={:?}",
             backend, db_root, split_brain_mode, soll_access_mode
         );
 
-        // MIL-AXO-015 P3 slice 3b: under PostgreSQL the "DB path" is a
-        // DATABASE_URL passed verbatim to pg_init_db_compat. The SOLL /
-        // IST file-layout below applies only to the duckdb backend;
-        // PG keeps SOLL + per-project IST inside the same database via
-        // schema namespacing (CPT-AXO-039).
-        let pg_database_url: Option<String> = match backend {
-            crate::graph::PluginBackend::Postgres => {
-                Some(resolve_pg_database_url().with_context(|| {
-                    "AXON_DB_BACKEND=postgres requires AXON_LIVE_DATABASE_URL, \
-                     AXON_DEV_DATABASE_URL, or DATABASE_URL to be set"
-                })?)
-            }
-            crate::graph::PluginBackend::Duckdb => None,
-        };
+        // Under PostgreSQL the "DB path" is a DATABASE_URL passed
+        // verbatim to pg_init_db_compat. SOLL + per-project IST live
+        // inside the same database via schema namespacing
+        // (CPT-AXO-039).
+        let pg_database_url: Option<String> = Some(
+            resolve_pg_database_url().with_context(|| {
+                "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
+                 AXON_DEV_DATABASE_URL, or DATABASE_URL"
+            })?,
+        );
+        let _ = soll_access_mode; // kept for future PG-side write gating
 
-        if backend == crate::graph::PluginBackend::Duckdb
-            && !is_memory
-            && matches!(soll_access_mode, SollAccessMode::ReadWrite)
-        {
-            let soll_dir = PathBuf::from(db_root);
-            std::fs::create_dir_all(&soll_dir)?;
-
-            let soll_path = canonical_soll_db_path(db_root)
-                .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
-            let soll_c_path = CString::new(soll_path.to_string_lossy().to_string())?;
-
-            unsafe {
-                let soll_ptr = init_fn(soll_c_path.as_ptr(), false);
-                if soll_ptr.is_null() {
-                    return Err(anyhow!("Failed to bootstrap SOLL database"));
-                }
-                close_fn(soll_ptr);
-            }
-        }
-
-        let live_ist_path = if is_memory || backend == crate::graph::PluginBackend::Postgres {
-            None
-        } else {
-            let ist_path = canonical_ist_db_path(db_root)
-                .ok_or_else(|| anyhow!("Failed to derive IST database path"))?;
-            std::fs::create_dir_all(
-                ist_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
-            )?;
-            Some(ist_path)
-        };
+        let live_ist_path: Option<PathBuf> = None;
         let reader_db_path = if split_brain_mode {
             canonical_ist_reader_db_path(db_root)
         } else {

@@ -21,12 +21,16 @@
 //! poll DB pathway (slice S4c) catches the drop.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::warn;
 
 use crate::graph::GraphStore;
 
+use super::metrics::StageMetrics;
 use super::types::ParsedFile;
 
 /// Receipt emitted by A3 once persistence committed.
@@ -86,6 +90,153 @@ pub async fn a3_enroll(
         last_seen_ms: now_ms,
         chunk_ids,
     })
+}
+
+/// REQ-AXO-295 — Spawn the canonical batched A3 worker.
+///
+/// Mirrors the pattern of [`super::stage_b2::spawn_b2_batched_worker`]:
+/// blocks on the first `ParsedFile`, then drains additional files until
+/// `batch_size` or `batch_timeout`, and writes the whole batch in one
+/// `GraphStore::upsert_graph_v2_batch` round-trip — one BEGIN/COMMIT
+/// per batch instead of one per file. The chunk_ids returned for each
+/// file are individually `try_send`-fanned to the B1 inbox; the
+/// downstream `tx.send` carries the per-file [`EnrolledFile`] receipt.
+///
+/// `project_code` is stamped onto every Symbol / Chunk / IndexedFile
+/// row (CPT-AXO-053 single-project per indexer instance).
+///
+/// Metrics: `record_started` on each item entering the batch,
+/// `record_finished` with per-item mean duration after the batched
+/// write commits. `record_error` per item if the batch write fails.
+pub fn spawn_a3_batched_worker(
+    mut rx: Receiver<ParsedFile>,
+    tx: Sender<EnrolledFile>,
+    b1_inbox_tx: Sender<String>,
+    store: Arc<GraphStore>,
+    project_code: Arc<str>,
+    metrics: Arc<StageMetrics>,
+    batch_size: usize,
+    batch_timeout: Duration,
+) {
+    let batch_size = batch_size.max(1);
+    tokio::spawn(async move {
+        // REQ-AXO-295 — tick-based semantics: every `batch_timeout`
+        // ms we attempt to flush whatever is queued. If the queue is
+        // empty at tick time we do nothing. If it reaches
+        // `batch_size` between two ticks we flush early without
+        // waiting for the tick. The timer is anchored on the last
+        // flush (or worker start) — NOT on the arrival of the first
+        // item, so a single straggler waits AT MOST `batch_timeout`
+        // ms from when it enters the buffer.
+        let mut tick = tokio::time::interval(batch_timeout);
+        // Skip the immediate first tick that `interval` fires; with
+        // an empty buffer it would be a no-op anyway.
+        tick.tick().await;
+        let mut buffer: Vec<ParsedFile> = Vec::with_capacity(batch_size);
+
+        loop {
+            let flush_now = tokio::select! {
+                biased;
+                received = rx.recv() => {
+                    match received {
+                        Some(item) => {
+                            buffer.push(item);
+                            buffer.len() >= batch_size
+                        }
+                        None => {
+                            // Upstream closed — drain remaining
+                            // buffer then exit.
+                            if buffer.is_empty() {
+                                return;
+                            }
+                            true
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    !buffer.is_empty()
+                }
+            };
+
+            if !flush_now {
+                continue;
+            }
+
+            let upstream_closed_after_drain = rx.is_closed() && buffer.len() < batch_size;
+            let batch: Vec<ParsedFile> = std::mem::take(&mut buffer);
+            for _ in &batch {
+                metrics.record_started();
+            }
+
+            let store_clone = store.clone();
+            let pc_str = project_code.to_string();
+            let batch_for_block = batch.clone();
+            let started = Instant::now();
+            let join_result = tokio::task::spawn_blocking(move || {
+                store_clone.upsert_graph_v2_batch(&batch_for_block, &pc_str)
+            })
+            .await;
+
+            match join_result {
+                Ok(Ok(chunk_ids_per_file)) if chunk_ids_per_file.len() == batch.len() => {
+                    let elapsed_us =
+                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                    let now_ms = Utc::now().timestamp_millis();
+                    for (parsed, chunk_ids) in
+                        batch.into_iter().zip(chunk_ids_per_file.into_iter())
+                    {
+                        for cid in &chunk_ids {
+                            let _ = b1_inbox_tx.try_send(cid.clone());
+                        }
+                        let receipt = EnrolledFile {
+                            path: parsed.path.to_string_lossy().into_owned(),
+                            content_hash: parsed.content_hash,
+                            symbols_count: parsed.symbols.len(),
+                            relations_count: parsed.relations.len(),
+                            last_seen_ms: now_ms,
+                            chunk_ids,
+                        };
+                        metrics.record_finished(per_item_us);
+                        if tx.send(receipt).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(Ok(chunk_ids_per_file)) => {
+                    warn!(
+                        stage = "A3",
+                        expected = batch.len(),
+                        actual = chunk_ids_per_file.len(),
+                        "upsert_graph_v2_batch returned mismatched per-file count"
+                    );
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+                Ok(Err(err)) => {
+                    warn!(stage = "A3", error = ?err, "upsert_graph_v2_batch failed");
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+                Err(join_err) => {
+                    warn!(
+                        stage = "A3",
+                        error = ?join_err,
+                        "spawn_blocking joined with error"
+                    );
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+            }
+
+            if upstream_closed_after_drain {
+                return;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
