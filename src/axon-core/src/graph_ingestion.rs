@@ -4251,6 +4251,34 @@ impl GraphStore {
         .unwrap_or(0))
     }
 
+    /// REQ-AXO-289 S3c — UPSERT a row into the v2 watcher filter table
+    /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent by design
+    /// via PG `ON CONFLICT (path) DO UPDATE`. Called from stage A3 once a file
+    /// has been transformed and persisted as graph + chunks.
+    ///
+    /// Under DuckDB the same `ON CONFLICT (path) DO UPDATE` syntax is
+    /// supported, so this method is portable across both backends until
+    /// REQ-AXO-289 slice S7 cut-over retires DuckDB entirely.
+    pub fn upsert_indexed_file(
+        &self,
+        path: &str,
+        content_hash: &str,
+        last_seen_ms: i64,
+    ) -> Result<()> {
+        let safe_path = Self::escape_sql(path);
+        let safe_hash = Self::escape_sql(content_hash);
+        self.execute(&format!(
+            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
+             VALUES ('{path}', '{hash}', {ts}) \
+             ON CONFLICT (path) DO UPDATE SET \
+                 content_hash = EXCLUDED.content_hash, \
+                 last_seen_ms = EXCLUDED.last_seen_ms;",
+            path = safe_path,
+            hash = safe_hash,
+            ts = last_seen_ms,
+        ))
+    }
+
     fn upsert_file_queries(
         path: &str,
         project: &str,

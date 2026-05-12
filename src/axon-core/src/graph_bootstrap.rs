@@ -1094,6 +1094,10 @@ impl GraphStore {
             "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE, first_seen_at_ms BIGINT, indexing_started_at_ms BIGINT, graph_ready_at_ms BIGINT, vectorization_started_at_ms BIGINT, vector_ready_at_ms BIGINT, last_state_change_at_ms BIGINT, last_error_at_ms BIGINT)")?;
+        // REQ-AXO-289 S2 — minimal watcher filter table for streaming v2.
+        // path PK + content_hash + last_seen_ms only. NO status machine.
+        // Coexists with the legacy `File` table until slice S7 cut-over.
+        self.execute("CREATE TABLE IF NOT EXISTS IndexedFile (path VARCHAR PRIMARY KEY, content_hash VARCHAR NOT NULL, last_seen_ms BIGINT NOT NULL)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_code VARCHAR, embedding FLOAT[{DIMENSION}])"))?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_code VARCHAR, file_path VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT, chunk_part_index BIGINT, chunk_part_count BIGINT, chunk_path VARCHAR)")?;
         self.ensure_embedding_runtime_tables()?;
