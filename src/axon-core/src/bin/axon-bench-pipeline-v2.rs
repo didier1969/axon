@@ -49,6 +49,8 @@ struct Args {
     source: PathBuf,
     max_files: usize,
     duration_secs: u64,
+    warmup_secs: u64,
+    cycle: bool,
     project: String,
     embedder_mode: EmbedderMode,
     output: OutputMode,
@@ -65,6 +67,8 @@ impl Args {
         // saturation, lets the operator pick a useful slice.
         let mut max_files: usize = 3000;
         let mut duration_secs: u64 = 0;
+        let mut warmup_secs: u64 = 0;
+        let mut cycle = false;
         let mut project = String::from("AXO");
         let mut embedder_mode = EmbedderMode::Gpu;
         let mut output = OutputMode::Csv;
@@ -76,6 +80,10 @@ impl Args {
                 "--duration-secs" => {
                     duration_secs = iter.next().context("--duration-secs N")?.parse()?
                 }
+                "--warmup-secs" => {
+                    warmup_secs = iter.next().context("--warmup-secs N")?.parse()?
+                }
+                "--cycle" => cycle = true,
                 "--project" => project = iter.next().context("--project AXO")?,
                 "--gpu" => embedder_mode = EmbedderMode::Gpu,
                 "--cpu" => embedder_mode = EmbedderMode::Cpu,
@@ -93,6 +101,8 @@ impl Args {
             source,
             max_files,
             duration_secs,
+            warmup_secs,
+            cycle,
             project,
             embedder_mode,
             output,
@@ -104,9 +114,21 @@ fn print_help() {
     eprintln!(
         "axon-bench-pipeline-v2 — REQ-AXO-289 S6a\n\
          Usage: axon-bench-pipeline-v2 [--source PATH] [--max-files N] \\\n\
-                                       [--duration-secs N] [--gpu|--cpu|--noop] \\\n\
-                                       [--project CODE] [--csv|--human]\n\
-         Env: AXON_DEV_DATABASE_URL or DATABASE_URL for non-NoOp modes."
+                                       [--duration-secs N] [--warmup-secs N] [--cycle] \\\n\
+                                       [--gpu|--cpu|--noop] [--project CODE] [--csv|--human]\n\
+         \n\
+         Modes:\n\
+         * Burst (default)       : drain --max-files once then exit. CSV counts the full run.\n\
+         * Sustained (--duration-secs N --warmup-secs M [--cycle])\n\
+                                  : run for N seconds. After M seconds warmup, snapshot metrics ;\n\
+                                    at end-of-bench, report differential = sustained-plateau throughput.\n\
+                                    --cycle recycles the file list when exhausted — needed when\n\
+                                    --max-files * processing-time-per-file < --duration-secs.\n\
+         \n\
+         Env: AXON_DEV_DATABASE_URL or DATABASE_URL for non-NoOp modes.\n\
+              AXON_B2_BATCH_SIZE (default 64), AXON_B2_BATCH_TIMEOUT_MS (default 200),\n\
+              AXON_A1/A2/A3_WORKERS, AXON_B1/B2/B3_WORKERS, AXON_PIPELINE_INTERNAL_CHANNEL_CAP,\n\
+              AXON_PIPELINE_A3_TO_B1_BUFFER_CAP."
     );
 }
 
@@ -249,27 +271,61 @@ async fn run() -> Result<()> {
 
     let total_files = files.len();
     let start = Instant::now();
-
-    // Move the sole input_tx into the feeder so its drop closes the
-    // channel once every path has been pushed. Keeping a clone on the
-    // stack here would leave A1 workers waiting on recv() forever.
-    let input_tx = handles_a.input_tx;
-    let feeder = tokio::spawn(async move {
-        for path in files {
-            if input_tx.send(path).await.is_err() {
-                break;
-            }
-        }
-        // input_tx dropped here -> A1 recv() returns None ->
-        // A2 / A3 cascade-drain -> output_tx + b1_inbox_tx drop ->
-        // B1 / B2 / B3 cascade-drain.
-    });
-
-    // Consumer task — drain EnrolledFile + PersistedEmbedding receipts
-    // and count them. Time-boxed by --duration-secs if non-zero, else
-    // run until both channels close.
+    // A bench is meaningless if the pipeline runs out of material mid-
+    // measurement — we'd just measure "no file to process". So when a
+    // duration window is set, cycling is implicit : the feeder loops
+    // through the walked pool indefinitely, throttled by the A1 input
+    // channel's natural backpressure. --cycle is still honoured as an
+    // explicit toggle for single-pass-with-duration cases.
+    let cycle = args.cycle || args.duration_secs > 0;
     let deadline =
         (args.duration_secs > 0).then(|| Instant::now() + Duration::from_secs(args.duration_secs));
+
+    // Move the sole input_tx into the feeder so its drop closes the
+    // channel once feeding stops. Keeping a clone on the stack here
+    // would leave A1 workers waiting on recv() forever.
+    let input_tx = handles_a.input_tx;
+    let feeder_files = files.clone();
+    let feeder = tokio::spawn(async move {
+        if cycle {
+            // Sustained mode : recycle the file list until --duration-secs
+            // window elapses (or downstream closes). input_tx.send().await
+            // backpressures naturally when A1 is saturated.
+            loop {
+                for path in &feeder_files {
+                    if let Some(d) = deadline {
+                        if Instant::now() >= d {
+                            return;
+                        }
+                    }
+                    if input_tx.send(path.clone()).await.is_err() {
+                        return;
+                    }
+                }
+                if deadline.is_none() {
+                    return; // no duration cap + cycle = single pass
+                }
+            }
+        } else {
+            for path in feeder_files {
+                if input_tx.send(path).await.is_err() {
+                    return;
+                }
+            }
+            // input_tx dropped on scope-exit -> A1 recv() returns None ->
+            // cascade-drain.
+        }
+    });
+
+    // Consumer task — drain receipts and count. In sustained mode we
+    // snapshot metrics at end-of-warmup and end-of-bench to compute the
+    // differential plateau throughput (vs the cold-start period dominated
+    // by TensorRT compile).
+    let warmup_marker = (args.warmup_secs > 0)
+        .then(|| Instant::now() + Duration::from_secs(args.warmup_secs));
+    let mut warmup_snapshot_a: Option<u64> = None;
+    let mut warmup_snapshot_b: Option<u64> = None;
+    let mut warmup_marker_t: Option<Instant> = None;
 
     let mut a_count = 0usize;
     let mut b_count = 0usize;
@@ -279,6 +335,18 @@ async fn run() -> Result<()> {
         if let Some(d) = deadline {
             if Instant::now() >= d {
                 break;
+            }
+        }
+        // Capture warmup-end snapshot exactly once.
+        if let Some(m) = warmup_marker {
+            if warmup_snapshot_a.is_none() && Instant::now() >= m {
+                warmup_snapshot_a = Some(a_count as u64);
+                warmup_snapshot_b = Some(b_count as u64);
+                warmup_marker_t = Some(Instant::now());
+                eprintln!(
+                    "axon-bench-pipeline-v2: warmup snapshot at {:.1}s — a_count={a_count} b_count={b_count}",
+                    args.warmup_secs as f64
+                );
             }
         }
         tokio::select! {
@@ -296,6 +364,12 @@ async fn run() -> Result<()> {
 
     let elapsed = start.elapsed();
     let _ = feeder.await;
+
+    // Sustained-plateau differential : substract warmup counts to isolate
+    // the steady-state throughput from the cold-start tail.
+    let sustained_a = warmup_snapshot_a.map(|w| a_count.saturating_sub(w as usize));
+    let sustained_b = warmup_snapshot_b.map(|w| b_count.saturating_sub(w as usize));
+    let sustained_elapsed = warmup_marker_t.map(|t| t.elapsed());
 
     // Post-run sanity counts via the writer ctx — under the embedded
     // test backend the reader ctx serves a stale snapshot during the
@@ -326,18 +400,31 @@ async fn run() -> Result<()> {
 
     let files_per_sec = a_count as f64 / elapsed.as_secs_f64().max(0.000_001);
     let chunks_per_sec = b_count as f64 / elapsed.as_secs_f64().max(0.000_001);
+    // Sustained-plateau throughput (post-warmup, pre-deadline window).
+    // -1.0 when warmup wasn't configured.
+    let (sustained_files_per_sec, sustained_chunks_per_sec) =
+        match (sustained_a, sustained_b, sustained_elapsed) {
+            (Some(sa), Some(sb), Some(el)) => {
+                let secs = el.as_secs_f64().max(0.000_001);
+                (sa as f64 / secs, sb as f64 / secs)
+            }
+            _ => (-1.0, -1.0),
+        };
 
     match args.output {
         OutputMode::Csv => {
             println!(
                 "label,files,chunks,elapsed_ms,files_per_sec,chunks_per_sec,\
+                 sustained_files_per_sec,sustained_chunks_per_sec,sustained_elapsed_ms,\
                  a1_in,a1_out,a1_err,a1_bp,a2_in,a2_out,a2_err,a2_bp,\
                  a3_in,a3_out,a3_err,a3_bp,b1_in,b1_out,b1_err,b1_bp,\
                  b2_in,b2_out,b2_err,b2_bp,b3_in,b3_out,b3_err,b3_bp"
             );
             println!(
-                "v2-bench,{},{},{:.0},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "v2-bench,{},{},{:.0},{:.2},{:.2},{:.2},{:.2},{:.0},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 a_count, b_count, elapsed.as_millis(), files_per_sec, chunks_per_sec,
+                sustained_files_per_sec, sustained_chunks_per_sec,
+                sustained_elapsed.map(|d| d.as_millis() as f64).unwrap_or(-1.0),
                 snap_a1.items_in_total, snap_a1.items_out_total, snap_a1.errors_total, snap_a1.backpressure_blocks_total,
                 snap_a2.items_in_total, snap_a2.items_out_total, snap_a2.errors_total, snap_a2.backpressure_blocks_total,
                 snap_a3.items_in_total, snap_a3.items_out_total, snap_a3.errors_total, snap_a3.backpressure_blocks_total,
@@ -349,7 +436,8 @@ async fn run() -> Result<()> {
         OutputMode::Human => {
             println!(
                 "axon-bench-pipeline-v2: {} files / {} chunks in {:.1}s\n\
-                 → {:.2} files/s · {:.2} chunks/s\n\
+                 → wall    : {:.2} files/s · {:.2} chunks/s\n\
+                 → sustained (post-warmup): {} files/s · {} chunks/s\n\
                  a1 in/out/err/bp = {}/{}/{}/{}\n\
                  a2 in/out/err/bp = {}/{}/{}/{}\n\
                  a3 in/out/err/bp = {}/{}/{}/{}\n\
@@ -357,9 +445,11 @@ async fn run() -> Result<()> {
                  b2 in/out/err/bp = {}/{}/{}/{}\n\
                  b3 in/out/err/bp = {}/{}/{}/{}\n\
                  PG rows: Symbol={} Chunk={} IndexedFile={} ChunkEmbedding={}\n\
-                 total source files walked = {}",
+                 cycle={cycle} duration_secs={duration_secs} warmup_secs={warmup_secs} pool_size={total_files}",
                 a_count, b_count, elapsed.as_secs_f64(),
                 files_per_sec, chunks_per_sec,
+                if sustained_files_per_sec >= 0.0 { format!("{:.2}", sustained_files_per_sec) } else { "n/a".to_string() },
+                if sustained_chunks_per_sec >= 0.0 { format!("{:.2}", sustained_chunks_per_sec) } else { "n/a".to_string() },
                 snap_a1.items_in_total, snap_a1.items_out_total, snap_a1.errors_total, snap_a1.backpressure_blocks_total,
                 snap_a2.items_in_total, snap_a2.items_out_total, snap_a2.errors_total, snap_a2.backpressure_blocks_total,
                 snap_a3.items_in_total, snap_a3.items_out_total, snap_a3.errors_total, snap_a3.backpressure_blocks_total,
@@ -367,7 +457,10 @@ async fn run() -> Result<()> {
                 snap_b2.items_in_total, snap_b2.items_out_total, snap_b2.errors_total, snap_b2.backpressure_blocks_total,
                 snap_b3.items_in_total, snap_b3.items_out_total, snap_b3.errors_total, snap_b3.backpressure_blocks_total,
                 symbol_rows, chunk_rows, indexed_rows, embedding_rows,
-                total_files,
+                cycle = cycle,
+                duration_secs = args.duration_secs,
+                warmup_secs = args.warmup_secs,
+                total_files = total_files,
             );
         }
     }
