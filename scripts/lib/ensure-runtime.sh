@@ -26,6 +26,27 @@ axon_backup_dir="${AXON_SOLL_BACKUP_DIR:-${HOME}/backups/soll}"
 # below any real project (axon itself has 849); a fresh empty DB has 0.
 axon_seeded_min_soll_nodes="${AXON_SEEDED_MIN_SOLL_NODES:-50}"
 
+# Resolve PG client binaries directly from /nix/store so this lib can run
+# from a non-devenv shell without paying a `devenv shell` entry (~5-15s
+# on this machine). Falls back to PATH for operators outside the devenv.
+axon_resolve_pg_bin() {
+    local name="$1"
+    local found
+    found="$(ls -1d /nix/store/*-postgresql-and-plugins-17.*/bin/"$name" 2>/dev/null | sort -V | tail -1 || true)"
+    if [[ -z "$found" ]]; then
+        found="$(ls -1d /nix/store/*-postgresql-and-plugins-*/bin/"$name" 2>/dev/null | sort -V | tail -1 || true)"
+    fi
+    if [[ -z "$found" ]]; then
+        found="$(command -v "$name" 2>/dev/null || true)"
+    fi
+    [[ -n "$found" ]] || return 1
+    echo "$found"
+}
+
+PSQL_BIN="${PSQL_BIN:-$(axon_resolve_pg_bin psql || true)}"
+PG_ISREADY_BIN="${PG_ISREADY_BIN:-$(axon_resolve_pg_bin pg_isready || true)}"
+DEVENV_BIN="${DEVENV_BIN:-$(command -v devenv 2>/dev/null || true)}"
+
 axon_pg_port_listener_pid() {
     ss -tnlp 2>/dev/null \
         | awk -v p="$axon_canonical_pg_port" '
@@ -76,7 +97,11 @@ ensure_devenv_pg_running() {
     echo "🐘 Postgres not running on :${axon_canonical_pg_port} — booting devenv-Nix service..."
     local proj
     proj="${PROJECT_ROOT:-${PWD}}"
-    (cd "$proj" && devenv up postgres -d >/dev/null 2>&1)
+    if [[ -z "$DEVENV_BIN" ]]; then
+        echo "❌ devenv binary not found in PATH (required to boot postgres)." >&2
+        return 1
+    fi
+    (cd "$proj" && "$DEVENV_BIN" up postgres -d >/dev/null 2>&1)
     local rc=$?
     if [[ $rc -ne 0 ]]; then
         echo "❌ devenv up postgres -d failed (rc=$rc)." >&2
@@ -85,7 +110,7 @@ ensure_devenv_pg_running() {
     local deadline=$(( SECONDS + 60 ))
     while (( SECONDS < deadline )); do
         if axon_pg_port_listener_pid >/dev/null \
-           && pg_isready -h 127.0.0.1 -p "$axon_canonical_pg_port" -q 2>/dev/null; then
+           && "$PG_ISREADY_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -q 2>/dev/null; then
             echo "✅ Postgres ready on :${axon_canonical_pg_port}"
             return 0
         fi
@@ -99,13 +124,13 @@ ensure_axon_role_exists() {
     local owner_user
     owner_user="$(id -un)"
     local exists
-    exists="$(psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U "$owner_user" \
+    exists="$("$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U "$owner_user" \
         -d postgres -tAXc "SELECT 1 FROM pg_roles WHERE rolname='axon'" 2>/dev/null || true)"
     if [[ "$exists" == "1" ]]; then
         return 0
     fi
     echo "🔑 Creating Postgres role 'axon' (SUPERUSER, LOGIN)..."
-    psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U "$owner_user" -d postgres \
+    "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U "$owner_user" -d postgres \
         -c "CREATE ROLE axon LOGIN SUPERUSER" >/dev/null
 }
 
@@ -124,7 +149,7 @@ axon_latest_backup_for() {
 
 axon_db_soll_node_count() {
     local dbname="$1"
-    psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d "$dbname" -tAXc \
+    "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d "$dbname" -tAXc \
         "SELECT count(*) FROM soll.node" 2>/dev/null || echo 0
 }
 
@@ -133,10 +158,10 @@ ensure_database_seeded() {
     local dbname
     dbname="$(axon_database_for_instance "$instance")"
 
-    if ! psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d postgres -tAXc \
+    if ! "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d postgres -tAXc \
         "SELECT 1 FROM pg_database WHERE datname='${dbname}'" 2>/dev/null | grep -q 1; then
         echo "📦 Creating database ${dbname}..."
-        psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d postgres \
+        "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon -d postgres \
             -c "CREATE DATABASE ${dbname}" >/dev/null
     fi
 
@@ -166,7 +191,7 @@ ensure_database_seeded() {
         echo "🗄️ ${dbname} is empty (soll.node=${node_count}). Restoring from $(basename "$backup")..."
     fi
 
-    if ! zcat "$backup" | psql -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
+    if ! zcat "$backup" | "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
             -d "$dbname" -v ON_ERROR_STOP=1 >/dev/null 2>&1; then
         echo "❌ Restore of ${dbname} from $(basename "$backup") failed." >&2
         return 1
@@ -177,6 +202,10 @@ ensure_database_seeded() {
 
 ensure_runtime_ready() {
     local instance="${1:-${AXON_INSTANCE_KIND:-live}}"
+    if [[ -z "$PSQL_BIN" || -z "$PG_ISREADY_BIN" ]]; then
+        echo "❌ psql/pg_isready not resolvable from /nix/store or PATH." >&2
+        return 1
+    fi
     ensure_no_competing_pg_listener || return 1
     ensure_devenv_pg_running || return 1
     ensure_axon_role_exists || return 1

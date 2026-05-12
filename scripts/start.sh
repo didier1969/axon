@@ -146,17 +146,17 @@ if [[ -n "$AXON_RUNTIME_CONFIG_FILE" && -f "$AXON_RUNTIME_CONFIG_FILE" ]]; then
     echo "🔧 Loaded runtime config from $AXON_RUNTIME_CONFIG_FILE"
 fi
 
-# REQ-AXO-XXX — auto-bootstrap PG / role / DB before any binary check.
+# Auto-bootstrap PG / role / DB before any binary check.
 # Without this, a fresh WSL, a wiped .devenv/state, or a competing
 # Docker container holding :44144 forces operator into a 5-step manual
 # recovery. ensure_runtime_ready is idempotent — safe to call on every
-# start. Skipped only when the backend is explicitly not Postgres.
+# start. Runs inline (no devenv shell wrap) by resolving psql /
+# pg_isready / devenv from /nix/store + PATH directly, saving the
+# ~10-15s cost of a devenv shell entry on this machine. Skipped only
+# when the backend is explicitly not Postgres.
 if [[ "${AXON_DB_BACKEND:-postgres}" == "postgres" \
       && "${AXON_SKIP_RUNTIME_BOOTSTRAP:-0}" != "1" ]]; then
-    if ! devenv shell --no-reload --no-tui -- bash -lc \
-            "PROJECT_ROOT='$PROJECT_ROOT'; \
-             source '$PROJECT_ROOT/scripts/lib/ensure-runtime.sh'; \
-             ensure_runtime_ready '$AXON_INSTANCE_KIND'"; then
+    if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
         echo "❌ Runtime bootstrap (ensure_runtime_ready) failed; refusing to start." >&2
         exit 1
     fi
@@ -402,6 +402,15 @@ while [[ $# -gt 0 ]]; do
         --skip-elixir-prewarm)
             SKIP_ELIXIR_PREWARM=1
             ;;
+        --fast)
+            # Dev-iteration shorthand: brain serves MCP, nothing else.
+            # Skips dashboard (Elixir/Phoenix not needed for MCP-only
+            # work), Elixir Hex/Rebar prewarm, and the post-start MCP
+            # quality gate. ~5× faster restart for pipeline / GPU work.
+            START_DASHBOARD=0
+            RUN_MCP_TESTS=0
+            SKIP_ELIXIR_PREWARM=1
+            ;;
         --tensorrt)
             REQUEST_TENSORRT=1
             ;;
@@ -420,6 +429,7 @@ Options:
   --no-dashboard   Disable Elixir LiveView dashboard
   --skip-mcp-tests Skip automatic MCP quality gate validation after startup
   --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
+  --fast          MCP-only dev iteration shorthand (=--no-dashboard --skip-mcp-tests --skip-elixir-prewarm)
 EOF
             exit 0
             ;;
