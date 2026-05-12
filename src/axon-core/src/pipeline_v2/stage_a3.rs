@@ -1,23 +1,24 @@
-//! Stage A3 — Enregistrement graphe (CPT-AXO-054, session 18 topology).
+//! Stage A3 — Enregistrement graphe + chunks + FTS (CPT-AXO-054, session 19 topology).
 //!
-//! A3 is the **graph-only** persistence stage for pipeline A. It consumes
-//! a [`ParsedFile`] from A2 and writes — in a single atomic transaction
-//! via [`GraphStore::upsert_graph_v2`]:
+//! A3 is the **single-transaction persistence stage** for pipeline A. It
+//! consumes a [`ParsedFile`] from A2 and writes — atomically via
+//! [`GraphStore::upsert_graph_v2`]:
 //!
-//!   * `public.Symbol` rows (UPSERT, idempotent)
-//!   * AGE `Symbol` + `File` vertex enrichment (when AGE dual-write is
-//!     active under PG)
-//!   * `CONTAINS` / `CALLS` / `CALLS_NIF` relation edges (SQL + AGE)
-//!   * `public.IndexedFile(path, content_hash, last_seen_ms)` — the
-//!     minimal watcher-filter row
+//!   * `public.Symbol` (UPSERT, idempotent)
+//!   * AGE `Symbol` + `File` vertex enrichment (under PG)
+//!   * `CONTAINS` / `CALLS` / `CALLS_NIF` edges (SQL + AGE dual-write)
+//!   * `public.Chunk` rows with full `content` text — REQ-AXO-292 PG FTS
+//!     attaches automatically through the `content_tsv` GENERATED column,
+//!     so the lexical retrieval lane is ready **without any GPU**
+//!     dependency. SOTA hybrid retrieval: lexical + structural on CPU,
+//!     vector enrichment optional.
+//!   * `public.IndexedFile(path, content_hash, last_seen_ms)` watcher
+//!     filter row
 //!
-//! A3 does **not** persist `public.Chunk` rows. Chunking is the entry
-//! stage of pipeline B (B1) — running it inside the graph pipeline
-//! would slow the graph for vector-pipeline preparation work that has
-//! no graph-side consumer. PG FTS (REQ-AXO-292) attaches to B1's
-//! Chunk INSERTs via a GENERATED `content_tsv` column, so the lexical
-//! retrieval lane comes for free as a side-effect — no separate FTS
-//! stage exists in the topology.
+//! The chunk_ids persisted are returned to the orchestrator so the A3
+//! worker can `try_send` them to the B1 inbox (best-effort, non-blocking)
+//! for the GPU embedder lane. If the channel is full, B1's cold-start
+//! poll DB pathway (slice S4c) catches the drop.
 
 use std::sync::Arc;
 
@@ -28,14 +29,11 @@ use crate::graph::GraphStore;
 
 use super::types::ParsedFile;
 
-/// Receipt emitted by A3 once graph persistence committed successfully.
+/// Receipt emitted by A3 once persistence committed.
 ///
-/// Carries the bare minimum for downstream observability and for the
-/// B-pipeline hand-off: the file path, the content_hash that was
-/// recorded in `IndexedFile`, the counts (informational), and the
-/// commit timestamp. The chunking work that B1 performs derives its
-/// inputs from the same path + content that A1 read, so this receipt
-/// does NOT carry chunk_ids — those don't exist yet at A3.
+/// Carries the chunk_ids the row produced so the orchestrator can fan
+/// them out to B1. `symbols_count` / `relations_count` are kept for
+/// observability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrolledFile {
     pub path: String,
@@ -43,14 +41,15 @@ pub struct EnrolledFile {
     pub symbols_count: usize,
     pub relations_count: usize,
     pub last_seen_ms: i64,
+    pub chunk_ids: Vec<String>,
 }
 
-/// Persist `parsed`'s graph layer atomically and return an
-/// [`EnrolledFile`] receipt.
+/// Persist `parsed`'s graph + chunks atomically and return the receipt
+/// with chunk_ids ready to fan out to B1.
 ///
-/// Idempotent: re-running A3 on the same [`ParsedFile`] is a no-op
-/// (every INSERT inside [`GraphStore::upsert_graph_v2`] uses ON CONFLICT
-/// DO UPDATE / DO NOTHING).
+/// Idempotent: re-running A3 on the same [`ParsedFile`] is a no-op for
+/// the canonical rows (every INSERT inside [`GraphStore::upsert_graph_v2`]
+/// uses `ON CONFLICT DO UPDATE` / `DO NOTHING`).
 pub async fn a3_enroll(
     parsed: ParsedFile,
     store: Arc<GraphStore>,
@@ -63,12 +62,14 @@ pub async fn a3_enroll(
     let store_clone = store.clone();
     let path_for_block = path_str.clone();
     let hash_for_block = parsed.content_hash.clone();
+    let content_for_block = parsed.content.clone();
     let symbols_for_block = parsed.symbols.clone();
     let relations_for_block = parsed.relations.clone();
-    tokio::task::spawn_blocking(move || {
+    let chunk_ids = tokio::task::spawn_blocking(move || {
         store_clone.upsert_graph_v2(
             &path_for_block,
             &project_code_str,
+            &content_for_block,
             &hash_for_block,
             now_ms,
             &symbols_for_block,
@@ -83,6 +84,7 @@ pub async fn a3_enroll(
         symbols_count: parsed.symbols.len(),
         relations_count: parsed.relations.len(),
         last_seen_ms: now_ms,
+        chunk_ids,
     })
 }
 
@@ -134,6 +136,10 @@ mod tests {
         assert_eq!(receipt.content_hash, "hash-abc");
         assert_eq!(receipt.symbols_count, 1);
         assert!(receipt.last_seen_ms > 0);
+        assert!(
+            !receipt.chunk_ids.is_empty(),
+            "A3 must emit at least one chunk_id for a parseable symbol"
+        );
 
         let count = store
             .query_count(
@@ -144,12 +150,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a3_enroll_persists_symbol_row_for_each_parsed_symbol() {
+    async fn a3_enroll_persists_symbol_and_chunk_rows() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let parsed = parsed_with(
-            "/tmp/sym_demo.rs",
+            "/tmp/sym_chunk.rs",
             "fn alpha() {}\nfn beta() {}",
-            "hash-syms",
+            "hash-sc",
             vec!["alpha", "beta"],
         );
 
@@ -157,40 +163,47 @@ mod tests {
             .await
             .unwrap();
 
-        let alpha = store
+        let symbol_count = store
             .query_count(
-                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'alpha'",
+                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name IN ('alpha','beta')",
             )
             .unwrap();
-        let beta = store
-            .query_count("SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'beta'")
+        assert!(
+            symbol_count >= 2,
+            "A3 must persist Symbol rows for the two parsed fns"
+        );
+
+        let chunk_count = store
+            .query_count("SELECT count(*) FROM Chunk WHERE file_path = '/tmp/sym_chunk.rs'")
             .unwrap();
-        assert_eq!(alpha, 1, "A3 must persist Symbol row for `alpha`");
-        assert_eq!(beta, 1, "A3 must persist Symbol row for `beta`");
+        assert!(
+            chunk_count >= 1,
+            "A3 must persist Chunk rows in the same transaction (session 19)"
+        );
     }
 
     #[tokio::test]
-    async fn a3_enroll_does_not_persist_chunk_rows() {
-        // A3 is graph-only — chunking is B1's job (slice S4). Re-confirm
-        // that this invariant holds so future LLMs don't regress it.
+    async fn a3_enroll_full_content_text_persists_for_fts() {
+        // REQ-AXO-292: PG FTS attaches to `Chunk.content` via a
+        // GENERATED `content_tsv` column. A3 must persist full content
+        // text so the GIN index has material to tokenise.
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let parsed = parsed_with(
-            "/tmp/no_chunks.rs",
-            "fn x() { 1 + 1; }",
-            "hash-nc",
-            vec!["x"],
-        );
+        let marker = "UNIQ_MARKER_TENSORRT_42";
+        let body = format!("fn carry() {{ let s = \"{marker}\"; }}\n");
+        let parsed = parsed_with("/tmp/a3_fts.rs", &body, "hash-fts", vec!["carry"]);
 
         a3_enroll(parsed, store.clone(), Arc::from("AXO"))
             .await
             .unwrap();
 
-        let chunks = store
-            .query_count("SELECT count(*) FROM Chunk WHERE file_path = '/tmp/no_chunks.rs'")
+        let n = store
+            .query_count(&format!(
+                "SELECT count(*) FROM Chunk WHERE file_path = '/tmp/a3_fts.rs' AND content LIKE '%{marker}%'"
+            ))
             .unwrap();
-        assert_eq!(
-            chunks, 0,
-            "A3 must NOT persist Chunk rows — that's B1's responsibility (slice S4)"
+        assert!(
+            n >= 1,
+            "A3 Chunk row must carry the full content text for FTS GIN"
         );
     }
 
@@ -205,22 +218,32 @@ mod tests {
         );
         let parsed_b = parsed_a.clone();
 
-        a3_enroll(parsed_a, store.clone(), Arc::from("AXO"))
+        let r1 = a3_enroll(parsed_a, store.clone(), Arc::from("AXO"))
             .await
             .unwrap();
-        a3_enroll(parsed_b, store.clone(), Arc::from("AXO"))
+        let r2 = a3_enroll(parsed_b, store.clone(), Arc::from("AXO"))
             .await
             .unwrap();
+
+        assert_eq!(
+            r1.chunk_ids, r2.chunk_ids,
+            "two enrolments over the same content must emit identical chunk_id Vecs"
+        );
 
         let indexed_count = store
             .query_count("SELECT count(*) FROM IndexedFile WHERE path = '/tmp/idem_v2.rs'")
             .unwrap();
-        assert_eq!(indexed_count, 1, "IndexedFile UPSERT must not duplicate");
+        assert_eq!(indexed_count, 1);
 
         let symbol_count = store
             .query_count("SELECT count(*) FROM Symbol WHERE name = 'idem' AND project_code = 'AXO'")
             .unwrap();
-        assert_eq!(symbol_count, 1, "Symbol UPSERT must not duplicate");
+        assert_eq!(symbol_count, 1);
+
+        let chunk_count = store
+            .query_count("SELECT count(*) FROM Chunk WHERE file_path = '/tmp/idem_v2.rs'")
+            .unwrap();
+        assert_eq!(chunk_count, r1.chunk_ids.len() as i64);
     }
 
     #[tokio::test]

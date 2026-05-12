@@ -4255,9 +4255,8 @@ impl GraphStore {
     /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent via
     /// `ON CONFLICT (path) DO UPDATE`. Standalone helper for path-only
     /// callers (e.g. cache reconstitution tests); the streaming A3 stage
-    /// goes through [`upsert_file_v2`] so the IndexedFile UPSERT lands
-    /// inside the same transaction as the Symbol / Chunk / relation
-    /// inserts.
+    /// goes through [`upsert_graph_v2`] so the IndexedFile UPSERT lands
+    /// inside the same transaction as the Symbol + AGE relation inserts.
     pub fn upsert_indexed_file(
         &self,
         path: &str,
@@ -4278,37 +4277,46 @@ impl GraphStore {
         ))
     }
 
-    /// REQ-AXO-289 S3d (session 18 topology) — A3 atomic graph
-    /// persistence: Symbol + CONTAINS/CALLS/CALLS_NIF edges (SQL + AGE
-    /// dual-write) + IndexedFile watcher-filter row, all in ONE
-    /// transaction.
+    /// REQ-AXO-289 S3d+S4a (session 19 topology) — A3 atomic
+    /// graph + chunks + FTS persistence. All artefacts a parsed file
+    /// produces land in ONE PG transaction:
     ///
-    /// **No Chunk writing.** Chunking is the entry stage of pipeline B
-    /// (the vectorisation lane), not part of pipeline A. The graph
-    /// pipeline stays pure-graph so it keeps its priority/speed; B1
-    /// (slice S4) takes the parsed file from A1's fan-out, derives
-    /// chunks, and UPSERTs `public.Chunk` rows. The PG FTS GIN on
-    /// `content_tsv` (REQ-AXO-292) attaches to that B1 write
-    /// automatically via a GENERATED column — no separate FTS stage.
+    ///   * `public.Symbol` (UPSERT, idempotent)
+    ///   * AGE Symbol + File vertex enrichment (under PG)
+    ///   * `CONTAINS` / `CALLS` / `CALLS_NIF` edges (SQL + AGE dual-write)
+    ///   * `public.Chunk` — full `content` text stored so the
+    ///     REQ-AXO-292 `content_tsv` GENERATED column populates the
+    ///     GIN FTS index automatically. Lexical retrieval works
+    ///     CPU-only, no GPU dependency.
+    ///   * `public.IndexedFile(path, content_hash, last_seen_ms)`
     ///
-    /// Idempotent — Symbol/IndexedFile UPSERTs use `ON CONFLICT DO
-    /// UPDATE`, relation INSERTs use `ON CONFLICT DO NOTHING`. Re-run
-    /// with the same parsed inputs is a no-op. The legacy
-    /// `public.File` status table is NOT touched (legacy
-    /// `insert_file_data_batch` keeps writing it until slice S7
-    /// cut-over).
+    /// **Session 19 pivot** (operator critique 2026-05-12 post-S3d):
+    /// putting chunking in B1 made FTS dependent on the GPU lane having
+    /// run at least once. Moving it back to A keeps the CPU-only stack
+    /// (graphe + FTS) authoritative and resilient; B becomes a thin
+    /// "fetch chunk content from DB → GPU embed → UPSERT embedding"
+    /// lane. SOTA hybrid retrieval pattern: lexical + structural on
+    /// CPU, vector as optional enrichment.
+    ///
+    /// Idempotent — every INSERT uses `ON CONFLICT DO UPDATE` (Symbol,
+    /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).
+    ///
+    /// Returns the chunk_ids persisted. The A3 stage worker `try_send`s
+    /// these to the B1 inbox so the GPU lane picks them up immediately
+    /// in steady-state; B1 cold-start poll DB catches any drops.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_graph_v2(
         &self,
         path: &str,
         project_code: &str,
+        content: &str,
         content_hash: &str,
         last_seen_ms: i64,
         symbols: &[crate::parser::Symbol],
         relations: &[crate::parser::Relation],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         use crate::graph_ingestion::async_writer::{
-            RelationRow, SymbolRow, WriteAccumulator,
+            ChunkRow, RelationRow, SymbolRow, WriteAccumulator,
         };
         use std::collections::HashSet;
 
@@ -4319,6 +4327,7 @@ impl GraphStore {
             && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
 
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
+        let mut chunk_rows: Vec<ChunkRow> = Vec::new();
         let mut contains_rows: Vec<RelationRow> = Vec::new();
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
@@ -4326,6 +4335,7 @@ impl GraphStore {
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
+        let mut chunk_ids_emitted: Vec<String> = Vec::new();
 
         for sym in symbols {
             let symbol_id = Self::symbol_id(project_code, path, &sym.name);
@@ -4356,9 +4366,33 @@ impl GraphStore {
             });
             contains_rows.push(RelationRow {
                 source_id: path.to_string(),
-                target_id: symbol_id,
+                target_id: symbol_id.clone(),
                 project_code: project_code.to_string(),
             });
+            for derived_chunk in Self::build_chunk_content(sym, content) {
+                let chunk_id = Self::chunk_part_id(
+                    &symbol_id,
+                    derived_chunk.part_index,
+                    derived_chunk.part_count,
+                );
+                let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
+                chunk_rows.push(ChunkRow {
+                    chunk_id: chunk_id.clone(),
+                    source_type: "symbol".to_string(),
+                    source_id: symbol_id.clone(),
+                    project_code: project_code.to_string(),
+                    file_path: path.to_string(),
+                    kind: sym.kind.clone(),
+                    content: derived_chunk.content.clone(),
+                    content_hash: chunk_hash,
+                    start_line: derived_chunk.start_line as i64,
+                    end_line: derived_chunk.end_line as i64,
+                    part_index: derived_chunk.part_index as i64,
+                    part_count: derived_chunk.part_count as i64,
+                    chunk_path: derived_chunk.chunk_path.clone(),
+                });
+                chunk_ids_emitted.push(chunk_id);
+            }
         }
         contains_rows.sort_unstable();
         contains_rows.dedup();
@@ -4390,6 +4424,7 @@ impl GraphStore {
 
         let mut acc = WriteAccumulator::new();
         acc.symbols = symbol_rows;
+        acc.chunks = chunk_rows;
         acc.contains = contains_rows;
         acc.calls = calls_rows;
         acc.calls_nif = calls_nif_rows;
@@ -4397,11 +4432,11 @@ impl GraphStore {
         // PG-canonical: `_pg` renderers emit pgvector literals for the
         // Symbol embedding column when set, and `NULL` when unset (the
         // streaming-v2 path leaves embeddings to B3, so symbols arrive
-        // here with `embedding: None`). The CONTAINS / CALLS /
-        // CALLS_NIF `_pg` renderers emit portable INSERT…ON CONFLICT
-        // SQL that PG accepts natively.
+        // here with `embedding: None`). Chunk INSERT triggers the
+        // REQ-AXO-292 `content_tsv` GENERATED column automatically.
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
+        queries.extend(acc.render_chunks_pg());
         if !skip_sql_relations {
             queries.extend(acc.render_contains_pg());
             queries.extend(acc.render_calls_pg());
@@ -4447,7 +4482,44 @@ impl GraphStore {
         ));
 
         self.execute_batch(&queries)?;
-        Ok(())
+        Ok(chunk_ids_emitted)
+    }
+
+    /// REQ-AXO-289 S4a (session 19) — Pipeline-v2 stage B1 fetch
+    /// chunk content from PG for the GPU embedder lane.
+    ///
+    /// B1 receives a `chunk_id: String` from A3's `try_send` fan-out
+    /// (or from the cold-start poll DB pathway) and needs to load the
+    /// chunk's text content to feed B2 (GPU). A3 already persisted the
+    /// row inside `public.Chunk`, so B1 just SELECTs it back.
+    ///
+    /// Returns `Ok(None)` if the chunk_id no longer exists (race with
+    /// a re-parse that re-derived chunk_ids — caller drops silently and
+    /// moves on). Returns `Ok(Some((content, content_hash)))` for the
+    /// common case.
+    pub fn fetch_chunk_for_embedding(
+        &self,
+        chunk_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let safe_id = Self::escape_sql(chunk_id);
+        let raw = self.query_json(&format!(
+            "SELECT content, content_hash FROM Chunk WHERE id = '{safe_id}'"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let content = row
+            .first()
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let content_hash = row
+            .get(1)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        Ok(Some((content, content_hash)))
     }
 
     fn upsert_file_queries(

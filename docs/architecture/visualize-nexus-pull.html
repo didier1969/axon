@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Axon Pipeline v2 — Streaming Architecture (REQ-AXO-289)</title>
+  <title>Axon Pipeline v2 — Streaming Architecture (REQ-AXO-289, session 19)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -654,17 +654,15 @@
   <!-- ===================== HERO ===================== -->
   <header class="hero animate" style="--i:0">
     <div>
-      <span class="eyebrow"><span class="dot"></span> REQ-AXO-289 · session 18 topology · 2026-05-12</span>
-      <h1>Axon Pipeline v2 <em>streaming-v2</em><br>Six stages, deux lanes, zéro machine-à-états</h1>
+      <span class="eyebrow"><span class="dot"></span> REQ-AXO-289 · session 19 topology · 2026-05-12</span>
+      <h1>Axon Pipeline v2 <em>streaming-v2</em><br>Six stages, lexical+graphe CPU, vector GPU</h1>
       <p class="lede">
         Architecture canonicalisée par <code>CPT-AXO-053</code> + <code>CPT-AXO-054</code>.
         Le watcher pousse les fichiers nouveaux/modifiés dans deux lanes <em>indépendantes en débit</em> :
-        <strong>A = graphe</strong> (priorité vitesse, structure + relations + métadonnées) et
-        <strong>B = vectorisation + lexical</strong> (chunking, embedding GPU, FTS auto).
-        Bounded <code>tokio::sync::mpsc</code> entre tous les stages,
-        idempotence par UPSERT, persistance minimale (<code>IndexedFile</code> 3 colonnes),
-        et un seul <code>try_send</code> non-bloquant pour le cross-pipeline A1→B1
-        — le graphe ne ralentit JAMAIS pour le GPU.
+        <strong>A = graphe + chunks + FTS</strong> (tout le travail CPU dans une transaction PG atomique) et
+        <strong>B = embedding GPU uniquement</strong> (lit les chunks depuis PG, embed, persiste vecteur).
+        Le stack CPU est <em>authoritative</em> et résilient : lexical + structural fonctionnent
+        complètement <strong>sans GPU</strong>. Pattern SOTA hybrid retrieval : vector layer = enrichissement optionnel.
       </p>
     </div>
     <div class="hero-meta">
@@ -677,8 +675,8 @@
         <div class="value">3 cols<small>IndexedFile filter</small></div>
       </div>
       <div class="meta-card">
-        <div class="label">Buffer A1→B1</div>
-        <div class="value">10 000<small>try_send fichiers</small></div>
+        <div class="label">Buffer A3→B1</div>
+        <div class="value">10 000<small>try_send chunk_ids</small></div>
       </div>
       <div class="meta-card">
         <div class="label">Buffer interne</div>
@@ -692,8 +690,8 @@
     <div class="section-head">
       <h2>1 · Topologie de flux <span class="tag">six stages · bounded channels</span></h2>
       <p>
-        A1 lit le fichier une fois et émet un <code>PreparedFile</code> qui voyage en parallèle vers A2 (parsing+graphe) et B1 (chunking+vectorisation).
-        Le canal A1→B1 est <strong>non-bloquant</strong> avec un buffer de 10 000 fichiers — le graphe garde sa cadence quoi qu'il arrive.
+        A persiste graphe + chunks + FTS en UNE transaction PG (lexical CPU-only, autoritatif). B = pipeline GPU pur : lit les chunk_ids émis par A3 via try_send (cap 10 000), va chercher le contenu en PG, embed, persiste le vecteur.
+        Le canal A3→B1 est non-bloquant — le pipeline CPU ne ralentit jamais pour le GPU.
       </p>
     </div>
 
@@ -708,29 +706,29 @@ graph TD
   W["watcher<br/>notify_debouncer 750ms"]
   FILT["IndexedFile filter<br/>arc-swap&lt;DashMap&lt;path,hash&gt;&gt;<br/>drop si (path,hash) connu"]
 
-  subgraph PA["pipeline A — graphe (priorité vitesse)"]
+  subgraph PA["pipeline A — graphe + chunks + FTS (CPU, autoritatif)"]
     A1["A1 · Préparation<br/>tokio::fs read<br/>SHA-256 + mtime + size<br/>→ PreparedFile"]
     A2["A2 · Transformation<br/>tree-sitter parse<br/>spawn_blocking<br/>→ ParsedFile (Symbols + Relations)"]
-    A3["A3 · Enregistrement graphe<br/>upsert_graph_v2 ATOMIQUE :<br/>Symbol + AGE vertex<br/>CONTAINS / CALLS / CALLS_NIF (SQL+AGE)<br/>File vertex + IndexedFile UPSERT<br/>→ EnrolledFile"]
+    A3["A3 · Enregistrement atomique<br/>upsert_graph_v2 SINGLE TX :<br/>• Symbol + AGE vertex<br/>• CONTAINS/CALLS/CALLS_NIF (SQL+AGE)<br/>• Chunk (content intégral)<br/>• File vertex + IndexedFile<br/>→ EnrolledFile + chunk_ids"]
+    FTS["public.Chunk.content_tsv<br/>GENERATED ALWAYS AS STORED<br/>(GIN auto-index, REQ-AXO-292)"]
   end
 
-  subgraph PB["pipeline B — chunks + vectorisation + FTS"]
-    B1["B1 · Chunking + Persistance Chunk<br/>re-parse tree-sitter (déterministe)<br/>build_symbol_chunks(sym, content)<br/>UPSERT public.Chunk<br/>→ chunk_id"]
-    B2["B2 · Embedder GPU<br/>SELECT content WHERE id=$1<br/>seq-len bucketing (REQ-AXO-262)<br/>ORT + TensorRT + BGE-Large 1024d<br/>1 worker par GPU<br/>→ (chunk_id, Vec&lt;f32&gt;)"]
+  subgraph PB["pipeline B — embedding GPU (enrichissement)"]
+    B1["B1 · Fetch chunk content<br/>SELECT content FROM Chunk<br/>WHERE id = chunk_id<br/>→ ChunkForEmbedding"]
+    B2["B2 · Embedder GPU<br/>seq-len bucketing (REQ-AXO-262)<br/>ORT + TensorRT + BGE-Large 1024d<br/>1 worker par GPU<br/>→ (chunk_id, Vec&lt;f32&gt;)"]
     B3["B3 · Enregistrement vecteur<br/>UPSERT ChunkEmbedding<br/>pgvector vector(1024)<br/>ON CONFLICT(chunk_id, model_id)"]
     POLL["B1 cold-start poll<br/>SELECT id FROM Chunk LEFT JOIN<br/>ChunkEmbedding WHERE NULL<br/>LIMIT 256"]
-    FTS["public.Chunk.content_tsv<br/>GENERATED ALWAYS AS STORED<br/>(GIN auto-index, REQ-AXO-292)"]
   end
 
   W --> FILT
   FILT --> A1
   A1 -->|blocking send.await<br/>cap 1024| A2
-  A1 -.->|try_send NON-BLOQUANT<br/>cap 10 000 fichiers<br/>drop silently si plein| B1
   A2 -->|cap 1024| A3
+  A3 -.->|colonne GENERATED<br/>auto-recompute| FTS
+  A3 -.->|try_send NON-BLOQUANT<br/>cap 10 000 chunk_ids<br/>drop silently si plein| B1
   B1 -->|cap 512| B2
   B2 -->|cap 512| B3
   POLL -.->|rattrapage drops| B1
-  B1 -.->|side-effect<br/>colonne GENERATED| FTS
 
   classDef stageA fill:#d7eaee,stroke:#245f73,stroke-width:2px,color:#1b1b18;
   classDef stageB fill:#dfe8d7,stroke:#45653a,stroke-width:2px,color:#1b1b18;
@@ -747,11 +745,11 @@ graph TD
     <div class="legend">
       <div class="legend-item">
         <div class="legend-swatch" style="background:var(--blue-soft); border-color:var(--blue)"></div>
-        Lane A — graphe pur (Symbol + AGE + relations + IndexedFile)
+        Lane A — graphe + chunks + FTS (CPU, autoritatif)
       </div>
       <div class="legend-item">
         <div class="legend-swatch" style="background:var(--green-soft); border-color:var(--green)"></div>
-        Lane B — chunks + vectorisation + FTS
+        Lane B — embedding GPU (enrichissement optionnel)
       </div>
       <div class="legend-item">
         <div class="legend-swatch" style="background:var(--amber-soft); border-color:var(--amber)"></div>
@@ -786,17 +784,17 @@ graph TD
         </thead>
         <tbody>
           <tr>
-            <td><span class="stage-id stage-shared">A1</span></td>
-            <td><span class="lane-pill lane-AB">A + B</span></td>
+            <td><span class="stage-id stage-a">A1</span></td>
+            <td><span class="lane-pill lane-A">A CPU</span></td>
             <td><code>PathBuf</code></td>
-            <td class="ops"><code>tokio::fs::read</code> · SHA-256(content) · mtime + size · fan-out blocking→A2 + try_send→B1</td>
+            <td class="ops"><code>tokio::fs::read</code> · SHA-256(content) · mtime + size</td>
             <td><code>PreparedFile</code></td>
             <td>—<br><small>filter en RAM (arc-swap)</small></td>
             <td class="workers">4<br><small>/ 2</small></td>
           </tr>
           <tr>
             <td><span class="stage-id stage-a">A2</span></td>
-            <td><span class="lane-pill lane-A">A graphe</span></td>
+            <td><span class="lane-pill lane-A">A CPU</span></td>
             <td><code>PreparedFile</code></td>
             <td class="ops">dispatch <code>get_parser_for_file</code> · tree-sitter parse via <code>spawn_blocking</code> · extract Symbols + Relations</td>
             <td><code>ParsedFile</code></td>
@@ -805,38 +803,39 @@ graph TD
           </tr>
           <tr>
             <td><span class="stage-id stage-a">A3</span></td>
-            <td><span class="lane-pill lane-A">A graphe</span></td>
+            <td><span class="lane-pill lane-A">A CPU</span></td>
             <td><code>ParsedFile</code></td>
             <td class="ops">
-              <code>upsert_graph_v2</code> en <strong>une transaction</strong> :
-              Symbol UPSERT (ON CONFLICT DO UPDATE) · CONTAINS/CALLS/CALLS_NIF (SQL + AGE dual-write) ·
-              AGE Symbol+File vertex enrichment · IndexedFile UPSERT
+              <code>upsert_graph_v2</code> en <strong>UNE transaction</strong> :
+              Symbol UPSERT · <strong>Chunk UPSERT</strong> (content intégral → FTS auto) ·
+              CONTAINS/CALLS/CALLS_NIF (SQL + AGE) · AGE Symbol+File vertex · IndexedFile UPSERT ·
+              <em>fan-out chunk_ids via try_send vers B1</em>
             </td>
-            <td><code>EnrolledFile</code></td>
-            <td><code>Symbol</code> · <code>IndexedFile</code> · AGE edges + vertices</td>
+            <td><code>EnrolledFile</code><br><small>+ Vec&lt;chunk_id&gt;</small></td>
+            <td><code>Symbol</code> · <code>Chunk</code> (+ <code>content_tsv</code> GIN auto, REQ-AXO-292) · <code>IndexedFile</code> · AGE edges/vertices</td>
             <td class="workers">2<br><small>/ 1</small></td>
           </tr>
           <tr>
             <td><span class="stage-id stage-b">B1</span></td>
-            <td><span class="lane-pill lane-B">B vector + FTS</span></td>
-            <td><code>PreparedFile</code> via try_send<br>+ cold-start poll DB</td>
-            <td class="ops">re-parse tree-sitter (déterministe vs A2) · <code>build_symbol_chunks(sym, content)</code> · UPSERT <code>public.Chunk</code> avec <code>content</code> intégral</td>
-            <td><code>chunk_id: String</code></td>
-            <td><code>Chunk</code><br><small>+ <code>content_tsv</code> GIN auto via REQ-AXO-292 (GENERATED column)</small></td>
+            <td><span class="lane-pill lane-B">B GPU</span></td>
+            <td><code>chunk_id: String</code> via try_send<br>+ cold-start poll DB</td>
+            <td class="ops">SELECT <code>content, content_hash FROM Chunk WHERE id=$1</code> · None silently dropped (race) · forward payload à B2</td>
+            <td><code>ChunkForEmbedding</code></td>
+            <td>—</td>
             <td class="workers">4<br><small>/ 2</small></td>
           </tr>
           <tr>
             <td><span class="stage-id stage-b">B2</span></td>
-            <td><span class="lane-pill lane-B">B vector</span></td>
-            <td><code>chunk_id</code></td>
-            <td class="ops">SELECT <code>content FROM Chunk WHERE id=$1</code> · seq-len bucketing (REQ-AXO-262) · ORT + TensorRT BGE-Large 1024d</td>
+            <td><span class="lane-pill lane-B">B GPU</span></td>
+            <td><code>ChunkForEmbedding</code></td>
+            <td class="ops">seq-len bucketing (REQ-AXO-262) · ORT + TensorRT + BGE-Large 1024d · IoBinding pré-alloué</td>
             <td><code>(chunk_id, Vec&lt;f32&gt;)</code></td>
             <td>— (mémoire GPU)</td>
             <td class="workers">1<br><small>/ 1 (×GPU)</small></td>
           </tr>
           <tr>
             <td><span class="stage-id stage-b">B3</span></td>
-            <td><span class="lane-pill lane-B">B vector</span></td>
+            <td><span class="lane-pill lane-B">B GPU</span></td>
             <td><code>(chunk_id, Vec&lt;f32&gt;)</code></td>
             <td class="ops">UPSERT <code>ChunkEmbedding</code> ON CONFLICT(chunk_id, model_id) DO UPDATE</td>
             <td>persisté</td>
@@ -858,39 +857,37 @@ graph TD
     <div class="props-grid">
 
       <div class="prop" data-accent="blue">
-        <h3><span class="idx">P1</span>Graph priority absolue</h3>
+        <h3><span class="idx">P1</span>CPU stack autoritatif (SOTA hybrid)</h3>
         <p>
-          A1 fait deux choses : <code>send().await</code> bloquant vers A2 (lane graphe), et <code>try_send</code> non-bloquant vers B1 (lane vecteur).
-          Si B1 est saturé (buffer 10 000 plein), le try_send échoue silencieusement et A1 continue à servir A2 sans attendre.
-          Le graphe atteint sa vitesse native indépendamment de la cadence GPU.
+          Le stack lexical + structural (graphe AGE + Chunk + content_tsv FTS) est entièrement persisté par A en CPU. <strong>Aucune dépendance GPU pour rechercher.</strong> Un déploiement sans GPU (laptop, edge, CI) a <code>code_search</code> mode lexical + <code>query</code>/<code>impact</code> fonctionnels.
+        </p>
+        <p>
+          B (GPU) = enrichissement <em>optionnel</em> qui ajoute la couche vector. Pattern SOTA : la couche coûteuse + fragile ajoute, ne remplace pas.
         </p>
       </div>
 
       <div class="prop" data-accent="green">
         <h3><span class="idx">P2</span>Idempotence par UPSERT</h3>
         <p>
-          A3 UPSERT (<code>ON CONFLICT DO UPDATE</code>) Symbol + IndexedFile, et <code>ON CONFLICT DO NOTHING</code> sur les relations.
-          B1 UPSERT Chunk. B3 UPSERT ChunkEmbedding. <strong>Crash à n'importe quel stage → restart → watcher rediscover → UPSERT = no-op.</strong> Zéro orphan à reaper, zéro claim à libérer.
+          A3 UPSERT Symbol + Chunk + IndexedFile (<code>ON CONFLICT DO UPDATE</code>) et relations (<code>ON CONFLICT DO NOTHING</code>) dans UNE transaction. B3 UPSERT ChunkEmbedding. <strong>Crash à n'importe quel stage → restart → watcher rediscover → UPSERT = no-op.</strong> Zéro orphan à reaper, zéro claim à libérer.
         </p>
       </div>
 
       <div class="prop" data-accent="amber">
-        <h3><span class="idx">P3</span>Dual-parse déterministe</h3>
+        <h3><span class="idx">P3</span>Single-parse, atomique</h3>
         <p>
-          A2 et B1 parsent tous deux le même <code>content</code> via tree-sitter (déterministe), produisent les mêmes Symbols, et dérivent les mêmes Chunks via <code>build_symbol_chunks</code> (fonction pure).
-          Coût ≈ 5 ms par parse × 2 = négligeable vs GPU embed ≈ 250-280 ms / batch.
+          A2 parse une fois. A3 dérive Symbol + Chunk de la <strong>même extraction</strong>, persiste tout dans UNE transaction PG. Pas de dual-parse, pas de race entre lanes — la cohérence est garantie au niveau du moteur PG.
         </p>
         <p>
-          Les IDs (<code>symbol_id</code>, <code>chunk_id</code>) sont pures fonctions de <code>(project_code, path, name, part_index)</code> → 1:1 identiques entre A et B. Même si l'ordre des Vec divergeait, l'UPSERT garantit l'état final.
+          B1 ne re-parse PAS : il SELECTe <code>content</code> dans <code>public.Chunk</code> à partir du <code>chunk_id</code> reçu d'A3. Lane B est ainsi totalement découplée du tree-sitter.
         </p>
       </div>
 
       <div class="prop" data-accent="plum">
-        <h3><span class="idx">P4</span>FTS gratuit (REQ-AXO-292)</h3>
+        <h3><span class="idx">P4</span>FTS gratuit, instantané (REQ-AXO-292)</h3>
         <p>
           PG FTS lexical = colonne <code>content_tsv</code> <code>GENERATED ALWAYS AS … STORED</code> sur <code>public.Chunk</code>.
-          Dès que B1 fait son UPSERT Chunk, PG calcule le tsvector et l'index GIN se met à jour <strong>sans aucun code applicatif</strong>.
-          Pas de stage C1, pas de worker FTS — l'effet est latent dans le moteur PG.
+          Dès que A3 commit sa transaction, PG calcule le tsvector et l'index GIN se met à jour <strong>dans la même transaction</strong>. La FTS est utilisable au commit, sans attendre B.
         </p>
       </div>
 
@@ -906,8 +903,7 @@ graph TD
         <h3><span class="idx">P6</span>Activation orthogonale</h3>
         <p>
           <code>AXON_RUNTIME_MODE</code> = <code>brain_only</code> / <code>indexer_graph</code> / <code>indexer_vector</code> / <code>indexer_full</code>.
-          Les pipelines A et B peuvent tourner indépendamment : graphe seul (pas de GPU), vecteur seul (rattrapage des chunks non-embeddés), brain seul (MCP serveur sur la base), ou les deux.
-          Permis par MIL-AXO-015 (PG MVCC multi-writer natif).
+          <code>indexer_graph</code> = stack complet sauf vector. <code>indexer_vector</code> = B1 lit chunks depuis PG via cold-start poll, embed, persiste. Brain sert MCP en parallèle. Permis par MIL-AXO-015 (PG MVCC multi-writer natif).
         </p>
       </div>
 
@@ -953,8 +949,9 @@ graph TD
     </div>
 
     <div class="callout">
-      <strong>Mode <code>indexer_vector</code>.</strong> Quand seul B tourne (graphe déjà peuplé), B1 ne reçoit RIEN du canal A1→B1 (A est inactif). Il s'appuie alors sur son <strong>cold-start poll DB</strong> :
-      <code>SELECT id FROM Chunk LEFT JOIN ChunkEmbedding WHERE NULL LIMIT 256</code> pour rattraper tous les chunks non-embeddés. Même chemin si <code>indexer_full</code> démarre après un long brain-only.
+      <strong>Mode <code>indexer_graph</code> (sans GPU).</strong> A persiste graphe + chunks + FTS. <code>code_search</code> mode lexical est immédiatement fonctionnel via la colonne GENERATED <code>content_tsv</code>. Toutes les queries MCP <code>query</code>/<code>inspect</code>/<code>impact</code>/<code>retrieve_context</code> tournent. La couche vector est juste vide — <code>code_search</code> en mode <code>hybrid</code> tombera back sur lexical seul jusqu'à ce que B tourne.
+      <br><br>
+      <strong>Mode <code>indexer_vector</code>.</strong> A est inactif ; B1 lit les chunks depuis PG via cold-start poll : <code>SELECT id FROM Chunk LEFT JOIN ChunkEmbedding WHERE NULL LIMIT 256</code>. Rattrape tous les chunks non-embeddés. Même chemin si <code>indexer_full</code> démarre après un long brain-only.
     </div>
   </section>
 
@@ -982,12 +979,14 @@ graph TD
         <li>orchestrator.rs<span> spawn_pipeline_a + handles</span></li>
         <li>stage_a1.rs<span> read + sha256 + mtime</span></li>
         <li>stage_a2.rs<span> tree-sitter spawn_blocking</span></li>
-        <li>stage_a3.rs<span> a3_enroll → upsert_graph_v2</span></li>
+        <li>stage_a3.rs<span> a3_enroll → upsert_graph_v2 (graph + chunks + FTS atomique)</span></li>
+        <li>stage_b1.rs<span> b1_fetch_for_embedding (SELECT content from PG)</span></li>
         <li>worker_pool.rs<span> competing consumers pattern</span></li>
         <li>channels.rs<span> mpsc cap defaults</span></li>
         <li>indexed_file_cache.rs<span> arc-swap watcher filter</span></li>
         <li>types.rs<span> PreparedFile + ParsedFile pivot types</span></li>
-        <li>graph_ingestion.rs::upsert_graph_v2<span> single-tx PG write</span></li>
+        <li>graph_ingestion.rs::upsert_graph_v2<span> single-tx PG write (Symbol + Chunk + AGE + IndexedFile)</span></li>
+        <li>graph_ingestion.rs::fetch_chunk_for_embedding<span> B1 SELECT helper</span></li>
       </ul>
     </div>
   </footer>

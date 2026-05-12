@@ -1,11 +1,14 @@
-//! Pipeline A orchestrator (CPT-AXO-054, session 18 topology).
+//! Pipeline A + Pipeline B orchestrator (CPT-AXO-054, session 19 topology).
 //!
 //! Wires A1 → A2 → A3 stages through bounded channels and per-stage worker
-//! pools. A1's output ALSO fans out via `try_send` to a downstream
-//! `b1_inbox` channel — that's the hand-off slot for pipeline B (the
-//! vectorisation lane) once slice S4 wires its consumer. The graph
-//! pipeline (A) and vector pipeline (B) thus stay throughput-independent
-//! per CPT-AXO-053: A never blocks on B's pace.
+//! pools. A3 try_sends the chunk_ids it just persisted to a downstream
+//! `b1_inbox` channel — that's the hand-off slot for pipeline B (the GPU
+//! embedder lane). The cross-pipeline `try_send` is non-blocking per
+//! CPT-AXO-053: graph + chunks + FTS keep their CPU-native cadence
+//! regardless of B's GPU pace.
+//!
+//! Pipeline B (slice S4a) wires B1 (fetch content from PG by chunk_id).
+//! B2 / B3 land in slice S4b on the same channel topology.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use super::metrics::StageMetrics;
 use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::{a3_enroll, EnrolledFile};
-use super::types::PreparedFile;
+use super::stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
 use super::worker_pool::spawn_stage_workers;
 
 /// Tunable per-stage worker counts. Operator-overridable through env vars
@@ -38,6 +41,61 @@ impl Default for PipelineAWorkerCounts {
             a2: 8,
             a3: 2,
         }
+    }
+}
+
+/// Tunable per-stage worker counts for Pipeline B. Operator-overridable
+/// through env vars `AXON_B1_WORKERS`, `AXON_B2_WORKERS`, `AXON_B3_WORKERS`.
+///
+/// Slice S4a wires B1 only; B2 / B3 fields are reserved for slice S4b.
+#[derive(Debug, Clone, Copy)]
+pub struct PipelineBWorkerCounts {
+    pub b1: usize,
+    pub b2: usize,
+    pub b3: usize,
+}
+
+impl Default for PipelineBWorkerCounts {
+    fn default() -> Self {
+        Self {
+            b1: 4,
+            b2: 1,
+            b3: 2,
+        }
+    }
+}
+
+impl PipelineBWorkerCounts {
+    pub fn from_env() -> Self {
+        let mut counts = Self::default();
+        if let Ok(v) = std::env::var("AXON_B1_WORKERS").and_then(|raw| {
+            raw.trim()
+                .parse::<usize>()
+                .map_err(|_| std::env::VarError::NotPresent)
+        }) {
+            if v > 0 {
+                counts.b1 = v;
+            }
+        }
+        if let Ok(v) = std::env::var("AXON_B2_WORKERS").and_then(|raw| {
+            raw.trim()
+                .parse::<usize>()
+                .map_err(|_| std::env::VarError::NotPresent)
+        }) {
+            if v > 0 {
+                counts.b2 = v;
+            }
+        }
+        if let Ok(v) = std::env::var("AXON_B3_WORKERS").and_then(|raw| {
+            raw.trim()
+                .parse::<usize>()
+                .map_err(|_| std::env::VarError::NotPresent)
+        }) {
+            if v > 0 {
+                counts.b3 = v;
+            }
+        }
+        counts
     }
 }
 
@@ -80,22 +138,15 @@ impl PipelineAWorkerCounts {
 /// * `input_tx` — feed paths to A1 (typically wired to the watcher debounce
 ///   handler). Bounded; blocks `send().await` if A1 is saturated (natural
 ///   upstream backpressure).
-/// * `output_rx` — receive [`EnrolledFile`] receipts from A3. Optional to
-///   consume — if you don't care about acks, just drop the receiver and the
-///   sender side is fine (mpsc senders survive a dropped receiver only until
-///   they try to send, at which point the worker exits cleanly).
-/// * `b1_inbox_rx` — non-blocking fan-out from A1 to the B-pipeline. Each
-///   [`PreparedFile`] published by A1 is also `try_send`'d here so B1 can
-///   chunk-and-vectorise it in parallel. The channel is bounded at
-///   `caps.a3_to_b1` (default 10_000). When full, A1 drops the send
-///   silently — B1's cold-start poll DB pathway picks up any leakage.
-///   Slice S4 wires B1 to consume from this receiver; until then it's
-///   exposed so callers can drain or assert on it in tests.
-/// * `metrics` — one [`StageMetrics`] per stage, observable for telemetry.
+/// * `output_rx` — receive [`EnrolledFile`] receipts from A3.
+/// * `b1_inbox_rx` — `chunk_id: String` items A3 fan-outs via `try_send`
+///   (best-effort, non-blocking, cap `caps.a3_to_b1` = 10 000). Hand off
+///   this receiver to [`spawn_pipeline_b_b1_only`] to wire pipeline B.
+/// * `metrics_*` — observable per-stage telemetry.
 pub struct PipelineAHandles {
     pub input_tx: Sender<PathBuf>,
     pub output_rx: Receiver<EnrolledFile>,
-    pub b1_inbox_rx: Receiver<PreparedFile>,
+    pub b1_inbox_rx: Receiver<String>,
     pub metrics_a1: Arc<StageMetrics>,
     pub metrics_a2: Arc<StageMetrics>,
     pub metrics_a3: Arc<StageMetrics>,
@@ -110,8 +161,8 @@ pub struct PipelineAHandles {
 ///
 /// `project_code` is the canonical 3-letter project the watcher is rooted
 /// at. CPT-AXO-053 prescribes single-project per indexer instance, so
-/// passing it here once is enough — A3 stamps every Symbol / IndexedFile
-/// row with this code.
+/// passing it here once is enough — A3 stamps every Symbol / Chunk /
+/// IndexedFile row with this code.
 pub fn spawn_pipeline_a(
     counts: PipelineAWorkerCounts,
     caps: PipelineChannelCaps,
@@ -120,35 +171,20 @@ pub fn spawn_pipeline_a(
 ) -> PipelineAHandles {
     let project_code: Arc<str> = project_code.into();
     let (input_tx, input_rx) = mpsc::channel::<PathBuf>(caps.internal);
-    let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel::<PreparedFile>(caps.internal);
+    let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
     let (output_tx, output_rx) = mpsc::channel::<EnrolledFile>(caps.internal);
-    let (b1_inbox_tx, b1_inbox_rx) = mpsc::channel::<PreparedFile>(caps.a3_to_b1);
+    let (b1_inbox_tx, b1_inbox_rx) = mpsc::channel::<String>(caps.a3_to_b1);
 
     let metrics_a1 = StageMetrics::new("A1");
     let metrics_a2 = StageMetrics::new("A2");
     let metrics_a3 = StageMetrics::new("A3");
 
-    // A1 produces a single PreparedFile; the worker pool emits it onto
-    // `a1_to_a2_tx`, AND we tap a fan-out so the same PreparedFile is
-    // `try_send`'d to `b1_inbox_tx` (best-effort, non-blocking) for B's
-    // consumption. Wrapping the user closure in `forward_with_b1_fanout`
-    // keeps the worker_pool generic intact.
-    let b1_tx_for_a1 = b1_inbox_tx.clone();
     spawn_stage_workers(
         counts.a1,
         input_rx,
         a1_to_a2_tx,
-        move |path: PathBuf| {
-            let b1_tx = b1_tx_for_a1.clone();
-            async move {
-                let prepared = a1_prepare(path).await?;
-                // Best-effort fan-out to B1's inbox. Graph priority:
-                // never block A on B's pace.
-                let _ = b1_tx.try_send(prepared.clone());
-                Ok(prepared)
-            }
-        },
+        |path: PathBuf| async move { a1_prepare(path).await },
         metrics_a1.clone(),
     );
 
@@ -162,6 +198,7 @@ pub fn spawn_pipeline_a(
 
     let store_for_a3 = store.clone();
     let pc_for_a3 = project_code.clone();
+    let b1_tx_for_a3 = b1_inbox_tx.clone();
     spawn_stage_workers(
         counts.a3,
         a2_to_a3_rx,
@@ -169,7 +206,17 @@ pub fn spawn_pipeline_a(
         move |parsed| {
             let store = store_for_a3.clone();
             let pc = pc_for_a3.clone();
-            async move { a3_enroll(parsed, store, pc).await }
+            let b1_tx = b1_tx_for_a3.clone();
+            async move {
+                let enrolled = a3_enroll(parsed, store, pc).await?;
+                // Best-effort fan-out to B1's inbox. Graph priority:
+                // drop silently on full — B1's cold-start poll DB
+                // pathway (slice S4c) catches the leakage.
+                for cid in &enrolled.chunk_ids {
+                    let _ = b1_tx.try_send(cid.clone());
+                }
+                Ok(enrolled)
+            }
         },
         metrics_a3.clone(),
     );
@@ -184,20 +231,73 @@ pub fn spawn_pipeline_a(
     }
 }
 
+/// Handles for talking to a running Pipeline B (S4a scope: B1 only).
+///
+/// `output_rx` yields one [`ChunkForEmbedding`] per chunk_id B1
+/// successfully fetched from `public.Chunk`. None-fetches (race with a
+/// concurrent re-parse that re-derived chunk_ids) are dropped silently
+/// and do NOT surface on this channel — they just don't get embedded
+/// this round; B1 cold-start poll DB (slice S4c) catches them later.
+pub struct PipelineBHandles {
+    pub output_rx: Receiver<ChunkForEmbedding>,
+    pub metrics_b1: Arc<StageMetrics>,
+}
+
+/// Spawn Pipeline B stage workers (B1 only for S4a).
+///
+/// `b1_inbox_rx` is the receiver returned by [`spawn_pipeline_a`] —
+/// pass it here to connect the A → B hand-off. B2 (GPU embedder) and
+/// B3 (ChunkEmbedding UPSERT) land in slice S4b.
+pub fn spawn_pipeline_b_b1_only(
+    counts: PipelineBWorkerCounts,
+    caps: PipelineChannelCaps,
+    store: Arc<GraphStore>,
+    b1_inbox_rx: Receiver<String>,
+) -> PipelineBHandles {
+    let (output_tx, output_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
+    let metrics_b1 = StageMetrics::new("B1");
+
+    let store_for_b1 = store.clone();
+    spawn_stage_workers(
+        counts.b1,
+        b1_inbox_rx,
+        output_tx,
+        move |chunk_id: String| {
+            let store = store_for_b1.clone();
+            async move {
+                // None = chunk_id no longer addressable (race with
+                // re-parse). Surface a "soft skip" via Err so the
+                // worker pool records it as a no-op step without
+                // forwarding to the downstream channel.
+                match b1_fetch_for_embedding(chunk_id, store).await? {
+                    Some(payload) => Ok(payload),
+                    None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
+                }
+            }
+        },
+        metrics_b1.clone(),
+    );
+
+    PipelineBHandles {
+        output_rx,
+        metrics_b1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
     #[tokio::test]
-    async fn pipeline_a_end_to_end_persists_graph_and_indexed_file_for_a_rust_fixture() {
-        // Create a real .rs file on disk so A1 has something to read,
-        // A2 has something to parse, and A3 has something to UPSERT.
+    async fn pipeline_a_end_to_end_persists_graph_chunks_and_indexed_file_for_a_rust_fixture() {
+        // Session-19 contract: A persists graph + chunks + FTS in ONE
+        // transaction. Receipt carries chunk_ids ready for B's GPU
+        // lane. b1_inbox_rx receives the same chunk_ids via try_send.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("e2e_fixture.rs");
         std::fs::write(&path, "fn main() { let x = 42; println!(\"{x}\"); }\n").unwrap();
 
-        // Single-worker counts keep the test deterministic and snappy.
         let counts = PipelineAWorkerCounts {
             a1: 1,
             a2: 1,
@@ -207,10 +307,8 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let mut handles = spawn_pipeline_a(counts, caps, store.clone(), "AXO");
 
-        // Feed the fixture path in.
         handles.input_tx.send(path.clone()).await.unwrap();
 
-        // Wait for A3's receipt with a generous timeout (CI hosts vary).
         let receipt = tokio::time::timeout(Duration::from_secs(5), handles.output_rx.recv())
             .await
             .expect("pipeline A must produce a receipt within 5 s")
@@ -222,55 +320,49 @@ mod tests {
             receipt.symbols_count >= 1,
             "rust parser surfaces at least one symbol from `fn main` fixture"
         );
+        assert!(
+            !receipt.chunk_ids.is_empty(),
+            "A3 must emit at least one chunk_id (session 19 chunking in A)"
+        );
 
-        // IndexedFile row must be in the canonical store after A3 enrolled the file.
-        let in_db = store
+        // IndexedFile + Symbol + Chunk rows must all be in PG after the
+        // single A3 transaction committed.
+        let indexed = store
             .query_count(&format!(
                 "SELECT count(*) FROM IndexedFile WHERE path = '{}'",
                 path.to_string_lossy()
             ))
             .unwrap();
-        assert_eq!(in_db, 1, "A3 must persist exactly one IndexedFile row");
+        assert_eq!(indexed, 1);
 
-        // Symbol row(s) for the parsed file must be in the canonical store.
-        let symbol_count = store
+        let symbols = store
             .query_count(
                 "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'main'",
             )
             .unwrap();
-        assert!(
-            symbol_count >= 1,
-            "A3 must persist Symbol row(s) for the parsed fixture (saw {symbol_count})"
-        );
+        assert!(symbols >= 1);
 
-        // A3 is graph-only — no Chunk rows. B1 (slice S4) owns Chunk
-        // persistence. Re-asserting here so the topology invariant is
-        // graven into the test suite.
-        let chunk_count = store
+        let chunks = store
             .query_count(&format!(
                 "SELECT count(*) FROM Chunk WHERE file_path = '{}'",
                 path.to_string_lossy()
             ))
             .unwrap();
-        assert_eq!(
-            chunk_count, 0,
-            "A3 must NOT persist Chunk rows; that work belongs to B1 (slice S4)"
+        assert!(
+            chunks >= 1,
+            "A3 must persist Chunk rows in the same transaction (session 19)"
         );
 
-        // B1 inbox must have received the PreparedFile via A1's
-        // try_send fan-out (cap 10_000, never full for one item).
-        let b1_prepared =
-            tokio::time::timeout(Duration::from_secs(1), handles.b1_inbox_rx.recv())
-                .await
-                .expect("b1_inbox must receive within 1 s")
-                .expect("b1_inbox receiver yields Some(PreparedFile)");
-        assert_eq!(b1_prepared.path, path);
-        assert_eq!(
-            b1_prepared.content_hash, receipt.content_hash,
-            "B1 inbox must carry the same content_hash A3 recorded in IndexedFile"
+        // B1 inbox must have received the chunk_ids via A3's try_send.
+        let first_id = tokio::time::timeout(Duration::from_secs(1), handles.b1_inbox_rx.recv())
+            .await
+            .expect("b1_inbox must receive within 1 s")
+            .expect("b1_inbox receiver yields Some(chunk_id: String)");
+        assert!(
+            receipt.chunk_ids.contains(&first_id),
+            "chunk_id fanned out to B1 must match one of the ids returned by A3"
         );
 
-        // Per-stage metrics: each stage must have processed exactly one item.
         let snap_a1 = handles.metrics_a1.snapshot();
         let snap_a2 = handles.metrics_a2.snapshot();
         let snap_a3 = handles.metrics_a3.snapshot();
@@ -298,7 +390,6 @@ mod tests {
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
-        // Give the pipeline a moment to process and surface the error.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let snap_a1 = handles.metrics_a1.snapshot();
@@ -320,5 +411,74 @@ mod tests {
         assert_eq!(counts.a1, 4);
         assert_eq!(counts.a2, 8);
         assert_eq!(counts.a3, 2);
+    }
+
+    #[test]
+    fn default_pipeline_b_worker_counts_match_session_19_table() {
+        let counts = PipelineBWorkerCounts::default();
+        assert_eq!(counts.b1, 4);
+        assert_eq!(counts.b2, 1);
+        assert_eq!(counts.b3, 2);
+    }
+
+    #[tokio::test]
+    async fn pipelines_a_and_b_together_yield_chunk_for_embedding_payloads() {
+        // Full A → B (B1 only) happy path. A3 writes graph + chunks +
+        // FTS in one tx and try_sends chunk_ids to B1. B1 fetches the
+        // chunk content back from PG and emits ChunkForEmbedding ready
+        // for the slice S4b GPU embedder.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_fixture.rs");
+        std::fs::write(&path, "fn alpha() { 1 + 1; }\nfn beta() { let q = 2; }\n").unwrap();
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let caps = PipelineChannelCaps::default();
+        let counts_a = PipelineAWorkerCounts {
+            a1: 1,
+            a2: 1,
+            a3: 1,
+        };
+        let counts_b = PipelineBWorkerCounts {
+            b1: 1,
+            b2: 1,
+            b3: 1,
+        };
+
+        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), "AXO");
+        let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
+        let mut handles_b = spawn_pipeline_b_b1_only(counts_b, caps, store.clone(), b1_inbox_rx);
+
+        handles_a.input_tx.send(path.clone()).await.unwrap();
+
+        let enrolled = tokio::time::timeout(Duration::from_secs(5), handles_a.output_rx.recv())
+            .await
+            .expect("A must produce a receipt within 5 s")
+            .expect("A output channel must yield Some(EnrolledFile)");
+        assert!(
+            !enrolled.chunk_ids.is_empty(),
+            "A3 must emit chunk_ids for the fixture"
+        );
+
+        // Drain B1: each chunk_id A3 emitted must eventually round-trip
+        // through B1 as a ChunkForEmbedding (no GPU yet, but the
+        // payload is ready for B2).
+        let expected = enrolled.chunk_ids.len();
+        let mut received = Vec::new();
+        for _ in 0..expected {
+            let payload = tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
+                .await
+                .expect("B1 must produce a payload within 5 s")
+                .expect("B1 output channel must yield Some(ChunkForEmbedding)");
+            received.push(payload);
+        }
+        assert_eq!(received.len(), expected);
+        for payload in &received {
+            assert!(enrolled.chunk_ids.contains(&payload.chunk_id));
+            assert!(!payload.content.is_empty());
+        }
+
+        let snap_b1 = handles_b.metrics_b1.snapshot();
+        assert_eq!(snap_b1.items_out_total as usize, expected);
+        assert_eq!(snap_b1.errors_total, 0);
     }
 }
