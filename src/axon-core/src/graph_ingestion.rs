@@ -4252,13 +4252,12 @@ impl GraphStore {
     }
 
     /// REQ-AXO-289 S3c — UPSERT a row into the v2 watcher filter table
-    /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent by design
-    /// via PG `ON CONFLICT (path) DO UPDATE`. Called from stage A3 once a file
-    /// has been transformed and persisted as graph + chunks.
-    ///
-    /// Under DuckDB the same `ON CONFLICT (path) DO UPDATE` syntax is
-    /// supported, so this method is portable across both backends until
-    /// REQ-AXO-289 slice S7 cut-over retires DuckDB entirely.
+    /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent via
+    /// `ON CONFLICT (path) DO UPDATE`. Standalone helper for path-only
+    /// callers (e.g. cache reconstitution tests); the streaming A3 stage
+    /// goes through [`upsert_file_v2`] so the IndexedFile UPSERT lands
+    /// inside the same transaction as the Symbol / Chunk / relation
+    /// inserts.
     pub fn upsert_indexed_file(
         &self,
         path: &str,
@@ -4277,6 +4276,178 @@ impl GraphStore {
             hash = safe_hash,
             ts = last_seen_ms,
         ))
+    }
+
+    /// REQ-AXO-289 S3d (session 18 topology) — A3 atomic graph
+    /// persistence: Symbol + CONTAINS/CALLS/CALLS_NIF edges (SQL + AGE
+    /// dual-write) + IndexedFile watcher-filter row, all in ONE
+    /// transaction.
+    ///
+    /// **No Chunk writing.** Chunking is the entry stage of pipeline B
+    /// (the vectorisation lane), not part of pipeline A. The graph
+    /// pipeline stays pure-graph so it keeps its priority/speed; B1
+    /// (slice S4) takes the parsed file from A1's fan-out, derives
+    /// chunks, and UPSERTs `public.Chunk` rows. The PG FTS GIN on
+    /// `content_tsv` (REQ-AXO-292) attaches to that B1 write
+    /// automatically via a GENERATED column — no separate FTS stage.
+    ///
+    /// Idempotent — Symbol/IndexedFile UPSERTs use `ON CONFLICT DO
+    /// UPDATE`, relation INSERTs use `ON CONFLICT DO NOTHING`. Re-run
+    /// with the same parsed inputs is a no-op. The legacy
+    /// `public.File` status table is NOT touched (legacy
+    /// `insert_file_data_batch` keeps writing it until slice S7
+    /// cut-over).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_graph_v2(
+        &self,
+        path: &str,
+        project_code: &str,
+        content_hash: &str,
+        last_seen_ms: i64,
+        symbols: &[crate::parser::Symbol],
+        relations: &[crate::parser::Relation],
+    ) -> Result<()> {
+        use crate::graph_ingestion::async_writer::{
+            RelationRow, SymbolRow, WriteAccumulator,
+        };
+        use std::collections::HashSet;
+
+        let backend_is_pg = self.is_postgres_backend();
+        let skip_sql_relations =
+            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+        let emit_age = backend_is_pg
+            && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
+
+        let mut symbol_rows: Vec<SymbolRow> = Vec::new();
+        let mut contains_rows: Vec<RelationRow> = Vec::new();
+        let mut calls_rows: Vec<RelationRow> = Vec::new();
+        let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
+        let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
+        let mut seen_calls: HashSet<RelationRow> = HashSet::new();
+        let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
+
+        for sym in symbols {
+            let symbol_id = Self::symbol_id(project_code, path, &sym.name);
+            if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
+                continue;
+            }
+            symbol_vertices.push((
+                symbol_id.clone(),
+                serde_json::json!({
+                    "name": sym.name,
+                    "kind": sym.kind,
+                    "is_public": sym.is_public,
+                    "is_nif": sym.is_nif,
+                    "is_unsafe": sym.is_unsafe,
+                    "project_code": project_code,
+                }),
+            ));
+            symbol_rows.push(SymbolRow {
+                symbol_id: symbol_id.clone(),
+                name: sym.name.clone(),
+                kind: sym.kind.clone(),
+                tested: sym.tested,
+                is_public: sym.is_public,
+                is_nif: sym.is_nif,
+                is_unsafe: sym.is_unsafe,
+                project_code: project_code.to_string(),
+                embedding: sym.embedding.clone(),
+            });
+            contains_rows.push(RelationRow {
+                source_id: path.to_string(),
+                target_id: symbol_id,
+                project_code: project_code.to_string(),
+            });
+        }
+        contains_rows.sort_unstable();
+        contains_rows.dedup();
+        for relation in relations {
+            let Some(table) = Self::relation_table(&relation.rel_type) else {
+                continue;
+            };
+            let source_id = Self::symbol_id(project_code, path, &relation.from);
+            let target_id = Self::symbol_id(project_code, path, &relation.to);
+            let row = RelationRow {
+                source_id,
+                target_id,
+                project_code: project_code.to_string(),
+            };
+            match table {
+                "CALLS" => {
+                    if seen_calls.insert(row.clone()) {
+                        calls_rows.push(row);
+                    }
+                }
+                "CALLS_NIF" => {
+                    if seen_calls_nif.insert(row.clone()) {
+                        calls_nif_rows.push(row);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut acc = WriteAccumulator::new();
+        acc.symbols = symbol_rows;
+        acc.contains = contains_rows;
+        acc.calls = calls_rows;
+        acc.calls_nif = calls_nif_rows;
+
+        // PG-canonical: `_pg` renderers emit pgvector literals for the
+        // Symbol embedding column when set, and `NULL` when unset (the
+        // streaming-v2 path leaves embeddings to B3, so symbols arrive
+        // here with `embedding: None`). The CONTAINS / CALLS /
+        // CALLS_NIF `_pg` renderers emit portable INSERT…ON CONFLICT
+        // SQL that PG accepts natively.
+        let mut queries: Vec<String> = Vec::new();
+        queries.extend(acc.render_symbols_pg());
+        if !skip_sql_relations {
+            queries.extend(acc.render_contains_pg());
+            queries.extend(acc.render_calls_pg());
+            queries.extend(acc.render_calls_nif_pg());
+        }
+        if emit_age {
+            queries.extend(acc.render_contains_age_cypher("axon_graph"));
+            queries.extend(acc.render_calls_age_cypher("axon_graph"));
+            queries.extend(acc.render_calls_nif_age_cypher("axon_graph"));
+            let file_props = serde_json::json!({ "project_code": project_code });
+            if let Ok(cypher) = crate::postgres::age::cypher_merge_vertex(
+                "axon_graph",
+                "File",
+                "path",
+                path,
+                &file_props,
+            ) {
+                queries.push(cypher);
+            }
+            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
+                "axon_graph",
+                "Symbol",
+                "id",
+                &symbol_vertices,
+                500,
+            ) {
+                queries.extend(cypher_list);
+            }
+        }
+        let _ = backend_is_pg; // PG-canonical path — keep variable for future skip-on-bootstrap gating.
+
+        let safe_path = Self::escape_sql(path);
+        let safe_hash = Self::escape_sql(content_hash);
+        queries.push(format!(
+            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
+             VALUES ('{path}', '{hash}', {ts}) \
+             ON CONFLICT (path) DO UPDATE SET \
+                 content_hash = EXCLUDED.content_hash, \
+                 last_seen_ms = EXCLUDED.last_seen_ms;",
+            path = safe_path,
+            hash = safe_hash,
+            ts = last_seen_ms,
+        ));
+
+        self.execute_batch(&queries)?;
+        Ok(())
     }
 
     fn upsert_file_queries(

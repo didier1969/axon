@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Axon Architecture: Brain / Indexer Split</title>
+  <title>Axon Pipeline v2 — Streaming Architecture (REQ-AXO-289)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #f4efe3;
@@ -15,6 +15,7 @@
       --ink: #1b1b18;
       --muted: #625d55;
       --line: #d9cfbc;
+      --line-strong: #c8bca3;
       --red: #aa3a1c;
       --red-soft: #f4d8cf;
       --blue: #245f73;
@@ -23,59 +24,85 @@
       --green-soft: #dfe8d7;
       --amber: #8f6717;
       --amber-soft: #f0e4c1;
+      --plum: #6a3a73;
+      --plum-soft: #e6d9ec;
       --shadow: 0 18px 50px rgba(41, 29, 7, 0.08);
+      --shadow-strong: 0 28px 70px rgba(41, 29, 7, 0.12);
       --radius: 22px;
+      --radius-sm: 12px;
       --mono: "IBM Plex Mono", monospace;
       --sans: "Space Grotesk", sans-serif;
     }
 
-    * {
-      box-sizing: border-box;
-      min-width: 0;
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161310;
+        --panel: rgba(38, 33, 28, 0.85);
+        --panel-strong: rgba(48, 41, 34, 0.92);
+        --ink: #f5efe1;
+        --muted: #b1a796;
+        --line: rgba(217, 207, 188, 0.18);
+        --line-strong: rgba(217, 207, 188, 0.32);
+        --red: #e07a5f;
+        --red-soft: rgba(224, 122, 95, 0.18);
+        --blue: #6db5c8;
+        --blue-soft: rgba(109, 181, 200, 0.18);
+        --green: #93b87f;
+        --green-soft: rgba(147, 184, 127, 0.18);
+        --amber: #d9a64a;
+        --amber-soft: rgba(217, 166, 74, 0.18);
+        --plum: #c1a0cb;
+        --plum-soft: rgba(193, 160, 203, 0.18);
+        --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+        --shadow-strong: 0 28px 70px rgba(0, 0, 0, 0.6);
+      }
     }
+
+    * { box-sizing: border-box; min-width: 0; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
 
     body {
-      margin: 0;
       font-family: var(--sans);
       background:
-        radial-gradient(circle at top left, rgba(36, 95, 115, 0.08), transparent 28%),
-        radial-gradient(circle at top right, rgba(170, 58, 28, 0.08), transparent 22%),
-        linear-gradient(180deg, #f6f1e7 0%, #f2ecdf 100%);
+        radial-gradient(circle at 12% 8%, rgba(36, 95, 115, 0.10), transparent 28%),
+        radial-gradient(circle at 88% 4%, rgba(170, 58, 28, 0.10), transparent 22%),
+        radial-gradient(circle at 50% 100%, rgba(106, 58, 115, 0.08), transparent 35%),
+        var(--bg);
       color: var(--ink);
-      line-height: 1.45;
+      line-height: 1.55;
+      min-height: 100vh;
+      padding: 28px 20px 80px;
     }
 
-    .shell {
-      width: min(1380px, calc(100vw - 40px));
-      margin: 28px auto 72px;
+    @media (prefers-color-scheme: dark) {
+      body {
+        background:
+          radial-gradient(circle at 12% 8%, rgba(109, 181, 200, 0.08), transparent 28%),
+          radial-gradient(circle at 88% 4%, rgba(224, 122, 95, 0.08), transparent 22%),
+          radial-gradient(circle at 50% 100%, rgba(193, 160, 203, 0.06), transparent 35%),
+          var(--bg);
+      }
     }
 
-    .hero,
-    .section,
-    .strip,
-    .footer-note {
-      background: rgba(255, 253, 247, 0.8);
-      border: 1px solid rgba(217, 207, 188, 0.9);
+    .shell { width: min(1380px, 100%); margin: 0 auto; }
+
+    /* ---------- HERO ---------- */
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       backdrop-filter: blur(14px);
-    }
-
-    .hero {
-      padding: 34px 36px 30px;
+      padding: 36px 40px 32px;
+      margin-bottom: 26px;
       display: grid;
-      grid-template-columns: 1.45fr 0.95fr;
-      gap: 26px;
-      margin-bottom: 24px;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 30px;
     }
 
-    .eyebrow,
-    .chip,
-    .label,
-    .code,
-    .legend-tag {
-      font-family: var(--mono);
-      letter-spacing: 0.02em;
+    @media (max-width: 920px) {
+      .hero { grid-template-columns: 1fr; }
     }
 
     .eyebrow {
@@ -83,12 +110,14 @@
       gap: 10px;
       align-items: center;
       border: 1px solid var(--line);
-      background: #fffaf0;
+      background: var(--panel-strong);
       border-radius: 999px;
-      padding: 7px 12px;
-      font-size: 12px;
+      padding: 7px 14px;
+      font-family: var(--mono);
+      font-size: 11.5px;
       color: var(--muted);
-      margin-bottom: 16px;
+      letter-spacing: 0.08em;
+      margin-bottom: 18px;
       text-transform: uppercase;
     }
 
@@ -98,630 +127,955 @@
       border-radius: 999px;
       background: var(--red);
       box-shadow: 0 0 0 6px rgba(170, 58, 28, 0.12);
+      animation: pulse 2.4s ease-in-out infinite;
     }
 
-    h1, h2, h3 {
-      margin: 0;
-      font-weight: 700;
-      letter-spacing: -0.03em;
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 6px rgba(170, 58, 28, 0.12); }
+      50% { box-shadow: 0 0 0 10px rgba(170, 58, 28, 0.04); }
     }
 
     h1 {
-      font-size: clamp(2.3rem, 4vw, 4rem);
-      line-height: 0.95;
+      font-size: clamp(28px, 3.4vw, 44px);
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      line-height: 1.08;
+      text-wrap: balance;
       margin-bottom: 18px;
-      max-width: 10ch;
     }
 
-    h2 {
-      font-size: 1.4rem;
+    h1 em {
+      font-style: normal;
+      color: var(--red);
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: 0.82em;
+      vertical-align: 0.02em;
     }
 
-    p {
-      margin: 0;
+    .lede {
       color: var(--muted);
+      font-size: 16px;
+      line-height: 1.65;
+      max-width: 56ch;
     }
 
-    .hero-copy p {
-      font-size: 1.02rem;
-      max-width: 72ch;
-    }
-
-    .hero-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 24px;
-    }
-
-    .hero-stat {
-      padding: 14px 15px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
+    .lede code {
+      font-family: var(--mono);
       background: var(--panel-strong);
-    }
-
-    .hero-stat strong {
-      display: block;
-      font-size: 1.12rem;
-      color: var(--ink);
-      margin-top: 4px;
-    }
-
-    .hero-aside {
-      display: grid;
-      gap: 12px;
-    }
-
-    .callout {
-      padding: 16px 18px;
-      border-radius: 18px;
-      background: linear-gradient(180deg, rgba(255, 253, 247, 0.9), rgba(250, 245, 234, 0.95));
       border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 5px;
+      font-size: 0.88em;
+      color: var(--blue);
     }
 
-    .callout strong {
-      display: block;
-      margin-bottom: 8px;
+    .hero-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      align-self: start;
+    }
+
+    .meta-card {
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
+    }
+
+    .meta-card .label {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .meta-card .value {
+      font-size: 17px;
+      font-weight: 600;
       color: var(--ink);
     }
 
-    .callout.red { border-color: rgba(170, 58, 28, 0.22); background: linear-gradient(180deg, rgba(244, 216, 207, 0.58), rgba(255, 252, 247, 0.92)); }
-    .callout.blue { border-color: rgba(36, 95, 115, 0.24); background: linear-gradient(180deg, rgba(215, 234, 238, 0.65), rgba(255, 252, 247, 0.92)); }
-    .callout.green { border-color: rgba(69, 101, 58, 0.25); background: linear-gradient(180deg, rgba(223, 232, 215, 0.68), rgba(255, 252, 247, 0.92)); }
+    .meta-card .value small {
+      display: block;
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--muted);
+      margin-top: 2px;
+      font-family: var(--mono);
+    }
 
+    /* ---------- SECTION ---------- */
     .section {
-      padding: 26px;
-      margin-bottom: 24px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 32px 36px;
+      margin-bottom: 26px;
     }
 
     .section-head {
       display: flex;
-      justify-content: space-between;
+      align-items: baseline;
       gap: 16px;
-      align-items: flex-end;
-      margin-bottom: 18px;
+      margin-bottom: 22px;
+      flex-wrap: wrap;
+    }
+
+    .section-head h2 {
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.012em;
+    }
+
+    .section-head h2 .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 500;
+      margin-left: 10px;
+      letter-spacing: 0.05em;
     }
 
     .section-head p {
-      max-width: 70ch;
+      color: var(--muted);
+      font-size: 14px;
+      max-width: 66ch;
+      flex: 1 1 320px;
     }
 
-    .two-col {
-      display: grid;
-      grid-template-columns: 1.18fr 0.82fr;
-      gap: 18px;
-    }
-
-    .architect-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 16px;
-    }
-
-    .card {
-      border-radius: 18px;
-      padding: 18px;
-      border: 1px solid var(--line);
+    /* ---------- MERMAID ---------- */
+    .mermaid-wrap {
+      position: relative;
       background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 28px 18px;
+      overflow: auto;
+      max-height: 78vh;
     }
 
-    .card.blue { background: linear-gradient(180deg, rgba(215, 234, 238, 0.7), rgba(255, 253, 247, 0.95)); }
-    .card.red { background: linear-gradient(180deg, rgba(244, 216, 207, 0.7), rgba(255, 253, 247, 0.95)); }
-    .card.green { background: linear-gradient(180deg, rgba(223, 232, 215, 0.72), rgba(255, 253, 247, 0.95)); }
-    .card.amber { background: linear-gradient(180deg, rgba(240, 228, 193, 0.72), rgba(255, 253, 247, 0.95)); }
+    .mermaid-wrap .mermaid {
+      display: flex;
+      justify-content: center;
+      transition: transform 0.2s ease;
+      transform-origin: top center;
+    }
 
-    .label {
-      display: inline-block;
-      padding: 5px 9px;
-      font-size: 11px;
-      border-radius: 999px;
-      margin-bottom: 10px;
-      border: 1px solid rgba(27, 27, 24, 0.12);
-      background: rgba(255, 255, 255, 0.6);
+    .zoom-controls {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      gap: 2px;
+      z-index: 10;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 3px;
+      box-shadow: var(--shadow);
+    }
+
+    .zoom-controls button {
+      width: 30px;
+      height: 30px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 15px;
+      cursor: pointer;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s ease, color 0.15s ease;
+    }
+
+    .zoom-controls button:hover { background: var(--line); color: var(--ink); }
+
+    .mermaid-wrap { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+    .mermaid-wrap::-webkit-scrollbar { width: 7px; height: 7px; }
+    .mermaid-wrap::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
+
+    .mermaid-wrap.is-zoomed { cursor: grab; }
+    .mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+
+    .mermaid .nodeLabel {
+      font-family: var(--sans) !important;
+      font-size: 14.5px !important;
+    }
+
+    .mermaid .edgeLabel {
+      font-family: var(--mono) !important;
+      font-size: 11.5px !important;
+    }
+
+    .mermaid .cluster rect {
+      rx: 14px !important;
+      ry: 14px !important;
+      stroke-width: 1.5px !important;
+    }
+
+    .mermaid .cluster-label .nodeLabel {
+      font-family: var(--mono) !important;
+      font-size: 12.5px !important;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
     }
 
-    .card h3 {
-      margin-bottom: 8px;
-      font-size: 1.08rem;
-    }
-
-    .stack {
-      display: grid;
-      gap: 12px;
-    }
-
-    .pipeline {
-      display: grid;
-      gap: 18px;
-      grid-template-columns: 1fr;
-    }
-
-    .lane-title {
+    /* ---------- LEGEND ---------- */
+    .legend {
       display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-
-    .lane-title strong {
-      font-size: 1.12rem;
-    }
-
-    .rail {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      align-items: stretch;
-    }
-
-    .rail.long {
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-    }
-
-    .node {
-      position: relative;
-      padding: 16px 14px 14px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
+      gap: 22px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+      padding: 14px 18px;
       background: var(--panel-strong);
-      min-height: 130px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
     }
 
-    .node:not(:last-child)::after {
-      content: "";
-      position: absolute;
-      top: 50%;
-      right: -12px;
-      width: 24px;
-      height: 2px;
-      background: linear-gradient(90deg, rgba(27,27,24,0.22), rgba(27,27,24,0.55));
-      transform: translateY(-50%);
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--muted);
     }
 
-    .node:not(:last-child)::before {
-      content: "";
-      position: absolute;
-      top: calc(50% - 5px);
-      right: -12px;
-      border-left: 8px solid rgba(27,27,24,0.55);
-      border-top: 6px solid transparent;
-      border-bottom: 6px solid transparent;
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      border: 1.5px solid;
     }
 
-    .node strong {
+    /* ---------- STAGE TABLE ---------- */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-strong);
+      scrollbar-width: thin;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+      min-width: 920px;
+    }
+
+    thead { position: sticky; top: 0; background: var(--panel-strong); z-index: 2; }
+
+    th {
+      text-align: left;
+      padding: 14px 16px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1.5px solid var(--line-strong);
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 14px 16px;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    tr:nth-child(even) td { background: rgba(217, 207, 188, 0.08); }
+    tr:hover td { background: rgba(217, 207, 188, 0.16); }
+
+    .stage-id {
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: 13px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      display: inline-block;
+      min-width: 36px;
+      text-align: center;
+      border: 1px solid;
+    }
+
+    .stage-a { background: var(--blue-soft); color: var(--blue); border-color: var(--blue); }
+    .stage-b { background: var(--green-soft); color: var(--green); border-color: var(--green); }
+    .stage-shared { background: var(--amber-soft); color: var(--amber); border-color: var(--amber); }
+
+    .lane-pill {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      letter-spacing: 0.08em;
+      border: 1px solid;
+      text-transform: uppercase;
+    }
+
+    .lane-A { background: var(--blue-soft); color: var(--blue); border-color: var(--blue); }
+    .lane-B { background: var(--green-soft); color: var(--green); border-color: var(--green); }
+    .lane-AB { background: var(--amber-soft); color: var(--amber); border-color: var(--amber); }
+
+    td code, .ops code, .props code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--blue);
+      white-space: nowrap;
+    }
+
+    .ops {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .workers {
+      font-family: var(--mono);
+      font-weight: 600;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .workers small {
       display: block;
+      font-weight: 400;
+      color: var(--muted);
+      font-size: 10.5px;
+      margin-top: 2px;
+    }
+
+    /* ---------- PROPS GRID ---------- */
+    .props-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .prop {
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--blue);
+      border-radius: var(--radius-sm);
+      padding: 18px 20px;
+    }
+
+    .prop[data-accent="green"] { border-left-color: var(--green); }
+    .prop[data-accent="amber"] { border-left-color: var(--amber); }
+    .prop[data-accent="red"]   { border-left-color: var(--red); }
+    .prop[data-accent="plum"]  { border-left-color: var(--plum); }
+
+    .prop h3 {
+      font-size: 15px;
+      font-weight: 600;
       margin-bottom: 8px;
-      font-size: 1rem;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    .prop h3 .idx {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .prop p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .prop p + p { margin-top: 8px; }
+
+    .prop code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1px 5px;
+      border-radius: 4px;
       color: var(--ink);
     }
 
-    .node p {
-      font-size: 0.95rem;
+    /* ---------- ACTIVATION MATRIX ---------- */
+    .activation {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 8px;
     }
 
-    .node.blue { background: linear-gradient(180deg, rgba(215, 234, 238, 0.9), rgba(255, 253, 247, 0.96)); }
-    .node.red { background: linear-gradient(180deg, rgba(244, 216, 207, 0.88), rgba(255, 253, 247, 0.96)); }
-    .node.green { background: linear-gradient(180deg, rgba(223, 232, 215, 0.9), rgba(255, 253, 247, 0.96)); }
-    .node.amber { background: linear-gradient(180deg, rgba(240, 228, 193, 0.9), rgba(255, 253, 247, 0.96)); }
+    @media (max-width: 920px) {
+      .activation { grid-template-columns: 1fr 1fr; }
+    }
 
-    .bridge {
+    .mode-card {
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 16px 18px;
+    }
+
+    .mode-card h4 {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--ink);
+      letter-spacing: 0.04em;
+    }
+
+    .mode-stages {
       display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 16px;
-      align-items: center;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+    }
+
+    .mode-stages span {
+      text-align: center;
+      padding: 6px 0;
+      border-radius: 5px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+
+    .mode-stages span.on { background: var(--green-soft); border-color: var(--green); color: var(--green); font-weight: 600; }
+    .mode-stages span.off { color: var(--muted); opacity: 0.5; text-decoration: line-through; }
+
+    /* ---------- CALLOUT / FOOTER ---------- */
+    .callout {
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--amber);
+      border-radius: var(--radius-sm);
+      padding: 18px 22px;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--muted);
       margin-top: 18px;
     }
 
-    .bridge-line {
-      height: 2px;
-      background: linear-gradient(90deg, rgba(36, 95, 115, 0.25), rgba(36, 95, 115, 0.85));
-      border-radius: 999px;
-    }
+    .callout strong { color: var(--ink); }
 
-    .stock-chip {
-      padding: 9px 14px;
-      border-radius: 999px;
-      border: 1px solid rgba(36, 95, 115, 0.25);
-      background: rgba(215, 234, 238, 0.8);
-      color: var(--blue);
-      font-size: 12px;
+    .callout code {
       font-family: var(--mono);
-    }
-
-    .matrix {
-      width: 100%;
-      border-collapse: collapse;
-      overflow: hidden;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--panel-strong);
-    }
-
-    .matrix th,
-    .matrix td {
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-      text-align: left;
-      vertical-align: top;
-    }
-
-    .matrix th {
       font-size: 12px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--amber);
+    }
+
+    .footer {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      padding: 28px 32px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      font-size: 13px;
+    }
+
+    @media (max-width: 720px) {
+      .footer { grid-template-columns: 1fr; }
+    }
+
+    .footer h3 {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
       color: var(--muted);
-      background: rgba(255, 250, 240, 0.9);
-      font-family: var(--mono);
+      margin-bottom: 12px;
     }
 
-    .matrix tr:last-child td {
-      border-bottom: none;
-    }
-
-    .matrix td strong {
-      display: block;
-      color: var(--ink);
-      margin-bottom: 6px;
-    }
-
-    .strip {
-      padding: 22px 24px;
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-
-    .strip-block {
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px dashed rgba(27, 27, 24, 0.18);
-      background: rgba(255, 255, 255, 0.46);
-    }
-
-    .footer-note {
-      padding: 22px 24px;
-      display: grid;
-      gap: 10px;
-    }
-
-    .code {
-      font-size: 12px;
-      padding: 2px 6px;
-      border-radius: 6px;
-      background: rgba(27, 27, 24, 0.06);
-      color: var(--ink);
-    }
-
-    .legend {
+    .footer ul {
+      list-style: none;
       display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 10px;
+      flex-direction: column;
+      gap: 6px;
     }
 
-    .legend-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 10px;
-      border-radius: 999px;
+    .footer ul li {
+      color: var(--ink);
+      font-family: var(--mono);
       font-size: 12px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.66);
     }
 
-    .legend-color {
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
+    .footer ul li span {
+      color: var(--muted);
+      margin-left: 6px;
+      font-family: var(--sans);
     }
 
-    @media (max-width: 1080px) {
-      .hero,
-      .two-col,
-      .strip {
-        grid-template-columns: 1fr;
-      }
+    /* ---------- ANIMATION ---------- */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
 
-      .architect-grid,
-      .hero-grid {
-        grid-template-columns: 1fr;
-      }
+    .animate {
+      animation: fadeUp 0.5s ease-out both;
+      animation-delay: calc(var(--i, 0) * 0.07s);
+    }
 
-      .rail,
-      .rail.long {
-        grid-template-columns: 1fr;
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+        transition-duration: 0.01ms !important;
       }
-
-      .node:not(:last-child)::after,
-      .node:not(:last-child)::before {
-        display: none;
-      }
-
-      .bridge {
-        grid-template-columns: 1fr;
-      }
+      .dot { animation: none; }
     }
   </style>
 </head>
 <body>
-  <main class="shell">
-    <section class="hero">
-      <div class="hero-copy">
-        <div class="eyebrow"><span class="dot"></span> Axon Architecture · Canonical Runtime View</div>
-        <h1>Brain / Indexer split with push, pull, and async boundaries.</h1>
-        <p>
-          Cette vue remplace l’ancien schéma monolithique. Elle montre la séparation opératoire réelle
-          voulue pour Axon: <strong>control plane</strong> côté <span class="code">axon-brain</span>,
-          <strong>data plane</strong> côté <span class="code">axon-indexer</span>, avec un modèle
-          d’inventaire intermédiaire explicite entre les deux boucles du système.
-        </p>
-        <div class="hero-grid">
-          <div class="hero-stat">
-            <span class="label">Processus</span>
-            <strong>2 runtimes séparés</strong>
-            <p>Start, stop, status, pid, sockets et run roots distincts.</p>
-          </div>
-          <div class="hero-stat">
-            <span class="label">Writer ownership</span>
-            <strong>Brain = SOLL · Indexer = IST</strong>
-            <p>Single-writer enforcement par rôle, lecture IST côté brain.</p>
-          </div>
-          <div class="hero-stat">
-            <span class="label">Flow semantics</span>
-            <strong>Push · Pull · Async</strong>
-            <p>Boucle amont en push, aval GPU en pull, finalize hors hot path.</p>
-          </div>
-        </div>
-      </div>
-      <aside class="hero-aside">
-        <div class="callout red">
-          <strong>Ce que le schéma veut empêcher</strong>
-          <p>Un runtime unique qui mélange MCP public, dashboard, ingestion, graph, vectorisation et ownership d’écriture sans frontières claires.</p>
-        </div>
-        <div class="callout blue">
-          <strong>Ce que le schéma veut rendre trivial</strong>
-          <p>Déployer <span class="code">brain</span> sans casser l’indexation, redémarrer <span class="code">indexer</span> sans couper le MCP, et raisonner avec une vérité runtime unique.</p>
-        </div>
-        <div class="callout green">
-          <strong>Stocks critiques</strong>
-          <p><span class="code">persisted_file_pending</span> pilote le throughput global. <span class="code">graph_ready</span> pilote l’alimentation GPU aval.</p>
-        </div>
-      </aside>
-    </section>
+<div class="shell">
 
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <h2>Topologie canonique</h2>
-          <p>Le cerveau et l’indexeur partagent la vérité durable, mais ne portent plus les mêmes responsabilités ni le même budget opératoire.</p>
-        </div>
+  <!-- ===================== HERO ===================== -->
+  <header class="hero animate" style="--i:0">
+    <div>
+      <span class="eyebrow"><span class="dot"></span> REQ-AXO-289 · session 18 topology · 2026-05-12</span>
+      <h1>Axon Pipeline v2 <em>streaming-v2</em><br>Six stages, deux lanes, zéro machine-à-états</h1>
+      <p class="lede">
+        Architecture canonicalisée par <code>CPT-AXO-053</code> + <code>CPT-AXO-054</code>.
+        Le watcher pousse les fichiers nouveaux/modifiés dans deux lanes <em>indépendantes en débit</em> :
+        <strong>A = graphe</strong> (priorité vitesse, structure + relations + métadonnées) et
+        <strong>B = vectorisation + lexical</strong> (chunking, embedding GPU, FTS auto).
+        Bounded <code>tokio::sync::mpsc</code> entre tous les stages,
+        idempotence par UPSERT, persistance minimale (<code>IndexedFile</code> 3 colonnes),
+        et un seul <code>try_send</code> non-bloquant pour le cross-pipeline A1→B1
+        — le graphe ne ralentit JAMAIS pour le GPU.
+      </p>
+    </div>
+    <div class="hero-meta">
+      <div class="meta-card">
+        <div class="label">Stages totaux</div>
+        <div class="value">6<small>A1·A2·A3 + B1·B2·B3</small></div>
       </div>
-      <div class="architect-grid">
-        <article class="card blue">
-          <span class="label">axon-brain</span>
-          <h3>Control plane public</h3>
-          <p>MCP public, dashboard unique, lecture <span class="code">IST</span>, écriture <span class="code">SOLL</span>, surfaces de status, diagnostics et orchestration.</p>
-        </article>
-        <article class="card red">
-          <span class="label">axon-indexer</span>
-          <h3>Data plane d’indexation</h3>
-          <p>Watcher, ingress, graph production, préparation sémantique, GPU et finalisation, avec ownership exclusif du writer <span class="code">IST</span>.</p>
-        </article>
-        <article class="card amber">
-          <span class="label">SOLL</span>
-          <h3>Intentional graph</h3>
-          <p>Vision, requirements, decisions, milestones, validation et mutation de projet. Single writer: <span class="code">brain</span>.</p>
-        </article>
-        <article class="card green">
-          <span class="label">IST</span>
-          <h3>Indexed structural truth</h3>
-          <p>Fichiers, graphe structurel, états de production, ready queues, lecture snapshotée côté brain, écriture singleton côté indexer.</p>
-        </article>
+      <div class="meta-card">
+        <div class="label">Persistance v2</div>
+        <div class="value">3 cols<small>IndexedFile filter</small></div>
       </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <h2>Les deux boucles du système</h2>
-          <p>Le système n’est plus présenté comme une chaîne uniforme. Il est découpé en une boucle amont qui pousse la matière, puis une boucle aval cadencée par la ressource GPU.</p>
-        </div>
+      <div class="meta-card">
+        <div class="label">Buffer A1→B1</div>
+        <div class="value">10 000<small>try_send fichiers</small></div>
       </div>
-      <div class="pipeline">
-        <div class="card blue">
-          <div class="lane-title">
-            <span class="label">Boucle 1</span>
-            <strong>Push: supply / discovery / production</strong>
-          </div>
-          <div class="rail">
-            <div class="node blue">
-              <span class="label">watcher + scan</span>
-              <strong>buffered_discovery</strong>
-              <p>Événements chauds et détection bulk. Le système pousse la matière dès qu’elle existe.</p>
-            </div>
-            <div class="node blue">
-              <span class="label">admission</span>
-              <strong>persisted_file_pending</strong>
-              <p>Stock critique du throughput global. Travail canonique durable avant graphing.</p>
-            </div>
-            <div class="node blue">
-              <span class="label">graph production</span>
-              <strong>graph_wip</strong>
-              <p>Zone de production structurelle, limitée par admission et WIP explicite.</p>
-            </div>
-            <div class="node green">
-              <span class="label">output</span>
-              <strong>graph_ready</strong>
-              <p>Stock central de la boucle GPU aval. Ce n’est pas le centre de tout le système, mais le pont critique vers l’aval.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="bridge">
-          <div class="bridge-line"></div>
-          <div class="stock-chip">graph_ready = inventaire intermédiaire central pour nourrir le GPU</div>
-          <div class="bridge-line"></div>
-        </div>
-
-        <div class="card red">
-          <div class="lane-title">
-            <span class="label">Boucle 2</span>
-            <strong>Pull: GPU-paced downstream</strong>
-          </div>
-          <div class="rail long">
-            <div class="node green">
-              <span class="label">input stock</span>
-              <strong>graph_ready</strong>
-              <p>Si ce stock est vide, la boucle 2 peut dormir. S’il est sain, le GPU doit rester nourri.</p>
-            </div>
-            <div class="node amber">
-              <span class="label">prepare</span>
-              <strong>chunk extraction</strong>
-              <p>Préparation CPU, découpage, tokenisation, pré-batchs et réserve courte.</p>
-            </div>
-            <div class="node amber">
-              <span class="label">ready reserve</span>
-              <strong>ready_batches</strong>
-              <p>Quelques batchs d’avance, dimensionnés selon VRAM, densité et cadence effective.</p>
-            </div>
-            <div class="node red">
-              <span class="label">hot path</span>
-              <strong>GPU execution</strong>
-              <p>Point de cadence de l’aval. Le GPU pilote la consommation, pas l’amont produit.</p>
-            </div>
-            <div class="node green">
-              <span class="label">output</span>
-              <strong>vector_ready</strong>
-              <p>Résultat indexé et exploitable. La persistance finale reste découplée de cette étape.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="card amber">
-          <div class="lane-title">
-            <span class="label">Sortie</span>
-            <strong>Finalize async</strong>
-          </div>
-          <p>La finalisation ne doit pas ralentir le hot path GPU. Elle vit derrière la boucle 2 comme une sortie asynchrone robuste, pas comme un verrou de fin de calcul.</p>
-        </div>
+      <div class="meta-card">
+        <div class="label">Buffer interne</div>
+        <div class="value">1 024<small>mpsc adjacent</small></div>
       </div>
-    </section>
+    </div>
+  </header>
 
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <h2>Ownership et contrats de lecture / écriture</h2>
-          <p>Le modèle ne repose pas sur “qui touche la base”, mais sur des frontières simples: un writer singleton par vérité, et des readers séparés pour servir sans casser le plan de données.</p>
-        </div>
+  <!-- ===================== TOPOLOGY ===================== -->
+  <section class="section animate" style="--i:1">
+    <div class="section-head">
+      <h2>1 · Topologie de flux <span class="tag">six stages · bounded channels</span></h2>
+      <p>
+        A1 lit le fichier une fois et émet un <code>PreparedFile</code> qui voyage en parallèle vers A2 (parsing+graphe) et B1 (chunking+vectorisation).
+        Le canal A1→B1 est <strong>non-bloquant</strong> avec un buffer de 10 000 fichiers — le graphe garde sa cadence quoi qu'il arrive.
+      </p>
+    </div>
+
+    <div class="mermaid-wrap">
+      <div class="zoom-controls">
+        <button onclick="zoomDiagram(this, 1.2)" title="Zoom in">+</button>
+        <button onclick="zoomDiagram(this, 0.8)" title="Zoom out">&minus;</button>
+        <button onclick="resetZoom(this)" title="Reset zoom">&#8634;</button>
       </div>
-      <table class="matrix">
+      <pre class="mermaid">
+graph TD
+  W["watcher<br/>notify_debouncer 750ms"]
+  FILT["IndexedFile filter<br/>arc-swap&lt;DashMap&lt;path,hash&gt;&gt;<br/>drop si (path,hash) connu"]
+
+  subgraph PA["pipeline A — graphe (priorité vitesse)"]
+    A1["A1 · Préparation<br/>tokio::fs read<br/>SHA-256 + mtime + size<br/>→ PreparedFile"]
+    A2["A2 · Transformation<br/>tree-sitter parse<br/>spawn_blocking<br/>→ ParsedFile (Symbols + Relations)"]
+    A3["A3 · Enregistrement graphe<br/>upsert_graph_v2 ATOMIQUE :<br/>Symbol + AGE vertex<br/>CONTAINS / CALLS / CALLS_NIF (SQL+AGE)<br/>File vertex + IndexedFile UPSERT<br/>→ EnrolledFile"]
+  end
+
+  subgraph PB["pipeline B — chunks + vectorisation + FTS"]
+    B1["B1 · Chunking + Persistance Chunk<br/>re-parse tree-sitter (déterministe)<br/>build_symbol_chunks(sym, content)<br/>UPSERT public.Chunk<br/>→ chunk_id"]
+    B2["B2 · Embedder GPU<br/>SELECT content WHERE id=$1<br/>seq-len bucketing (REQ-AXO-262)<br/>ORT + TensorRT + BGE-Large 1024d<br/>1 worker par GPU<br/>→ (chunk_id, Vec&lt;f32&gt;)"]
+    B3["B3 · Enregistrement vecteur<br/>UPSERT ChunkEmbedding<br/>pgvector vector(1024)<br/>ON CONFLICT(chunk_id, model_id)"]
+    POLL["B1 cold-start poll<br/>SELECT id FROM Chunk LEFT JOIN<br/>ChunkEmbedding WHERE NULL<br/>LIMIT 256"]
+    FTS["public.Chunk.content_tsv<br/>GENERATED ALWAYS AS STORED<br/>(GIN auto-index, REQ-AXO-292)"]
+  end
+
+  W --> FILT
+  FILT --> A1
+  A1 -->|blocking send.await<br/>cap 1024| A2
+  A1 -.->|try_send NON-BLOQUANT<br/>cap 10 000 fichiers<br/>drop silently si plein| B1
+  A2 -->|cap 1024| A3
+  B1 -->|cap 512| B2
+  B2 -->|cap 512| B3
+  POLL -.->|rattrapage drops| B1
+  B1 -.->|side-effect<br/>colonne GENERATED| FTS
+
+  classDef stageA fill:#d7eaee,stroke:#245f73,stroke-width:2px,color:#1b1b18;
+  classDef stageB fill:#dfe8d7,stroke:#45653a,stroke-width:2px,color:#1b1b18;
+  classDef stageShared fill:#f0e4c1,stroke:#8f6717,stroke-width:2px,color:#1b1b18;
+  classDef gen fill:#e6d9ec,stroke:#6a3a73,stroke-width:1.5px,color:#1b1b18,stroke-dasharray: 4 3;
+
+  class A1,A2,A3 stageA;
+  class B1,B2,B3 stageB;
+  class W,FILT,POLL stageShared;
+  class FTS gen;
+      </pre>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:var(--blue-soft); border-color:var(--blue)"></div>
+        Lane A — graphe pur (Symbol + AGE + relations + IndexedFile)
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:var(--green-soft); border-color:var(--green)"></div>
+        Lane B — chunks + vectorisation + FTS
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:var(--amber-soft); border-color:var(--amber)"></div>
+        Watcher / filter / rattrapage
+      </div>
+      <div class="legend-item">
+        <div class="legend-swatch" style="background:var(--plum-soft); border-color:var(--plum)"></div>
+        Side-effect PG natif (GENERATED column)
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== STAGE BREAKDOWN ===================== -->
+  <section class="section animate" style="--i:2">
+    <div class="section-head">
+      <h2>2 · Détail des stages <span class="tag">opérations · workers · persistance</span></h2>
+      <p>Chaque stage = un pool de workers tokio en compétition sur un seul <code>mpsc::Receiver</code> partagé via <code>Arc&lt;Mutex&lt;_&gt;&gt;</code>. Pattern <em>competing consumers</em> : load-balance naturel, zéro doublon possible.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
         <thead>
           <tr>
-            <th>Surface</th>
-            <th>Writer autorisé</th>
-            <th>Readers autorisés</th>
-            <th>Pourquoi</th>
+            <th>Stage</th>
+            <th>Lane</th>
+            <th>Entrée</th>
+            <th>Opérations</th>
+            <th>Sortie</th>
+            <th>Persistance PG</th>
+            <th>Workers<br><small>live / dev</small></th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td><strong>SOLL</strong>Intentional graph, mutations produit, guidelines, décisions.</td>
-            <td><strong>axon-brain</strong>Single writer public et opératoire.</td>
-            <td><strong>axon-brain</strong> et lecteurs dérivés si besoin.</td>
-            <td>Les mutations produit et l’interface publique doivent rester côté control plane.</td>
+            <td><span class="stage-id stage-shared">A1</span></td>
+            <td><span class="lane-pill lane-AB">A + B</span></td>
+            <td><code>PathBuf</code></td>
+            <td class="ops"><code>tokio::fs::read</code> · SHA-256(content) · mtime + size · fan-out blocking→A2 + try_send→B1</td>
+            <td><code>PreparedFile</code></td>
+            <td>—<br><small>filter en RAM (arc-swap)</small></td>
+            <td class="workers">4<br><small>/ 2</small></td>
           </tr>
           <tr>
-            <td><strong>IST</strong>Fichiers connus, graph structurel, queues, états de production.</td>
-            <td><strong>axon-indexer</strong>Writer singleton d’indexation.</td>
-            <td><strong>axon-brain</strong> en lecture, <strong>axon-indexer</strong> en lecture/écriture.</td>
-            <td>Le service MCP doit continuer à lire même si l’indexeur est arrêté; l’indexeur doit reprendre l’écriture dès son redémarrage.</td>
+            <td><span class="stage-id stage-a">A2</span></td>
+            <td><span class="lane-pill lane-A">A graphe</span></td>
+            <td><code>PreparedFile</code></td>
+            <td class="ops">dispatch <code>get_parser_for_file</code> · tree-sitter parse via <code>spawn_blocking</code> · extract Symbols + Relations</td>
+            <td><code>ParsedFile</code></td>
+            <td>—</td>
+            <td class="workers">8<br><small>/ 4</small></td>
           </tr>
           <tr>
-            <td><strong>MCP public</strong>Surface client-facing, outils publics, dashboard.</td>
-            <td><strong>axon-brain</strong></td>
-            <td>Clients externes, dashboard, opérateurs.</td>
-            <td>On évite que la vie interne de l’indexation dégrade directement la stabilité du plan public.</td>
+            <td><span class="stage-id stage-a">A3</span></td>
+            <td><span class="lane-pill lane-A">A graphe</span></td>
+            <td><code>ParsedFile</code></td>
+            <td class="ops">
+              <code>upsert_graph_v2</code> en <strong>une transaction</strong> :
+              Symbol UPSERT (ON CONFLICT DO UPDATE) · CONTAINS/CALLS/CALLS_NIF (SQL + AGE dual-write) ·
+              AGE Symbol+File vertex enrichment · IndexedFile UPSERT
+            </td>
+            <td><code>EnrolledFile</code></td>
+            <td><code>Symbol</code> · <code>IndexedFile</code> · AGE edges + vertices</td>
+            <td class="workers">2<br><small>/ 1</small></td>
           </tr>
           <tr>
-            <td><strong>MCP internal / commands</strong>Diagnostics, actions internes, surface non publique.</td>
-            <td><strong>axon-brain</strong> ou bridge interne</td>
-            <td>Outils d’exploitation et qualification.</td>
-            <td>Le brain reste la porte d’entrée de contrôle, même quand l’indexer fait le travail lourd.</td>
+            <td><span class="stage-id stage-b">B1</span></td>
+            <td><span class="lane-pill lane-B">B vector + FTS</span></td>
+            <td><code>PreparedFile</code> via try_send<br>+ cold-start poll DB</td>
+            <td class="ops">re-parse tree-sitter (déterministe vs A2) · <code>build_symbol_chunks(sym, content)</code> · UPSERT <code>public.Chunk</code> avec <code>content</code> intégral</td>
+            <td><code>chunk_id: String</code></td>
+            <td><code>Chunk</code><br><small>+ <code>content_tsv</code> GIN auto via REQ-AXO-292 (GENERATED column)</small></td>
+            <td class="workers">4<br><small>/ 2</small></td>
+          </tr>
+          <tr>
+            <td><span class="stage-id stage-b">B2</span></td>
+            <td><span class="lane-pill lane-B">B vector</span></td>
+            <td><code>chunk_id</code></td>
+            <td class="ops">SELECT <code>content FROM Chunk WHERE id=$1</code> · seq-len bucketing (REQ-AXO-262) · ORT + TensorRT BGE-Large 1024d</td>
+            <td><code>(chunk_id, Vec&lt;f32&gt;)</code></td>
+            <td>— (mémoire GPU)</td>
+            <td class="workers">1<br><small>/ 1 (×GPU)</small></td>
+          </tr>
+          <tr>
+            <td><span class="stage-id stage-b">B3</span></td>
+            <td><span class="lane-pill lane-B">B vector</span></td>
+            <td><code>(chunk_id, Vec&lt;f32&gt;)</code></td>
+            <td class="ops">UPSERT <code>ChunkEmbedding</code> ON CONFLICT(chunk_id, model_id) DO UPDATE</td>
+            <td>persisté</td>
+            <td><code>ChunkEmbedding</code> (pgvector)</td>
+            <td class="workers">2<br><small>/ 1</small></td>
           </tr>
         </tbody>
       </table>
-    </section>
+    </div>
+  </section>
 
-    <section class="strip">
-      <div class="strip-block">
-        <span class="label">Règle 1</span>
-        <h3>Le GPU ne commande pas l’amont.</h3>
-        <p>Le GPU cadence la consommation de <span class="code">graph_ready</span>. Il ne doit pas redéfinir la priorité produit de <span class="code">watcher → admission → graph</span>.</p>
-      </div>
-      <div class="strip-block">
-        <span class="label">Règle 2</span>
-        <h3>Brain doit survivre à l’arrêt de l’indexer.</h3>
-        <p>Le MCP public et le dashboard restent en lecture. L’absence de writer IST ne doit pas couper la surface publique.</p>
-      </div>
-      <div class="strip-block">
-        <span class="label">Règle 3</span>
-        <h3>Indexer doit repartir sans reprendre SOLL.</h3>
-        <p>Le data plane n’a pas à porter les mutations d’intention. Il doit se contenter d’écrire sa vérité technique.</p>
-      </div>
-    </section>
+  <!-- ===================== DESIGN PROPERTIES ===================== -->
+  <section class="section animate" style="--i:3">
+    <div class="section-head">
+      <h2>3 · Propriétés architecturales <span class="tag">six garanties graven dans le code</span></h2>
+      <p>Chaque propriété est une décision verrouillée par construction — pas un best-effort, pas une convention, mais une invariante reflétée dans la signature des stages et la topologie des canaux.</p>
+    </div>
 
-    <section class="section">
-      <div class="section-head">
-        <div>
-          <h2>Statut runtime visé</h2>
-          <p>La surface de statut doit pouvoir dire sans ambiguïté quel process détient quoi, qui sert quoi, et si le split est réellement convergé ou seulement en mode shadow.</p>
+    <div class="props-grid">
+
+      <div class="prop" data-accent="blue">
+        <h3><span class="idx">P1</span>Graph priority absolue</h3>
+        <p>
+          A1 fait deux choses : <code>send().await</code> bloquant vers A2 (lane graphe), et <code>try_send</code> non-bloquant vers B1 (lane vecteur).
+          Si B1 est saturé (buffer 10 000 plein), le try_send échoue silencieusement et A1 continue à servir A2 sans attendre.
+          Le graphe atteint sa vitesse native indépendamment de la cadence GPU.
+        </p>
+      </div>
+
+      <div class="prop" data-accent="green">
+        <h3><span class="idx">P2</span>Idempotence par UPSERT</h3>
+        <p>
+          A3 UPSERT (<code>ON CONFLICT DO UPDATE</code>) Symbol + IndexedFile, et <code>ON CONFLICT DO NOTHING</code> sur les relations.
+          B1 UPSERT Chunk. B3 UPSERT ChunkEmbedding. <strong>Crash à n'importe quel stage → restart → watcher rediscover → UPSERT = no-op.</strong> Zéro orphan à reaper, zéro claim à libérer.
+        </p>
+      </div>
+
+      <div class="prop" data-accent="amber">
+        <h3><span class="idx">P3</span>Dual-parse déterministe</h3>
+        <p>
+          A2 et B1 parsent tous deux le même <code>content</code> via tree-sitter (déterministe), produisent les mêmes Symbols, et dérivent les mêmes Chunks via <code>build_symbol_chunks</code> (fonction pure).
+          Coût ≈ 5 ms par parse × 2 = négligeable vs GPU embed ≈ 250-280 ms / batch.
+        </p>
+        <p>
+          Les IDs (<code>symbol_id</code>, <code>chunk_id</code>) sont pures fonctions de <code>(project_code, path, name, part_index)</code> → 1:1 identiques entre A et B. Même si l'ordre des Vec divergeait, l'UPSERT garantit l'état final.
+        </p>
+      </div>
+
+      <div class="prop" data-accent="plum">
+        <h3><span class="idx">P4</span>FTS gratuit (REQ-AXO-292)</h3>
+        <p>
+          PG FTS lexical = colonne <code>content_tsv</code> <code>GENERATED ALWAYS AS … STORED</code> sur <code>public.Chunk</code>.
+          Dès que B1 fait son UPSERT Chunk, PG calcule le tsvector et l'index GIN se met à jour <strong>sans aucun code applicatif</strong>.
+          Pas de stage C1, pas de worker FTS — l'effet est latent dans le moteur PG.
+        </p>
+      </div>
+
+      <div class="prop" data-accent="red">
+        <h3><span class="idx">P5</span>Multi-worker safe</h3>
+        <p>
+          Chaque stage = N workers en compétition sur un <code>Arc&lt;Mutex&lt;Receiver&gt;&gt;</code>. Le lock n'est tenu que pendant <code>recv()</code> (µs), pas pendant <code>work()</code> (ms-s).
+          mpsc garantit qu'un item n'est reçu qu'une fois → <strong>aucun doublon possible</strong>, load-balance naturel, scale linéaire jusqu'à 16+ workers.
+        </p>
+      </div>
+
+      <div class="prop" data-accent="green">
+        <h3><span class="idx">P6</span>Activation orthogonale</h3>
+        <p>
+          <code>AXON_RUNTIME_MODE</code> = <code>brain_only</code> / <code>indexer_graph</code> / <code>indexer_vector</code> / <code>indexer_full</code>.
+          Les pipelines A et B peuvent tourner indépendamment : graphe seul (pas de GPU), vecteur seul (rattrapage des chunks non-embeddés), brain seul (MCP serveur sur la base), ou les deux.
+          Permis par MIL-AXO-015 (PG MVCC multi-writer natif).
+        </p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ===================== ACTIVATION MATRIX ===================== -->
+  <section class="section animate" style="--i:4">
+    <div class="section-head">
+      <h2>4 · Matrice d'activation <span class="tag">AXON_RUNTIME_MODE</span></h2>
+      <p>Quels workers tournent selon le mode runtime sélectionné. Les modes sont mutuellement exclusifs côté binaire indexer ; le brain tourne en parallèle dans son propre process.</p>
+    </div>
+
+    <div class="activation">
+      <div class="mode-card">
+        <h4>brain_only</h4>
+        <div class="mode-stages">
+          <span class="off">A1</span><span class="off">A2</span><span class="off">A3</span>
+          <span class="off">B1</span><span class="off">B2</span><span class="off">B3</span>
         </div>
       </div>
-      <div class="two-col">
-        <div class="stack">
-          <div class="card green">
-            <span class="label">Runtime truth</span>
-            <h3>Ce que l’on veut exposer</h3>
-            <p><span class="code">topology = brain_indexer_split</span>, <span class="code">process_role</span>, <span class="code">public_mcp_authority</span>, <span class="code">soll_writer_authority</span>, <span class="code">ist_writer_authority</span>, états de feed et fraîcheur snapshot.</p>
-          </div>
-          <div class="card amber">
-            <span class="label">Shadow mode</span>
-            <h3>Ce que shadow veut dire</h3>
-            <p>Le split existe, mais n’est pas encore promotable automatiquement. Tant que rollback, version identity et vérité runtime ne sont pas verts, on bloque le cutover.</p>
-          </div>
-        </div>
-        <div class="card red">
-          <span class="label">Operational note</span>
-          <h3>Ce que le document remplace</h3>
-          <p>L’ancien fichier mélangeait encore hypothèses monolithiques, “runtime MCP publiable” et pipeline unique. Cette version assume la séparation des responsabilités et les deux boucles indépendantes.</p>
-          <div class="legend">
-            <span class="legend-tag"><span class="legend-color" style="background: var(--blue);"></span>control plane</span>
-            <span class="legend-tag"><span class="legend-color" style="background: var(--red);"></span>GPU-paced downstream</span>
-            <span class="legend-tag"><span class="legend-color" style="background: var(--green);"></span>canonical stock / truth</span>
-            <span class="legend-tag"><span class="legend-color" style="background: var(--amber);"></span>buffer / async / reserve</span>
-          </div>
+      <div class="mode-card">
+        <h4>indexer_graph</h4>
+        <div class="mode-stages">
+          <span class="on">A1</span><span class="on">A2</span><span class="on">A3</span>
+          <span class="off">B1</span><span class="off">B2</span><span class="off">B3</span>
         </div>
       </div>
-    </section>
+      <div class="mode-card">
+        <h4>indexer_vector</h4>
+        <div class="mode-stages">
+          <span class="off">A1</span><span class="off">A2</span><span class="off">A3</span>
+          <span class="on">B1</span><span class="on">B2</span><span class="on">B3</span>
+        </div>
+      </div>
+      <div class="mode-card">
+        <h4>indexer_full</h4>
+        <div class="mode-stages">
+          <span class="on">A1</span><span class="on">A2</span><span class="on">A3</span>
+          <span class="on">B1</span><span class="on">B2</span><span class="on">B3</span>
+        </div>
+      </div>
+    </div>
 
-    <section class="footer-note">
-      <h2>Résumé exécutable</h2>
-      <p>
-        <strong>Axon Brain</strong> sert le monde extérieur et écrit <span class="code">SOLL</span>.
-        <strong>Axon Indexer</strong> produit la vérité technique et écrit <span class="code">IST</span>.
-        Le système s’organise autour de deux boucles parallèles:
-        <span class="code">push</span> jusqu’à <span class="code">graph_ready</span>,
-        puis <span class="code">pull</span> cadencé par le GPU jusqu’à <span class="code">vector_ready</span>,
-        avec <span class="code">finalize</span> hors hot path.
-      </p>
-      <p>
-        Fichier régénéré pour refléter l’état d’architecture actuel du dépôt Axon en date du <span class="code">2026-04-21</span>.
-      </p>
-    </section>
-  </main>
+    <div class="callout">
+      <strong>Mode <code>indexer_vector</code>.</strong> Quand seul B tourne (graphe déjà peuplé), B1 ne reçoit RIEN du canal A1→B1 (A est inactif). Il s'appuie alors sur son <strong>cold-start poll DB</strong> :
+      <code>SELECT id FROM Chunk LEFT JOIN ChunkEmbedding WHERE NULL LIMIT 256</code> pour rattraper tous les chunks non-embeddés. Même chemin si <code>indexer_full</code> démarre après un long brain-only.
+    </div>
+  </section>
+
+  <!-- ===================== REFERENCES ===================== -->
+  <footer class="footer animate" style="--i:5">
+    <div>
+      <h3>SOLL canonical</h3>
+      <ul>
+        <li>REQ-AXO-289<span> umbrella streaming v2 migration</span></li>
+        <li>REQ-AXO-290<span> env config templates dev + live</span></li>
+        <li>REQ-AXO-291<span> embedder test flakiness (P3, cure structurelle via S7)</span></li>
+        <li>REQ-AXO-292<span> hybrid retrieval FTS (P2, gated)</span></li>
+        <li>REQ-AXO-262<span> seq-len bucketing GPU embed</span></li>
+        <li>CPT-AXO-053<span> dual-product brain/indexer</span></li>
+        <li>CPT-AXO-054<span> implementation contract 6-stage</span></li>
+        <li>PIL-AXO-001<span> Shared Runtime Truth</span></li>
+        <li>PIL-AXO-007<span> Utility-First Adaptive Orchestration</span></li>
+        <li>MIL-AXO-015<span> PG migration (made v2 possible)</span></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Code map</h3>
+      <ul>
+        <li>src/axon-core/src/pipeline_v2/<span> module v2</span></li>
+        <li>orchestrator.rs<span> spawn_pipeline_a + handles</span></li>
+        <li>stage_a1.rs<span> read + sha256 + mtime</span></li>
+        <li>stage_a2.rs<span> tree-sitter spawn_blocking</span></li>
+        <li>stage_a3.rs<span> a3_enroll → upsert_graph_v2</span></li>
+        <li>worker_pool.rs<span> competing consumers pattern</span></li>
+        <li>channels.rs<span> mpsc cap defaults</span></li>
+        <li>indexed_file_cache.rs<span> arc-swap watcher filter</span></li>
+        <li>types.rs<span> PreparedFile + ParsedFile pivot types</span></li>
+        <li>graph_ingestion.rs::upsert_graph_v2<span> single-tx PG write</span></li>
+      </ul>
+    </div>
+  </footer>
+
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    look: 'classic',
+    themeVariables: {
+      background: isDark ? '#1f1c18' : '#fffdf7',
+      primaryColor: isDark ? '#26221c' : '#fbf8f0',
+      primaryBorderColor: isDark ? '#b1a796' : '#625d55',
+      primaryTextColor: isDark ? '#f5efe1' : '#1b1b18',
+      secondaryColor: isDark ? '#2a2622' : '#f4efe3',
+      secondaryBorderColor: isDark ? '#b1a796' : '#625d55',
+      tertiaryColor: isDark ? '#2a2622' : '#fefce8',
+      tertiaryBorderColor: isDark ? '#d9a64a' : '#8f6717',
+      lineColor: isDark ? '#b1a796' : '#625d55',
+      edgeLabelBackground: isDark ? '#26221c' : '#fffdf7',
+      clusterBkg: isDark ? 'rgba(48,41,34,0.6)' : 'rgba(255,253,247,0.7)',
+      clusterBorder: isDark ? '#b1a796' : '#625d55',
+      fontSize: '14.5px',
+      fontFamily: "'Space Grotesk', system-ui, sans-serif",
+      noteBkgColor: isDark ? '#2e2618' : '#fefce8',
+      noteTextColor: isDark ? '#f5efe1' : '#1b1b18',
+      noteBorderColor: isDark ? '#d9a64a' : '#8f6717',
+    }
+  });
+</script>
+<script>
+  function updateZoomState(wrap) {
+    var target = wrap.querySelector('.mermaid');
+    var zoom = parseFloat(target.dataset.zoom || '1');
+    wrap.classList.toggle('is-zoomed', zoom > 1);
+  }
+  function zoomDiagram(btn, factor) {
+    var wrap = btn.closest('.mermaid-wrap');
+    var target = wrap.querySelector('.mermaid');
+    var current = parseFloat(target.dataset.zoom || '1');
+    var next = Math.min(Math.max(current * factor, 0.3), 5);
+    target.dataset.zoom = next;
+    target.style.transform = 'scale(' + next + ')';
+    updateZoomState(wrap);
+  }
+  function resetZoom(btn) {
+    var wrap = btn.closest('.mermaid-wrap');
+    var target = wrap.querySelector('.mermaid');
+    target.dataset.zoom = '1';
+    target.style.transform = 'scale(1)';
+    updateZoomState(wrap);
+  }
+  document.querySelectorAll('.mermaid-wrap').forEach(function(wrap) {
+    wrap.addEventListener('wheel', function(e) {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      var target = wrap.querySelector('.mermaid');
+      var current = parseFloat(target.dataset.zoom || '1');
+      var factor = e.deltaY < 0 ? 1.1 : 0.9;
+      var next = Math.min(Math.max(current * factor, 0.3), 5);
+      target.dataset.zoom = next;
+      target.style.transform = 'scale(' + next + ')';
+      updateZoomState(wrap);
+    }, { passive: false });
+    var startX, startY, scrollL, scrollT;
+    wrap.addEventListener('mousedown', function(e) {
+      if (e.target.closest('.zoom-controls')) return;
+      var target = wrap.querySelector('.mermaid');
+      if (parseFloat(target.dataset.zoom || '1') <= 1) return;
+      wrap.classList.add('is-panning');
+      startX = e.clientX; startY = e.clientY;
+      scrollL = wrap.scrollLeft; scrollT = wrap.scrollTop;
+    });
+    window.addEventListener('mousemove', function(e) {
+      if (!wrap.classList.contains('is-panning')) return;
+      wrap.scrollLeft = scrollL - (e.clientX - startX);
+      wrap.scrollTop = scrollT - (e.clientY - startY);
+    });
+    window.addEventListener('mouseup', function() {
+      wrap.classList.remove('is-panning');
+    });
+  });
+</script>
 </body>
 </html>
