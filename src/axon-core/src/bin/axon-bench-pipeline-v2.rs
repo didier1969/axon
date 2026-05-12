@@ -236,17 +236,12 @@ async fn run() -> Result<()> {
     let embedder = build_embedder(args.embedder_mode)?;
     let store = Arc::new(build_store(args.embedder_mode)?);
     let caps = PipelineChannelCaps::from_env();
-    // Bench-specific minimum production rate (operator north-star 2026-05-12) :
-    // ≥6 A3 workers writing chunks so B2's GPU stays saturated. Env
-    // AXON_A3_WORKERS=N still overrides if higher.
-    let counts_a = {
-        let env_counts = PipelineAWorkerCounts::from_env();
-        PipelineAWorkerCounts {
-            a1: env_counts.a1,
-            a2: env_counts.a2,
-            a3: env_counts.a3.max(6),
-        }
-    };
+    // Honor env counts verbatim. The previous `.max(6)` clamp on A3 made
+    // it impossible to characterize the upstream (A2 vs A3) bottleneck:
+    // setting AXON_A3_WORKERS=2 to probe A3 capacity was silently lifted
+    // to 6, falsifying the isolation experiment the operator wanted.
+    // Operator stays responsible for choosing sensible counts.
+    let counts_a = PipelineAWorkerCounts::from_env();
     let counts_b = PipelineBWorkerCounts::from_env();
 
     eprintln!(

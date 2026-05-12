@@ -26,7 +26,7 @@
 # Operator env knobs picked up automatically (export before invoking):
 #   AXON_B2_BATCH_SIZE=128       (default 64 — bump for higher GPU saturation)
 #   AXON_B2_BATCH_TIMEOUT_MS=200 (default 200)
-#   AXON_A1_WORKERS / A2 / A3    (defaults 4/8/2 — bench forces A3>=6)
+#   AXON_A1_WORKERS / A2 / A3    (defaults 4/8/2 — env honored verbatim)
 #   AXON_B1_WORKERS / B2 / B3    (defaults 4/1/2)
 #   AXON_DEV_DATABASE_URL        (required for --gpu / --cpu — bench skips PG under --noop)
 #
@@ -138,6 +138,6 @@ fi
 
 echo "▶ axon-bench-pipeline-v2 ${FWD[*]}" >&2
 echo "  AXON_B2_BATCH_SIZE=${AXON_B2_BATCH_SIZE:-64} AXON_B2_BATCH_TIMEOUT_MS=${AXON_B2_BATCH_TIMEOUT_MS:-200}" >&2
-echo "  AXON_A1_WORKERS=${AXON_A1_WORKERS:-4} AXON_A2_WORKERS=${AXON_A2_WORKERS:-8} AXON_A3_WORKERS=${AXON_A3_WORKERS:-6}" >&2
+echo "  AXON_A1_WORKERS=${AXON_A1_WORKERS:-4} AXON_A2_WORKERS=${AXON_A2_WORKERS:-8} AXON_A3_WORKERS=${AXON_A3_WORKERS:-2}" >&2
 echo "  AXON_B1_WORKERS=${AXON_B1_WORKERS:-4} AXON_B2_WORKERS=${AXON_B2_WORKERS:-1} AXON_B3_WORKERS=${AXON_B3_WORKERS:-2}" >&2
 exec "$BIN" "${FWD[@]}"
