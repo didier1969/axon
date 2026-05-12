@@ -34,7 +34,7 @@ pub use orchestrator::{
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::{a3_enroll, EnrolledFile};
-pub use stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
+pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, ChunkForEmbedding};
 pub use stage_b2::{b2_embed, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::{b3_persist_embedding, PersistedEmbedding};
 pub use types::{ParsedFile, PreparedFile};

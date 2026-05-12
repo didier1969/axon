@@ -4559,6 +4559,32 @@ impl GraphStore {
         self.execute(&sql)
     }
 
+    /// REQ-AXO-289 S4c — Pipeline-v2 B1 cold-start poll: return up to
+    /// `limit` chunk_ids that exist in `public.Chunk` but have no
+    /// matching `public.ChunkEmbedding` row for the canonical model.
+    ///
+    /// Run by B1 at indexer boot, and once after any
+    /// brain-only-to-indexer reactivation, to rattrape chunks that
+    /// either never traversed the A3 → B1 `try_send` (drops on full
+    /// buffer) or pre-date the v2 cut-over.
+    pub fn select_chunks_needing_embedding(&self, limit: usize) -> Result<Vec<String>> {
+        let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
+        let safe_model_id = Self::escape_sql(model_id);
+        let raw = self.query_json(&format!(
+            "SELECT c.id FROM Chunk c \
+             LEFT JOIN ChunkEmbedding ce \
+               ON ce.chunk_id = c.id AND ce.model_id = '{safe_model_id}' \
+             WHERE ce.chunk_id IS NULL \
+             LIMIT {limit}"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect())
+    }
+
     /// REQ-AXO-289 S4a (session 19) — Pipeline-v2 stage B1 fetch
     /// chunk content from PG for the GPU embedder lane.
     ///
