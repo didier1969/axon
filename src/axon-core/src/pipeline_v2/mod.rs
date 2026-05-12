@@ -1,0 +1,20 @@
+//! Streaming pipeline v2 — REQ-AXO-289 / CPT-AXO-054.
+//!
+//! Six independent stages over two pipelines (A graph, B vector), each backed by
+//! a per-stage worker pool draining a bounded `tokio::sync::mpsc` channel.
+//!
+//! This is the scaffolding module: it defines [`StageMetrics`], the
+//! [`spawn_stage_workers`] helper, and the canonical channel capacities used
+//! across the pipeline. Concrete stage implementations (A1/A2/A3, B1/B2/B3) are
+//! wired in slices S2–S5 of REQ-AXO-289.
+
+pub mod channels;
+pub mod metrics;
+pub mod worker_pool;
+
+pub use channels::{
+    PipelineChannelCaps, A3_TO_B1_BUFFER_CAP_DEFAULT, B1_COLDSTART_BATCH_SIZE_DEFAULT,
+    INTERNAL_CHANNEL_CAP_DEFAULT,
+};
+pub use metrics::{StageMetrics, StageSnapshot};
+pub use worker_pool::spawn_stage_workers;
