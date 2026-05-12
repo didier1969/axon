@@ -1047,20 +1047,32 @@ if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
 fi
 
 if [ "$RUN_MCP_TESTS" = "1" ] && ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    echo ""
-    echo "⏳ Waiting for initial ingestion to stabilize..."
-    for i in {1..30}; do
-        pending=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''pending'\'', '\''indexing'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
-        indexed=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''indexed'\'', '\''indexed_degraded'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
-        if [ "$pending" = "0" ]; then
-            echo "✅ Ingestion stabilized ($indexed files indexed)."
-            break
-        fi
-        sleep 2
-    done
+    # Ingestion stabilization is only meaningful when an indexer is
+    # actually running and writing the IST. Brain-only restarts have no
+    # active writer, so the loop just burns 60s waiting for a quantity
+    # that will not change. Restrict to non-brain-only modes (full-stack
+    # scenarios where this start invocation also spawned an indexer).
+    if [[ "$RUNTIME_MODE" != "brain_only" ]]; then
+        echo ""
+        echo "⏳ Waiting for initial ingestion to stabilize..."
+        for i in {1..30}; do
+            pending=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''pending'\'', '\''indexing'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
+            indexed=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''indexed'\'', '\''indexed_degraded'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
+            if [ "$pending" = "0" ]; then
+                echo "✅ Ingestion stabilized ($indexed files indexed)."
+                break
+            fi
+            sleep 2
+        done
+    fi
 
     echo "🧪 Running MCP Quality Gate Validation..."
-    if run_devenv_shell "./scripts/axon --instance $AXON_INSTANCE_KIND quality-mcp"; then
+    # The dispatcher's verb is `qualify-mcp` (`quality-mcp` does not
+    # exist — every restart under the previous wording exited 1 with
+    # "Unknown command" and reported "❌ MCP Quality Gate failed"
+    # regardless of actual MCP health). Call the canonical wrapper
+    # directly so renames in `scripts/axon` cannot break us again.
+    if run_devenv_shell "bash '$PROJECT_ROOT/scripts/mcp_quality_gate.sh'"; then
         echo "✅ MCP Quality Gate passed."
     else
         echo "❌ MCP Quality Gate failed."
