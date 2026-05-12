@@ -4538,10 +4538,15 @@ impl GraphStore {
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
         let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
+        // REQ-AXO-295 Phase 2 — File vertices accumulated for one
+        // UNWIND-batched cypher() call (was one cypher() per file).
+        let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
-        let mut indexed_file_inserts: Vec<String> = Vec::with_capacity(files.len());
+        // REQ-AXO-295 Phase 2 — IndexedFile rows accumulated for one
+        // multi-row INSERT VALUES (was one INSERT per file).
+        let mut indexed_file_rows: Vec<(String, String, i64)> = Vec::with_capacity(files.len());
 
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
@@ -4629,18 +4634,15 @@ impl GraphStore {
                 }
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let safe_path = Self::escape_sql(&path_str);
-            let safe_hash = Self::escape_sql(&parsed.content_hash);
-            indexed_file_inserts.push(format!(
-                "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
-                 VALUES ('{path}', '{hash}', {ts}) \
-                 ON CONFLICT (path) DO UPDATE SET \
-                     content_hash = EXCLUDED.content_hash, \
-                     last_seen_ms = EXCLUDED.last_seen_ms;",
-                path = safe_path,
-                hash = safe_hash,
-                ts = now_ms,
-            ));
+            indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms));
+            // Defer File vertex MERGE — accumulated below for one
+            // UNWIND-batched cypher() call.
+            if emit_age {
+                file_vertices.push((
+                    path_str.clone(),
+                    serde_json::json!({ "project_code": project_code }),
+                ));
+            }
             chunk_ids_per_file.push(chunk_ids_emitted);
         }
 
@@ -4666,20 +4668,20 @@ impl GraphStore {
             queries.extend(acc.render_contains_age_cypher("axon_graph"));
             queries.extend(acc.render_calls_age_cypher("axon_graph"));
             queries.extend(acc.render_calls_nif_age_cypher("axon_graph"));
-            // File vertices for AGE — one MERGE per file (rare path on
-            // the bench critical loop, fine to emit individually).
-            for parsed in files {
-                let path_str = parsed.path.to_string_lossy().into_owned();
-                let file_props = serde_json::json!({ "project_code": project_code });
-                if let Ok(cypher) = crate::postgres::age::cypher_merge_vertex(
-                    "axon_graph",
-                    "File",
-                    "path",
-                    &path_str,
-                    &file_props,
-                ) {
-                    queries.push(cypher);
-                }
+            // REQ-AXO-295 Phase 2 — File vertex MERGEs UNWIND-batched.
+            // Previously this emitted one cypher() call per file in the
+            // batch; at ~25 ms parser+planner overhead per cypher()
+            // that was ~800 ms / 32-file batch and dominated the PG
+            // round-trip budget. UNWIND collapses N MERGEs into one
+            // cypher() call.
+            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
+                "axon_graph",
+                "File",
+                "path",
+                &file_vertices,
+                500,
+            ) {
+                queries.extend(cypher_list);
             }
             if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
                 "axon_graph",
@@ -4692,7 +4694,32 @@ impl GraphStore {
             }
         }
         let _ = backend_is_pg;
-        queries.extend(indexed_file_inserts);
+
+        // REQ-AXO-295 Phase 2 — IndexedFile multi-row INSERT instead
+        // of one statement per file. Same shape as the multi-row
+        // Symbol / Chunk inserts: ON CONFLICT (path) DO UPDATE.
+        if !indexed_file_rows.is_empty() {
+            let mut values_buf =
+                String::with_capacity(indexed_file_rows.len() * 80);
+            for (i, (path, hash, ts)) in indexed_file_rows.iter().enumerate() {
+                if i > 0 {
+                    values_buf.push(',');
+                }
+                values_buf.push_str(&format!(
+                    "('{}', '{}', {})",
+                    Self::escape_sql(path),
+                    Self::escape_sql(hash),
+                    ts
+                ));
+            }
+            queries.push(format!(
+                "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
+                 VALUES {values_buf} \
+                 ON CONFLICT (path) DO UPDATE SET \
+                     content_hash = EXCLUDED.content_hash, \
+                     last_seen_ms = EXCLUDED.last_seen_ms;"
+            ));
+        }
 
         self.execute_batch(&queries)?;
         Ok(chunk_ids_per_file)
