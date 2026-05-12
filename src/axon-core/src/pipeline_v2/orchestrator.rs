@@ -23,6 +23,8 @@ use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::{a3_enroll, EnrolledFile};
 use super::stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
+use super::stage_b2::{b2_embed, B2Embedder, EmbeddedChunk};
+use super::stage_b3::{b3_persist_embedding, PersistedEmbedding};
 use super::worker_pool::spawn_stage_workers;
 
 /// Tunable per-stage worker counts. Operator-overridable through env vars
@@ -284,6 +286,95 @@ pub fn spawn_pipeline_b_b1_only(
     }
 }
 
+/// Handles for talking to the full Pipeline B (B1 + B2 + B3).
+///
+/// `output_rx` yields one [`PersistedEmbedding`] receipt per chunk that
+/// successfully traversed B1 (fetch) → B2 (GPU embed) → B3 (UPSERT).
+/// Soft-skipped chunks (B1 None-fetch on race, B2 embedder error) do
+/// NOT surface on this channel; their counts live on the
+/// `errors_total` stage metric instead.
+pub struct PipelineBFullHandles {
+    pub output_rx: Receiver<PersistedEmbedding>,
+    pub metrics_b1: Arc<StageMetrics>,
+    pub metrics_b2: Arc<StageMetrics>,
+    pub metrics_b3: Arc<StageMetrics>,
+}
+
+/// Spawn the three Pipeline B stages and return their handles.
+///
+/// `b1_inbox_rx` is the receiver returned by [`spawn_pipeline_a`] —
+/// pass it here to connect the A → B hand-off. `embedder` is the
+/// [`B2Embedder`] trait object that drives B2's GPU work; tests inject
+/// [`super::stage_b2::NoOpEmbedder`], production wires the
+/// `OrtGpuFirstTextEmbedding` wrapper (slice S4d).
+pub fn spawn_pipeline_b_full(
+    counts: PipelineBWorkerCounts,
+    caps: PipelineChannelCaps,
+    store: Arc<GraphStore>,
+    project_code: impl Into<Arc<str>>,
+    embedder: Arc<dyn B2Embedder>,
+    b1_inbox_rx: Receiver<String>,
+) -> PipelineBFullHandles {
+    let project_code: Arc<str> = project_code.into();
+    let (b1_to_b2_tx, b1_to_b2_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
+    let (b2_to_b3_tx, b2_to_b3_rx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
+    let (output_tx, output_rx) = mpsc::channel::<PersistedEmbedding>(caps.internal);
+
+    let metrics_b1 = StageMetrics::new("B1");
+    let metrics_b2 = StageMetrics::new("B2");
+    let metrics_b3 = StageMetrics::new("B3");
+
+    let store_for_b1 = store.clone();
+    spawn_stage_workers(
+        counts.b1,
+        b1_inbox_rx,
+        b1_to_b2_tx,
+        move |chunk_id: String| {
+            let store = store_for_b1.clone();
+            async move {
+                match b1_fetch_for_embedding(chunk_id, store).await? {
+                    Some(payload) => Ok(payload),
+                    None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
+                }
+            }
+        },
+        metrics_b1.clone(),
+    );
+
+    let embedder_for_b2 = embedder.clone();
+    spawn_stage_workers(
+        counts.b2,
+        b1_to_b2_rx,
+        b2_to_b3_tx,
+        move |payload: ChunkForEmbedding| {
+            let embedder = embedder_for_b2.clone();
+            async move { b2_embed(payload, embedder).await }
+        },
+        metrics_b2.clone(),
+    );
+
+    let store_for_b3 = store.clone();
+    let pc_for_b3 = project_code.clone();
+    spawn_stage_workers(
+        counts.b3,
+        b2_to_b3_rx,
+        output_tx,
+        move |embedded: EmbeddedChunk| {
+            let store = store_for_b3.clone();
+            let pc = pc_for_b3.clone();
+            async move { b3_persist_embedding(embedded, store, pc).await }
+        },
+        metrics_b3.clone(),
+    );
+
+    PipelineBFullHandles {
+        output_rx,
+        metrics_b1,
+        metrics_b2,
+        metrics_b3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +510,85 @@ mod tests {
         assert_eq!(counts.b1, 4);
         assert_eq!(counts.b2, 1);
         assert_eq!(counts.b3, 2);
+    }
+
+    #[tokio::test]
+    async fn pipelines_a_and_b_full_persist_chunk_embeddings_end_to_end() {
+        // Full A → B (B1+B2+B3) happy path with NoOpEmbedder. After
+        // both pipelines drain the fixture, the store must contain:
+        //   * Symbol rows (A3)
+        //   * Chunk rows with content_tsv-ready content (A3)
+        //   * IndexedFile row (A3)
+        //   * ChunkEmbedding rows (B3) — one per chunk_id A3 emitted
+        use super::super::stage_b2::NoOpEmbedder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab_full_fixture.rs");
+        std::fs::write(&path, "fn alpha() {}\nfn beta() { let x = 1; }\n").unwrap();
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let caps = PipelineChannelCaps::default();
+        let counts_a = PipelineAWorkerCounts {
+            a1: 1,
+            a2: 1,
+            a3: 1,
+        };
+        let counts_b = PipelineBWorkerCounts {
+            b1: 1,
+            b2: 1,
+            b3: 1,
+        };
+
+        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), "AXO");
+        let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
+        let embedder: Arc<dyn B2Embedder> = Arc::new(NoOpEmbedder);
+        let mut handles_b =
+            spawn_pipeline_b_full(counts_b, caps, store.clone(), "AXO", embedder, b1_inbox_rx);
+
+        handles_a.input_tx.send(path.clone()).await.unwrap();
+
+        let enrolled = tokio::time::timeout(Duration::from_secs(5), handles_a.output_rx.recv())
+            .await
+            .expect("A must produce a receipt within 5 s")
+            .expect("A output channel must yield Some(EnrolledFile)");
+
+        let expected_chunks = enrolled.chunk_ids.len();
+        assert!(expected_chunks >= 1);
+
+        let mut persisted = 0usize;
+        for _ in 0..expected_chunks {
+            let receipt =
+                tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
+                    .await
+                    .expect("B3 must produce a persist receipt within 5 s")
+                    .expect("B3 output channel must yield Some(PersistedEmbedding)");
+            assert!(enrolled.chunk_ids.contains(&receipt.chunk_id));
+            persisted += 1;
+        }
+        assert_eq!(persisted, expected_chunks);
+
+        let embed_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ChunkEmbedding WHERE chunk_id IN ({})",
+                enrolled
+                    .chunk_ids
+                    .iter()
+                    .map(|c| format!("'{c}'"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+            .unwrap();
+        assert_eq!(embed_count as usize, expected_chunks);
+
+        let snap_b1 = handles_b.metrics_b1.snapshot();
+        let snap_b2 = handles_b.metrics_b2.snapshot();
+        let snap_b3 = handles_b.metrics_b3.snapshot();
+        assert_eq!(snap_b1.items_out_total as usize, expected_chunks);
+        assert_eq!(snap_b2.items_out_total as usize, expected_chunks);
+        assert_eq!(snap_b3.items_out_total as usize, expected_chunks);
+        assert_eq!(snap_b1.errors_total, 0);
+        assert_eq!(snap_b2.errors_total, 0);
+        assert_eq!(snap_b3.errors_total, 0);
     }
 
     #[tokio::test]

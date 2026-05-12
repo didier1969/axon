@@ -16,6 +16,8 @@ pub mod stage_a1;
 pub mod stage_a2;
 pub mod stage_a3;
 pub mod stage_b1;
+pub mod stage_b2;
+pub mod stage_b3;
 pub mod types;
 pub mod worker_pool;
 
@@ -26,12 +28,14 @@ pub use channels::{
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
 pub use orchestrator::{
-    spawn_pipeline_a, spawn_pipeline_b_b1_only, PipelineAHandles, PipelineAWorkerCounts,
-    PipelineBHandles, PipelineBWorkerCounts,
+    spawn_pipeline_a, spawn_pipeline_b_b1_only, spawn_pipeline_b_full, PipelineAHandles,
+    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBHandles, PipelineBWorkerCounts,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::{a3_enroll, EnrolledFile};
 pub use stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
+pub use stage_b2::{b2_embed, B2Embedder, EmbeddedChunk, NoOpEmbedder};
+pub use stage_b3::{b3_persist_embedding, PersistedEmbedding};
 pub use types::{ParsedFile, PreparedFile};
 pub use worker_pool::spawn_stage_workers;

@@ -4485,6 +4485,80 @@ impl GraphStore {
         Ok(chunk_ids_emitted)
     }
 
+    /// REQ-AXO-289 S4b — Pipeline-v2 stage B3 UPSERT a ChunkEmbedding
+    /// row produced by the GPU embedder (B2).
+    ///
+    /// `embedding` is the model output vector. PG stores it as
+    /// `vector(N)` (pgvector). `source_hash` lets readers tell stale
+    /// embeddings apart from current ones when a chunk's content
+    /// changes between embedding runs.
+    ///
+    /// Idempotent: `ON CONFLICT (chunk_id, model_id) DO UPDATE`
+    /// overwrites the previous embedding with the latest in place,
+    /// matching CPT-AXO-054's idempotence contract for B3.
+    pub fn upsert_chunk_embedding_v2(
+        &self,
+        chunk_id: &str,
+        project_code: &str,
+        source_hash: &str,
+        embedding: &[f32],
+        embedded_at_ms: i64,
+    ) -> Result<()> {
+        let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
+        let safe_chunk_id = Self::escape_sql(chunk_id);
+        let safe_project = Self::escape_sql(project_code);
+        let safe_source_hash = Self::escape_sql(source_hash);
+        let safe_model_id = Self::escape_sql(model_id);
+
+        let backend_is_pg = self.is_postgres_backend();
+        let embedding_literal = if backend_is_pg {
+            crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+                anyhow::anyhow!("upsert_chunk_embedding_v2: vector_literal failed: {e}")
+            })?
+        } else {
+            use crate::embedding_contract::DIMENSION;
+            format!("CAST({embedding:?} AS FLOAT[{DIMENSION}])")
+        };
+
+        // PG carries an extra `project_code` column on ChunkEmbedding
+        // (REQ-AXO-216 schema). The legacy embedded test backend lacks
+        // it — branch on the backend so test paths stay green until
+        // REQ-AXO-271 finishes retiring the legacy plugin.
+        let sql = if backend_is_pg {
+            format!(
+                "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+                 VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
+                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                     source_hash = EXCLUDED.source_hash, \
+                     embedding = EXCLUDED.embedding, \
+                     project_code = EXCLUDED.project_code, \
+                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                cid = safe_chunk_id,
+                mid = safe_model_id,
+                pc = safe_project,
+                sh = safe_source_hash,
+                emb = embedding_literal,
+                ts = embedded_at_ms,
+            )
+        } else {
+            format!(
+                "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash, embedding, embedded_at_ms) \
+                 VALUES ('{cid}', '{mid}', '{sh}', {emb}, {ts}) \
+                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                     source_hash = EXCLUDED.source_hash, \
+                     embedding = EXCLUDED.embedding, \
+                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                cid = safe_chunk_id,
+                mid = safe_model_id,
+                sh = safe_source_hash,
+                emb = embedding_literal,
+                ts = embedded_at_ms,
+            )
+        };
+        let _ = safe_project; // silence unused under non-PG branch
+        self.execute(&sql)
+    }
+
     /// REQ-AXO-289 S4a (session 19) — Pipeline-v2 stage B1 fetch
     /// chunk content from PG for the GPU embedder lane.
     ///
