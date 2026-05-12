@@ -277,22 +277,25 @@ async fn run() -> Result<()> {
     let elapsed = start.elapsed();
     let _ = feeder.await;
 
-    // Post-run sanity counts straight from the canonical store. Reveal
-    // discrepancies between in-RAM stage counters and persisted PG /
-    // legacy backend rows (e.g. B1 oversend, MVCC visibility lag,
-    // ON CONFLICT silent dedup in bulk INSERT).
-    let chunk_rows = store
-        .query_count("SELECT count(*) FROM Chunk")
-        .unwrap_or(-1);
-    let embedding_rows = store
-        .query_count("SELECT count(*) FROM ChunkEmbedding")
-        .unwrap_or(-1);
-    let symbol_rows = store
-        .query_count("SELECT count(*) FROM Symbol")
-        .unwrap_or(-1);
-    let indexed_rows = store
-        .query_count("SELECT count(*) FROM IndexedFile")
-        .unwrap_or(-1);
+    // Post-run sanity counts via the writer ctx — under the embedded
+    // test backend the reader ctx serves a stale snapshot during the
+    // shutdown window, which makes legitimate Chunk / Symbol writes
+    // appear as zero. Writer ctx is authoritative across backends.
+    fn writer_count(store: &GraphStore, table: &str) -> i64 {
+        let raw = match store.query_json_writer(&format!("SELECT count(*) FROM {table}")) {
+            Ok(r) => r,
+            Err(_) => return -1,
+        };
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        rows.first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .unwrap_or(-1)
+    }
+    let chunk_rows = writer_count(&store, "Chunk");
+    let embedding_rows = writer_count(&store, "ChunkEmbedding");
+    let symbol_rows = writer_count(&store, "Symbol");
+    let indexed_rows = writer_count(&store, "IndexedFile");
 
     let snap_a1 = handles_a.metrics_a1.snapshot();
     let snap_a2 = handles_a.metrics_a2.snapshot();
