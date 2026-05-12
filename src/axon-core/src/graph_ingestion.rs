@@ -4602,7 +4602,12 @@ impl GraphStore {
         chunk_id: &str,
     ) -> Result<Option<(String, String)>> {
         let safe_id = Self::escape_sql(chunk_id);
-        let raw = self.query_json(&format!(
+        // Read from the writer ctx so B1 sees A3's freshly-committed
+        // rows — the reader ctx may serve a slightly stale snapshot
+        // under split-brain modes, which the cross-pipeline try_send
+        // makes very likely (B1 picks up chunk_id microseconds after
+        // A3 commits, before the reader catches the writer's epoch).
+        let raw = self.query_json_writer(&format!(
             "SELECT content, content_hash FROM Chunk WHERE id = '{safe_id}'"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
