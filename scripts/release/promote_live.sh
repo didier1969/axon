@@ -259,14 +259,32 @@ verified=0
 restart_failed=0
 postcheck_failed=0
 if [[ "$RESTART_LIVE" -eq 1 ]]; then
-  python3 - <<'PY'
-import json, os, pathlib, shutil, shlex
+  # REQ-AXO-286 Bug 1 fix: stop services BEFORE copying binaries.
+  # Previously the copy ran first and failed with `OSError: [Errno 26] Text
+  # file busy` whenever the live brain held bin/axon-brain open. The stop
+  # then never ran, leaving the script aborted mid-promotion.
+  if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
+    restart_failed=1
+  elif ! assert_live_stopped; then
+    restart_failed=1
+  fi
+
+  if [[ "$restart_failed" -ne 1 ]]; then
+    # REQ-AXO-286 Bug 1 follow-up: AXON_SKIP_BIN_SYNC=1 short-circuit.
+    # When the operator has already pre-staged the binary (canonical recovery
+    # pattern via AXON_LIVE_RELEASE_MANIFEST + AXON_SKIP_BIN_SYNC) and the
+    # bin/<artifact> sha256 already matches the manifest, skip the copy
+    # entirely. Reduces I/O + avoids the EBUSY race when the script is
+    # re-run after a partial failure.
+    AXON_SKIP_BIN_SYNC="${AXON_SKIP_BIN_SYNC:-0}" python3 - <<'PY'
+import hashlib, json, os, pathlib, shutil, shlex
 root = pathlib.Path(os.environ["ROOT_DIR"])
 manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
 release_version = os.environ["RELEASE_VERSION"]
 build_id = os.environ["BUILD_ID"]
 package_version = os.environ["PACKAGE_VERSION"]
 install_generation = os.environ["INSTALL_GENERATION"]
+skip_bin_sync = os.environ.get("AXON_SKIP_BIN_SYNC", "0") == "1"
 artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
 if not artifacts:
     artifacts = {"axon-core": manifest["artifact"]}
@@ -274,7 +292,18 @@ for name, entry in artifacts.items():
     source = pathlib.Path(entry["path"])
     target = root / "bin" / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+    expected_sha = entry.get("sha256")
+    skip_this = False
+    if skip_bin_sync and target.exists() and isinstance(expected_sha, str):
+        h = hashlib.sha256()
+        with target.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        if h.hexdigest() == expected_sha:
+            skip_this = True
+            print(f"  skip-bin-sync: bin/{name} sha256 already matches manifest")
+    if not skip_this:
+        shutil.copy2(source, target)
     build_info_target = root / "bin" / f"{name}.build-info"
     build_info_source = entry.get("build_info_path")
     if isinstance(build_info_source, str) and pathlib.Path(build_info_source).exists():
@@ -290,11 +319,10 @@ for name, entry in artifacts.items():
             for key, value in payload.items():
                 handle.write(f"{key}={shlex.quote(value)}\n")
 PY
-  if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
-    restart_failed=1
-  elif ! assert_live_stopped; then
-    restart_failed=1
-  else
+  fi
+
+  # Start services on the staged manifest (only if stop+copy succeeded)
+  if [[ "$restart_failed" -ne 1 ]]; then
     if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-indexer.sh"; then
       restart_failed=1
     elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
