@@ -83,8 +83,9 @@ pub(crate) use batch_lanes::{
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 use gpu_backend::{
     cuda_execution_provider_dispatch, ort_cuda_provider_library_available,
-    ort_cuda_provider_library_path, OrtGpuFirstTextEmbedding,
+    ort_cuda_provider_library_path,
 };
+pub(crate) use gpu_backend::OrtGpuFirstTextEmbedding;
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
@@ -772,7 +773,7 @@ fn embed_prepared_batch_with_breakdown_ort(
     ))
 }
 
-fn embed_texts_with_breakdown_ort(
+pub(crate) fn embed_texts_with_breakdown_ort(
     model: &mut OrtGpuFirstTextEmbedding,
     texts: &[String],
 ) -> AnyhowResult<(Vec<Vec<f32>>, u64, u64, u64, u64, u64)> {

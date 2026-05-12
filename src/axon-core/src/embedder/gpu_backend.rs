@@ -22,7 +22,7 @@ use super::{
     ort_pooling_cls, ort_pooling_mean, runtime_embedding_snapshot_dir, FASTEMBED_OUTPUT_PRECEDENCE,
 };
 
-pub(super) struct OrtGpuFirstTextEmbedding {
+pub(crate) struct OrtGpuFirstTextEmbedding {
     pub(super) tokenizer: Tokenizer,
     pub(super) session: Session,
     pub(super) io_binding: IoBinding,
@@ -86,7 +86,7 @@ impl EmbeddingBatchStats {
 
 
 impl OrtGpuFirstTextEmbedding {
-    pub(super) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
+    pub(crate) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
         let snapshot_dir = runtime_embedding_snapshot_dir()?;
         let model_path = snapshot_dir.join("onnx").join("model.onnx");
         let tokenizer = load_runtime_embedding_tokenizer()?;
