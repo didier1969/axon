@@ -11,6 +11,8 @@
 pub mod channels;
 pub mod indexed_file_cache;
 pub mod metrics;
+pub mod stage_a1;
+pub mod types;
 pub mod worker_pool;
 
 pub use channels::{
@@ -19,4 +21,6 @@ pub use channels::{
 };
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
+pub use stage_a1::a1_prepare;
+pub use types::PreparedFile;
 pub use worker_pool::spawn_stage_workers;

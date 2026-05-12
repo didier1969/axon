@@ -79,6 +79,11 @@ async-trait = "0.1"
 # dashmap for concurrent path → hash lookup on the watcher hot path.
 arc-swap = "1.7"
 dashmap = "6.1"
+# Stable cross-restart content hash for IndexedFile cache (REQ-AXO-289 S3).
+# Already in the transitive dep graph (ort, tokenizers); direct dep makes the
+# usage explicit. SHA-256 is overkill for change detection but is the most
+# portable choice in the Rust ecosystem.
+sha2 = "0.10"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 libc = "0.2"
 
