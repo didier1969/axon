@@ -277,6 +277,23 @@ async fn run() -> Result<()> {
     let elapsed = start.elapsed();
     let _ = feeder.await;
 
+    // Post-run sanity counts straight from the canonical store. Reveal
+    // discrepancies between in-RAM stage counters and persisted PG /
+    // legacy backend rows (e.g. B1 oversend, MVCC visibility lag,
+    // ON CONFLICT silent dedup in bulk INSERT).
+    let chunk_rows = store
+        .query_count("SELECT count(*) FROM Chunk")
+        .unwrap_or(-1);
+    let embedding_rows = store
+        .query_count("SELECT count(*) FROM ChunkEmbedding")
+        .unwrap_or(-1);
+    let symbol_rows = store
+        .query_count("SELECT count(*) FROM Symbol")
+        .unwrap_or(-1);
+    let indexed_rows = store
+        .query_count("SELECT count(*) FROM IndexedFile")
+        .unwrap_or(-1);
+
     let snap_a1 = handles_a.metrics_a1.snapshot();
     let snap_a2 = handles_a.metrics_a2.snapshot();
     let snap_a3 = handles_a.metrics_a3.snapshot();
@@ -316,6 +333,7 @@ async fn run() -> Result<()> {
                  b1 in/out/err/bp = {}/{}/{}/{}\n\
                  b2 in/out/err/bp = {}/{}/{}/{}\n\
                  b3 in/out/err/bp = {}/{}/{}/{}\n\
+                 PG rows: Symbol={} Chunk={} IndexedFile={} ChunkEmbedding={}\n\
                  total source files walked = {}",
                 a_count, b_count, elapsed.as_secs_f64(),
                 files_per_sec, chunks_per_sec,
@@ -325,6 +343,7 @@ async fn run() -> Result<()> {
                 snap_b1.items_in_total, snap_b1.items_out_total, snap_b1.errors_total, snap_b1.backpressure_blocks_total,
                 snap_b2.items_in_total, snap_b2.items_out_total, snap_b2.errors_total, snap_b2.backpressure_blocks_total,
                 snap_b3.items_in_total, snap_b3.items_out_total, snap_b3.errors_total, snap_b3.backpressure_blocks_total,
+                symbol_rows, chunk_rows, indexed_rows, embedding_rows,
                 total_files,
             );
         }
