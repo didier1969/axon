@@ -229,17 +229,20 @@ async fn run() -> Result<()> {
 
     let total_files = files.len();
     let start = Instant::now();
-    let input_tx = handles_a.input_tx.clone();
 
-    // Feeder task — push every file path then drop the sender so A1
-    // workers exit cleanly once drained.
+    // Move the sole input_tx into the feeder so its drop closes the
+    // channel once every path has been pushed. Keeping a clone on the
+    // stack here would leave A1 workers waiting on recv() forever.
+    let input_tx = handles_a.input_tx;
     let feeder = tokio::spawn(async move {
         for path in files {
             if input_tx.send(path).await.is_err() {
                 break;
             }
         }
-        drop(input_tx);
+        // input_tx dropped here -> A1 recv() returns None ->
+        // A2 / A3 cascade-drain -> output_tx + b1_inbox_tx drop ->
+        // B1 / B2 / B3 cascade-drain.
     });
 
     // Consumer task — drain EnrolledFile + PersistedEmbedding receipts
@@ -250,7 +253,9 @@ async fn run() -> Result<()> {
 
     let mut a_count = 0usize;
     let mut b_count = 0usize;
-    loop {
+    let mut a_open = true;
+    let mut b_open = true;
+    while a_open || b_open {
         if let Some(d) = deadline {
             if Instant::now() >= d {
                 break;
@@ -258,15 +263,19 @@ async fn run() -> Result<()> {
         }
         tokio::select! {
             biased;
-            Some(_) = handles_a.output_rx.recv() => { a_count += 1; }
-            Some(_) = handles_b.output_rx.recv() => { b_count += 1; }
-            else => break,
+            msg = handles_a.output_rx.recv(), if a_open => match msg {
+                Some(_) => a_count += 1,
+                None => a_open = false,
+            },
+            msg = handles_b.output_rx.recv(), if b_open => match msg {
+                Some(_) => b_count += 1,
+                None => b_open = false,
+            },
         }
     }
 
     let elapsed = start.elapsed();
     let _ = feeder.await;
-    let _ = handles_a.input_tx; // already dropped
 
     let snap_a1 = handles_a.metrics_a1.snapshot();
     let snap_a2 = handles_a.metrics_a2.snapshot();
