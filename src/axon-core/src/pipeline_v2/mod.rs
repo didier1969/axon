@@ -9,6 +9,7 @@
 //! wired in slices S2–S5 of REQ-AXO-289.
 
 pub mod channels;
+pub mod indexed_file_cache;
 pub mod metrics;
 pub mod worker_pool;
 
@@ -16,5 +17,6 @@ pub use channels::{
     PipelineChannelCaps, A3_TO_B1_BUFFER_CAP_DEFAULT, B1_COLDSTART_BATCH_SIZE_DEFAULT,
     INTERNAL_CHANNEL_CAP_DEFAULT,
 };
+pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
 pub use worker_pool::spawn_stage_workers;

@@ -350,6 +350,18 @@ fn ist_ddl_global() -> Vec<String> {
             last_error_at_ms BIGINT\
          )"
         .to_string(),
+        // REQ-AXO-289 streaming pipeline v2 — minimal watcher filter table.
+        // 3 columns only: path PK, content_hash for change detection,
+        // last_seen_ms for hygiene. NO status machine, NO worker_id, NO
+        // claim state. Replaces public.File during the v2 cut-over
+        // (slice S7-S8). Until then the two coexist; v2 stages exclusively
+        // read+write IndexedFile, legacy ingestion still writes public.File.
+        "CREATE TABLE IF NOT EXISTS public.IndexedFile (\
+            path TEXT PRIMARY KEY,\
+            content_hash TEXT NOT NULL,\
+            last_seen_ms BIGINT NOT NULL\
+         )"
+        .to_string(),
         format!(
             "CREATE TABLE IF NOT EXISTS public.Symbol (\
                 id TEXT PRIMARY KEY,\

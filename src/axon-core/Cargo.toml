@@ -74,6 +74,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2"
 parking_lot = "0.12.5"
 async-trait = "0.1"
+# REQ-AXO-289 streaming pipeline v2 — IndexedFile in-RAM filter cache
+# (CPT-AXO-054). arc-swap for atomic snapshot replacement on bulk reload;
+# dashmap for concurrent path → hash lookup on the watcher hot path.
+arc-swap = "1.7"
+dashmap = "6.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 libc = "0.2"
 
