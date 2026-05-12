@@ -780,27 +780,24 @@ defmodule Axon.Watcher.CockpitLive do
             <div class="band-title-row">
               <div>
                 <p class="eyebrow">Memory</p>
-                <h2>Heap, file pages & DuckDB</h2>
+                <h2>Heap & file pages</h2>
               </div>
               <span class="band-kicker">{memory_dominant(@runtime)}</span>
             </div>
 
+            <%!--
+              REQ-AXO-284: DuckDB-era stats (db_file_bytes, db_wal_bytes,
+              db_total_bytes, duckdb_memory_bytes, duckdb_temporary_bytes)
+              are not produced by the PG runtime. They are dropped here to
+              avoid surfacing 0 MB phantom rows. PG-equivalent metrics
+              (pg_database_size, buffer_cache hit ratio, etc.) are tracked
+              in the `Postgres health` band below when available.
+            --%>
             <div class="detail-grid">
               <.signal_stat label="RSS" value={"#{format_mib(@runtime.rss_bytes)} MB"} />
               <.signal_stat label="RssAnon" value={"#{format_mib(@runtime.rss_anon_bytes)} MB"} />
               <.signal_stat label="RssFile" value={"#{format_mib(@runtime.rss_file_bytes)} MB"} />
               <.signal_stat label="RssShmem" value={"#{format_mib(@runtime.rss_shmem_bytes)} MB"} />
-              <.signal_stat label="DuckDB DB" value={"#{format_mib(@runtime.db_file_bytes)} MB"} />
-              <.signal_stat label="DuckDB WAL" value={"#{format_mib(@runtime.db_wal_bytes)} MB"} />
-              <.signal_stat label="DuckDB Total" value={"#{format_mib(@runtime.db_total_bytes)} MB"} />
-              <.signal_stat
-                label="DuckDB Memory"
-                value={"#{format_mib(@runtime.duckdb_memory_bytes)} MB"}
-              />
-              <.signal_stat
-                label="DuckDB Temp"
-                value={"#{format_mib(@runtime.duckdb_temporary_bytes)} MB"}
-              />
             </div>
           </section>
         </div>

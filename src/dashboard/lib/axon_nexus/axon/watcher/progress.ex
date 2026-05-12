@@ -2,7 +2,12 @@
 
 defmodule Axon.Watcher.Progress do
   @moduledoc """
-  Factual reporting of indexing progress using DuckDB as the sole source of truth.
+  Factual reporting of indexing progress.
+
+  Source of truth: PostgreSQL canonical IST (post MIL-AXO-015 / REQ-AXO-271).
+  Queries use unquoted identifiers (`FROM File`, `FROM Chunk LEFT JOIN
+  ChunkEmbedding`) which PG case-folds to `public.file` etc. — same query
+  text works against both backends without modification.
   """
 
   alias Axon.Watcher.SqlGateway
