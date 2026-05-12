@@ -1609,6 +1609,51 @@ impl GraphStore {
         })
     }
 
+    /// REQ-AXO-288: Reset orphaned `File` rows stuck in `status='indexing'`
+    /// back to `status='pending'`. An "orphan" is a row whose
+    /// `indexing_started_at_ms` is older than `stale_after_ms` ago (or NULL),
+    /// meaning it was claimed by a prior indexer process that crashed/exited
+    /// without releasing the claim — no current worker owns the `worker_id`,
+    /// so the autonomous_ingestor's `WHERE status='pending'` filter never
+    /// re-picks them up. Without this sweep every indexer restart accumulates
+    /// orphans until the visible `pending` set shrinks toward zero.
+    ///
+    /// Returns the number of rows reset. Safe on a fresh DB (returns 0).
+    /// Intended to be called once at indexer startup before
+    /// `spawn_autonomous_ingestor` and other ingestion background tasks.
+    pub fn reset_orphaned_indexing_rows(&self, stale_after_ms: u64) -> Result<usize> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let cutoff_ms = now_ms.saturating_sub(i64::try_from(stale_after_ms).unwrap_or(i64::MAX));
+
+        let count_sql = format!(
+            "SELECT count(*) FROM File \
+             WHERE status = 'indexing' \
+               AND (indexing_started_at_ms IS NULL OR indexing_started_at_ms < {})",
+            cutoff_ms
+        );
+        let orphan_count = usize::try_from(self.query_count(&count_sql)?).unwrap_or(0);
+        if orphan_count == 0 {
+            return Ok(0);
+        }
+
+        self.execute(&format!(
+            "UPDATE File \
+             SET status = 'pending', \
+                 worker_id = NULL, \
+                 last_error_reason = NULL, \
+                 status_reason = 'reaped_orphan', \
+                 file_stage = 'promoted', \
+                 graph_ready = FALSE, \
+                 vector_ready = FALSE, \
+                 last_state_change_at_ms = {} \
+             WHERE status = 'indexing' \
+               AND (indexing_started_at_ms IS NULL OR indexing_started_at_ms < {});",
+            now_ms, cutoff_ms
+        ))?;
+
+        Ok(orphan_count)
+    }
+
     pub fn fetch_unembedded_symbols(&self, count: usize) -> Result<Vec<(String, String)>> {
         let query = format!(
             "SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}",
@@ -4225,6 +4270,77 @@ mod tests {
             .unwrap();
 
         assert_eq!(stale, 1);
+    }
+
+    #[test]
+    fn reset_orphaned_indexing_rows_resets_stale_claims_back_to_pending() {
+        // REQ-AXO-288: orphan reaper for File rows stuck in status='indexing'
+        // across indexer restarts. Three fixtures cover the matrix:
+        //   - stale claim (indexing_started_at_ms = now - 1h)    → reaped
+        //   - NULL claim timestamp                                → reaped
+        //   - fresh claim (indexing_started_at_ms = now - 1s)    → preserved
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let stale_ms = now_ms - 3_600_000;
+        let fresh_ms = now_ms - 1_000;
+
+        store
+            .execute(&format!(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority, worker_id, indexing_started_at_ms, status_reason) \
+                 VALUES ('/tmp/orphan_stale.rs', 'PRJ', 'indexing', 'claimed', FALSE, FALSE, 100, 1, 0, 12345, {}, 'claimed_for_indexing')",
+                stale_ms
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority, worker_id, indexing_started_at_ms, status_reason) \
+                 VALUES ('/tmp/fresh_claim.rs', 'PRJ', 'indexing', 'claimed', FALSE, FALSE, 100, 1, 0, 67890, {}, 'claimed_for_indexing')",
+                fresh_ms
+            ))
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority, worker_id, indexing_started_at_ms, status_reason) \
+                 VALUES ('/tmp/orphan_null.rs', 'PRJ', 'indexing', 'claimed', FALSE, FALSE, 100, 1, 0, 11111, NULL, 'claimed_for_indexing')",
+            )
+            .unwrap();
+
+        let reaped = store.reset_orphaned_indexing_rows(600_000).unwrap();
+        assert_eq!(reaped, 2, "expected 2 orphans reaped (stale + null), got {}", reaped);
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File WHERE path = '/tmp/orphan_stale.rs' AND status = 'pending' AND worker_id IS NULL AND status_reason = 'reaped_orphan' AND file_stage = 'promoted'"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File WHERE path = '/tmp/orphan_null.rs' AND status = 'pending' AND worker_id IS NULL AND status_reason = 'reaped_orphan'"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File WHERE path = '/tmp/fresh_claim.rs' AND status = 'indexing' AND worker_id = 67890 AND status_reason = 'claimed_for_indexing'"
+                )
+                .unwrap(),
+            1,
+            "fresh claim must not be reaped"
+        );
+
+        // Idempotency: re-running with no new orphans returns 0.
+        let reaped_again = store.reset_orphaned_indexing_rows(600_000).unwrap();
+        assert_eq!(reaped_again, 0, "expected idempotent reap, got {}", reaped_again);
+
+        // Fresh-DB safety: a store with no indexing rows returns 0 without erroring.
+        let pristine = crate::tests::test_helpers::create_test_db().unwrap();
+        assert_eq!(pristine.reset_orphaned_indexing_rows(600_000).unwrap(), 0);
     }
 }
 

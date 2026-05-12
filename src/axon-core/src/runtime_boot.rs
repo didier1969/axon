@@ -847,6 +847,33 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
 
     if runtime_mode.ingestion_enabled() {
+        // REQ-AXO-288: reap `File` rows orphaned in `status='indexing'` by a
+        // prior indexer crash before the new autonomous_ingestor spawns. The
+        // `fetch_pending_candidates` SQL only sees `status='pending'`, so
+        // orphans accumulate forever without this sweep. 10-minute staleness
+        // window covers normal indexer lifecycle without false-positives on
+        // legitimately-claimed rows from a still-running co-tenant indexer
+        // (no other indexer process can have claimed in the last 10 min if
+        // we're the one booting now under the same PG instance).
+        const REAPER_STALE_AFTER_MS: u64 = 600_000;
+        match graph_store.reset_orphaned_indexing_rows(REAPER_STALE_AFTER_MS) {
+            Ok(0) => {
+                info!("REQ-AXO-288 startup reaper: no orphaned indexing rows.");
+            }
+            Ok(reaped) => {
+                info!(
+                    "REQ-AXO-288 startup reaper: reset {} orphaned indexing row(s) back to pending (stale_after_ms={}).",
+                    reaped, REAPER_STALE_AFTER_MS
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "REQ-AXO-288 startup reaper failed (continuing boot): {}",
+                    err
+                );
+            }
+        }
+
         main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
         main_background::spawn_ingress_promoter(
             graph_store.clone(),
