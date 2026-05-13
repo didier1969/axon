@@ -5,7 +5,7 @@ description: Use when working in the Axon repository and choosing MCP tools, run
 
 # Axon Engineering Protocol — LLM contract (Axon-repo internal)
 
-LLM-only doc per CPT-AXO-024 / CPT-PRO-006 (SKILL/SOLL/MEMORY triad). For full prose see archived `docs/archive/2026-05-02/SKILL.md.bak`. For canonical concepts use `cypher SELECT description FROM soll.Node WHERE id='<ID>'`.
+LLM-only doc per CPT-AXO-024 / CPT-PRO-006 (SKILL/SOLL/MEMORY triad). For canonical concepts use `sql SELECT description FROM soll.Node WHERE id='<ID>'` (MCP tool renamed from `cypher` per MIL-AXO-017 slice 6B Phase F).
 
 **Scope** : this skill is for LLMs working **inside the Axon repository** (`project_code='AXO'`). For LLMs working on a **consumer project** (any non-Axon repo with Axon MCP available), route to `/axon-driven-development` instead.
 
@@ -37,36 +37,23 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. 
 ## Tool routing
 | Task | Tool |
 |---|---|
-| Find symbol (multi-token, underscore-aware REQ-AXO-088) | `query` — under `AXON_DB_BACKEND=postgres` (MIL-AXO-015 / CPT-AXO-039 superseded by CPT-AXO-043 multi-project tables, 2026-05-08), the Symbol/Chunk/File queries are SQL-shape identical to the DuckDB path with `project_code` as a row-level filter; only the cosine-distance dialect differs (pgvector `<=>` vs DuckDB `array_cosine_distance`) |
-| Inspect detail (callers/callees survive synthetic target_id format via name-suffix join, REQ-AXO-134) | `inspect` |
-| Evidence packet | `retrieve_context` — post-CPT-AXO-039 supersedure (CPT-AXO-043, 2026-05-08), semantic ANN runs against the multi-project `public.ChunkEmbedding` table with `project_code` as a row-level filter on both backends. Under PG the cosine-distance expression uses pgvector's `<=>` operator + `'[..]'::vector(N)` literal; under DuckDB the legacy `array_cosine_distance(... CAST(... AS FLOAT[N]))` form remains. |
-| Multi-resolution retrieval (intent + code + recent) in one call | `retrieve_context_layered` (REQ-AXO-264, CPT-AXO-050, Phase A v2, 2026-05-10) — wraps `retrieve_context` and re-organises the packet into `intent_band` (SOLL concepts/decisions/requirements partitioned by kind), `code_band` (chunks reused from packet), `recent_band` (`git log --since=24h --name-only` on resolved project root + cwd). Optional `bands.{intent,code,recent}.max_tokens` enforces per-band budgets (defaults 2000/6000/1500); truncation is priority-ordered (intent: requirements > decisions > concepts ; code: lowest-rank first ; recent: oldest commits first). `tokens_overflowed` per band + `metadata.total_tokens_overflowed` surfaced. recent_band exposes `status ∈ {ok, no_project_root, git_error}` so LLM clients can act on git failure modes. Backward-compat: existing `retrieve_context` shape unchanged. |
-| Blast radius | `impact` |
+| Find symbol (multi-token, underscore-aware) | `query` (REQ-AXO-088 / REQ-AXO-128) |
+| Inspect detail (callers/callees) | `inspect` (REQ-AXO-134 name-suffix join for synthetic IDs) |
+| Evidence packet | `retrieve_context` |
+| Hybrid retrieval (FTS+vector+graph RRF) | `retrieve_context_v2` (MIL-AXO-017 slice 4, public.Edge SQL) |
+| Multi-resolution (intent+code+recent) | `retrieve_context_layered` (REQ-AXO-264, CPT-AXO-050) |
+| Blast radius | `impact` (via public.callers_of, REQ-AXO-299) |
 | Why it exists | `why` |
-| Source-sink flow | `path` |
+| Source-sink flow | `path` (via public.Edge SQL) |
 | Structural risks | `anomalies` |
 | Mutation safety | `change_safety` |
 | Architecture map | `conception_view` |
 | Compact runtime | `status mode=brief` |
 | Project state | `project_status` |
 | SOLL intent | `soll_query_context` |
-| Raw graph SQL escape | `cypher` (after `schema_overview` / `list_labels_tables` / `query_examples`) |
+| Raw read-only SQL escape | `sql` (was `cypher`, renamed MIL-AXO-017 slice 6B Phase F) — after `schema_overview` / `list_labels_tables` / `query_examples` |
 
-Default `mode=brief`. `query` brain semantic search works under `brain_only` profile (REQ-AXO-128).
-
-PG age-only mode (REQ-AXO-251, `AXON_AGE_ONLY_RELATIONS=true`): SQL relation tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS / SUBSTANTIATES) are empty/dropped — `impact` / `path` / `bidi_trace` / `architectural_drift` use AGE Cypher primary; diagnostic surfaces (`truth_check`, `simulate_mutation`, `diagnose_indexing`, `axon_anomalies` analytics, `inspect` callers/callees) return neutral defaults instead of querying missing tables. Tool args/output schema unchanged.
-
-PG schema contract (REQ-AXO-216 Stop A, 2026-05-09 + REQ-AXO-254 post-promote residue, 2026-05-10): under `AXON_DB_BACKEND=postgres`, the cypher MCP escape uses PG-native namespacing — `SELECT … FROM soll.Node` (DuckDB-attached `soll.main.*` was a DuckDB-only convention). MCP tools internal to the brain (soll_validate, soll_verify_requirements, soll_query_context, soll_manager) automatically rewrite via `normalize_attached_soll_query` (REQ-AXO-249); the rewriter also handles legacy 3-part `soll.main.X → soll.X` and bare `OptimizerDecisionLog → axon_runtime.OptimizerDecisionLog` (REQ-AXO-254). MCP tools that emit `metadata LIKE '%logical_key%'` branch on backend (`metadata->>'logical_key'` for PG, LIKE for DuckDB). Direct `mcp__axon__cypher` callers should prefer the 2-part form. The 5 SQL relation tables no longer exist post-Stop A — every edge query goes through AGE Cypher (`SELECT * FROM cypher('axon_graph', $$ MATCH … $$) AS …`).
-
-PG transaction handling (REQ-AXO-254 workaround, 2026-05-10): under `AXON_DB_BACKEND=postgres`, `axon_soll_commit_revision` and `axon_soll_rollback_revision` SKIP the explicit `BEGIN/COMMIT` wrapper because the PG plugin's deadpool fresh-connection-per-call breaks the BEGIN/COMMIT pairing (BEGIN ends on conn A, INSERTs on conns B/C/…, leaving conn A "idle in transaction" with row locks held). Each INSERT auto-commits; partial failures leave the soll.Revision row in place and the operator can clean up via `soll_rollback_revision`. DuckDB keeps the explicit transaction (single-connection, no pool). The proper architectural fix (`with_pinned_connection` primitive) is tracked under REQ-AXO-254.
-
-Broken evidence cleanup (REQ-AXO-254 closure of MIL-AXO-015 wave G followup, 2026-05-10): `soll_remove_evidence` is the canonical verb to prune `soll.Traceability` rows when refactors leave behind file/document references that no longer resolve. Default mode `broken_only=true` removes ONLY rows whose `artifact_ref` does not exist on disk (project-root-relative or absolute, same path-resolution as `broken_file_evidence_count_for_requirement`). Idempotent — running twice returns `removed_count=0`. Set `broken_only=false` and supply explicit `artifact_refs` to surgically drop a stale row whose target still exists (e.g. file moved). Use after audit confirms the broken rows are residue, not legitimate traceability targets.
-
-Vector lane pipeline mode (REQ-AXO-270 Phase 1, 2026-05-10): `AXON_VECTOR_PIPELINE_STAGES` selects the embedder lane shape — unset / `1` (default) keeps DEC-AXO-070 single-loop; `3` activates the Phase 1 skeleton (Producer / Embedder / Persister stage stubs that warn + heartbeat only — NO chunks are embedded, runtime parks in a 5s sleep). Use `3` only for Phase 2 wiring tests and Phase 3 benches; production keeps the default. Phase 2 fills the stages; Phase 2 AC2.7 mandates the Persister bulk-writes ≥1000 rows per DB transaction (one multi-row INSERT/COPY per tick rather than per-chunk inserts) — operator directive 2026-05-10, aligns with REQ-AXO-244 `execute_batch` path.
-
-DuckDB excision (REQ-AXO-271, 2026-05-10): operator directive "supprime tous ces éléments de DuckDB". Slice 1 removed the DuckDB-era Parquet side-stores — `embedder/parquet_embedding_store.rs` (DEC-AXO-073), `graph_ingestion/parquet_chunk_content_store.rs` + `graph_ingestion/chunk_content_archiver.rs` (DEC-AXO-074). `AXON_PARQUET_EMBEDDING_STORE_ENABLED` and `AXON_PARQUET_CHUNK_CONTENT_ENABLED` env vars are now no-ops. `mcp__retrieve_context` semantic candidate JOIN goes through `ChunkEmbedding` directly on both backends (PG = pgvector `<=>`, DuckDB = `array_cosine_distance`). Future slices collapse `is_postgres_backend()` branches → PG-only.
-
-MIL-AXO-017 AGE retirement (DEC-AXO-083, slices 1-5 shipped 2026-05-13): canonical IST edge storage migrating from Apache AGE elabels (`axon_graph` schema, 3-5× slower at depth=5 due to agtype overhead) onto the unified `public.Edge(source_id, target_id, relation_type, project_code, metadata, created_at_ms)` table with composite B-tree + GIN indexes. Slice 1 added the schema (REQ-AXO-295). Slice 2 added the SQL function library `db/ddl/04_graph_functions.sql` (REQ-AXO-296): `public.impact / callers_of / why_chain / blast_radius / path` — all `LANGUAGE sql STABLE PARALLEL SAFE` wrapping `WITH RECURSIVE` on `public.Edge`. Slice 3 wired A3 to dual-write `public.Edge` alongside AGE (REQ-AXO-297). Slice 4 added `public.retrieve_context_v2(query_text, query_embedding, project_code, k)` — single-plan RRF (k=60) fusion of FTS + vector + 2-hop graph (REQ-AXO-298). Slice 5 (REQ-AXO-299, partial) basculed `axon_impact` MCP tool onto `public.callers_of` with AGE Cypher fallback during the transitional dual-write window. Slices 6 (REQ-AXO-300, AGE drop + bascule the remaining 5 named tools) and 7 (REQ-AXO-301, live promote + VAL-AXO-073) are operator-gated.
+Backend = PostgreSQL 17 + pgvector (DuckDB fully purged REQ-AXO-271, AGE retiring MIL-AXO-017). Default `mode=brief`. SOLL canonical query path = 2-part `soll.Node` (REQ-AXO-216).
 
 ## Search recovery (server guidance is primary)
 1. Follow `next_action` first
@@ -207,16 +194,14 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 - `soll_validate` exempts `status='archived'` Requirements from `Orphan requirements` and `Requirements without criteria/evidence` reports (REQ-AXO-245). Archived = closed work; the violation list must be reachable to zero by curation alone. `status='completed'` Requirements still surface if no Traceability evidence is attached — attach a commit/test ref via `soll_attach_evidence` to clear them
 
 ## Architecture-state CPTs (load these at session start for perf work)
-Each CPT below names a load-bearing structural fact discovered the hard way. Fetch via `cypher SELECT description FROM soll.Node WHERE id='<CPT-ID>'` (IDs assigned when entries are created in SOLL).
+Fetch via `sql SELECT description FROM soll.Node WHERE id='<CPT-ID>'`.
 
 | CPT | Anchor | When to load |
 |---|---|---|
-| Single writer mutex serialization | `graph.rs:33` | Any perf or contention work |
-| DuckDB plugin layer (FFI) | `axon-plugin-duckdb/src/lib.rs` | Extending DB capabilities (Appender, Parquet, etc.) |
-| Writer Actor batching pattern | `worker.rs:296` | Throughput / pipeline work |
+| CPT-AXO-054 streaming pipeline v2 (A1/A2/A3 → B1/B2/B3) | `src/axon-core/src/pipeline_v2/` | Indexer / throughput work |
+| Writer Actor batching pattern | `graph_ingestion/async_writer.rs` | Throughput / pipeline work |
 | Memgraph publication contract | `bin_memgraph_publication.rs` | Visualization or publication |
 | Env var 2-layer propagation | `axon-instance.sh` + `start.sh` | Adding new `AXON_*` env knobs |
-| DuckDB workload boundaries | empirical (VAL-AXO-034/036) | Any storage or write-heavy redesign |
 
 ## Performance investigation playbook
 1. **Instrument first** — add per-stage `Instant::now()` to `vector_worker_loop` + `writer_actor`; emit timings via sidecar trace files (pattern: `writer_actor_trace()` / `vector_trace()`). Bypass tracing subscriber so signal stays clean under noisy `RUST_LOG`.
@@ -232,7 +217,7 @@ Each CPT below names a load-bearing structural fact discovered the hard way. Fet
 | PERMISSION CAVEAT | sub-agents can be denied `axon-dev start` permissions. Always verify by starting long-running services from the parent shell. Pattern: parent runs `./scripts/axon-dev start ...`; sub-agent runs `sleep N; capture heartbeat snapshots; ./scripts/axon-dev stop` |
 
 ## Hand Off (systematic, every session end)
-Procedure canonical = **GUI-PRO-028 Axon Hand Off** in SOLL. Read body via `soll_query_context` or `cypher SELECT description FROM soll.Node WHERE id='GUI-PRO-028'` (REQ-AXO-90007 caveat under PG-only). 5 mandatory steps : (1) SOLL session_pointer `CPT-AXO-052` update, (2) SOLL cleanup + `soll_work_plan` topological replan, (3) boot-loaded docs prune+compact (MEMORY.md / CLAUDE.md ×3 / kickoff_bundle nodes), (4) this SKILL.md consolidation pass (no DuckDB/retired-tool residue), (5) working-notes audit. No content duplicated here — body lives in GUI-PRO-028 only.
+Procedure canonical = **GUI-PRO-028 Axon Hand Off** in SOLL. Read body via `soll_query_context` or `sql SELECT description FROM soll.Node WHERE id='GUI-PRO-028'`. 5 mandatory steps : (1) SOLL session_pointer `CPT-AXO-052` update, (2) SOLL cleanup + `soll_work_plan` topological replan, (3) boot-loaded docs prune+compact (MEMORY.md / CLAUDE.md ×3 / kickoff_bundle nodes), (4) this SKILL.md consolidation pass, (5) working-notes audit. No content duplicated here — body lives in GUI-PRO-028 only.
 
 ## Maintenance
 Update this skill when: tool names change, surface visibility changes, runtime authority changes, SOLL workflow/schema changes, qualification or release protocol changes. Concept canonicals (CPT-AXO-018/019/020/021/024/025) live in SOLL — `soll_manager(action=update)` them, never copy-paste. SKILL.md prune = step 4 of GUI-PRO-028 each Hand Off.
