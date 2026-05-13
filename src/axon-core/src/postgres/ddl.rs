@@ -71,13 +71,15 @@ pub fn generate_global_schema() -> Vec<String> {
         // `public`) to match the consumer code path that the DuckDB-era
         // init_schema established (graph_bootstrap.rs:1368). Columns
         // mirror the DuckDB ALTER chain (project_name, project_path,
-        // project_slug, session_pointer_json) so axon_init_project +
-        // soll_validate + axon_commit_work all round-trip on PG.
+        // session_pointer_json) so axon_init_project + soll_validate +
+        // axon_commit_work all round-trip on PG. REQ-AXO-90003: the
+        // `project_slug` column (canonical column rename to
+        // `project_code` in 2026-04 hardening) is no longer materialised
+        // here — `project_code` is sole identifier.
         "CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (\
             project_code TEXT PRIMARY KEY,\
             project_name TEXT,\
             project_path TEXT,\
-            project_slug TEXT,\
             session_pointer_json TEXT,\
             registered_at_ms BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::BIGINT\
          )"

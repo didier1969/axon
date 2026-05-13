@@ -11,10 +11,31 @@ CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
     project_code TEXT PRIMARY KEY,
     project_name TEXT,
     project_path TEXT,
-    project_slug TEXT,
     session_pointer_json TEXT,
     registered_at_ms BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::BIGINT
 );
+-- REQ-AXO-90003 cleanup migration: live DBs may still carry the legacy
+-- `project_slug` column from pre-2026-04 schemas. Drop it idempotently
+-- (ProjectCodeRegistry) and rename it to project_code (Registry +
+-- RevisionPreview). Wrapped in DO blocks so re-running the script after
+-- migration is a no-op.
+ALTER TABLE soll.ProjectCodeRegistry DROP COLUMN IF EXISTS project_slug;
+DO $migrate$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='soll' AND table_name='registry' AND column_name='project_slug'
+    ) THEN
+        EXECUTE 'ALTER TABLE soll.Registry RENAME COLUMN project_slug TO project_code';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='soll' AND table_name='revisionpreview' AND column_name='project_slug'
+    ) THEN
+        EXECUTE 'ALTER TABLE soll.RevisionPreview RENAME COLUMN project_slug TO project_code';
+    END IF;
+END
+$migrate$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx
     ON soll.ProjectCodeRegistry(project_code);

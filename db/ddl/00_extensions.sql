@@ -37,41 +37,11 @@ BEGIN
 END
 $$;
 
--- AGE labels — idempotent because `create_vlabel` / `create_elabel`
--- raise on duplicate. We catch any "already exists" error so re-runs
--- on a populated graph are safe.
-DO $$
-DECLARE
-    lbl TEXT;
-    kind TEXT;
-BEGIN
-    FOR kind, lbl IN VALUES
-        ('vlabel', 'File'),
-        ('vlabel', 'Symbol'),
-        ('vlabel', 'Chunk'),
-        ('elabel', 'CONTAINS'),
-        ('elabel', 'CALLS'),
-        ('elabel', 'CALLS_NIF'),
-        ('elabel', 'IMPACTS'),
-        ('elabel', 'SUBSTANTIATES')
-    LOOP
-        BEGIN
-            IF kind = 'vlabel' THEN
-                PERFORM ag_catalog.create_vlabel('axon_graph', lbl);
-            ELSE
-                PERFORM ag_catalog.create_elabel('axon_graph', lbl);
-            END IF;
-        EXCEPTION
-            WHEN duplicate_table THEN NULL;
-            WHEN duplicate_object THEN NULL;
-            WHEN sqlstate '42P07' THEN NULL;
-            WHEN OTHERS THEN
-                IF SQLERRM LIKE '%already exists%' THEN
-                    NULL;
-                ELSE
-                    RAISE;
-                END IF;
-        END;
-    END LOOP;
-END
-$$;
+-- AGE label creation removed (MIL-AXO-017 slice 6A / REQ-AXO-90005).
+-- AGE labels are no longer created at bootstrap — `public.Edge` is the
+-- canonical structural edge storage (DEC-AXO-083). Existing live/dev
+-- DBs keep their pre-existing axon_graph labels dormant until the
+-- destructive DROP SCHEMA is executed in the AGE-drop followup.
+-- The cstring vs TEXT mismatch on AGE 1.5.x ag_catalog.create_vlabel
+-- signature also made this block non-idempotent in practice, so even
+-- on AGE retention this block was a permanent bootstrap blocker.

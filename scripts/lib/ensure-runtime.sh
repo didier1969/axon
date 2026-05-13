@@ -200,6 +200,36 @@ ensure_database_seeded() {
     echo "✅ ${dbname} restored (soll.node=${node_count})"
 }
 
+apply_canonical_ddl() {
+    # REQ-AXO-90004 — Auto-install of DEC-AXO-082 canonical DDL files.
+    # Applies db/ddl/[0-9][0-9]_*.sql in lexical order to the target DB.
+    # Each file is idempotent (CREATE TABLE/INDEX/FUNCTION IF NOT EXISTS
+    # or CREATE OR REPLACE for functions), so re-running is a no-op.
+    # Replaces the previous manual-`psql -f` step that the operator
+    # had to remember after every promote-live.
+    local instance="$1"  # "live" or "dev"
+    local dbname="axon_${instance}"
+    local repo_root="${AXON_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local ddl_root="${repo_root}/db/ddl"
+    if [[ ! -d "$ddl_root" ]]; then
+        echo "ℹ️ ${dbname}: no db/ddl directory at ${ddl_root}; skip canonical DDL apply"
+        return 0
+    fi
+    local file applied=0
+    for file in "$ddl_root"/[0-9][0-9]_*.sql; do
+        [[ -f "$file" ]] || continue
+        if ! "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
+                -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >/dev/null 2>&1; then
+            echo "❌ ${dbname}: applying canonical DDL $(basename "$file") failed." >&2
+            return 1
+        fi
+        applied=$((applied + 1))
+    done
+    if [[ "$applied" -gt 0 ]]; then
+        echo "✅ ${dbname}: applied ${applied} canonical DDL file(s) from db/ddl/"
+    fi
+}
+
 ensure_runtime_ready() {
     local instance="${1:-${AXON_INSTANCE_KIND:-live}}"
     if [[ -z "$PSQL_BIN" || -z "$PG_ISREADY_BIN" ]]; then
@@ -210,4 +240,5 @@ ensure_runtime_ready() {
     ensure_devenv_pg_running || return 1
     ensure_axon_role_exists || return 1
     ensure_database_seeded "$instance" || return 1
+    apply_canonical_ddl "$instance" || return 1
 }
