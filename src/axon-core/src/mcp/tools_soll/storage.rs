@@ -74,12 +74,8 @@ impl McpServer {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
 
-        // REQ-AXO-90006 : Registry counter is the single source of truth. We do NOT
-        // chain off MAX(soll.Node.id) — that legacy fallback let fixture leaks (e.g.
-        // REQ-AXO-90001) poison the sequence and produce 5-digit IDs out of order.
-        // If Registry desyncs from Node, repair via an explicit admin command, never
-        // via implicit silent recovery on the read path.
-        let _ = (table, id_expr); // tuple fields kept for future ergonomic resets
+        // DEC-AXO-085: counter = soll.Registry, single source of truth.
+        let _ = (table, id_expr);
         let next = current + 1;
         self.graph_store.execute(&format!(
             "UPDATE soll.Registry SET {} = {} WHERE project_code = '{}'",
@@ -246,8 +242,7 @@ pub(super) fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// Format the canonical SOLL ID per **GUI-AXO-1000** : `XXX-YYY-NNN` with
-/// `NNN` zero-padded to minimum 3 digits (no upper cap).
+/// DEC-AXO-085: format = `TYPE-PROJ-N` with N min 3 digits zero-padded.
 pub(super) fn format_canonical_id(prefix: &str, project_code: &str, next: u64) -> String {
     format!("{prefix}-{project_code}-{next:03}")
 }

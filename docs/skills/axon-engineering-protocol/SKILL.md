@@ -148,7 +148,7 @@ For `soll_verify_requirements`: a Requirement is **done** EITHER when status ∈
 CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` (or `--args-file -` for stdin). Avoid fragile inline shell JSON.
 
 ## Identity
-Server-owned IDs `XXX-YYY-NNN` per **GUI-AXO-1000** (canonical SOLL ID format — single source of truth, no rediscussion). Format : 3-letter type, 3-char project_code (1st alpha + 2 alphanum, all uppercase), suffix min 3 digits zero-padded no upper cap. Sequence from `soll.Registry.last_{type}` only — never from `MAX(soll.Node.id)`. Never fabricate: project_code, preview, revision, SOLL IDs. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only, registration succeeds. Backend-agnostic per DEC-AXO-075 (now PG-only post-MIL-AXO-015).
+ID format = **DEC-AXO-085** (`TYPE-PROJ-N`, server-assigned, never fabricate). Counter source: `soll.Registry.last_{type}`. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only.
 
 ## Delivery flow
 1. `status`
