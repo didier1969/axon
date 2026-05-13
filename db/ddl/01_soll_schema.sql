@@ -70,6 +70,71 @@ CREATE TABLE IF NOT EXISTS soll.Node (
     metadata JSONB
 );
 
+-- REQ-AXO-90006: Canonical ID format = `XXX-YYY-NNN` where
+--   XXX = 3 uppercase letters (entity type : VIS/PIL/REQ/CPT/DEC/MIL/VAL/STK/GUI)
+--   YYY = 3-char project_code, first char alpha, chars 2-3 alphanumeric, all uppercase
+--   NNN = unique sequence per (XXX, YYY), minimum 3 digits, zero-padded if < 100,
+--         no upper cap (the canonical allocator produces "001" through "9999999...").
+-- The sequence is owned by soll.Registry (last_vis / last_pil / ...). The allocator
+-- (mcp/tools_soll/storage.rs::next_server_numeric_id) MUST NOT chain off observed
+-- max in soll.Node — that path poisoned the counter when test fixtures leaked IDs
+-- like REQ-AXO-90001 (session-23 incident → REQ-AXO-90007 mis-allocated).
+-- Drop superseded sentinel (incorrect digit cap) if still present.
+ALTER TABLE soll.Node DROP CONSTRAINT IF EXISTS soll_node_canonical_id_range;
+DO $canonical_id$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_schema = 'soll'
+          AND table_name = 'node'
+          AND constraint_name = 'soll_node_canonical_id_format'
+    ) THEN
+        ALTER TABLE soll.Node
+            ADD CONSTRAINT soll_node_canonical_id_format
+            CHECK (id ~ '^[A-Z]{3}-[A-Z][A-Z0-9]{2}-[0-9]{3,}$')
+            NOT VALID;
+    END IF;
+END
+$canonical_id$;
+
+-- Project_code invariant : 3 chars, first char alphabetic, chars 2-3 alphanumeric,
+-- all uppercase. Applied across every SOLL table that stores a project_code column.
+-- NOT VALID to preserve legacy rows ; future inserts/updates must conform.
+DO $project_code_canonical$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_node_project_code_canonical') THEN
+        ALTER TABLE soll.Node ADD CONSTRAINT soll_node_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_edge_project_code_canonical') THEN
+        ALTER TABLE soll.Edge ADD CONSTRAINT soll_edge_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revision_project_code_canonical') THEN
+        ALTER TABLE soll.Revision ADD CONSTRAINT soll_revision_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revchange_project_code_canonical') THEN
+        ALTER TABLE soll.RevisionChange ADD CONSTRAINT soll_revchange_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revprev_project_code_canonical') THEN
+        ALTER TABLE soll.RevisionPreview ADD CONSTRAINT soll_revprev_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_mcpjob_project_code_canonical') THEN
+        ALTER TABLE soll.McpJob ADD CONSTRAINT soll_mcpjob_project_code_canonical
+            CHECK (project_code IS NULL OR project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+END
+$project_code_canonical$;
+
 CREATE TABLE IF NOT EXISTS soll.Edge (
     source_id TEXT NOT NULL,
     target_id TEXT NOT NULL,

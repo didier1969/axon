@@ -74,22 +74,13 @@ impl McpServer {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let ids_query = format!(
-            "SELECT {} FROM {} WHERE {} LIKE '{}-{}-%'",
-            id_expr,
-            table,
-            id_expr,
-            prefix,
-            escape_sql(&project_code)
-        );
-        let observed_max = self
-            .query_single_column(&ids_query)?
-            .into_iter()
-            .filter_map(|value| parse_numeric_suffix(&value))
-            .max()
-            .unwrap_or(0);
-
-        let next = current.max(observed_max) + 1;
+        // REQ-AXO-90006 : Registry counter is the single source of truth. We do NOT
+        // chain off MAX(soll.Node.id) — that legacy fallback let fixture leaks (e.g.
+        // REQ-AXO-90001) poison the sequence and produce 5-digit IDs out of order.
+        // If Registry desyncs from Node, repair via an explicit admin command, never
+        // via implicit silent recovery on the read path.
+        let _ = (table, id_expr); // tuple fields kept for future ergonomic resets
+        let next = current + 1;
         self.graph_store.execute(&format!(
             "UPDATE soll.Registry SET {} = {} WHERE project_code = '{}'",
             reg_col,
@@ -253,4 +244,61 @@ pub(super) fn parse_numeric_suffix(value: &str) -> Option<u64> {
 
 pub(super) fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+/// Format the canonical SOLL ID per **GUI-AXO-1000** : `XXX-YYY-NNN` with
+/// `NNN` zero-padded to minimum 3 digits (no upper cap).
+pub(super) fn format_canonical_id(prefix: &str, project_code: &str, next: u64) -> String {
+    format!("{prefix}-{project_code}-{next:03}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use regex::Regex;
+
+    fn canonical_regex() -> Regex {
+        Regex::new(r"^[A-Z]{3}-[A-Z][A-Z0-9]{2}-[0-9]{3,}$").unwrap()
+    }
+
+    #[test]
+    fn format_canonical_id_zero_pads_below_one_hundred() {
+        assert_eq!(format_canonical_id("REQ", "AXO", 1), "REQ-AXO-001");
+        assert_eq!(format_canonical_id("REQ", "AXO", 42), "REQ-AXO-042");
+        assert_eq!(format_canonical_id("CPT", "BKS", 99), "CPT-BKS-099");
+    }
+
+    #[test]
+    fn format_canonical_id_keeps_natural_length_above_three_digits() {
+        assert_eq!(format_canonical_id("REQ", "AXO", 100), "REQ-AXO-100");
+        assert_eq!(format_canonical_id("REQ", "AXO", 999), "REQ-AXO-999");
+        assert_eq!(format_canonical_id("REQ", "AXO", 1_000), "REQ-AXO-1000");
+        assert_eq!(format_canonical_id("REQ", "AXO", 9_999), "REQ-AXO-9999");
+        assert_eq!(format_canonical_id("REQ", "AXO", 10_000), "REQ-AXO-10000");
+        assert_eq!(format_canonical_id("REQ", "AXO", 1_000_000), "REQ-AXO-1000000");
+    }
+
+    #[test]
+    fn format_canonical_id_outputs_match_canonical_regex() {
+        let re = canonical_regex();
+        for n in [1u64, 42, 99, 100, 999, 1_000, 9_999, 10_000, 99_999] {
+            let id = format_canonical_id("REQ", "AXO", n);
+            assert!(re.is_match(&id), "{id} must match canonical pattern");
+        }
+        // Project code with alphanumeric (TE2) — canonical project_code regex allows it.
+        assert!(re.is_match(&format_canonical_id("DEC", "TE2", 1)));
+    }
+
+    #[test]
+    fn canonical_regex_rejects_malformed_ids() {
+        let re = canonical_regex();
+        assert!(!re.is_match("REQ-AXO-01"), "<3 digit suffix forbidden");
+        assert!(!re.is_match("REQU-AXO-001"), "4-letter type forbidden");
+        assert!(!re.is_match("REQ-AX-001"), "2-char project_code forbidden");
+        assert!(!re.is_match("REQ-1AX-001"), "project_code first char must be alpha");
+        assert!(!re.is_match("REQ-axo-001"), "project_code must be uppercase");
+        assert!(!re.is_match("REQ-AXO-01a"), "suffix must be digits only");
+        assert!(!re.is_match("REQ-AXO-"), "suffix cannot be empty");
+        assert!(!re.is_match("R3Q-AXO-001"), "type must be alphabetic");
+    }
 }

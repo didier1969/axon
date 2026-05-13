@@ -148,7 +148,7 @@ For `soll_verify_requirements`: a Requirement is **done** EITHER when status ∈
 CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> --args-file <file.json>` (or `--args-file -` for stdin). Avoid fragile inline shell JSON.
 
 ## Identity
-Server-owned IDs `TYPE-CODE-NNN`. Never fabricate: project_code, preview, revision, SOLL IDs. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only, registration succeeds. Backend-agnostic: same contract under DuckDB or PostgreSQL deployment (DEC-AXO-075).
+Server-owned IDs `XXX-YYY-NNN` per **GUI-AXO-1000** (canonical SOLL ID format — single source of truth, no rediscussion). Format : 3-letter type, 3-char project_code (1st alpha + 2 alphanum, all uppercase), suffix min 3 digits zero-padded no upper cap. Sequence from `soll.Registry.last_{type}` only — never from `MAX(soll.Node.id)`. Never fabricate: project_code, preview, revision, SOLL IDs. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only, registration succeeds. Backend-agnostic per DEC-AXO-075 (now PG-only post-MIL-AXO-015).
 
 ## Delivery flow
 1. `status`
@@ -226,5 +226,8 @@ Each CPT below names a load-bearing structural fact discovered the hard way. Fet
 | FORBIDDEN | code exploration that would force IST reconstruction — sub-agents have no MCP, so they re-read source and burn 100-200K tokens |
 | PERMISSION CAVEAT | sub-agents can be denied `axon-dev start` permissions. Always verify by starting long-running services from the parent shell. Pattern: parent runs `./scripts/axon-dev start ...`; sub-agent runs `sleep N; capture heartbeat snapshots; ./scripts/axon-dev stop` |
 
+## Hand Off (systematic, every session end)
+Procedure canonical = **GUI-PRO-028 Axon Hand Off** in SOLL. Read body via `soll_query_context` or `cypher SELECT description FROM soll.Node WHERE id='GUI-PRO-028'` (REQ-AXO-90007 caveat under PG-only). 5 mandatory steps : (1) SOLL session_pointer `CPT-AXO-052` update, (2) SOLL cleanup + `soll_work_plan` topological replan, (3) boot-loaded docs prune+compact (MEMORY.md / CLAUDE.md ×3 / kickoff_bundle nodes), (4) this SKILL.md consolidation pass (no DuckDB/retired-tool residue), (5) working-notes audit. No content duplicated here — body lives in GUI-PRO-028 only.
+
 ## Maintenance
-Update this skill when: tool names change, surface visibility changes, runtime authority changes, SOLL workflow/schema changes, qualification or release protocol changes. Concept canonicals (CPT-AXO-018/019/020/021/024/025) live in SOLL — `soll_manager(action=update)` them, never copy-paste.
+Update this skill when: tool names change, surface visibility changes, runtime authority changes, SOLL workflow/schema changes, qualification or release protocol changes. Concept canonicals (CPT-AXO-018/019/020/021/024/025) live in SOLL — `soll_manager(action=update)` them, never copy-paste. SKILL.md prune = step 4 of GUI-PRO-028 each Hand Off.

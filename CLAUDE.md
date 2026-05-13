@@ -22,10 +22,10 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Component | Path | Note |
 |---|---|---|
 | Runtime | `src/axon-core/` | Rust |
-| DB | PostgreSQL 17 + AGE + pgvector | canonical IST + SOLL (post-MIL-AXO-015 ; REQ-AXO-271 retires the legacy embedded-DuckDB path) |
+| DB | PostgreSQL 17 + pgvector (+ AGE retiring) | canonical IST + SOLL. DuckDB fully purged (REQ-AXO-271). AGE retirement in flight per **MIL-AXO-017 / DEC-AXO-083** — IST edges migrate to `public.Edge` + `WITH RECURSIVE` SQL functions (`db/ddl/04_graph_functions.sql`). Slices 1-5 + 6A shipped, 6B + 7 pending. |
 | Streaming pipeline v2 | `src/axon-core/src/pipeline_v2/` | A1/A2/A3 (graph + chunks + FTS, CPU) → try_send → B1/B2/B3 (GPU embed). REQ-AXO-289 / CPT-AXO-054 (session 19 canonical). Diagram: `docs/architecture/visualize-nexus-pull.html`. |
 | GPU | `src/axon-core/src/embedder/` | ONNX Runtime, CUDA/TensorRT EP, BGE-Large 1024d. `GpuB2Embedder` (pipeline_v2/embedder_gpu.rs) is the v2 wrapper. |
-| MCP server | `src/axon-core/src/mcp/` | 60 public tools |
+| MCP server | `src/axon-core/src/mcp/` | live tool count via `status mode=brief` |
 | Visualization | Memgraph | human-only, non-canonical |
 | Dashboard | Elixir/Phoenix | observation only |
 | Supervisor | `src/axon-core/src/bin/axonctl.rs` | — |
@@ -42,7 +42,8 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Structural risks | `anomalies` |
 | SOLL intent | `soll_query_context` |
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
-| Lexical / text search | `code_search` (REQ-AXO-292, gated — pending REQ-AXO-289 cut-over + ≥250 ch/s sustained) |
+| Hybrid retrieval (FTS+vector+graph RRF) | `retrieve_context_v2` (MIL-AXO-017 slice 4 / REQ-AXO-298) |
+| Lexical / text search | `code_search` (REQ-AXO-292 backlog, largely subsumed by `retrieve_context_v2`) |
 
 ## Pipeline v2 bench
 ```
@@ -72,6 +73,9 @@ Full operator reference: `docs/skills/axon-engineering-protocol/SKILL.md`.
 - SOLL: NEVER delete (visions/requirements/decisions). Roll back via `soll_rollback_revision`.
 - IST dev: delete freely; rebuilt by indexer from source.
 - IST live: delete only on explicit user request; serves MCP clients.
+
+## Session Hand Off (every session end)
+Procedure = **GUI-PRO-028** in SOLL (5 mandatory steps : session_pointer / SOLL cleanup+replan / boot-docs prune / SKILL.md consolidation / working-notes audit). Trigger : "Axon Hand Off" or context approaching 70%. Read body via `soll_query_context` or `retrieve_context question="GUI-PRO-028 body"`. NO content duplicated here.
 
 ## Deployment Pipeline
 - NEVER manual `cargo build --release` + copy to `bin/`. Use the pipeline.
