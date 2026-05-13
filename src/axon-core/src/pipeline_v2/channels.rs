@@ -62,15 +62,24 @@ pub const A3_BATCH_SIZE_DEFAULT: usize = 32;
 /// override: `AXON_A3_BATCH_TIMEOUT_MS`.
 pub const A3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
 
-/// REQ-AXO-295 — Default batch size for the B3 ChunkEmbedding UPSERT
-/// writer. Mirror of A3: single-row UPSERTs to pgvector contend on
-/// HNSW index updates; multi-row UPSERT amortizes the contention.
-/// Operator override: `AXON_B3_BATCH_SIZE`.
-pub const B3_BATCH_SIZE_DEFAULT: usize = 64;
+/// Default batch size for the B3 ChunkEmbedding UPSERT writer.
+/// Multi-row UPSERTs amortize pgvector HNSW index maintenance cost
+/// (a single transaction does N graph mutations vs N transactions ×
+/// 1 mutation). 256 = 4× B2's 64-batch — B2 flushes faster than B3
+/// can drain at single-batch granularity, so widening B3 closes the
+/// downstream throttle. Operator override: `AXON_B3_BATCH_SIZE`.
+pub const B3_BATCH_SIZE_DEFAULT: usize = 256;
 
-/// REQ-AXO-295 — B3 partial-batch flush timeout. Operator override:
+/// B3 partial-batch flush timeout. **Critical: 200 ms, not 10 ms.**
+/// Prior 10 ms default was copy-pasted from A3 (whose 10 ms floor
+/// was operator-requested 2026-05-12 for FTS visibility latency).
+/// B3 is the terminal vector writer — embedding latency adds nothing
+/// downstream, while a too-eager flush degrades the effective batch
+/// to ~1 row per tick under realistic B2 arrival rates (100-300/s),
+/// nullifying `B3_BATCH_SIZE`. 200 ms gives B3 enough wall time to
+/// collect a full batch from B2's GPU bursts. Operator override:
 /// `AXON_B3_BATCH_TIMEOUT_MS`.
-pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
+pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
 
 /// Effective pipeline channel capacities after env-var resolution.
 ///
@@ -196,7 +205,7 @@ mod tests {
         let caps = PipelineChannelCaps::default();
         assert_eq!(caps.a3_batch_size, 32);
         assert_eq!(caps.a3_batch_timeout_ms, 10);
-        assert_eq!(caps.b3_batch_size, 64);
-        assert_eq!(caps.b3_batch_timeout_ms, 10);
+        assert_eq!(caps.b3_batch_size, 256);
+        assert_eq!(caps.b3_batch_timeout_ms, 200);
     }
 }
