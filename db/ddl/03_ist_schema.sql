@@ -9,6 +9,15 @@
 
 -- ── Core IST tables ──────────────────────────────────────────────────
 
+-- public.RuntimeMetadata — KV store probed by scripts/start.sh schema
+-- gate (line 725). Created here so the PG bootstrap path satisfies the
+-- DuckDB-era invariant. Stores runtime build metadata, active install
+-- generation, last promote timestamp, etc.
+CREATE TABLE IF NOT EXISTS public.RuntimeMetadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
 -- public.File — legacy state machine. Retained for the v2 cut-over
 -- window (REQ-AXO-289 S7→S8); empty rows expected in pure-v2 indexer
 -- runs because the new pipeline writes IndexedFile instead.
