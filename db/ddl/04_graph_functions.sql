@@ -256,3 +256,160 @@ $$;
 
 COMMENT ON FUNCTION public.path(TEXT, TEXT, INT, TEXT) IS
 'Shortest path from start_id to end_id on public.Edge, up to max_depth hops. Returns one row per hop with the outbound relation to the next node. Empty if unreachable. Replaces AGE Cypher SHORTEST_PATH for MCP path tool.';
+
+-- ─────────────────────────────────────────────────────────────────────
+-- retrieve_context_v2(query_text, query_embedding, project_code, k)
+--   (MIL-AXO-017, REQ-AXO-298, DEC-AXO-083)
+--
+-- Unified hybrid retrieval over the three orthogonal indexes on
+-- `public.Chunk` substance:
+--
+--   1. FTS lane — `public.Chunk.content_tsv` GIN
+--      (REQ-AXO-292 GENERATED column).
+--   2. Vector lane — `public.ChunkEmbedding.embedding` pgvector HNSW
+--      (cosine distance via `<=>`).
+--   3. Graph lane — `public.Edge` 2-hop expansion around the chunks
+--      surfaced by lanes 1 and 2 (re-uses their seed symbols).
+--
+-- All three lanes' candidate sets are fused with **Reciprocal Rank
+-- Fusion** (Cormack et al., 2009; k_rrf = 60). RRF is robust to
+-- score-scale differences across heterogeneous rankers and is the
+-- pattern Anthropic, OpenAI, and Elastic recommend for hybrid retrieval.
+--
+-- The whole computation lives inside a single PG plan — the planner
+-- chooses join order across the 3 lanes (e.g. tiny chunk set → graph
+-- expansion last). This is the key win over the legacy 3-code-paths
+-- retrieve_context which did client-side fusion across separate calls.
+--
+-- Acceptance target (VAL-AXO-073 gate 4): p95 < 100 ms on the AXO
+-- production corpus.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.retrieve_context_v2(
+    p_query_text      TEXT,
+    p_query_embedding vector(1024),
+    p_project_code    TEXT,
+    p_k               INT DEFAULT 20
+) RETURNS TABLE (
+    chunk_id         TEXT,
+    content          TEXT,
+    file_path        TEXT,
+    symbol_id        TEXT,
+    rrf_score        DOUBLE PRECISION,
+    fts_score        DOUBLE PRECISION,
+    vector_distance  DOUBLE PRECISION,
+    graph_distance   INT
+)
+LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    WITH
+    -- Lane 1 — FTS. plainto_tsquery normalises the operator's free-text
+    -- query; we over-fetch by 3x p_k so RRF has room to blend.
+    fts_lane AS (
+        SELECT
+            c.id AS chunk_id,
+            ROW_NUMBER() OVER (
+                ORDER BY ts_rank_cd(c.content_tsv,
+                                    plainto_tsquery('english', p_query_text)) DESC
+            ) AS rank,
+            ts_rank_cd(c.content_tsv,
+                       plainto_tsquery('english', p_query_text)) AS score
+        FROM public.Chunk c
+        WHERE (p_project_code = '' OR c.project_code = p_project_code)
+          AND c.content_tsv @@ plainto_tsquery('english', p_query_text)
+        ORDER BY score DESC
+        LIMIT GREATEST(p_k * 3, 30)
+    ),
+    -- Lane 2 — Vector ANN. HNSW index on (embedding vector_cosine_ops)
+    -- powers this lookup; `<=>` is pgvector's cosine-distance operator.
+    vector_lane AS (
+        SELECT
+            ce.chunk_id,
+            ROW_NUMBER() OVER (ORDER BY ce.embedding <=> p_query_embedding) AS rank,
+            (ce.embedding <=> p_query_embedding) AS distance
+        FROM public.ChunkEmbedding ce
+        WHERE (p_project_code = '' OR ce.project_code = p_project_code)
+        ORDER BY ce.embedding <=> p_query_embedding
+        LIMIT GREATEST(p_k * 3, 30)
+    ),
+    -- Lane 3a — Seed symbols from the FTS/Vector candidates. These are
+    -- the symbols whose 2-hop neighbourhood is worth pulling into the
+    -- candidate set even if the symbol itself didn't match text or
+    -- semantics.
+    seed_symbols AS (
+        SELECT DISTINCT c.source_id AS sym_id
+        FROM public.Chunk c
+        WHERE c.source_type = 'symbol'
+          AND c.id IN (
+              SELECT chunk_id FROM fts_lane
+              UNION
+              SELECT chunk_id FROM vector_lane
+          )
+    ),
+    -- Lane 3b — Two-hop expansion on public.Edge. Depth bound to 2 so
+    -- the join volume stays tractable for the planner — deeper walks
+    -- belong to the explicit `impact` / `path` functions, not the
+    -- retrieval default. Cycle-safe by construction (each hop is a
+    -- separate JOIN rather than a recursive CTE, so the planner can
+    -- bound the result set at INDEX-driven cardinality).
+    expanded_symbols AS (
+        SELECT sym_id, 0 AS distance FROM seed_symbols
+        UNION
+        SELECT e.target_id, 1 AS distance
+        FROM public.Edge e
+        JOIN seed_symbols s ON e.source_id = s.sym_id
+        WHERE p_project_code = '' OR e.project_code = p_project_code
+        UNION
+        SELECT e2.target_id, 2 AS distance
+        FROM public.Edge e1
+        JOIN seed_symbols s ON e1.source_id = s.sym_id
+        JOIN public.Edge e2 ON e2.source_id = e1.target_id
+        WHERE p_project_code = ''
+           OR (e1.project_code = p_project_code AND e2.project_code = p_project_code)
+    ),
+    graph_lane AS (
+        SELECT
+            c.id AS chunk_id,
+            ROW_NUMBER() OVER (ORDER BY MIN(es.distance), c.id) AS rank,
+            MIN(es.distance)::INT AS distance
+        FROM public.Chunk c
+        JOIN expanded_symbols es ON c.source_id = es.sym_id
+        WHERE c.source_type = 'symbol'
+          AND (p_project_code = '' OR c.project_code = p_project_code)
+        GROUP BY c.id
+        ORDER BY MIN(es.distance), c.id
+        LIMIT GREATEST(p_k * 3, 30)
+    ),
+    -- RRF fusion — contribution from each lane summed per chunk.
+    -- k_rrf=60 is the Cormack-Clarke-Buettcher constant.
+    fused AS (
+        SELECT chunk_id, 1.0 / (60.0 + rank) AS contrib FROM fts_lane
+        UNION ALL
+        SELECT chunk_id, 1.0 / (60.0 + rank) AS contrib FROM vector_lane
+        UNION ALL
+        SELECT chunk_id, 1.0 / (60.0 + rank) AS contrib FROM graph_lane
+    ),
+    ranked AS (
+        SELECT chunk_id, SUM(contrib)::DOUBLE PRECISION AS rrf_score
+        FROM fused
+        GROUP BY chunk_id
+        ORDER BY rrf_score DESC
+        LIMIT p_k
+    )
+    SELECT
+        r.chunk_id,
+        c.content,
+        c.file_path,
+        c.source_id   AS symbol_id,
+        r.rrf_score,
+        COALESCE(f.score, 0.0)::DOUBLE PRECISION   AS fts_score,
+        COALESCE(v.distance, 1.0)::DOUBLE PRECISION AS vector_distance,
+        COALESCE(g.distance, 999)::INT             AS graph_distance
+    FROM ranked r
+    LEFT JOIN public.Chunk      c ON c.id = r.chunk_id
+    LEFT JOIN fts_lane    f ON f.chunk_id = r.chunk_id
+    LEFT JOIN vector_lane v ON v.chunk_id = r.chunk_id
+    LEFT JOIN graph_lane  g ON g.chunk_id = r.chunk_id
+    ORDER BY r.rrf_score DESC;
+$$;
+
+COMMENT ON FUNCTION public.retrieve_context_v2(TEXT, vector, TEXT, INT) IS
+'Unified hybrid retrieval over Chunk substance: FTS (content_tsv) + vector ANN (pgvector cosine) + graph expansion (public.Edge depth-2). RRF k=60 fusion in one PG plan. VAL-AXO-073 target: p95 < 100ms.';
