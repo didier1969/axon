@@ -234,7 +234,7 @@ impl McpServer {
         // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
         // (CALLS / CALLS_NIF / CONTAINS) are empty/dropped — skip those
         // checks so drift is reported only on canonical surfaces.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
         let canonical_count = |query: &str| -> i64 {
             self.graph_store
                 .execute_raw_sql_gateway(query)
@@ -250,7 +250,7 @@ impl McpServer {
             ("File", "SELECT count(*) FROM File"),
             ("Symbol", "SELECT count(*) FROM Symbol"),
         ];
-        if !skip_sql_relations {
+        if !skip_legacy_relations {
             checks.extend([
                 ("CALLS", "SELECT count(*) FROM CALLS"),
                 ("CALLS_NIF", "SELECT count(*) FROM CALLS_NIF"),
@@ -298,9 +298,9 @@ impl McpServer {
         // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
         // (CALLS / CALLS_NIF) are empty/dropped — bypass the SQL translation
         // and let the AGE Cypher path handle the query natively.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
         // Minimal robust support for common multi-hop CALLS checks.
-        if !skip_sql_relations
+        if !skip_legacy_relations
             && ql.contains("match")
             && ql.contains("[:calls")
             && ql.contains("return count(*)")
@@ -341,7 +341,7 @@ impl McpServer {
         match self.graph_store.query_json(q) {
             Ok(result) => {
                 if result.trim() == "[]" && ql.contains("match") {
-                    let calls_count = if skip_sql_relations {
+                    let calls_count = if skip_legacy_relations {
                         0
                     } else {
                         self.graph_store

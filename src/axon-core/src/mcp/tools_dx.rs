@@ -983,7 +983,7 @@ impl McpServer {
         // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
         // empty/dropped. Treat as zero so the structure-only-empty branch is
         // taken (canonical edge facts live in AGE post-Stop A).
-        let contains_count = if self.graph_store.skip_sql_relations() {
+        let contains_count = if self.graph_store.skip_legacy_relations() {
             0
         } else {
             self.graph_store
@@ -1312,8 +1312,8 @@ impl McpServer {
         // (canonical caller/callee facts live in AGE; this tool falls back to
         // the AGE-aware path/impact tools for full traversal). Skip the join
         // shape entirely so the query stays valid against both backends.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let query = if skip_sql_relations {
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
+        let query = if skip_legacy_relations {
             if project.is_some() {
                 format!(
                     "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
@@ -1638,8 +1638,8 @@ impl McpServer {
             json!({"target_id": target_id})
         };
         // MIL-AXO-017 slice 6B: AGE retired ; up/down via SQL only.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let (up_res, down_res) = if skip_sql_relations {
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
+        let (up_res, down_res) = if skip_legacy_relations {
             ("[]".to_string(), "[]".to_string())
         } else {
             let up = self
@@ -1774,7 +1774,7 @@ impl McpServer {
         // Authoritative consumer-traversal lives on AGE; api_break_check is a
         // diagnostic surface that degrades gracefully here until it gains an
         // AGE-native equivalent.
-        let sql_result = if self.graph_store.skip_sql_relations() {
+        let sql_result = if self.graph_store.skip_legacy_relations() {
             Ok::<String, anyhow::Error>("[]".to_string())
         } else {
             self.graph_store.query_json_param(query, &params)

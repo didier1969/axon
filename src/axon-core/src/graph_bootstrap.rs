@@ -2533,12 +2533,7 @@ impl GraphStore {
     }
 
     fn reset_ist_state(&self) -> Result<()> {
-        // REQ-AXO-248 / MIL-AXO-015 B.2 slice S4: under PG, also clear
-        // the Apache AGE graph so post-reset reads return empty rather
-        // than the pre-reset shadow. `MATCH (n) DETACH DELETE n` removes
-        // every vertex + edge in axon_graph in one statement. Best-
-        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL DELETE chain handles
-        // cleanup. AGE elabel clear no longer needed (no more AGE writes).
+        // MIL-AXO-017 slice 6B Phase C: SQL DELETE chain handles cleanup.
 
         let mut cleanup_queries: Vec<&str> = Vec::with_capacity(8);
         cleanup_queries.extend([

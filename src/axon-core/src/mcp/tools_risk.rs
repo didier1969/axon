@@ -182,7 +182,7 @@ impl McpServer {
         // / CONTAINS tables are empty/dropped — bypass the SQL fallback so
         // an empty AGE result yields an empty caller set instead of querying
         // a missing relation table.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
         // MIL-AXO-017 slice 5 (REQ-AXO-299) — prefer the unified
         // public.Edge SQL function. Falls through to AGE Cypher on PG
         // when the SQL path returns empty (transitional dual-write
@@ -196,7 +196,7 @@ impl McpServer {
         };
         // MIL-AXO-017 slice 6B: AGE retired ; fall through to legacy SQL only.
         let query_outcome = public_edge_result.unwrap_or_else(|| {
-            if skip_sql_relations {
+            if skip_legacy_relations {
                 Ok("[]".to_string())
             } else {
                 self.graph_store.query_json_param(&query, &params)
@@ -571,7 +571,7 @@ impl McpServer {
         // `axon_impact` proper higher up in this same tool; this fallthrough
         // is only reached when the symbol resolves but no impact rows came
         // back — same outcome under either backend.
-        let calls_count = if self.graph_store.skip_sql_relations() {
+        let calls_count = if self.graph_store.skip_legacy_relations() {
             0
         } else {
             self.graph_store
@@ -817,7 +817,7 @@ impl McpServer {
         // that degrades to "0 components" gracefully. Operators wanting a
         // real estimate use `axon_impact` (already AGE-aware above) /
         // `axon_path` for the full traversal.
-        if self.graph_store.skip_sql_relations() {
+        if self.graph_store.skip_legacy_relations() {
             let report = format!(
                 "## 🔮 Dry-Run Mutation: {}\n\n{}",
                 symbol,

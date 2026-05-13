@@ -1397,7 +1397,7 @@ impl SemanticWorkerPool {
                         Vec::new();
                     let mut failed: HashMap<String, Vec<GraphProjectionWork>> = HashMap::new();
 
-                    // REQ-AXO-269 v1: under PG (`skip_sql_relations() = true`,
+                    // REQ-AXO-269 v1: under PG (`skip_legacy_relations() = true`,
                     // REQ-AXO-251 / MIL-AXO-015 Stop A), `refresh_file_projection`
                     // and `refresh_symbol_projection` early-return Ok without
                     // writing GraphProjectionState. Without this short-circuit,
@@ -1409,18 +1409,18 @@ impl SemanticWorkerPool {
                     // the embed pass — graph projection cache is meaningless
                     // under AGE-only mode (authoritative call-graph reads go
                     // through AGE Cypher primary tools per REQ-AXO-251).
-                    if graph_store.skip_sql_relations() {
+                    if graph_store.skip_legacy_relations() {
                         let drained = pending.len();
                         if let Err(err) = graph_store
                             .mark_graph_projection_work_done(&pending)
                         {
                             error!(
-                                "Semantic Graph Worker [{}]: failed to mark {} projection jobs done under skip_sql_relations: {:?}",
+                                "Semantic Graph Worker [{}]: failed to mark {} projection jobs done under skip_legacy_relations: {:?}",
                                 worker_idx, drained, err
                             );
                         } else {
                             debug!(
-                                "Semantic Graph Worker [{}]: drained {} projection jobs under skip_sql_relations (AGE-only authoritative)",
+                                "Semantic Graph Worker [{}]: drained {} projection jobs under skip_legacy_relations (AGE-only authoritative)",
                                 worker_idx, drained
                             );
                         }

@@ -438,7 +438,7 @@ impl McpServer {
         // SUBSTANTIATES/IMPACTS edges live on soll.main.Edge.relation_type;
         // an AGE/SOLL-Edge-native equivalent for this query is a follow-up
         // (tracked on REQ-AXO-251 closure notes).
-        if self.graph_store.skip_sql_relations() {
+        if self.graph_store.skip_legacy_relations() {
             return 0;
         }
         let degraded_file_query = format!(

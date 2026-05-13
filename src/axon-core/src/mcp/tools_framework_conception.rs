@@ -99,8 +99,8 @@ impl McpServer {
         // tables are empty/dropped — degrade conception-view flows to empty
         // gracefully (the LLM still gets module + contract context). An
         // AGE-native equivalent is tracked for the fuller migration.
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let flows_raw = if skip_sql_relations {
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
+        let flows_raw = if skip_legacy_relations {
             "[]".to_string()
         } else {
             self.graph_store
@@ -155,7 +155,7 @@ impl McpServer {
                 escaped_project
             ))
             .unwrap_or(0);
-        let flow_count = if skip_sql_relations {
+        let flow_count = if skip_legacy_relations {
             0
         } else {
             self.graph_store

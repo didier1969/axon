@@ -78,8 +78,8 @@ impl McpServer {
         // tables are empty/dropped — these governance counts return 0 cleanly
         // (canonical edge counts live in AGE post-Stop A; this diagnostic is
         // a SQL-storage health probe).
-        let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let calls_direct = if skip_sql_relations {
+        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
+        let calls_direct = if skip_legacy_relations {
             0
         } else {
             self.sql_scalar(&format!(
@@ -87,7 +87,7 @@ impl McpServer {
                 Self::project_filter(project, "s.project_code")
             ))
         };
-        let calls_nif = if skip_sql_relations {
+        let calls_nif = if skip_legacy_relations {
             0
         } else {
             self.sql_scalar(&format!(
@@ -780,7 +780,7 @@ impl McpServer {
         source_layer: &str,
         target_layer: &str,
     ) -> Option<String> {
-        if self.graph_store.skip_sql_relations() {
+        if self.graph_store.skip_legacy_relations() {
             return None;
         }
         let query = "

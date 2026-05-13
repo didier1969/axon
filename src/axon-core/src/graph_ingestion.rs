@@ -538,9 +538,9 @@ impl GraphStore {
         // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
         // the SQL relation writes — AGE dual-write remains the sole
         // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL relation tables
-        // canonical. `skip_sql_relations` stays as false (no skipping).
+        // canonical. `skip_legacy_relations` stays as false (no skipping).
         let _ = backend_is_pg;
-        let skip_sql_relations = false;
+        let skip_legacy_relations = false;
         let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vectorization_paths = Vec::new();
@@ -745,7 +745,7 @@ impl GraphStore {
             // populated). Under AGE-only the subquery returns empty so
             // those DELETEs become no-ops — addressed in a follow-up
             // slice that pre-resolves cascading symbol IDs from AGE.
-            if !skip_sql_relations {
+            if !skip_legacy_relations {
                 queries.push(format!(
                     "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                     indexed_filter, indexed_filter
@@ -767,7 +767,7 @@ impl GraphStore {
                 "DELETE FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter
             ));
-            if !skip_sql_relations {
+            if !skip_legacy_relations {
                 queries.push(format!(
                     "DELETE FROM CONTAINS WHERE source_id IN ({});",
                     indexed_filter
@@ -970,17 +970,17 @@ impl GraphStore {
                 Some(crate::postgres::bulk_writer::PgBulkBatch {
                     symbols: std::mem::take(&mut symbol_rows),
                     chunks: std::mem::take(&mut chunk_rows),
-                    contains: if skip_sql_relations {
+                    contains: if skip_legacy_relations {
                         Vec::new()
                     } else {
                         contains_rows.clone()
                     },
-                    calls: if skip_sql_relations {
+                    calls: if skip_legacy_relations {
                         Vec::new()
                     } else {
                         calls_rows.clone()
                     },
-                    calls_nif: if skip_sql_relations {
+                    calls_nif: if skip_legacy_relations {
                         Vec::new()
                     } else {
                         calls_nif_rows.clone()
@@ -1040,12 +1040,12 @@ impl GraphStore {
         // AXON_ASYNC_WRITER_ENABLED=true. Falls through to sync
         // `execute_batch` otherwise.
         //
-        // Under skip_sql_relations=true (PG-AGE-only mode,
+        // Under skip_legacy_relations=true (PG-AGE-only mode,
         // AXON_AGE_ONLY_RELATIONS=true) the SQL relation tables are
         // empty/dropped and AGE Cypher is canonical — relation_queries
         // ends up empty and the route call is a no-op.
         let mut relation_queries: Vec<String> = Vec::new();
-        if !use_bulk_writer && !skip_sql_relations {
+        if !use_bulk_writer && !skip_legacy_relations {
             let mut relation_acc = self::async_writer::WriteAccumulator::new();
             if !contains_rows.is_empty() {
                 relation_acc.absorb(self::async_writer::WriteDiff::Contains(
@@ -4070,8 +4070,7 @@ impl GraphStore {
         // schema, REQ-AXO-297 dual-write) is the canonical structural
         // edge storage. Non-PG dev fixtures still use the legacy
         // renderer for symmetry.
-        let skip_sql_relations = backend_is_pg;
-        let emit_age = false;
+        let skip_legacy_relations = backend_is_pg;
 
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
         let mut chunk_rows: Vec<ChunkRow> = Vec::new();
@@ -4172,7 +4171,7 @@ impl GraphStore {
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
         queries.extend(acc.render_chunks_pg());
-        if !skip_sql_relations {
+        if !skip_legacy_relations {
             queries.extend(acc.render_contains_pg());
             queries.extend(acc.render_calls_pg());
             queries.extend(acc.render_calls_nif_pg());
@@ -4180,7 +4179,6 @@ impl GraphStore {
         // MIL-AXO-017 slice 6 — AGE writes retired. `public.Edge`
         // (REQ-AXO-295 schema, REQ-AXO-297 UPSERTs) is now the sole
         // structural edge storage on PG.
-        let _ = emit_age; // retained as `false` for now to keep diff focal — block deleted.
         if backend_is_pg {
             queries.extend(acc.render_unified_edge_pg(last_seen_ms));
         }
@@ -4237,8 +4235,7 @@ impl GraphStore {
         // MIL-AXO-017 slice 3 — see upsert_graph_v2 comment above for
         // rationale (legacy SQL relation tables dropped by REQ-AXO-216,
         // unified public.Edge replaces them).
-        let skip_sql_relations = backend_is_pg;
-        let emit_age = false;
+        let skip_legacy_relations = backend_is_pg;
 
         // Per-file chunk_ids preserved for the return value.
         let mut chunk_ids_per_file: Vec<Vec<String>> = Vec::with_capacity(files.len());
@@ -4354,13 +4351,12 @@ impl GraphStore {
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
         queries.extend(acc.render_chunks_pg());
-        if !skip_sql_relations {
+        if !skip_legacy_relations {
             queries.extend(acc.render_contains_pg());
             queries.extend(acc.render_calls_pg());
             queries.extend(acc.render_calls_nif_pg());
         }
         // MIL-AXO-017 slice 6 — AGE writes retired.
-        let _ = emit_age;
         if backend_is_pg {
             let now_ms = chrono::Utc::now().timestamp_millis();
             queries.extend(acc.render_unified_edge_pg(now_ms));

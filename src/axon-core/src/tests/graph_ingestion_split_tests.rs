@@ -115,7 +115,7 @@ mod tests {
     // REQ-AXO-269 v1 unit-level coverage: prove that the underlying primitive
     // `mark_graph_projection_work_done` cleanly drains a queued+inflight set
     // back to (0, 0). This is the exact call the embedder.rs short-circuit
-    // makes when `graph_store.skip_sql_relations()` returns true (PG mode).
+    // makes when `graph_store.skip_legacy_relations()` returns true (PG mode).
     //
     // The bench harness can't easily exercise this path under PG-AGE-only
     // (autoconfig sets graph_workers=0 under tight VRAM, see VAL-AXO-061;
@@ -129,7 +129,7 @@ mod tests {
         // Enqueue one work item then fetch+mark in one cycle. The
         // multi-row fetch path has a separate concern (DuckDB AND/OR
         // precedence under UPDATE); this test focuses on REQ-AXO-269 v1's
-        // contract: given a non-empty `pending` batch + skip_sql_relations,
+        // contract: given a non-empty `pending` batch + skip_legacy_relations,
         // the primitive `mark_graph_projection_work_done` removes the
         // inflight rows it was given.
         store

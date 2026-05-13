@@ -16,7 +16,7 @@ impl GraphStore {
         }
         // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
         // tables are empty/dropped — degrade audit to neutral (no findings).
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok((100, "[]".to_string()));
         }
         let scoped = project != "*";
@@ -111,7 +111,7 @@ impl GraphStore {
             return Ok(serde_json::Map::new());
         }
         // REQ-AXO-251: SQL CONTAINS / CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(serde_json::Map::new());
         }
         let scoped = project != "*";
@@ -163,7 +163,7 @@ impl GraphStore {
             return Ok(serde_json::Map::new());
         }
         // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(serde_json::Map::new());
         }
         let scoped = project != "*";
@@ -214,7 +214,7 @@ impl GraphStore {
             return Ok(100);
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(100);
         }
         let scoped = project != "*";
@@ -242,7 +242,7 @@ impl GraphStore {
             return Ok(0);
         }
         // REQ-AXO-251: SQL CONTAINS / CALLS / CALLS_NIF empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(0);
         }
         let scoped = project != "*";
@@ -274,7 +274,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -346,7 +346,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -426,7 +426,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -517,7 +517,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -583,7 +583,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CONTAINS / SUBSTANTIATES / IMPACTS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -684,7 +684,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL WITH RECURSIVE is canonical.
@@ -751,7 +751,7 @@ impl GraphStore {
             return Ok(0);
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(0);
         }
         // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL self-join is canonical.
@@ -799,7 +799,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -848,7 +848,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";
@@ -906,7 +906,7 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         // REQ-AXO-251: SQL CALLS_NIF empty/dropped under age-only.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Vec::new());
         }
         let scoped = project != "*";

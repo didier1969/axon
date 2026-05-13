@@ -139,7 +139,7 @@ ID format = **DEC-AXO-085** (`TYPE-PROJ-N`, server-assigned, never fabricate). C
 
 ## Tool contract changes (recent)
 - **`cypher` MCP tool renamed → `sql`** (MIL-AXO-017 slice 6B Phase F / REQ-AXO-90005). Input param `cypher` → `sql`. Error envelope prefix `"Graph plugin error: ..."` (was `"DuckDB plugin error: ..."`, REQ-AXO-90007). Update callers: `mcp__axon__cypher` → `mcp__axon__sql`.
-- **AGE reader fallback removed** (slice 6B Phase B): `path`, `impact_callers`, `bidi_trace`, `architectural_drift` no longer call AGE Cypher. Primary path = `public.Edge` SQL functions (`public.path` / `public.callers_of` / `public.impact` etc). Empty result is returned as `[]` directly. Phase C-E (delete `postgres/age.rs` + writer paths + `CREATE EXTENSION age`) deferred per REQ-AXO-90005.
+- **AGE retired physically** (MIL-AXO-017 slice 6B Phases B+C+D+E shipped): `path`, `impact_callers`, `bidi_trace`, `architectural_drift` use only `public.Edge` SQL functions. `postgres/age.rs` deleted (1387 LOC). `CREATE EXTENSION age` removed from DDL. Live PG `DROP EXTENSION age CASCADE` executed. `skip_sql_relations` renamed → `skip_legacy_relations` (no longer AGE-specific). `emit_age` dead-flag purged. VAL-AXO-001 gates 1+2+3+4+7 ✅, gate 5 (sustained bench) pending indexer run.
 - `debug` no longer renders Graph Storage / Graph Memory sections under PG (returned 0s — observability via `pg_stat_activity` deferred).
 
 ## Delivery flow

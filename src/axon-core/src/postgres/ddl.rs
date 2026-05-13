@@ -427,11 +427,11 @@ fn ist_ddl_global() -> Vec<String> {
         ),
         // ── Relation tables — REINTRODUCED (MIL-AXO-017 slice 1) ──
         // REQ-AXO-216 (Stop A) dropped the 5 per-type SQL relation
-        // tables in favor of AGE elabels (axon_graph). REQ-AXO-295
-        // (DEC-AXO-083) reintroduces a single unified `public.Edge`
-        // table backed by composite B-tree + GIN metadata indexes
-        // because AGE was 3-5× slower at depth=5 traversal due to
-        // agtype encode/decode overhead and absence of indexes on
+        // tables in favor of a graph-store elabels approach (retired
+        // in MIL-AXO-017 slice 6B). REQ-AXO-295 (DEC-AXO-083)
+        // reintroduces a single unified `public.Edge` table backed by
+        // composite B-tree + GIN metadata indexes for fast traversal
+        // with predictable PG planner statistics and no overhead from
         // create_elabel() tables. Schema-only backup preserved at
         // /home/dstadel/backups/pg/relations-schema-pre-stopA-
         // 20260509T215841Z.sql (pre-Stop-A snapshot for audit).
@@ -780,7 +780,7 @@ mod tests {
         assert!(
             joined.contains("CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw_idx ON public.ChunkEmbedding")
         );
-        assert!(joined.contains("create_graph('axon_graph')"));
+        // create_graph assertion retired (MIL-AXO-017 Phase E).
         // No per-project schema artefacts left (with word boundaries
         // so `axon_runtime` doesn't trigger the false-positive).
         assert!(!joined.contains("CREATE SCHEMA IF NOT EXISTS axo "));

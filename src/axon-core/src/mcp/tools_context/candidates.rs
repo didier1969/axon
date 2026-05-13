@@ -207,7 +207,7 @@ impl McpServer {
         if file_paths.is_empty() { return Vec::new(); }
         // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
         // empty/dropped — return no bindings gracefully.
-        if self.graph_store.skip_sql_relations() { return Vec::new(); }
+        if self.graph_store.skip_legacy_relations() { return Vec::new(); }
         let values = file_paths.iter().map(|p| format!("'{}'", Self::escape_sql(p))).collect::<Vec<_>>().join(", ");
         let query = format!("SELECT c.target_id, c.source_id FROM CONTAINS c WHERE c.source_id IN ({values}){project_filter}",
             project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]));

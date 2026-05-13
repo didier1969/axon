@@ -183,7 +183,7 @@ impl GraphStore {
     /// dropped, ANY query against them errors. Callers MUST short-circuit
     /// under PG even when the env knob is unset. Hence: PG ⇒ skip
     /// (regardless of AXON_AGE_ONLY_RELATIONS). DuckDB ⇒ unchanged.
-    pub fn skip_sql_relations(&self) -> bool {
+    pub fn skip_legacy_relations(&self) -> bool {
         self.is_postgres_backend()
     }
 

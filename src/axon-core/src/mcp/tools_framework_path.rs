@@ -259,7 +259,7 @@ impl McpServer {
     /// primary path handles the lookup. The caller's BFS gets a clean empty
     /// edge set rather than a stale / errored SQL response.
     fn path_edges_via_sql(&self, project: Option<&str>) -> Option<String> {
-        if self.graph_store.skip_sql_relations() {
+        if self.graph_store.skip_legacy_relations() {
             return None;
         }
         let edge_query = if let Some(project) = project {

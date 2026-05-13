@@ -505,7 +505,7 @@ impl GraphStore {
         // projection (acceptable because authoritative call-graph reads now
         // go through AGE primary tools). An AGE Cypher equivalent for the
         // projection refresh is tracked separately on REQ-AXO-251.
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(Some(anchor_id));
         }
 
@@ -610,7 +610,7 @@ impl GraphStore {
         // tables are empty/dropped — skip the projection refresh (mirrors
         // refresh_symbol_projection). Authoritative file-call traversal goes
         // through AGE primary tools (axon_path / axon_impact).
-        if self.skip_sql_relations() {
+        if self.skip_legacy_relations() {
             return Ok(());
         }
         let radius = radius.max(1) as i64;

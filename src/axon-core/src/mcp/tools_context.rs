@@ -1689,7 +1689,7 @@ impl McpServer {
         // empty/dropped — return no bindings gracefully (the candidate set
         // simply lacks file→symbol enrichment until an AGE Cypher equivalent
         // lands). Other context surfaces (vector retrieve, query) keep working.
-        if self.graph_store.skip_sql_relations() {
+        if self.graph_store.skip_legacy_relations() {
             return Vec::new();
         }
         let values = file_paths

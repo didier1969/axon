@@ -178,34 +178,18 @@ impl WriteAccumulator {
         // skip, no AGE dual-write). Writer-thread callers should prefer
         // `render_bulk_queries_with` so they can flip the gates from the
         // sink + env at flush time.
-        self.render_bulk_queries_with(false, false, "axon_graph")
+        self.render_bulk_queries_with(false)
     }
 
-    /// REQ-AXO-250: render the accumulator under a PG-aware backend
-    /// gate.
-    /// - `skip_sql_relations` (= `is_postgres_backend && AXON_AGE_ONLY_RELATIONS=true`)
-    ///   omits the SQL CONTAINS/CALLS/CALLS_NIF emissions so the writer
-    ///   never queries the dropped relation tables (REQ-AXO-216).
-    /// - `emit_age` (= `is_postgres_backend && (skip_sql_relations || AXON_AGE_DUAL_WRITE=true)`)
-    ///   appends AGE Cypher MERGE statements for the same relation rows.
-    /// - `age_graph` is the AGE graph name (always `axon_graph` today).
-    ///
-    /// Order: Symbols → Chunks → SQL relations (gated) → AGE Cypher
-    /// (gated) → RawQueries. Sequencing keeps the producer's existing
-    /// transactional semantics intact: typed INSERTs land before any
-    /// RawQueries that depend on them.
-    pub fn render_bulk_queries_with(
-        &self,
-        skip_sql_relations: bool,
-        emit_age: bool,
-        age_graph: &str,
-    ) -> Vec<String> {
-        // MIL-AXO-017 slice 6B Phase C: emit_age + age_graph no-ops (AGE retired).
-        let _ = (emit_age, age_graph);
+    /// Render the accumulator. `skip_legacy_relations` omits the
+    /// CONTAINS/CALLS/CALLS_NIF emissions so the writer never queries
+    /// the dropped relation tables under PG-only backend.
+    /// Order: Symbols → Chunks → SQL relations (gated) → RawQueries.
+    pub fn render_bulk_queries_with(&self, skip_legacy_relations: bool) -> Vec<String> {
         let mut out = Vec::new();
         out.extend(self.render_symbols_duckdb());
         out.extend(self.render_chunks_duckdb());
-        if !skip_sql_relations {
+        if !skip_legacy_relations {
             out.extend(self.render_contains_duckdb());
             out.extend(self.render_calls_duckdb());
             out.extend(self.render_calls_nif_duckdb());
@@ -703,7 +687,7 @@ fn flush<S: WriterSink>(
     // to the legacy path.
     // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL relation tables canonical.
     let _ = sink.is_postgres_backend();
-    let queries = accumulator.render_bulk_queries_with(false, false, "axon_graph");
+    let queries = accumulator.render_bulk_queries_with(false);
     if !queries.is_empty() {
         if let Err(e) = sink.execute_batch(&queries) {
             stats.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -1509,16 +1493,15 @@ mod tests {
 
     #[test]
     fn render_bulk_queries_with_default_gates_matches_legacy() {
-        // skip_sql_relations=false + emit_age=false reproduces the legacy
-        // DuckDB shape exactly. Sanity for backwards-compatibility on
-        // every existing caller that hits render_bulk_queries().
+        // skip_legacy_relations=false reproduces the legacy shape exactly.
+        // Sanity for backwards-compatibility on every existing caller.
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
         acc.absorb(WriteDiff::Calls(vec![sample_relation("sym1", "sym2")]));
         acc.absorb(WriteDiff::CallsNif(vec![sample_relation("sym1", "sym3")]));
 
         let legacy = acc.render_bulk_queries();
-        let parametrised = acc.render_bulk_queries_with(false, false, "axon_graph");
+        let parametrised = acc.render_bulk_queries_with(false);
         assert_eq!(legacy, parametrised);
         // Sanity: the rendered output mentions every SQL relation table.
         let joined = parametrised.join("\n");
@@ -1528,8 +1511,8 @@ mod tests {
     }
 
     #[test]
-    fn render_bulk_queries_with_skip_sql_relations_omits_relation_inserts() {
-        // skip_sql_relations=true (PG age-only mode, REQ-AXO-216 prep)
+    fn render_bulk_queries_with_skip_legacy_relations_omits_relation_inserts() {
+        // skip_legacy_relations=true (PG age-only mode, REQ-AXO-216 prep)
         // drops every SQL CONTAINS / CALLS / CALLS_NIF emission.
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::Contains(vec![sample_relation("/a.rs", "sym1")]));
@@ -1537,20 +1520,20 @@ mod tests {
         acc.absorb(WriteDiff::CallsNif(vec![sample_relation("sym1", "sym3")]));
         acc.absorb(WriteDiff::Symbols(vec![sample_symbol("sym1")]));
 
-        let rendered = acc.render_bulk_queries_with(true, false, "axon_graph");
+        let rendered = acc.render_bulk_queries_with(true);
         let joined = rendered.join("\n");
         assert!(
             !joined.contains("INSERT INTO CONTAINS"),
-            "CONTAINS SQL emission must be gated under skip_sql_relations: {}",
+            "CONTAINS SQL emission must be gated under skip_legacy_relations: {}",
             joined
         );
         assert!(
             !joined.contains("INSERT INTO CALLS "),
-            "CALLS SQL emission must be gated under skip_sql_relations"
+            "CALLS SQL emission must be gated under skip_legacy_relations"
         );
         assert!(
             !joined.contains("INSERT INTO CALLS_NIF "),
-            "CALLS_NIF SQL emission must be gated under skip_sql_relations"
+            "CALLS_NIF SQL emission must be gated under skip_legacy_relations"
         );
         // Symbol IST writes always fire (IST table, not relation table).
         assert!(joined.contains("INSERT INTO Symbol"));
