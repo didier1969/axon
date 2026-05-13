@@ -113,6 +113,32 @@ impl Scanner {
         total_files
     }
 
+    /// Pure enumeration — no GraphStore mutation. Returns the same set
+    /// of file paths that `scan_path` would dispatch through the
+    /// ingress buffer, applying every Scanner filter (directory noise,
+    /// hidden files, .gitignore / .axonignore stack, supported
+    /// extensions). Used by benches and observability tooling that
+    /// need the watcher's view of a tree without writing anything.
+    pub fn enumerate_files(&self) -> Vec<PathBuf> {
+        self.enumerate_files_under(&self.root.clone())
+    }
+
+    pub fn enumerate_files_under(&self, start: &Path) -> Vec<PathBuf> {
+        let walker = self.build_walker_from(start);
+        let mut out = Vec::new();
+        for entry in walker.build().filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                continue;
+            }
+            if !self.should_process_path(p) {
+                continue;
+            }
+            out.push(p.to_path_buf());
+        }
+        out
+    }
+
     pub fn should_process_path(&self, path: &Path) -> bool {
         if !path.is_file() {
             return false;

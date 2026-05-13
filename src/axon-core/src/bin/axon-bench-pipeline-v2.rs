@@ -133,41 +133,25 @@ fn print_help() {
 }
 
 fn walk_source(root: &Path, max_files: usize) -> Result<Vec<PathBuf>> {
-    fn rec(dir: &Path, out: &mut Vec<PathBuf>, cap: usize) -> Result<()> {
-        if out.len() >= cap {
-            return Ok(());
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
-        };
-        for entry in entries.flatten() {
-            if out.len() >= cap {
-                return Ok(());
-            }
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
-                continue;
-            }
-            if path.is_dir() {
-                rec(&path, out, cap)?;
-            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(
-                    ext,
-                    "rs" | "ex" | "exs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java"
-                ) {
-                    out.push(path);
-                }
-            }
-        }
-        Ok(())
+    // REQ-AXO-295 Phase 3 — delegate to the canonical Scanner so the
+    // bench sees exactly the same file set the production watcher
+    // would emit: .gitignore + .axonignore + .axoninclude stack +
+    // ignored-directory-segments + supported_extensions config. The
+    // previous ad-hoc filter (hard-coded extension list, drop names
+    // starting with '.') diverged from the production filter by
+    // 5-10× on real repos.
+    let project_code = "AXO";
+    let scanner = axon_core::scanner::Scanner::new(
+        &root.to_string_lossy(),
+        project_code,
+    );
+    let mut files = scanner.enumerate_files();
+    if files.len() > max_files {
+        files.truncate(max_files);
     }
-    let mut out = Vec::new();
-    rec(root, &mut out, max_files)?;
-    Ok(out)
+    Ok(files)
 }
+
 
 fn build_embedder(mode: EmbedderMode) -> Result<Arc<dyn B2Embedder>> {
     match mode {

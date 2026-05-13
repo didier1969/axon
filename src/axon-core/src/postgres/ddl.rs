@@ -391,6 +391,28 @@ fn ist_ddl_global() -> Vec<String> {
             chunk_path TEXT\
          )"
         .to_string(),
+        // REQ-AXO-292 — FTS GENERATED column + GIN index. The weights
+        // mirror the hybrid retrieval plan (chunk_path / kind as title
+        // = A, content body = B, file_path as path metadata = C).
+        // GENERATED ALWAYS AS STORED means PG recomputes it on every
+        // INSERT/UPDATE of `content` (or chunk_path / kind / file_path).
+        // Adds ~0.5 ms / chunk on write but unlocks the lexical lane
+        // for hybrid retrieval (gate ≥ 250 ch/s sustained).
+        "ALTER TABLE public.Chunk \
+         ADD COLUMN IF NOT EXISTS content_tsv tsvector \
+         GENERATED ALWAYS AS ( \
+             setweight(to_tsvector('simple', coalesce(chunk_path, '')), 'A') || \
+             setweight(to_tsvector('simple', coalesce(kind, '')), 'A') || \
+             setweight(to_tsvector('english', coalesce(content, '')), 'B') || \
+             setweight(to_tsvector('simple', coalesce(file_path, '')), 'C') \
+         ) STORED"
+        .to_string(),
+        "CREATE INDEX IF NOT EXISTS idx_chunk_content_tsv \
+         ON public.Chunk USING GIN(content_tsv)"
+        .to_string(),
+        "CREATE INDEX IF NOT EXISTS idx_chunk_project_code \
+         ON public.Chunk(project_code)"
+        .to_string(),
         format!(
             "CREATE TABLE IF NOT EXISTS public.ChunkEmbedding (\
                 chunk_id TEXT NOT NULL,\
