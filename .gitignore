@@ -58,6 +58,7 @@ docs/derived/
 .devenv/tasks.db
 .devenv/tasks.db-shm
 .devenv/tasks.db-wal
+.devenv/backup_soll.log
 
 # Generated native artifacts
 src/dashboard/priv/native/*.so

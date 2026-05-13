@@ -159,5 +159,14 @@ in
     echo "Storage:                 PostgreSQL 17 + AGE + pgvector @ 127.0.0.1:44144" >&2
     echo "HydraDB:                 detached legacy workflow" >&2
     echo "---------------------------------------" >&2
+
+    # Daily SOLL backup: fire-and-forget, idempotent (1×/UTC-day max).
+    # Disabled with AXON_SKIP_SOLL_BACKUP=1.
+    if [ "''${AXON_SKIP_SOLL_BACKUP:-0}" != "1" ] && [ -x "$DEVENV_ROOT/scripts/backup_soll_daily.sh" ]; then
+      mkdir -p "$DEVENV_ROOT/.devenv"
+      nohup bash "$DEVENV_ROOT/scripts/backup_soll_daily.sh" \
+        >> "$DEVENV_ROOT/.devenv/backup_soll.log" 2>&1 </dev/null &
+      disown 2>/dev/null || true
+    fi
   '';
 }
