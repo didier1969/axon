@@ -154,25 +154,24 @@ CREATE INDEX IF NOT EXISTS edge_proj_idx
 CREATE INDEX IF NOT EXISTS edge_metadata_idx
     ON public.Edge USING GIN (metadata jsonb_path_ops);
 
--- ── Queues (legacy autonomous ingestor, retired with REQ-AXO-289 S7) ─
-CREATE TABLE IF NOT EXISTS public.FileVectorizationQueue (
-    file_path TEXT PRIMARY KEY,
-    project_code TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'queued',
-    status_reason TEXT,
-    attempts BIGINT NOT NULL DEFAULT 0,
-    queued_at BIGINT,
-    last_error_reason TEXT,
-    last_attempt_at BIGINT,
-    next_eligible_at_ms BIGINT,
-    interactive_pause_count BIGINT NOT NULL DEFAULT 0,
-    claim_token TEXT,
-    claimed_at_ms BIGINT,
-    lease_heartbeat_at_ms BIGINT,
-    lease_owner TEXT,
-    lease_epoch BIGINT NOT NULL DEFAULT 0,
-    persist_started_at_ms BIGINT
-);
+-- DEC-AXO-086 : FileVectorizationQueue retired ; vectorization work signalled
+-- via PG NOTIFY + in-memory PendingSet (no disk queue).
+DROP TABLE IF EXISTS public.FileVectorizationQueue;
+
+-- DEC-AXO-086 : pg_notify on Chunk INSERT or content_hash change. No row write.
+-- Listener (B1) maintains in-memory pending set; reconciliation tick every 5s
+-- catches missed NOTIFYs via LEFT JOIN anti-join on ChunkEmbedding.
+CREATE OR REPLACE FUNCTION public.fn_notify_chunk_pending() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('chunk_pending_embed', NEW.id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_chunk_notify_pending ON public.Chunk;
+CREATE TRIGGER trg_chunk_notify_pending
+    AFTER INSERT OR UPDATE OF content_hash ON public.Chunk
+    FOR EACH ROW EXECUTE FUNCTION public.fn_notify_chunk_pending();
 
 CREATE TABLE IF NOT EXISTS public.GraphProjectionQueue (
     anchor_type TEXT NOT NULL,
@@ -330,8 +329,7 @@ CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw_idx
     ON public.ChunkEmbedding USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
-CREATE INDEX IF NOT EXISTS file_vec_queue_project_status_idx
-    ON public.FileVectorizationQueue (project_code, status, queued_at);
+-- DEC-AXO-086 : file_vec_queue_project_status_idx removed with FileVectorizationQueue.
 CREATE INDEX IF NOT EXISTS gp_queue_project_status_idx
     ON public.GraphProjectionQueue (project_code, status, queued_at);
 
