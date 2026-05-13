@@ -28,8 +28,8 @@ use tracing::{info, warn};
 use crate::graph::GraphStore;
 use crate::ingress_buffer::SharedIngressBuffer;
 use crate::pipeline_v2::{
-    b1_cold_start_poll, spawn_pipeline_a, spawn_pipeline_b_full, GpuB2Embedder, NoOpEmbedder,
-    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
+    b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_a, spawn_pipeline_b_full,
+    GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
@@ -94,6 +94,12 @@ pub fn spawn_pipeline_v2_indexer(
     // any drop on full buffer must be rattrapé by SELECT … LEFT JOIN …
     // ChunkEmbedding IS NULL (CPT-AXO-054 contract).
     let b1_inbox_tx_for_poll = handles_a.b1_inbox_tx.clone();
+    // DEC-AXO-086 slice 1B — third producer of the same B1 inbox :
+    // a PG LISTEN task consumes 'chunk_pending_embed' notifications
+    // (fired by the trigger on Chunk INSERT/UPDATE OF content_hash) and
+    // forwards chunk_ids to B1. Three independent producers (A3 try_send
+    // / cold-start poll / NOTIFY listener) converge on the same consumer.
+    let b1_inbox_tx_for_listener = handles_a.b1_inbox_tx.clone();
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
@@ -124,6 +130,16 @@ pub fn spawn_pipeline_v2_indexer(
         //     so ~30k chunk_ids overflow per cycle without this poll)
         //   * chunks from previous indexer instances (pre-v2 cut-over)
         //   * any race where B1 fetch raced with A3 commit
+        // DEC-AXO-086 slice 1B : spawn the PG NOTIFY listener.
+        match resolve_listener_database_url() {
+            Ok(url) => {
+                spawn_chunk_pending_listener(url, b1_inbox_tx_for_listener);
+            }
+            Err(err) => {
+                warn!(error = %err, "pipeline_v2: PG NOTIFY listener disabled (DATABASE_URL unresolved); cold-start poll remains the safety net");
+            }
+        }
+
         let store_for_poll = store.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(
@@ -156,6 +172,7 @@ pub fn spawn_pipeline_v2_indexer(
         // a closed-channel error, then drain silently.
         let mut rx = b1_inbox_rx;
         let _ = b1_inbox_tx_for_poll;
+        let _ = b1_inbox_tx_for_listener;
         tokio::spawn(async move {
             while rx.recv().await.is_some() {
                 // Silently drop chunk_ids — there's no B to embed them
@@ -230,4 +247,20 @@ pub fn spawn_pipeline_v2_indexer(
     });
 
     Ok(())
+}
+
+/// DEC-AXO-086 slice 1B helper : pick the PostgreSQL connection string
+/// for the running instance. Honors `AXON_LIVE_DATABASE_URL` /
+/// `AXON_DEV_DATABASE_URL` then `DATABASE_URL`, gated by
+/// `AXON_INSTANCE_KIND` (default: live).
+fn resolve_listener_database_url() -> Result<String> {
+    use crate::postgres::{database_url_for, AxonInstance};
+    let kind = std::env::var("AXON_INSTANCE_KIND")
+        .unwrap_or_else(|_| "live".to_string())
+        .to_lowercase();
+    let instance = match kind.as_str() {
+        "dev" => AxonInstance::Dev,
+        _ => AxonInstance::Live,
+    };
+    database_url_for(instance)
 }

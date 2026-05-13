@@ -52,6 +52,7 @@ pub mod indexed_file_cache;
 pub mod metrics;
 pub mod orchestrator;
 pub mod project_resolver;
+pub mod notify_listener;
 pub mod stage_a1;
 pub mod stage_a2;
 pub mod stage_a3;
@@ -74,6 +75,7 @@ pub use orchestrator::{
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::{a3_enroll, EnrolledFile};
+pub use notify_listener::spawn_chunk_pending_listener;
 pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, ChunkForEmbedding};
 pub use embedder_gpu::GpuB2Embedder;
 pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
