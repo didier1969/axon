@@ -424,16 +424,38 @@ fn ist_ddl_global() -> Vec<String> {
                 PRIMARY KEY (chunk_id, model_id)\
              )"
         ),
-        // ── Relation tables — REMOVED (REQ-AXO-216 / Stop A) ──────
-        // The 5 SQL relation tables (CALLS / CALLS_NIF / CONTAINS /
-        // IMPACTS / SUBSTANTIATES) are dropped. Canonical edge storage
-        // lives on Apache AGE elabels (axon_graph). Readers gate on
-        // skip_sql_relations() (REQ-AXO-251 wave 9, ships in build
-        // v0.8.0-320-gc84900d+); writers go through async_writer's
-        // emit_age path under PG (REQ-AXO-250 wave 9).
-        // Bootstrap no longer recreates these tables. Schema-only
-        // backup preserved at /home/dstadel/backups/pg/relations-
-        // schema-pre-stopA-20260509T215841Z.sql for rollback.
+        // ── Relation tables — REINTRODUCED (MIL-AXO-017 slice 1) ──
+        // REQ-AXO-216 (Stop A) dropped the 5 per-type SQL relation
+        // tables in favor of AGE elabels (axon_graph). REQ-AXO-295
+        // (DEC-AXO-083) reintroduces a single unified `public.Edge`
+        // table backed by composite B-tree + GIN metadata indexes
+        // because AGE was 3-5× slower at depth=5 traversal due to
+        // agtype encode/decode overhead and absence of indexes on
+        // create_elabel() tables. Schema-only backup preserved at
+        // /home/dstadel/backups/pg/relations-schema-pre-stopA-
+        // 20260509T215841Z.sql (pre-Stop-A snapshot for audit).
+        "CREATE TABLE IF NOT EXISTS public.Edge (\
+            source_id     TEXT NOT NULL,\
+            target_id     TEXT NOT NULL,\
+            relation_type TEXT NOT NULL,\
+            project_code  TEXT NOT NULL DEFAULT '',\
+            metadata      JSONB,\
+            created_at_ms BIGINT NOT NULL,\
+            PRIMARY KEY (source_id, target_id, relation_type, project_code)\
+         )"
+        .to_string(),
+        "CREATE INDEX IF NOT EXISTS edge_fwd_idx \
+            ON public.Edge (source_id, relation_type, target_id)"
+            .to_string(),
+        "CREATE INDEX IF NOT EXISTS edge_rev_idx \
+            ON public.Edge (target_id, relation_type, source_id)"
+            .to_string(),
+        "CREATE INDEX IF NOT EXISTS edge_proj_idx \
+            ON public.Edge (project_code, relation_type)"
+            .to_string(),
+        "CREATE INDEX IF NOT EXISTS edge_metadata_idx \
+            ON public.Edge USING GIN (metadata jsonb_path_ops)"
+            .to_string(),
         // ── Queues ────────────────────────────────────────────────
         "CREATE TABLE IF NOT EXISTS public.FileVectorizationQueue (\
             file_path TEXT PRIMARY KEY,\

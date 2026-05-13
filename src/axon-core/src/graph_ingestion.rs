@@ -4321,8 +4321,16 @@ impl GraphStore {
         use std::collections::HashSet;
 
         let backend_is_pg = self.is_postgres_backend();
+        // MIL-AXO-017 slice 3 — the legacy per-type SQL relation tables
+        // (CONTAINS / CALLS / CALLS_NIF / IMPACTS / SUBSTANTIATES) were
+        // dropped by REQ-AXO-216 (Stop A) and never re-created on PG.
+        // Emitting INSERTs against them would error with `relation does
+        // not exist`. Always skip the SQL-relation-table path under PG;
+        // the unified `public.Edge` UPSERT (REQ-AXO-297) takes their
+        // place. The env-var gate is preserved for non-PG dev paths so
+        // any in-memory fixture can still exercise the legacy renderer.
         let skip_sql_relations =
-            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+            backend_is_pg || crate::postgres::age::age_only_relations_enabled();
         let emit_age = backend_is_pg
             && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
 
@@ -4466,7 +4474,15 @@ impl GraphStore {
                 queries.extend(cypher_list);
             }
         }
-        let _ = backend_is_pg; // PG-canonical path — keep variable for future skip-on-bootstrap gating.
+        // REQ-AXO-297 (MIL-AXO-017 slice 3) — dual-write the unified
+        // `public.Edge` table alongside AGE. Always emit when on PG so
+        // MCP tools (REQ-AXO-299) can switch onto WITH RECURSIVE before
+        // AGE is dropped (REQ-AXO-300). On non-PG backends this is a
+        // no-op because the table won't exist (DuckDB is fully retired
+        // per CPT-AXO-053).
+        if backend_is_pg {
+            queries.extend(acc.render_unified_edge_pg(last_seen_ms));
+        }
 
         let safe_path = Self::escape_sql(path);
         let safe_hash = Self::escape_sql(content_hash);
@@ -4517,8 +4533,11 @@ impl GraphStore {
         }
 
         let backend_is_pg = self.is_postgres_backend();
+        // MIL-AXO-017 slice 3 — see upsert_graph_v2 comment above for
+        // rationale (legacy SQL relation tables dropped by REQ-AXO-216,
+        // unified public.Edge replaces them).
         let skip_sql_relations =
-            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
+            backend_is_pg || crate::postgres::age::age_only_relations_enabled();
         let emit_age = backend_is_pg
             && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
 
@@ -4693,7 +4712,15 @@ impl GraphStore {
                 queries.extend(cypher_list);
             }
         }
-        let _ = backend_is_pg;
+        // REQ-AXO-297 (MIL-AXO-017 slice 3) — dual-write the unified
+        // `public.Edge` table alongside AGE. Always emit when on PG so
+        // MCP tools (REQ-AXO-299) can switch onto WITH RECURSIVE before
+        // AGE is dropped (REQ-AXO-300). Reuses the accumulator rows
+        // already collected by the loop above.
+        if backend_is_pg {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            queries.extend(acc.render_unified_edge_pg(now_ms));
+        }
 
         // REQ-AXO-295 Phase 2 — IndexedFile multi-row INSERT instead
         // of one statement per file. Same shape as the multi-row

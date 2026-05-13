@@ -462,6 +462,66 @@ impl WriteAccumulator {
         self.render_calls_nif_duckdb()
     }
 
+    /// REQ-AXO-297 (MIL-AXO-017 slice 3) — render accumulated CONTAINS /
+    /// CALLS / CALLS_NIF rows as UPSERTs into the unified `public.Edge`
+    /// table (REQ-AXO-295 schema). Replaces the per-type tables retired
+    /// by REQ-AXO-216 (Stop A) and runs IN PARALLEL with AGE Cypher
+    /// during the MIL-AXO-017 transition — A3 dual-writes so MCP tools
+    /// can be bascule onto `public.Edge` (REQ-AXO-299) before AGE is
+    /// dropped (REQ-AXO-300).
+    ///
+    /// Batched at 500 rows per INSERT (matches the per-renderer cadence
+    /// of `render_symbols_duckdb` / `render_chunks_duckdb`).
+    /// `ON CONFLICT DO NOTHING` because edges are immutable in the
+    /// composite-key sense (source_id, target_id, relation_type,
+    /// project_code) — a re-walked file emits the same tuples.
+    pub fn render_unified_edge_pg(&self, created_at_ms: i64) -> Vec<String> {
+        use super::sql_helpers::escape_sql_text;
+
+        if self.contains.is_empty() && self.calls.is_empty() && self.calls_nif.is_empty() {
+            return Vec::new();
+        }
+
+        // Build (source_id, target_id, relation_type, project_code,
+        // created_at_ms) tuples for each row, tagged by their canonical
+        // relation_type.
+        let mut tagged: Vec<(&str, &RelationRow)> =
+            Vec::with_capacity(self.contains.len() + self.calls.len() + self.calls_nif.len());
+        for row in &self.contains {
+            tagged.push(("CONTAINS", row));
+        }
+        for row in &self.calls {
+            tagged.push(("CALLS", row));
+        }
+        for row in &self.calls_nif {
+            tagged.push(("CALLS_NIF", row));
+        }
+
+        let mut queries = Vec::with_capacity(tagged.len() / 500 + 1);
+        for batch in tagged.chunks(500) {
+            let values: Vec<String> = batch
+                .iter()
+                .map(|(rel, row)| {
+                    format!(
+                        "('{}', '{}', '{}', '{}', {})",
+                        escape_sql_text(&row.source_id),
+                        escape_sql_text(&row.target_id),
+                        escape_sql_text(rel),
+                        escape_sql_text(&row.project_code),
+                        created_at_ms,
+                    )
+                })
+                .collect();
+            queries.push(format!(
+                "INSERT INTO public.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 VALUES {} \
+                 ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING;",
+                values.join(",")
+            ));
+        }
+        queries
+    }
+
     pub fn render_chunks_duckdb(&self) -> Vec<String> {
         if self.chunks.is_empty() {
             return Vec::new();

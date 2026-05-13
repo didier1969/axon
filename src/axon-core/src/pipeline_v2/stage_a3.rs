@@ -421,6 +421,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a3_enroll_dual_writes_public_edge_rows() {
+        // REQ-AXO-297 (MIL-AXO-017 slice 3) — A3 must dual-write
+        // CONTAINS rows into the unified `public.Edge` table so MCP
+        // tools can be bascule onto WITH RECURSIVE traversal before AGE
+        // is dropped.
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let parsed = parsed_with(
+            "/tmp/a3_edge_dual.rs",
+            "fn gamma() {}\nfn delta() {}",
+            "hash-edge",
+            vec!["gamma", "delta"],
+        );
+
+        a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
+
+        // The A3 path emits a CONTAINS edge from File path to each
+        // Symbol. With two symbols we expect at least 2 rows in
+        // public.Edge keyed on the file path.
+        let n = store
+            .query_count(
+                "SELECT count(*) FROM public.Edge \
+                 WHERE source_id = '/tmp/a3_edge_dual.rs' \
+                 AND relation_type = 'CONTAINS' \
+                 AND project_code = 'AXO'",
+            )
+            .unwrap();
+        assert!(
+            n >= 2,
+            "A3 must emit at least 2 CONTAINS rows in public.Edge for two parsed symbols (got {n})"
+        );
+
+        // Idempotence: re-running the same enrolment must not duplicate
+        // rows thanks to the composite-PK ON CONFLICT DO NOTHING.
+        let parsed2 = parsed_with(
+            "/tmp/a3_edge_dual.rs",
+            "fn gamma() {}\nfn delta() {}",
+            "hash-edge",
+            vec!["gamma", "delta"],
+        );
+        a3_enroll(parsed2, store.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
+        let n2 = store
+            .query_count(
+                "SELECT count(*) FROM public.Edge \
+                 WHERE source_id = '/tmp/a3_edge_dual.rs' \
+                 AND relation_type = 'CONTAINS' \
+                 AND project_code = 'AXO'",
+            )
+            .unwrap();
+        assert_eq!(n, n2, "public.Edge dual-write must be idempotent");
+    }
+
+    #[tokio::test]
     async fn a3_enroll_updates_hash_on_content_change() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let parsed_v1 = parsed_with("/tmp/change_v2.rs", "fn v1() {}", "hash-v1", vec!["v1"]);
