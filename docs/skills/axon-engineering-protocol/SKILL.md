@@ -150,6 +150,10 @@ CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> 
 ## Identity
 ID format = **DEC-AXO-085** (`TYPE-PROJ-N`, server-assigned, never fabricate). Counter source: `soll.Registry.last_{type}`. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only.
 
+## Tool contract changes (recent)
+- `cypher` failure envelope → error prefix `"Graph plugin error: ..."` (was `"DuckDB plugin error: ..."`, REQ-AXO-90007 closure).
+- `debug` no longer renders Graph Storage / Graph Memory sections under PG (returned 0s — observability via `pg_stat_activity` deferred).
+
 ## Delivery flow
 1. `status`
 2. `query` / `inspect` / `retrieve_context`

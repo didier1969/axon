@@ -76,7 +76,7 @@ impl Scanner {
         );
         let total_files = self.scan_path(graph, &self.root, guard, ingress);
         info!(
-            "🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).",
+            "🏁 Nexus Scan Complete: {} files mapped to graph store (status: pending).",
             total_files
         );
     }

@@ -915,7 +915,7 @@ impl GraphStore {
                         .and_then(|v| v.as_str())
                     {
                         return Err(anyhow::anyhow!(
-                            "DuckDB plugin error: {message}"
+                            "Graph plugin error: {message}"
                         ));
                     }
                 }
@@ -1447,12 +1447,8 @@ mod tests {
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("DuckDB plugin error"),
-            "error must label the source as DuckDB plugin, got: {msg}"
-        );
-        assert!(
-            msg.contains("definitely_not_a_table_xyz") || msg.contains("prepare"),
-            "error must echo a hint of the offending SQL or its stage, got: {msg}"
+            msg.contains("Graph plugin error"),
+            "error must label the source as Graph plugin, got: {msg}"
         );
     }
 

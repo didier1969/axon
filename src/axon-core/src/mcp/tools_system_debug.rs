@@ -18,7 +18,7 @@ use crate::optimizer::{
 };
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{
-    duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
+    process_memory_snapshot,
 };
 use crate::service_guard;
 use crate::vector_control::{
@@ -261,8 +261,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         0
     };
     let memory = process_memory_snapshot();
-    let storage = duckdb_storage_snapshot(&server.graph_store);
-    let duckdb_memory = duckdb_memory_snapshot(&server.graph_store);
     let ingress = ingress_metrics_snapshot();
     let provider = current_embedding_provider_diagnostics();
     let lane_config = embedding_lane_config_from_env();
@@ -497,7 +495,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         "## Axon Core V2 (Maestria) - Internal Diagnostic\n\n\
         **Engine Architecture:**\n\
         *   **Mode:** Embedded (C-FFI) without TCP network.\n\
-        *   **Graph Database:** DuckDB (Local, Zero-Copy).\n\
+        *   **Graph Database:** PostgreSQL 17 + pgvector (network, devenv-managed @ 127.0.0.1:44144).\n\
         *   **Active Parsers:** Rust, Elixir, Python, TypeScript, etc.\n\
         *   **OOM Protection:** Option B (Watchdog Process Cycling Active at 14 GB).\n\n\
         **Runtime Memory:**\n\
@@ -529,13 +527,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         {}\
         {}\
         {}\
-        **DuckDB Storage:**\n\
-        *   Main file: {}\n\
-        *   WAL: {}\n\
-        *   Total: {}\n\n\
-        **DuckDB Memory:**\n\
-        *   Allocated memory: {}\n\
-        *   Temporary/spill: {}\n\n\
         **Ingress Buffer:**\n\
         *   Enabled: {}\n\
         *   Buffered entries: {}\n\
@@ -664,11 +655,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         file_stage_section,
         backlog_reason_section,
         vector_queue_status_section,
-        format_bytes_human(storage.db_file_bytes),
-        format_bytes_human(storage.db_wal_bytes),
-        format_bytes_human(storage.db_total_bytes),
-        format_bytes_human(duckdb_memory.memory_usage_bytes),
-        format_bytes_human(duckdb_memory.temporary_storage_bytes),
         if ingress.enabled { "yes" } else { "no" },
         ingress.buffered_entries,
         ingress.subtree_hints,
