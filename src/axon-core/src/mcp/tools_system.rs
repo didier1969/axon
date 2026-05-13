@@ -290,26 +290,25 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
-    /// DEC-AXO-086 slice 2 — read-only embedding backlog snapshot.
+    /// DEC-AXO-086 slice 2 — operator health snapshot (renamed conceptually
+    /// from "embedding status" to a full storage + pipeline overview;
+    /// catalog name kept for backward compat).
     ///
-    /// Surfaces the three numbers a caller needs to gauge embedding
-    /// freshness without dispatching `diagnose_indexing`: total chunks,
-    /// embedded chunks, pending chunks (= total − embedded). Plus the
-    /// static pipeline configuration: NOTIFY channel name + cold-start
-    /// poll interval (CPT-AXO-054 contract).
+    /// Surfaces row counts for the canonical IST tables (Symbol / Chunk /
+    /// ChunkEmbedding / Edge / IndexedFile / Project), embedding coverage,
+    /// and the pipeline A + B worker / batch parameters as resolved from
+    /// env vars at request time (matches what the responding process sees;
+    /// indexer-side overrides may differ if the brain runs separately).
     ///
     /// `project` arg optional: when set, scopes the counts to that
     /// `project_code`; `*` (default) is global.
     pub(crate) fn axon_embedding_status(&self, args: &Value) -> Option<Value> {
         let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
-        let (where_chunk, where_emb) = if project == "*" {
-            (String::new(), String::new())
+        let where_project = if project == "*" {
+            String::new()
         } else {
             let safe = project.replace('\'', "''");
-            (
-                format!(" WHERE project_code = '{}'", safe),
-                format!(" WHERE project_code = '{}'", safe),
-            )
+            format!(" WHERE project_code = '{}'", safe)
         };
 
         let scalar = |query: &str| -> i64 {
@@ -321,14 +320,22 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
-        let total_chunks = scalar(&format!(
-            "SELECT count(*) FROM public.Chunk{}",
-            where_chunk
-        ));
+        let total_chunks = scalar(&format!("SELECT count(*) FROM public.Chunk{}", where_project));
         let embedded_chunks = scalar(&format!(
             "SELECT count(*) FROM public.ChunkEmbedding{}",
-            where_emb
+            where_project
         ));
+        let symbols = scalar(&format!(
+            "SELECT count(*) FROM public.Symbol{}",
+            where_project
+        ));
+        let indexed_files = scalar(&format!(
+            "SELECT count(*) FROM public.IndexedFile{}",
+            where_project
+        ));
+        // Edge + Project tables don't carry project_code → always global.
+        let edges = scalar("SELECT count(*) FROM public.Edge");
+        let projects = scalar("SELECT count(*) FROM public.Project");
         let pending_chunks = (total_chunks - embedded_chunks).max(0);
         let coverage_pct = if total_chunks > 0 {
             (embedded_chunks as f64 / total_chunks as f64) * 100.0
@@ -336,31 +343,73 @@ impl McpServer {
             0.0
         };
 
+        // Pipeline params — read env (best-effort, reflects responder).
+        let env_usize = |key: &str, default: usize| -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let env_u64 = |key: &str, default: u64| -> u64 {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let a1 = env_usize("AXON_A1_WORKERS", 4);
+        let a2 = env_usize("AXON_A2_WORKERS", 8);
+        let a3 = env_usize("AXON_A3_WORKERS", 2);
+        let a3_batch = env_usize("AXON_A3_BATCH_SIZE", 32);
+        let a3_timeout = env_u64("AXON_A3_BATCH_TIMEOUT_MS", 10);
+        let b1 = env_usize("AXON_B1_WORKERS", 4);
+        let b2 = env_usize("AXON_B2_WORKERS", 1);
+        let b3 = env_usize("AXON_B3_WORKERS", 2);
+        let b2_batch = env_usize("AXON_B2_BATCH_SIZE", 64);
+        let b2_timeout = env_u64("AXON_B2_BATCH_TIMEOUT_MS", 200);
+        let b3_batch = env_usize("AXON_B3_BATCH_SIZE", 64);
+        let b3_timeout = env_u64("AXON_B3_BATCH_TIMEOUT_MS", 200);
+        let coldstart_batch = env_usize("AXON_B1_COLDSTART_BATCH_SIZE", 4096);
+        let a3_to_b1_cap = env_usize("AXON_A3_TO_B1_BUFFER", 10_000);
+
         let report = format!(
-            "## Embedding Status (project={project})\n\n\
-             - Total chunks:    {total_chunks}\n\
-             - Embedded chunks: {embedded_chunks}\n\
-             - Pending chunks:  {pending_chunks}\n\
-             - Coverage:        {coverage_pct:.2}%\n\n\
-             ### Pipeline B configuration (DEC-AXO-086 / CPT-AXO-054)\n\
-             - NOTIFY channel:        chunk_pending_embed\n\
-             - Cold-start poll:       every 30s (LEFT JOIN safety net)\n\
-             - A3→B1 try_send buffer: 10 000 (drops rattrapés par cold-start poll)\n\
-             - B2 batch size:         64 chunks\n\
-             - B2 batch timeout:      200 ms\n\n\
-             A backlog > 0 with NOTIFY listener up clears within minutes; \
-             a sustained backlog suggests the indexer is stopped or the \
-             listener is disconnected — run `diagnose_indexing` for triage."
+            "## Axon Status (project={project})\n\n\
+             ### Storage\n\
+             | Entity         | Count        |\n\
+             |----------------|--------------|\n\
+             | Symbol         | {symbols:>12} |\n\
+             | Chunk          | {total_chunks:>12} |\n\
+             | ChunkEmbedding | {embedded_chunks:>12} |\n\
+             | Edge           | {edges:>12} |\n\
+             | IndexedFile    | {indexed_files:>12} |\n\
+             | Project        | {projects:>12} |\n\n\
+             **Embedding coverage** : {embedded_chunks} / {total_chunks} = {coverage_pct:.2}%  (pending = {pending_chunks})\n\n\
+             ### Pipeline A — CPU (graph + chunks + FTS)\n\
+             - Workers:           a1={a1}  a2={a2}  a3={a3}\n\
+             - A3 batch:          {a3_batch} chunks, timeout {a3_timeout} ms\n\n\
+             ### Pipeline B — GPU embedding\n\
+             - Workers:           b1={b1}  b2={b2}  b3={b3}\n\
+             - B2 batch:          {b2_batch} chunks, timeout {b2_timeout} ms\n\
+             - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
+             - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par cold-start poll)\n\
+             - NOTIFY channel:    chunk_pending_embed\n\
+             - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\n\
+             Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer)."
         );
 
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "structuredContent": {
                 "project": project,
+                "symbols": symbols,
                 "total_chunks": total_chunks,
                 "embedded_chunks": embedded_chunks,
                 "pending_chunks": pending_chunks,
                 "coverage_pct": coverage_pct,
+                "edges": edges,
+                "indexed_files": indexed_files,
+                "projects": projects,
+                "pipeline_a": { "a1": a1, "a2": a2, "a3": a3, "a3_batch_size": a3_batch, "a3_batch_timeout_ms": a3_timeout },
+                "pipeline_b": { "b1": b1, "b2": b2, "b3": b3, "b2_batch_size": b2_batch, "b2_batch_timeout_ms": b2_timeout, "b3_batch_size": b3_batch, "b3_batch_timeout_ms": b3_timeout, "a3_to_b1_buffer_cap": a3_to_b1_cap, "coldstart_batch_size": coldstart_batch },
                 "notify_channel": "chunk_pending_embed",
                 "coldstart_poll_interval_secs": 30,
             }

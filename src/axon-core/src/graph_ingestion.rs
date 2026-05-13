@@ -4545,11 +4545,20 @@ impl GraphStore {
     pub fn select_chunks_needing_embedding(&self, limit: usize) -> Result<Vec<String>> {
         let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
         let safe_model_id = Self::escape_sql(model_id);
+        // Bucket-batching optimization: order by content length so each
+        // B1 batch (64 consecutive chunk_ids) is length-homogeneous.
+        // BGE-Large transformer cost = batch_size × max_seq_len² (padding
+        // is paid for every item up to the longest in the batch). With
+        // randomly-ordered inputs a single 512-token chunk forces all 63
+        // siblings to pad to 512; with length-sorted inputs each batch
+        // stays inside one of TensorRT's seq_buckets [128, 256, 384, 512]
+        // → near-zero padding → GPU does proportionally less wasted work.
         let raw = self.query_json(&format!(
             "SELECT c.id FROM Chunk c \
              LEFT JOIN ChunkEmbedding ce \
                ON ce.chunk_id = c.id AND ce.model_id = '{safe_model_id}' \
              WHERE ce.chunk_id IS NULL \
+             ORDER BY length(c.content) \
              LIMIT {limit}"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
