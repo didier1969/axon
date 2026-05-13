@@ -55,7 +55,7 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"soll_apply_plan_v2"));
     assert!(tool_names.contains(&"refine_lattice"));
     assert!(tool_names.contains(&"batch"));
-    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"sql"));
     assert!(tool_names.contains(&"debug"));
     assert!(tool_names.contains(&"schema_overview"));
     assert!(tool_names.contains(&"list_labels_tables"));
@@ -255,7 +255,7 @@ fn test_mcp_tools_list_in_full_autonomous_exposes_information_surface() {
     assert!(tool_names.contains(&"truth_check"));
     assert!(!tool_names.contains(&"resume_vectorization"));
     assert!(tool_names.contains(&"debug"));
-    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"sql"));
     assert!(tool_names.contains(&"diagnose_indexing"));
 
     unsafe {
@@ -309,7 +309,7 @@ fn test_mcp_tools_list_include_internal_adds_resume_vectorization_only() {
     assert!(tool_names.contains(&"simulate_mutation"));
     assert!(tool_names.contains(&"resume_vectorization"));
     assert!(tool_names.contains(&"debug"));
-    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"sql"));
     assert!(tool_names.contains(&"schema_overview"));
 
     unsafe {
@@ -1683,7 +1683,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"simulate_mutation"));
     assert!(!public_tool_names.contains(&"resume_vectorization"));
     assert!(public_tool_names.contains(&"refine_lattice"));
-    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"sql"));
     assert!(public_tool_names.contains(&"debug"));
     assert!(public_tool_names.contains(&"schema_overview"));
     assert!(public_tool_names.contains(&"list_labels_tables"));
@@ -3610,7 +3610,7 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
     assert!(public_tool_names.contains(&"simulate_mutation"));
     assert!(!public_tool_names.contains(&"resume_vectorization"));
     assert!(public_tool_names.contains(&"refine_lattice"));
-    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"sql"));
     assert!(public_tool_names.contains(&"debug"));
     assert!(public_tool_names.contains(&"schema_overview"));
     assert!(public_tool_names.contains(&"list_labels_tables"));

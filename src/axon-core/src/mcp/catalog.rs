@@ -822,14 +822,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "cypher",
-                "description": "[LLM/ADVANCED] Raw read-only graph query interface. Use only after `schema_overview`, `list_labels_tables`, or `query_examples`, when the product surface does not answer precisely enough.",
+                "name": "sql",
+                "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview`, `list_labels_tables`, or `query_examples`, when the product surface does not answer precisely enough.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "cypher": { "type": "string" }
+                        "sql": { "type": "string" }
                     },
-                    "required": ["cypher"]
+                    "required": ["sql"]
                 }
             },
             json!({

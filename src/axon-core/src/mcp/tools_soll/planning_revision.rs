@@ -48,8 +48,8 @@ impl McpServer {
                             "invalid_field": "revision_id",
                             "stage": "rollback_operation",
                             "supplied_revision_id": revision_id,
-                            "follow_up_tools": ["soll_validate", "cypher"],
-                            "hint": "rollback operation failed mid-transaction; verify revision integrity via `cypher SELECT * FROM soll.main.Revision WHERE revision_id='<id>'` and `soll_validate` post-rollback"
+                            "follow_up_tools": ["soll_validate", "sql"],
+                            "hint": "rollback operation failed mid-transaction; verify revision integrity via `sql SELECT * FROM soll.Revision WHERE revision_id='<id>'` and `soll_validate` post-rollback"
                         },
                         "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
                     }

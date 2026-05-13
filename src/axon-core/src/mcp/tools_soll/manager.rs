@@ -69,14 +69,14 @@ impl McpServer {
                 "diagnostic_excerpt": excerpt,
                 "operator_guidance": {
                     "problem_class": kind,
-                    "follow_up_tools": ["cypher", "soll_relation_schema", "project_registry_lookup"],
+                    "follow_up_tools": ["sql", "soll_relation_schema", "project_registry_lookup"],
                     "confidence": "high"
                 },
                 "parameter_repair": {
                     "invalid_field": repair_field,
                     "category": category,
                     "action": action,
-                    "follow_up_tools": ["cypher", "soll_relation_schema", "project_registry_lookup"],
+                    "follow_up_tools": ["sql", "soll_relation_schema", "project_registry_lookup"],
                     "hint": recovery,
                 }
             }
@@ -638,8 +638,8 @@ impl McpServer {
                                         "supplied_source_id": src,
                                         "supplied_target_id": tgt,
                                         "supplied_relation_type": explicit_rel,
-                                        "follow_up_tools": ["soll_relation_schema", "cypher"],
-                                        "hint": "the link insert failed; verify both endpoints exist via `cypher SELECT id FROM soll.main.Node WHERE id IN ('<src>','<tgt>')` and the relation_type is allowed via `soll_relation_schema`"
+                                        "follow_up_tools": ["soll_relation_schema", "sql"],
+                                        "hint": "the link insert failed; verify both endpoints exist via `sql SELECT id FROM soll.Node WHERE id IN ('<src>','<tgt>')` and the relation_type is allowed via `soll_relation_schema`"
                                     }));
                                     obj.insert("diagnostic_excerpt".to_string(), json!(e.to_string().chars().take(240).collect::<String>()));
                                 }

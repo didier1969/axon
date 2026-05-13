@@ -290,9 +290,9 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
-    pub(crate) fn axon_cypher(&self, args: &Value) -> Option<Value> {
-        let cypher = args.get("cypher")?.as_str()?;
-        let q = cypher.trim();
+    pub(crate) fn axon_sql(&self, args: &Value) -> Option<Value> {
+        let sql = args.get("sql")?.as_str()?;
+        let q = sql.trim();
         let ql = q.to_ascii_lowercase();
 
         // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
@@ -377,7 +377,7 @@ impl McpServer {
                             "status": "input_invalid",
                             "next_action": {
                                 "kind": "fix_column_then_retry",
-                                "tool": "cypher",
+                                "tool": "sql",
                                 "when": "after_replacing_invalid_column"
                             },
                             "operator_guidance": {
@@ -385,7 +385,7 @@ impl McpServer {
                                 "follow_up_tools": ["schema_overview", "list_labels_tables", "query_examples"],
                             },
                             "parameter_repair": {
-                                "invalid_field": "cypher",
+                                "invalid_field": "sql",
                                 "missing_column": missing_col,
                                 "available_columns": candidates,
                                 "hint": format!(

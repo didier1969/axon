@@ -5988,7 +5988,7 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         .collect();
     assert!(kinds.contains("file"), "entry_points must include `file` steps: {kinds:?}");
     assert!(kinds.contains("mcp"), "entry_points must include `mcp` steps: {kinds:?}");
-    assert!(kinds.contains("cypher"), "entry_points must include `cypher` steps: {kinds:?}");
+    assert!(kinds.contains("sql"), "entry_points must include `sql` steps: {kinds:?}");
 
     let content = result["content"][0]["text"].as_str().unwrap();
     assert!(
