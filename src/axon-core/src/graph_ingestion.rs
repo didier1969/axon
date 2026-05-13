@@ -4321,25 +4321,21 @@ impl GraphStore {
         use std::collections::HashSet;
 
         let backend_is_pg = self.is_postgres_backend();
-        // MIL-AXO-017 slice 3 — the legacy per-type SQL relation tables
-        // (CONTAINS / CALLS / CALLS_NIF / IMPACTS / SUBSTANTIATES) were
-        // dropped by REQ-AXO-216 (Stop A) and never re-created on PG.
-        // Emitting INSERTs against them would error with `relation does
-        // not exist`. Always skip the SQL-relation-table path under PG;
-        // the unified `public.Edge` UPSERT (REQ-AXO-297) takes their
-        // place. The env-var gate is preserved for non-PG dev paths so
-        // any in-memory fixture can still exercise the legacy renderer.
+        // MIL-AXO-017 slice 6 phase A — AGE writes retired. Legacy SQL
+        // relation tables were dropped by REQ-AXO-216 (Stop A) and AGE
+        // Cypher writes are deleted now that `public.Edge` (REQ-AXO-295
+        // schema, REQ-AXO-297 dual-write) is the canonical structural
+        // edge storage. Non-PG dev fixtures still use the legacy
+        // renderer for symmetry.
         let skip_sql_relations =
             backend_is_pg || crate::postgres::age::age_only_relations_enabled();
-        let emit_age = backend_is_pg
-            && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
+        let emit_age = false;
 
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
         let mut chunk_rows: Vec<ChunkRow> = Vec::new();
         let mut contains_rows: Vec<RelationRow> = Vec::new();
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
-        let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
@@ -4350,17 +4346,6 @@ impl GraphStore {
             if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
                 continue;
             }
-            symbol_vertices.push((
-                symbol_id.clone(),
-                serde_json::json!({
-                    "name": sym.name,
-                    "kind": sym.kind,
-                    "is_public": sym.is_public,
-                    "is_nif": sym.is_nif,
-                    "is_unsafe": sym.is_unsafe,
-                    "project_code": project_code,
-                }),
-            ));
             symbol_rows.push(SymbolRow {
                 symbol_id: symbol_id.clone(),
                 name: sym.name.clone(),
@@ -4450,36 +4435,10 @@ impl GraphStore {
             queries.extend(acc.render_calls_pg());
             queries.extend(acc.render_calls_nif_pg());
         }
-        if emit_age {
-            queries.extend(acc.render_contains_age_cypher("axon_graph"));
-            queries.extend(acc.render_calls_age_cypher("axon_graph"));
-            queries.extend(acc.render_calls_nif_age_cypher("axon_graph"));
-            let file_props = serde_json::json!({ "project_code": project_code });
-            if let Ok(cypher) = crate::postgres::age::cypher_merge_vertex(
-                "axon_graph",
-                "File",
-                "path",
-                path,
-                &file_props,
-            ) {
-                queries.push(cypher);
-            }
-            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
-                "axon_graph",
-                "Symbol",
-                "id",
-                &symbol_vertices,
-                500,
-            ) {
-                queries.extend(cypher_list);
-            }
-        }
-        // REQ-AXO-297 (MIL-AXO-017 slice 3) — dual-write the unified
-        // `public.Edge` table alongside AGE. Always emit when on PG so
-        // MCP tools (REQ-AXO-299) can switch onto WITH RECURSIVE before
-        // AGE is dropped (REQ-AXO-300). On non-PG backends this is a
-        // no-op because the table won't exist (DuckDB is fully retired
-        // per CPT-AXO-053).
+        // MIL-AXO-017 slice 6 — AGE writes retired. `public.Edge`
+        // (REQ-AXO-295 schema, REQ-AXO-297 UPSERTs) is now the sole
+        // structural edge storage on PG.
+        let _ = emit_age; // retained as `false` for now to keep diff focal — block deleted.
         if backend_is_pg {
             queries.extend(acc.render_unified_edge_pg(last_seen_ms));
         }
@@ -4538,8 +4497,7 @@ impl GraphStore {
         // unified public.Edge replaces them).
         let skip_sql_relations =
             backend_is_pg || crate::postgres::age::age_only_relations_enabled();
-        let emit_age = backend_is_pg
-            && (skip_sql_relations || crate::postgres::age::age_dual_write_enabled());
+        let emit_age = false;
 
         // Per-file chunk_ids preserved for the return value.
         let mut chunk_ids_per_file: Vec<Vec<String>> = Vec::with_capacity(files.len());
@@ -4556,10 +4514,6 @@ impl GraphStore {
         let mut contains_rows: Vec<RelationRow> = Vec::new();
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
-        let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
-        // REQ-AXO-295 Phase 2 — File vertices accumulated for one
-        // UNWIND-batched cypher() call (was one cypher() per file).
-        let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
@@ -4575,17 +4529,6 @@ impl GraphStore {
                 if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
                     continue;
                 }
-                symbol_vertices.push((
-                    symbol_id.clone(),
-                    serde_json::json!({
-                        "name": sym.name,
-                        "kind": sym.kind,
-                        "is_public": sym.is_public,
-                        "is_nif": sym.is_nif,
-                        "is_unsafe": sym.is_unsafe,
-                        "project_code": project_code,
-                    }),
-                ));
                 symbol_rows.push(SymbolRow {
                     symbol_id: symbol_id.clone(),
                     name: sym.name.clone(),
@@ -4654,14 +4597,6 @@ impl GraphStore {
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
             indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms));
-            // Defer File vertex MERGE — accumulated below for one
-            // UNWIND-batched cypher() call.
-            if emit_age {
-                file_vertices.push((
-                    path_str.clone(),
-                    serde_json::json!({ "project_code": project_code }),
-                ));
-            }
             chunk_ids_per_file.push(chunk_ids_emitted);
         }
 
@@ -4683,40 +4618,8 @@ impl GraphStore {
             queries.extend(acc.render_calls_pg());
             queries.extend(acc.render_calls_nif_pg());
         }
-        if emit_age {
-            queries.extend(acc.render_contains_age_cypher("axon_graph"));
-            queries.extend(acc.render_calls_age_cypher("axon_graph"));
-            queries.extend(acc.render_calls_nif_age_cypher("axon_graph"));
-            // REQ-AXO-295 Phase 2 — File vertex MERGEs UNWIND-batched.
-            // Previously this emitted one cypher() call per file in the
-            // batch; at ~25 ms parser+planner overhead per cypher()
-            // that was ~800 ms / 32-file batch and dominated the PG
-            // round-trip budget. UNWIND collapses N MERGEs into one
-            // cypher() call.
-            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
-                "axon_graph",
-                "File",
-                "path",
-                &file_vertices,
-                500,
-            ) {
-                queries.extend(cypher_list);
-            }
-            if let Ok(cypher_list) = crate::postgres::age::cypher_merge_vertices_unwind(
-                "axon_graph",
-                "Symbol",
-                "id",
-                &symbol_vertices,
-                500,
-            ) {
-                queries.extend(cypher_list);
-            }
-        }
-        // REQ-AXO-297 (MIL-AXO-017 slice 3) — dual-write the unified
-        // `public.Edge` table alongside AGE. Always emit when on PG so
-        // MCP tools (REQ-AXO-299) can switch onto WITH RECURSIVE before
-        // AGE is dropped (REQ-AXO-300). Reuses the accumulator rows
-        // already collected by the loop above.
+        // MIL-AXO-017 slice 6 — AGE writes retired.
+        let _ = emit_age;
         if backend_is_pg {
             let now_ms = chrono::Utc::now().timestamp_millis();
             queries.extend(acc.render_unified_edge_pg(now_ms));
