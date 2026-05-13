@@ -4588,7 +4588,12 @@ impl GraphStore {
     /// [`Self::fetch_chunk_for_embedding`] but for a slice of chunk_ids
     /// in a single SQL roundtrip. Missing ids (race with re-parse) are
     /// silently absent from the result, mirroring the per-row
-    /// `Ok(None)` semantics. Order of results is not guaranteed.
+    /// `Ok(None)` semantics.
+    ///
+    /// DEC-AXO-086 follow-up — rows are returned `ORDER BY token_count`
+    /// so consecutive items handed off to B2 fall into the same TensorRT
+    /// seq_bucket → padding ≈ 0 per batch. NULL token_count (back-fill)
+    /// is approximated via `length(content)/3`.
     ///
     /// Reads through the writer ctx for the same read-after-write
     /// reason as the per-row path (cross-pipeline try_send hand-off).
@@ -4605,7 +4610,8 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(",");
         let raw = self.query_json_writer(&format!(
-            "SELECT id, content, content_hash FROM Chunk WHERE id IN ({in_list})"
+            "SELECT id, content, content_hash FROM Chunk WHERE id IN ({in_list}) \
+             ORDER BY COALESCE(token_count, length(content) / 3)"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut out = Vec::with_capacity(rows.len());

@@ -371,18 +371,27 @@ pub fn spawn_pipeline_b_full(
     // Per-item B1 was bottlenecking GPU at 27% util: 4 PG SELECT/worker ×
     // ~50ms each = ~80 ch/s feed rate vs B2 batch=64 / 200ms timeout
     // (~320 ch/s needed to keep batches full). Batched B1 = 1 SELECT IN
-    // (..) per 64 chunk_ids → matches B2 granularity → GPU saturates.
+    // (..) per pool_size chunk_ids → matches B2 granularity → GPU saturates.
     // `counts.b1` is no longer wired to a parallel-worker fan-out because
     // a single batched worker already serializes the SELECTs cheaper
     // than the deadpool can parallelize them; the count is preserved on
     // the struct for telemetry symmetry with B3.
+    //
+    // DEC-AXO-086 follow-up (option-b bucket-sort) — B1 pool size = 4× B2
+    // batch size so every fetch returns ≥4 B2-batches worth of chunks,
+    // and the fetch SQL orders them by token_count. B2 then captures
+    // consecutive 64-windows that statistically fall in the SAME TensorRT
+    // seq_bucket → padding ≈ 0 per GPU batch. Smaller pool means B2
+    // batches cross bucket boundaries (current bug); larger pool wastes
+    // memory + latency without further benefit.
     let _ = counts.b1;
+    let b1_pool_size = caps.b2_batch_size.saturating_mul(4).max(caps.b2_batch_size);
     super::stage_b1::spawn_b1_batched_worker(
         b1_inbox_rx,
         b1_to_b2_tx,
         store.clone(),
         metrics_b1.clone(),
-        caps.b2_batch_size,
+        b1_pool_size,
         std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
     );
 
