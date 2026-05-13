@@ -110,6 +110,113 @@ pub async fn b1_fetch_for_embedding(
     }))
 }
 
+/// REQ-AXO-314 batched B1 — accumulates chunk_ids from `rx` up to
+/// `batch_size` or `batch_timeout`, then issues ONE batched SELECT
+/// (`WHERE id IN (...)`) and forwards each [`ChunkForEmbedding`] to B2.
+///
+/// Replaces the generic-per-item `spawn_stage_workers` wiring for B1.
+/// Mirrors [`super::stage_b2::spawn_b2_batched_worker`] /
+/// [`super::stage_b3::spawn_b3_batched_worker`] in shape so the three
+/// pipeline-B stages now share one batched-workload pattern.
+///
+/// Throughput rationale (CPT-AXO-054):
+/// * Per-item B1 caps at ~4 × (1 / SELECT-latency) ≈ 50-80 ch/s on PG
+///   under deadpool contention, leaving B2's GPU batch=64 chronically
+///   under-filled (B2 timeouts flush partial batches → BGE-Large
+///   under-utilized).
+/// * Batched B1 issues one SELECT per 64 chunk_ids → matches B2's
+///   batch granularity → GPU runs at peak.
+pub fn spawn_b1_batched_worker(
+    mut rx: tokio::sync::mpsc::Receiver<String>,
+    tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
+    store: Arc<crate::graph::GraphStore>,
+    metrics: Arc<super::metrics::StageMetrics>,
+    batch_size: usize,
+    batch_timeout: std::time::Duration,
+) {
+    let batch_size = batch_size.max(1);
+    tokio::spawn(async move {
+        loop {
+            let first = match rx.recv().await {
+                Some(item) => item,
+                None => break,
+            };
+            let mut batch: Vec<String> = Vec::with_capacity(batch_size);
+            batch.push(first);
+
+            let deadline = tokio::time::Instant::now() + batch_timeout;
+            while batch.len() < batch_size {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, rx.recv()).await {
+                    Ok(Some(item)) => batch.push(item),
+                    Ok(None) => break,
+                    Err(_) => break, // timeout
+                }
+            }
+
+            for _ in &batch {
+                metrics.record_started();
+            }
+            let started = std::time::Instant::now();
+            let store_clone = store.clone();
+            let batch_for_block = batch.clone();
+            let join_result = tokio::task::spawn_blocking(move || {
+                store_clone.fetch_chunks_for_embedding_batch(&batch_for_block)
+            })
+            .await;
+
+            match join_result {
+                Ok(Ok(fetched)) => {
+                    let elapsed_us =
+                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                    // Missing chunk_ids (race with re-parse) count as
+                    // errors so the metric stays comparable with the
+                    // per-item path; B2 won't see them.
+                    let fetched_len = fetched.len();
+                    for (chunk_id, content, content_hash) in fetched {
+                        metrics.record_finished(per_item_us);
+                        let payload = ChunkForEmbedding {
+                            chunk_id,
+                            content,
+                            content_hash,
+                        };
+                        if tx.send(payload).await.is_err() {
+                            return; // downstream closed
+                        }
+                    }
+                    for _ in 0..(batch.len() - fetched_len) {
+                        metrics.record_error();
+                    }
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        stage = "B1",
+                        error = ?err,
+                        "fetch_chunks_for_embedding_batch failed"
+                    );
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+                Err(join_err) => {
+                    tracing::warn!(
+                        stage = "B1",
+                        error = ?join_err,
+                        "B1 batched fetch spawn_blocking joined with error"
+                    );
+                    for _ in 0..batch.len() {
+                        metrics.record_error();
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

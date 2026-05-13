@@ -4572,6 +4572,42 @@ impl GraphStore {
     /// a re-parse that re-derived chunk_ids — caller drops silently and
     /// moves on). Returns `Ok(Some((content, content_hash)))` for the
     /// common case.
+    /// REQ-AXO-314 batched fetch — same contract as
+    /// [`Self::fetch_chunk_for_embedding`] but for a slice of chunk_ids
+    /// in a single SQL roundtrip. Missing ids (race with re-parse) are
+    /// silently absent from the result, mirroring the per-row
+    /// `Ok(None)` semantics. Order of results is not guaranteed.
+    ///
+    /// Reads through the writer ctx for the same read-after-write
+    /// reason as the per-row path (cross-pipeline try_send hand-off).
+    pub fn fetch_chunks_for_embedding_batch(
+        &self,
+        chunk_ids: &[String],
+    ) -> Result<Vec<(String, String, String)>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let in_list = chunk_ids
+            .iter()
+            .map(|id| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = self.query_json_writer(&format!(
+            "SELECT id, content, content_hash FROM Chunk WHERE id IN ({in_list})"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.first().and_then(|v| v.as_str()).map(|s| s.to_string());
+            let content = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let hash = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let (Some(id), Some(content), Some(hash)) = (id, content, hash) {
+                out.push((id, content, hash));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn fetch_chunk_for_embedding(
         &self,
         chunk_id: &str,

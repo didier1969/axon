@@ -367,21 +367,23 @@ pub fn spawn_pipeline_b_full(
     let metrics_b2 = StageMetrics::new("B2");
     let metrics_b3 = StageMetrics::new("B3");
 
-    let store_for_b1 = store.clone();
-    spawn_stage_workers(
-        counts.b1,
+    // REQ-AXO-314 — B1 runs the canonical batched worker (mirror of B2/B3).
+    // Per-item B1 was bottlenecking GPU at 27% util: 4 PG SELECT/worker ×
+    // ~50ms each = ~80 ch/s feed rate vs B2 batch=64 / 200ms timeout
+    // (~320 ch/s needed to keep batches full). Batched B1 = 1 SELECT IN
+    // (..) per 64 chunk_ids → matches B2 granularity → GPU saturates.
+    // `counts.b1` is no longer wired to a parallel-worker fan-out because
+    // a single batched worker already serializes the SELECTs cheaper
+    // than the deadpool can parallelize them; the count is preserved on
+    // the struct for telemetry symmetry with B3.
+    let _ = counts.b1;
+    super::stage_b1::spawn_b1_batched_worker(
         b1_inbox_rx,
         b1_to_b2_tx,
-        move |chunk_id: String| {
-            let store = store_for_b1.clone();
-            async move {
-                match b1_fetch_for_embedding(chunk_id, store).await? {
-                    Some(payload) => Ok(payload),
-                    None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
-                }
-            }
-        },
+        store.clone(),
         metrics_b1.clone(),
+        caps.b2_batch_size,
+        std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
     );
 
     // REQ-AXO-289 S4b' — B2 runs a dedicated batched worker, not the
