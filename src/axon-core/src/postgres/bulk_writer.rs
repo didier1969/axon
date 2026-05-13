@@ -75,11 +75,22 @@ fn runtime() -> Result<&'static Runtime> {
 }
 
 fn resolve_database_url() -> Result<String> {
-    for key in [
-        "AXON_LIVE_DATABASE_URL",
-        "AXON_DEV_DATABASE_URL",
-        "DATABASE_URL",
-    ] {
+    // REQ-AXO-NNN — honor AXON_INSTANCE_KIND for DB selection. Prior
+    // bug: the static priority list put AXON_LIVE_DATABASE_URL first
+    // regardless of instance. On a dev indexer that inherits both env
+    // vars from the runtime-config (live + dev URLs are both exported
+    // by the scripts/lib/axon-env-vars.sh layer), bulk_writer's pool
+    // would silently connect to axon_live and dev writes leaked into
+    // production. Detection symptom: axon_dev rows stay at 0 while
+    // axon_live grows under a dev-mode indexer.
+    let kind = std::env::var("AXON_INSTANCE_KIND")
+        .unwrap_or_else(|_| "live".to_string())
+        .to_lowercase();
+    let primary = match kind.as_str() {
+        "dev" => "AXON_DEV_DATABASE_URL",
+        _ => "AXON_LIVE_DATABASE_URL",
+    };
+    for key in [primary, "DATABASE_URL"] {
         if let Ok(v) = std::env::var(key) {
             if !v.trim().is_empty() {
                 return Ok(v);
@@ -87,7 +98,7 @@ fn resolve_database_url() -> Result<String> {
         }
     }
     Err(anyhow!(
-        "bulk_writer requires AXON_LIVE_DATABASE_URL / AXON_DEV_DATABASE_URL / DATABASE_URL"
+        "bulk_writer requires {primary} or DATABASE_URL (AXON_INSTANCE_KIND={kind})"
     ))
 }
 

@@ -22,20 +22,27 @@ const IST_INGESTION_VERSION: &str = "4";
 const IST_EMBEDDING_VERSION: &str = "2";
 const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
 
-/// MIL-AXO-015 P3 slice 3b: resolve the connection URL to use for
-/// the PostgreSQL plugin. Honoured precedence — `AXON_LIVE_DATABASE_URL`
-/// > `AXON_DEV_DATABASE_URL` > `DATABASE_URL`. The preference for live
-/// matches the brain's most common runtime mode; callers running a dev
-/// loop must override `AXON_LIVE_DATABASE_URL` (e.g. set it to empty)
-/// or set the dev URL explicitly. axon-core does not currently know
-/// which AxonInstance the caller intends — that resolution lives one
-/// layer up in `RuntimeProcessRole` and is wired in slice 3c.
+/// Resolve the connection URL for the PostgreSQL plugin, honoring
+/// `AXON_INSTANCE_KIND` so dev-mode processes target `axon_dev` even
+/// when both `AXON_LIVE_DATABASE_URL` and `AXON_DEV_DATABASE_URL` are
+/// exported by the runtime scripts. Falls back to `DATABASE_URL` when
+/// the instance-scoped var is missing (plain `cargo test` etc.).
+///
+/// Bug history: prior implementation tested `AXON_LIVE_DATABASE_URL`
+/// first regardless of instance, so a dev indexer started via
+/// `./scripts/axon-dev start` (which exports both URLs from
+/// `runtime-config.dev.env` plus inherited live exports) silently wrote
+/// to `axon_live`. Reproduced 2026-05-14: dev counts stayed 0 while
+/// live grew under a dev-instance indexer.
 fn resolve_pg_database_url() -> Result<String> {
-    for var in [
-        "AXON_LIVE_DATABASE_URL",
-        "AXON_DEV_DATABASE_URL",
-        "DATABASE_URL",
-    ] {
+    let kind = std::env::var("AXON_INSTANCE_KIND")
+        .unwrap_or_else(|_| "live".to_string())
+        .to_lowercase();
+    let primary = match kind.as_str() {
+        "dev" => "AXON_DEV_DATABASE_URL",
+        _ => "AXON_LIVE_DATABASE_URL",
+    };
+    for var in [primary, "DATABASE_URL"] {
         if let Ok(v) = std::env::var(var) {
             if !v.trim().is_empty() {
                 return Ok(v);
@@ -43,8 +50,8 @@ fn resolve_pg_database_url() -> Result<String> {
         }
     }
     Err(anyhow!(
-        "no PostgreSQL connection URL configured (set AXON_LIVE_DATABASE_URL, \
-         AXON_DEV_DATABASE_URL, or DATABASE_URL)"
+        "no PostgreSQL connection URL configured (set {primary} or DATABASE_URL; \
+         AXON_INSTANCE_KIND={kind})"
     ))
 }
 
