@@ -183,7 +183,19 @@ impl McpServer {
         // an empty AGE result yields an empty caller set instead of querying
         // a missing relation table.
         let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let age_result = if self.graph_store.is_postgres_backend()
+        // MIL-AXO-017 slice 5 (REQ-AXO-299) — prefer the unified
+        // public.Edge SQL function. Falls through to AGE Cypher on PG
+        // when the SQL path returns empty (transitional dual-write
+        // window per REQ-AXO-297) so this slice is non-destructive.
+        // AGE branch is removed in slice 6 (REQ-AXO-300).
+        let public_edge_result = if self.graph_store.is_postgres_backend() {
+            self.impact_callers_via_public_edge(&target_id, project, depth)
+                .map(Ok)
+        } else {
+            None
+        };
+        let age_result = if public_edge_result.is_none()
+            && self.graph_store.is_postgres_backend()
             && crate::postgres::age::age_read_enabled()
         {
             self.impact_callers_via_age(&target_id, project, depth)
@@ -191,13 +203,15 @@ impl McpServer {
         } else {
             None
         };
-        let query_outcome = age_result.unwrap_or_else(|| {
-            if skip_sql_relations {
-                Ok("[]".to_string())
-            } else {
-                self.graph_store.query_json_param(&query, &params)
-            }
-        });
+        let query_outcome = public_edge_result
+            .or(age_result)
+            .unwrap_or_else(|| {
+                if skip_sql_relations {
+                    Ok("[]".to_string())
+                } else {
+                    self.graph_store.query_json_param(&query, &params)
+                }
+            });
 
         match query_outcome {
             Ok(res) => {
@@ -899,6 +913,63 @@ impl McpServer {
     /// error, or empty result so the caller falls back to SQL —
     /// covers AGE empty (dual-write opt-in not enabled), schema gaps,
     /// or AGE quirks we haven't covered yet.
+    /// MIL-AXO-017 slice 5 (REQ-AXO-299) — query `public.callers_of`
+    /// SQL function (REQ-AXO-296) for reverse-traversal callers. Joins
+    /// with `public.Symbol` + `public.Chunk` to surface the 5-column
+    /// shape `axon_impact` expects (caller_id, edge_type, origin, name,
+    /// kind), keeping the JSON contract identical to the AGE-based
+    /// `impact_callers_via_age` helper. Returns `None` on empty / error
+    /// so the caller falls through to AGE for diagnosis during the
+    /// transition.
+    fn impact_callers_via_public_edge(
+        &self,
+        target_id: &str,
+        project: Option<&str>,
+        depth: u64,
+    ) -> Option<String> {
+        let depth_clamped = depth.clamp(1, 10) as i32;
+        let project_code_param = project.unwrap_or("");
+        // Uses Axon's positional `?` placeholders (`expand_named_params`
+        // inlines escaped string literals before dispatch). The graph
+        // SQL function `public.callers_of` returns (source_id, distance,
+        // relation_type) — we map relation_type to the lowercased
+        // canonical labels (`calls`, `calls_nif`) that `axon_impact`
+        // parses for direct vs nif edge accounting.
+        let sql = format!(
+            "WITH callers AS (\
+                 SELECT source_id, distance, relation_type FROM callers_of(?, {depth_clamped}::INT, ?)\
+             ),\
+             enriched AS (\
+                 SELECT c.source_id AS caller_id,\
+                        CASE c.relation_type\
+                            WHEN 'CALLS'     THEN 'calls'\
+                            WHEN 'CALLS_NIF' THEN 'calls_nif'\
+                            ELSE lower(c.relation_type)\
+                        END AS edge_type,\
+                        COALESCE(s.name, '-') AS name,\
+                        COALESCE(s.kind, '-') AS kind,\
+                        COALESCE(MIN(ch.file_path), '-') AS origin\
+                 FROM callers c\
+                 LEFT JOIN public.Symbol s ON s.id = c.source_id\
+                 LEFT JOIN public.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'\
+                 GROUP BY c.source_id, c.relation_type, s.name, s.kind\
+             )\
+             SELECT caller_id, edge_type, origin, name, kind FROM enriched"
+        );
+        let params = serde_json::json!([target_id, project_code_param]);
+        let raw = match self.graph_store.query_json_param(&sql, &params) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("impact_callers_via_public_edge: SQL query failed: {}", e);
+                return None;
+            }
+        };
+        if raw.trim() == "[]" {
+            return None;
+        }
+        Some(raw)
+    }
+
     fn impact_callers_via_age(
         &self,
         target_id: &str,
