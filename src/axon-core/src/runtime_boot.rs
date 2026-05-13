@@ -431,38 +431,6 @@ pub fn run_brain() -> anyhow::Result<()> {
 }
 
 pub fn run_indexer() -> anyhow::Result<()> {
-    // MIL-AXO-015 P3 slice 3h: under the PostgreSQL backend, the
-    // indexer hot path was rejected by default until the writer surfaces
-    // were PG-branched. Status as of 2026-05-08 session 4 phase 3:
-    //   - ChunkEmbedding upsert: PG-branched (pgvector text literal)
-    //   - Symbol.embedding inline + UPDATE: PG-branched
-    //   - GraphEmbedding upsert: PG-branched
-    //   - OptimizerDecisionLog / Vector* runtime tables: PG-branched
-    //   - vectorization_queue / graph_projection_queue / file_ingress:
-    //     no DuckDB-only patterns (UPDATE/DELETE cross-backend)
-    //   - B.2 dual-write CONTAINS/CALLS/CALLS_NIF wired into AGE
-    // The gate stays IN PLACE pending an integration smoke test under
-    // a live `axon-test/age-pgvector:pg17` container. Set
-    // `AXON_INDEXER_PG_OPT_IN=1` to bypass for the smoke-test cycle —
-    // operator must verify IST count parity vs the DuckDB baseline
-    // before the gate is removed.
-    if matches!(
-        crate::graph::PluginBackend::current(),
-        crate::graph::PluginBackend::Postgres
-    ) && std::env::var("AXON_INDEXER_PG_OPT_IN")
-        .ok()
-        .filter(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-        .is_none()
-    {
-        return Err(anyhow::anyhow!(
-            "axon-indexer under AXON_DB_BACKEND=postgres is gated pending integration smoke test. \
-             Writer hot path is PG-clean (pgvector helpers wired through ChunkEmbedding / Symbol / \
-             GraphEmbedding / Optimizer / Vector* runtime; B.2 AGE dual-write live for relations). \
-             Set AXON_INDEXER_PG_OPT_IN=1 to bypass and run the indexer against a PG container. \
-             Verify IST count parity vs DuckDB baseline (Symbol/Chunk/CONTAINS/CALLS counts) and \
-             a clean shutdown before removing this gate. Brain-only on PG is fully supported."
-        ));
-    }
     run(RuntimeBootProfile::indexer())
 }
 
