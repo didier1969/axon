@@ -737,21 +737,10 @@ impl McpServer {
         let target_layer = args.get("target_layer")?.as_str()?;
 
         // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, run the
-        // layer-to-layer drift detection via AGE Cypher's variable-
-        // length path. Falls back to SQL on empty / error so existing
-        // PG installs without dual-write keep working.
-        let raw = if self.graph_store.is_postgres_backend()
-            && crate::postgres::age::age_read_enabled()
-        {
-            self.architectural_drift_via_age(source_layer, target_layer)
-                .unwrap_or_else(|| {
-                    self.architectural_drift_via_sql(source_layer, target_layer)
-                        .unwrap_or_else(|| "[]".to_string())
-                })
-        } else {
-            self.architectural_drift_via_sql(source_layer, target_layer)
-                .unwrap_or_else(|| "[]".to_string())
-        };
+        // MIL-AXO-017 slice 6B: AGE retired ; drift detection via SQL only.
+        let raw = self
+            .architectural_drift_via_sql(source_layer, target_layer)
+            .unwrap_or_else(|| "[]".to_string());
 
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let report = if !rows.is_empty() {
@@ -823,89 +812,7 @@ impl McpServer {
         self.graph_store.query_json_param(&query, &params).ok()
     }
 
-    /// MIL-AXO-015 B.3: AGE Cypher implementation of architectural
-    /// drift. Uses variable-length pattern `[:CALLS*1..5]` and projects
-    /// the path's symbol ids through `nodes(p)`. Each row is a JSON
-    /// array of strings (parsed by `parse_agtype_string_list`) that we
-    /// re-format as `'a -> b -> c'` to match the SQL output shape.
-    /// Returns `None` on identifier validation failure, AGE query
-    /// error, empty result, or agtype parse failure so the caller
-    /// falls back to SQL.
-    fn architectural_drift_via_age(
-        &self,
-        source_layer: &str,
-        target_layer: &str,
-    ) -> Option<String> {
-        // Layers are inlined into a Cypher string literal (CONTAINS).
-        // Reject any value containing `"` or `\\` so the heredoc stays
-        // safe; rely on a permissive validator since layer names can
-        // contain `/` and `-` which validate_identifier rejects.
-        if source_layer
-            .chars()
-            .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
-            || target_layer
-                .chars()
-                .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
-        {
-            log::warn!(
-                "architectural_drift_via_age: layer literal rejected (contains escape char)"
-            );
-            return None;
-        }
-        // AGE list comprehension `[n IN nodes(p) | n.id]` is not
-        // supported on pg17/age 1.6.0 — return raw nodes and parse
-        // the id property in Rust via
-        // parse_agtype_vertex_list_property.
-        let cypher = format!(
-            "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol), \
-                   path = (s1)-[:CALLS*1..5]->(s2:Symbol), \
-                   (s2)<-[:CONTAINS]-(f2:File) \
-             WHERE f1.path CONTAINS \"{source_layer}\" AND f2.path CONTAINS \"{target_layer}\" \
-             RETURN nodes(path) AS path_nodes \
-             LIMIT 20"
-        );
-        let sql = match crate::postgres::age::cypher_query(
-            "axon_graph",
-            &cypher,
-            &["path_nodes"],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "architectural_drift_via_age: cypher_query build failed: {}",
-                    e
-                );
-                return None;
-            }
-        };
-        let raw = match self.graph_store.query_json(&sql) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("architectural_drift_via_age: AGE query failed: {}", e);
-                return None;
-            }
-        };
-        if raw.trim() == "[]" {
-            return None;
-        }
-        // pg_query_json renders rows as arrays-of-columns. Each row's
-        // first column is the agtype list (rendered as a JSON string).
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
-        let mut formatted_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let cell = row.first()?;
-            let raw_list = match cell {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let ids = crate::postgres::age::parse_agtype_vertex_list_property(
-                &raw_list, "id",
-            )?;
-            let path_str = ids.join(" -> ");
-            formatted_rows.push(vec![serde_json::Value::String(path_str)]);
-        }
-        Some(serde_json::to_string(&formatted_rows).ok()?)
-    }
+    // MIL-AXO-017 slice 6B: AGE helper architectural_drift_via_age removed ; SQL is canonical.
 }
 
 /// REQ-AXO-212 — render one diagnose_indexing cause as a two-line

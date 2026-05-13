@@ -1637,42 +1637,10 @@ impl McpServer {
         } else {
             json!({"target_id": target_id})
         };
-        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, run the
-        // up/down traversals via AGE Cypher (same `[name, kind,
-        // project_code]` shape). Falls back to SQL on empty / error.
-        //
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
-        // empty/dropped — bypass the SQL fallback so AGE empty returns "[]"
-        // directly instead of querying a missing relation table.
+        // MIL-AXO-017 slice 6B: AGE retired ; up/down via SQL only.
         let skip_sql_relations = self.graph_store.skip_sql_relations();
-        let (up_res, down_res) = if self.graph_store.is_postgres_backend()
-            && crate::postgres::age::age_read_enabled()
-        {
-            let sql_or_empty_up = || {
-                if skip_sql_relations {
-                    "[]".to_string()
-                } else {
-                    self.graph_store
-                        .query_json_param(&up_query, &params)
-                        .unwrap_or_else(|_| "[]".to_string())
-                }
-            };
-            let sql_or_empty_down = || {
-                if skip_sql_relations {
-                    "[]".to_string()
-                } else {
-                    self.graph_store
-                        .query_json_param(&down_query, &params)
-                        .unwrap_or_else(|_| "[]".to_string())
-                }
-            };
-            let up = self
-                .bidi_trace_via_age(&target_id, project, depth, true)
-                .unwrap_or_else(sql_or_empty_up);
-            let down = self
-                .bidi_trace_via_age(&target_id, project, depth, false)
-                .unwrap_or_else(sql_or_empty_down);
-            (up, down)
+        let (up_res, down_res) = if skip_sql_relations {
+            ("[]".to_string(), "[]".to_string())
         } else {
             let up = self
                 .graph_store
@@ -1872,80 +1840,7 @@ impl McpServer {
         }
     }
 
-    /// MIL-AXO-015 B.3: AGE Cypher implementation of bidi_trace's
-    /// up (`up=true`, callers) or down (`up=false`, callees) variable-
-    /// length traversal. Returns the same `[name, kind, project_code]`
-    /// row shape as the SQL form. Returns `None` on identifier
-    /// validation failure, AGE error, or empty result so the caller
-    /// falls back to SQL.
-    fn bidi_trace_via_age(
-        &self,
-        target_id: &str,
-        project: Option<&str>,
-        depth: u64,
-        up: bool,
-    ) -> Option<String> {
-        let depth_clamped = depth.clamp(1, 24);
-        if target_id
-            .chars()
-            .any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
-        {
-            log::warn!("bidi_trace_via_age: target_id rejected (escape char)");
-            return None;
-        }
-        let project_filter = match project {
-            Some(p) => {
-                if crate::postgres::age::validate_identifier(p, "project_code").is_err() {
-                    log::warn!(
-                        "bidi_trace_via_age: project '{}' fails AGE identifier validation; falling back",
-                        p
-                    );
-                    return None;
-                }
-                if up {
-                    format!("WHERE caller.project_code = \"{p}\"")
-                } else {
-                    format!("WHERE callee.project_code = \"{p}\"")
-                }
-            }
-            None => String::new(),
-        };
-        let cypher = if up {
-            format!(
-                "MATCH (caller:Symbol)-[:CALLS*1..{depth_clamped}]->(target:Symbol {{id: \"{target_id}\"}}) \
-                 {project_filter} \
-                 RETURN DISTINCT caller.name, caller.kind, caller.project_code"
-            )
-        } else {
-            format!(
-                "MATCH (target:Symbol {{id: \"{target_id}\"}})-[:CALLS*1..{depth_clamped}]->(callee:Symbol) \
-                 {project_filter} \
-                 RETURN DISTINCT callee.name, callee.kind, callee.project_code"
-            )
-        };
-        let sql = match crate::postgres::age::cypher_query(
-            "axon_graph",
-            &cypher,
-            &["name", "kind", "project_code"],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("bidi_trace_via_age: cypher_query build failed: {}", e);
-                return None;
-            }
-        };
-        let raw = match self.graph_store.query_json(&sql) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("bidi_trace_via_age: AGE query failed: {}", e);
-                return None;
-            }
-        };
-        if raw.trim() == "[]" {
-            return None;
-        }
-        Some(raw)
-    }
+    // MIL-AXO-017 slice 6B: AGE helper bidi_trace_via_age removed ; SQL is canonical.
 }
 
 #[cfg(test)]

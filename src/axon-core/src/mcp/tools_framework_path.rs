@@ -73,23 +73,10 @@ impl McpServer {
             }));
         };
 
-        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, dump
-        // adjacency from the AGE graph (populated by B.2 dual-write).
-        // Vertex enrichment (commit 0f3828b) put name/project_code
-        // on each Symbol so the same RETURN shape as the SQL path is
-        // achievable without a JOIN. Falls back to SQL on empty /
-        // error so existing PG installs without dual-write still work.
-        let raw = if self.graph_store.is_postgres_backend()
-            && crate::postgres::age::age_read_enabled()
-        {
-            self.path_edges_via_age(project).unwrap_or_else(|| {
-                self.path_edges_via_sql(project)
-                    .unwrap_or_else(|| "[]".to_string())
-            })
-        } else {
-            self.path_edges_via_sql(project)
-                .unwrap_or_else(|| "[]".to_string())
-        };
+        // MIL-AXO-017 slice 6B: AGE retired ; adjacency comes from public.Edge SQL.
+        let raw = self
+            .path_edges_via_sql(project)
+            .unwrap_or_else(|| "[]".to_string());
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut adjacency: std::collections::HashMap<String, Vec<(String, String, String)>> =
             std::collections::HashMap::new();
@@ -305,66 +292,5 @@ impl McpServer {
         self.graph_store.query_json(&edge_query).ok()
     }
 
-    /// MIL-AXO-015 B.3: dump the same adjacency from the AGE graph
-    /// via Cypher MATCH. Relies on B.2 vertex enrichment (commit
-    /// 0f3828b) so `s.name` / `s.project_code` are searchable. Returns
-    /// `None` on:
-    /// - identifier validation failure (invalid project literal)
-    /// - cypher_query SQL build failure
-    /// - graph_store.query_json error (AGE empty, schema missing, …)
-    /// - empty result (caller falls back to SQL — safer than serving
-    ///   an empty path response when the AGE graph is unpopulated).
-    fn path_edges_via_age(&self, project: Option<&str>) -> Option<String> {
-        // AGE doesn't bind params; inline the project filter after
-        // single-quote escaping. validate_identifier rejects values
-        // that contain `$$` / `\n` / `;` / quotes.
-        let where_clause = if let Some(project_code) = project {
-            if crate::postgres::age::validate_identifier(project_code, "project_code").is_err() {
-                log::warn!(
-                    "path_edges_via_age: project_code '{}' fails AGE identifier validation; falling back",
-                    project_code
-                );
-                return None;
-            }
-            format!(
-                "WHERE src.project_code = \"{project_code}\" AND dst.project_code = \"{project_code}\""
-            )
-        } else {
-            String::new()
-        };
-        // AGE doesn't support edge-label alternation `[r:CALLS|CALLS_NIF]`
-        // (verified via syntax error against pg17/age 1.6.0). Two
-        // MATCH clauses joined by UNION cover the same shape.
-        let cypher = format!(
-            "MATCH (src:Symbol)-[r:CALLS]->(dst:Symbol) {where_clause} \
-             RETURN src.id, src.name, dst.id, dst.name, 'CALLS' AS edge_type \
-             UNION \
-             MATCH (src:Symbol)-[r:CALLS_NIF]->(dst:Symbol) {where_clause} \
-             RETURN src.id, src.name, dst.id, dst.name, 'CALLS_NIF' AS edge_type"
-        );
-        let sql = match crate::postgres::age::cypher_query(
-            "axon_graph",
-            &cypher,
-            &["src_id", "src_name", "dst_id", "dst_name", "edge_type"],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("path_edges_via_age: cypher_query build failed: {}", e);
-                return None;
-            }
-        };
-        let raw = match self.graph_store.query_json(&sql) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("path_edges_via_age: AGE query failed: {}", e);
-                return None;
-            }
-        };
-        // Empty result -> fall back to SQL. AGE may not have been
-        // populated yet (dual-write opt-in or fresh deployment).
-        if raw.trim() == "[]" {
-            return None;
-        }
-        Some(raw)
-    }
+    // MIL-AXO-017 slice 6B: AGE helper path_edges_via_age removed ; SQL is canonical.
 }
