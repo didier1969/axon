@@ -28,14 +28,22 @@ use tracing::{info, warn};
 use crate::graph::GraphStore;
 use crate::ingress_buffer::SharedIngressBuffer;
 use crate::pipeline_v2::{
-    spawn_pipeline_a, spawn_pipeline_b_full, GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts,
-    PipelineBWorkerCounts, PipelineChannelCaps,
+    b1_cold_start_poll, spawn_pipeline_a, spawn_pipeline_b_full, GpuB2Embedder, NoOpEmbedder,
+    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
 const INGRESS_DRAIN_BATCH: usize = 256;
 const INGRESS_DRAIN_POLL_MS: u64 = 200;
+/// Cadence of the periodic `b1_cold_start_poll` that rattrapes chunks
+/// A3's `try_send` dropped under A1→B1 buffer pressure. Conservative
+/// default — 30 s — keeps the poll cost negligible (a single
+/// `SELECT … LEFT JOIN … LIMIT batch_size` per tick when steady-state)
+/// while ensuring the embedding backlog drains promptly when A
+/// outpaces B (the common case at boot + large workspaces).
+const B1_COLDSTART_POLL_INTERVAL_SECS: u64 = 30;
+const B1_COLDSTART_BATCH_SIZE: usize = 256;
 
 /// Boot the streaming pipeline v2 in the indexer binary.
 ///
@@ -81,6 +89,11 @@ pub fn spawn_pipeline_v2_indexer(
         &mut handles_a.b1_inbox_rx,
         mpsc::channel::<String>(1).1,
     );
+    // Keep an extra clone of the same channel for the cold-start poll
+    // task — A3 also pushes here via try_send during steady state, but
+    // any drop on full buffer must be rattrapé by SELECT … LEFT JOIN …
+    // ChunkEmbedding IS NULL (CPT-AXO-054 contract).
+    let b1_inbox_tx_for_poll = handles_a.b1_inbox_tx.clone();
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
@@ -101,10 +114,48 @@ pub fn spawn_pipeline_v2_indexer(
         let _handles_b = spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
         // Persisted-embedding receipts are observability-only; drop the
         // rx side. B3 still UPSERTs ChunkEmbedding regardless.
+
+        // CPT-AXO-054 cold-start poll: every 30 s, sweep public.Chunk
+        // for rows without a matching ChunkEmbedding and push their
+        // chunk_ids into the same inbox. Rattrape:
+        //   * chunks A3 try_send-dropped because the buffer was full
+        //     (the operator-validated session-22 cause: bootstrap +
+        //     watcher push 40k chunks while B side embeds at ~100 ch/s,
+        //     so ~30k chunk_ids overflow per cycle without this poll)
+        //   * chunks from previous indexer instances (pre-v2 cut-over)
+        //   * any race where B1 fetch raced with A3 commit
+        let store_for_poll = store.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(
+                B1_COLDSTART_POLL_INTERVAL_SECS,
+            ));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tick.tick().await;
+                match b1_cold_start_poll(
+                    store_for_poll.clone(),
+                    b1_inbox_tx_for_poll.clone(),
+                    B1_COLDSTART_BATCH_SIZE,
+                )
+                .await
+                {
+                    Ok(n) if n > 0 => {
+                        info!(
+                            "pipeline_v2 cold-start poll: forwarded {n} chunk_id(s) to B1"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(error = %err, "pipeline_v2 cold-start poll failed");
+                    }
+                }
+            }
+        });
     } else {
         // No B side — keep the inbox alive so A3's try_send never gets
         // a closed-channel error, then drain silently.
         let mut rx = b1_inbox_rx;
+        let _ = b1_inbox_tx_for_poll;
         tokio::spawn(async move {
             while rx.recv().await.is_some() {
                 // Silently drop chunk_ids — there's no B to embed them
