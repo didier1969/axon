@@ -59,8 +59,7 @@ pub fn schema_name_for(project_code: &str) -> Result<String> {
 /// for the same Axon binary build.
 pub fn generate_global_schema() -> Vec<String> {
     let mut stmts: Vec<String> = vec![
-        // Extensions. Must come first; both are required for the rest.
-        "CREATE EXTENSION IF NOT EXISTS age".to_string(),
+        // MIL-AXO-017 slice 6B Phase E: AGE extension retired. pgvector required.
         "CREATE EXTENSION IF NOT EXISTS vector".to_string(),
         // SOLL schema: shared intent layer across all projects.
         // Created BEFORE soll.ProjectCodeRegistry so the table can land in
@@ -627,37 +626,7 @@ fn ist_ddl_global() -> Vec<String> {
         // scan handles the post-filter efficiently.
         "CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw_idx ON public.ChunkEmbedding USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)"
             .to_string(),
-        // ── AGE graph namespace (CPT-AXO-040 expanded for option B) ─
-        // Single global graph hosting structural edges. Vertices for
-        // File / Symbol / Chunk are mirrored from the SQL tables (which
-        // remain authoritative for indexed attribute lookups + pgvector
-        // ANN). Edges (CONTAINS / CALLS / CALLS_NIF / IMPACTS /
-        // SUBSTANTIATES) are progressively migrated from SQL relation
-        // tables into AGE elabels (option B roadmap).
-        //
-        // For phase B.1 (DDL only) we declare every label up-front so
-        // future writer slices can `CREATE (n:Symbol ...)` /
-        // `MATCH ()-[:CONTAINS]->()` without DDL drift.
-        "DO $$\n\
-         BEGIN\n\
-           IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'axon_graph') THEN\n\
-             PERFORM create_graph('axon_graph');\n\
-           END IF;\n\
-         END\n\
-         $$"
-        .to_string(),
-        // Vertex labels mirrored from SQL entity tables. AGE rejects
-        // CREATE on a label that already exists; wrap in DO/EXCEPTION
-        // for idempotence.
-        age_idempotent_create("vlabel", "File").to_string(),
-        age_idempotent_create("vlabel", "Symbol").to_string(),
-        age_idempotent_create("vlabel", "Chunk").to_string(),
-        // Edge labels — destinations of phase B.2 writer migration.
-        age_idempotent_create("elabel", "CONTAINS").to_string(),
-        age_idempotent_create("elabel", "CALLS").to_string(),
-        age_idempotent_create("elabel", "CALLS_NIF").to_string(),
-        age_idempotent_create("elabel", "IMPACTS").to_string(),
-        age_idempotent_create("elabel", "SUBSTANTIATES").to_string(),
+        // MIL-AXO-017 slice 6B Phase E: AGE schema + labels retired ; public.Edge canonical.
     ]
 }
 
@@ -668,36 +637,7 @@ fn ist_ddl_global() -> Vec<String> {
 /// SQL-standard `42P07` (duplicate_table) or `42710`
 /// (duplicate_object) we would expect. The narrow handlers were
 /// silently letting the second-run schema bootstrap fail under
-/// `bootstrap_global_pg_schema`. The handler now also catches the
-/// catch-all `OTHERS` branch so the operation is fully idempotent —
-/// safe because the function only ever calls one PERFORM with a
-/// hardcoded label, so any thrown exception either means
-/// "already exists" (the desired no-op) or a real DDL bug that the
-/// upstream test suite + smoke tests will surface.
-fn age_idempotent_create(kind: &'static str, label: &str) -> String {
-    let func = match kind {
-        "vlabel" => "create_vlabel",
-        "elabel" => "create_elabel",
-        _ => unreachable!("invalid AGE label kind"),
-    };
-    format!(
-        "DO $$\n\
-         BEGIN\n\
-           PERFORM {func}('axon_graph', '{label}');\n\
-         EXCEPTION\n\
-           WHEN duplicate_table THEN NULL;\n\
-           WHEN duplicate_object THEN NULL;\n\
-           WHEN sqlstate '42P07' THEN NULL;\n\
-           WHEN OTHERS THEN \n\
-             IF SQLERRM LIKE '%already exists%' THEN \n\
-               NULL; \n\
-             ELSE \n\
-               RAISE; \n\
-             END IF;\n\
-         END\n\
-         $$"
-    )
-}
+// MIL-AXO-017 slice 6B Phase D: age_idempotent_create helper retired.
 
 /// Per-project provisioning entry point.
 ///
@@ -797,49 +737,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn age_idempotent_create_catches_already_exists_message() {
-        // Regression for the bench-blocker discovered 2026-05-08:
-        // AGE's create_vlabel raises sqlstate 'XX000' (internal_error)
-        // with message 'label "File" already exists' — the narrow
-        // duplicate_table / duplicate_object handlers don't catch it,
-        // so a second-run bootstrap_global_pg_schema fails. The fix
-        // adds an OTHERS branch that no-ops only when SQLERRM matches
-        // 'already exists', re-raising every other error.
-        let stmt = age_idempotent_create("vlabel", "File");
-        assert!(stmt.contains("WHEN OTHERS THEN"));
-        assert!(stmt.contains("SQLERRM LIKE '%already exists%'"));
-        assert!(stmt.contains("RAISE"));
-        // Specific catches preserved so the common-case sqlstate match
-        // still hits the cheap path.
-        assert!(stmt.contains("WHEN duplicate_table THEN NULL"));
-        assert!(stmt.contains("WHEN duplicate_object THEN NULL"));
-    }
-
-    #[test]
-    fn global_schema_declares_age_labels_for_option_b() {
-        // Option B (AGE-native edges): every relation gets a pre-
-        // declared elabel and the entity vertex labels exist so the
-        // writer migration (phase B.2+) can `CREATE` and `MATCH`
-        // without DDL drift.
-        let joined = generate_global_schema().join("\n");
-        for label in ["File", "Symbol", "Chunk"] {
-            assert!(
-                joined.contains(&format!("create_vlabel('axon_graph', '{label}')")),
-                "expected vlabel '{label}' declaration"
-            );
-        }
-        for label in ["CONTAINS", "CALLS", "CALLS_NIF", "IMPACTS", "SUBSTANTIATES"] {
-            assert!(
-                joined.contains(&format!("create_elabel('axon_graph', '{label}')")),
-                "expected elabel '{label}' declaration"
-            );
-        }
-        // Idempotence guard: every label create wraps PERFORM in a DO
-        // block with EXCEPTION handlers so re-running is safe.
-        assert!(joined.contains("WHEN duplicate_table THEN NULL"));
-        assert!(joined.contains("WHEN sqlstate '42P07' THEN NULL"));
-    }
+    // MIL-AXO-017 slice 6B Phase D: AGE label tests removed with the helper.
 
     #[test]
     fn global_schema_includes_multi_project_ist_tables() {

@@ -17,14 +17,10 @@
 //   - `vector::{vector_literal, upsert_chunk_embedding_sql,
 //     cosine_ann_where_order_limit}` (P4): pgvector helpers, all
 //     multi-project after the CPT-AXO-039 supersedure.
-//   - `age::{cypher_merge_vertex, cypher_merge_edge, cypher_query,
-//     cypher_props_literal}` (option B.2 foundation 2026-05-08):
-//     AGE Cypher writer + reader helpers, validate identifiers and
-//     escape property strings so the heredoc cannot be terminated.
 //   - `seed::{apply_seed, load_seed_if_needed, SeedDocument}` (P5):
 //     SOLL bootstrap loader for empty PG instances.
+// MIL-AXO-017 slice 6B Phase D: `age` module retired ; canonical edge storage = public.Edge.
 
-pub mod age;
 pub mod bulk_writer;
 pub mod ddl;
 pub mod seed;
@@ -126,25 +122,10 @@ pub async fn smoke_check(pool: &Pool) -> Result<SmokeReport> {
         .context("server_version probe failed")?;
     let server_version: String = row.get(0);
 
-    // Apache AGE: ensure CREATE EXTENSION succeeds (idempotent if already
-    // installed). CPT-AXO-040.
-    conn.batch_execute("CREATE EXTENSION IF NOT EXISTS age")
-        .await
-        .context("CREATE EXTENSION age failed; install Apache AGE in this database")?;
-
-    // pgvector: same idempotent check. CPT-AXO-041.
+    // MIL-AXO-017 slice 6B Phase E: AGE extension retired. pgvector still required.
     conn.batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
         .await
         .context("CREATE EXTENSION vector failed; install pgvector in this database")?;
-
-    let age_row = conn
-        .query_opt(
-            "SELECT extversion FROM pg_extension WHERE extname = $1",
-            &[&"age"],
-        )
-        .await
-        .context("age version probe failed")?;
-    let age_version = age_row.map(|r| r.get::<_, String>(0));
 
     let vector_row = conn
         .query_opt(
@@ -155,15 +136,10 @@ pub async fn smoke_check(pool: &Pool) -> Result<SmokeReport> {
         .context("vector version probe failed")?;
     let vector_version = vector_row.map(|r| r.get::<_, String>(0));
 
-    debug!(
-        ?age_version,
-        ?vector_version,
-        "extensions present after smoke check"
-    );
+    debug!(?vector_version, "extensions present after smoke check");
 
     Ok(SmokeReport {
         server_version,
-        age_version,
         vector_version,
     })
 }
@@ -171,13 +147,12 @@ pub async fn smoke_check(pool: &Pool) -> Result<SmokeReport> {
 #[derive(Debug, Clone)]
 pub struct SmokeReport {
     pub server_version: String,
-    pub age_version: Option<String>,
     pub vector_version: Option<String>,
 }
 
 impl SmokeReport {
     pub fn is_complete(&self) -> bool {
-        self.age_version.is_some() && self.vector_version.is_some()
+        self.vector_version.is_some()
     }
 }
 
@@ -252,13 +227,11 @@ mod tests {
     fn smoke_report_completeness_check() {
         let r = SmokeReport {
             server_version: "PostgreSQL 17".to_string(),
-            age_version: Some("1.5.0".to_string()),
             vector_version: Some("0.8.0".to_string()),
         };
         assert!(r.is_complete());
         let partial = SmokeReport {
             server_version: "PostgreSQL 17".to_string(),
-            age_version: Some("1.5.0".to_string()),
             vector_version: None,
         };
         assert!(!partial.is_complete());

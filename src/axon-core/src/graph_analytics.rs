@@ -687,13 +687,7 @@ impl GraphStore {
         if self.skip_sql_relations() {
             return Ok(Vec::new());
         }
-        // MIL-AXO-015 B.3: AGE Cypher path with variable-length cycle.
-        // Falls back to SQL on empty / error.
-        if self.is_postgres_backend() && crate::postgres::age::age_read_enabled() {
-            if let Some(findings) = self.circular_dependencies_via_age(project) {
-                return Ok(findings);
-            }
-        }
+        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL WITH RECURSIVE is canonical.
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
@@ -760,15 +754,7 @@ impl GraphStore {
         if self.skip_sql_relations() {
             return Ok(0);
         }
-        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, count
-        // 2-cycles via the AGE graph. Falls back to the SQL self-join
-        // on empty / error so existing PG installs without dual-write
-        // still return correct counts from the relation tables.
-        if self.is_postgres_backend() && crate::postgres::age::age_read_enabled() {
-            if let Some(count) = self.circular_dependency_count_via_age(project) {
-                return Ok(count);
-            }
-        }
+        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL self-join is canonical.
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -799,152 +785,9 @@ impl GraphStore {
         Ok(self.query_count(&query).unwrap_or(0))
     }
 
-    /// MIL-AXO-015 B.3: 2-cycle count via AGE Cypher. Each reciprocal
-    /// pair (a→b→a) is counted once thanks to `a.id < b.id`. Returns
-    /// `None` on any failure so the caller can fall back to SQL —
-    /// covers AGE empty (dual-write opt-in not enabled) and identifier
-    /// validation failure on the project literal.
-    fn circular_dependency_count_via_age(&self, project: &str) -> Option<i64> {
-        let project_filter = if project == "*" {
-            String::new()
-        } else {
-            if crate::postgres::age::validate_identifier(project, "project_code").is_err() {
-                log::warn!(
-                    "circular_dependency_count_via_age: project '{}' fails AGE identifier validation; falling back",
-                    project
-                );
-                return None;
-            }
-            format!(" AND a.project_code = \"{project}\"")
-        };
-        let cypher = format!(
-            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol)-[:CALLS]->(a) \
-             WHERE a.id < b.id{project_filter} \
-             RETURN count(*) AS cycle_count"
-        );
-        let sql = match crate::postgres::age::cypher_query(
-            "axon_graph",
-            &cypher,
-            &["cycle_count"],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "circular_dependency_count_via_age: cypher_query build failed: {}",
-                    e
-                );
-                return None;
-            }
-        };
-        let raw = match self.query_json(&sql) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("circular_dependency_count_via_age: AGE query failed: {}", e);
-                return None;
-            }
-        };
-        // AGE returns agtype, which we parse as JSON. Empty result
-        // means "0 cycles" only if the graph has any Symbol with CALLS;
-        // otherwise (graph empty) we fall back to SQL to avoid serving
-        // a misleading zero.
-        if raw.trim() == "[]" {
-            return None;
-        }
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
-        let count_val = rows.first()?.first()?;
-        count_val.as_i64().or_else(|| {
-            // agtype renders integers sometimes as strings — robust
-            // parse via string trimming.
-            count_val.as_str().and_then(|s| s.trim().parse::<i64>().ok())
-        })
-    }
-
-    /// MIL-AXO-015 B.3: deep-cycle detection via AGE variable-length
-    /// pattern. Mirrors `get_circular_dependencies`'s SQL WITH RECURSIVE
-    /// shape:
-    ///   MATCH path = (s:Symbol)-[:CALLS*1..10]->(s)
-    ///   WHERE s.project_code = '<project>'
-    ///   RETURN [n IN nodes(path) | n.name] AS path_names
-    /// Each row is then formatted in Rust as `'a -> b -> c -> a'` to
-    /// match the legacy SQL output. Returns `None` on any failure so
-    /// the caller falls back to SQL.
-    fn circular_dependencies_via_age(&self, project: &str) -> Option<Vec<String>> {
-        let project_filter = if project == "*" {
-            String::new()
-        } else {
-            if crate::postgres::age::validate_identifier(project, "project_code").is_err() {
-                log::warn!(
-                    "circular_dependencies_via_age: project '{}' fails AGE identifier validation; falling back",
-                    project
-                );
-                return None;
-            }
-            format!(" WHERE s.project_code = \"{project}\"")
-        };
-        // AGE doesn't support `[n IN nodes(path) | n.name]` list
-        // comprehension reliably (errors with "could not find
-        // properties for n" against pg17/age 1.6.0). Return the raw
-        // vertex list and extract the name property in Rust via
-        // parse_agtype_vertex_list_property.
-        let cypher = format!(
-            "MATCH path = (s:Symbol)-[:CALLS*1..10]->(s){project_filter} \
-             RETURN nodes(path) AS path_nodes \
-             LIMIT 50"
-        );
-        let sql = match crate::postgres::age::cypher_query(
-            "axon_graph",
-            &cypher,
-            &["path_nodes"],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("circular_dependencies_via_age: cypher_query build failed: {}", e);
-                return None;
-            }
-        };
-        let raw = match self.query_json(&sql) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("circular_dependencies_via_age: AGE query failed: {}", e);
-                return None;
-            }
-        };
-        if raw.trim() == "[]" {
-            return None;
-        }
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).ok()?;
-        let mut findings = Vec::with_capacity(rows.len());
-        for row in rows {
-            let cell = row.into_iter().next()?;
-            let raw_list = match cell {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            let names = crate::postgres::age::parse_agtype_vertex_list_property(
-                &raw_list, "name",
-            )?;
-            // SQL form closes the cycle by appending the source name
-            // after the cycle path: `'a -> b -> c -> a'`. Cypher's
-            // `nodes(path)` already includes the start node twice (it
-            // appears as both the cycle origin and the closing step
-            // since path = (s)-[*]->(s) means s appears as nodes[0]
-            // and is reached again at the end). We honour this by
-            // appending nodes[0] once more if not already trailing.
-            let formatted = if names.last().is_some_and(|last| names.first().is_some_and(|first| first == last)) {
-                names.join(" -> ")
-            } else if !names.is_empty() {
-                let mut closed = names.clone();
-                if let Some(first) = closed.first().cloned() {
-                    closed.push(first);
-                }
-                closed.join(" -> ")
-            } else {
-                continue;
-            };
-            findings.push(formatted);
-        }
-        Some(findings)
-    }
+    // MIL-AXO-017 slice 6B Phase C: AGE cycle detection helpers
+    // (circular_dependency_count_via_age, circular_dependencies_via_age) removed ;
+    // SQL WITH RECURSIVE in callers is canonical.
 
     pub fn get_domain_leakage(
         &self,

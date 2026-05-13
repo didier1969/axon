@@ -537,15 +537,10 @@ impl GraphStore {
         let backend_is_pg = self.is_postgres_backend();
         // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
         // the SQL relation writes — AGE dual-write remains the sole
-        // writer. Hoisted from later in the function so the cascade
-        // DELETE chain (REQ-AXO-248 / S2) can also gate on it.
-        let skip_sql_relations =
-            backend_is_pg && crate::postgres::age::age_only_relations_enabled();
-        // MIL-AXO-015 B.2 vertex enrichment: dual-write Symbol / File
-        // vertex properties to AGE so future readers (B.3) can MATCH
-        // by name / kind / is_nif / project_code. Same lockstep as the
-        // relation edges — populated alongside the SQL writes and
-        // emitted post-execute_batch under PG + age_dual_write flag.
+        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL relation tables
+        // canonical. `skip_sql_relations` stays as false (no skipping).
+        let _ = backend_is_pg;
+        let skip_sql_relations = false;
         let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vectorization_paths = Vec::new();
@@ -735,35 +730,8 @@ impl GraphStore {
         processed_paths.extend(degraded_paths.clone());
 
         if !processed_paths.is_empty() {
-            // REQ-AXO-248 / MIL-AXO-015 B.2 slice S2: under PG, cascade
-            // the OLD relation edges (CONTAINS / CALLS / CALLS_NIF
-            // incident on Symbols of these files) through Apache AGE
-            // BEFORE the SQL chain — DETACH DELETE removes the AGE
-            // Symbol vertices + their edges in a single statement.
-            // Falls back to a warning on AGE failure so the SQL chain
-            // still tombstones the rows under both backends.
-            if backend_is_pg {
-                let raw_paths: Vec<&str> = indexed_paths_raw
-                    .iter()
-                    .chain(degraded_paths_raw.iter())
-                    .map(String::as_str)
-                    .collect();
-                if let Ok(Some(cypher)) =
-                    crate::postgres::age::cypher_cascade_delete_symbols_for_files(
-                        "axon_graph",
-                        &raw_paths,
-                    )
-                {
-                    if let Err(e) = self.execute(&cypher) {
-                        log::warn!(
-                            "AGE cascade DETACH DELETE failed for {} processed paths (SQL chain will still tombstone): {}",
-                            raw_paths.len(),
-                            e
-                        );
-                    }
-                }
-            }
-
+            // MIL-AXO-017 slice 6B Phase C: AGE cascade retired ; SQL chain handles cleanup.
+            let _ = (&indexed_paths_raw, &degraded_paths_raw);
             let indexed_filter = processed_paths.join(",");
             queries.extend(Self::derived_cleanup_queries(&indexed_filter));
             // SQL relation tables (CALLS / CALLS_NIF / CONTAINS) ar
@@ -1169,45 +1137,10 @@ impl GraphStore {
                 .map_err(|e| anyhow!("bulk_writer flush_batch failed: {}", e))?;
         }
 
-        // MIL-AXO-015 option B.2 / B.4: write edges into the AGE
-        // graph under PG when AXON_AGE_DUAL_WRITE=true (B.2) OR
-        // AXON_AGE_ONLY_RELATIONS=true (B.4 — SQL relation writes
-        // were skipped above so AGE must run). Best-effort under
-        // dual-write; mandatory under AGE-only.
-        if self.is_postgres_backend()
-            && (age_dual_write_enabled() || crate::postgres::age::age_only_relations_enabled())
-        {
-            // Vertex enrichment first so subsequent edge MERGEs hit
-            // already-populated vertices (idempotent either way, but
-            // a populated vertex carries `name`/`kind`/`project_code`
-            // ready for B.3 readers).
-            self.dual_write_vertices_age("File", "path", &file_vertices);
-            self.dual_write_vertices_age("Symbol", "id", &symbol_vertices);
-            self.dual_write_relation_edges_age(
-                "File",
-                "path",
-                "Symbol",
-                "id",
-                "CONTAINS",
-                &contains_rows,
-            );
-            self.dual_write_relation_edges_age(
-                "Symbol",
-                "id",
-                "Symbol",
-                "id",
-                "CALLS",
-                &calls_rows,
-            );
-            self.dual_write_relation_edges_age(
-                "Symbol",
-                "id",
-                "Symbol",
-                "id",
-                "CALLS_NIF",
-                &calls_nif_rows,
-            );
-        }
+        // MIL-AXO-017 slice 6B Phase C: AGE dual-write retired ; SQL relation
+        // tables are canonical. Vertex/edge collections kept for future bulk
+        // writers that may emit to public.Edge directly (slice 3 dual-write).
+        let _ = (&file_vertices, &symbol_vertices, &contains_rows, &calls_rows, &calls_nif_rows);
 
         // DEC-AXO-071 H.2 inline embedding pass. Runs after chunks are
         // committed so embeddings reference rows that exist in the DB.
@@ -2201,209 +2134,19 @@ impl GraphStore {
     }
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
-        // SQL relation table — authoritative on both backends today.
-        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
-        // the SQL write so AGE becomes the sole writer (final step
-        // before DROP TABLE on the relation tables).
-        let skip_sql_relations =
-            self.is_postgres_backend() && crate::postgres::age::age_only_relations_enabled();
-        if !skip_sql_relations {
-            self.execute(&format!(
-                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
-                from, to, from
-            ))?;
-        }
-
-        // MIL-AXO-015 option B.2 / B.4: write the edge into the AGE
-        // graph under PG when `AXON_AGE_DUAL_WRITE=true` (B.2 dual-
-        // write phase) OR when `AXON_AGE_ONLY_RELATIONS=true` (B.4
-        // AGE-only writes — SQL above was skipped). When neither
-        // flag is set, we're in the legacy SQL-only mode.
-        if self.is_postgres_backend()
-            && (age_dual_write_enabled() || crate::postgres::age::age_only_relations_enabled())
-        {
-            let cypher = match crate::postgres::age::cypher_merge_edge(
-                "axon_graph",
-                "Project",
-                "id",
-                from,
-                "CONTAINS",
-                &serde_json::json!({"project_code": from}),
-                "Project",
-                "id",
-                to,
-            ) {
-                Ok(sql) => sql,
-                Err(e) => {
-                    log::warn!(
-                        "AGE dual-write skipped for project dependency {} -> {}: {}",
-                        from,
-                        to,
-                        e
-                    );
-                    return Ok(());
-                }
-            };
-            if let Err(e) = self.execute(&cypher) {
-                // Dual-write is best-effort — SQL is still authoritative.
-                log::warn!(
-                    "AGE dual-write CONTAINS edge failed (SQL succeeded): {}",
-                    e
-                );
-            }
-        }
+        // MIL-AXO-017 slice 6B Phase C: AGE dual-write retired ; SQL canonical.
+        self.execute(&format!(
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
+            from, to, from
+        ))?;
         Ok(())
     }
 
-    /// MIL-AXO-015 option B.2 + REQ-AXO-244 follow-up batch dual-write:
-    /// emit chunked UNWIND statements that fold N vertices into one
-    /// Cypher MERGE per chunk via `cypher_merge_vertices_unwind`. One
-    /// PG round-trip per chunk vs. N — typical AXO workloads see
-    /// ~46 symbols/file × 700 files = ~32k vertex MERGEs that the
-    /// legacy per-vertex loop turned into ~32k round-trips. Failures
-    /// log at warn level and do not abort the SQL path. Empty
-    /// `vertices` is a no-op.
-    fn dual_write_vertices_age(
-        &self,
-        label: &str,
-        id_property: &str,
-        vertices: &[(String, serde_json::Value)],
-    ) {
-        if vertices.is_empty() {
-            return;
-        }
-        // Same chunk size as the relation UNWIND batch (200) so AGE
-        // sees batches of comparable shape. The skip-row contract
-        // inside the helper drops malformed-id vertices with a per-row
-        // warn instead of aborting the whole batch.
-        const UNWIND_CHUNK: usize = 200;
-        let cyphers = match crate::postgres::age::cypher_merge_vertices_unwind(
-            "axon_graph",
-            label,
-            id_property,
-            vertices,
-            UNWIND_CHUNK,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!(
-                    "AGE dual-write skipped for {} vertex batch ({} entries): {}",
-                    label,
-                    vertices.len(),
-                    e
-                );
-                return;
-            }
-        };
-        for (chunk_idx, sql) in cyphers.iter().enumerate() {
-            if let Err(e) = self.execute(sql) {
-                let chunk_size = if chunk_idx + 1 == cyphers.len() {
-                    vertices.len() - chunk_idx * UNWIND_CHUNK
-                } else {
-                    UNWIND_CHUNK
-                };
-                log::warn!(
-                    "AGE dual-write {} vertex UNWIND chunk {}/{} (size {}) failed: {}",
-                    label,
-                    chunk_idx + 1,
-                    cyphers.len(),
-                    chunk_size,
-                    e
-                );
-            }
-        }
-    }
-
-    /// MIL-AXO-015 option B.2 batch dual-write: emit one or more Cypher
-    /// `UNWIND $rows AS row MERGE …` statements that fold the entire
-    /// edge batch into AGE in a single round-trip per chunk. REQ-AXO-238
-    /// replaces the legacy per-edge MERGE loop (one PG round-trip per
-    /// edge) with the chunked UNWIND helper — typical AXO workloads
-    /// see 100-2000 edges per producer batch, so the saving is
-    /// proportional. Failures are logged at warn level and do not
-    /// abort the SQL path that ran upstream. Empty rows is a no-op.
-    fn dual_write_relation_edges_age(
-        &self,
-        src_label: &str,
-        src_id_property: &str,
-        dst_label: &str,
-        dst_id_property: &str,
-        edge_label: &str,
-        rows: &[self::async_writer::RelationRow],
-    ) {
-        if rows.is_empty() {
-            return;
-        }
-        // Each row's (source_id, target_id, project_code) feeds the
-        // UNWIND list; project_code rides as an edge property so MATCH
-        // queries can filter on it without touching the vertex catalog.
-        let triples: Vec<(String, String, String)> = rows
-            .iter()
-            .map(|r| {
-                (
-                    r.source_id.clone(),
-                    r.target_id.clone(),
-                    r.project_code.clone(),
-                )
-            })
-            .collect();
-        // Chunk size matches the SQL-side `replace_relation_queries`
-        // chunk size (200) so AGE and SQL see batches of comparable
-        // shape under EXPLAIN. Empirically this stays well within
-        // AGE's parser limits on the combined image.
-        const UNWIND_CHUNK: usize = 200;
-        let cyphers = match crate::postgres::age::cypher_merge_relation_edges_unwind(
-            "axon_graph",
-            src_label,
-            src_id_property,
-            edge_label,
-            dst_label,
-            dst_id_property,
-            &triples,
-            UNWIND_CHUNK,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!(
-                    "AGE dual-write skipped for {} batch ({} edges): {}",
-                    edge_label,
-                    rows.len(),
-                    e
-                );
-                return;
-            }
-        };
-        for (chunk_idx, sql) in cyphers.iter().enumerate() {
-            if let Err(e) = self.execute(sql) {
-                // We can't pinpoint the exact offending row from a
-                // chunk-level failure, but we log the chunk index +
-                // size so the operator can correlate with batch_run
-                // telemetry.
-                let chunk_size = if chunk_idx + 1 == cyphers.len() {
-                    rows.len() - chunk_idx * UNWIND_CHUNK
-                } else {
-                    UNWIND_CHUNK
-                };
-                log::warn!(
-                    "AGE dual-write {} UNWIND chunk {}/{} (size {}) failed: {}",
-                    edge_label,
-                    chunk_idx + 1,
-                    cyphers.len(),
-                    chunk_size,
-                    e
-                );
-            }
-        }
-    }
+    // MIL-AXO-017 slice 6B Phase C: dual_write_vertices_age / dual_write_relation_edges_age
+    // helpers removed ; AGE retired entirely.
 }
 
-/// REQ-AXO-250: thin re-export of the public helper in `postgres::age`
-/// so existing call-sites in this module keep their bare `age_dual_write_enabled()`
-/// shape. The canonical source-of-truth lives in `postgres::age` so the
-/// async-writer path reads the same env-flag semantics.
-fn age_dual_write_enabled() -> bool {
-    crate::postgres::age::age_dual_write_enabled()
-}
+// MIL-AXO-017 slice 6B Phase C: age_dual_write_enabled() shim removed.
 
 #[cfg(test)]
 mod tests {
@@ -4327,8 +4070,7 @@ impl GraphStore {
         // schema, REQ-AXO-297 dual-write) is the canonical structural
         // edge storage. Non-PG dev fixtures still use the legacy
         // renderer for symmetry.
-        let skip_sql_relations =
-            backend_is_pg || crate::postgres::age::age_only_relations_enabled();
+        let skip_sql_relations = backend_is_pg;
         let emit_age = false;
 
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
@@ -4495,8 +4237,7 @@ impl GraphStore {
         // MIL-AXO-017 slice 3 — see upsert_graph_v2 comment above for
         // rationale (legacy SQL relation tables dropped by REQ-AXO-216,
         // unified public.Edge replaces them).
-        let skip_sql_relations =
-            backend_is_pg || crate::postgres::age::age_only_relations_enabled();
+        let skip_sql_relations = backend_is_pg;
         let emit_age = false;
 
         // Per-file chunk_ids preserved for the return value.

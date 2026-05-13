@@ -1,10 +1,10 @@
--- Axon canonical schema — extensions + AGE graph bootstrap (DEC-AXO-082).
+-- Axon canonical schema — extensions (DEC-AXO-082 / MIL-AXO-017 slice 6B Phase E).
 -- Idempotent: safe to re-run on every startup.
 --
--- Loaded first because every later file relies on `vector(N)` types or
--- `LOAD 'age'` + the canonical `axon_graph` graph.
+-- AGE extension retired (DEC-AXO-083) — `public.Edge` is the canonical
+-- structural edge storage. Loaded first because every later file relies
+-- on `vector(N)` types from pgvector.
 
-CREATE EXTENSION IF NOT EXISTS age;
 CREATE EXTENSION IF NOT EXISTS vector;
 -- pg_trgm powers GIN trigram indexes on soll.Node.title / description
 -- (used by soll_query_context fuzzy lookups). Optional — wrapped so
@@ -23,25 +23,3 @@ EXCEPTION
         RAISE NOTICE 'pg_trgm unavailable (%); soll fuzzy search disabled.', SQLERRM;
 END
 $$;
-
--- The single global AGE graph hosting structural edges.
--- (CONTAINS / CALLS / CALLS_NIF / IMPACTS / SUBSTANTIATES — phase B.2
--- writer migration target; vertices for File / Symbol / Chunk are
--- mirrored from the SQL tables which remain authoritative for indexed
--- attribute lookups + pgvector ANN.)
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'axon_graph') THEN
-        PERFORM ag_catalog.create_graph('axon_graph');
-    END IF;
-END
-$$;
-
--- AGE label creation removed (MIL-AXO-017 slice 6A / REQ-AXO-90005).
--- AGE labels are no longer created at bootstrap — `public.Edge` is the
--- canonical structural edge storage (DEC-AXO-083). Existing live/dev
--- DBs keep their pre-existing axon_graph labels dormant until the
--- destructive DROP SCHEMA is executed in the AGE-drop followup.
--- The cstring vs TEXT mismatch on AGE 1.5.x ag_catalog.create_vlabel
--- signature also made this block non-idempotent in practice, so even
--- on AGE retention this block was a permanent bootstrap blocker.
