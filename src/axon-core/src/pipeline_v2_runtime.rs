@@ -117,9 +117,21 @@ pub fn spawn_pipeline_v2_indexer(
                 Arc::new(NoOpEmbedder)
             }
         };
-        let _handles_b = spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
-        // Persisted-embedding receipts are observability-only; drop the
-        // rx side. B3 still UPSERTs ChunkEmbedding regardless.
+        let mut handles_b = spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
+        // REQ-AXO-314 — keep the receipt rx alive by draining it in a
+        // background task. Dropping `handles_b.output_rx` immediately
+        // would close the receipt channel; B3 then short-circuits on
+        // its first `tx.send(receipt)` failure (stage_b3.rs:185) and
+        // returns, cascading back through B2 → B1 → b1_inbox close.
+        // Observed symptom: exactly one batch embedded post-boot, then
+        // NOTIFY listener loops with "b1_inbox closed".
+        let mut output_rx_b = std::mem::replace(
+            &mut handles_b.output_rx,
+            tokio::sync::mpsc::channel(1).1,
+        );
+        tokio::spawn(async move {
+            while output_rx_b.recv().await.is_some() {}
+        });
 
         // CPT-AXO-054 cold-start poll: every 30 s, sweep public.Chunk
         // for rows without a matching ChunkEmbedding and push their
