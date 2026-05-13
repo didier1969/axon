@@ -364,12 +364,30 @@ impl McpServer {
         let b1 = env_usize("AXON_B1_WORKERS", 4);
         let b2 = env_usize("AXON_B2_WORKERS", 1);
         let b3 = env_usize("AXON_B3_WORKERS", 2);
-        let b2_batch = env_usize("AXON_B2_BATCH_SIZE", 64);
-        let b2_timeout = env_u64("AXON_B2_BATCH_TIMEOUT_MS", 200);
-        let b3_batch = env_usize("AXON_B3_BATCH_SIZE", 64);
-        let b3_timeout = env_u64("AXON_B3_BATCH_TIMEOUT_MS", 200);
-        let coldstart_batch = env_usize("AXON_B1_COLDSTART_BATCH_SIZE", 4096);
-        let a3_to_b1_cap = env_usize("AXON_A3_TO_B1_BUFFER", 10_000);
+        let b2_batch = env_usize(
+            "AXON_B2_BATCH_SIZE",
+            crate::pipeline_v2::channels::B2_BATCH_SIZE_DEFAULT,
+        );
+        let b2_timeout = env_u64(
+            "AXON_B2_BATCH_TIMEOUT_MS",
+            crate::pipeline_v2::channels::B2_BATCH_TIMEOUT_MS_DEFAULT,
+        );
+        let b3_batch = env_usize(
+            "AXON_B3_BATCH_SIZE",
+            crate::pipeline_v2::channels::B3_BATCH_SIZE_DEFAULT,
+        );
+        let b3_timeout = env_u64(
+            "AXON_B3_BATCH_TIMEOUT_MS",
+            crate::pipeline_v2::channels::B3_BATCH_TIMEOUT_MS_DEFAULT,
+        );
+        let coldstart_batch = env_usize(
+            "AXON_B1_COLDSTART_BATCH_SIZE",
+            crate::pipeline_v2::channels::B1_COLDSTART_BATCH_SIZE_DEFAULT,
+        );
+        let a3_to_b1_cap = env_usize(
+            "AXON_A3_TO_B1_BUFFER",
+            crate::pipeline_v2::channels::A3_TO_B1_BUFFER_CAP_DEFAULT,
+        );
 
         let report = format!(
             "## Axon Status (project={project})\n\n\
