@@ -109,10 +109,41 @@ CREATE TABLE IF NOT EXISTS public.ChunkEmbedding (
     PRIMARY KEY (chunk_id, model_id)
 );
 
--- ── Relation tables — REMOVED (REQ-AXO-216 / Stop A) ─────────────────
--- The 5 SQL relation tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS /
--- SUBSTANTIATES) live exclusively on AGE elabels (axon_graph).
--- See 00_extensions.sql for the label DDL.
+-- ── Relation tables — REINTRODUCED (MIL-AXO-017, REQ-AXO-295) ────────
+-- Historical context: REQ-AXO-216 (Stop A) dropped the 5 per-type SQL
+-- relation tables (CALLS / CALLS_NIF / CONTAINS / IMPACTS /
+-- SUBSTANTIATES) in favor of AGE elabels in `axon_graph`. The
+-- AGE-based approach is being retired by MIL-AXO-017 (DEC-AXO-083):
+-- AGE is replaced by this single unified `public.Edge` table backed by
+-- composite B-tree indexes + GIN metadata. Graph traversal patterns
+-- will live as a SQL function library (db/ddl/04_graph_functions.sql,
+-- REQ-AXO-296) wrapping WITH RECURSIVE queries.
+--
+-- This slice (REQ-AXO-295) introduces the schema only. The A3 writer
+-- starts dual-writing AGE + public.Edge in REQ-AXO-298 (transitional);
+-- AGE is dropped entirely in REQ-AXO-301.
+CREATE TABLE IF NOT EXISTS public.Edge (
+    source_id     TEXT NOT NULL,
+    target_id     TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    project_code  TEXT NOT NULL DEFAULT '',
+    metadata      JSONB,
+    created_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (source_id, target_id, relation_type, project_code)
+);
+
+-- Forward walks: source → target via relation_type (impact, blast_radius).
+CREATE INDEX IF NOT EXISTS edge_fwd_idx
+    ON public.Edge (source_id, relation_type, target_id);
+-- Reverse walks: target ← source (callers_of, why_chain).
+CREATE INDEX IF NOT EXISTS edge_rev_idx
+    ON public.Edge (target_id, relation_type, source_id);
+-- Project-scoped scans (multi-project queries).
+CREATE INDEX IF NOT EXISTS edge_proj_idx
+    ON public.Edge (project_code, relation_type);
+-- Metadata filtering (anomaly detection, scoped queries on attributes).
+CREATE INDEX IF NOT EXISTS edge_metadata_idx
+    ON public.Edge USING GIN (metadata jsonb_path_ops);
 
 -- ── Queues (legacy autonomous ingestor, retired with REQ-AXO-289 S7) ─
 CREATE TABLE IF NOT EXISTS public.FileVectorizationQueue (
