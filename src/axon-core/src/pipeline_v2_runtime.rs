@@ -43,7 +43,10 @@ const INGRESS_DRAIN_POLL_MS: u64 = 200;
 /// while ensuring the embedding backlog drains promptly when A
 /// outpaces B (the common case at boot + large workspaces).
 const B1_COLDSTART_POLL_INTERVAL_SECS: u64 = 30;
-const B1_COLDSTART_BATCH_SIZE: usize = 256;
+// REQ-AXO-314 follow-up — read cold-start batch from `caps.b1_coldstart_batch_size`
+// at boot (default 4096, env knob `AXON_B1_COLDSTART_BATCH_SIZE`). The
+// hardcoded 256-row constant was a dead-knob bug: caps was plumbed but
+// never read here, so the env never took effect.
 
 /// Boot the streaming pipeline v2 in the indexer binary.
 ///
@@ -153,6 +156,7 @@ pub fn spawn_pipeline_v2_indexer(
         }
 
         let store_for_poll = store.clone();
+        let coldstart_batch_size = caps.b1_coldstart_batch_size;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(
                 B1_COLDSTART_POLL_INTERVAL_SECS,
@@ -163,7 +167,7 @@ pub fn spawn_pipeline_v2_indexer(
                 match b1_cold_start_poll(
                     store_for_poll.clone(),
                     b1_inbox_tx_for_poll.clone(),
-                    B1_COLDSTART_BATCH_SIZE,
+                    coldstart_batch_size,
                 )
                 .await
                 {

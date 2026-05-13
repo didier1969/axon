@@ -30,7 +30,7 @@ pub const A3_TO_B1_BUFFER_CAP_DEFAULT: usize = 10_000;
 /// Chunk.id WHERE ce.chunk_id IS NULL LIMIT N` — run once at indexer startup
 /// to enqueue every chunk that was graphed but never vectorised. Operator
 /// override: `AXON_B1_COLDSTART_BATCH_SIZE`.
-pub const B1_COLDSTART_BATCH_SIZE_DEFAULT: usize = 256;
+pub const B1_COLDSTART_BATCH_SIZE_DEFAULT: usize = 4096;
 
 /// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
 /// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
