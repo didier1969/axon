@@ -290,6 +290,83 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
+    /// DEC-AXO-086 slice 2 — read-only embedding backlog snapshot.
+    ///
+    /// Surfaces the three numbers a caller needs to gauge embedding
+    /// freshness without dispatching `diagnose_indexing`: total chunks,
+    /// embedded chunks, pending chunks (= total − embedded). Plus the
+    /// static pipeline configuration: NOTIFY channel name + cold-start
+    /// poll interval (CPT-AXO-054 contract).
+    ///
+    /// `project` arg optional: when set, scopes the counts to that
+    /// `project_code`; `*` (default) is global.
+    pub(crate) fn axon_embedding_status(&self, args: &Value) -> Option<Value> {
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let (where_chunk, where_emb) = if project == "*" {
+            (String::new(), String::new())
+        } else {
+            let safe = project.replace('\'', "''");
+            (
+                format!(" WHERE project_code = '{}'", safe),
+                format!(" WHERE project_code = '{}'", safe),
+            )
+        };
+
+        let scalar = |query: &str| -> i64 {
+            self.graph_store
+                .execute_raw_sql_gateway(query)
+                .ok()
+                .as_deref()
+                .and_then(tools_system_debug::parse_scalar_count_row)
+                .unwrap_or(0)
+        };
+
+        let total_chunks = scalar(&format!(
+            "SELECT count(*) FROM public.Chunk{}",
+            where_chunk
+        ));
+        let embedded_chunks = scalar(&format!(
+            "SELECT count(*) FROM public.ChunkEmbedding{}",
+            where_emb
+        ));
+        let pending_chunks = (total_chunks - embedded_chunks).max(0);
+        let coverage_pct = if total_chunks > 0 {
+            (embedded_chunks as f64 / total_chunks as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let report = format!(
+            "## Embedding Status (project={project})\n\n\
+             - Total chunks:    {total_chunks}\n\
+             - Embedded chunks: {embedded_chunks}\n\
+             - Pending chunks:  {pending_chunks}\n\
+             - Coverage:        {coverage_pct:.2}%\n\n\
+             ### Pipeline B configuration (DEC-AXO-086 / CPT-AXO-054)\n\
+             - NOTIFY channel:        chunk_pending_embed\n\
+             - Cold-start poll:       every 30s (LEFT JOIN safety net)\n\
+             - A3→B1 try_send buffer: 10 000 (drops rattrapés par cold-start poll)\n\
+             - B2 batch size:         64 chunks\n\
+             - B2 batch timeout:      200 ms\n\n\
+             A backlog > 0 with NOTIFY listener up clears within minutes; \
+             a sustained backlog suggests the indexer is stopped or the \
+             listener is disconnected — run `diagnose_indexing` for triage."
+        );
+
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "structuredContent": {
+                "project": project,
+                "total_chunks": total_chunks,
+                "embedded_chunks": embedded_chunks,
+                "pending_chunks": pending_chunks,
+                "coverage_pct": coverage_pct,
+                "notify_channel": "chunk_pending_embed",
+                "coldstart_poll_interval_secs": 30,
+            }
+        }))
+    }
+
     pub(crate) fn axon_sql(&self, args: &Value) -> Option<Value> {
         let sql = args.get("sql")?.as_str()?;
         let q = sql.trim();

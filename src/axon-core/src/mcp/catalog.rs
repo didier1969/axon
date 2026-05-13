@@ -664,6 +664,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "embedding_status",
+                "description": "[SYSTEM] Embedding backlog snapshot: total/embedded/pending chunks + pipeline B configuration. Cheap read; pair with diagnose_indexing for full triage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Project code or '*' for global (default '*')." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "audit",
                 "description": "[GOVERNANCE] In-depth compliance check (security, quality, anti-patterns, technical debt).",
                 "inputSchema": {
