@@ -107,6 +107,16 @@ CREATE INDEX IF NOT EXISTS idx_chunk_content_tsv
 CREATE INDEX IF NOT EXISTS idx_chunk_project_code
     ON public.Chunk(project_code);
 
+-- DEC-AXO-086 bucket-batching follow-up — store the BGE-Large estimated
+-- token count from `code_chunker::estimated_token_count` so the B1
+-- cold-start poll can `ORDER BY token_count` and feed length-homogeneous
+-- batches to B2 (cuts transformer padding waste). Nullable for back-fill;
+-- the SELECT path uses `COALESCE(token_count, length(content)/3)`.
+ALTER TABLE public.Chunk
+    ADD COLUMN IF NOT EXISTS token_count INTEGER;
+CREATE INDEX IF NOT EXISTS idx_chunk_token_count
+    ON public.Chunk(token_count);
+
 -- public.ChunkEmbedding — pgvector storage (1024-d cosine, HNSW).
 CREATE TABLE IF NOT EXISTS public.ChunkEmbedding (
     chunk_id TEXT NOT NULL,

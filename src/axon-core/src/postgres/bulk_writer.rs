@@ -940,6 +940,7 @@ mod tests {
                 part_index: 0,
                 part_count: 1,
                 chunk_path: "/tmp/a.rs#alpha".to_string(),
+                token_count: Some(11),
             }],
             contains: vec![RelationRow {
                 source_id: "/tmp/a.rs".to_string(),

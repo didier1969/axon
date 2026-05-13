@@ -63,6 +63,12 @@ pub struct ChunkRow {
     pub part_index: i64,
     pub part_count: i64,
     pub chunk_path: String,
+    /// Estimated BGE-Large token count from `code_chunker::estimated_token_count`.
+    /// Stored so the B1 bucket-batching SELECT can `ORDER BY token_count`
+    /// without recomputing — see DEC-AXO-086 follow-up. `None` for back-fill
+    /// scenarios where the chunker was bypassed; SELECT falls back to a
+    /// `length(content)/3` proxy via `COALESCE`.
+    pub token_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -428,8 +434,12 @@ impl WriteAccumulator {
             let values: Vec<String> = batch
                 .iter()
                 .map(|c| {
+                    let token_count_sql = c
+                        .token_count
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "NULL".to_string());
                     format!(
-                        "('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}')",
+                        "('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
                         escape_sql_text(&c.chunk_id),
                         escape_sql_text(&c.source_type),
                         escape_sql_text(&c.source_id),
@@ -443,12 +453,13 @@ impl WriteAccumulator {
                         c.part_index,
                         c.part_count,
                         escape_sql_text(&c.chunk_path),
+                        token_count_sql,
                     )
                 })
                 .collect();
             queries.push(format!(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES {} \
-                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path;",
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) VALUES {} \
+                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path, token_count=EXCLUDED.token_count;",
                 values.join(",")
             ));
         }
@@ -732,6 +743,7 @@ mod tests {
             part_index: 0,
             part_count: 1,
             chunk_path: "/tmp/a.rs#alpha".to_string(),
+            token_count: Some(42),
         }
     }
 
@@ -1251,17 +1263,19 @@ mod tests {
             part_index: 0,
             part_count: 1,
             chunk_path: "/tmp/a.rs#alpha".to_string(),
+            token_count: Some(11),
         }]));
         let rendered = acc.render_chunks_duckdb();
         assert_eq!(rendered.len(), 1);
         let q = &rendered[0];
 
-        // Header + ON CONFLICT clause shape (verbatim from legacy emit).
+        // Header + ON CONFLICT clause shape — includes token_count column
+        // (DEC-AXO-086 follow-up: stored alongside chunk for B1 bucket sort).
         assert!(q.starts_with(
-            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES "
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) VALUES "
         ));
         assert!(q.contains(
-            "ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path;"
+            "ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line, chunk_part_index=EXCLUDED.chunk_part_index, chunk_part_count=EXCLUDED.chunk_part_count, chunk_path=EXCLUDED.chunk_path, token_count=EXCLUDED.token_count;"
         ));
 
         // Single-quote escape: the apostrophe inside `"hi 'world'"` must
@@ -1296,7 +1310,7 @@ mod tests {
         assert_eq!(rendered.len(), 3, "1200 chunks split into 500/500/200 batches");
         for q in &rendered {
             assert!(q.starts_with("INSERT INTO Chunk"));
-            assert!(q.ends_with("chunk_path=EXCLUDED.chunk_path;"));
+            assert!(q.ends_with("token_count=EXCLUDED.token_count;"));
         }
     }
 

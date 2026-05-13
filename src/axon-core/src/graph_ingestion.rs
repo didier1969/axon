@@ -657,6 +657,7 @@ impl GraphStore {
                                     part_index: derived_chunk.part_index as i64,
                                     part_count: derived_chunk.part_count as i64,
                                     chunk_path: derived_chunk.chunk_path.clone(),
+                                    token_count: Some(derived_chunk.estimated_tokens as i64),
                                 });
                                 if inline_enabled {
                                     inline_chunks.push((
@@ -4124,6 +4125,7 @@ impl GraphStore {
                     part_index: derived_chunk.part_index as i64,
                     part_count: derived_chunk.part_count as i64,
                     chunk_path: derived_chunk.chunk_path.clone(),
+                    token_count: Some(derived_chunk.estimated_tokens as i64),
                 });
                 chunk_ids_emitted.push(chunk_id);
             }
@@ -4304,6 +4306,7 @@ impl GraphStore {
                         part_index: derived_chunk.part_index as i64,
                         part_count: derived_chunk.part_count as i64,
                         chunk_path: derived_chunk.chunk_path.clone(),
+                        token_count: Some(derived_chunk.estimated_tokens as i64),
                     });
                     chunk_ids_emitted.push(chunk_id);
                 }
@@ -4545,20 +4548,20 @@ impl GraphStore {
     pub fn select_chunks_needing_embedding(&self, limit: usize) -> Result<Vec<String>> {
         let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
         let safe_model_id = Self::escape_sql(model_id);
-        // Bucket-batching optimization: order by content length so each
-        // B1 batch (64 consecutive chunk_ids) is length-homogeneous.
-        // BGE-Large transformer cost = batch_size × max_seq_len² (padding
-        // is paid for every item up to the longest in the batch). With
-        // randomly-ordered inputs a single 512-token chunk forces all 63
-        // siblings to pad to 512; with length-sorted inputs each batch
-        // stays inside one of TensorRT's seq_buckets [128, 256, 384, 512]
-        // → near-zero padding → GPU does proportionally less wasted work.
+        // Bucket-batching: order by token_count (BGE-Large estimate stored
+        // by A3 at chunking time) so each B1→B2 batch is token-homogeneous.
+        // Falls back to length(content)/3 (proxy for chunks pre-dating the
+        // token_count column, which back-fill to NULL). BGE-Large transformer
+        // cost = batch_size × max_seq_len² (TensorRT pads every item up to
+        // the longest in the batch, then snaps to seq_buckets
+        // [128, 256, 384, 512]). Token-sorted inputs keep each batch inside
+        // a single bucket → near-zero wasted padding compute.
         let raw = self.query_json(&format!(
             "SELECT c.id FROM Chunk c \
              LEFT JOIN ChunkEmbedding ce \
                ON ce.chunk_id = c.id AND ce.model_id = '{safe_model_id}' \
              WHERE ce.chunk_id IS NULL \
-             ORDER BY length(c.content) \
+             ORDER BY COALESCE(c.token_count, length(c.content) / 3) \
              LIMIT {limit}"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
