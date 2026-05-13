@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
 -- RevisionPreview). Wrapped in DO blocks so re-running the script after
 -- migration is a no-op.
 ALTER TABLE soll.ProjectCodeRegistry DROP COLUMN IF EXISTS project_slug;
+ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS session_pointer_json TEXT;
 DO $migrate$
 BEGIN
     IF EXISTS (
