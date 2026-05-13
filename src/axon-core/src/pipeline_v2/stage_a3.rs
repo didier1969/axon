@@ -31,6 +31,7 @@ use tracing::warn;
 use crate::graph::GraphStore;
 
 use super::metrics::StageMetrics;
+use super::project_resolver::ProjectCodeResolver;
 use super::types::ParsedFile;
 
 /// Receipt emitted by A3 once persistence committed.
@@ -51,17 +52,22 @@ pub struct EnrolledFile {
 /// Persist `parsed`'s graph + chunks atomically and return the receipt
 /// with chunk_ids ready to fan out to B1.
 ///
+/// `resolver` returns the project_code for `parsed.path`. DEC-AXO-081
+/// allows a single pipeline_v2 instance to serve N projects — the
+/// resolver is invoked once per call, the resulting code stamps every
+/// Symbol / Chunk / IndexedFile row written for this file.
+///
 /// Idempotent: re-running A3 on the same [`ParsedFile`] is a no-op for
 /// the canonical rows (every INSERT inside [`GraphStore::upsert_graph_v2`]
 /// uses `ON CONFLICT DO UPDATE` / `DO NOTHING`).
 pub async fn a3_enroll(
     parsed: ParsedFile,
     store: Arc<GraphStore>,
-    project_code: Arc<str>,
+    resolver: ProjectCodeResolver,
 ) -> Result<EnrolledFile> {
     let path_str = parsed.path.to_string_lossy().into_owned();
     let now_ms = Utc::now().timestamp_millis();
-    let project_code_str = project_code.to_string();
+    let project_code_str = resolver(&parsed.path);
 
     let store_clone = store.clone();
     let path_for_block = path_str.clone();
@@ -102,8 +108,11 @@ pub async fn a3_enroll(
 /// file are individually `try_send`-fanned to the B1 inbox; the
 /// downstream `tx.send` carries the per-file [`EnrolledFile`] receipt.
 ///
-/// `project_code` is stamped onto every Symbol / Chunk / IndexedFile
-/// row (CPT-AXO-053 single-project per indexer instance).
+/// `resolver` returns the project_code per file (DEC-AXO-081). Each
+/// flush groups the batch by resolved project_code and issues one
+/// `upsert_graph_v2_batch` per group — keeping the single-PG-transaction
+/// guarantee within each project while letting a single pipeline_v2
+/// serve N projects.
 ///
 /// Metrics: `record_started` on each item entering the batch,
 /// `record_finished` with per-item mean duration after the batched
@@ -113,7 +122,7 @@ pub fn spawn_a3_batched_worker(
     tx: Sender<EnrolledFile>,
     b1_inbox_tx: Sender<String>,
     store: Arc<GraphStore>,
-    project_code: Arc<str>,
+    resolver: ProjectCodeResolver,
     metrics: Arc<StageMetrics>,
     batch_size: usize,
     batch_timeout: Duration,
@@ -168,66 +177,80 @@ pub fn spawn_a3_batched_worker(
                 metrics.record_started();
             }
 
-            let store_clone = store.clone();
-            let pc_str = project_code.to_string();
-            let batch_for_block = batch.clone();
-            let started = Instant::now();
-            let join_result = tokio::task::spawn_blocking(move || {
-                store_clone.upsert_graph_v2_batch(&batch_for_block, &pc_str)
-            })
-            .await;
+            // DEC-AXO-081 — group the batch by per-file resolved
+            // project_code so each upsert_graph_v2_batch call still
+            // sees a homogeneous-project group (the SQL renderer
+            // assumes one project_code per call).
+            let mut groups: std::collections::BTreeMap<String, Vec<ParsedFile>> =
+                std::collections::BTreeMap::new();
+            for parsed in batch {
+                let code = resolver(&parsed.path);
+                groups.entry(code).or_default().push(parsed);
+            }
 
-            match join_result {
-                Ok(Ok(chunk_ids_per_file)) if chunk_ids_per_file.len() == batch.len() => {
-                    let elapsed_us =
-                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
-                    let now_ms = Utc::now().timestamp_millis();
-                    for (parsed, chunk_ids) in
-                        batch.into_iter().zip(chunk_ids_per_file.into_iter())
-                    {
-                        for cid in &chunk_ids {
-                            let _ = b1_inbox_tx.try_send(cid.clone());
+            let started = Instant::now();
+            let total_items: usize = groups.values().map(|v| v.len()).sum();
+            for (pc_str, group_batch) in groups {
+                let store_clone = store.clone();
+                let group_for_block = group_batch.clone();
+                let join_result = tokio::task::spawn_blocking(move || {
+                    store_clone.upsert_graph_v2_batch(&group_for_block, &pc_str)
+                })
+                .await;
+
+                let group_len = group_batch.len();
+                match join_result {
+                    Ok(Ok(chunk_ids_per_file)) if chunk_ids_per_file.len() == group_len => {
+                        let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
+                            as u64;
+                        let per_item_us = elapsed_us / (total_items as u64).max(1);
+                        let now_ms = Utc::now().timestamp_millis();
+                        for (parsed, chunk_ids) in
+                            group_batch.into_iter().zip(chunk_ids_per_file.into_iter())
+                        {
+                            for cid in &chunk_ids {
+                                let _ = b1_inbox_tx.try_send(cid.clone());
+                            }
+                            let receipt = EnrolledFile {
+                                path: parsed.path.to_string_lossy().into_owned(),
+                                content_hash: parsed.content_hash,
+                                symbols_count: parsed.symbols.len(),
+                                relations_count: parsed.relations.len(),
+                                last_seen_ms: now_ms,
+                                chunk_ids,
+                            };
+                            metrics.record_finished(per_item_us);
+                            if tx.send(receipt).await.is_err() {
+                                return;
+                            }
                         }
-                        let receipt = EnrolledFile {
-                            path: parsed.path.to_string_lossy().into_owned(),
-                            content_hash: parsed.content_hash,
-                            symbols_count: parsed.symbols.len(),
-                            relations_count: parsed.relations.len(),
-                            last_seen_ms: now_ms,
-                            chunk_ids,
-                        };
-                        metrics.record_finished(per_item_us);
-                        if tx.send(receipt).await.is_err() {
-                            return;
+                    }
+                    Ok(Ok(chunk_ids_per_file)) => {
+                        warn!(
+                            stage = "A3",
+                            expected = group_len,
+                            actual = chunk_ids_per_file.len(),
+                            "upsert_graph_v2_batch returned mismatched per-file count"
+                        );
+                        for _ in 0..group_len {
+                            metrics.record_error();
                         }
                     }
-                }
-                Ok(Ok(chunk_ids_per_file)) => {
-                    warn!(
-                        stage = "A3",
-                        expected = batch.len(),
-                        actual = chunk_ids_per_file.len(),
-                        "upsert_graph_v2_batch returned mismatched per-file count"
-                    );
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
+                    Ok(Err(err)) => {
+                        warn!(stage = "A3", error = ?err, "upsert_graph_v2_batch failed");
+                        for _ in 0..group_len {
+                            metrics.record_error();
+                        }
                     }
-                }
-                Ok(Err(err)) => {
-                    warn!(stage = "A3", error = ?err, "upsert_graph_v2_batch failed");
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
-                    }
-                }
-                Err(join_err) => {
-                    warn!(
-                        stage = "A3",
-                        error = ?join_err,
-                        "spawn_blocking joined with error"
-                    );
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
+                    Err(join_err) => {
+                        warn!(
+                            stage = "A3",
+                            error = ?join_err,
+                            "spawn_blocking joined with error"
+                        );
+                        for _ in 0..group_len {
+                            metrics.record_error();
+                        }
                     }
                 }
             }
@@ -279,7 +302,7 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let parsed = parsed_with("/tmp/demo_indexed.rs", "fn demo() {}", "hash-abc", vec!["demo"]);
 
-        let receipt = a3_enroll(parsed, store.clone(), Arc::from("AXO"))
+        let receipt = a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
 
@@ -310,7 +333,7 @@ mod tests {
             vec!["alpha", "beta"],
         );
 
-        a3_enroll(parsed, store.clone(), Arc::from("AXO"))
+        a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
 
@@ -343,7 +366,7 @@ mod tests {
         let body = format!("fn carry() {{ let s = \"{marker}\"; }}\n");
         let parsed = parsed_with("/tmp/a3_fts.rs", &body, "hash-fts", vec!["carry"]);
 
-        a3_enroll(parsed, store.clone(), Arc::from("AXO"))
+        a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
 
@@ -369,10 +392,10 @@ mod tests {
         );
         let parsed_b = parsed_a.clone();
 
-        let r1 = a3_enroll(parsed_a, store.clone(), Arc::from("AXO"))
+        let r1 = a3_enroll(parsed_a, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
-        let r2 = a3_enroll(parsed_b, store.clone(), Arc::from("AXO"))
+        let r2 = a3_enroll(parsed_b, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
 
@@ -403,10 +426,10 @@ mod tests {
         let parsed_v1 = parsed_with("/tmp/change_v2.rs", "fn v1() {}", "hash-v1", vec!["v1"]);
         let parsed_v2 = parsed_with("/tmp/change_v2.rs", "fn v2() {}", "hash-v2", vec!["v2"]);
 
-        a3_enroll(parsed_v1, store.clone(), Arc::from("AXO"))
+        a3_enroll(parsed_v1, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
-        a3_enroll(parsed_v2, store.clone(), Arc::from("AXO"))
+        a3_enroll(parsed_v2, store.clone(), super::super::const_resolver("AXO"))
             .await
             .unwrap();
 

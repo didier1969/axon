@@ -22,6 +22,7 @@ use tracing::warn;
 use crate::graph::GraphStore;
 
 use super::metrics::StageMetrics;
+use super::project_resolver::project_code_from_chunk_id;
 use super::stage_b2::EmbeddedChunk;
 
 /// Receipt emitted by B3 once the embedding committed.
@@ -34,20 +35,24 @@ pub struct PersistedEmbedding {
 
 /// UPSERT `embedded`'s embedding row into `public.ChunkEmbedding`.
 ///
-/// `project_code` is the canonical 3-letter code the indexer is rooted
-/// at (CPT-AXO-053 single-project per indexer instance). The write is
-/// wrapped in [`tokio::task::spawn_blocking`] so the synchronous SQL
-/// dispatch does not stall the tokio runtime.
+/// DEC-AXO-081 — `project_code` is extracted from the canonical
+/// `chunk_id` prefix (`"{project_code}::path::name::chunk[::part-NN]"`).
+/// Falls back to `embedded.fallback_project_code` (default `"AXO"`)
+/// when the prefix is malformed — bench / tests rely on the
+/// fallback so their hand-built chunk_ids stay accepted. The write
+/// is wrapped in [`tokio::task::spawn_blocking`] so the synchronous
+/// SQL dispatch does not stall the tokio runtime.
 pub async fn b3_persist_embedding(
     embedded: EmbeddedChunk,
     store: Arc<GraphStore>,
-    project_code: Arc<str>,
 ) -> Result<PersistedEmbedding> {
     let chunk_id = embedded.chunk_id.clone();
     let source_hash = embedded.source_hash.clone();
     let embedding = embedded.embedding;
     let now_ms = Utc::now().timestamp_millis();
-    let project_code_str = project_code.to_string();
+    let project_code_str = project_code_from_chunk_id(&chunk_id)
+        .unwrap_or("AXO")
+        .to_string();
 
     let store_clone = store.clone();
     let chunk_id_for_block = chunk_id.clone();
@@ -82,7 +87,6 @@ pub fn spawn_b3_batched_worker(
     mut rx: Receiver<EmbeddedChunk>,
     tx: Sender<PersistedEmbedding>,
     store: Arc<GraphStore>,
-    project_code: Arc<str>,
     metrics: Arc<StageMetrics>,
     batch_size: usize,
     batch_timeout: Duration,
@@ -128,57 +132,76 @@ pub fn spawn_b3_batched_worker(
             }
 
             let now_ms = Utc::now().timestamp_millis();
-            let items: Vec<(String, String, Vec<f32>, i64)> = batch
-                .iter()
-                .map(|e| {
-                    (
-                        e.chunk_id.clone(),
-                        e.source_hash.clone(),
-                        e.embedding.clone(),
-                        now_ms,
-                    )
-                })
-                .collect();
 
-            let store_clone = store.clone();
-            let pc_str = project_code.to_string();
+            // DEC-AXO-081 — group items by project_code parsed from
+            // each chunk_id (canonical prefix). Each
+            // upsert_chunk_embedding_v2_batch call stamps a single
+            // project_code, so the per-project subgroup is the
+            // largest natural granularity.
+            let mut groups: std::collections::BTreeMap<String, Vec<EmbeddedChunk>> =
+                std::collections::BTreeMap::new();
+            for embedded in batch {
+                let code = project_code_from_chunk_id(&embedded.chunk_id)
+                    .unwrap_or("AXO")
+                    .to_string();
+                groups.entry(code).or_default().push(embedded);
+            }
+
             let started = Instant::now();
-            let join_result = tokio::task::spawn_blocking(move || {
-                store_clone.upsert_chunk_embedding_v2_batch(&pc_str, &items)
-            })
-            .await;
+            let total_items: usize = groups.values().map(|v| v.len()).sum();
+            for (pc_str, group_batch) in groups {
+                let items: Vec<(String, String, Vec<f32>, i64)> = group_batch
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.chunk_id.clone(),
+                            e.source_hash.clone(),
+                            e.embedding.clone(),
+                            now_ms,
+                        )
+                    })
+                    .collect();
 
-            match join_result {
-                Ok(Ok(())) => {
-                    let elapsed_us =
-                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
-                    for embedded in batch {
-                        metrics.record_finished(per_item_us);
-                        let receipt = PersistedEmbedding {
-                            chunk_id: embedded.chunk_id,
-                            source_hash: embedded.source_hash,
-                            embedded_at_ms: now_ms,
-                        };
-                        if tx.send(receipt).await.is_err() {
-                            return;
+                let store_clone = store.clone();
+                let pc_for_block = pc_str.clone();
+                let join_result = tokio::task::spawn_blocking(move || {
+                    store_clone.upsert_chunk_embedding_v2_batch(&pc_for_block, &items)
+                })
+                .await;
+
+                let group_len = group_batch.len();
+                match join_result {
+                    Ok(Ok(())) => {
+                        let elapsed_us =
+                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let per_item_us = elapsed_us / (total_items as u64).max(1);
+                        for embedded in group_batch {
+                            metrics.record_finished(per_item_us);
+                            let receipt = PersistedEmbedding {
+                                chunk_id: embedded.chunk_id,
+                                source_hash: embedded.source_hash,
+                                embedded_at_ms: now_ms,
+                            };
+                            if tx.send(receipt).await.is_err() {
+                                return;
+                            }
                         }
                     }
-                }
-                Ok(Err(err)) => {
-                    warn!(stage = "B3", error = ?err, "upsert_chunk_embedding_v2_batch failed");
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
+                    Ok(Err(err)) => {
+                        warn!(stage = "B3", error = ?err, "upsert_chunk_embedding_v2_batch failed");
+                        for _ in 0..group_len {
+                            metrics.record_error();
+                        }
                     }
-                }
-                Err(join_err) => {
-                    warn!(
-                        stage = "B3",
-                        error = ?join_err,
-                        "spawn_blocking joined with error"
-                    );
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
+                    Err(join_err) => {
+                        warn!(
+                            stage = "B3",
+                            error = ?join_err,
+                            "spawn_blocking joined with error"
+                        );
+                        for _ in 0..group_len {
+                            metrics.record_error();
+                        }
                     }
                 }
             }
@@ -247,7 +270,7 @@ mod tests {
             embedding,
         };
 
-        let receipt = b3_persist_embedding(payload, store.clone(), Arc::from("AXO"))
+        let receipt = b3_persist_embedding(payload, store.clone())
             .await
             .unwrap();
         assert_eq!(receipt.chunk_id, cid);
@@ -290,10 +313,10 @@ mod tests {
             }
         };
 
-        b3_persist_embedding(mk_payload(), store.clone(), Arc::from("AXO"))
+        b3_persist_embedding(mk_payload(), store.clone())
             .await
             .unwrap();
-        b3_persist_embedding(mk_payload(), store.clone(), Arc::from("AXO"))
+        b3_persist_embedding(mk_payload(), store.clone())
             .await
             .unwrap();
 

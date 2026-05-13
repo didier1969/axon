@@ -28,6 +28,7 @@ pub mod mcp_http;
 pub mod optimizer;
 pub mod parser;
 pub mod pipeline_v2;
+pub mod pipeline_v2_runtime;
 pub mod postgres;
 pub mod project_meta;
 pub mod queue;

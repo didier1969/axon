@@ -815,13 +815,19 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
 
     if runtime_mode.ingestion_enabled() {
-        main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
-        main_background::spawn_ingress_promoter(
+        // REQ-AXO-289 S7 / DEC-AXO-081 — streaming pipeline v2 replaces
+        // the DuckDB-era public.File state machine. spawn_pipeline_v2_indexer
+        // boots A1→A2→A3 (and B1→B2→B3 when semantic workers are
+        // enabled), feeds them from an initial scan + the shared
+        // ingress_buffer, and resolves project_code per file.
+        if let Err(err) = crate::pipeline_v2_runtime::spawn_pipeline_v2_indexer(
+            runtime_mode,
             graph_store.clone(),
-            watch_root_str.clone(),
-            file_ingress_guard.clone(),
             ingress_buffer.clone(),
-        );
+            watch_root_str.clone(),
+        ) {
+            warn!(error = %err, "pipeline_v2_runtime: failed to spawn streaming indexer");
+        }
         main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
         main_background::spawn_federation_orchestrator(

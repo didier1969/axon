@@ -162,17 +162,19 @@ pub struct PipelineAHandles {
 /// workers will see `recv() = None` and exit, which closes the A1→A2
 /// channel, which propagates through A2 and A3 in turn.
 ///
-/// `project_code` is the canonical 3-letter project the watcher is rooted
-/// at. CPT-AXO-053 prescribes single-project per indexer instance, so
-/// passing it here once is enough — A3 stamps every Symbol / Chunk /
-/// IndexedFile row with this code.
+/// `resolver` returns the canonical 3-letter project_code for each
+/// file path the pipeline processes. DEC-AXO-081 (supersedes the
+/// single-project-per-indexer line in CPT-AXO-054): a single
+/// pipeline_v2 instance can serve N projects; A3 calls the resolver
+/// once per file and groups its batches by the resolved code so each
+/// PG transaction stays homogeneous-project. Bench / tests pass
+/// [`super::const_resolver`] for backward compatibility.
 pub fn spawn_pipeline_a(
     counts: PipelineAWorkerCounts,
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
-    project_code: impl Into<Arc<str>>,
+    resolver: super::project_resolver::ProjectCodeResolver,
 ) -> PipelineAHandles {
-    let project_code: Arc<str> = project_code.into();
     let (input_tx, input_rx) = mpsc::channel::<PathBuf>(caps.internal);
     let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
@@ -219,7 +221,7 @@ pub fn spawn_pipeline_a(
                 output_tx,
                 b1_inbox_tx.clone(),
                 store.clone(),
-                project_code.clone(),
+                resolver.clone(),
                 metrics_a3.clone(),
                 bs,
                 bto,
@@ -234,7 +236,7 @@ pub fn spawn_pipeline_a(
                     output_tx.clone(),
                     b1_inbox_tx.clone(),
                     store.clone(),
-                    project_code.clone(),
+                    resolver.clone(),
                     metrics_a3.clone(),
                     bs,
                     bto,
@@ -345,11 +347,11 @@ pub fn spawn_pipeline_b_full(
     counts: PipelineBWorkerCounts,
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
-    project_code: impl Into<Arc<str>>,
     embedder: Arc<dyn B2Embedder>,
     b1_inbox_rx: Receiver<String>,
 ) -> PipelineBFullHandles {
-    let project_code: Arc<str> = project_code.into();
+    // DEC-AXO-081 — B3 self-extracts project_code from each chunk_id
+    // prefix; no orchestrator-level project_code needed here.
     let (b1_to_b2_tx, b1_to_b2_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
     let (b2_to_b3_tx, b2_to_b3_rx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
     let (output_tx, output_rx) = mpsc::channel::<PersistedEmbedding>(caps.internal);
@@ -407,7 +409,6 @@ pub fn spawn_pipeline_b_full(
                 b2_to_b3_rx,
                 output_tx,
                 store.clone(),
-                project_code.clone(),
                 metrics_b3.clone(),
                 bs,
                 bto,
@@ -422,7 +423,6 @@ pub fn spawn_pipeline_b_full(
                     wrx,
                     output_tx.clone(),
                     store.clone(),
-                    project_code.clone(),
                     metrics_b3.clone(),
                     bs,
                     bto,
@@ -472,7 +472,7 @@ mod tests {
         };
         let caps = PipelineChannelCaps::default();
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let mut handles = spawn_pipeline_a(counts, caps, store.clone(), "AXO");
+        let mut handles = spawn_pipeline_a(counts, caps, store.clone(), super::super::const_resolver("AXO"));
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
@@ -553,7 +553,7 @@ mod tests {
             a3: 1,
         };
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let handles = spawn_pipeline_a(counts, PipelineChannelCaps::default(), store, "AXO");
+        let handles = spawn_pipeline_a(counts, PipelineChannelCaps::default(), store, super::super::const_resolver("AXO"));
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
@@ -615,11 +615,11 @@ mod tests {
             b3: 1,
         };
 
-        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), "AXO");
+        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
         let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
         let embedder: Arc<dyn B2Embedder> = Arc::new(NoOpEmbedder);
         let mut handles_b =
-            spawn_pipeline_b_full(counts_b, caps, store.clone(), "AXO", embedder, b1_inbox_rx);
+            spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
 
         handles_a.input_tx.send(path.clone()).await.unwrap();
 
@@ -690,7 +690,7 @@ mod tests {
             b3: 1,
         };
 
-        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), "AXO");
+        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
         let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
         let mut handles_b = spawn_pipeline_b_b1_only(counts_b, caps, store.clone(), b1_inbox_rx);
 

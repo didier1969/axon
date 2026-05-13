@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
-    spawn_pipeline_a, spawn_pipeline_b_full, B2Embedder, GpuB2Embedder, NoOpEmbedder,
+    const_resolver, spawn_pipeline_a, spawn_pipeline_b_full, B2Embedder, GpuB2Embedder,
+    NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
 
@@ -224,7 +225,8 @@ async fn run() -> Result<()> {
         caps.b2_batch_size, caps.b2_batch_timeout_ms
     );
 
-    let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), args.project.clone());
+    let resolver = const_resolver(args.project.clone());
+    let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), resolver);
     let b1_inbox_rx = std::mem::replace(
         &mut handles_a.b1_inbox_rx,
         tokio::sync::mpsc::channel(1).1,
@@ -233,7 +235,6 @@ async fn run() -> Result<()> {
         counts_b,
         caps,
         store.clone(),
-        args.project.clone(),
         embedder,
         b1_inbox_rx,
     );
