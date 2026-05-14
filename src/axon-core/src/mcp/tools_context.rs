@@ -488,6 +488,9 @@ impl McpServer {
                 "multipart_symbol_groups_selected": diagnostics.multipart_symbol_groups_selected,
                 "graph_neighbors_selected": diagnostics.graph_neighbors_selected,
                 "soll_entities_selected": diagnostics.soll_entities_selected,
+                // REQ-AXO-324 slice 2 — FTS modality observability.
+                "fts_chunks_considered": diagnostics.fts_chunks_considered,
+                "fts_chunks_selected": diagnostics.fts_chunks_selected,
             },
             "retrieval_timings_ms": {
                 "planner": timings.planner_ms,
@@ -1528,6 +1531,7 @@ impl McpServer {
                 same_file_as_entry: true,
                 score: 4.0 + f64::from(base_rank.max(0)),
                 reasons,
+                fts_rank: None,
             });
             if entries.len() >= limit.min(2) {
                 break;
@@ -2015,6 +2019,7 @@ impl McpServer {
                         same_file_as_entry,
                         score: 0.0,
                         reasons: Vec::new(),
+                        fts_rank: None,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2164,6 +2169,7 @@ impl McpServer {
                     same_file_as_entry,
                     score: 0.0,
                     reasons: Vec::new(),
+                    fts_rank: None,
                 })
             })
             .collect::<Vec<_>>();
@@ -2202,11 +2208,17 @@ impl McpServer {
         if !self.graph_store.is_postgres_backend() {
             return Vec::new();
         }
-        if std::env::var("AXON_IST_FTS_DISABLED")
-            .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
-        {
+        // Rollback knobs: legacy `AXON_IST_FTS_DISABLED` (slice 1)
+        // stays for backwards-compat; new `AXON_HYBRID_RETRIEVAL_DISABLED`
+        // (slice 2) is the canonical superset knob disabling the
+        // whole hybrid path. Either one short-circuits FTS.
+        let env_is_truthy = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false)
+        };
+        if env_is_truthy("AXON_IST_FTS_DISABLED") || env_is_truthy("AXON_HYBRID_RETRIEVAL_DISABLED") {
             return Vec::new();
         }
         let trimmed = question.trim();
@@ -2214,8 +2226,11 @@ impl McpServer {
             return Vec::new();
         }
         let escaped_question = Self::escape_sql(trimmed);
-        let project_filter =
-            Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]);
+        // `public.Chunk` carries `file_path` directly — no need to
+        // join the legacy `CONTAINS` table (which was retired by
+        // MIL-AXO-017 slice 6 in favour of `public.Edge` with
+        // relation_type='CONTAINS'). Filter on `c.project_code` only.
+        let project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]);
         // websearch_to_tsquery with the `english` dictionary matches
         // the DDL's content-body indexing (postgres/ddl.rs:414 builds
         // content_tsv with `english` for content body, `simple` for
@@ -2229,15 +2244,13 @@ impl McpServer {
         let query = format!(
             "WITH q AS (SELECT websearch_to_tsquery('english', '{q}') AS tsq) \
              SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), \
-                    COALESCE(f.path, ''), c.content, \
+                    COALESCE(c.file_path, ''), c.content, \
                     COALESCE(c.chunk_part_index, 1), \
                     COALESCE(c.chunk_part_count, 1), \
                     COALESCE(c.chunk_path, '1/1'), \
                     ts_rank_cd(c.content_tsv, q.tsq) AS fts_score \
              FROM public.Chunk c \
              CROSS JOIN q \
-             LEFT JOIN public.CONTAINS rel ON rel.target_id = c.source_id \
-             LEFT JOIN public.File f ON f.path = rel.source_id \
              WHERE c.content_tsv @@ q.tsq AND q.tsq IS NOT NULL{project_filter} \
              ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC \
              LIMIT {limit}",
@@ -2268,9 +2281,13 @@ impl McpServer {
                     .map(|n| n as usize)
                     .unwrap_or(1);
                 let chunk_path = row.get(7)?.as_str().unwrap_or("1/1").to_string();
-                // ts_rank_cd ∈ [0, +∞); higher is better. We flip the
-                // sign so it can plug into the existing
-                // `semantic_distance` ordering (lower = better).
+                // SLICE 2 — the FTS signal lives in its own dedicated
+                // `fts_rank` field (raw `ts_rank_cd`, ∈ [0, +∞), higher
+                // is better) instead of being smuggled through
+                // `semantic_distance` as a negated value. The rerank
+                // step picks it up and gives FTS hits a dedicated
+                // bonus band; `select_supporting_chunks` reserves
+                // slots for them even when anchors exist.
                 let fts_score = row.get(8).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 Some(ChunkCandidate {
                     chunk_id,
@@ -2280,7 +2297,7 @@ impl McpServer {
                     content,
                     match_reason: "fts".to_string(),
                     lexical_hits: 0,
-                    semantic_distance: Some(-fts_score),
+                    semantic_distance: None,
                     chunk_part_index,
                     chunk_part_count,
                     chunk_path,
@@ -2288,6 +2305,7 @@ impl McpServer {
                     same_file_as_entry: false,
                     score: 0.0,
                     reasons: vec![format!("fts:ts_rank_cd={:.4}", fts_score)],
+                    fts_rank: Some(fts_score),
                 })
             })
             .collect()
@@ -2323,6 +2341,20 @@ impl McpServer {
             if let Some(distance) = candidate.semantic_distance {
                 score += (1.0 - distance).max(0.0) * 3.0;
                 candidate.reasons.push("semantic_chunk_match".to_string());
+            }
+            // DEC-AXO-093 / REQ-AXO-324 slice 2 — FTS modality bonus
+            // band. `ts_rank_cd` typically sits in [0.01, 1.5] for
+            // relevant matches. Multiplying by 4 and clamping at 6
+            // places a strong FTS hit at the same magnitude as an
+            // anchored hit (5.0), so FTS-found chunks compete on
+            // equal footing rather than being structurally outranked
+            // by anchor affinity.
+            if let Some(fts_rank) = candidate.fts_rank {
+                let bonus = (fts_rank * 4.0).min(6.0);
+                score += bonus;
+                candidate
+                    .reasons
+                    .push(format!("fts_rank_cd_match:{:.4}", fts_rank));
             }
             if candidate.chunk_part_count > 1 {
                 score += 0.25;
@@ -2399,10 +2431,18 @@ impl McpServer {
                     candidate.reasons.push(reason.to_string());
                 }
             }
+            // REQ-AXO-324 slice 2 — FTS hits are explicitly not
+            // "generic semantic". Without the `fts_rank.is_none()`
+            // guard, an FTS hit (lexical_hits=0, semantic_distance=None,
+            // !anchored, !same_file, but fts_rank.is_some()) used to
+            // pass this predicate and lose 1.0 — but now that FTS
+            // carries its own bonus band the penalty would only fight
+            // it. Keeps firing for true vector-only hits.
             if !candidate.anchored_to_entry
                 && !candidate.same_file_as_entry
                 && candidate.semantic_distance.is_some()
                 && candidate.lexical_hits == 0
+                && candidate.fts_rank.is_none()
             {
                 score -= 1.0;
                 candidate
@@ -2440,6 +2480,27 @@ impl McpServer {
         let prefers_operational_code = Self::route_prefers_operational_code(route);
         let mut broader_selected = 0usize;
         let mut non_operational_selected = 0usize;
+        // DEC-AXO-093 / REQ-AXO-324 slice 2 — FTS-discovered chunks
+        // get up to 2 reserved slots in the broader band even when
+        // anchors exist. Without this, the hierarchical gate at
+        // `has_anchor && !anchored_selected` (or the global cap
+        // `broader_selected >= 1`) would systematically suppress
+        // FTS hits and the dormant content_tsv GIN index would never
+        // pay off. Gated by `AXON_HYBRID_RETRIEVAL_DISABLED` for
+        // rollback safety.
+        let hybrid_enabled = !std::env::var("AXON_HYBRID_RETRIEVAL_DISABLED")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let fts_slot_cap: usize = if hybrid_enabled { 2 } else { 0 };
+        let mut fts_selected = 0usize;
+        diagnostics.fts_chunks_considered =
+            candidates.iter().filter(|c| c.fts_rank.is_some()).count();
 
         let anchored = candidates
             .iter()
@@ -2463,20 +2524,21 @@ impl McpServer {
                       seen_uris: &mut HashSet<String>,
                       selected_source_parts: &mut HashMap<String, Vec<usize>>,
                       consumed_tokens: &mut usize,
-                      diagnostics: &mut RetrievalDiagnostics| {
+                      diagnostics: &mut RetrievalDiagnostics|
+         -> bool {
             if selected.len() >= chunk_cap {
-                return;
+                return false;
             }
             if !selected_ids.insert(candidate.chunk_id.clone()) {
-                return;
+                return false;
             }
             if !Self::can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) {
-                return;
+                return false;
             }
             let snippet = Self::truncate(&candidate.content, 220);
             let estimated = Self::estimate_tokens(&[&snippet]);
             if *consumed_tokens + estimated > token_budget / 2 {
-                return;
+                return false;
             }
             *consumed_tokens += estimated;
             seen_uris.insert(candidate.uri.clone());
@@ -2491,6 +2553,9 @@ impl McpServer {
             }
             if candidate.chunk_part_count > 1 {
                 diagnostics.multipart_chunks_selected += 1;
+            }
+            if candidate.fts_rank.is_some() {
+                diagnostics.fts_chunks_selected += 1;
             }
             selected.push(json!({
                 "chunk_id": candidate.chunk_id,
@@ -2508,6 +2573,7 @@ impl McpServer {
                 "score": candidate.score,
                 "ranking_reasons": candidate.reasons,
             }));
+            true
         };
 
         for candidate in &anchored {
@@ -2540,11 +2606,16 @@ impl McpServer {
         }
 
         for candidate in &broader {
-            if has_anchor && !anchored_selected {
+            let is_fts = candidate.fts_rank.is_some();
+            // SLICE 2 — FTS hits bypass the anchor-affinity gate up
+            // to `fts_slot_cap` (= 2 when hybrid enabled). Non-FTS
+            // broader candidates still respect the original
+            // `has_anchor && !anchored_selected` short-circuit.
+            if has_anchor && !anchored_selected && !(is_fts && fts_selected < fts_slot_cap) {
                 excluded_because.push("not_anchor_affine".to_string());
                 continue;
             }
-            if has_anchor && prefers_operational_code {
+            if has_anchor && prefers_operational_code && !is_fts {
                 if let Some(reason) = Self::chunk_penalty_reason(candidate) {
                     excluded_because.push(reason.to_string());
                     if reason != "test_file_penalty" && reason != "docs_file_penalty" {
@@ -2553,21 +2624,31 @@ impl McpServer {
                     continue;
                 }
             }
-            if broader_selected >= 1 {
+            // SLICE 2 — global broader cap respected for non-FTS;
+            // FTS gets its own dedicated `fts_slot_cap` budget that
+            // does not count against `broader_selected`.
+            if !is_fts && broader_selected >= 1 {
                 excluded_because.push("broader_semantic_dropped_due_to_anchor".to_string());
                 continue;
             }
-            if candidate.semantic_distance.is_some() && candidate.lexical_hits == 0 {
+            if is_fts && fts_selected >= fts_slot_cap {
+                excluded_because.push("fts_slot_cap_exhausted".to_string());
+                continue;
+            }
+            if !is_fts && candidate.semantic_distance.is_some() && candidate.lexical_hits == 0 {
                 excluded_because.push("generic_semantic_only".to_string());
             }
-            if prefers_operational_code && Self::chunk_penalty_reason(candidate).is_some() {
+            if prefers_operational_code
+                && Self::chunk_penalty_reason(candidate).is_some()
+                && !is_fts
+            {
                 if non_operational_selected >= 1 {
                     excluded_because.push("non_operational_chunk_penalized".to_string());
                     continue;
                 }
                 non_operational_selected += 1;
             }
-            ingest(
+            let ingested = ingest(
                 candidate,
                 &mut selected,
                 &mut selected_ids,
@@ -2576,7 +2657,13 @@ impl McpServer {
                 &mut consumed_tokens,
                 diagnostics,
             );
-            broader_selected += 1;
+            if ingested {
+                if is_fts {
+                    fts_selected += 1;
+                } else {
+                    broader_selected += 1;
+                }
+            }
         }
 
         if prefers_operational_code
@@ -3978,6 +4065,7 @@ mod tests {
             same_file_as_entry,
             score: 0.0,
             reasons: Vec::new(),
+            fts_rank: None,
         }
     }
 

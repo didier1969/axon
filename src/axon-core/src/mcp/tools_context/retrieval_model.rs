@@ -70,6 +70,15 @@ pub(super) struct ChunkCandidate {
     pub(super) same_file_as_entry: bool,
     pub(super) score: f64,
     pub(super) reasons: Vec<String>,
+    // DEC-AXO-093 / REQ-AXO-324 slice 2 — when this candidate was
+    // discovered via the FTS modality, this carries the raw
+    // `ts_rank_cd` score (cover-density). `None` for all other
+    // sources. Used by `rerank_chunk_candidates` to give FTS a
+    // dedicated bonus band so it competes with anchored hits on
+    // an equal footing, and by `select_supporting_chunks` to
+    // reserve slots for FTS-discovered evidence even when
+    // anchors exist.
+    pub(super) fts_rank: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -83,6 +92,9 @@ pub(super) struct RetrievalDiagnostics {
     pub(super) multipart_symbol_groups_selected: usize,
     pub(super) graph_neighbors_selected: usize,
     pub(super) soll_entities_selected: usize,
+    // REQ-AXO-324 slice 2 — FTS modality observability.
+    pub(super) fts_chunks_considered: usize,
+    pub(super) fts_chunks_selected: usize,
 }
 
 #[derive(Clone, Debug, Default)]

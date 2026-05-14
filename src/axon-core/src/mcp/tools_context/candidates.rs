@@ -134,7 +134,7 @@ impl McpServer {
                 content: snippet, match_reason: "repo_literal".to_string(), lexical_hits: matched_terms.len(),
                 semantic_distance: None, chunk_part_index: 1, chunk_part_count: 1, chunk_path: "1/1".to_string(),
                 anchored_to_entry: true, same_file_as_entry: true,
-                score: 4.0 + f64::from(base_rank.max(0)), reasons });
+                score: 4.0 + f64::from(base_rank.max(0)), reasons, fts_rank: None });
             if entries.len() >= limit.min(2) { break; }
         }
         (entries, chunks)
@@ -321,7 +321,7 @@ impl McpServer {
                 let same_file_as_entry = entry_uris.contains(&uri);
                 Some(ChunkCandidate { chunk_id, source_id, project_code, uri, content, match_reason, lexical_hits,
                     semantic_distance: None, chunk_part_index, chunk_part_count, chunk_path, anchored_to_entry,
-                    same_file_as_entry, score: 0.0, reasons: Vec::new() })
+                    same_file_as_entry, score: 0.0, reasons: Vec::new(), fts_rank: None })
             }).collect::<Vec<_>>();
             if !anchored_candidates.is_empty() { return anchored_candidates; }
         }
@@ -418,7 +418,7 @@ impl McpServer {
             let same_file_as_entry = entry_uris.contains(&uri);
             Some(ChunkCandidate { chunk_id, source_id, project_code, uri, content, match_reason, lexical_hits,
                 semantic_distance, chunk_part_index, chunk_part_count, chunk_path, anchored_to_entry,
-                same_file_as_entry, score: 0.0, reasons: Vec::new() })
+                same_file_as_entry, score: 0.0, reasons: Vec::new(), fts_rank: None })
         }).collect::<Vec<_>>();
         if candidates.is_empty() {
             let (_, repo_chunks) = self.repo_literal_fallback_candidates(project, terms, limit);
@@ -437,6 +437,18 @@ impl McpServer {
             if candidate.anchored_to_entry { score += 5.0; candidate.reasons.push("anchored_to_entry".to_string()); }
             else if candidate.same_file_as_entry { score += 3.5; candidate.reasons.push("same_file_as_entry".to_string()); }
             if let Some(distance) = candidate.semantic_distance { score += (1.0 - distance).max(0.0) * 3.0; candidate.reasons.push("semantic_chunk_match".to_string()); }
+            // DEC-AXO-093 / REQ-AXO-324 slice 2 — FTS modality bonus
+            // band. `ts_rank_cd` values are in [0, +∞) but typically
+            // sit in [0.01, 1.0] for relevant matches. Multiplying by
+            // 4 and clamping at 6 places a strong FTS hit
+            // (`ts_rank_cd >= 1.5`) at the same magnitude as an
+            // anchored hit (5.0), so FTS-found chunks compete on
+            // equal footing rather than being structurally outranked.
+            if let Some(fts_rank) = candidate.fts_rank {
+                let bonus = (fts_rank * 4.0).min(6.0);
+                score += bonus;
+                candidate.reasons.push(format!("fts_rank_cd_match:{:.4}", fts_rank));
+            }
             if candidate.chunk_part_count > 1 {
                 score += 0.25; candidate.reasons.push("multipart_symbol_chunk".to_string());
                 if candidate.chunk_part_index == 1 { score += 0.6; candidate.reasons.push("multipart_lead_chunk".to_string()); }
@@ -461,7 +473,17 @@ impl McpServer {
             if Self::route_prefers_operational_code(route) {
                 if let Some(reason) = Self::chunk_penalty_reason(candidate) { score -= 2.0; candidate.reasons.push(reason.to_string()); }
             }
-            if !candidate.anchored_to_entry && !candidate.same_file_as_entry && candidate.semantic_distance.is_some() && candidate.lexical_hits == 0 {
+            // REQ-AXO-324 slice 2 — FTS hits are explicitly not
+            // "generic semantic". Without this exclusion, an FTS hit
+            // (lexical_hits=0, semantic_distance=None,
+            // !anchored, !same_file, but fts_rank.is_some()) would
+            // otherwise still pass the predicate and get penalised.
+            // The check still fires for true vector-only hits.
+            if !candidate.anchored_to_entry && !candidate.same_file_as_entry
+                && candidate.semantic_distance.is_some()
+                && candidate.lexical_hits == 0
+                && candidate.fts_rank.is_none()
+            {
                 score -= 1.0; candidate.reasons.push("generic_semantic_only_penalty".to_string());
             }
             candidate.score = score;
@@ -482,26 +504,42 @@ impl McpServer {
         let prefers_operational_code = Self::route_prefers_operational_code(route);
         let mut broader_selected = 0usize;
         let mut non_operational_selected = 0usize;
+        // DEC-AXO-093 / REQ-AXO-324 slice 2 — FTS-discovered chunks
+        // get up to 2 reserved slots in the broader band even when an
+        // anchor exists. Without this, the hierarchical gate at
+        // `has_anchor && !anchored_selected` (or the global cap
+        // `broader_selected >= 1`) would systematically suppress
+        // FTS hits and the dormant content_tsv GIN index would never
+        // pay off. Gated by `AXON_HYBRID_RETRIEVAL_DISABLED` for
+        // rollback.
+        let hybrid_enabled = !std::env::var("AXON_HYBRID_RETRIEVAL_DISABLED")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let fts_slot_cap: usize = if hybrid_enabled { 2 } else { 0 };
+        let mut fts_selected = 0usize;
 
         let anchored = candidates.iter().filter(|c| c.anchored_to_entry).cloned().collect::<Vec<_>>();
         let same_file = candidates.iter().filter(|c| !c.anchored_to_entry && c.same_file_as_entry).cloned().collect::<Vec<_>>();
         let broader = candidates.iter().filter(|c| !c.anchored_to_entry && !c.same_file_as_entry).cloned().collect::<Vec<_>>();
+        diagnostics.fts_chunks_considered = candidates.iter().filter(|c| c.fts_rank.is_some()).count();
 
         let ingest = |candidate: &ChunkCandidate, selected: &mut Vec<Value>, selected_ids: &mut HashSet<String>,
             seen_uris: &mut HashSet<String>, selected_source_parts: &mut HashMap<String, Vec<usize>>,
-            consumed_tokens: &mut usize, diagnostics: &mut RetrievalDiagnostics| {
-            if selected.len() >= chunk_cap { return; }
-            if !selected_ids.insert(candidate.chunk_id.clone()) { return; }
-            if !Self::can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) { return; }
+            consumed_tokens: &mut usize, diagnostics: &mut RetrievalDiagnostics| -> bool {
+            if selected.len() >= chunk_cap { return false; }
+            if !selected_ids.insert(candidate.chunk_id.clone()) { return false; }
+            if !Self::can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) { return false; }
             let snippet = Self::truncate(&candidate.content, 220);
             let estimated = Self::estimate_tokens(&[&snippet]);
-            if *consumed_tokens + estimated > token_budget / 2 { return; }
+            if *consumed_tokens + estimated > token_budget / 2 { return false; }
             *consumed_tokens += estimated;
             seen_uris.insert(candidate.uri.clone());
             selected_source_parts.entry(candidate.source_id.clone()).or_default().push(candidate.chunk_part_index);
             if candidate.anchored_to_entry || candidate.same_file_as_entry { diagnostics.anchored_chunks_selected += 1; }
             else { diagnostics.unanchored_chunks_selected += 1; }
             if candidate.chunk_part_count > 1 { diagnostics.multipart_chunks_selected += 1; }
+            if candidate.fts_rank.is_some() { diagnostics.fts_chunks_selected += 1; }
             selected.push(json!({
                 "chunk_id": candidate.chunk_id, "source_id": candidate.source_id,
                 "project_code": candidate.project_code, "uri": candidate.uri,
@@ -511,6 +549,7 @@ impl McpServer {
                 "same_file_as_entry": candidate.same_file_as_entry, "snippet": snippet,
                 "score": candidate.score, "ranking_reasons": candidate.reasons,
             }));
+            true
         };
 
         for candidate in &anchored { ingest(candidate, &mut selected, &mut selected_ids, &mut seen_uris, &mut selected_source_parts, &mut consumed_tokens, diagnostics); }
@@ -523,22 +562,36 @@ impl McpServer {
         }
 
         for candidate in &broader {
-            if has_anchor && !anchored_selected { excluded_because.push("not_anchor_affine".to_string()); continue; }
-            if has_anchor && prefers_operational_code {
+            let is_fts = candidate.fts_rank.is_some();
+            // SLICE 2 — FTS hits bypass the anchor-affinity gate up
+            // to `fts_slot_cap` (= 2 when hybrid enabled). Non-FTS
+            // broader candidates still respect the original
+            // `has_anchor && !anchored_selected` short-circuit.
+            if has_anchor && !anchored_selected && !(is_fts && fts_selected < fts_slot_cap) {
+                excluded_because.push("not_anchor_affine".to_string()); continue;
+            }
+            if has_anchor && prefers_operational_code && !is_fts {
                 if let Some(reason) = Self::chunk_penalty_reason(candidate) {
                     excluded_because.push(reason.to_string());
                     if reason != "test_file_penalty" && reason != "docs_file_penalty" { excluded_because.push("non_operational_chunk_penalized".to_string()); }
                     continue;
                 }
             }
-            if broader_selected >= 1 { excluded_because.push("broader_semantic_dropped_due_to_anchor".to_string()); continue; }
-            if candidate.semantic_distance.is_some() && candidate.lexical_hits == 0 { excluded_because.push("generic_semantic_only".to_string()); }
-            if prefers_operational_code && Self::chunk_penalty_reason(candidate).is_some() {
+            // SLICE 2 — global broader cap respected for non-FTS;
+            // FTS gets its own dedicated `fts_slot_cap` budget that
+            // does not count against `broader_selected`.
+            if !is_fts && broader_selected >= 1 { excluded_because.push("broader_semantic_dropped_due_to_anchor".to_string()); continue; }
+            if is_fts && fts_selected >= fts_slot_cap { excluded_because.push("fts_slot_cap_exhausted".to_string()); continue; }
+            if !is_fts && candidate.semantic_distance.is_some() && candidate.lexical_hits == 0 { excluded_because.push("generic_semantic_only".to_string()); }
+            if prefers_operational_code && Self::chunk_penalty_reason(candidate).is_some() && !is_fts {
                 if non_operational_selected >= 1 { excluded_because.push("non_operational_chunk_penalized".to_string()); continue; }
                 non_operational_selected += 1;
             }
-            ingest(candidate, &mut selected, &mut selected_ids, &mut seen_uris, &mut selected_source_parts, &mut consumed_tokens, diagnostics);
-            broader_selected += 1;
+            let ingested = ingest(candidate, &mut selected, &mut selected_ids, &mut seen_uris, &mut selected_source_parts, &mut consumed_tokens, diagnostics);
+            if ingested {
+                if is_fts { fts_selected += 1; }
+                else { broader_selected += 1; }
+            }
         }
 
         if prefers_operational_code && !same_file.is_empty() && broader_selected > 0 && diagnostics.anchored_chunks_selected > 0 {
