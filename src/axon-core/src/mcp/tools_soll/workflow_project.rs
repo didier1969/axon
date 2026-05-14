@@ -615,20 +615,79 @@ impl McpServer {
     }
 
     fn read_wave_1_unblockers(&self, project_code: &str) -> serde_json::Value {
-        let args = serde_json::json!({
-            "project_code": project_code,
-            "format": "brief",
-            "top": 3,
-            "limit": 5,
-        });
-        match self.axon_soll_work_plan(&args) {
-            Some(response) => response
-                .get("data")
-                .and_then(|d| d.get("top_recommendations"))
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!([])),
-            None => serde_json::json!([]),
-        }
+        // Cold-start fast path: emit top open Requirements ordered by priority +
+        // recency via a direct SQL query. Row shape mirrors
+        // `soll_work_plan.data.top_recommendations` so existing consumers keep
+        // parsing. The full prioritization (cycle detection, blocker analysis,
+        // validation gates, descendant counts) is intentionally NOT computed
+        // here — it requires `count_degraded_links_for_node` per node plus
+        // `soll_verify_requirements` + `validate_soll` + `completeness_snapshot`
+        // (~9 s on a 900-node SOLL graph), which made `axon_init_project`
+        // exceed the MCP HTTP transport timeout and break cold-start. LLMs that
+        // need full prioritization call `soll_work_plan` directly once
+        // onboarded.
+        let escaped = escape_sql(project_code);
+        let table = self.graph_store.soll_table("Node");
+        let priority_expr = if self.graph_store.is_postgres_backend() {
+            "(metadata->>'priority')"
+        } else {
+            "json_extract_string(metadata, '$.priority')"
+        };
+        let updated_expr = if self.graph_store.is_postgres_backend() {
+            "(metadata->>'updated_at')"
+        } else {
+            "json_extract_string(metadata, '$.updated_at')"
+        };
+        let raw = match self.graph_store.query_json(&format!(
+            "SELECT id, title, status, COALESCE({priority_expr}, '') \
+             FROM {table} \
+             WHERE project_code = '{escaped}' \
+               AND type = 'Requirement' \
+               AND status IN ('proposed','in_progress') \
+             ORDER BY \
+               CASE COALESCE({priority_expr}, '') \
+                 WHEN 'critical' THEN 0 \
+                 WHEN 'high' THEN 1 \
+                 WHEN 'medium' THEN 2 \
+                 WHEN 'low' THEN 3 \
+                 ELSE 4 END, \
+               CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
+             LIMIT 3"
+        )) {
+            Ok(s) => s,
+            Err(_) => return serde_json::json!([]),
+        };
+        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(_) => return serde_json::json!([]),
+        };
+        serde_json::Value::Array(
+            rows.into_iter()
+                .filter_map(|row| {
+                    let mut iter = row.into_iter();
+                    let id = iter.next()?;
+                    let title = iter.next()?;
+                    let status = iter.next().unwrap_or_default();
+                    let priority = iter.next().unwrap_or_default();
+                    let priority_value = if priority.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(priority)
+                    };
+                    Some(serde_json::json!({
+                        "id": id,
+                        "entity_type": "Requirement",
+                        "title": title,
+                        "score": serde_json::Value::Null,
+                        "wave_index": serde_json::Value::Null,
+                        "kind": status,
+                        "reason": "kickoff fast path: ranked by priority + recency. Call `soll_work_plan` for cycle/blocker/validation analysis.",
+                        "validation_gates": serde_json::json!({}),
+                        "priority": priority_value,
+                    }))
+                })
+                .collect(),
+        )
     }
 
     fn axon_init_project_bundle(

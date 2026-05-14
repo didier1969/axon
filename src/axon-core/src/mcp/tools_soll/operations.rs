@@ -222,6 +222,17 @@ impl McpServer {
     }
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
+        self.axon_validate_soll_with_cached_coverage(args, None)
+    }
+
+    /// Memoized variant — accepts a precomputed
+    /// `RequirementCoverageSummary` so callers like `axon_soll_work_plan`
+    /// can avoid the repeated heavy recomputation.
+    pub(crate) fn axon_validate_soll_with_cached_coverage(
+        &self,
+        args: &Value,
+        cached_coverage: Option<&RequirementCoverageSummary>,
+    ) -> Option<Value> {
         let project_code = args.get("project_code").and_then(|v| v.as_str());
         // REQ-AXO-043 — when project_code is supplied but unregistered,
         // surface the structured wrong_project_scope contract via the
@@ -233,7 +244,9 @@ impl McpServer {
                 return Some(self.wrong_project_scope_response(code, "soll_validate"));
             }
         }
-        let snapshot = match self.soll_completeness_snapshot(project_code) {
+        let snapshot = match self
+            .soll_completeness_snapshot_with_cached_coverage(project_code, cached_coverage)
+        {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 return Some(json!({

@@ -47,7 +47,13 @@ impl McpServer {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
-        let mut nodes = self.load_work_plan_nodes(project_code);
+        // REQ-AXO-319 — compute requirement_coverage_summary ONCE upfront and
+        // thread it through load_work_plan_nodes + the three downstream
+        // wrappers (verify/validate/completeness). Previously each call site
+        // recomputed it (~5× per work_plan invocation).
+        let cached_coverage = self.requirement_coverage_summary(project_code).ok();
+        let mut nodes =
+            self.load_work_plan_nodes_with_cached_coverage(project_code, cached_coverage.as_ref());
         let edges = self.load_work_plan_edges(project_code);
         let adjacency = build_adjacency_map(&edges);
         let cycle_sets = detect_cycle_sets(nodes.keys(), &adjacency);
@@ -133,10 +139,20 @@ impl McpServer {
 
         let (limited_waves, returned_items, truncated) = apply_wave_limit(&waves, limit);
         let top_recommendations = build_top_recommendations(&limited_waves, top);
-        let global_validation =
-            self.axon_soll_verify_requirements(&json!({ "project_code": project_code }));
-        let soll_validation = self.axon_validate_soll(&json!({ "project_code": project_code }));
-        let completeness_snapshot = self.soll_completeness_snapshot(Some(project_code)).ok();
+        let global_validation = self.axon_soll_verify_requirements_with_cached_coverage(
+            &json!({ "project_code": project_code }),
+            cached_coverage.as_ref(),
+        );
+        let soll_validation = self.axon_validate_soll_with_cached_coverage(
+            &json!({ "project_code": project_code }),
+            cached_coverage.as_ref(),
+        );
+        let completeness_snapshot = self
+            .soll_completeness_snapshot_with_cached_coverage(
+                Some(project_code),
+                cached_coverage.as_ref(),
+            )
+            .ok();
         let requirement_verification = global_validation
             .as_ref()
             .and_then(|resp| resp.get("data"))
@@ -214,13 +230,29 @@ impl McpServer {
     }
 
     fn load_work_plan_nodes(&self, project_code: &str) -> HashMap<String, WorkPlanNode> {
+        self.load_work_plan_nodes_with_cached_coverage(project_code, None)
+    }
+
+    /// Memoized variant — see REQ-AXO-319.
+    fn load_work_plan_nodes_with_cached_coverage(
+        &self,
+        project_code: &str,
+        cached_coverage: Option<&RequirementCoverageSummary>,
+    ) -> HashMap<String, WorkPlanNode> {
         let Ok(project_code) = self.resolve_project_code(project_code) else {
             return HashMap::new();
         };
         let mut nodes = HashMap::new();
-        let requirement_coverage = self
-            .requirement_coverage_summary(&project_code)
-            .unwrap_or_default();
+        let owned_coverage;
+        let requirement_coverage: &RequirementCoverageSummary = match cached_coverage {
+            Some(c) => c,
+            None => {
+                owned_coverage = self
+                    .requirement_coverage_summary(&project_code)
+                    .unwrap_or_default();
+                &owned_coverage
+            }
+        };
         let requirement_coverage_by_id = requirement_coverage
             .entries
             .iter()

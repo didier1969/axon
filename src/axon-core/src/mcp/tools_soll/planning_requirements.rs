@@ -2,6 +2,17 @@ use super::*;
 
 impl McpServer {
     pub(crate) fn axon_soll_verify_requirements(&self, args: &Value) -> Option<Value> {
+        self.axon_soll_verify_requirements_with_cached_coverage(args, None)
+    }
+
+    /// Memoized variant — same contract, but reuses a precomputed
+    /// `RequirementCoverageSummary` when the caller (typically
+    /// `axon_soll_work_plan`) has already paid the cost.
+    pub(crate) fn axon_soll_verify_requirements_with_cached_coverage(
+        &self,
+        args: &Value,
+        cached_coverage: Option<&RequirementCoverageSummary>,
+    ) -> Option<Value> {
         let project_code_input = args
             .get("project_code")
             .and_then(|v| v.as_str())
@@ -15,8 +26,17 @@ impl McpServer {
                 return Some(self.wrong_project_scope_response(project_code_input, "soll_verify_requirements"));
             }
         };
-        let summary = self.requirement_coverage_summary(&project_code).ok()?;
-        let snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok()?;
+        let owned_summary;
+        let summary: &RequirementCoverageSummary = match cached_coverage {
+            Some(c) => c,
+            None => {
+                owned_summary = self.requirement_coverage_summary(&project_code).ok()?;
+                &owned_summary
+            }
+        };
+        let snapshot = self
+            .soll_completeness_snapshot_with_cached_coverage(Some(&project_code), Some(summary))
+            .ok()?;
         let details = summary
             .entries
             .iter()

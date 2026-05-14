@@ -176,6 +176,19 @@ CREATE TABLE IF NOT EXISTS soll.Traceability (
     created_at BIGINT
 );
 
+-- REQ-AXO-320 — filesystem-state-in-DB for evidence artifacts.
+-- Eliminates the per-requirement Path::exists() N+1 in
+-- broken_file_evidence_counts_by_requirement: instead of a syscall per
+-- artifact_ref, we read from this column. Refreshed by a lazy sweeper
+-- (TTL-driven on read, or explicitly via maintenance call). Values:
+-- 'present', 'broken', 'directory', 'unknown'.
+ALTER TABLE soll.Traceability
+    ADD COLUMN IF NOT EXISTS artifact_status TEXT,
+    ADD COLUMN IF NOT EXISTS artifact_checked_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS soll_traceability_status_idx
+    ON soll.Traceability (artifact_status)
+    WHERE artifact_status IS NOT NULL;
+
 -- REQ-AXO-247 — McpJob mirror of DuckDB-era init_schema:1385.
 -- axon_commit_work + soll_apply_plan persist async-job state here;
 -- without it those tools fail under PG.

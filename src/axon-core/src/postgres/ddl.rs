@@ -161,6 +161,17 @@ pub fn generate_global_schema() -> Vec<String> {
             created_at BIGINT\
          )"
         .to_string(),
+        // REQ-AXO-320 — filesystem-state-in-DB. Eliminates Path::exists()
+        // N+1 in broken_file_evidence_counts_by_requirement. ALTER is
+        // idempotent so it's safe on every boot.
+        "ALTER TABLE soll.Traceability \
+            ADD COLUMN IF NOT EXISTS artifact_status TEXT, \
+            ADD COLUMN IF NOT EXISTS artifact_checked_at TIMESTAMPTZ"
+            .to_string(),
+        "CREATE INDEX IF NOT EXISTS soll_traceability_status_idx \
+            ON soll.Traceability (artifact_status) \
+            WHERE artifact_status IS NOT NULL"
+            .to_string(),
         // REQ-AXO-247 — McpJob mirror of DuckDB-era init_schema:1385.
         // axon_commit_work + soll_apply_plan persist async-job state
         // here; without it those tools fail under PG.
