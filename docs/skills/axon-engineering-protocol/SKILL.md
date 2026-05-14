@@ -12,9 +12,17 @@ LLM-only doc per CPT-AXO-024 / CPT-PRO-006 (SKILL/SOLL/MEMORY triad). For canoni
 **Methodology cross-references** : CPT-AXO-019/020/024/025 each have `metadata.generalized_by` pointing to canonical cross-project concepts (CPT-PRO-004/005/006/007 + DEC-PRO-001). The CPT-AXO body remains Axon-specific ; the CPT-PRO body is universal. Fetch CPT-PRO via `sql SELECT description FROM soll.Node WHERE id='CPT-PRO-NNN'`. New methodology guidelines available as `GUI-PRO-022..030` (workflow Pocock + token economy) and inherited via `metadata.pillar` mapping to `PIL-PRO-001..004`.
 
 ## Boot
-On user phrase "Axon init" / "init Axon" / "Axon démarre" / "go" / "continue" / "reprends" → first call MUST be `mcp__axon__axon_init_project project_path=<cwd>`. Read `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, **bootstrap_required**, **input_documents**). REQ-AXO-278 adds `bootstrap_required: bool` + `input_documents: array` to the bundle — `true` when no Vision exists for `project_code` (consumer-side LLM routes to `/bootstrap-soll` via `/axon-driven-development`); `input_documents[]` lists README/vision/brief/PRD/CONTEXT/*.md at project_path depth=1 with `{path, size_bytes, mtime_unix_secs}`. REQ-AXO-143: `session_pointer = {kind, value, label?}` is the canonical workflow-agnostic onboarding pointer (`kind ∈ file|url|soll_node|none`); persist via `axon_init_project.session_pointer` arg. Apply the pointed artefact before anything else (file path, Linear ticket URL, SOLL node, …). `active_handoff` is preserved as a backward-compat alias mirroring `session_pointer.value` only when kind=file. REQ-AXO-176: the four recent-activity arrays (`in_progress_requirements`, `wave_1_unblockers` from `soll_work_plan top=3`, `recent_req_commits` matching `REQ-XXX-NNN`, `recent_soll_writes` top-8 by `metadata.updated_at`) collapse what was previously 4 separate calls into the single init response — no Session entity type was added; CPT-AXO-027-style Concept summaries remain an opt-in pattern.
+Trigger phrases (`"Axon init"`, `"init Axon"`, `"Axon démarre"`, `"go"`, `"continue"`, `"reprends"`) → first call: `mcp__axon__axon_init_project project_path=<cwd>`. Use `data.kickoff_bundle`:
 
-Without trigger phrase: `help()` → `status()` → `help(tool=X)` for schemas. `project_code` auto-resolved from cwd.
+| Field | Action |
+|---|---|
+| `kickoff_prompt`, `methodology_summary`, `entry_points` | execute verbatim |
+| `session_pointer {kind, value, label?}` (kind ∈ `file`\|`url`\|`soll_node`\|`none`) | apply pointed artefact before anything else |
+| `bootstrap_required: bool` + `input_documents[{path,size_bytes,mtime_unix_secs}]` | if true → route to `/bootstrap-soll` |
+| `in_progress_requirements`, `wave_1_unblockers`, `recent_req_commits`, `recent_soll_writes` | recent-activity signals |
+| `active_handoff` | backward-compat alias of `session_pointer.value` (kind=file) |
+
+Without trigger phrase: `help()` → `status()` → `help(tool=X)`. `project_code` auto-resolved from cwd.
 
 ## Truth hierarchy
 | Source | Authority |
@@ -137,11 +145,6 @@ CLI bridge for large JSON: `./scripts/axon --instance live mcp-call call <tool> 
 ## Identity
 ID format = **DEC-AXO-085** (`TYPE-PROJ-N`, server-assigned, never fabricate). Counter source: `soll.Registry.last_{type}`. `axon_init_project` returns `project_code` and `data.kickoff_bundle` (REQ-AXO-119) on first-init AND re-init. `data.path_exists_on_disk=false` → warning only.
 
-## Tool contract changes (recent)
-- **`cypher` MCP tool renamed → `sql`** (MIL-AXO-017 slice 6B Phase F / REQ-AXO-90005). Input param `cypher` → `sql`. Error envelope prefix `"Graph plugin error: ..."` (was `"DuckDB plugin error: ..."`, REQ-AXO-90007). Update callers: `mcp__axon__cypher` → `mcp__axon__sql`.
-- **AGE retired physically** (MIL-AXO-017 slice 6B Phases B+C+D+E shipped): `path`, `impact_callers`, `bidi_trace`, `architectural_drift` use only `public.Edge` SQL functions. `postgres/age.rs` deleted (1387 LOC). `CREATE EXTENSION age` removed from DDL. Live PG `DROP EXTENSION age CASCADE` executed. `skip_sql_relations` renamed → `skip_legacy_relations` (no longer AGE-specific). `emit_age` dead-flag purged. VAL-AXO-001 gates 1+2+3+4+7 ✅, gate 5 (sustained bench) pending indexer run.
-- `debug` no longer renders Graph Storage / Graph Memory sections under PG (returned 0s — observability via `pg_stat_activity` deferred).
-
 ## Delivery flow
 1. `status`
 2. `query` / `inspect` / `retrieve_context`
@@ -174,7 +177,7 @@ Canonical for live: `bash scripts/release/promote_live_safe.sh --project AXO`. *
 
 Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (false bug claim that corrupted CPT-AXO-021).
 
-## PDCA with SOLL (CPT-AXO-024 — hard rule, set 2026-05-02)
+## PDCA with SOLL (CPT-AXO-024 — hard rule)
 - **P**lan: research SOLL+IST first; create REQ/DEC BEFORE code; `soll_manager link` to PIL/CPT.
 - **D**o: execute highest-score wave-1 from `soll_work_plan`; one fix one commit; `axon_pre_flight_check` then `axon_commit_work`.
 - **C**heck: tests; query live MCP for status (don't trust conversation context — lossy on compaction); cross-check SOLL acceptance criteria.
@@ -183,7 +186,7 @@ Never log without picking a branch. REQ-AXO-129 is the cautionary anti-pattern (
 ## Hygiene
 - TDD gate (GUI-PRO-001 / REQ-AXO-121): `.rs` containing `#[cfg(test)]` substring satisfies tests.rs requirement; sibling `_tests.rs` / `/tests/` still valid; files with neither remain blocked
 - IST/SOLL test fixtures (REQ-AXO-142): use `crate::test_support::ist_fixtures::{SymbolFixture, CallFixture, SollNodeFixture, EdgeFixture, IstSeed, create_test_server_with_ist_seed}` for new IST/SOLL projection tests instead of inline `INSERT INTO Symbol/CALLS/...` SQL. `CallFixture::synthetic(file, name, project)` covers the REQ-AXO-134 `<file>::<name>` target_id form; canonical Symbol.id form via `CallFixture::canonical(...)`.
-- soll.Edge INSERT hygiene (REQ-AXO-152): every `INSERT INTO soll.Edge` MUST populate `project_code` (5-column form `(source_id, target_id, relation_type, metadata, project_code)`). NULL `project_code` rows brick brain boot via DuckDB WAL replay / backfill PK conflict (observed 2026-05-03 promotion). Derive via `super::shared::project_code_from_canonical_entity_id(source_id).or_else(|| ...(target_id)).unwrap_or_else(|| "AXO".into())`, or pass an in-scope `p_code` directly when the caller already has it.
+- `soll.Edge` INSERT requires 5 columns `(source_id, target_id, relation_type, metadata, project_code)`. NULL `project_code` blocks brain boot. Derive via `super::shared::project_code_from_canonical_entity_id(source_id).or_else(|| ...(target_id)).unwrap_or_else(|| "AXO".into())`.
 - `axon_commit_work` does NOT mean "stage everything" — only auto-stages git-rm
 - archival `SOLL_EXPORT_*.md` not in routine commits (REQ-AXO-126 — `soll_export` is snapshot-per-release, fired by `promote_live_safe.sh`)
 - Derived docs (`soll_generate_docs`, `docs/derived/soll/...`) are read surfaces, NOT canonical truth — don't restore from them
