@@ -19,10 +19,14 @@ loop:
     elevate undersold       (REQ→CPT/PIL, DEC→PIL, …)
     demote overclaimed      (CPT→REQ, PIL→CPT, DEC→REQ, …)
   pass_D:  # density + future utility — GUI-PRO-100
-    compress descriptions   > 2K chars → preserve 100% intent
-    convert prose refs      "REQ-XXX-N" → native edges
-    strip inline dates      → metadata or Revision
-    lifecycle compress      post-delivery nodes → thin pointer
+    compress descriptions    > 2K chars → preserve 100% intent
+    convert prose refs       "REQ-XXX-N" → native edges
+    strip inline dates       → metadata or Revision
+    lifecycle compress       post-delivery nodes → thin pointer
+    skill size (DEC-AXO-094) docs/skills/*/SKILL.md > 5500 chars → flag
+    skill cell width         any line > 200 chars in docs/skills/*/SKILL.md → flag
+    skill ID annotation      (CPT|DEC|GUI|REQ|MIL|PIL)-[A-Z]{3}-[0-9]+ without `(label)` → flag
+    skill immutability       SKILL.md mutated outside tool/surface change → flag (GUI-AXO-NEW)
   if last two passes produced zero mutation: stop   # fixed-point
 ```
 
