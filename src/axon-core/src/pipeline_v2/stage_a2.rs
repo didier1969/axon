@@ -12,6 +12,7 @@
 //! `spawn_stage_workers` just steers items off the channel.
 
 use anyhow::{Context, Result};
+use tracing::info;
 
 use super::types::{ParsedFile, PreparedFile};
 
@@ -21,7 +22,10 @@ use super::types::{ParsedFile, PreparedFile};
 /// blocking task itself panicked. A file with zero symbols is a valid result
 /// (e.g. a file containing only comments) — it returns `Ok(ParsedFile { symbols: vec![], ... })`.
 pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
-    tokio::task::spawn_blocking(move || {
+    // REQ-AXO-345 — A2 in/out trace.
+    info!(target: "pipeline_v2::a2", "A2 in: {}", prep.path.display());
+    let path_for_log = prep.path.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let parser = crate::parser::get_parser_for_file(&prep.path).ok_or_else(|| {
             anyhow::anyhow!("A2: no parser registered for {}", prep.path.display())
         })?;
@@ -37,7 +41,17 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         })
     })
     .await
-    .context("A2 parse task panicked or was cancelled")?
+    .context("A2 parse task panicked or was cancelled")?;
+    if let Ok(ref parsed) = result {
+        info!(
+            target: "pipeline_v2::a2",
+            "A2 out: {} symbols={} relations={}",
+            path_for_log.display(),
+            parsed.symbols.len(),
+            parsed.relations.len()
+        );
+    }
+    result
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 use super::types::PreparedFile;
 
@@ -24,6 +25,8 @@ use super::types::PreparedFile;
 /// Errors are surfaced verbatim so the worker pool can record them in
 /// `StageMetrics::errors_total` without crashing the pipeline.
 pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
+    // REQ-AXO-345 — A1 in/out trace for silent-drop hunt.
+    info!(target: "pipeline_v2::a1", "A1 in: {}", path.display());
     let content = tokio::fs::read_to_string(&path)
         .await
         .with_context(|| format!("A1 read failed for {}", path.display()))?;
@@ -42,6 +45,12 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     let size_bytes = metadata.len();
     let content_hash = sha256_hex(&content);
 
+    info!(
+        target: "pipeline_v2::a1",
+        "A1 out: {} size={}",
+        path.display(),
+        size_bytes
+    );
     Ok(PreparedFile {
         path,
         content,
