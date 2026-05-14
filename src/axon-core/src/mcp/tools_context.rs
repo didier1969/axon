@@ -277,6 +277,28 @@ impl McpServer {
         } else {
             Vec::new()
         };
+        // DEC-AXO-093 / REQ-AXO-324 — FTS modality (3rd trinity branch
+        // alongside graph + vector). The GIN-indexed `content_tsv`
+        // column has been live since MIL-AXO-017 slice 4 / REQ-AXO-292;
+        // before this PR nothing in the MCP layer was actually
+        // querying it. We append FTS hits to the candidate pool and
+        // let the existing rerank step decide the final order. RRF
+        // formal fusion across modality ranks is REQ-AXO-324 slice 2.
+        if allow_unanchored_fallback {
+            let fts_hits = self.find_chunk_candidates_via_fts(project, question, top_k * 5);
+            if !fts_hits.is_empty() {
+                let known: std::collections::HashSet<String> = chunk_candidates
+                    .iter()
+                    .map(|c| c.chunk_id.clone())
+                    .collect();
+                for hit in fts_hits {
+                    if known.contains(&hit.chunk_id) {
+                        continue;
+                    }
+                    chunk_candidates.push(hit);
+                }
+            }
+        }
         diagnostics.chunk_candidates_considered = chunk_candidates.len();
         let has_direct_soll_traceability =
             self.has_direct_soll_traceability(&entry_candidates, project);
@@ -2150,6 +2172,125 @@ impl McpServer {
             candidates.extend(repo_chunks);
         }
         candidates
+    }
+
+    /// DEC-AXO-093 / REQ-AXO-324 — FTS modality for hybrid retrieval.
+    ///
+    /// Queries `public.Chunk.content_tsv` (GIN-indexed by MIL-AXO-017
+    /// slice 4 / REQ-AXO-292) via `websearch_to_tsquery` so operators
+    /// can pass natural-language questions, multi-word phrases, or
+    /// boolean operators interchangeably. Ranked by `ts_rank_cd`
+    /// which considers proximity + density of matches, not just
+    /// presence.
+    ///
+    /// Returns empty when:
+    /// - The backend is not PostgreSQL (FTS infrastructure is PG-only)
+    /// - The env knob `AXON_IST_FTS_DISABLED=1` is set (rollback safety)
+    /// - `websearch_to_tsquery` returns an empty tsquery (no hits)
+    /// - The SQL fails (returns Vec::new(), no propagation)
+    ///
+    /// The caller merges these into the existing chunk candidate pool;
+    /// the rerank step downstream decides final ordering. v1 ships as
+    /// an additive candidate source; explicit RRF fusion across
+    /// modalities is REQ-AXO-324 slice 2.
+    fn find_chunk_candidates_via_fts(
+        &self,
+        project: Option<&str>,
+        question: &str,
+        limit: usize,
+    ) -> Vec<ChunkCandidate> {
+        if !self.graph_store.is_postgres_backend() {
+            return Vec::new();
+        }
+        if std::env::var("AXON_IST_FTS_DISABLED")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            return Vec::new();
+        }
+        let trimmed = question.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        let escaped_question = Self::escape_sql(trimmed);
+        let project_filter =
+            Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]);
+        // websearch_to_tsquery with the `english` dictionary matches
+        // the DDL's content-body indexing (postgres/ddl.rs:414 builds
+        // content_tsv with `english` for content body, `simple` for
+        // path/kind metadata). English stemming normalises
+        // `recommendations`/`recommendation`/`recommend` to the same
+        // lexeme and removes a handful of natural-language stop-words
+        // (`how`/`the`/`a`) which is fine for question-style queries.
+        // Identifiers like `soll_work_plan` are split on `_` by both
+        // dictionaries so `soll`, `work`, `plan` lexemes still match.
+        // ts_rank_cd uses cover density which favours dense matches.
+        let query = format!(
+            "WITH q AS (SELECT websearch_to_tsquery('english', '{q}') AS tsq) \
+             SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), \
+                    COALESCE(f.path, ''), c.content, \
+                    COALESCE(c.chunk_part_index, 1), \
+                    COALESCE(c.chunk_part_count, 1), \
+                    COALESCE(c.chunk_path, '1/1'), \
+                    ts_rank_cd(c.content_tsv, q.tsq) AS fts_score \
+             FROM public.Chunk c \
+             CROSS JOIN q \
+             LEFT JOIN public.CONTAINS rel ON rel.target_id = c.source_id \
+             LEFT JOIN public.File f ON f.path = rel.source_id \
+             WHERE c.content_tsv @@ q.tsq AND q.tsq IS NOT NULL{project_filter} \
+             ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC \
+             LIMIT {limit}",
+            q = escaped_question,
+        );
+        let Ok(raw) = self.graph_store.query_json(&query) else {
+            return Vec::new();
+        };
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                if row.len() < 9 {
+                    return None;
+                }
+                let chunk_id = row.first()?.as_str()?.to_string();
+                let source_id = row.get(1)?.as_str().unwrap_or("").to_string();
+                let project_code = row.get(2)?.as_str().unwrap_or("unknown").to_string();
+                let uri = row.get(3)?.as_str().unwrap_or("").to_string();
+                let content = row.get(4)?.as_str().unwrap_or("").to_string();
+                let chunk_part_index = row
+                    .get(5)
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(1);
+                let chunk_part_count = row
+                    .get(6)
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(1);
+                let chunk_path = row.get(7)?.as_str().unwrap_or("1/1").to_string();
+                // ts_rank_cd ∈ [0, +∞); higher is better. We flip the
+                // sign so it can plug into the existing
+                // `semantic_distance` ordering (lower = better).
+                let fts_score = row.get(8).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                Some(ChunkCandidate {
+                    chunk_id,
+                    source_id,
+                    project_code,
+                    uri,
+                    content,
+                    match_reason: "fts".to_string(),
+                    lexical_hits: 0,
+                    semantic_distance: Some(-fts_score),
+                    chunk_part_index,
+                    chunk_part_count,
+                    chunk_path,
+                    anchored_to_entry: false,
+                    same_file_as_entry: false,
+                    score: 0.0,
+                    reasons: vec![format!("fts:ts_rank_cd={:.4}", fts_score)],
+                })
+            })
+            .collect()
     }
 
     fn rerank_chunk_candidates(
