@@ -3096,6 +3096,94 @@ pub(crate) fn spawn_federation_orchestrator(
     });
 }
 
+/// REQ-AXO-340 — periodic full re-scan of every federation-eligible project
+/// under `AXON_WATCH_DIR`. The diff itself happens inside the canonical
+/// Scanner → FileIngressGuard pipeline (`should_stage` returns
+/// `SkipUnchanged` for files whose `(path, mtime, size)` already match the
+/// guard's hydrated `FileIngressRow` snapshot). Only new or changed files
+/// reach the `IngressBuffer`, so steady-state cost is bounded by
+/// `walk + stat + HashMap lookup` per file. This closes the gap where
+/// federation discovery runs the initial scan exactly once: any file added
+/// outside an inotify-emitting touch (cold-clone, partial bootstrap failure,
+/// projects discovered after the first sweep) is otherwise invisible until
+/// the next process restart.
+fn scope_reconciliation_enabled() -> bool {
+    std::env::var("AXON_SCOPE_RECONCILE_ENABLED")
+        .map(|raw| {
+            !matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn scope_reconciliation_interval_secs() -> u64 {
+    const DEFAULT_SECS: u64 = 60;
+    const MIN_SECS: u64 = 5;
+    std::env::var("AXON_SCOPE_RECONCILE_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= MIN_SECS)
+        .unwrap_or(DEFAULT_SECS)
+}
+
+pub(crate) fn spawn_scope_reconciliation_orchestrator(
+    store: Arc<GraphStore>,
+    watch_root: String,
+    file_ingress_guard: SharedFileIngressGuard,
+    ingress_buffer: SharedIngressBuffer,
+) {
+    if !scope_reconciliation_enabled() {
+        info!("Reconciliation : orchestrateur désactivé via AXON_SCOPE_RECONCILE_ENABLED.");
+        return;
+    }
+    let interval = Duration::from_secs(scope_reconciliation_interval_secs());
+    info!(
+        "Reconciliation : démarrage (scope: {}, interval: {}s).",
+        if watch_root.is_empty() {
+            "<unrestricted>"
+        } else {
+            watch_root.as_str()
+        },
+        interval.as_secs()
+    );
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(interval);
+            // REQ-AXO-340 — reuse the canonical federation candidate filter to
+            // honour AXON_WATCH_DIR isolation (REQ-AXO-172). Projects without
+            // `.axon/meta.json` are deliberately out of scope for this slice;
+            // a follow-up REQ will auto-bootstrap meta.json for un-bound dirs.
+            let candidates = filter_orchestration_candidates_by_watch_root(
+                federation_orchestration_candidates_from_identities(
+                    axon_core::project_meta::discover_project_identities(),
+                ),
+                &watch_root,
+            );
+            if candidates.is_empty() {
+                continue;
+            }
+            let pass_start = std::time::Instant::now();
+            let mut scanned = 0usize;
+            for (project_code, project_path) in &candidates {
+                let scanner = Scanner::new(project_path, project_code);
+                scanner.scan_with_guard_and_ingress(
+                    store.clone(),
+                    Some(&file_ingress_guard),
+                    Some(&ingress_buffer),
+                );
+                scanned += 1;
+            }
+            debug!(
+                "Reconciliation : passe terminée — {} projet(s) scanné(s) en {} ms.",
+                scanned,
+                pass_start.elapsed().as_millis()
+            );
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3105,8 +3193,9 @@ mod tests {
         flush_ingress_buffer_once, handle_watcher_events, ingress_flush_batch_size,
         ingress_promoter_backoff_ms, ingress_promoter_sleep_ms, memory_limit_bytes,
         memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, optimizer_loop_interval_ms,
-        plan_admissions, should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm,
-        ClaimMode, RescanGuardReset, INGRESS_FORCE_BATCH_SIZE, INGRESS_HOT_PRIORITY_BATCH_CAP,
+        plan_admissions, scope_reconciliation_enabled, scope_reconciliation_interval_secs,
+        should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm, ClaimMode,
+        RescanGuardReset, INGRESS_FORCE_BATCH_SIZE, INGRESS_HOT_PRIORITY_BATCH_CAP,
         INGRESS_MAX_BATCH_SIZE, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
@@ -3188,6 +3277,61 @@ mod tests {
         assert!(!federation_orchestrator_enabled());
         unsafe {
             std::env::remove_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR");
+        }
+    }
+
+    #[test]
+    fn test_scope_reconciliation_enabled_defaults_to_true() {
+        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::remove_var("AXON_SCOPE_RECONCILE_ENABLED");
+        }
+        assert!(scope_reconciliation_enabled());
+    }
+
+    #[test]
+    fn test_scope_reconciliation_enabled_respects_false_env() {
+        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        for value in ["false", "FALSE", "0", "off", "no"] {
+            unsafe {
+                std::env::set_var("AXON_SCOPE_RECONCILE_ENABLED", value);
+            }
+            assert!(
+                !scope_reconciliation_enabled(),
+                "value `{value}` should disable reconciliation"
+            );
+        }
+        unsafe {
+            std::env::remove_var("AXON_SCOPE_RECONCILE_ENABLED");
+        }
+    }
+
+    #[test]
+    fn test_scope_reconciliation_interval_defaults_and_clamps() {
+        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::remove_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS");
+        }
+        assert_eq!(scope_reconciliation_interval_secs(), 60);
+
+        unsafe {
+            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "300");
+        }
+        assert_eq!(scope_reconciliation_interval_secs(), 300);
+
+        // Values below the 5s floor fall back to the default.
+        unsafe {
+            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "1");
+        }
+        assert_eq!(scope_reconciliation_interval_secs(), 60);
+
+        unsafe {
+            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "not-a-number");
+        }
+        assert_eq!(scope_reconciliation_interval_secs(), 60);
+
+        unsafe {
+            std::env::remove_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS");
         }
     }
 

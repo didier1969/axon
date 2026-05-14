@@ -791,6 +791,16 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             file_ingress_guard.clone(),
             ingress_buffer.clone(),
         );
+        // REQ-AXO-340 — periodic scope reconciliation so files added outside
+        // an inotify-emitting touch (cold clones, partial bootstrap failures,
+        // late-arriving projects) reach the ingress buffer without waiting
+        // for the next process restart.
+        main_background::spawn_scope_reconciliation_orchestrator(
+            graph_store.clone(),
+            watch_root_str.clone(),
+            file_ingress_guard.clone(),
+            ingress_buffer.clone(),
+        );
     } else {
         info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
     }
