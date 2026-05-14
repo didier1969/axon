@@ -1,6 +1,42 @@
 use super::*;
+use crate::soll_snapshot::SollSnapshot;
 
 impl McpServer {
+    /// DEC-AXO-091 / REQ-AXO-322 (v2) — snapshot-aware endpoint
+    /// classifier. When the snapshot contains the id we skip the SQL
+    /// existence check entirely (saves ~1ms per endpoint × thousands
+    /// per `collect_relation_policy_violations`). Falls back to the
+    /// legacy SQL classifier for non-SOLL ids (File/Symbol/Chunk
+    /// artifacts) and for SOLL ids that are absent from the snapshot
+    /// (cross-project edges, dangling references, or snapshot=None).
+    pub(crate) fn classify_endpoint_fast(
+        &self,
+        id: &str,
+        snapshot: Option<&SollSnapshot>,
+    ) -> anyhow::Result<LinkEndpointKind> {
+        if let Some(snap) = snapshot {
+            if snap.nodes.contains_key(id) {
+                let prefix = id.split('-').next().unwrap_or("");
+                let canonical_prefix = match prefix {
+                    "VIS" => "VIS",
+                    "PIL" => "PIL",
+                    "REQ" => "REQ",
+                    "CPT" => "CPT",
+                    "DEC" => "DEC",
+                    "MIL" => "MIL",
+                    "VAL" => "VAL",
+                    "STK" => "STK",
+                    "GUI" => "GUI",
+                    _ => {
+                        return self.classify_existing_link_endpoint(id);
+                    }
+                };
+                return Ok(LinkEndpointKind::Soll(canonical_prefix));
+            }
+        }
+        self.classify_existing_link_endpoint(id)
+    }
+
     pub(crate) fn classify_existing_link_endpoint(
         &self,
         id: &str,
@@ -278,22 +314,49 @@ impl McpServer {
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
 
-        let rows_raw = self.graph_store.query_json(
-            "SELECT source_id, target_id, relation_type FROM soll.Edge ORDER BY source_id, target_id",
-        )?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-        for row in rows {
-            if row.len() < 3 {
-                continue;
-            }
-            let source_id = &row[0];
-            let target_id = &row[1];
-            let relation_type = &row[2];
+        // DEC-AXO-091 / REQ-AXO-322 (v2) — when the call is scoped to a
+        // project, walk the in-memory snapshot's edges and classify
+        // endpoints via the snapshot's nodes map. The previous SQL
+        // path issued 2 `SELECT count(*)` per edge to verify endpoint
+        // existence — at 789 AXO edges that's ~1,500 round-trips per
+        // call, observed at ~1.6 s of `soll_verify_requirements`.
+        // Workspace-wide (no project_code) keeps SQL since the
+        // snapshot is per-project.
+        let edge_rows: Vec<(String, String, String)> = if let Some(code) = project_code {
+            let snapshot = self.soll_cache().snapshot(code)?;
+            snapshot
+                .edges
+                .iter()
+                .map(|e| (e.source_id.clone(), e.target_id.clone(), e.relation_type.clone()))
+                .collect()
+        } else {
+            let rows_raw = self.graph_store.query_json(
+                "SELECT source_id, target_id, relation_type FROM soll.Edge ORDER BY source_id, target_id",
+            )?;
+            let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+            rows.into_iter()
+                .filter_map(|r| {
+                    if r.len() < 3 { None } else { Some((r[0].clone(), r[1].clone(), r[2].clone())) }
+                })
+                .collect()
+        };
+
+        // Cache snapshot for endpoint classification (fast-path lookup).
+        let snapshot_opt = if let Some(code) = project_code {
+            self.soll_cache().snapshot(code).ok()
+        } else {
+            None
+        };
+
+        for (source_id, target_id, relation_type) in edge_rows.iter() {
+            let source_id: &str = source_id.as_str();
+            let target_id: &str = target_id.as_str();
+            let relation_type: &str = relation_type.as_str();
             if !relation_scope_matches(source_id, target_id, project_code) {
                 continue;
             }
 
-            let source_kind = match self.classify_existing_link_endpoint(source_id) {
+            let source_kind = match self.classify_endpoint_fast(source_id, snapshot_opt.as_deref()) {
                 Ok(kind) => kind,
                 Err(e) => {
                     violations.push(format!(
@@ -303,7 +366,7 @@ impl McpServer {
                     continue;
                 }
             };
-            let target_kind = match self.classify_existing_link_endpoint(target_id) {
+            let target_kind = match self.classify_endpoint_fast(target_id, snapshot_opt.as_deref()) {
                 Ok(kind) => kind,
                 Err(e) => {
                     violations.push(format!(
@@ -346,7 +409,7 @@ impl McpServer {
 
             if !policy.allow_multiple_types {
                 exclusive_pairs
-                    .entry((source_id.clone(), target_id.clone()))
+                    .entry((source_id.to_string(), target_id.to_string()))
                     .or_default()
                     .insert(relation_type.to_string());
             }

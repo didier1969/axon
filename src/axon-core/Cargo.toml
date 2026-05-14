@@ -84,6 +84,11 @@ async-trait = "0.1"
 # dashmap for concurrent path → hash lookup on the watcher hot path.
 arc-swap = "1.7"
 dashmap = "6.1"
+# DEC-AXO-091 / REQ-AXO-322: SOLL in-memory graph snapshot. petgraph
+# replaces hand-rolled cycle-detection / descendant BFS in soll_work_plan
+# and powers the orphan / validation-without-verifies /
+# decision-without-links checks in soll_completeness_snapshot.
+petgraph = "0.6"
 # Stable cross-restart content hash for IndexedFile cache (REQ-AXO-289 S3).
 # Already in the transitive dep graph (ort, tokenizers); direct dep makes the
 # usage explicit. SHA-256 is overkill for change detection but is the most

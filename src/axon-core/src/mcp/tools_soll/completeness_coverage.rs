@@ -154,53 +154,52 @@ impl McpServer {
         project_code: &str,
     ) -> anyhow::Result<RequirementCoverageSummary> {
         let project_code = self.resolve_project_code(project_code)?;
-        // Use the (project_code, type) composite index instead of `id LIKE
-        // 'REQ-{code}-%'` which forces a sequential scan on soll.Node — same
-        // selectivity, indexable. The same swap on soll.Edge would require a
-        // project_code column on Edge (it exists; see soll_edge_project_*_idx)
-        // but we keep the LIKE on e.source_id since the prefix is selective
-        // enough and the pkey already covers (source_id, target_id, relation_type).
-        let query = format!(
-            "SELECT r.id,
-                    COALESCE(r.status,''),
-                    COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''),
-                    COUNT(DISTINCT t.id),
-                    COUNT(DISTINCT CASE WHEN e.relation_type = 'VERIFIES' THEN e.source_id END)
-             FROM soll.Node r
-             LEFT JOIN soll.Traceability t
-               ON lower(t.soll_entity_type) = lower(r.type)
-              AND t.soll_entity_id = r.id
-             LEFT JOIN soll.Edge e
-               ON e.target_id = r.id
-              AND e.relation_type = 'VERIFIES'
-              AND e.source_id LIKE 'VAL-{}-%'
-             WHERE r.type='Requirement' AND r.project_code='{}'
-             GROUP BY 1,2,3
-             ORDER BY r.id",
-            escape_sql(&project_code),
-            escape_sql(&project_code)
-        );
-        let rows_raw = self.graph_store.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+
+        // DEC-AXO-091 / REQ-AXO-322 (v2) — entirely snapshot-driven:
+        // iterate Requirement nodes from the in-memory snapshot, count
+        // traceability rows from the snapshot's pre-built index, and
+        // count VERIFIES edges from VAL-{code}-* via the incoming-edge
+        // index. The expensive multi-JOIN SQL is gone.
+        let snapshot = self.soll_cache().snapshot(&project_code)?;
+        let val_prefix = format!("VAL-{}-", project_code);
         let mut summary = RequirementCoverageSummary::default();
 
-        // Single batched query for ALL broken-file-evidence counts in this project,
-        // replacing the per-requirement N+1 (was 328 SQL round-trips + 328 stat()
-        // syscalls per call to `requirement_coverage_summary`, and this function
-        // is invoked 3-4× per `soll_work_plan` invocation).
+        // broken_file_evidence_counts_by_requirement still drives the
+        // filesystem freshness sweep (REQ-AXO-320) — keep that SQL path
+        // since it owns the stat() + UPDATE flow. Hot-path callers
+        // already pay this only once per work_plan invocation (cached
+        // upstream by REQ-AXO-319).
         let broken_counts = self.broken_file_evidence_counts_by_requirement(&project_code);
 
-        for row in rows {
-            if row.len() < 5 {
+        // Stable iteration order by id so callers comparing snapshots
+        // across calls (tests, diff tooling) see deterministic output.
+        let mut req_ids: Vec<&String> = snapshot
+            .node_ids_of_type("Requirement")
+            .iter()
+            .collect();
+        req_ids.sort();
+
+        for id in req_ids {
+            let Some(node) = snapshot.nodes.get(id) else {
                 continue;
-            }
-            let id = row[0].clone();
-            let status = row[1].clone();
-            let criteria = row[2].clone();
-            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
-            let validation_count = row[4].parse::<usize>().unwrap_or(0);
+            };
+            let status = node.status.clone();
+            let meta: serde_json::Value =
+                serde_json::from_str(&node.metadata_raw).unwrap_or(serde_json::json!({}));
+            let criteria = meta
+                .get("acceptance_criteria")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default();
             let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
-            let broken_file_evidence_count = broken_counts.get(&id).copied().unwrap_or(0);
+
+            let evidence_count = snapshot.traceability_rows_for("requirement", id).count();
+            let validation_count =
+                snapshot.count_incoming_edges_with(id, "VERIFIES", Some(&val_prefix));
+            let broken_file_evidence_count = broken_counts.get(id).copied().unwrap_or(0);
+
             let state = requirement_state_from(
                 status.as_str(),
                 &criteria,
@@ -223,7 +222,7 @@ impl McpServer {
             }
 
             summary.entries.push(RequirementCoverageEntry {
-                id,
+                id: id.clone(),
                 status,
                 evidence_count,
                 validation_count,
@@ -263,81 +262,144 @@ impl McpServer {
             .clone()
             .map(|code| format!("project:{code}"))
             .unwrap_or_else(|| "workspace:*".to_string());
-        let project_scope_predicate = |id_column: &str, project_code: Option<&str>| {
-            project_code
-                .map(|code| format!("AND {id_column} LIKE '%-{}-%'", escape_sql(code)))
-                .unwrap_or_default()
-        };
-
-        let total_nodes = self
-            .graph_store
-            .query_count(&format!(
-                "SELECT count(*) FROM soll.Node n WHERE 1=1{}",
-                scoped_query_filter(resolved_project_code.as_deref(), "n.")
-            ))
-            .unwrap_or(0) as usize;
-
-        // REQ-AXO-319 Phase 3 — fuse the 4 independent ID-list queries
-        // (orphan_requirements, validations_without_verifies,
-        // decisions_without_links, uncovered_requirements) into ONE
-        // UNION ALL round-trip with a `category` tag. PostgreSQL plans
-        // each branch independently and the result is partitioned in
-        // Rust. 4 round-trips → 1.
-        let r_scope = project_scope_predicate("r.id", resolved_project_code.as_deref());
-        let v_scope = project_scope_predicate("v.id", resolved_project_code.as_deref());
-        let d_scope = project_scope_predicate("d.id", resolved_project_code.as_deref());
-        let fused_sql = format!(
-            "SELECT 'orphan_requirement' AS category, id FROM soll.Node r \
-             WHERE type = 'Requirement' \
-               AND COALESCE(r.status, '') <> 'archived' \
-               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id) \
-               {r_scope1} \
-             UNION ALL \
-             SELECT 'validation_without_verifies' AS category, id FROM soll.Node v \
-             WHERE type = 'Validation' \
-               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES') \
-               {v_scope} \
-             UNION ALL \
-             SELECT 'decision_without_links' AS category, id FROM soll.Node d \
-             WHERE type = 'Decision' \
-               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS')) \
-               {d_scope} \
-             UNION ALL \
-             SELECT 'uncovered_requirement' AS category, r.id FROM soll.Node r \
-             LEFT JOIN soll.Traceability t \
-               ON lower(t.soll_entity_type) = lower(r.type) \
-              AND t.soll_entity_id = r.id \
-             WHERE r.type = 'Requirement' \
-               AND COALESCE(r.status, '') <> 'archived' \
-               {r_scope2} \
-             GROUP BY r.id, r.status, r.metadata \
-             HAVING COUNT(t.id) = 0 \
-                AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]') \
-             ORDER BY 1, 2",
-            r_scope1 = r_scope,
-            v_scope = v_scope,
-            d_scope = d_scope,
-            r_scope2 = r_scope,
-        );
-        let fused_raw = self.graph_store.query_json(&fused_sql)?;
-        let fused_rows: Vec<Vec<String>> = serde_json::from_str(&fused_raw).unwrap_or_default();
+        // DEC-AXO-091 / REQ-AXO-322 (v2) — when a project_code is in
+        // scope, derive total_nodes and the 4 ID lists (orphan_req,
+        // validation_without_verifies, decision_without_links,
+        // uncovered_req) from the in-memory snapshot. The UNION ALL
+        // round-trip is gone. For workspace-wide calls (no project
+        // scope), fall back to SQL because the snapshot is per-project.
         let mut orphan_requirements: Vec<String> = Vec::new();
         let mut validations_without_verifies: Vec<String> = Vec::new();
         let mut decisions_without_links: Vec<String> = Vec::new();
         let mut uncovered_requirements: Vec<String> = Vec::new();
-        for row in fused_rows {
-            if row.len() < 2 {
-                continue;
+
+        let total_nodes = if let Some(code) = resolved_project_code.as_deref() {
+            let snapshot = self.soll_cache().snapshot(code)?;
+
+            // orphan_requirement: Requirement, status <> archived, no edges.
+            for id in snapshot.node_ids_of_type("Requirement") {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                if node.status == "archived" {
+                    continue;
+                }
+                if !snapshot.has_any_edge(id) {
+                    orphan_requirements.push(id.clone());
+                }
             }
-            let id = row[1].clone();
-            match row[0].as_str() {
-                "orphan_requirement" => orphan_requirements.push(id),
-                "validation_without_verifies" => validations_without_verifies.push(id),
-                "decision_without_links" => decisions_without_links.push(id),
-                "uncovered_requirement" => uncovered_requirements.push(id),
-                _ => {}
+
+            // validation_without_verifies: Validation with no VERIFIES
+            // edge (in either direction).
+            for id in snapshot.node_ids_of_type("Validation") {
+                let has_verifies = snapshot
+                    .outgoing_edges(id)
+                    .any(|(_, rel)| rel == "VERIFIES")
+                    || snapshot
+                        .incoming_edges(id)
+                        .any(|(_, rel)| rel == "VERIFIES");
+                if !has_verifies {
+                    validations_without_verifies.push(id.clone());
+                }
             }
-        }
+
+            // decision_without_links: Decision with no SOLVES/IMPACTS.
+            for id in snapshot.node_ids_of_type("Decision") {
+                let has_links = snapshot
+                    .outgoing_edges(id)
+                    .any(|(_, rel)| matches!(rel, "SOLVES" | "IMPACTS"))
+                    || snapshot
+                        .incoming_edges(id)
+                        .any(|(_, rel)| matches!(rel, "SOLVES" | "IMPACTS"));
+                if !has_links {
+                    decisions_without_links.push(id.clone());
+                }
+            }
+
+            // uncovered_requirement: Requirement, status <> archived,
+            // no traceability AND no acceptance_criteria. The legacy
+            // SQL grouped on metadata; we evaluate the same predicate
+            // on the in-memory metadata_raw JSON.
+            for id in snapshot.node_ids_of_type("Requirement") {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                if node.status == "archived" {
+                    continue;
+                }
+                if snapshot.traceability_rows_for("requirement", id).next().is_some() {
+                    continue;
+                }
+                let meta: serde_json::Value =
+                    serde_json::from_str(&node.metadata_raw).unwrap_or(serde_json::json!({}));
+                let criteria = meta
+                    .get("acceptance_criteria")
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
+                if !has_criteria {
+                    uncovered_requirements.push(id.clone());
+                }
+            }
+
+            orphan_requirements.sort();
+            validations_without_verifies.sort();
+            decisions_without_links.sort();
+            uncovered_requirements.sort();
+
+            snapshot.nodes.len()
+        } else {
+            // Workspace-wide (no project_code) — keep SQL since the
+            // snapshot is per-project. This branch is rare (only the
+            // unscoped public wrapper).
+            let total = self
+                .graph_store
+                .query_count("SELECT count(*) FROM soll.Node")
+                .unwrap_or(0) as usize;
+            let fused_sql =
+                "SELECT 'orphan_requirement' AS category, id FROM soll.Node r \
+                 WHERE type = 'Requirement' \
+                   AND COALESCE(r.status, '') <> 'archived' \
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id) \
+                 UNION ALL \
+                 SELECT 'validation_without_verifies' AS category, id FROM soll.Node v \
+                 WHERE type = 'Validation' \
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES') \
+                 UNION ALL \
+                 SELECT 'decision_without_links' AS category, id FROM soll.Node d \
+                 WHERE type = 'Decision' \
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS')) \
+                 UNION ALL \
+                 SELECT 'uncovered_requirement' AS category, r.id FROM soll.Node r \
+                 LEFT JOIN soll.Traceability t \
+                   ON lower(t.soll_entity_type) = lower(r.type) \
+                  AND t.soll_entity_id = r.id \
+                 WHERE r.type = 'Requirement' \
+                   AND COALESCE(r.status, '') <> 'archived' \
+                 GROUP BY r.id, r.status, r.metadata \
+                 HAVING COUNT(t.id) = 0 \
+                    AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]') \
+                 ORDER BY 1, 2";
+            let fused_raw = self.graph_store.query_json(fused_sql)?;
+            let fused_rows: Vec<Vec<String>> = serde_json::from_str(&fused_raw).unwrap_or_default();
+            for row in fused_rows {
+                if row.len() < 2 {
+                    continue;
+                }
+                let id = row[1].clone();
+                match row[0].as_str() {
+                    "orphan_requirement" => orphan_requirements.push(id),
+                    "validation_without_verifies" => validations_without_verifies.push(id),
+                    "decision_without_links" => decisions_without_links.push(id),
+                    "uncovered_requirement" => uncovered_requirements.push(id),
+                    _ => {}
+                }
+            }
+            total
+        };
 
         let duplicate_title_rows_raw = self.graph_store.query_json(&format!(
             "SELECT type, title, string_agg(id, ', ' ORDER BY id)
