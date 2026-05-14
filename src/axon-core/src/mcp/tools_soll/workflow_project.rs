@@ -486,40 +486,42 @@ impl McpServer {
         project_code: &str,
         limit: usize,
     ) -> serde_json::Value {
-        let escaped = escape_sql(project_code);
-        let table = self.graph_store.soll_table("Node");
-        let priority_expr = if self.graph_store.is_postgres_backend() {
-            "(metadata->>'priority')"
-        } else {
-            "json_extract_string(metadata, '$.priority')"
+        // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven kickoff
+        // helper: iterate Requirement nodes, filter status=in_progress,
+        // sort by metadata.updated_at DESC, take limit.
+        let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
+            return serde_json::json!([]);
         };
-        let updated_expr = if self.graph_store.is_postgres_backend() {
-            "(metadata->>'updated_at')"
-        } else {
-            "json_extract_string(metadata, '$.updated_at')"
-        };
-        let raw = match self.graph_store.query_json(&format!(
-            "SELECT id, title, COALESCE({priority_expr}, '') \
-             FROM {table} \
-             WHERE project_code = '{escaped}' AND type = 'Requirement' AND status = 'in_progress' \
-             ORDER BY CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
-             LIMIT {limit}"
-        )) {
-            Ok(s) => s,
-            Err(_) => return serde_json::json!([]),
-        };
-        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(_) => return serde_json::json!([]),
-        };
+        let mut rows: Vec<(&String, &String, i64, String)> = snapshot
+            .node_ids_of_type("Requirement")
+            .iter()
+            .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+            .filter(|(_, n)| n.status == "in_progress")
+            .map(|(id, n)| {
+                let meta: serde_json::Value =
+                    serde_json::from_str(&n.metadata_raw).unwrap_or(serde_json::json!({}));
+                let updated_at = meta
+                    .get("updated_at")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => s.parse::<i64>().ok(),
+                        serde_json::Value::Number(num) => num.as_i64(),
+                        _ => None,
+                    })
+                    .unwrap_or(i64::MIN);
+                let priority = meta
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (id, &n.title, updated_at, priority)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        rows.truncate(limit);
         serde_json::Value::Array(
             rows.into_iter()
-                .filter_map(|row| {
-                    let mut iter = row.into_iter();
-                    let id = iter.next()?;
-                    let title = iter.next()?;
-                    let priority = iter.next().unwrap_or_default();
-                    Some(serde_json::json!({
+                .map(|(id, title, _, priority)| {
+                    serde_json::json!({
                         "id": id,
                         "title": title,
                         "priority": if priority.is_empty() {
@@ -527,7 +529,7 @@ impl McpServer {
                         } else {
                             serde_json::Value::from(priority)
                         },
-                    }))
+                    })
                 })
                 .collect(),
         )
@@ -538,45 +540,44 @@ impl McpServer {
         project_code: &str,
         limit: usize,
     ) -> serde_json::Value {
-        let escaped = escape_sql(project_code);
-        let table = self.graph_store.soll_table("Node");
-        let updated_expr = if self.graph_store.is_postgres_backend() {
-            "(metadata->>'updated_at')"
-        } else {
-            "json_extract_string(metadata, '$.updated_at')"
+        // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven: rank all
+        // SOLL nodes by metadata.updated_at DESC, take limit.
+        let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
+            return serde_json::json!([]);
         };
-        let raw = match self.graph_store.query_json(&format!(
-            "SELECT id, type, title, COALESCE({updated_expr}, '') \
-             FROM {table} \
-             WHERE project_code = '{escaped}' \
-             ORDER BY CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
-             LIMIT {limit}"
-        )) {
-            Ok(s) => s,
-            Err(_) => return serde_json::json!([]),
-        };
-        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(_) => return serde_json::json!([]),
-        };
+        let mut rows: Vec<(&String, &String, &String, i64)> = snapshot
+            .nodes
+            .values()
+            .map(|n| {
+                let meta: serde_json::Value =
+                    serde_json::from_str(&n.metadata_raw).unwrap_or(serde_json::json!({}));
+                let updated_at = meta
+                    .get("updated_at")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => s.parse::<i64>().ok(),
+                        serde_json::Value::Number(num) => num.as_i64(),
+                        _ => None,
+                    })
+                    .unwrap_or(i64::MIN);
+                (&n.id, &n.entity_type, &n.title, updated_at)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.3.cmp(&a.3));
+        rows.truncate(limit);
         serde_json::Value::Array(
             rows.into_iter()
-                .filter_map(|row| {
-                    let mut iter = row.into_iter();
-                    let id = iter.next()?;
-                    let r#type = iter.next()?;
-                    let title = iter.next()?;
-                    let updated_at = iter.next().unwrap_or_default();
-                    Some(serde_json::json!({
+                .map(|(id, entity_type, title, updated_at)| {
+                    let updated_value = if updated_at == i64::MIN {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(updated_at.to_string())
+                    };
+                    serde_json::json!({
                         "id": id,
-                        "type": r#type,
+                        "type": entity_type,
                         "title": title,
-                        "updated_at": if updated_at.is_empty() {
-                            serde_json::Value::Null
-                        } else {
-                            serde_json::Value::from(updated_at)
-                        },
-                    }))
+                        "updated_at": updated_value,
+                    })
                 })
                 .collect(),
         )
@@ -615,66 +616,63 @@ impl McpServer {
     }
 
     fn read_wave_1_unblockers(&self, project_code: &str) -> serde_json::Value {
-        // Cold-start fast path: emit top open Requirements ordered by priority +
-        // recency via a direct SQL query. Row shape mirrors
-        // `soll_work_plan.data.top_recommendations` so existing consumers keep
-        // parsing. The full prioritization (cycle detection, blocker analysis,
-        // validation gates, descendant counts) is intentionally NOT computed
-        // here — it requires `count_degraded_links_for_node` per node plus
-        // `soll_verify_requirements` + `validate_soll` + `completeness_snapshot`
-        // (~9 s on a 900-node SOLL graph), which made `axon_init_project`
-        // exceed the MCP HTTP transport timeout and break cold-start. LLMs that
-        // need full prioritization call `soll_work_plan` directly once
-        // onboarded.
-        let escaped = escape_sql(project_code);
-        let table = self.graph_store.soll_table("Node");
-        let priority_expr = if self.graph_store.is_postgres_backend() {
-            "(metadata->>'priority')"
-        } else {
-            "json_extract_string(metadata, '$.priority')"
+        // DEC-AXO-091 / REQ-AXO-322 (v3) — cold-start fast path is now
+        // entirely snapshot-driven. Original SQL ordered by priority
+        // CASE + updated_at DESC; same logic applied to the in-memory
+        // Requirement set. The full prioritization (cycle / descendant
+        // analysis) remains in `soll_work_plan` for LLMs that ask for
+        // it after onboarding.
+        let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
+            return serde_json::json!([]);
         };
-        let updated_expr = if self.graph_store.is_postgres_backend() {
-            "(metadata->>'updated_at')"
-        } else {
-            "json_extract_string(metadata, '$.updated_at')"
-        };
-        let raw = match self.graph_store.query_json(&format!(
-            "SELECT id, title, status, COALESCE({priority_expr}, '') \
-             FROM {table} \
-             WHERE project_code = '{escaped}' \
-               AND type = 'Requirement' \
-               AND status IN ('proposed','in_progress') \
-             ORDER BY \
-               CASE COALESCE({priority_expr}, '') \
-                 WHEN 'critical' THEN 0 \
-                 WHEN 'high' THEN 1 \
-                 WHEN 'medium' THEN 2 \
-                 WHEN 'low' THEN 3 \
-                 ELSE 4 END, \
-               CAST(NULLIF({updated_expr}, '') AS BIGINT) DESC NULLS LAST \
-             LIMIT 3"
-        )) {
-            Ok(s) => s,
-            Err(_) => return serde_json::json!([]),
-        };
-        let rows: Vec<Vec<String>> = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(_) => return serde_json::json!([]),
-        };
+        fn priority_rank(p: &str) -> u8 {
+            match p {
+                "critical" => 0,
+                "high" => 1,
+                "medium" => 2,
+                "low" => 3,
+                _ => 4,
+            }
+        }
+        let mut rows: Vec<(&String, &String, &String, i64, String)> = snapshot
+            .node_ids_of_type("Requirement")
+            .iter()
+            .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+            .filter(|(_, n)| matches!(n.status.as_str(), "proposed" | "in_progress"))
+            .map(|(id, n)| {
+                let meta: serde_json::Value =
+                    serde_json::from_str(&n.metadata_raw).unwrap_or(serde_json::json!({}));
+                let updated_at = meta
+                    .get("updated_at")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => s.parse::<i64>().ok(),
+                        serde_json::Value::Number(num) => num.as_i64(),
+                        _ => None,
+                    })
+                    .unwrap_or(i64::MIN);
+                let priority = meta
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (id, &n.title, &n.status, updated_at, priority)
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            priority_rank(&a.4)
+                .cmp(&priority_rank(&b.4))
+                .then_with(|| b.3.cmp(&a.3))
+        });
+        rows.truncate(3);
         serde_json::Value::Array(
             rows.into_iter()
-                .filter_map(|row| {
-                    let mut iter = row.into_iter();
-                    let id = iter.next()?;
-                    let title = iter.next()?;
-                    let status = iter.next().unwrap_or_default();
-                    let priority = iter.next().unwrap_or_default();
+                .map(|(id, title, status, _, priority)| {
                     let priority_value = if priority.is_empty() {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::from(priority)
                     };
-                    Some(serde_json::json!({
+                    serde_json::json!({
                         "id": id,
                         "entity_type": "Requirement",
                         "title": title,
@@ -684,7 +682,7 @@ impl McpServer {
                         "reason": "kickoff fast path: ranked by priority + recency. Call `soll_work_plan` for cycle/blocker/validation analysis.",
                         "validation_gates": serde_json::json!({}),
                         "priority": priority_value,
-                    }))
+                    })
                 })
                 .collect(),
         )
@@ -751,18 +749,10 @@ impl McpServer {
     }
 
     fn bootstrap_required(&self, project_code: &str) -> bool {
-        let escaped = escape_sql(project_code);
-        let q = format!(
-            "SELECT 1 FROM {} WHERE project_code = '{}' AND type = 'Vision' LIMIT 1",
-            self.graph_store.soll_table("Node"),
-            escaped
-        );
-        match self.graph_store.query_json(&q) {
-            Ok(raw) => {
-                let rows: Vec<Vec<serde_json::Value>> =
-                    serde_json::from_str(&raw).unwrap_or_default();
-                rows.is_empty()
-            }
+        // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven: bootstrap
+        // phase = no Vision node yet. Replaces SQL existence probe.
+        match self.soll_cache().snapshot(project_code) {
+            Ok(snapshot) => snapshot.node_ids_of_type("Vision").is_empty(),
             Err(_) => false,
         }
     }

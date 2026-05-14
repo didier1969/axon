@@ -73,8 +73,24 @@ impl McpServer {
             markdown.push_str(&format!("*Scope: project `{}`*\n\n", code));
         }
 
+        // DEC-AXO-091 / REQ-AXO-322 (v3) — when scoped to a project,
+        // walk the snapshot for both the Mermaid topology and the
+        // node listing. Workspace-wide (no project_code) falls back
+        // to SQL since the snapshot is per-project. Export still
+        // needs `description` which the snapshot doesn't carry; pull
+        // descriptions in a single batched SQL when needed.
         markdown.push_str("## Topologie (Mermaid)\n```mermaid\ngraph TD;\n");
-        if let Ok(res) = self.graph_store.query_json(&format!(
+        let snapshot_opt = project_code
+            .as_deref()
+            .and_then(|code| self.soll_cache().snapshot(code).ok());
+        if let Some(snapshot) = snapshot_opt.as_deref() {
+            for edge in &snapshot.edges {
+                markdown.push_str(&format!(
+                    "  {} -- {} --> {};\n",
+                    edge.source_id, edge.relation_type, edge.target_id
+                ));
+            }
+        } else if let Ok(res) = self.graph_store.query_json(&format!(
             "SELECT source_id, target_id, relation_type FROM soll.Edge{}",
             project_scope_clause_for_relation(project_code.as_deref())
         )) {
@@ -87,7 +103,66 @@ impl McpServer {
         }
         markdown.push_str("```\n\n");
 
-        if let Ok(res) = self.graph_store.query_json(&format!(
+        if let Some(snapshot) = snapshot_opt.as_deref() {
+            // Snapshot doesn't include description (kept out of the
+            // hot-read footprint). Fetch descriptions in one batched
+            // SQL keyed by id list — single round-trip regardless of
+            // node count.
+            let descriptions = if !snapshot.nodes.is_empty() {
+                let ids = snapshot
+                    .nodes
+                    .keys()
+                    .map(|id| format!("'{}'", escape_sql(id)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.graph_store
+                    .query_json(&format!(
+                        "SELECT id, COALESCE(description, '') FROM soll.Node WHERE id IN ({ids})"
+                    ))
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+                    .map(|rows| {
+                        rows.into_iter()
+                            .filter_map(|r| {
+                                let mut it = r.into_iter();
+                                let id = it.next()?;
+                                let desc = it.next().unwrap_or_default();
+                                Some((id, desc))
+                            })
+                            .collect::<std::collections::HashMap<String, String>>()
+                    })
+                    .unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            };
+            let mut sorted_ids: Vec<&String> = snapshot.nodes.keys().collect();
+            sorted_ids.sort_by(|a, b| {
+                let na = &snapshot.nodes[*a];
+                let nb = &snapshot.nodes[*b];
+                na.entity_type.cmp(&nb.entity_type).then_with(|| a.cmp(b))
+            });
+            let mut current_type = String::new();
+            for id in sorted_ids {
+                let node = &snapshot.nodes[id];
+                if node.entity_type != current_type {
+                    markdown.push_str(&format!("## Entities: {}\n", node.entity_type));
+                    current_type = node.entity_type.clone();
+                }
+                markdown.push_str(&format!("### {} - {}\n", node.id, node.title));
+                if let Some(desc) = descriptions.get(&node.id) {
+                    if !desc.is_empty() {
+                        markdown.push_str(&format!("**Description:** {}\n", desc));
+                    }
+                }
+                if !node.status.is_empty() {
+                    markdown.push_str(&format!("**Status:** {}\n", node.status));
+                }
+                if node.metadata_raw != "{}" {
+                    markdown.push_str(&format!("**Meta:** `{}`\n", node.metadata_raw));
+                }
+                markdown.push('\n');
+            }
+        } else if let Ok(res) = self.graph_store.query_json(&format!(
             "SELECT id, type, title, description, status, metadata FROM soll.Node{} ORDER BY type, id",
             project_scope_clause_for_table("id", project_code.as_deref())
         )) {
