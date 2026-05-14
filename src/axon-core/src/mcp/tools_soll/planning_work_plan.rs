@@ -1,5 +1,186 @@
 use super::planning_output::build_top_recommendations;
 use super::*;
+use crate::soll_snapshot::SollSnapshot;
+use petgraph::algo::tarjan_scc;
+use petgraph::graph::NodeIndex;
+use petgraph::visit::{EdgeFiltered, EdgeRef};
+use petgraph::Direction;
+
+/// REQ-AXO-346 Slice 3 — predicate matching the SOLVES + BELONGS_TO
+/// edge subset that the work_plan considers. Used with
+/// `petgraph::visit::EdgeFiltered` so all algorithms run on the
+/// **existing** `SollSnapshot::graph()` without any per-call rebuild.
+fn is_work_plan_relation(relation_type: &str) -> bool {
+    matches!(relation_type, "SOLVES" | "BELONGS_TO")
+}
+
+/// Cycle detection via `petgraph::algo::tarjan_scc` on the snapshot
+/// graph filtered inline with `EdgeFiltered`. Multi-node SCCs are
+/// cycles; single-node SCCs count only if they carry a self-loop (the
+/// self-loop check also respects the work_plan relation filter).
+fn cycle_sets_snapshot(snapshot: &SollSnapshot) -> Vec<HashSet<String>> {
+    let g = snapshot.graph();
+    let view = EdgeFiltered::from_fn(g, |e| is_work_plan_relation(e.weight().as_str()));
+    let mut out = Vec::new();
+    for component in tarjan_scc(&view) {
+        if component.len() > 1 {
+            out.push(component.into_iter().map(|n| g[n].clone()).collect());
+        } else if let Some(&n) = component.first() {
+            let has_self_loop = g
+                .edges_directed(n, Direction::Outgoing)
+                .any(|e| e.target() == n && is_work_plan_relation(e.weight().as_str()));
+            if has_self_loop {
+                let mut set = HashSet::new();
+                set.insert(g[n].clone());
+                out.push(set);
+            }
+        }
+    }
+    out
+}
+
+/// Forward BFS over the filtered snapshot edges, collecting every node
+/// transitively reachable from any seed in `cycle_node_ids`.
+fn blocked_by_cycles_snapshot(
+    snapshot: &SollSnapshot,
+    cycle_node_ids: &HashSet<String>,
+) -> HashSet<String> {
+    let mut blocked = HashSet::new();
+    let mut queue: VecDeque<NodeIndex> = cycle_node_ids
+        .iter()
+        .filter_map(|id| snapshot.node_index(id))
+        .collect();
+    while let Some(n) = queue.pop_front() {
+        for e in snapshot.graph().edges_directed(n, Direction::Outgoing) {
+            if !is_work_plan_relation(e.weight().as_str()) {
+                continue;
+            }
+            let target_id = &snapshot.graph()[e.target()];
+            if cycle_node_ids.contains(target_id) {
+                continue;
+            }
+            if !blocked.insert(target_id.clone()) {
+                continue;
+            }
+            queue.push_back(e.target());
+        }
+    }
+    blocked
+}
+
+/// Per-node forward BFS over the filtered snapshot edges, restricted to
+/// the schedulable subset (REQ-AXO-135 terminal-status exclusion).
+fn descendant_counts_snapshot(
+    snapshot: &SollSnapshot,
+    allowed: &HashSet<String>,
+) -> HashMap<String, usize> {
+    let mut out: HashMap<String, usize> = HashMap::with_capacity(allowed.len());
+    let mut ordered: Vec<&String> = allowed.iter().collect();
+    ordered.sort();
+    for source_id in ordered {
+        let Some(start) = snapshot.node_index(source_id) else {
+            out.insert(source_id.clone(), 0);
+            continue;
+        };
+        let mut visited: HashSet<NodeIndex> = HashSet::new();
+        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+        queue.push_back(start);
+        visited.insert(start);
+        let mut count = 0usize;
+        while let Some(n) = queue.pop_front() {
+            for e in snapshot.graph().edges_directed(n, Direction::Outgoing) {
+                if !is_work_plan_relation(e.weight().as_str()) {
+                    continue;
+                }
+                let nxt = e.target();
+                if !visited.insert(nxt) {
+                    continue;
+                }
+                if !allowed.contains(&snapshot.graph()[nxt]) {
+                    continue;
+                }
+                queue.push_back(nxt);
+                count += 1;
+            }
+        }
+        out.insert(source_id.clone(), count);
+    }
+    out
+}
+
+/// Kahn's topological-wave layering on the filtered snapshot edges,
+/// restricted to schedulable nodes. Replaces the legacy `build_waves`.
+fn build_waves_snapshot(
+    nodes: &HashMap<String, WorkPlanNode>,
+    snapshot: &SollSnapshot,
+    schedulable_ids: &HashSet<String>,
+) -> Vec<WorkPlanWave> {
+    let mut indegree: HashMap<String, usize> = schedulable_ids
+        .iter()
+        .map(|id| (id.clone(), 0usize))
+        .collect();
+    for id in schedulable_ids {
+        let Some(idx) = snapshot.node_index(id) else {
+            continue;
+        };
+        for e in snapshot.graph().edges_directed(idx, Direction::Outgoing) {
+            if !is_work_plan_relation(e.weight().as_str()) {
+                continue;
+            }
+            let target_id = &snapshot.graph()[e.target()];
+            if schedulable_ids.contains(target_id) {
+                *indegree.entry(target_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ready: Vec<String> = indegree
+        .iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    ready.sort();
+    let mut waves = Vec::new();
+    let mut wave_index = 1usize;
+    while !ready.is_empty() {
+        let current = std::mem::take(&mut ready);
+        let mut items: Vec<WorkPlanNode> = current
+            .iter()
+            .filter_map(|id| nodes.get(id).cloned())
+            .collect();
+        items.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| b.descendants.cmp(&a.descendants))
+                .then_with(|| a.entity_type.sort_rank().cmp(&b.entity_type.sort_rank()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        waves.push(WorkPlanWave { wave_index, items });
+        wave_index += 1;
+        let mut next_ready: BTreeSet<String> = BTreeSet::new();
+        for current_id in current {
+            if let Some(idx) = snapshot.node_index(&current_id) {
+                for e in snapshot.graph().edges_directed(idx, Direction::Outgoing) {
+                    if !is_work_plan_relation(e.weight().as_str()) {
+                        continue;
+                    }
+                    let child_id = snapshot.graph()[e.target()].clone();
+                    if !schedulable_ids.contains(&child_id) {
+                        continue;
+                    }
+                    if let Some(deg) = indegree.get_mut(&child_id) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            next_ready.insert(child_id);
+                        }
+                    }
+                }
+            }
+            indegree.remove(&current_id);
+        }
+        ready = next_ready.into_iter().collect();
+    }
+    waves
+}
 
 impl McpServer {
     pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
@@ -54,14 +235,21 @@ impl McpServer {
         let cached_coverage = self.requirement_coverage_summary(project_code).ok();
         let mut nodes =
             self.load_work_plan_nodes_with_cached_coverage(project_code, cached_coverage.as_ref());
-        let edges = self.load_work_plan_edges(project_code);
-        let adjacency = build_adjacency_map(&edges);
-        let cycle_sets = detect_cycle_sets(nodes.keys(), &adjacency);
+        // REQ-AXO-346 Slice 3 — query the EXISTING snapshot petgraph
+        // (REQ-AXO-322 / DEC-AXO-091). No per-call graph rebuild ; the
+        // `is_work_plan_relation` predicate filters SOLVES+BELONGS_TO
+        // edges on the fly via `petgraph::visit::EdgeFiltered`.
+        let snapshot = self
+            .soll_cache()
+            .snapshot(project_code)
+            .ok()
+            .unwrap_or_else(|| std::sync::Arc::new(SollSnapshot::empty(project_code, 0)));
+        let cycle_sets = cycle_sets_snapshot(&snapshot);
         let cycle_node_ids = cycle_sets
             .iter()
             .flat_map(|set| set.iter().cloned())
             .collect::<HashSet<_>>();
-        let blocked_by_cycles = collect_blocked_by_cycles(&adjacency, &cycle_node_ids);
+        let blocked_by_cycles = blocked_by_cycles_snapshot(&snapshot, &cycle_node_ids);
         let backlog_visible = self
             .project_scope_summary(Some(project_code))
             .map(|summary| summary.backlog_files > 0)
@@ -94,8 +282,9 @@ impl McpServer {
             })
             .map(|(id, _)| id.clone())
             .collect::<HashSet<_>>();
-        let schedulable_adj = filter_adjacency(&adjacency, &schedulable_ids);
-        let descendants = compute_descendant_counts(&schedulable_ids, &schedulable_adj);
+        // REQ-AXO-346 Slice 3 — descendant count via BFS on the existing
+        // snapshot petgraph, filtered to SOLVES+BELONGS_TO + schedulable.
+        let descendants = descendant_counts_snapshot(&snapshot, &schedulable_ids);
 
         for node in nodes.values_mut() {
             node.descendants = *descendants.get(&node.id).unwrap_or(&0);
@@ -106,7 +295,9 @@ impl McpServer {
             node.validation_gates = gates;
         }
 
-        let waves = build_waves(&nodes, &edges, &schedulable_ids);
+        // REQ-AXO-346 Slice 3 — Kahn's topological waves on the existing
+        // snapshot petgraph.
+        let waves = build_waves_snapshot(&nodes, &snapshot, &schedulable_ids);
         let cycles = cycle_sets
             .into_iter()
             .map(|set| {
@@ -357,41 +548,6 @@ impl McpServer {
             }
         }
         nodes
-    }
-
-    /// REQ-AXO-322 / DEC-AXO-091 — edges come from the in-memory
-    /// snapshot. The work-plan algorithm consumes a flat `Vec<(source,
-    /// target)>` of SOLVES (DEC→REQ) and BELONGS_TO (REQ→REQ|MIL); we
-    /// filter the snapshot's full edge list to this projection without
-    /// touching PG.
-    fn load_work_plan_edges(&self, project_code: &str) -> Vec<(String, String)> {
-        let Ok(project_code) = self.resolve_project_code(project_code) else {
-            return Vec::new();
-        };
-        let Ok(snapshot) = self.soll_cache().snapshot(&project_code) else {
-            return Vec::new();
-        };
-        let dec_prefix = format!("DEC-{}-", project_code);
-        let req_prefix = format!("REQ-{}-", project_code);
-        let mil_prefix = format!("MIL-{}-", project_code);
-        let mut edges: Vec<(String, String)> = Vec::new();
-        for edge in &snapshot.edges {
-            if edge.relation_type == "SOLVES"
-                && edge.source_id.starts_with(&dec_prefix)
-                && edge.target_id.starts_with(&req_prefix)
-            {
-                edges.push((edge.source_id.clone(), edge.target_id.clone()));
-            } else if edge.relation_type == "BELONGS_TO"
-                && edge.source_id.starts_with(&req_prefix)
-                && (edge.target_id.starts_with(&req_prefix)
-                    || edge.target_id.starts_with(&mil_prefix))
-            {
-                edges.push((edge.source_id.clone(), edge.target_id.clone()));
-            }
-        }
-        edges.sort();
-        edges.dedup();
-        edges
     }
 
     fn count_degraded_links_for_node(&self, node_id: &str) -> usize {

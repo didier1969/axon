@@ -70,183 +70,34 @@ pub(super) struct WorkPlanBlocker {
 
 /// Returns true when a SOLL Node status represents a terminal lifecycle
 /// state. Terminal nodes are excluded from `soll_work_plan` scheduling and
-/// from descendant counting (REQ-AXO-135). Recognized terminal states across
-/// SOLL types: `delivered` and `superseded` (Decision); `completed` and
-/// `superseded` (Requirement, Milestone); `archived` (any).
+/// from descendant counting.
+///
+/// Recognized terminal states per DEC-PRO-100 canonical vocabulary
+/// `[current, planned, delivered, superseded, rejected]` + legacy values
+/// still present in older nodes :
+/// - `delivered` / `superseded` (Decision)
+/// - `completed` / `superseded` (Requirement, Milestone — legacy `completed`
+///    retained for historical nodes; new ones use `delivered`)
+/// - `archived` (any type)
+/// - `rejected` (REQ-AXO-346) — explicit operator/LLM rejection. Pre-fix,
+///    rejected nodes leaked into `soll_work_plan` Wave 1 with inflated
+///    `unblocks N` scores pointing at their rejected descendants
+///    (DEC-AXO-077 / 078 / 084 lit. observed session 32). Adding `rejected`
+///    here closes Bug 1+2+3 of REQ-AXO-346.
 pub(super) fn is_terminal_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
-        "delivered" | "superseded" | "completed" | "archived"
+        "delivered" | "superseded" | "completed" | "archived" | "rejected"
     )
 }
 
-pub(super) fn build_adjacency_map(edges: &[(String, String)]) -> HashMap<String, BTreeSet<String>> {
-    let mut adjacency: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for (source, target) in edges {
-        adjacency
-            .entry(source.clone())
-            .or_default()
-            .insert(target.clone());
-        adjacency.entry(target.clone()).or_default();
-    }
-    adjacency
-}
-
-pub(super) fn detect_cycle_sets<'a, I>(
-    node_ids: I,
-    adjacency: &HashMap<String, BTreeSet<String>>,
-) -> Vec<HashSet<String>>
-where
-    I: IntoIterator<Item = &'a String>,
-{
-    struct TarjanState {
-        index: usize,
-        indices: HashMap<String, usize>,
-        lowlinks: HashMap<String, usize>,
-        stack: Vec<String>,
-        on_stack: HashSet<String>,
-        components: Vec<HashSet<String>>,
-    }
-
-    fn strong_connect(
-        node: &str,
-        adjacency: &HashMap<String, BTreeSet<String>>,
-        state: &mut TarjanState,
-    ) {
-        let current_index = state.index;
-        state.indices.insert(node.to_string(), current_index);
-        state.lowlinks.insert(node.to_string(), current_index);
-        state.index += 1;
-        state.stack.push(node.to_string());
-        state.on_stack.insert(node.to_string());
-
-        if let Some(neighbors) = adjacency.get(node) {
-            for neighbor in neighbors {
-                if !state.indices.contains_key(neighbor) {
-                    strong_connect(neighbor, adjacency, state);
-                    let neighbor_low = *state.lowlinks.get(neighbor).unwrap_or(&current_index);
-                    if let Some(low) = state.lowlinks.get_mut(node) {
-                        *low = (*low).min(neighbor_low);
-                    }
-                } else if state.on_stack.contains(neighbor) {
-                    let neighbor_index = *state.indices.get(neighbor).unwrap_or(&current_index);
-                    if let Some(low) = state.lowlinks.get_mut(node) {
-                        *low = (*low).min(neighbor_index);
-                    }
-                }
-            }
-        }
-
-        if state.indices.get(node) == state.lowlinks.get(node) {
-            let mut component = HashSet::new();
-            while let Some(member) = state.stack.pop() {
-                state.on_stack.remove(&member);
-                component.insert(member.clone());
-                if member == node {
-                    break;
-                }
-            }
-
-            let is_cycle = if component.len() > 1 {
-                true
-            } else {
-                component.iter().next().is_some_and(|single| {
-                    adjacency
-                        .get(single)
-                        .is_some_and(|neighbors| neighbors.contains(single))
-                })
-            };
-            if is_cycle {
-                state.components.push(component);
-            }
-        }
-    }
-
-    let mut state = TarjanState {
-        index: 0,
-        indices: HashMap::new(),
-        lowlinks: HashMap::new(),
-        stack: Vec::new(),
-        on_stack: HashSet::new(),
-        components: Vec::new(),
-    };
-
-    let mut ordered_ids = node_ids.into_iter().cloned().collect::<Vec<_>>();
-    ordered_ids.sort();
-    for node in ordered_ids {
-        if !state.indices.contains_key(&node) {
-            strong_connect(&node, adjacency, &mut state);
-        }
-    }
-
-    state.components
-}
-
-pub(super) fn collect_blocked_by_cycles(
-    adjacency: &HashMap<String, BTreeSet<String>>,
-    cycle_node_ids: &HashSet<String>,
-) -> HashSet<String> {
-    let mut blocked = HashSet::new();
-    let mut queue = cycle_node_ids.iter().cloned().collect::<VecDeque<_>>();
-    while let Some(node) = queue.pop_front() {
-        if let Some(children) = adjacency.get(&node) {
-            for child in children {
-                if cycle_node_ids.contains(child) || !blocked.insert(child.clone()) {
-                    continue;
-                }
-                queue.push_back(child.clone());
-            }
-        }
-    }
-    blocked
-}
-
-pub(super) fn filter_adjacency(
-    adjacency: &HashMap<String, BTreeSet<String>>,
-    allowed_ids: &HashSet<String>,
-) -> HashMap<String, BTreeSet<String>> {
-    let mut filtered = HashMap::new();
-    for id in allowed_ids {
-        let neighbors = adjacency
-            .get(id)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter(|child| allowed_ids.contains(*child))
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        filtered.insert(id.clone(), neighbors);
-    }
-    filtered
-}
-
-pub(super) fn compute_descendant_counts(
-    schedulable_ids: &HashSet<String>,
-    adjacency: &HashMap<String, BTreeSet<String>>,
-) -> HashMap<String, usize> {
-    let mut descendants = HashMap::new();
-    let mut ordered_ids = schedulable_ids.iter().cloned().collect::<Vec<_>>();
-    ordered_ids.sort();
-    for node_id in ordered_ids {
-        let mut seen = HashSet::new();
-        let mut stack = adjacency
-            .get(&node_id)
-            .map(|children| children.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        while let Some(next) = stack.pop() {
-            if !seen.insert(next.clone()) {
-                continue;
-            }
-            if let Some(children) = adjacency.get(&next) {
-                stack.extend(children.iter().cloned());
-            }
-        }
-        descendants.insert(node_id, seen.len());
-    }
-    descendants
-}
+// REQ-AXO-346 Slice 3 — the hand-rolled adjacency map, Tarjan SCC,
+// blocked-by-cycle BFS, filtered-adjacency view, and descendant counter
+// previously living here are replaced by the petgraph-native helpers in
+// `planning_work_plan.rs`. petgraph already powers `SollSnapshot`
+// (REQ-AXO-322 / DEC-AXO-091) and `petgraph::algo::tarjan_scc` is
+// O(V+E) by contract — no need to maintain a second implementation.
+// `build_waves` likewise moved to a petgraph Kahn variant.
 
 /// REQ-AXO-144 — half-life used when no override is supplied via args.
 pub(super) const DEFAULT_DECAY_HALF_LIFE_DAYS: f64 = 30.0;
@@ -528,5 +379,40 @@ pub(super) fn recommendation_reason(node: &WorkPlanNode) -> String {
             .first()
             .cloned()
             .unwrap_or_else(|| "immediate action".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_terminal_status;
+
+    /// REQ-AXO-346 Slice 1 — lock the terminal-status contract.
+    /// `rejected` must be terminal (DEC-PRO-100 canonical vocabulary)
+    /// so `soll_work_plan` excludes rejected DECs from Wave 1.
+    #[test]
+    fn rejected_status_is_terminal() {
+        assert!(is_terminal_status("rejected"));
+        assert!(is_terminal_status("REJECTED"));
+        assert!(is_terminal_status("  rejected  "));
+    }
+
+    #[test]
+    fn delivered_superseded_completed_archived_are_terminal() {
+        for status in ["delivered", "superseded", "completed", "archived"] {
+            assert!(
+                is_terminal_status(status),
+                "`{status}` must be terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn active_statuses_are_not_terminal() {
+        for status in ["current", "planned", "in_progress", "draft", "proposed", ""] {
+            assert!(
+                !is_terminal_status(status),
+                "`{status}` must NOT be terminal"
+            );
+        }
     }
 }
