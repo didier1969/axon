@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::graph::GraphStore;
 
@@ -190,17 +190,38 @@ pub fn spawn_a3_batched_worker(
 
             let started = Instant::now();
             let total_items: usize = groups.values().map(|v| v.len()).sum();
+            // REQ-AXO-344 — trace per-flush project_code distribution so we can
+            // verify previously-unindexed projects (NBL, NEX, ODM, …) reach A3.
+            info!(
+                target: "pipeline_v2::a3",
+                "A3 flush: total_items={} project_codes={:?}",
+                total_items,
+                groups.keys().collect::<Vec<_>>()
+            );
             for (pc_str, group_batch) in groups {
                 let store_clone = store.clone();
                 let group_for_block = group_batch.clone();
+                let pc_for_block = pc_str.clone();
                 let join_result = tokio::task::spawn_blocking(move || {
-                    store_clone.upsert_graph_v2_batch(&group_for_block, &pc_str)
+                    store_clone.upsert_graph_v2_batch(&group_for_block, &pc_for_block)
                 })
                 .await;
 
                 let group_len = group_batch.len();
                 match join_result {
                     Ok(Ok(chunk_ids_per_file)) if chunk_ids_per_file.len() == group_len => {
+                        // REQ-AXO-344 — trace successful upserts per project so we
+                        // can confirm rows are committed for previously-unseen
+                        // project_codes.
+                        let chunks_total: usize =
+                            chunk_ids_per_file.iter().map(|v| v.len()).sum();
+                        info!(
+                            target: "pipeline_v2::a3",
+                            "A3 upsert ok: project={} files={} chunks_emitted={}",
+                            pc_str,
+                            group_len,
+                            chunks_total
+                        );
                         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
                             as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);

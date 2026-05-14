@@ -243,6 +243,21 @@ pub fn spawn_pipeline_v2_indexer(
                     .unwrap_or_else(|poison| poison.into_inner());
                 guard.drain_batch(INGRESS_DRAIN_BATCH)
             };
+            // REQ-AXO-344 — trace drain throughput so we can correlate
+            // Scanner walks (`Nexus Scan Complete: N`) with A1 ingress.
+            if !batch.files.is_empty() {
+                let sample_path = batch
+                    .files
+                    .first()
+                    .map(|f| f.path.clone())
+                    .unwrap_or_default();
+                info!(
+                    target: "pipeline_v2::drain",
+                    "drain: forwarded {} paths to A1 (sample: {})",
+                    batch.files.len(),
+                    sample_path
+                );
+            }
             for file_event in batch.files {
                 let path = PathBuf::from(file_event.path);
                 if input_tx_drain.send(path).await.is_err() {
