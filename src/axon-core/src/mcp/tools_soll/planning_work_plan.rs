@@ -229,11 +229,14 @@ impl McpServer {
         }))
     }
 
-    fn load_work_plan_nodes(&self, project_code: &str) -> HashMap<String, WorkPlanNode> {
-        self.load_work_plan_nodes_with_cached_coverage(project_code, None)
-    }
-
     /// Memoized variant — see REQ-AXO-319.
+    ///
+    /// REQ-AXO-322 / DEC-AXO-091: nodes are read from the in-memory
+    /// SOLL snapshot. The hot path no longer issues per-call SQL for
+    /// Requirement / Decision / Milestone rows; evidence counts for
+    /// Decisions and Milestones come from the snapshot's pre-aggregated
+    /// traceability index. The snapshot is invalidated by the dispatch
+    /// layer after any mutation tool.
     fn load_work_plan_nodes_with_cached_coverage(
         &self,
         project_code: &str,
@@ -242,7 +245,10 @@ impl McpServer {
         let Ok(project_code) = self.resolve_project_code(project_code) else {
             return HashMap::new();
         };
-        let mut nodes = HashMap::new();
+        let snapshot = match self.soll_cache().snapshot(&project_code) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
         let owned_coverage;
         let requirement_coverage: &RequirementCoverageSummary = match cached_coverage {
             Some(c) => c,
@@ -258,206 +264,131 @@ impl McpServer {
             .iter()
             .map(|entry| (entry.id.clone(), entry.clone()))
             .collect::<HashMap<_, _>>();
-        let decision_evidence_counts =
-            self.load_work_plan_evidence_counts(&project_code, "DEC", "decision");
-        let milestone_evidence_counts =
-            self.load_work_plan_evidence_counts(&project_code, "MIL", "milestone");
-        let req_query = format!(
-            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}')
-             FROM soll.Node r
-             WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
-             ORDER BY r.id",
-            escape_sql(&project_code)
-        );
-        if let Ok(raw) = self.graph_store.query_json(&req_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                if row.len() < 4 {
-                    continue;
+
+        let mut nodes = HashMap::with_capacity(snapshot.nodes.len());
+        for snap_node in snapshot.nodes.values() {
+            let meta: serde_json::Value =
+                serde_json::from_str(&snap_node.metadata_raw).unwrap_or(serde_json::json!({}));
+            let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
+            match snap_node.entity_type.as_str() {
+                "Requirement" => {
+                    let priority = meta
+                        .get("priority")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let coverage_entry = requirement_coverage_by_id.get(&snap_node.id);
+                    nodes.insert(
+                        snap_node.id.clone(),
+                        WorkPlanNode {
+                            id: snap_node.id.clone(),
+                            title: snap_node.title.clone(),
+                            entity_type: WorkPlanEntityType::Requirement,
+                            status: snap_node.status.clone(),
+                            priority,
+                            requirement_state: Some(
+                                coverage_entry
+                                    .map(|entry| entry.state.clone())
+                                    .unwrap_or_else(|| "missing".to_string()),
+                            ),
+                            evidence_count: coverage_entry
+                                .map(|entry| entry.evidence_count)
+                                .unwrap_or(0),
+                            descendants: 0,
+                            ist_degraded_links: 0,
+                            backlog_visible: false,
+                            score: 0,
+                            reasons: Vec::new(),
+                            validation_gates: Vec::new(),
+                            ist_signals: Vec::new(),
+                            updated_at_ms,
+                        },
+                    );
                 }
-                let meta: serde_json::Value =
-                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
-                let priority = meta
-                    .get("priority")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
-                let status = row[2].clone();
-                let id = row[0].clone();
-                let coverage_entry = requirement_coverage_by_id.get(&id);
-                nodes.insert(
-                    id.clone(),
-                    WorkPlanNode {
-                        id,
-                        title: row[1].clone(),
-                        entity_type: WorkPlanEntityType::Requirement,
-                        status,
-                        priority,
-                        requirement_state: Some(
-                            coverage_entry
-                                .map(|entry| entry.state.clone())
-                                .unwrap_or_else(|| "missing".to_string()),
-                        ),
-                        evidence_count: coverage_entry
-                            .map(|entry| entry.evidence_count)
-                            .unwrap_or(0),
-                        descendants: 0,
-                        ist_degraded_links: 0,
-                        backlog_visible: false,
-                        score: 0,
-                        reasons: Vec::new(),
-                        validation_gates: Vec::new(),
-                        ist_signals: Vec::new(),
-                        updated_at_ms,
-                    },
-                );
+                "Decision" => {
+                    let evidence_count =
+                        snapshot.traceability_count_for("decision", &snap_node.id);
+                    nodes.insert(
+                        snap_node.id.clone(),
+                        WorkPlanNode {
+                            id: snap_node.id.clone(),
+                            title: snap_node.title.clone(),
+                            entity_type: WorkPlanEntityType::Decision,
+                            status: snap_node.status.clone(),
+                            priority: String::new(),
+                            requirement_state: None,
+                            evidence_count,
+                            descendants: 0,
+                            ist_degraded_links: 0,
+                            backlog_visible: false,
+                            score: 0,
+                            reasons: Vec::new(),
+                            validation_gates: Vec::new(),
+                            ist_signals: Vec::new(),
+                            updated_at_ms,
+                        },
+                    );
+                }
+                "Milestone" => {
+                    let evidence_count =
+                        snapshot.traceability_count_for("milestone", &snap_node.id);
+                    nodes.insert(
+                        snap_node.id.clone(),
+                        WorkPlanNode {
+                            id: snap_node.id.clone(),
+                            title: snap_node.title.clone(),
+                            entity_type: WorkPlanEntityType::Milestone,
+                            status: snap_node.status.clone(),
+                            priority: String::new(),
+                            requirement_state: None,
+                            evidence_count,
+                            descendants: 0,
+                            ist_degraded_links: 0,
+                            backlog_visible: false,
+                            score: 0,
+                            reasons: Vec::new(),
+                            validation_gates: Vec::new(),
+                            ist_signals: Vec::new(),
+                            updated_at_ms,
+                        },
+                    );
+                }
+                _ => {}
             }
         }
-
-        let dec_query = format!(
-            "SELECT id, title, COALESCE(status,''), COALESCE(metadata,'{{}}') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id",
-            escape_sql(&project_code)
-        );
-        if let Ok(raw) = self.graph_store.query_json(&dec_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                if row.len() < 4 {
-                    continue;
-                }
-                let id = row[0].clone();
-                let evidence_count = decision_evidence_counts.get(&id).copied().unwrap_or(0);
-                let meta: serde_json::Value =
-                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
-                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
-                nodes.insert(
-                    id.clone(),
-                    WorkPlanNode {
-                        id,
-                        title: row[1].clone(),
-                        entity_type: WorkPlanEntityType::Decision,
-                        status: row[2].clone(),
-                        priority: String::new(),
-                        requirement_state: None,
-                        evidence_count,
-                        descendants: 0,
-                        ist_degraded_links: 0,
-                        backlog_visible: false,
-                        score: 0,
-                        reasons: Vec::new(),
-                        validation_gates: Vec::new(),
-                        ist_signals: Vec::new(),
-                        updated_at_ms,
-                    },
-                );
-            }
-        }
-
-        let mil_query = format!(
-            "SELECT id, title, COALESCE(status,''), COALESCE(metadata,'{{}}') FROM soll.Node WHERE type='Milestone' AND id LIKE 'MIL-{}-%' ORDER BY id",
-            escape_sql(&project_code)
-        );
-        if let Ok(raw) = self.graph_store.query_json(&mil_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                if row.len() < 4 {
-                    continue;
-                }
-                let id = row[0].clone();
-                let evidence_count = milestone_evidence_counts.get(&id).copied().unwrap_or(0);
-                let meta: serde_json::Value =
-                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
-                let updated_at_ms = meta.get("updated_at").and_then(|v| v.as_i64());
-                nodes.insert(
-                    id.clone(),
-                    WorkPlanNode {
-                        id,
-                        title: row[1].clone(),
-                        entity_type: WorkPlanEntityType::Milestone,
-                        status: row[2].clone(),
-                        priority: String::new(),
-                        requirement_state: None,
-                        evidence_count,
-                        descendants: 0,
-                        ist_degraded_links: 0,
-                        backlog_visible: false,
-                        score: 0,
-                        reasons: Vec::new(),
-                        validation_gates: Vec::new(),
-                        ist_signals: Vec::new(),
-                        updated_at_ms,
-                    },
-                );
-            }
-        }
-
         nodes
     }
 
-    fn load_work_plan_evidence_counts(
-        &self,
-        project_code: &str,
-        id_prefix: &str,
-        entity_type: &str,
-    ) -> HashMap<String, usize> {
-        let query = format!(
-            "SELECT soll_entity_id, COUNT(*) FROM soll.Traceability
-             WHERE soll_entity_id LIKE '{}-{}-%'
-               AND LOWER(COALESCE(soll_entity_type, '')) = '{}'
-             GROUP BY soll_entity_id",
-            escape_sql(id_prefix),
-            escape_sql(project_code),
-            escape_sql(entity_type)
-        );
-        let Ok(raw) = self.graph_store.query_json(&query) else {
-            return HashMap::new();
-        };
-        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        rows.into_iter()
-            .filter_map(|row| {
-                if row.len() < 2 {
-                    return None;
-                }
-                let count = row[1].parse::<usize>().ok()?;
-                Some((row[0].clone(), count))
-            })
-            .collect()
-    }
-
+    /// REQ-AXO-322 / DEC-AXO-091 — edges come from the in-memory
+    /// snapshot. The work-plan algorithm consumes a flat `Vec<(source,
+    /// target)>` of SOLVES (DEC→REQ) and BELONGS_TO (REQ→REQ|MIL); we
+    /// filter the snapshot's full edge list to this projection without
+    /// touching PG.
     fn load_work_plan_edges(&self, project_code: &str) -> Vec<(String, String)> {
         let Ok(project_code) = self.resolve_project_code(project_code) else {
             return Vec::new();
         };
-        let mut edges = Vec::new();
-        let solves_query = format!(
-            "SELECT source_id, target_id FROM soll.Edge WHERE relation_type='SOLVES' AND source_id LIKE 'DEC-{}-%' AND target_id LIKE 'REQ-{}-%'",
-            escape_sql(&project_code),
-            escape_sql(&project_code)
-        );
-        if let Ok(raw) = self.graph_store.query_json(&solves_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                if row.len() >= 2 {
-                    edges.push((row[0].clone(), row[1].clone()));
-                }
+        let Ok(snapshot) = self.soll_cache().snapshot(&project_code) else {
+            return Vec::new();
+        };
+        let dec_prefix = format!("DEC-{}-", project_code);
+        let req_prefix = format!("REQ-{}-", project_code);
+        let mil_prefix = format!("MIL-{}-", project_code);
+        let mut edges: Vec<(String, String)> = Vec::new();
+        for edge in &snapshot.edges {
+            if edge.relation_type == "SOLVES"
+                && edge.source_id.starts_with(&dec_prefix)
+                && edge.target_id.starts_with(&req_prefix)
+            {
+                edges.push((edge.source_id.clone(), edge.target_id.clone()));
+            } else if edge.relation_type == "BELONGS_TO"
+                && edge.source_id.starts_with(&req_prefix)
+                && (edge.target_id.starts_with(&req_prefix)
+                    || edge.target_id.starts_with(&mil_prefix))
+            {
+                edges.push((edge.source_id.clone(), edge.target_id.clone()));
             }
         }
-
-        let belongs_query = format!(
-            "SELECT source_id, target_id FROM soll.Edge WHERE relation_type='BELONGS_TO' AND source_id LIKE 'REQ-{}-%' AND (target_id LIKE 'REQ-{}-%' OR target_id LIKE 'MIL-{}-%')",
-            escape_sql(&project_code),
-            escape_sql(&project_code),
-            escape_sql(&project_code)
-        );
-        if let Ok(raw) = self.graph_store.query_json(&belongs_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                if row.len() >= 2 {
-                    edges.push((row[0].clone(), row[1].clone()));
-                }
-            }
-        }
-
         edges.sort();
         edges.dedup();
         edges

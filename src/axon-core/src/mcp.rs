@@ -1,5 +1,6 @@
 use crate::graph::GraphStore;
 use crate::project_meta::discover_project_identities;
+use crate::soll_snapshot::SollSnapshotCache;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -54,6 +55,11 @@ use crate::runtime_topology::current_runtime_process_role;
 
 pub struct McpServer {
     graph_store: Arc<GraphStore>,
+    // DEC-AXO-091 / REQ-AXO-322 — in-memory SOLL snapshot cache.
+    // Lazily loaded per project_code on first hot-read call.
+    // Invalidated after every MCP-side mutation tool via
+    // `attach_derived_docs_refresh_metadata`.
+    soll_cache: Arc<SollSnapshotCache>,
 }
 
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
@@ -80,7 +86,16 @@ impl McpServer {
     ];
 
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
-        Self { graph_store }
+        let soll_cache = SollSnapshotCache::new(graph_store.clone());
+        Self {
+            graph_store,
+            soll_cache,
+        }
+    }
+
+    /// REQ-AXO-322 — access the in-memory SOLL snapshot for hot reads.
+    pub(crate) fn soll_cache(&self) -> &Arc<SollSnapshotCache> {
+        &self.soll_cache
     }
 
     fn public_tool_name_for(requested_name: &str, normalized_name: &str) -> String {
@@ -818,6 +833,10 @@ impl McpServer {
         let refresh_payload = if let Some(project_code) =
             self.derive_docs_refresh_project_code(normalized_name, arguments, &enriched)
         {
+            // DEC-AXO-091 / REQ-AXO-322 — drop the cached in-memory
+            // snapshot for this project so the next hot-read call
+            // reloads from PG and reflects this mutation.
+            self.soll_cache.invalidate(&project_code);
             if let Some(site_root) = canonical_soll_site_dir() {
                 match self.generate_soll_derived_docs(
                     &project_code,

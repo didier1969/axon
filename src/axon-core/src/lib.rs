@@ -48,6 +48,7 @@ pub mod runtime_writer_guard;
 pub(crate) mod test_support;
 pub mod scanner;
 pub mod service_guard;
+pub mod soll_snapshot;
 pub mod vector_control;
 pub mod watcher_probe;
 pub mod worker;
