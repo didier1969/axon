@@ -62,7 +62,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 - `soll_commit_revision` — checkpoint per `preview_id`
 - `axon_apply_methodology_bundle` — versioned bundle
 
-Async: `job_id` → `job_status`; `wait=true` blocks. `soll_work_plan` / `soll_verify_requirements` shape: CPT-AXO-024 (LLM-only doc methodology). `soll_work_plan` excludes terminal-status nodes (`delivered`/`superseded`/`completed`/`archived`/`rejected`) from Wave 1 and from `unblocks N` (REQ-AXO-135 (terminal-status) + REQ-AXO-346 (petgraph-only refactor)).
+Async: `job_id` → `job_status`; `wait=true` blocks. `soll_work_plan` / `soll_verify_requirements` shape: CPT-AXO-024 (LLM-only doc methodology). `soll_work_plan` excludes terminal-status nodes (`delivered`/`superseded`/`completed`/`archived`/`rejected`) from Wave 1 and from `unblocks N`; cycle / descendant / wave algorithms consume the `SollSnapshot` petgraph (REQ-AXO-135 + REQ-AXO-346, single source of truth).
 
 ## Vision rule
 
