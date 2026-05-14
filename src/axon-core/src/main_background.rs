@@ -2796,7 +2796,10 @@ fn handle_watcher_events(
             }
 
             if !paths.is_empty() {
-                info!(
+                // REQ-AXO-331: per-batch event log is high-volume (84 % of indexer log
+                // bytes under 19-project /home/dstadel/projects watch root). Downgraded
+                // to DEBUG; aggregate counts remain queryable via watcher_probe::recent().
+                debug!(
                     "Rust FS watcher received {} path event(s) under {}",
                     paths.len(),
                     watch_root.display()
@@ -2855,7 +2858,10 @@ fn handle_watcher_events(
                 &ingress_buffer,
             ) {
                 Ok(staged) if staged > 0 => {
-                    info!("Rust FS watcher buffered {} hot delta(s).", staged);
+                    // REQ-AXO-331: per-batch buffer log downgraded to DEBUG (paired
+                    // with watcher.received). watcher.staged remains INFO inside
+                    // fs_watcher for the actual file-level staging event.
+                    debug!("Rust FS watcher buffered {} hot delta(s).", staged);
                     watcher_probe::record(
                         "watcher.buffered_batch",
                         None,
@@ -2863,7 +2869,7 @@ fn handle_watcher_events(
                     );
                 }
                 Ok(_) => {
-                    info!("Rust FS watcher received event(s) but buffered no hot delta.");
+                    debug!("Rust FS watcher received event(s) but buffered no hot delta.");
                     watcher_probe::record(
                         "watcher.buffered_none",
                         None,

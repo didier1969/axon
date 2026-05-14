@@ -25,10 +25,22 @@ pub fn record(checkpoint: &str, path: Option<&Path>, detail: impl Into<String>) 
         guard.push_back(line.clone());
     }
 
-    // REQ-AXO-185 #4: filtered/ignored_directory_event is high-volume noise.
-    // Keep it queryable via `recent()` ring buffer, but log at debug level so
-    // INFO-level capture remains useful for diagnosing the pipeline.
-    if detail.contains("ignored_directory_event") || checkpoint == "watcher.filtered" {
+    // REQ-AXO-185 #4 + REQ-AXO-331: high-volume checkpoints are kept in the
+    // `recent()` ring buffer (operator-queryable) but emitted at DEBUG so a
+    // running indexer does not flood the log file. INFO is reserved for
+    // checkpoints that signal actual work (staging, reconcile, rescan, errors).
+    let is_high_volume = matches!(
+        checkpoint,
+        "watcher.filtered"
+            | "watcher.received"
+            | "watcher.buffered_batch"
+            | "watcher.buffered_none"
+            | "watcher.buffered_subtree_hint"
+            | "watcher.buffered_tombstone"
+            | "watcher.control_file"
+    ) || detail.contains("ignored_directory_event");
+
+    if is_high_volume {
         debug!("WatcherProbe {}", line);
     } else {
         info!("WatcherProbe {}", line);
