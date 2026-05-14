@@ -445,68 +445,23 @@ fn run(profile: RuntimeBootProfile) -> anyhow::Result<()> {
         .block_on(async move { boot(profile, runtime_profile).await })
 }
 
-/// REQ-AXO-185 #1: derive `(log_dir, file_prefix)` for a runtime role under
-/// the given run root. Pure helper so the naming contract is testable without
-/// touching the global tracing subscriber.
-fn runtime_log_components(
-    run_root: &str,
-    role: crate::runtime_topology::AxonProcessRole,
-) -> (std::path::PathBuf, String) {
-    let log_dir = std::path::PathBuf::from(run_root);
-    let log_prefix = format!("{}.log", role.runtime_binary_name());
-    (log_dir, log_prefix)
-}
-
-/// REQ-AXO-185 #1: persistent log file per role.
-///
-/// When `AXON_RUN_ROOT` is set (every shell-launched runtime process), all
-/// log lines fan out to both stdout and `<AXON_RUN_ROOT>/<binary>.log.<YYYY-MM-DD>`
-/// with daily rotation, so the indexer/brain are post-mortem-observable when
-/// tmux scrollback truncates. The returned `WorkerGuard` MUST be kept alive
-/// for the lifetime of the process so the non-blocking file writer drains on
-/// shutdown. When `AXON_RUN_ROOT` is unset (CLI tools, unit tests), only the
-/// stdout layer is installed and `None` is returned.
-fn init_runtime_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// REQ-AXO-332: stdout-only tracing. Persistent forensics are the supervisor's
+/// responsibility (axonctl captures stdout/stderr per role with size-bounded
+/// rotation); live state is queryable via the `watcher_probe::recent()` ring
+/// buffer and MCP tools (`debug`, `health`, `mcp_surface_diagnostics`). Operators
+/// enable per-module DEBUG ad-hoc via `RUST_LOG=axon_core::<module>=debug`.
+fn init_runtime_tracing() {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let stdout_layer = tracing_subscriber::fmt::layer();
-
-    let run_root = std::env::var("AXON_RUN_ROOT")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    if let Some(run_root) = run_root {
-        let role = crate::runtime_topology::current_runtime_process_role();
-        let (log_dir, log_prefix) = runtime_log_components(&run_root, role);
-        let _ = std::fs::create_dir_all(&log_dir);
-        let appender = tracing_appender::rolling::daily(&log_dir, &log_prefix);
-        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
-            .with_ansi(false);
-        if tracing_subscriber::registry()
-            .with(env_filter)
-            .with(stdout_layer)
-            .with(file_layer)
-            .try_init()
-            .is_err()
-        {
-            // Subscriber already installed (e.g. test harness); keep the guard
-            // anyway so any prior writer remains drained at shutdown.
-            return Some(guard);
-        }
-        return Some(guard);
-    }
-
     let _ = tracing_subscriber::registry()
         .with(env_filter)
-        .with(stdout_layer)
+        .with(tracing_subscriber::fmt::layer())
         .try_init();
-    None
 }
 
 async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> anyhow::Result<()> {
-    let _tracing_log_guard = init_runtime_tracing();
+    init_runtime_tracing();
     let boot_time = chrono::Utc::now().to_rfc3339();
     let runtime_mode = profile.runtime_mode();
 
@@ -890,11 +845,10 @@ mod tests {
         apply_canonical_ort_thread_defaults_from_openmp, apply_canonical_watcher_runtime_env,
         apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
         canonical_embedding_provider_request, graph_first_indexer_lane_sizing,
-        runtime_log_components, RuntimeBootProfile, RuntimeBootRole,
+        RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
-    use crate::runtime_topology::AxonProcessRole;
     use crate::runtime_writer_guard::WriterTarget;
 
     /// REQ-AXO-099 Phase 1 — delegate to the crate-wide
@@ -1530,26 +1484,6 @@ mod tests {
             std::env::remove_var("AXON_GPU_RECYCLE_REQUIRED_BATCHES");
             std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
         }
-    }
-
-    #[test]
-    fn runtime_log_components_use_role_binary_name_as_prefix() {
-        // REQ-AXO-185 #1: log file naming contract — file_prefix matches the
-        // role's runtime binary name + ".log", log_dir == provided run_root.
-        // tracing-appender's daily rotation appends `.YYYY-MM-DD` so the
-        // prefix is what an operator greps for.
-        let (dir_indexer, prefix_indexer) =
-            runtime_log_components("/tmp/run-indexer", AxonProcessRole::Indexer);
-        assert_eq!(dir_indexer, std::path::PathBuf::from("/tmp/run-indexer"));
-        assert_eq!(prefix_indexer, "axon-indexer.log");
-
-        let (dir_brain, prefix_brain) =
-            runtime_log_components("/var/lib/axon/run-brain", AxonProcessRole::Brain);
-        assert_eq!(
-            dir_brain,
-            std::path::PathBuf::from("/var/lib/axon/run-brain")
-        );
-        assert_eq!(prefix_brain, "axon-brain.log");
     }
 
 }

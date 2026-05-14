@@ -76,7 +76,6 @@ futures-util = "0.3.32"
 crossbeam-channel = "0.5.15"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tracing-appender = "0.2"
 parking_lot = "0.12.5"
 async-trait = "0.1"
 # REQ-AXO-289 streaming pipeline v2 — IndexedFile in-RAM filter cache
