@@ -95,10 +95,19 @@ struct BufferedSubtreeHint {
     in_flight: bool,
 }
 
+/// REQ-AXO-345 — wrap the buffered variants with a monotonic insertion
+/// `seq` so `compare_buffered` can break priority ties FIFO instead of
+/// path-ASC. Without seq, late-alphabet projects (`nanobot-loop`,
+/// `nexus`, `triolingo`, `zeroclaw`, …) sit forever at the tail of the
+/// sort queue while Scanner refills the head with early-alphabet entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BufferedIngress {
-    File(IngressFileEvent),
-    Tombstone { path: String, source: IngressSource },
+    File { event: IngressFileEvent, seq: u64 },
+    Tombstone {
+        path: String,
+        source: IngressSource,
+        seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +155,10 @@ pub struct IngressBuffer {
     by_path: HashMap<String, BufferedIngress>,
     subtree_hints: HashMap<String, BufferedSubtreeHint>,
     collapsed_events: u64,
+    /// REQ-AXO-345 — monotonic insertion counter stamped on every new
+    /// `record_file` / `record_tombstone`. Used as FIFO tie-breaker in
+    /// `compare_buffered` so late-alphabet projects do not starve.
+    next_seq: u64,
 }
 
 impl IngressBuffer {
@@ -155,7 +168,14 @@ impl IngressBuffer {
             by_path: HashMap::new(),
             subtree_hints: HashMap::new(),
             collapsed_events: 0,
+            next_seq: 0,
         }
+    }
+
+    fn allocate_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        seq
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -165,7 +185,9 @@ impl IngressBuffer {
     pub fn record_file(&mut self, event: IngressFileEvent) {
         let key = event.path.clone();
         match self.by_path.get_mut(&key) {
-            Some(BufferedIngress::File(existing)) => {
+            Some(BufferedIngress::File {
+                event: existing, ..
+            }) => {
                 self.collapsed_events += 1;
                 INGRESS_COLLAPSED_TOTAL.fetch_add(1, Ordering::Relaxed);
                 merge_file_event(existing, event);
@@ -175,7 +197,9 @@ impl IngressBuffer {
                 INGRESS_COLLAPSED_TOTAL.fetch_add(1, Ordering::Relaxed);
             }
             None => {
-                self.by_path.insert(key, BufferedIngress::File(event));
+                let seq = self.allocate_seq();
+                self.by_path
+                    .insert(key, BufferedIngress::File { event, seq });
             }
         }
         self.sync_metrics();
@@ -184,6 +208,7 @@ impl IngressBuffer {
 
     pub fn record_tombstone(&mut self, path: impl Into<String>, source: IngressSource) {
         let path = path.into();
+        let seq = self.allocate_seq();
         if self
             .by_path
             .insert(
@@ -191,6 +216,7 @@ impl IngressBuffer {
                 BufferedIngress::Tombstone {
                     path: path.clone(),
                     source,
+                    seq,
                 },
             )
             .is_some()
@@ -300,7 +326,7 @@ impl IngressBuffer {
 
         for entry in self.by_path.values() {
             match entry {
-                BufferedIngress::File(file) => match file.source {
+                BufferedIngress::File { event, .. } => match event.source {
                     IngressSource::Watcher => hot_entries += 1,
                     IngressSource::Scan => scan_entries += 1,
                 },
@@ -361,7 +387,7 @@ impl IngressBuffer {
                 continue;
             };
             match entry {
-                BufferedIngress::File(file) => files.push(file),
+                BufferedIngress::File { event, .. } => files.push(event),
                 BufferedIngress::Tombstone { path, .. } => tombstones.push(path),
             }
         }
@@ -465,7 +491,7 @@ impl IngressBuffer {
         let mut scan_entries = 0usize;
         for entry in self.by_path.values() {
             match entry {
-                BufferedIngress::File(file) => match file.source {
+                BufferedIngress::File { event, .. } => match event.source {
                     IngressSource::Watcher => hot_entries += 1,
                     IngressSource::Scan => scan_entries += 1,
                 },
@@ -530,22 +556,36 @@ fn merge_file_event(existing: &mut IngressFileEvent, incoming: IngressFileEvent)
     }
 }
 
+/// REQ-AXO-345 — sort drain candidates by `(priority DESC, seq ASC)`.
+/// `seq` is the monotonic insertion counter, so within the same priority
+/// the buffer behaves FIFO. The previous `path ASC` tie-breaker starved
+/// late-alphabet projects (`nanobot-loop`, `nexus`, `triolingo`, …) when
+/// the buffer was perpetually refilled by Scanner with early-alphabet
+/// entries — see REQ-AXO-345 description.
 fn compare_buffered(left: &BufferedIngress, right: &BufferedIngress) -> std::cmp::Ordering {
     buffered_priority(right)
         .cmp(&buffered_priority(left))
-        .then_with(|| buffered_path(left).cmp(buffered_path(right)))
+        .then_with(|| buffered_seq(left).cmp(&buffered_seq(right)))
 }
 
 fn buffered_priority(entry: &BufferedIngress) -> i64 {
     match entry {
-        BufferedIngress::File(file) => file.priority,
+        BufferedIngress::File { event, .. } => event.priority,
         BufferedIngress::Tombstone { .. } => i64::MAX,
     }
 }
 
+fn buffered_seq(entry: &BufferedIngress) -> u64 {
+    match entry {
+        BufferedIngress::File { seq, .. } => *seq,
+        BufferedIngress::Tombstone { seq, .. } => *seq,
+    }
+}
+
+#[allow(dead_code)]
 fn buffered_path(entry: &BufferedIngress) -> &str {
     match entry {
-        BufferedIngress::File(file) => &file.path,
+        BufferedIngress::File { event, .. } => &event.path,
         BufferedIngress::Tombstone { path, .. } => path,
     }
 }

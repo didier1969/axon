@@ -4260,6 +4260,13 @@ impl GraphStore {
         // REQ-AXO-295 Phase 2 — IndexedFile rows accumulated for one
         // multi-row INSERT VALUES (was one INSERT per file).
         let mut indexed_file_rows: Vec<(String, String, i64)> = Vec::with_capacity(files.len());
+        // REQ-AXO-345 — also accumulate `public.file` lifecycle rows so
+        // FileIngressGuard.hydrate_from_store sees the path on next boot
+        // and `should_stage` can return SkipUnchanged. Without this the
+        // guard never populates and Scanner re-pushes every file on every
+        // pass, starving late-alphabet projects via the priority+path
+        // drain order. (size, mtime) are sourced from ParsedFile metadata.
+        let mut file_rows: Vec<(String, i64, i64, i64)> = Vec::with_capacity(files.len());
 
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
@@ -4338,6 +4345,13 @@ impl GraphStore {
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
             indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms));
+            // REQ-AXO-345 — file table population (size i64, mtime i64, now_ms).
+            file_rows.push((
+                path_str.clone(),
+                i64::try_from(parsed.size_bytes).unwrap_or(i64::MAX),
+                parsed.mtime_ms,
+                now_ms,
+            ));
             chunk_ids_per_file.push(chunk_ids_emitted);
         }
 
@@ -4388,6 +4402,39 @@ impl GraphStore {
                  ON CONFLICT (path) DO UPDATE SET \
                      content_hash = EXCLUDED.content_hash, \
                      last_seen_ms = EXCLUDED.last_seen_ms;"
+            ));
+        }
+
+        // REQ-AXO-345 — multi-row UPSERT into `public.file` so the legacy
+        // lifecycle table reflects what pipeline v2 committed. Restores
+        // FileIngressGuard.hydrate_from_store on next process restart.
+        if backend_is_pg && !file_rows.is_empty() {
+            let safe_project = Self::escape_sql(project_code);
+            let mut values_buf = String::with_capacity(file_rows.len() * 120);
+            for (i, (path, size, mtime, ts)) in file_rows.iter().enumerate() {
+                if i > 0 {
+                    values_buf.push(',');
+                }
+                values_buf.push_str(&format!(
+                    "('{}', '{}', 'committed', {}, {}, true, {})",
+                    Self::escape_sql(path),
+                    safe_project,
+                    size,
+                    mtime,
+                    ts
+                ));
+            }
+            queries.push(format!(
+                "INSERT INTO file \
+                 (path, project_code, status, size, mtime, graph_ready, last_state_change_at_ms) \
+                 VALUES {values_buf} \
+                 ON CONFLICT (path) DO UPDATE SET \
+                     project_code = EXCLUDED.project_code, \
+                     status = 'committed', \
+                     size = EXCLUDED.size, \
+                     mtime = EXCLUDED.mtime, \
+                     graph_ready = true, \
+                     last_state_change_at_ms = EXCLUDED.last_state_change_at_ms;"
             ));
         }
 
