@@ -649,6 +649,103 @@ fn test_soll_manager_unknown_entity_returns_parameter_repair() {
 }
 
 #[test]
+fn test_soll_manager_create_invalid_status_returns_parameter_repair() {
+    // REQ-AXO-325 — server-side status validation. Reject hors-vocabulaire
+    // BEFORE the DB CHECK constraint surfaces a cryptic error. Mirror the
+    // canonical parameter_repair envelope used elsewhere (entity / project_code
+    // / relation_type / target_id). Canonical vocabulary = DEC-PRO-100 (5 values).
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "requirement",
+                    "data": {
+                        "project_code": "AXO",
+                        "title": "REQ-AXO-325 contract test",
+                        "description": "status=completed must be rejected with normalization_hint=delivered",
+                        "status": "completed"
+                    }
+                }
+            })),
+            id: Some(json!(91475)),
+        })
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    let data = result.get("data").expect("data");
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["category"].as_str(), Some("status"));
+    assert_eq!(repair["invalid_field"].as_str(), Some("data.status"));
+    assert_eq!(repair["supplied_value"].as_str(), Some("completed"));
+    assert_eq!(repair["normalization_hint"].as_str(), Some("delivered"));
+    assert_eq!(repair["canonical_source"].as_str(), Some("DEC-PRO-100"));
+    let accepted = repair["accepted_values"]
+        .as_array()
+        .expect("accepted_values array");
+    let names: Vec<&str> = accepted.iter().filter_map(|v| v.as_str()).collect();
+    for canonical in ["current", "planned", "delivered", "superseded", "rejected"] {
+        assert!(
+            names.contains(&canonical),
+            "accepted_values must include `{canonical}`: {names:?}"
+        );
+    }
+    let example = data["example_valid_call"].clone();
+    assert_eq!(example["action"].as_str(), Some("create"));
+    assert_eq!(example["entity"].as_str(), Some("requirement"));
+    assert_eq!(
+        example["data"]["status"].as_str(),
+        Some("delivered"),
+        "example_valid_call must use the normalization_hint"
+    );
+}
+
+#[test]
+fn test_soll_manager_update_invalid_status_returns_parameter_repair() {
+    // REQ-AXO-325 — same vocabulary enforcement on update path.
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-91476', 'Requirement', 'AXO', 'REQ-AXO-325 update test', 'fixture for status validation on update path', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "update",
+                    "entity": "requirement",
+                    "data": {
+                        "id": "REQ-AXO-91476",
+                        "status": "accepted"
+                    }
+                }
+            })),
+            id: Some(json!(91476)),
+        })
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    let data = result.get("data").expect("data");
+    assert_eq!(data["status"].as_str(), Some("input_invalid"));
+
+    let repair = data["parameter_repair"].clone();
+    assert_eq!(repair["category"].as_str(), Some("status"));
+    assert_eq!(repair["supplied_value"].as_str(), Some("accepted"));
+    assert_eq!(repair["normalization_hint"].as_str(), Some("current"));
+}
+
+#[test]
 fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     // REQ-AXO-147 slice 2 — cross-project target_ids rejection now
     // surfaces structured `data.parameter_repair` (status,

@@ -291,6 +291,69 @@ impl McpServer {
                     status
                 };
 
+                // REQ-AXO-325 — server-side validation of `status` against canonical
+                // vocabulary (DEC-PRO-100). Mirror the entity-rejection envelope
+                // pattern above so the LLM gets a recoverable error BEFORE the
+                // DB CHECK constraint surfaces a cryptic message.
+                const ACCEPTED_STATUS: [&str; 5] =
+                    ["current", "planned", "delivered", "superseded", "rejected"];
+                if !status.is_empty() && !ACCEPTED_STATUS.contains(&status) {
+                    let normalization_hint = match status {
+                        "completed" | "done" | "passed" | "closed" | "archived" => "delivered",
+                        "accepted" | "in_progress" | "active" | "open" | "partial" | "pending" => {
+                            "current"
+                        }
+                        "proposed" | "draft" => "planned",
+                        "failed" => "rejected",
+                        _ => "current",
+                    };
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Invalid status `{}`. Canonical vocabulary (DEC-PRO-100) = [{}]. Suggested: `{}`.",
+                                status,
+                                ACCEPTED_STATUS.join(", "),
+                                normalization_hint,
+                            ),
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "operator_guidance": {
+                                "problem_class": "input_invalid",
+                                "likely_cause": "status_not_in_canonical_vocabulary",
+                                "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                "confidence": "high",
+                            },
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "status",
+                                "invalid_field": "data.status",
+                                "supplied_value": status,
+                                "accepted_values": ACCEPTED_STATUS,
+                                "normalization_hint": normalization_hint,
+                                "canonical_source": "DEC-PRO-100",
+                                "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                "hint": format!(
+                                    "retry with status in {:?} ; default `current` for newly-owned nodes",
+                                    ACCEPTED_STATUS,
+                                ),
+                            },
+                            "example_valid_call": {
+                                "action": "create",
+                                "entity": entity,
+                                "data": {
+                                    "project_code": canonical_code,
+                                    "title": "<title>",
+                                    "description": "<body>",
+                                    "status": normalization_hint,
+                                },
+                            },
+                        },
+                    }));
+                }
+
                 if let Some(goal) = data.get("goal") {
                     meta["goal"] = goal.clone();
                 }
@@ -463,6 +526,68 @@ impl McpServer {
                 let before_snapshot = project_code
                     .as_deref()
                     .and_then(|code| self.soll_completeness_snapshot(Some(code)).ok());
+
+                // REQ-AXO-325 — validate `status` if supplied. Mirrors the create
+                // path validation above; pre-empts the DB CHECK constraint.
+                if let Some(supplied_status) = data.get("status").and_then(|v| v.as_str()) {
+                    const ACCEPTED_STATUS: [&str; 5] =
+                        ["current", "planned", "delivered", "superseded", "rejected"];
+                    if !supplied_status.is_empty()
+                        && !ACCEPTED_STATUS.contains(&supplied_status)
+                    {
+                        let normalization_hint = match supplied_status {
+                            "completed" | "done" | "passed" | "closed" | "archived" => "delivered",
+                            "accepted" | "in_progress" | "active" | "open" | "partial"
+                            | "pending" => "current",
+                            "proposed" | "draft" => "planned",
+                            "failed" => "rejected",
+                            _ => "current",
+                        };
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "Invalid status `{}`. Canonical vocabulary (DEC-PRO-100) = [{}]. Suggested: `{}`.",
+                                    supplied_status,
+                                    ACCEPTED_STATUS.join(", "),
+                                    normalization_hint,
+                                ),
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "operator_guidance": {
+                                    "problem_class": "input_invalid",
+                                    "likely_cause": "status_not_in_canonical_vocabulary",
+                                    "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                    "confidence": "high",
+                                },
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "status",
+                                    "invalid_field": "data.status",
+                                    "supplied_value": supplied_status,
+                                    "accepted_values": ACCEPTED_STATUS,
+                                    "normalization_hint": normalization_hint,
+                                    "canonical_source": "DEC-PRO-100",
+                                    "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                    "hint": format!(
+                                        "retry with status in {:?}",
+                                        ACCEPTED_STATUS,
+                                    ),
+                                },
+                                "example_valid_call": {
+                                    "action": "update",
+                                    "entity": entity,
+                                    "data": {
+                                        "id": id,
+                                        "status": normalization_hint,
+                                    },
+                                },
+                            },
+                        }));
+                    }
+                }
 
                 let update_res: anyhow::Result<()> = (|| {
                     let current = self.query_named_row(
