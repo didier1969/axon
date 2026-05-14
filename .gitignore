@@ -63,3 +63,18 @@ docs/derived/
 # Generated native artifacts
 src/dashboard/priv/native/*.so
 /.worktrees/
+
+# Bench artifacts (REQ-AXO-289 / CPT-AXO-054 — CSV produced by dev-bench/dev-probe runs)
+dev-bench-*.csv
+dev-probe-*.csv
+
+# Local scheduler / agent state
+.claude/scheduled_tasks.lock
+
+# Devenv runtime state (PostgreSQL data dir etc.)
+.devenv/state/
+
+# Note: docs/archive/plans/ historical snapshot is TRACKED (history preserved per git mv).
+#       CLAUDE.md mandates SOLL tools for active plans (CPT-AXO-024); markdown plans
+#       here pre-date the policy. No new active plans should land in docs/plans/
+#       unless re-introduced via explicit SOLL DEC. Use `soll_work_plan` / `soll_apply_plan`.
