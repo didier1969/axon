@@ -4462,6 +4462,68 @@ fn test_axon_soll_manager_link_decision_supersedes_concept() {
 }
 
 #[test]
+fn test_axon_soll_manager_link_same_type_supersedes_allowed() {
+    // REQ-AXO-326 — PIL/GUI/REQ/CPT same-type SUPERSEDES now accepted so the
+    // graph carries canonical replacement edges (previously blocked by policy
+    // gap, forcing metadata.superseded_by workaround which is not graph-native).
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-101', 'Pillar', 'AXO', 'Old Pillar', '', 'superseded', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-102', 'Pillar', 'AXO', 'New Pillar', '', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-AXO-101', 'Guideline', 'AXO', 'Old Guideline', '', 'superseded', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-AXO-102', 'Guideline', 'AXO', 'New Guideline', '', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-101', 'Requirement', 'AXO', 'Old Req', '', 'superseded', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-102', 'Requirement', 'AXO', 'New Req', '', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-101', 'Concept', 'AXO', 'Old CPT', '', 'superseded', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-102', 'Concept', 'AXO', 'New CPT', '', 'current', '{}')").unwrap();
+
+    for (entity, source, target) in [
+        ("pillar", "PIL-AXO-101", "PIL-AXO-102"),
+        ("guideline", "GUI-AXO-101", "GUI-AXO-102"),
+        ("requirement", "REQ-AXO-101", "REQ-AXO-102"),
+        ("concept", "CPT-AXO-101", "CPT-AXO-102"),
+    ] {
+        let response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": {
+                        "action": "link",
+                        "entity": entity,
+                        "data": {
+                            "source_id": source,
+                            "target_id": target,
+                            "relation_type": "SUPERSEDES"
+                        }
+                    }
+                })),
+                id: Some(json!(91577)),
+            })
+            .unwrap();
+        let result = response.result.expect("expected SOLL link result");
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            content.contains("Link created"),
+            "{entity} {source}->{target}: {content}"
+        );
+        assert_eq!(
+            server
+                .graph_store
+                .query_count(&format!(
+                    "SELECT count(*) FROM soll.Edge WHERE relation_type='SUPERSEDES' AND source_id='{source}' AND target_id='{target}'"
+                ))
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
 fn test_soll_relation_schema_resolves_pair_by_ids() {
     let server = create_test_server();
     server

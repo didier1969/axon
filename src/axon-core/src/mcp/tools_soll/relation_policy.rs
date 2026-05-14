@@ -128,8 +128,13 @@ pub(super) fn relation_policy_for_pair(
         // accepted as an alias when the specialization adds material; default
         // INHERITS_FROM matches the GUI→GUI inheritance pattern used to
         // propagate cross-project guidelines (project_code='PRO' parent).
+        // REQ-AXO-326 — same-type SUPERSEDES enforces the canonical
+        // graph-as-index discipline: a deprecated CPT MUST carry an outgoing
+        // SUPERSEDES edge to its replacement (not just metadata.superseded_by).
+        // Default stays INHERITS_FROM (cross-project propagation) ; SUPERSEDES
+        // is opt-in when explicitly migrating duplicates / dead concepts.
         ("CPT", "CPT") => Some(RelationPolicy {
-            allowed: &["INHERITS_FROM", "REFINES"],
+            allowed: &["INHERITS_FROM", "REFINES", "SUPERSEDES"],
             default: Some("INHERITS_FROM"),
             allow_multiple_types: false,
             projection: RelationProjectionPolicy {
@@ -208,8 +213,12 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 90,
             },
         }),
+        // REQ-AXO-326 — SUPERSEDES added to enable canonical replacement
+        // of a project-scoped Guideline by the cross-project PRO equivalent
+        // (e.g. GUI-AXO-1001 → GUI-PRO-100 after PRO registry fix). Default
+        // stays INHERITS_FROM (cross-project propagation).
         ("GUI", "GUI") => Some(RelationPolicy {
-            allowed: &["INHERITS_FROM"],
+            allowed: &["INHERITS_FROM", "SUPERSEDES"],
             default: Some("INHERITS_FROM"),
             allow_multiple_types: false,
             projection: RelationProjectionPolicy {
@@ -269,9 +278,26 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 999,
             },
         }),
+        // REQ-AXO-326 — SUPERSEDES added so a Requirement deduplicated/
+        // replaced by a newer REQ carries the canonical edge (e.g.
+        // REQ-AXO-207/208 → REQ-AXO-198 — P2 DDL generator duplicates).
+        // Default stays REFINES (incremental specialization).
         ("REQ", "REQ") => Some(RelationPolicy {
-            allowed: &["REFINES", "BELONGS_TO"],
+            allowed: &["REFINES", "BELONGS_TO", "SUPERSEDES"],
             default: Some("REFINES"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
+        }),
+        // REQ-AXO-326 — a Pillar that absorbs another (e.g. PIL-AXO-006
+        // "Cohabitation polie live↔dev" fused into PIL-AXO-004) needs the
+        // canonical SUPERSEDES edge so the graph reflects the absorption.
+        ("PIL", "PIL") => Some(RelationPolicy {
+            allowed: &["SUPERSEDES"],
+            default: None,
             allow_multiple_types: false,
             projection: RelationProjectionPolicy {
                 role: ProjectionRole::Lateral,
