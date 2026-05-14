@@ -47,8 +47,7 @@ Without trigger phrase: `help()` → `status()` → `help(tool=X)`. `project_cod
 |---|---|
 | Find symbol (multi-token, underscore-aware) | `query` (REQ-AXO-088 / REQ-AXO-128) |
 | Inspect detail (callers/callees) | `inspect` (REQ-AXO-134 name-suffix join for synthetic IDs) |
-| Evidence packet | `retrieve_context` |
-| Hybrid retrieval (FTS+vector+graph RRF) | `retrieve_context_v2` (MIL-AXO-017 slice 4, public.Edge SQL) |
+| Evidence packet (graph + vector + FTS) | `retrieve_context` (REQ-AXO-324 slices 1-2 : `content_tsv` GIN index live, FTS hits surface in `supporting_chunks`) |
 | Multi-resolution (intent+code+recent) | `retrieve_context_layered` (REQ-AXO-264, CPT-AXO-050) |
 | Blast radius | `impact` (via public.callers_of, REQ-AXO-299) |
 | Why it exists | `why` |
