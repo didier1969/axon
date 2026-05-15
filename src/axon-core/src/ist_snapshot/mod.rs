@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod loader;
+pub mod notify_listener;
 pub mod snapshot;
 pub mod view;
 
