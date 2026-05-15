@@ -108,26 +108,24 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
-        // REQ-AXO-251: SQL CONTAINS / CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(serde_json::Map::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS / CALLS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT f.path, s.name
             FROM File f
-            JOIN CONTAINS c ON c.source_id = f.path
+            JOIN public.Edge c ON c.source_id = f.path AND c.relation_type = 'CONTAINS'
             JOIN Symbol s ON s.id = c.target_id
             WHERE (lower(s.name) LIKE '%todo%'
                OR lower(s.name) LIKE '%fixme%'
                OR lower(s.name) LIKE '%secret%'
                OR lower(s.name) LIKE '%hardcoded credential%'
                OR EXISTS (
-                    SELECT 1 FROM CALLS call
+                    SELECT 1 FROM public.Edge call
                     JOIN Symbol target ON target.id = call.target_id
-                    WHERE call.source_id = s.id
+                    WHERE call.relation_type = 'CALLS'
+                      AND call.source_id = s.id
                       AND lower(target.name) IN ('unwrap', 'eval')
                ))
             {}
@@ -160,18 +158,15 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
-        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(serde_json::Map::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT s.name, count(*) AS fan_in
             FROM Symbol s
-            JOIN CALLS c ON c.target_id = s.id
-            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            JOIN public.Edge c ON c.target_id = s.id AND c.relation_type = 'CALLS'
+            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             {}
             AND length(s.name) >= 3
@@ -237,22 +232,19 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
-        // REQ-AXO-251: SQL CONTAINS / CALLS / CALLS_NIF empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(0);
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS / CALLS / CALLS_NIF (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT count(*)
             FROM Symbol s
-            JOIN CONTAINS c ON c.target_id = s.id
+            JOIN public.Edge c ON c.target_id = s.id AND c.relation_type = 'CONTAINS'
             JOIN File f ON f.path = c.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
-              AND s.id NOT IN (SELECT target_id FROM CALLS)
-              AND s.id NOT IN (SELECT target_id FROM CALLS_NIF)
+              AND s.id NOT IN (SELECT target_id FROM public.Edge WHERE relation_type = 'CALLS')
+              AND s.id NOT IN (SELECT target_id FROM public.Edge WHERE relation_type = 'CALLS_NIF')
               AND f.path NOT LIKE '%/tests/%' AND f.path NOT LIKE '%_test.rs' AND f.path NOT LIKE '%_test.exs'
             {}
             ",
@@ -269,33 +261,32 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             WITH outbound AS (
                 SELECT source_id, count(*) AS total_calls
-                FROM CALLS
+                FROM public.Edge
+                WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             ),
             inbound AS (
                 SELECT target_id, count(*) AS total_callers
-                FROM CALLS
+                FROM public.Edge
+                WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             )
             SELECT s.name, target.name, COALESCE(inbound.total_callers, 0)
             FROM outbound o
-            JOIN CALLS c ON c.source_id = o.source_id
+            JOIN public.Edge c ON c.source_id = o.source_id AND c.relation_type = 'CALLS'
             JOIN Symbol s ON s.id = o.source_id
             JOIN Symbol target ON target.id = c.target_id
             LEFT JOIN inbound ON inbound.target_id = target.id
-            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             WHERE o.total_calls = 1
               AND COALESCE(s.is_public, false) = false
@@ -313,12 +304,12 @@ impl GraphStore {
             LIMIT 20
             ",
             if scoped {
-                format!("WHERE project_code = '{}'", escaped)
+                format!("AND project_code = '{}'", escaped)
             } else {
                 String::new()
             },
             if scoped {
-                format!("WHERE project_code = '{}'", escaped)
+                format!("AND project_code = '{}'", escaped)
             } else {
                 String::new()
             },
@@ -341,10 +332,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -352,7 +340,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, f.path
                 FROM Symbol s
-                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
@@ -368,9 +356,10 @@ impl GraphStore {
                     src.path AS source_path,
                     dst.path AS target_path,
                     count(*) AS call_count
-                FROM CALLS c
+                FROM public.Edge c
                 JOIN symbol_files src ON src.id = c.source_id
                 JOIN symbol_files dst ON dst.id = c.target_id
+                WHERE c.relation_type = 'CALLS'
                 {}
                 GROUP BY 1, 2, 3
             ),
@@ -403,7 +392,7 @@ impl GraphStore {
                 String::new()
             },
             if scoped {
-                format!("WHERE c.project_code = '{}'", escaped)
+                format!("AND c.project_code = '{}'", escaped)
             } else {
                 String::new()
             }
@@ -421,10 +410,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -432,7 +418,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, f.path, COALESCE(s.is_public, false) AS is_public
                 FROM Symbol s
-                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
@@ -444,13 +430,15 @@ impl GraphStore {
             ),
             inbound AS (
                 SELECT target_id, count(*) AS inbound_calls
-                FROM CALLS
+                FROM public.Edge
+                WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             ),
             outbound AS (
                 SELECT source_id, count(*) AS outbound_calls
-                FROM CALLS
+                FROM public.Edge
+                WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             )
@@ -458,14 +446,15 @@ impl GraphStore {
                 src.name,
                 mid.name,
                 dst.name
-            FROM CALLS c1
-            JOIN CALLS c2 ON c1.target_id = c2.source_id
+            FROM public.Edge c1
+            JOIN public.Edge c2 ON c1.target_id = c2.source_id AND c2.relation_type = 'CALLS'
             JOIN symbol_files src ON src.id = c1.source_id
             JOIN symbol_files mid ON mid.id = c1.target_id
             JOIN symbol_files dst ON dst.id = c2.target_id
             JOIN inbound mid_in ON mid_in.target_id = mid.id
             JOIN outbound mid_out ON mid_out.source_id = mid.id
-            WHERE src.path = mid.path
+            WHERE c1.relation_type = 'CALLS'
+              AND src.path = mid.path
               AND mid.path = dst.path
               AND src.id != dst.id
               AND mid_in.inbound_calls = 1
@@ -481,12 +470,12 @@ impl GraphStore {
                 String::new()
             },
             if scoped {
-                format!("WHERE project_code = '{}'", escaped)
+                format!("AND project_code = '{}'", escaped)
             } else {
                 String::new()
             },
             if scoped {
-                format!("WHERE project_code = '{}'", escaped)
+                format!("AND project_code = '{}'", escaped)
             } else {
                 String::new()
             },
@@ -512,10 +501,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -523,7 +509,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, lower(s.name) AS lowered_name, s.kind, f.path
                 FROM Symbol s
-                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE (
                     lower(f.path) NOT LIKE '%/tests/%'
@@ -792,10 +778,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS / CONTAINS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped_project = project.replace('\'', "''");
         let escaped_domain = domain_path.replace('\'', "''");
@@ -804,16 +787,17 @@ impl GraphStore {
         let query = format!(
             "
             SELECT s_domain.name || ' (' || f_domain.path || ') -> ' || s_infra.name || ' (' || f_infra.path || ')'
-            FROM CALLS c
+            FROM public.Edge c
             JOIN Symbol s_domain ON c.source_id = s_domain.id
-            JOIN CONTAINS c_domain ON c_domain.target_id = s_domain.id
+            JOIN public.Edge c_domain ON c_domain.target_id = s_domain.id AND c_domain.relation_type = 'CONTAINS'
             JOIN File f_domain ON f_domain.path = c_domain.source_id
-            
+
             JOIN Symbol s_infra ON c.target_id = s_infra.id
-            JOIN CONTAINS c_infra ON c_infra.target_id = s_infra.id
+            JOIN public.Edge c_infra ON c_infra.target_id = s_infra.id AND c_infra.relation_type = 'CONTAINS'
             JOIN File f_infra ON f_infra.path = c_infra.source_id
-            
-            WHERE f_domain.path LIKE '%{}%'
+
+            WHERE c.relation_type = 'CALLS'
+              AND f_domain.path LIKE '%{}%'
               AND f_infra.path LIKE '%{}%'
             {}
             ",
@@ -998,5 +982,73 @@ mod migration_guard_tests {
         assert!(body.contains("FROM public.Edge"));
         assert!(body.contains("c1.relation_type = 'CALLS'"));
         assert!(body.contains("c2.relation_type = 'CALLS'"));
+    }
+
+    // REQ-AXO-350 batch (b) — CALLS+CONTAINS mixed gates.
+
+    #[test]
+    fn batch_b_get_technical_debt_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_technical_debt");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CONTAINS'"));
+        assert!(body.contains("call.relation_type = 'CALLS'"));
+    }
+
+    #[test]
+    fn batch_b_get_god_objects_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_god_objects");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+    }
+
+    #[test]
+    fn batch_b_get_dead_code_count_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_dead_code_count");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CONTAINS'"));
+        assert!(body.contains("FROM public.Edge WHERE relation_type = 'CALLS'"));
+        assert!(body.contains("FROM public.Edge WHERE relation_type = 'CALLS_NIF'"));
+    }
+
+    #[test]
+    fn batch_b_get_wrapper_candidates_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_wrapper_candidates");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+    }
+
+    #[test]
+    fn batch_b_get_feature_envy_candidates_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_feature_envy_candidates");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+    }
+
+    #[test]
+    fn batch_b_get_detour_candidates_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_detour_candidates");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c1.relation_type = 'CALLS'"));
+        assert!(body.contains("c2.relation_type = 'CALLS'"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+    }
+
+    #[test]
+    fn batch_b_get_abstraction_detour_candidates_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_abstraction_detour_candidates");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+    }
+
+    #[test]
+    fn batch_b_get_domain_leakage_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_domain_leakage");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("c_domain.relation_type = 'CONTAINS'"));
+        assert!(body.contains("c_infra.relation_type = 'CONTAINS'"));
     }
 }
