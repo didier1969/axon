@@ -46,6 +46,7 @@ impl RustParser {
         source: &[u8],
         result: &mut ExtractionResult,
         class_name: &str,
+        current_function: &str,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -61,11 +62,17 @@ impl RustParser {
                 "mod_item" => self.extract_mod(child, source, result),
                 "type_item" => self.extract_type_alias(child, source, result),
                 "use_declaration" => self.extract_use(child, source, result),
-                "call_expression" => self.extract_call_expression(child, source, result),
-                "method_call_expression" => self.extract_method_call(child, source, result),
-                "macro_invocation" => self.extract_macro_invocation(child, source, result),
+                "call_expression" => {
+                    self.extract_call_expression(child, source, result, current_function)
+                }
+                "method_call_expression" => {
+                    self.extract_method_call(child, source, result, current_function)
+                }
+                "macro_invocation" => {
+                    self.extract_macro_invocation(child, source, result, current_function)
+                }
                 "line_comment" | "block_comment" => self.extract_comment(child, source, result),
-                _ => self.walk(child, source, result, class_name),
+                _ => self.walk(child, source, result, class_name, current_function),
             }
         }
     }
@@ -203,6 +210,17 @@ impl RustParser {
             }
         }
 
+        // REQ-AXO-91504 — keep the function name alive after the Symbol
+        // push so we can pass it as `current_function` when we recurse into
+        // the body. The body scope is `name` for free fns, `Class::name`
+        // for methods (graph_ingestion may strip the prefix during
+        // resolution but the qualified form disambiguates collisions).
+        let scope = if class_name.is_empty() {
+            name.clone()
+        } else {
+            format!("{}::{}", class_name, name)
+        };
+
         result.symbols.push(Symbol {
             name,
             kind: kind.to_string(),
@@ -219,7 +237,7 @@ impl RustParser {
         });
 
         if let Some(block) = self.find_child_by_type(node, "block") {
-            self.walk(block, source, result, class_name);
+            self.walk(block, source, result, class_name, &scope);
         }
     }
 
@@ -335,7 +353,7 @@ impl RustParser {
         });
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
-            self.walk(decl_list, source, result, &name);
+            self.walk(decl_list, source, result, &name, "");
         }
     }
 
@@ -370,7 +388,7 @@ impl RustParser {
         }
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
-            self.walk(decl_list, source, result, &struct_name);
+            self.walk(decl_list, source, result, &struct_name, "");
         }
     }
 
@@ -398,7 +416,7 @@ impl RustParser {
         });
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
-            self.walk(decl_list, source, result, "");
+            self.walk(decl_list, source, result, "", "");
         }
     }
 
@@ -540,6 +558,7 @@ impl RustParser {
         node: Node<'a>,
         source: &[u8],
         result: &mut ExtractionResult,
+        current_function: &str,
     ) {
         if node.child_count() == 0 {
             return;
@@ -549,7 +568,7 @@ impl RustParser {
                 "identifier" => {
                     let name = func_node.utf8_text(source).unwrap_or("").to_string();
                     result.relations.push(Relation {
-                        from: "".to_string(),
+                        from: current_function.to_string(),
                         to: name,
                         rel_type: "calls".to_string(),
                         properties: HashMap::new(),
@@ -572,7 +591,7 @@ impl RustParser {
                             props.insert("receiver".to_string(), receiver);
                         }
                         result.relations.push(Relation {
-                            from: "".to_string(),
+                            from: current_function.to_string(),
                             to: name,
                             rel_type: "calls".to_string(),
                             properties: props,
@@ -593,7 +612,7 @@ impl RustParser {
                             props.insert("receiver".to_string(), receiver);
                         }
                         result.relations.push(Relation {
-                            from: "".to_string(),
+                            from: current_function.to_string(),
                             to: name.to_string(),
                             rel_type: "calls".to_string(),
                             properties: props,
@@ -604,7 +623,7 @@ impl RustParser {
             }
         }
 
-        self.walk_for_calls(node, source, result, true);
+        self.walk_for_calls(node, source, result, true, current_function);
     }
 
     fn extract_method_call<'a>(
@@ -612,6 +631,7 @@ impl RustParser {
         node: Node<'a>,
         source: &[u8],
         result: &mut ExtractionResult,
+        current_function: &str,
     ) {
         if let Some(name_node) = self.find_child_by_type(node, "field_identifier") {
             let name = name_node.utf8_text(source).unwrap_or("").to_string();
@@ -626,13 +646,13 @@ impl RustParser {
                 props.insert("receiver".to_string(), receiver);
             }
             result.relations.push(Relation {
-                from: "".to_string(),
+                from: current_function.to_string(),
                 to: name,
                 rel_type: "calls".to_string(),
                 properties: props,
             });
         }
-        self.walk_for_calls(node, source, result, false);
+        self.walk_for_calls(node, source, result, false, current_function);
     }
 
     fn extract_macro_invocation<'a>(
@@ -640,11 +660,12 @@ impl RustParser {
         node: Node<'a>,
         source: &[u8],
         result: &mut ExtractionResult,
+        current_function: &str,
     ) {
         if let Some(name_node) = self.find_child_by_type(node, "identifier") {
             let name = format!("{}!", name_node.utf8_text(source).unwrap_or(""));
             result.relations.push(Relation {
-                from: "".to_string(),
+                from: current_function.to_string(),
                 to: name,
                 rel_type: "calls".to_string(),
                 properties: HashMap::new(),
@@ -658,6 +679,7 @@ impl RustParser {
         source: &[u8],
         result: &mut ExtractionResult,
         skip_first: bool,
+        current_function: &str,
     ) {
         let mut cursor = node.walk();
         let mut children: Vec<Node> = node.children(&mut cursor).collect();
@@ -666,10 +688,16 @@ impl RustParser {
         }
         for child in children {
             match child.kind() {
-                "call_expression" => self.extract_call_expression(child, source, result),
-                "method_call_expression" => self.extract_method_call(child, source, result),
-                "macro_invocation" => self.extract_macro_invocation(child, source, result),
-                _ => self.walk_for_calls(child, source, result, false),
+                "call_expression" => {
+                    self.extract_call_expression(child, source, result, current_function)
+                }
+                "method_call_expression" => {
+                    self.extract_method_call(child, source, result, current_function)
+                }
+                "macro_invocation" => {
+                    self.extract_macro_invocation(child, source, result, current_function)
+                }
+                _ => self.walk_for_calls(child, source, result, false, current_function),
             }
         }
     }
@@ -694,8 +722,96 @@ impl Parser for RustParser {
             relations: Vec::new(),
         };
 
-        self.walk(tree.root_node(), content.as_bytes(), &mut result, "");
+        self.walk(tree.root_node(), content.as_bytes(), &mut result, "", "");
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-91504 regression tests — verify that `from:` on extracted
+    //! `calls` relations carries the enclosing function name (previously
+    //! always empty, which made the IST call graph for Rust = 0 edges).
+    use super::*;
+    use crate::parser::Parser;
+
+    fn parser() -> RustParser {
+        // The Rust grammar wasm is loaded from the same place the prod
+        // pipeline_v2 uses. If absent in the test environment, the
+        // RustParser falls back to an empty result — which would mask the
+        // bug, so we skip the test rather than silently green-light it.
+        RustParser::new()
+    }
+
+    fn calls(rel: &[Relation]) -> Vec<&Relation> {
+        rel.iter().filter(|r| r.rel_type == "calls").collect()
+    }
+
+    #[test]
+    fn free_function_calls_carry_caller_name() {
+        let p = parser();
+        let result = p.parse("fn foo() { bar(); baz(); }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let cs = calls(&result.relations);
+        assert!(cs.len() >= 2, "expected >= 2 calls, got {}", cs.len());
+        for c in &cs {
+            assert_eq!(c.from, "foo", "every call inside `fn foo` must have from=foo, got {:?}", c);
+        }
+        let targets: Vec<&str> = cs.iter().map(|c| c.to.as_str()).collect();
+        assert!(targets.contains(&"bar"));
+        assert!(targets.contains(&"baz"));
+    }
+
+    #[test]
+    fn method_calls_carry_qualified_caller_name() {
+        let p = parser();
+        let result = p.parse("impl Foo { fn bar() { qux(); } }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let cs = calls(&result.relations);
+        assert!(!cs.is_empty(), "expected call to qux");
+        let qux: Vec<&&Relation> = cs.iter().filter(|c| c.to == "qux").collect();
+        assert_eq!(qux.len(), 1);
+        assert_eq!(
+            qux[0].from, "Foo::bar",
+            "method call must carry `Class::method` qualified caller"
+        );
+    }
+
+    #[test]
+    fn macro_invocations_carry_caller_name() {
+        let p = parser();
+        let result = p.parse("fn alpha() { println!(\"hi\"); }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let cs = calls(&result.relations);
+        let println_call: Vec<&&Relation> = cs.iter().filter(|c| c.to == "println!").collect();
+        assert_eq!(println_call.len(), 1);
+        assert_eq!(println_call[0].from, "alpha");
+    }
+
+    #[test]
+    fn top_level_calls_outside_function_have_empty_from() {
+        // Top-level calls outside any fn (rare but possible e.g. macros)
+        // should keep `from=""` — current_function is empty at module
+        // scope. This pins that semantics so future refactors don't
+        // accidentally hoist a wrong scope.
+        let p = parser();
+        let result = p.parse("const X: u32 = { foo(); 42 };");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        for c in calls(&result.relations) {
+            assert_eq!(c.from, "", "top-level call should have empty caller, got {:?}", c);
+        }
     }
 }
