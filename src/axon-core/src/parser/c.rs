@@ -27,7 +27,7 @@ impl CParser {
                 "struct_specifier" | "union_specifier" | "enum_specifier" => {
                     Self::extract_struct(child, source_bytes, result)
                 }
-                "call_expression" => Self::extract_call(child, source_bytes, result),
+                "call_expression" => Self::extract_call(child, source_bytes, result, ""),
                 _ => Self::walk(child, source_bytes, result),
             }
         }
@@ -62,7 +62,8 @@ impl CParser {
             }
 
             if let Some(body) = Self::find_child_by_type(node, "compound_statement") {
-                Self::walk_for_calls(body, source_bytes, result);
+                // REQ-AXO-91506 — body calls carry the function name.
+                Self::walk_for_calls(body, source_bytes, result, &name);
             }
 
             result.symbols.push(Symbol {
@@ -105,13 +106,18 @@ impl CParser {
         }
     }
 
-    fn extract_call<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn extract_call<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        caller: &str,
+    ) {
         if let Some(func_node) = node.named_child(0) {
             if func_node.kind() == "identifier" {
                 let call_name = func_node.utf8_text(source_bytes).unwrap_or("").to_string();
                 if !call_name.is_empty() {
                     result.relations.push(Relation {
-                        from: "".to_string(),
+                        from: caller.to_string(),
                         to: call_name,
                         rel_type: "calls".to_string(),
                         properties: HashMap::new(),
@@ -119,16 +125,21 @@ impl CParser {
                 }
             }
         }
-        Self::walk_for_calls(node, source_bytes, result);
+        Self::walk_for_calls(node, source_bytes, result, caller);
     }
 
-    fn walk_for_calls<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn walk_for_calls<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        caller: &str,
+    ) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             if child.kind() == "call_expression" {
-                Self::extract_call(child, source_bytes, result);
+                Self::extract_call(child, source_bytes, result, caller);
             } else {
-                Self::walk_for_calls(child, source_bytes, result);
+                Self::walk_for_calls(child, source_bytes, result, caller);
             }
         }
     }

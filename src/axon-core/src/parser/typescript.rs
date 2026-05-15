@@ -118,6 +118,49 @@ impl TypeScriptParser {
         None
     }
 
+    /// REQ-AXO-91506 — ascend the AST from a `call_expression` / `new_expression`
+    /// up to the enclosing function / method / arrow definition and return its
+    /// declared name (qualified with the class for methods). Returns empty
+    /// string for top-level calls (module-scope IIFE, init expressions).
+    fn find_enclosing_function(&self, mut node: Node, source: &[u8]) -> String {
+        let mut class_prefix: Option<String> = None;
+        while let Some(parent) = node.parent() {
+            match parent.kind() {
+                "function_declaration" | "method_definition" | "function_expression" => {
+                    if let Some(name_node) = parent.child_by_field_name("name") {
+                        let name = name_node.utf8_text(source).unwrap_or("").to_string();
+                        if let Some(cls) = class_prefix {
+                            return format!("{}::{}", cls, name);
+                        }
+                        return name;
+                    }
+                    return String::new();
+                }
+                "arrow_function" => {
+                    // arrow_function is anonymous ; climb one more level looking
+                    // for a `variable_declarator` whose name is its binding.
+                    if let Some(decl) = parent.parent() {
+                        if decl.kind() == "variable_declarator" {
+                            if let Some(name_node) = decl.child_by_field_name("name") {
+                                return name_node.utf8_text(source).unwrap_or("").to_string();
+                            }
+                        }
+                    }
+                    return String::new();
+                }
+                "class_declaration" => {
+                    if let Some(name_node) = parent.child_by_field_name("name") {
+                        class_prefix =
+                            Some(name_node.utf8_text(source).unwrap_or("").to_string());
+                    }
+                }
+                _ => {}
+            }
+            node = parent;
+        }
+        String::new()
+    }
+
     fn declaration_node_for_capture<'a>(&self, node: Node<'a>, kind: &str) -> Node<'a> {
         match kind {
             "function.name" | "method.name" => node.parent().unwrap_or(node),
@@ -429,16 +472,19 @@ impl Parser for TypeScriptParser {
                         });
                     }
                     "call.name" | "new.name" | "sink.name" => {
+                        // REQ-AXO-91506 — climb to the enclosing fn/method/arrow.
+                        let from = self.find_enclosing_function(node, source);
                         relations.push(Relation {
-                            from: "".to_string(),
+                            from,
                             to: text,
                             rel_type: "calls".to_string(),
                             properties: HashMap::new(),
                         });
                     }
                     "import.source" | "require.source" => {
+                        // Imports are module-scope ; from stays "" by design.
                         relations.push(Relation {
-                            from: "".to_string(),
+                            from: String::new(),
                             to: text,
                             rel_type: "imports".to_string(),
                             properties: HashMap::new(),

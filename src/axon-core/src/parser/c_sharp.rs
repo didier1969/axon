@@ -30,7 +30,7 @@ impl CSharpParser {
                 | "struct_declaration"
                 | "interface_declaration"
                 | "enum_declaration" => Self::extract_class(child, source_bytes, result),
-                "invocation_expression" => Self::extract_call(child, source_bytes, result),
+                "invocation_expression" => Self::extract_call(child, source_bytes, result, ""),
                 _ => Self::walk(child, source_bytes, result),
             }
         }
@@ -64,11 +64,13 @@ impl CSharpParser {
             }
 
             if let Some(body) = Self::find_child_by_type(node, "block") {
-                Self::walk_for_calls(body, source_bytes, result);
+                // REQ-AXO-91506 — propagate caller into call extraction.
+                Self::walk_for_calls(body, source_bytes, result, &name);
             }
+            let name_for_symbol = name.clone();
 
             result.symbols.push(Symbol {
-                name,
+                name: name_for_symbol,
                 kind: "method".to_string(),
                 start_line,
                 end_line,
@@ -111,28 +113,38 @@ impl CSharpParser {
         }
     }
 
-    fn extract_call<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn extract_call<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        caller: &str,
+    ) {
         if let Some(func_node) = node.named_child(0) {
             let call_name = func_node.utf8_text(source_bytes).unwrap_or("").to_string();
             if !call_name.is_empty() {
                 result.relations.push(Relation {
-                    from: "".to_string(),
+                    from: caller.to_string(),
                     to: call_name,
                     rel_type: "calls".to_string(),
                     properties: HashMap::new(),
                 });
             }
         }
-        Self::walk_for_calls(node, source_bytes, result);
+        Self::walk_for_calls(node, source_bytes, result, caller);
     }
 
-    fn walk_for_calls<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn walk_for_calls<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        caller: &str,
+    ) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             if child.kind() == "invocation_expression" {
-                Self::extract_call(child, source_bytes, result);
+                Self::extract_call(child, source_bytes, result, caller);
             } else {
-                Self::walk_for_calls(child, source_bytes, result);
+                Self::walk_for_calls(child, source_bytes, result, caller);
             }
         }
     }

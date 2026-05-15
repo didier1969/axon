@@ -157,8 +157,10 @@ impl MarkdownParser {
                         let url_start = rel_end + 2;
                         let url_end = url_start + end_paren;
                         let url = &line[url_start..url_end];
+                        // REQ-AXO-91506 — markdown has no function scope ;
+                        // tag links as coming from the "document" caller.
                         relations.push(Relation {
-                            from: "".to_string(),
+                            from: "document".to_string(),
                             to: url.to_string(),
                             rel_type: "imports".to_string(),
                             properties: HashMap::new(),
@@ -190,8 +192,9 @@ impl MarkdownParser {
                     lang_tag = tag;
                     block_start = line_no;
                     if !lang_tag.is_empty() {
+                        // REQ-AXO-91506 — code fence belongs to the document.
                         relations.push(Relation {
-                            from: "".to_string(),
+                            from: "document".to_string(),
                             to: lang_tag.clone(),
                             rel_type: "calls".to_string(),
                             properties: HashMap::new(),

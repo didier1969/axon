@@ -141,10 +141,19 @@ impl HtmlParser {
             });
         }
 
+        // REQ-AXO-91506 — HTML has no function scope ; use tag_name (or
+        // tag id when present) as caller so the call graph distinguishes
+        // `<button onclick=...>` from `<a href=...>` rather than coalescing
+        // into a single empty-from bucket.
+        let html_caller = attrs
+            .get("id")
+            .cloned()
+            .unwrap_or_else(|| tag_name.to_string());
+
         if tag_name == "script" {
             if let Some(src) = attrs.get("src") {
                 relations.push(Relation {
-                    from: "".to_string(),
+                    from: html_caller.clone(),
                     to: src.clone(),
                     rel_type: "imports".to_string(),
                     properties: HashMap::new(),
@@ -155,7 +164,7 @@ impl HtmlParser {
         if tag_name == "link" {
             if let Some(href) = attrs.get("href") {
                 relations.push(Relation {
-                    from: "".to_string(),
+                    from: html_caller.clone(),
                     to: href.clone(),
                     rel_type: "imports".to_string(),
                     properties: HashMap::new(),
@@ -168,7 +177,7 @@ impl HtmlParser {
                 let func_name = attr_value.split('(').next().unwrap_or("").trim();
                 if !func_name.is_empty() {
                     relations.push(Relation {
-                        from: "".to_string(),
+                        from: html_caller.clone(),
                         to: func_name.to_string(),
                         rel_type: "calls".to_string(),
                         properties: HashMap::new(),
@@ -180,7 +189,7 @@ impl HtmlParser {
         if tag_name == "a" {
             if let Some(href) = attrs.get("href") {
                 relations.push(Relation {
-                    from: "".to_string(),
+                    from: html_caller.clone(),
                     to: href.clone(),
                     rel_type: "calls".to_string(),
                     properties: HashMap::new(),

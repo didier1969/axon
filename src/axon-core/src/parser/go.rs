@@ -35,7 +35,8 @@ impl GoParser {
                 "method_declaration" => Self::extract_method(child, source_bytes, result),
                 "type_declaration" => Self::extract_type_declaration(child, source_bytes, result),
                 "import_declaration" => Self::extract_imports(child, source_bytes, result),
-                "call_expression" => Self::extract_call(child, source_bytes, result),
+                // REQ-AXO-91506 — top-level call_expression carries no caller.
+                "call_expression" => Self::extract_call(child, source_bytes, result, ""),
                 _ => Self::walk(child, source_bytes, result),
             }
         }
@@ -84,7 +85,8 @@ impl GoParser {
                 if node_content.contains("unsafe.") {
                     is_unsafe = true;
                 }
-                Self::walk_for_calls(body, source_bytes, result, false);
+                // REQ-AXO-91506 — body calls carry the function name as caller.
+                Self::walk_for_calls(body, source_bytes, result, false, &name);
             }
 
             result.symbols.push(Symbol {
@@ -169,7 +171,13 @@ impl GoParser {
                 if node_content.contains("unsafe.") {
                     is_unsafe = true;
                 }
-                Self::walk_for_calls(body, source_bytes, result, false);
+                // REQ-AXO-91506 — methods carry Type::method as caller.
+                let caller = if let Some(rt) = properties.get("class_name") {
+                    format!("{}::{}", rt, name)
+                } else {
+                    name.clone()
+                };
+                Self::walk_for_calls(body, source_bytes, result, false, &caller);
             }
 
             result.symbols.push(Symbol {
@@ -302,7 +310,12 @@ impl GoParser {
         }
     }
 
-    fn extract_call<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn extract_call<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        caller: &str,
+    ) {
         let func_node = node.named_child(0);
         if let Some(f_node) = func_node {
             let mut name = String::new();
@@ -325,7 +338,7 @@ impl GoParser {
                     properties.insert("receiver".to_string(), receiver);
                 }
                 result.relations.push(Relation {
-                    from: "".to_string(),
+                    from: caller.to_string(),
                     to: name,
                     rel_type: "calls".to_string(),
                     properties,
@@ -333,7 +346,7 @@ impl GoParser {
             }
         }
 
-        Self::walk_for_calls(node, source_bytes, result, true);
+        Self::walk_for_calls(node, source_bytes, result, true, caller);
     }
 
     fn walk_for_calls<'a>(
@@ -341,6 +354,7 @@ impl GoParser {
         source_bytes: &[u8],
         result: &mut ExtractionResult,
         skip_first: bool,
+        caller: &str,
     ) {
         let mut cursor = node.walk();
         let mut children = node.named_children(&mut cursor);
@@ -350,9 +364,9 @@ impl GoParser {
 
         for child in children {
             if child.kind() == "call_expression" {
-                Self::extract_call(child, source_bytes, result);
+                Self::extract_call(child, source_bytes, result, caller);
             } else {
-                Self::walk_for_calls(child, source_bytes, result, false);
+                Self::walk_for_calls(child, source_bytes, result, false, caller);
             }
         }
     }
