@@ -13,6 +13,7 @@ use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
 mod retrieval_model;
+mod rrf_fusion;
 use retrieval_model::{
     ChunkCandidate, EntryCandidate, RetrievalDiagnostics, RetrievalRoute, RetrievalRuntimeState,
     RetrievalTimings,
@@ -2684,17 +2685,60 @@ impl McpServer {
         entry_candidates: &[EntryCandidate],
         route: RetrievalRoute,
     ) -> Vec<Value> {
+        // REQ-AXO-91486 slice 2 — RAM fast-path : when AXON_IST_RAM_ENABLED=1
+        // and the cache is warm for the anchor's project, expand to radius
+        // 5-10 (Impact: 10) with neighbor cap 20-50 (Impact: 50), sub-µs
+        // CSR traversal. Cache miss / disabled → silent fallback to the
+        // legacy radius 1-2 / cap 2 SQL CTE path below.
+        let ram_view = crate::ist_snapshot::process_view();
+        let cap_per_anchor: usize =
+            if matches!(route, RetrievalRoute::Impact) { 50 } else { 20 };
+        let total_cap: usize = cap_per_anchor * 2;
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
         let radius = if matches!(route, RetrievalRoute::Impact) {
             2
         } else {
             1
         };
-        let mut selected = Vec::new();
-        let mut seen = HashSet::new();
 
         for anchor in entry_candidates.iter().take(2) {
             if anchor.kind == "file" {
                 continue;
+            }
+            if !anchor.project_code.is_empty() && ram_view.is_warm(&anchor.project_code) {
+                let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) { 10 } else { 5 };
+                if let Some(ids) = ram_view.forward_at_radius(
+                    &anchor.project_code,
+                    &anchor.id,
+                    ram_radius,
+                    cap_per_anchor,
+                    &[],
+                ) {
+                    for target_id in ids {
+                        if target_id == anchor.id {
+                            continue;
+                        }
+                        let key = format!("{}:{target_id}", anchor.id);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        selected.push(json!({
+                            "anchor_symbol": anchor.name,
+                            "target_type": "symbol",
+                            "target_id": target_id,
+                            "edge_kind": "ram_csr",
+                            "distance": 0,
+                            "label": target_id,
+                            "uri": "",
+                            "evidence_class": "derived_ist_ram_snapshot",
+                        }));
+                        if selected.len() >= total_cap {
+                            return selected;
+                        }
+                    }
+                    continue;
+                }
             }
             let Ok(Some(anchor_id)) = self
                 .graph_store
