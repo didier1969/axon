@@ -3,6 +3,24 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
+/// REQ-AXO-299 / MIL-AXO-017 slice 5 : build the SQL that wraps
+/// `public.path` and LEFT-JOINs Symbol to materialize names alongside
+/// hops. Pure formatter — extracted so the SQL-escape contract is unit
+/// testable without a live PG backend.
+fn build_path_sql(source_id: &str, sink_id: &str, depth: u64, project: &str) -> String {
+    format!(
+        "SELECT p.hop, p.node_id, COALESCE(s.name, p.node_id) AS name, \
+                COALESCE(p.relation_type, 'anchor') AS relation_type \
+         FROM public.path('{src}', '{snk}', {depth}, '{proj}') p \
+         LEFT JOIN public.Symbol s ON s.id = p.node_id \
+         ORDER BY p.hop",
+        src = source_id.replace('\'', "''"),
+        snk = sink_id.replace('\'', "''"),
+        depth = depth,
+        proj = project.replace('\'', "''"),
+    )
+}
+
 impl McpServer {
     pub(super) fn axon_path_impl(&self, args: &Value) -> Option<Value> {
         let source = args.get("source")?.as_str()?.trim();
@@ -73,69 +91,38 @@ impl McpServer {
             }));
         };
 
-        // MIL-AXO-017 slice 6B: AGE retired ; adjacency comes from public.Edge SQL.
+        // REQ-AXO-299 / MIL-AXO-017 slice 5 : thin wrapper on public.path SQL
+        // function (db/ddl/04_graph_functions.sql). The fn returns one row per
+        // hop on the shortest path discovered (cycle-safe WITH RECURSIVE on
+        // public.Edge). We JOIN with public.Symbol to materialize names.
+        let sql = build_path_sql(&source_id, &sink_id, depth, project.unwrap_or_default());
         let raw = self
-            .path_edges_via_sql(project)
-            .unwrap_or_else(|| "[]".to_string());
-        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let mut adjacency: std::collections::HashMap<String, Vec<(String, String, String)>> =
-            std::collections::HashMap::new();
-        let mut source_name = source.to_string();
-        for row in rows {
-            if row.len() < 5 {
-                continue;
-            }
-            if row[0] == source_id {
-                source_name = row[1].clone();
-            }
-            adjacency.entry(row[0].clone()).or_default().push((
-                row[2].clone(),
-                row[3].clone(),
-                row[4].clone(),
-            ));
-        }
+            .graph_store
+            .query_json(&sql)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
 
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back((
-            source_id.clone(),
-            vec![source_id.clone()],
-            vec![source_name],
-            vec!["anchor".to_string()],
-            0_u64,
-        ));
-
-        let mut resolved_path: Option<(Vec<String>, Vec<String>)> = None;
-        while let Some((node_id, path_ids, path_names, edge_kinds, current_depth)) =
-            queue.pop_front()
-        {
-            if node_id == sink_id {
-                resolved_path = Some((path_names, edge_kinds));
-                break;
+        let resolved_path: Option<(Vec<String>, Vec<String>)> = if rows.is_empty() {
+            None
+        } else {
+            let mut path_names: Vec<String> = Vec::with_capacity(rows.len());
+            let mut edge_kinds: Vec<String> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let name = row
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let rel = row
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("anchor")
+                    .to_string();
+                path_names.push(name);
+                edge_kinds.push(rel);
             }
-            if current_depth >= depth {
-                continue;
-            }
-            if let Some(neighbors) = adjacency.get(&node_id) {
-                for (target_id, target_name, edge_type) in neighbors {
-                    if path_ids.iter().any(|seen| seen == target_id) {
-                        continue;
-                    }
-                    let mut next_ids = path_ids.clone();
-                    next_ids.push(target_id.clone());
-                    let mut next_names = path_names.clone();
-                    next_names.push(target_name.clone());
-                    let mut next_edges = edge_kinds.clone();
-                    next_edges.push(edge_type.clone());
-                    queue.push_back((
-                        target_id.clone(),
-                        next_ids,
-                        next_names,
-                        next_edges,
-                        current_depth + 1,
-                    ));
-                }
-            }
-        }
+            Some((path_names, edge_kinds))
+        };
 
         let Some((path, edges)) = resolved_path else {
             return Some(json!({
@@ -223,8 +210,8 @@ impl McpServer {
                 "edge_kinds": edges,
                 "detours": [],
                 "confidence": "medium",
-                "provenance": "extracted_recursive_calls",
-                "evidence_sources": ["CALLS", "CALLS_NIF", "CONTAINS"],
+                "provenance": "public.path SQL function (WITH RECURSIVE on public.Edge)",
+                "evidence_sources": ["public.Edge"],
                 "safe_to_act": false,
                 "needs_human_confirmation": true,
                 "operator_guidance": {
@@ -247,50 +234,35 @@ impl McpServer {
             }
         }))
     }
+}
 
-    /// MIL-AXO-015 B.3: dump CALLS / CALLS_NIF adjacency from the SQL
-    /// relation tables. Returns the same JSON shape consumed by the
-    /// in-memory BFS in `axon_path_impl`: rows of `[src.id, src.name,
-    /// dst.id, dst.name, edge_type]`. Returns `None` on query error
-    /// so the caller can fall back to AGE / empty / etc.
-    ///
-    /// REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-    /// tables are empty/dropped — return `None` immediately so the AGE
-    /// primary path handles the lookup. The caller's BFS gets a clean empty
-    /// edge set rather than a stale / errored SQL response.
-    fn path_edges_via_sql(&self, project: Option<&str>) -> Option<String> {
-        if self.graph_store.skip_legacy_relations() {
-            return None;
-        }
-        let edge_query = if let Some(project) = project {
-            format!(
-                "WITH all_edges AS (
-                    SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                    UNION ALL
-                    SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                )
-                SELECT src.id, src.name, dst.id, dst.name, e.edge_type
-                FROM all_edges e
-                JOIN Symbol src ON src.id = e.source_id
-                JOIN Symbol dst ON dst.id = e.target_id
-                WHERE src.project_code = '{project}'
-                  AND dst.project_code = '{project}'",
-                project = project.replace('\'', "''")
-            )
-        } else {
-            "WITH all_edges AS (
-                SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                UNION ALL
-                SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-            )
-            SELECT src.id, src.name, dst.id, dst.name, e.edge_type
-            FROM all_edges e
-            JOIN Symbol src ON src.id = e.source_id
-            JOIN Symbol dst ON dst.id = e.target_id"
-                .to_string()
-        };
-        self.graph_store.query_json(&edge_query).ok()
+#[cfg(test)]
+mod tests {
+    use super::build_path_sql;
+
+    #[test]
+    fn build_path_sql_wraps_public_path_with_symbol_join() {
+        let sql = build_path_sql("foo", "bar", 5, "AXO");
+        assert!(
+            sql.contains("FROM public.path('foo', 'bar', 5, 'AXO')"),
+            "must call public.path SQL fn with positional args: {sql}"
+        );
+        assert!(
+            sql.contains("LEFT JOIN public.Symbol s ON s.id = p.node_id"),
+            "must JOIN public.Symbol to materialize names: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY p.hop"),
+            "must order rows by hop: {sql}"
+        );
     }
 
-    // MIL-AXO-017 slice 6B: AGE helper path_edges_via_age removed ; SQL is canonical.
+    #[test]
+    fn build_path_sql_escapes_single_quotes_and_unscoped_when_project_empty() {
+        let sql = build_path_sql("o'brien", "ba'r", 3, "");
+        assert!(
+            sql.contains("public.path('o''brien', 'ba''r', 3, '')"),
+            "must double single quotes for SQL safety and pass '' for unscoped: {sql}"
+        );
+    }
 }
