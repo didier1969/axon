@@ -1076,8 +1076,35 @@ impl McpServer {
                 data.remove("traceability");
             }
         }
+        // REQ-AXO-91484 — call-graph coverage surfaced only in verbose/full so
+        // brief stays fast. Cached at the response level via status_cache.
+        let verbose_or_full = matches!(mode, Some("verbose") | Some("VERBOSE") | Some("full"));
+        if verbose_or_full {
+            if let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) {
+                data.insert(
+                    "ist_call_graph_coverage".to_string(),
+                    self.ist_call_graph_coverage_snapshot(),
+                );
+            }
+        }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
+    }
+
+    // REQ-AXO-91484 — surface per-project/per-language call-graph coverage so
+    // operators (and the next-session LLM) can spot parser regressions like
+    // "Rust fns=N, outgoing_calls=0" without manually grepping public.edge.
+    // Lang derived from CONTAINS source_id extension (read-only SQL, one round
+    // trip, <50ms budget).
+    pub(crate) fn ist_call_graph_coverage_snapshot(&self) -> Value {
+        let rows: Vec<Vec<String>> = match self
+            .graph_store
+            .query_json(IST_CALL_GRAPH_COVERAGE_SQL)
+        {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => return json!({"per_project": {}, "alerts": []}),
+        };
+        ist_call_graph_coverage_build(&rows)
     }
 
     /// Auto-detect project_code from cwd by matching against ProjectCodeRegistry.
@@ -1122,5 +1149,160 @@ impl McpServer {
         } else {
             None
         }
+    }
+}
+
+// REQ-AXO-91484 — pure builder factored out so the JSON shape, the alert
+// threshold, and the coverage_ratio rounding can be unit-tested without
+// needing a live PG fixture. Rows come from IST_CALL_GRAPH_COVERAGE_SQL
+// projected as Vec<Vec<String>> by graph_store.query_json.
+const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
+         SELECT e.target_id AS symbol_id, e.project_code, \
+                CASE \
+                  WHEN e.source_id LIKE '%.rs' THEN 'rust' \
+                  WHEN e.source_id LIKE '%.py' THEN 'python' \
+                  WHEN e.source_id LIKE '%.exs' THEN 'elixir_script' \
+                  WHEN e.source_id LIKE '%.ex' THEN 'elixir' \
+                  WHEN e.source_id LIKE '%.tsx' THEN 'tsx' \
+                  WHEN e.source_id LIKE '%.ts' THEN 'typescript' \
+                  ELSE NULL \
+                END AS lang \
+         FROM public.edge e WHERE e.relation_type = 'CONTAINS'\
+       ), fn_per AS (\
+         SELECT sf.project_code, sf.lang, COUNT(*) AS fns \
+         FROM symbol_file sf \
+         JOIN public.symbol s ON s.id = sf.symbol_id \
+         WHERE sf.lang IS NOT NULL AND s.kind IN ('function','method') \
+         GROUP BY sf.project_code, sf.lang\
+       ), calls_per AS (\
+         SELECT sf.project_code, sf.lang, COUNT(*) AS outgoing_calls \
+         FROM symbol_file sf \
+         JOIN public.edge e ON e.source_id = sf.symbol_id AND e.relation_type = 'CALLS' \
+         WHERE sf.lang IS NOT NULL \
+         GROUP BY sf.project_code, sf.lang\
+       ) SELECT \
+           COALESCE(f.project_code, c.project_code) AS project_code, \
+           COALESCE(f.lang, c.lang) AS lang, \
+           COALESCE(f.fns, 0) AS fns, \
+           COALESCE(c.outgoing_calls, 0) AS outgoing_calls \
+         FROM fn_per f FULL OUTER JOIN calls_per c USING (project_code, lang) \
+         ORDER BY 1, 2";
+
+fn ist_call_graph_coverage_build(rows: &[Vec<String>]) -> Value {
+    let mut per_project = serde_json::Map::new();
+    let mut alerts: Vec<String> = Vec::new();
+    for row in rows {
+        if row.len() < 4 {
+            continue;
+        }
+        let code = row[0].as_str();
+        let lang = row[1].as_str();
+        let fns: u64 = row[2].parse().unwrap_or(0);
+        let calls: u64 = row[3].parse().unwrap_or(0);
+        let coverage_ratio = if fns > 0 {
+            ((calls as f64 / fns as f64) * 100.0).round() / 100.0
+        } else {
+            0.0
+        };
+        if fns > 100 && calls == 0 {
+            alerts.push(format!("{}:{}:zero_outgoing_calls", code, lang));
+        }
+        let entry = per_project
+            .entry(code.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                lang.to_string(),
+                json!({
+                    "fns": fns,
+                    "outgoing_calls": calls,
+                    "coverage_ratio": coverage_ratio
+                }),
+            );
+        }
+    }
+    json!({
+        "per_project": per_project,
+        "alerts": alerts
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(code: &str, lang: &str, fns: u64, calls: u64) -> Vec<String> {
+        vec![
+            code.to_string(),
+            lang.to_string(),
+            fns.to_string(),
+            calls.to_string(),
+        ]
+    }
+
+    #[test]
+    fn coverage_build_groups_per_project() {
+        let rows = vec![
+            row("AXO", "rust", 3617, 0),
+            row("AXO", "python", 460, 2727),
+            row("OPT", "elixir", 50, 80),
+        ];
+        let out = ist_call_graph_coverage_build(&rows);
+        assert_eq!(
+            out.pointer("/per_project/AXO/rust/fns").and_then(Value::as_u64),
+            Some(3617)
+        );
+        assert_eq!(
+            out.pointer("/per_project/AXO/python/outgoing_calls")
+                .and_then(Value::as_u64),
+            Some(2727)
+        );
+        assert_eq!(
+            out.pointer("/per_project/OPT/elixir/coverage_ratio")
+                .and_then(Value::as_f64),
+            Some(1.6)
+        );
+    }
+
+    #[test]
+    fn coverage_build_emits_zero_outgoing_calls_alert_above_threshold() {
+        let rows = vec![
+            row("AXO", "rust", 3617, 0),
+            row("AXO", "python", 460, 2727),
+        ];
+        let out = ist_call_graph_coverage_build(&rows);
+        let alerts = out.get("alerts").and_then(Value::as_array).unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].as_str(), Some("AXO:rust:zero_outgoing_calls"));
+    }
+
+    #[test]
+    fn coverage_build_skips_alert_below_threshold() {
+        let rows = vec![row("AXO", "rust", 50, 0)];
+        let out = ist_call_graph_coverage_build(&rows);
+        let alerts = out.get("alerts").and_then(Value::as_array).unwrap();
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn coverage_build_zero_fns_yields_zero_ratio() {
+        let rows = vec![row("AXO", "rust", 0, 0)];
+        let out = ist_call_graph_coverage_build(&rows);
+        assert_eq!(
+            out.pointer("/per_project/AXO/rust/coverage_ratio")
+                .and_then(Value::as_f64),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn coverage_build_handles_short_or_malformed_rows() {
+        let rows = vec![vec!["AXO".to_string(), "rust".to_string()], row("OPT", "python", 10, 5)];
+        let out = ist_call_graph_coverage_build(&rows);
+        assert!(out.pointer("/per_project/AXO").is_none());
+        assert_eq!(
+            out.pointer("/per_project/OPT/python/fns").and_then(Value::as_u64),
+            Some(10)
+        );
     }
 }
