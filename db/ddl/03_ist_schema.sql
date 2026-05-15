@@ -47,6 +47,32 @@ CREATE TABLE IF NOT EXISTS public.File (
     last_error_at_ms BIGINT
 );
 
+-- REQ-AXO-90004 follow-up : the CREATE TABLE above is a no-op against
+-- pre-DEC-AXO-082 environments where public.File already exists with
+-- only the original 8-column shape (path / project_code / status /
+-- size / priority / mtime / worker_id / trace_id). The state machine
+-- columns added by DEC-AXO-082 + REQ-AXO-289 (file_stage / graph_ready
+-- / vector_ready / *_at_ms / needs_reindex / defer_count / *_reason)
+-- must be backfilled with `ADD COLUMN IF NOT EXISTS` so that the
+-- `file_project_stage_ready_idx` index below (and the v2 pipeline
+-- writers) find them on every promote, not only on fresh installs.
+ALTER TABLE public.File
+    ADD COLUMN IF NOT EXISTS needs_reindex                BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS last_error_reason            TEXT,
+    ADD COLUMN IF NOT EXISTS status_reason                TEXT,
+    ADD COLUMN IF NOT EXISTS defer_count                  BIGINT  NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_deferred_at_ms          BIGINT,
+    ADD COLUMN IF NOT EXISTS file_stage                   TEXT    NOT NULL DEFAULT 'promoted',
+    ADD COLUMN IF NOT EXISTS graph_ready                  BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS vector_ready                 BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS first_seen_at_ms             BIGINT,
+    ADD COLUMN IF NOT EXISTS indexing_started_at_ms       BIGINT,
+    ADD COLUMN IF NOT EXISTS graph_ready_at_ms            BIGINT,
+    ADD COLUMN IF NOT EXISTS vectorization_started_at_ms  BIGINT,
+    ADD COLUMN IF NOT EXISTS vector_ready_at_ms           BIGINT,
+    ADD COLUMN IF NOT EXISTS last_state_change_at_ms      BIGINT,
+    ADD COLUMN IF NOT EXISTS last_error_at_ms             BIGINT;
+
 -- public.IndexedFile — REQ-AXO-289 streaming pipeline v2 watcher
 -- filter. 3 columns only: path PK, content_hash for change detection,
 -- last_seen_ms for hygiene. NO status machine, NO worker_id, NO claim

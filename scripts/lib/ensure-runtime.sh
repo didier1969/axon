@@ -216,11 +216,15 @@ apply_canonical_ddl() {
         return 0
     fi
     local file applied=0
+    local ddl_log="/tmp/axon-ddl-apply.${instance}.log"
+    : > "$ddl_log"
     for file in "$ddl_root"/[0-9][0-9]_*.sql; do
         [[ -f "$file" ]] || continue
         if ! "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
-                -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >/dev/null 2>&1; then
+                -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >>"$ddl_log" 2>&1; then
             echo "❌ ${dbname}: applying canonical DDL $(basename "$file") failed." >&2
+            echo "   psql stderr/stdout captured at ${ddl_log}" >&2
+            tail -20 "$ddl_log" >&2
             return 1
         fi
         applied=$((applied + 1))
