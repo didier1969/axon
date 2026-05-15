@@ -21,7 +21,7 @@ fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/payment.rs', 'BKS', 'indexed')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-why', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout orchestrates payment capture and settlement', 'hash-why-checkout', 1, 4)").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'accepted', '{\"rationale\":\"Operational safety\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-WHY', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
     let response = server
@@ -301,9 +301,9 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
         .graph_store
         .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{\"goal\":\"Vision first\"}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', 'Use Rust as the authoritative runtime', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{\"goal\":\"Vision first\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'planned', '{\"priority\":\"P1\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', 'Use Rust as the authoritative runtime', 'current', '{\"context\":\"\",\"rationale\":\"\"}')").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -413,7 +413,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
         .unwrap();
 
     let first = server
@@ -502,7 +502,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
         .unwrap();
 
     let first = server
@@ -645,11 +645,11 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Card charging', 'Charge cards safely', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Card charging', 'Charge cards safely', 'current', '{}')")
         .unwrap();
     server
         .graph_store
@@ -928,7 +928,7 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
         .graph_store
         .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'draft', '{\"priority\":\"P2\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'planned', '{\"priority\":\"P2\"}')").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1195,10 +1195,10 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
 #[test]
 fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'planned', '{\"priority\":\"P1\"}')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'current', '{\"context\":\"\",\"rationale\":\"\"}')")
         .unwrap();
     server
         .graph_store
@@ -1239,11 +1239,11 @@ fn test_soll_work_plan_groups_parallel_ready_nodes_in_same_wave() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Operator cockpit', '', 'draft', '{\"priority\":\"P2\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Operator cockpit', '', 'planned', '{\"priority\":\"P2\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1273,15 +1273,15 @@ fn test_soll_work_plan_reports_cycles_and_blocks_dependents() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -1327,7 +1327,7 @@ fn test_soll_work_plan_returns_contract_fields() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1370,15 +1370,15 @@ fn test_soll_work_plan_respects_limit_and_marks_truncated() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1407,11 +1407,11 @@ fn test_soll_work_plan_returns_top_recommendations() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'current', '{\"context\":\"\",\"rationale\":\"\"}')")
         .unwrap();
     server
         .graph_store
@@ -1456,7 +1456,7 @@ fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Active decision', '', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Active decision', '', 'current', '{}')")
         .unwrap();
     server
         .graph_store
@@ -1558,8 +1558,8 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
              VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Recent target', '', 'current', '{{\"priority\":\"P1\"}}'),\
                     ('REQ-AXO-002', 'Requirement', 'AXO', 'Old target', '', 'current', '{{\"priority\":\"P1\"}}'),\
-                    ('DEC-AXO-001', 'Decision', 'AXO', 'Recent decision', '', 'accepted', '{{\"updated_at\":{}}}'),\
-                    ('DEC-AXO-002', 'Decision', 'AXO', 'Old decision', '', 'accepted', '{{\"updated_at\":{}}}')",
+                    ('DEC-AXO-001', 'Decision', 'AXO', 'Recent decision', '', 'current', '{{\"updated_at\":{}}}'),\
+                    ('DEC-AXO-002', 'Decision', 'AXO', 'Old decision', '', 'current', '{{\"updated_at\":{}}}')",
             recent_ms, old_ms
         ))
         .unwrap();
@@ -1667,7 +1667,7 @@ fn test_soll_work_plan_counts_decision_evidence() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'current', '{\"context\":\"\",\"rationale\":\"\"}')")
         .unwrap();
     server
         .graph_store
@@ -2614,7 +2614,7 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
         .unwrap();
 
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-005', 'Requirement', 'BKS', 'Stripe integration', 'Need Stripe support', 'current', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Rust SDK selected for payment integration', 'accepted', '{\"rationale\":\"Operational safety\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Rust SDK selected for payment integration', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-BKS-010', 'REQ-BKS-005', 'SOLVES')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-001', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
@@ -2941,7 +2941,7 @@ fn test_retrieve_context_eval_harness_hits_route_and_grounded_evidence_threshold
         .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout creates a Stripe charge through the Rust SDK', 'hash-checkout', 1, 12)")
         .unwrap();
 
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'accepted', '{\"rationale\":\"Operational safety\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-EVAL-1', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
     let cases = vec![
@@ -3459,7 +3459,7 @@ fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
         .graph_store
         .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-FILE', 'Decision', 'BKS', 'Payment file rationale', 'File-level rationale', 'accepted', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-FILE', 'Decision', 'BKS', 'Payment file rationale', 'File-level rationale', 'current', '{}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-FILE', 'Requirement', 'BKS', 'File-level requirement', 'Requirement tied to file', 'current', '{}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-BKS-FILE', 'REQ-BKS-FILE', 'SOLVES')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-FILE-001', 'Decision', 'DEC-BKS-FILE', 'File', 'src/payment.rs', 1.0, 0)").unwrap();
@@ -3563,7 +3563,7 @@ fn test_retrieve_context_rationale_prefers_canonical_project_docs_over_workspace
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-T6', 'Decision', 'BKS', 'Use Stripe SDK', 'Canonical rationale', 'accepted', '{\"rationale\":\"Operational safety\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-T6', 'Decision', 'BKS', 'Use Stripe SDK', 'Canonical rationale', 'current', '{\"rationale\":\"Operational safety\"}')")
         .unwrap();
     server
         .graph_store
@@ -3733,7 +3733,7 @@ fn test_retrieve_context_under_critical_pressure_skips_graph_and_soll_even_with_
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-CRIT', 'Decision', 'AXO', 'Batch rationale', 'Why parse_batch exists', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-CRIT', 'Decision', 'AXO', 'Batch rationale', 'Why parse_batch exists', 'current', '{}')")
         .unwrap();
     server
         .graph_store
@@ -3822,7 +3822,7 @@ fn test_retrieve_context_under_recovering_pressure_keeps_soll_join_for_rationale
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-RECOVERING', 'Decision', 'AXO', 'Keep parse_batch explicit', 'Rationale for parse_batch', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-RECOVERING', 'Decision', 'AXO', 'Keep parse_batch explicit', 'Rationale for parse_batch', 'current', '{}')")
         .unwrap();
     server
         .graph_store

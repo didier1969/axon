@@ -366,7 +366,7 @@ fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'Shared title', 'Other project duplicate', 'draft', '{\"logical_key\":\"shared-key\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'Shared title', 'Other project duplicate', 'planned', '{\"logical_key\":\"shared-key\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2031,7 +2031,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Orphan requirement', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Orphan requirement', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -2039,7 +2039,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'current', '{}')")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-BKS-001', 'Concept', 'BKS', 'BKS Concept', 'Expl', '', '{}')").unwrap();
 
@@ -2072,19 +2072,19 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Duplicate req', 'No criteria', 'draft', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Duplicate req', 'No criteria', 'planned', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-011', 'Requirement', 'AXO', 'Duplicate req', 'Still no criteria', 'draft', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-011', 'Requirement', 'AXO', 'Duplicate req', 'Still no criteria', 'planned', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-010', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-010', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'current', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-011', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-011', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'current', '{}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2125,7 +2125,7 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -2133,7 +2133,7 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Linked decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Linked decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
@@ -2183,7 +2183,7 @@ fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-900', 'Requirement', 'AXO', 'Active uncovered', 'No criteria', 'draft', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-900', 'Requirement', 'AXO', 'Active uncovered', 'No criteria', 'planned', '{}')")
         .unwrap();
     server
         .graph_store
@@ -2224,11 +2224,11 @@ fn test_axon_validate_soll_can_scope_by_project_code() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO orphan', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'BKS orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'BKS orphan', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2305,7 +2305,7 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -3830,11 +3830,11 @@ fn test_soll_query_context_returns_project_visions_from_source() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{\"goal\":\"Vision first\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{\"goal\":\"Vision first\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -3897,7 +3897,7 @@ fn test_axon_soll_manager_link_rejects_missing_endpoint() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3937,11 +3937,11 @@ fn test_axon_soll_manager_link_applies_default_relation() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4032,7 +4032,7 @@ fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_a
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Existing decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Existing decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4134,11 +4134,11 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4201,11 +4201,11 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -4261,11 +4261,11 @@ fn test_axon_soll_manager_link_cardinality_conflict_preserves_text_and_data_shap
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'accepted', '{\"context\":\"c\",\"rationale\":\"r\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'current', '{\"context\":\"c\",\"rationale\":\"r\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'D2', '', 'accepted', '{\"context\":\"c\",\"rationale\":\"r\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'D2', '', 'current', '{\"context\":\"c\",\"rationale\":\"r\"}')")
         .unwrap();
     server
         .graph_store
@@ -4369,7 +4369,7 @@ fn test_axon_soll_manager_link_decision_refines_concept() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Architecture decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Architecture decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
@@ -4419,7 +4419,7 @@ fn test_axon_soll_manager_link_decision_supersedes_concept() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Replacement decision', '', 'accepted', '{\"context\":\"ctx\",\"rationale\":\"why\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Replacement decision', '', 'current', '{\"context\":\"ctx\",\"rationale\":\"why\"}')")
         .unwrap();
     server
         .graph_store
@@ -4528,11 +4528,11 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'planned', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let response = server
@@ -4717,7 +4717,7 @@ fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness()
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-200', 'Requirement', 'AXO', 'Lonely requirement', 'No links', 'draft', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-200', 'Requirement', 'AXO', 'Lonely requirement', 'No links', 'planned', '{}')")
         .unwrap();
     server
         .graph_store
@@ -5234,7 +5234,7 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Healthy decision', '', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Healthy decision', '', 'current', '{}')")
         .unwrap();
     server
         .graph_store
@@ -7345,7 +7345,7 @@ fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Generate derived site', 'Decision desc', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Generate derived site', 'Decision desc', 'current', '{}')")
         .unwrap();
     server
         .graph_store
@@ -7445,7 +7445,7 @@ fn test_soll_generate_docs_keeps_unattached_nodes_out_of_primary_project_roots()
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-999', 'Decision', 'AXO', 'Detached decision', 'No hierarchy parent', 'draft', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-999', 'Decision', 'AXO', 'Detached decision', 'No hierarchy parent', 'planned', '{}')")
         .unwrap();
 
     let result = server
@@ -8011,7 +8011,7 @@ fn test_relation_policy_accepts_cpt_to_dec_inherits_from() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-PRO-099', 'Decision', 'PRO', 'Cross-project canonical decision', 'body', 'accepted', '{\"rationale\":\"R\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-PRO-099', 'Decision', 'PRO', 'Cross-project canonical decision', 'body', 'current', '{\"rationale\":\"R\"}')")
         .unwrap();
     server
         .graph_store
