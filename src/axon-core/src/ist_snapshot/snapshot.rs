@@ -329,6 +329,121 @@ impl IstGraph {
         }
     }
 
+    /// REQ-AXO-91486 — Bounded-radius BFS forward from `source_id`. Returns
+    /// the set of canonical ids reached (excluding the seed). Aborts on
+    /// `max_neighbors` (returning the partial frontier). Relation filter
+    /// `rel_filter` short-circuits edges whose relation_type is not in the
+    /// set — when empty, all relations are traversed.
+    pub fn bfs_forward(
+        &self,
+        source_id: &str,
+        max_radius: u32,
+        max_neighbors: usize,
+        rel_filter: &[RelationType],
+    ) -> Vec<String> {
+        let Some(start) = self.index_of(source_id) else {
+            return Vec::new();
+        };
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(start);
+        let mut frontier: Vec<u32> = vec![start];
+        let mut out: Vec<String> = Vec::new();
+        for _ in 0..max_radius {
+            let mut next_frontier: Vec<u32> = Vec::new();
+            for node in &frontier {
+                for (target, rel) in self.forward_neighbors(*node) {
+                    if !rel_filter.is_empty() && !rel_filter.contains(&rel) {
+                        continue;
+                    }
+                    if visited.insert(target) {
+                        out.push(self.id_of(target).to_string());
+                        if out.len() >= max_neighbors {
+                            return out;
+                        }
+                        next_frontier.push(target);
+                    }
+                }
+            }
+            if next_frontier.is_empty() {
+                break;
+            }
+            frontier = next_frontier;
+        }
+        out
+    }
+
+    /// REQ-AXO-91486 — Bounded-radius BFS reverse (in-edges). Same contract
+    /// as [`bfs_forward`] but traverses [`reverse_neighbors`] ; used by
+    /// `impact` style queries (who calls X transitively).
+    pub fn bfs_reverse(
+        &self,
+        source_id: &str,
+        max_radius: u32,
+        max_neighbors: usize,
+        rel_filter: &[RelationType],
+    ) -> Vec<String> {
+        let Some(start) = self.index_of(source_id) else {
+            return Vec::new();
+        };
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(start);
+        let mut frontier: Vec<u32> = vec![start];
+        let mut out: Vec<String> = Vec::new();
+        for _ in 0..max_radius {
+            let mut next_frontier: Vec<u32> = Vec::new();
+            for node in &frontier {
+                for (source, rel) in self.reverse_neighbors(*node) {
+                    if !rel_filter.is_empty() && !rel_filter.contains(&rel) {
+                        continue;
+                    }
+                    if visited.insert(source) {
+                        out.push(self.id_of(source).to_string());
+                        if out.len() >= max_neighbors {
+                            return out;
+                        }
+                        next_frontier.push(source);
+                    }
+                }
+            }
+            if next_frontier.is_empty() {
+                break;
+            }
+            frontier = next_frontier;
+        }
+        out
+    }
+
+    /// REQ-AXO-91486 — count reciprocal CALLS cycles (A→B + B→A) used by
+    /// `get_circular_dependency_count_fast`. Linear in edges, dedup via
+    /// canonical pair ordering. Self-loops (A→A) are excluded.
+    pub fn reciprocal_calls_cycle_count(&self) -> usize {
+        let mut pairs: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
+        for source_idx in 0..(self.ids.len() as u32) {
+            for (target_idx, rel) in self.forward_neighbors(source_idx) {
+                if !matches!(rel, RelationType::Calls) {
+                    continue;
+                }
+                if source_idx == target_idx {
+                    continue;
+                }
+                // Look for the reverse edge (target -> source) with CALLS.
+                let has_reciprocal = self
+                    .forward_neighbors(target_idx)
+                    .any(|(t, r)| t == source_idx && matches!(r, RelationType::Calls));
+                if has_reciprocal {
+                    let pair = if source_idx < target_idx {
+                        (source_idx, target_idx)
+                    } else {
+                        (target_idx, source_idx)
+                    };
+                    pairs.insert(pair);
+                }
+            }
+        }
+        pairs.len()
+    }
+
     /// Approximate resident memory (bytes) — sum of CSR + arena + index
     /// overhead. Used by the bench binary and ist_snapshot diagnostics.
     pub fn approximate_bytes(&self) -> usize {
@@ -508,6 +623,111 @@ mod tests {
             assert_eq!(RelationType::from_db(s).as_db(), s);
         }
         assert_eq!(RelationType::from_db("UNKNOWN"), RelationType::Other);
+    }
+
+    #[test]
+    fn bfs_forward_returns_descendants_up_to_radius() {
+        // a -> b -> c -> d ; b -> e
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+            node("e", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+            edge("c", "d", RelationType::Calls),
+            edge("b", "e", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let reach = g.bfs_forward("a", 2, 100, &[]);
+        let set: std::collections::HashSet<&str> = reach.iter().map(String::as_str).collect();
+        assert!(set.contains("b"));
+        assert!(set.contains("c"));
+        assert!(set.contains("e"));
+        assert!(!set.contains("d"), "radius 2 should NOT reach d");
+    }
+
+    #[test]
+    fn bfs_forward_honors_max_neighbors_cap() {
+        let nodes = (0..10)
+            .map(|i| node(&format!("n{}", i), "AXO", NodeKind::Function))
+            .collect::<Vec<_>>();
+        let mut edges: Vec<EdgeTriple> = Vec::new();
+        for i in 1..10 {
+            edges.push(edge("n0", &format!("n{}", i), RelationType::Calls));
+        }
+        let g = IstGraph::build(nodes, edges);
+        let reach = g.bfs_forward("n0", 5, 3, &[]);
+        assert_eq!(reach.len(), 3);
+    }
+
+    #[test]
+    fn bfs_forward_filters_by_relation_type() {
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Contains),
+            edge("a", "c", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let reach_calls = g.bfs_forward("a", 3, 100, &[RelationType::Calls]);
+        assert_eq!(reach_calls, vec!["c"]);
+        let reach_contains = g.bfs_forward("a", 3, 100, &[RelationType::Contains]);
+        assert_eq!(reach_contains, vec!["b"]);
+    }
+
+    #[test]
+    fn bfs_reverse_collects_ancestors() {
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "c", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let callers = g.bfs_reverse("c", 1, 100, &[RelationType::Calls]);
+        let set: std::collections::HashSet<&str> = callers.iter().map(String::as_str).collect();
+        assert!(set.contains("a"));
+        assert!(set.contains("b"));
+    }
+
+    #[test]
+    fn reciprocal_calls_cycle_count_matches_pairs() {
+        // a<->b (1 cycle) ; c<->d (1 cycle) ; e->f one-way (0)
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+            node("e", "AXO", NodeKind::Function),
+            node("f", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "a", RelationType::Calls),
+            edge("c", "d", RelationType::Calls),
+            edge("d", "c", RelationType::Calls),
+            edge("e", "f", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(g.reciprocal_calls_cycle_count(), 2);
+    }
+
+    #[test]
+    fn reciprocal_calls_cycle_count_excludes_self_loops() {
+        let nodes = vec![node("a", "AXO", NodeKind::Function)];
+        let edges = vec![edge("a", "a", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(g.reciprocal_calls_cycle_count(), 0);
     }
 
     #[test]

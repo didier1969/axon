@@ -431,6 +431,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "ist_snapshot_warm",
+                "description": "[IST] REQ-AXO-91486 — cold-load the IST CSR snapshot for one project and publish it into the process cache. Subsequent calls to migrated call-sites (impact / collect_structural_neighbors / get_circular_dependency_count_fast) dispatch to RAM when AXON_IST_RAM_ENABLED=1. Returns nodes_loaded / edges_loaded / approximate_bytes / load_ms.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Required." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "job_status",
                 "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`. REQ-AXO-146: pass `wait: true` to block until terminal (completed|failed) or `timeout_ms` elapses, eliminating polling round-trips.",
                 "inputSchema": {

@@ -727,6 +727,19 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
+        // REQ-AXO-91486 slice 2 — RAM fast-path. When AXON_IST_RAM_ENABLED=1
+        // and the cache holds a snapshot for the project, count reciprocal
+        // CALLS cycles in-memory (linear scan over CSR) instead of running
+        // the SQL self-join. Cache miss / env disabled → silent fallback
+        // to the canonical PG path below. `project="*"` (workspace-wide)
+        // skips the fast-path because the cache is per-project.
+        if project != "*" {
+            if let Some(count) =
+                crate::ist_snapshot::process_view().reciprocal_calls_cycle_count(project)
+            {
+                return Ok(count as i64);
+            }
+        }
         // REQ-AXO-350 : public.Edge self-join replaces legacy CALLS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
