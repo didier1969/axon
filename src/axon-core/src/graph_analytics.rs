@@ -3,10 +3,18 @@
 use anyhow::Result;
 
 use crate::graph::GraphStore;
-use crate::runtime_mode::AxonRuntimeMode;
 
+// REQ-AXO-350 follow-up : pre-MIL-AXO-017 this gate returned false
+// in `brain_only` mode because IST edges lived in DuckDB / AGE
+// in-process state — the brain alone had no access. Post-REQ-AXO-295
+// (`public.Edge`) the IST is persistent in PG and any role with a
+// `GraphStore` (brain or indexer) can query it directly. The gate is
+// retained as a single inlined identity so the 16 analytics call
+// sites stay token-stable, but always returns true. Once the call
+// sites are inlined in a follow-up cleanup the function can be
+// deleted entirely.
 fn structural_graph_analytics_available() -> bool {
-    !matches!(AxonRuntimeMode::from_env(), AxonRuntimeMode::BrainOnly)
+    true
 }
 
 impl GraphStore {
