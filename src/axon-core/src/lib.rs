@@ -20,6 +20,7 @@ pub mod graph_query;
 pub mod hot_status_cache;
 pub mod indexing_policy;
 pub mod ingress_buffer;
+pub mod ist_snapshot;
 mod main_background;
 mod main_services;
 mod main_telemetry;

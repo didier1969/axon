@@ -45,6 +45,12 @@ path = "src/bin/axon-bench-graph-projection.rs"
 name = "axon-bench-writer"
 path = "src/bin/axon-bench-writer.rs"
 
+# REQ-AXO-91485 (MIL-AXO-019 slice 1): cold-load + neighbor traversal bench
+# for the in-memory IstGraph snapshot.
+[[bin]]
+name = "axon-bench-ist-snapshot"
+path = "src/bin/axon-bench-ist-snapshot.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"
