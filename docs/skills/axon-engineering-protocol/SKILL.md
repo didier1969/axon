@@ -62,7 +62,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 - `soll_commit_revision` — checkpoint per `preview_id`
 - `axon_apply_methodology_bundle` — versioned bundle
 
-Async: `job_id` → `job_status`; `wait=true` blocks. `soll_work_plan` / `soll_verify_requirements` shape: CPT-AXO-024 (LLM-only doc methodology). `soll_work_plan` excludes terminal-status nodes (`delivered`/`superseded`/`completed`/`archived`/`rejected`) from Wave 1 and from `unblocks N`; cycle / descendant / wave algorithms consume the `SollSnapshot` petgraph (REQ-AXO-135 + REQ-AXO-346, single source of truth).
+Async: `job_id` → `job_status`; `wait=true` blocks. `soll_work_plan` / `soll_verify_requirements` shape: CPT-AXO-024. `soll_work_plan` excludes terminal-status nodes (`delivered`/`superseded`/`completed`/`archived`/`rejected`) from Wave 1 and from `unblocks N`; cycle / descendant / wave algorithms consume the `SollSnapshot` petgraph (REQ-AXO-135 + REQ-AXO-346). REQ-AXO-91500 patch A: `unblocks N` counts the 6 canonical filiation relations (SOLVES/BELONGS_TO/TARGETS/REFINES/EXPLAINS/VERIFIES); cycle detection + Kahn waves keep the narrow SOLVES+BELONGS_TO scope.
 
 ## Vision rule
 

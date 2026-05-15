@@ -7,11 +7,25 @@ use petgraph::visit::{EdgeFiltered, EdgeRef};
 use petgraph::Direction;
 
 /// REQ-AXO-346 Slice 3 — predicate matching the SOLVES + BELONGS_TO
-/// edge subset that the work_plan considers. Used with
-/// `petgraph::visit::EdgeFiltered` so all algorithms run on the
-/// **existing** `SollSnapshot::graph()` without any per-call rebuild.
+/// edge subset that the work_plan considers for cycle detection and
+/// topological wave layering. Used with `petgraph::visit::EdgeFiltered`
+/// so all algorithms run on the **existing** `SollSnapshot::graph()`
+/// without any per-call rebuild.
 fn is_work_plan_relation(relation_type: &str) -> bool {
     matches!(relation_type, "SOLVES" | "BELONGS_TO")
+}
+
+/// REQ-AXO-91500 patch A — broader filiation predicate used for the
+/// "unblocks N descendants" metric only. Counts every canonical
+/// child-bearing relation: SOLVES (DEC→REQ), BELONGS_TO (REQ→PIL),
+/// TARGETS (MIL→REQ), REFINES (REQ→REQ, DEC→REQ), EXPLAINS (CPT→REQ),
+/// VERIFIES (VAL→REQ). Cycle detection and Kahn waves keep the narrow
+/// SOLVES+BELONGS_TO filter to preserve topological semantics.
+fn is_descendant_relation(relation_type: &str) -> bool {
+    matches!(
+        relation_type,
+        "SOLVES" | "BELONGS_TO" | "TARGETS" | "REFINES" | "EXPLAINS" | "VERIFIES"
+    )
 }
 
 /// Cycle detection via `petgraph::algo::tarjan_scc` on the snapshot
@@ -89,7 +103,10 @@ fn descendant_counts_snapshot(
         let mut count = 0usize;
         while let Some(n) = queue.pop_front() {
             for e in snapshot.graph().edges_directed(n, Direction::Outgoing) {
-                if !is_work_plan_relation(e.weight().as_str()) {
+                // REQ-AXO-91500 patch A — broader filiation filter for the
+                // unblocks metric (TARGETS / REFINES / EXPLAINS / VERIFIES
+                // now contribute alongside SOLVES / BELONGS_TO).
+                if !is_descendant_relation(e.weight().as_str()) {
                     continue;
                 }
                 let nxt = e.target();
@@ -193,6 +210,11 @@ impl McpServer {
             }
         };
         let project_code = project_code_owned.as_str();
+        // REQ-AXO-91500 patch A makes the scorer rank correctly via the
+        // broader filiation filter ; default limit stays at 50 per
+        // CPT-AXO-90009 pagination cognitive (top-K by default, drill-down
+        // via explicit `limit` arg). LLM may request `limit=N` for
+        // deeper inspection.
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -680,4 +702,148 @@ fn compact_soll_validation(data: &Value) -> Value {
         "compact": true,
         "expand_with": {"tool": "soll_validate", "arguments": {}}
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-91500 patch A regression test.
+    //!
+    //! Verifies that `descendant_counts_snapshot` counts every canonical
+    //! filiation relation (SOLVES, BELONGS_TO, TARGETS, REFINES, EXPLAINS,
+    //! VERIFIES) — not just SOLVES + BELONGS_TO. Pure in-memory test on
+    //! the `SollSnapshot::build` constructor (no DB, no fixtures, immune
+    //! to DEC-PRO-100 CHECK constraint).
+    use super::*;
+    use crate::soll_snapshot::{SnapshotEdge, SnapshotNode, SollSnapshot};
+    use std::collections::HashMap;
+
+    fn mk_node(id: &str, ty: &str) -> SnapshotNode {
+        SnapshotNode {
+            id: id.to_string(),
+            entity_type: ty.to_string(),
+            title: format!("title-{}", id),
+            status: "current".to_string(),
+            metadata_raw: "{}".to_string(),
+        }
+    }
+
+    fn mk_edge(src: &str, tgt: &str, rel: &str) -> SnapshotEdge {
+        SnapshotEdge {
+            source_id: src.to_string(),
+            target_id: tgt.to_string(),
+            relation_type: rel.to_string(),
+        }
+    }
+
+    /// MIL-AXO-019-style cluster: 1 milestone targets 3 REQs, each refined
+    /// by a smaller REQ. The milestone should count 6 transitive descendants
+    /// via TARGETS + REFINES — relations the legacy `is_work_plan_relation`
+    /// (SOLVES + BELONGS_TO only) would have ignored.
+    #[test]
+    fn descendant_counts_use_broad_filiation_filter() {
+        let mut nodes = HashMap::new();
+        nodes.insert("MIL-AXO-019".into(), mk_node("MIL-AXO-019", "Milestone"));
+        for n in 1..=3 {
+            nodes.insert(format!("REQ-AXO-100{n}"), mk_node(&format!("REQ-AXO-100{n}"), "Requirement"));
+            nodes.insert(format!("REQ-AXO-200{n}"), mk_node(&format!("REQ-AXO-200{n}"), "Requirement"));
+        }
+        let mut edges = Vec::new();
+        for n in 1..=3 {
+            edges.push(mk_edge("MIL-AXO-019", &format!("REQ-AXO-100{n}"), "TARGETS"));
+            edges.push(mk_edge(&format!("REQ-AXO-200{n}"), &format!("REQ-AXO-100{n}"), "REFINES"));
+        }
+
+        let snapshot = SollSnapshot::build("AXO", 1, nodes, edges, Vec::new());
+        let allowed: HashSet<String> = snapshot
+            .graph()
+            .raw_nodes()
+            .iter()
+            .map(|w| w.weight.clone())
+            .collect();
+
+        let counts = descendant_counts_snapshot(&snapshot, &allowed);
+
+        // MIL reaches 3 REQ-100x via TARGETS. Counting transitively via
+        // REFINES would only matter if the edge direction matched ; here
+        // REFINES is child→parent (REQ-200x → REQ-100x), so from
+        // MIL-AXO-019 only the 3 direct TARGETS targets are reachable.
+        assert_eq!(counts.get("MIL-AXO-019").copied().unwrap_or(0), 3,
+            "MIL-AXO-019 should count 3 TARGETS descendants (legacy filter returned 0)");
+
+        // REQ-AXO-2001 has 1 outgoing REFINES → REQ-AXO-1001. Patch A
+        // counts REFINES as filiation, so descendants == 1 (legacy filter
+        // returned 0 because REFINES was excluded).
+        assert_eq!(counts.get("REQ-AXO-2001").copied().unwrap_or(0), 1,
+            "REQ-AXO-2001 → REQ-AXO-1001 REFINES should count as 1 descendant");
+    }
+
+    /// Umbrella REQ pattern: parent REQ raffinée par N sous-REQ via REFINES
+    /// (child → parent). From the parent's outgoing side, REFINES gives 0
+    /// — the children point INTO the parent, not the other way. This test
+    /// pins the directional semantics so future refactors don't accidentally
+    /// invert REFINES.
+    #[test]
+    fn refines_direction_pinned_child_to_parent() {
+        let mut nodes = HashMap::new();
+        nodes.insert("REQ-AXO-91483".into(), mk_node("REQ-AXO-91483", "Requirement"));
+        for n in 91484..=91486 {
+            nodes.insert(format!("REQ-AXO-{n}"), mk_node(&format!("REQ-AXO-{n}"), "Requirement"));
+        }
+        let edges: Vec<SnapshotEdge> = (91484..=91486)
+            .map(|n| mk_edge(&format!("REQ-AXO-{n}"), "REQ-AXO-91483", "REFINES"))
+            .collect();
+
+        let snapshot = SollSnapshot::build("AXO", 1, nodes, edges, Vec::new());
+        let allowed: HashSet<String> = snapshot
+            .graph()
+            .raw_nodes()
+            .iter()
+            .map(|w| w.weight.clone())
+            .collect();
+        let counts = descendant_counts_snapshot(&snapshot, &allowed);
+
+        // Each child has 1 outgoing REFINES toward the umbrella → counts as 1.
+        assert_eq!(counts.get("REQ-AXO-91484").copied().unwrap_or(0), 1);
+        // The umbrella has 0 outgoing REFINES (children point INTO it).
+        assert_eq!(counts.get("REQ-AXO-91483").copied().unwrap_or(0), 0);
+    }
+
+    /// EXPLAINS direction: CPT → REQ. From the CPT, counting outgoing
+    /// edges gives N (the REQ it explains).
+    #[test]
+    fn explains_edge_counted_from_concept() {
+        let mut nodes = HashMap::new();
+        nodes.insert("CPT-AXO-018".into(), mk_node("CPT-AXO-018", "Concept"));
+        for n in 91493..=91497 {
+            nodes.insert(format!("REQ-AXO-{n}"), mk_node(&format!("REQ-AXO-{n}"), "Requirement"));
+        }
+        let edges: Vec<SnapshotEdge> = (91493..=91497)
+            .map(|n| mk_edge("CPT-AXO-018", &format!("REQ-AXO-{n}"), "EXPLAINS"))
+            .collect();
+
+        let snapshot = SollSnapshot::build("AXO", 1, nodes, edges, Vec::new());
+        let allowed: HashSet<String> = snapshot
+            .graph()
+            .raw_nodes()
+            .iter()
+            .map(|w| w.weight.clone())
+            .collect();
+        let counts = descendant_counts_snapshot(&snapshot, &allowed);
+
+        // CPT EXPLAINS 5 REQ → 5 descendants (legacy filter returned 0).
+        assert_eq!(counts.get("CPT-AXO-018").copied().unwrap_or(0), 5,
+            "CPT EXPLAINS should contribute to descendant count");
+    }
+
+    /// Predicate self-test: is_descendant_relation accepts the 6 canonical
+    /// filiation relations and rejects unrelated ones.
+    #[test]
+    fn descendant_predicate_accepts_canonical_filiation() {
+        for canon in ["SOLVES", "BELONGS_TO", "TARGETS", "REFINES", "EXPLAINS", "VERIFIES"] {
+            assert!(is_descendant_relation(canon), "{canon} should be filiation");
+        }
+        for non in ["SUPERSEDES", "INHERITS_FROM", "RANDOM"] {
+            assert!(!is_descendant_relation(non), "{non} should not be filiation");
+        }
+    }
 }
