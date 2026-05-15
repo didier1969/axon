@@ -1,5 +1,52 @@
 use super::*;
 
+/// REQ-AXO-323 Fault 3 — registry counter seed.
+///
+/// Returns an idempotent UPDATE that bumps each `last_*` counter in
+/// `soll.Registry` to `GREATEST(current, MAX(numeric_suffix))` over the
+/// project's existing `soll.Node` rows. Safe to run on every call —
+/// counters never go down. Called from `ensure_soll_registry_row` so a
+/// project whose registry row was added post-hoc (after nodes already
+/// exist) does not allocate colliding ids starting from 0.
+///
+/// `project_code` is interpolated directly (validated upstream as `^[A-Z]{3}$`
+/// by `validate_explicit_canonical_project_code`). Pure formatter so the
+/// SQL contract is unit testable.
+fn seed_registry_counters_sql(project_code: &str) -> String {
+    let max_for = |prefix: &str| {
+        format!(
+            "COALESCE((SELECT MAX(CAST(SUBSTRING(id FROM '[0-9]+$') AS INTEGER)) \
+             FROM soll.Node \
+             WHERE project_code = '{project_code}' \
+               AND id LIKE '{prefix}-%' \
+               AND id ~ '^[A-Z]{{3}}-[A-Z][A-Z0-9]{{2}}-[0-9]+$'), 0)",
+            project_code = project_code,
+            prefix = prefix
+        )
+    };
+    let assignments: Vec<String> = [
+        ("last_vis", "VIS"),
+        ("last_pil", "PIL"),
+        ("last_req", "REQ"),
+        ("last_cpt", "CPT"),
+        ("last_dec", "DEC"),
+        ("last_mil", "MIL"),
+        ("last_val", "VAL"),
+        ("last_stk", "STK"),
+        ("last_gui", "GUI"),
+        ("last_prv", "PRV"),
+        ("last_rev", "REV"),
+    ]
+    .iter()
+    .map(|(col, prefix)| format!("{col} = GREATEST({col}, {expr})", col = col, expr = max_for(prefix)))
+    .collect();
+    format!(
+        "UPDATE soll.Registry SET {assignments} WHERE project_code = '{project_code}'",
+        assignments = assignments.join(", "),
+        project_code = project_code,
+    )
+}
+
 impl McpServer {
     pub(super) fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
@@ -38,6 +85,16 @@ impl McpServer {
              ON CONFLICT (project_code) DO NOTHING",
             &json!([project_code]),
         )?;
+        // REQ-AXO-323 Fault 3 — seed counters from MAX(numeric_suffix) per
+        // type when the project already has nodes (e.g. registry row created
+        // post-hoc to recover from an unregistered-project workaround).
+        // Idempotent via GREATEST — counters never go down. Safe to run on
+        // every call. project_code is validated upstream as ^[A-Z]{3}$ so
+        // direct interpolation is safe.
+        if is_valid_project_code(project_code) {
+            self.graph_store
+                .execute_param(&seed_registry_counters_sql(project_code), &json!([]))?;
+        }
         Ok(())
     }
 
@@ -617,5 +674,52 @@ impl McpServer {
                 }
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests_req_axo_323 {
+    use super::seed_registry_counters_sql;
+
+    #[test]
+    fn seed_sql_targets_all_eleven_counters_with_greatest_idempotence() {
+        let sql = seed_registry_counters_sql("AXO");
+        for col in [
+            "last_vis", "last_pil", "last_req", "last_cpt", "last_dec", "last_mil",
+            "last_val", "last_stk", "last_gui", "last_prv", "last_rev",
+        ] {
+            let pattern = format!("{col} = GREATEST({col},");
+            assert!(
+                sql.contains(&pattern),
+                "missing idempotent GREATEST assignment for {col}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_sql_filters_by_canonical_id_regex_and_scoped_project_code() {
+        let sql = seed_registry_counters_sql("AXO");
+        assert!(sql.contains("project_code = 'AXO'"), "project_code scope missing: {sql}");
+        assert!(
+            sql.contains("id ~ '^[A-Z]{3}-[A-Z][A-Z0-9]{2}-[0-9]+$'"),
+            "canonical id regex missing: {sql}"
+        );
+        for prefix in ["VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "PRV", "REV"] {
+            let like = format!("id LIKE '{prefix}-%'");
+            assert!(sql.contains(&like), "missing prefix filter for {prefix}: {sql}");
+        }
+    }
+
+    #[test]
+    fn seed_sql_targets_correct_registry_row() {
+        let sql = seed_registry_counters_sql("PRO");
+        assert!(
+            sql.contains("UPDATE soll.Registry SET"),
+            "must update soll.Registry: {sql}"
+        );
+        assert!(
+            sql.ends_with("WHERE project_code = 'PRO'"),
+            "must scope WHERE to the project's registry row: {sql}"
+        );
     }
 }
