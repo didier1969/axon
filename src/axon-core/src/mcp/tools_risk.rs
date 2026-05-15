@@ -108,100 +108,15 @@ impl McpServer {
             return self.axon_impact_without_calls(symbol, project, depth);
         };
 
-        let query = if let Some(project_code) = project {
-            let escaped_project = project_code.replace('\'', "''");
-            format!(
-                "WITH RECURSIVE bridge_edges AS (
-                    SELECT s1.id AS source_id, s2.id AS target_id
-                    FROM Symbol s1
-                    JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
-                    WHERE s1.project_code = '{project}'
-                      AND s2.project_code = '{project}'
-                      AND (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
-                ),
-                all_edges AS (
-                    SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS WHERE project_code = '{project}'
-                    UNION ALL
-                    SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF WHERE project_code = '{project}'
-                    UNION ALL
-                    SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
-                ),
-                traverse(caller, callee, depth, edge_type) AS (
-                    SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
-                    UNION ALL
-                    SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
-                    FROM all_edges c JOIN traverse t ON c.target_id = t.caller
-                    WHERE t.depth < {depth}
-                )
-                SELECT t.caller, t.edge_type, COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
-                FROM traverse t
-                JOIN Symbol s ON t.caller = s.id
-                LEFT JOIN CONTAINS con ON s.id = con.target_id AND con.project_code = '{project}'
-                LEFT JOIN File f ON f.path = con.source_id",
-                project = escaped_project,
-                depth = depth
-            )
-        } else {
-            format!(
-            "WITH RECURSIVE bridge_edges AS (
-                SELECT s1.id AS source_id, s2.id AS target_id
-                FROM Symbol s1
-                JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
-                WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
-            ),
-            all_edges AS (
-                SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                UNION ALL
-                SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                UNION ALL
-                SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
-            ),
-            traverse(caller, callee, depth, edge_type) AS (
-                SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
-                UNION ALL
-                SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
-                FROM all_edges c JOIN traverse t ON c.target_id = t.caller
-                WHERE t.depth < {}
-            )
-            SELECT t.caller, t.edge_type, COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
-            FROM traverse t
-            JOIN Symbol s ON t.caller = s.id
-            LEFT JOIN CONTAINS con ON s.id = con.target_id
-            LEFT JOIN File f ON f.path = con.source_id",
-            depth
-        )
-        };
-        let params = json!({ "target_id": target_id });
-
-        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, try the
-        // AGE Cypher equivalent first. The AGE form returns the same
-        // 5-column shape so the downstream parsing is unchanged.
-        // Falls back to the SQL recursive form on empty / error.
-        //
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-        // / CONTAINS tables are empty/dropped — bypass the SQL fallback so
-        // an empty AGE result yields an empty caller set instead of querying
-        // a missing relation table.
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        // MIL-AXO-017 slice 5 (REQ-AXO-299) — prefer the unified
-        // public.Edge SQL function. Falls through to AGE Cypher on PG
-        // when the SQL path returns empty (transitional dual-write
-        // window per REQ-AXO-297) so this slice is non-destructive.
-        // AGE branch is removed in slice 6 (REQ-AXO-300).
-        let public_edge_result = if self.graph_store.is_postgres_backend() {
-            self.impact_callers_via_public_edge(&target_id, project, depth)
-                .map(Ok)
-        } else {
-            None
-        };
-        // MIL-AXO-017 slice 6B: AGE retired ; fall through to legacy SQL only.
-        let query_outcome = public_edge_result.unwrap_or_else(|| {
-            if skip_legacy_relations {
-                Ok("[]".to_string())
-            } else {
-                self.graph_store.query_json_param(&query, &params)
-            }
-        });
+        // REQ-AXO-350 : caller traversal goes through `public.callers_of`
+        // (REQ-AXO-296 SQL fn over public.Edge). The historical WITH
+        // RECURSIVE on legacy CALLS / CALLS_NIF / CONTAINS tables and
+        // its skip_legacy_relations guard are retired. AGE Cypher
+        // alternative was removed in MIL-AXO-017 slice 6B.
+        let query_outcome: Result<String, anyhow::Error> = self
+            .impact_callers_via_public_edge(&target_id, project, depth)
+            .map(Ok)
+            .unwrap_or_else(|| Ok("[]".to_string()));
 
         match query_outcome {
             Ok(res) => {
@@ -564,22 +479,13 @@ impl McpServer {
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-        // tables are empty/dropped — treat as 0 (the structure-empty branch
-        // below produces the right LLM response: "call graph not yet
-        // available, run path/inspect"). The AGE call graph is queried by
-        // `axon_impact` proper higher up in this same tool; this fallthrough
-        // is only reached when the symbol resolves but no impact rows came
-        // back — same outcome under either backend.
-        let calls_count = if self.graph_store.skip_legacy_relations() {
-            0
-        } else {
-            self.graph_store
-                .query_count(
-                    "SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
-                )
-                .unwrap_or(0)
-        };
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CALLS_NIF.
+        let calls_count = self
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM public.Edge WHERE relation_type IN ('CALLS', 'CALLS_NIF')",
+            )
+            .unwrap_or(0);
         if calls_count > 0 {
             return Some(json!({
                 "content": [{
@@ -812,41 +718,16 @@ impl McpServer {
                 }));
             }
         };
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
-        // empty/dropped — `simulate_mutation` is a quick blast-radius probe
-        // that degrades to "0 components" gracefully. Operators wanting a
-        // real estimate use `axon_impact` (already AGE-aware above) /
-        // `axon_path` for the full traversal.
-        if self.graph_store.skip_legacy_relations() {
-            let report = format!(
-                "## 🔮 Dry-Run Mutation: {}\n\n{}",
-                symbol,
-                format_standard_contract(
-                    "ok",
-                    "mutation blast-radius estimated",
-                    &project
-                        .map(|p| format!("project:{}", p))
-                        .unwrap_or_else(|| "workspace:*".to_string()),
-                    &evidence_by_mode(
-                        &format!(
-                            "Modifying '{}' will cascade-impact ~0 components in the SQL relation tables (PG age-only mode). Run `impact` for the AGE-backed traversal.",
-                            symbol
-                        ),
-                        mode,
-                    ),
-                    &["run `impact` for the AGE-backed blast-radius estimate"],
-                    "medium",
-                )
-            );
-            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS for the
+        // blast-radius probe (MIL-AXO-017).
         let query = format!(
             "WITH RECURSIVE traverse(caller, callee, depth) AS ( \
-                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id \
+                SELECT source_id, target_id, 1 AS depth FROM public.Edge \
+                  WHERE relation_type = 'CALLS' AND target_id = $target_id \
                 UNION ALL \
                 SELECT c.source_id, c.target_id, t.depth + 1 \
-                FROM CALLS c JOIN traverse t ON c.target_id = t.caller \
-                WHERE t.depth < {} \
+                FROM public.Edge c JOIN traverse t ON c.target_id = t.caller \
+                WHERE c.relation_type = 'CALLS' AND t.depth < {} \
             ) \
             SELECT count(DISTINCT caller) FROM traverse",
             depth

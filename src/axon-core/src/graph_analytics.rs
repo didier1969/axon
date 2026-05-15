@@ -564,30 +564,20 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CONTAINS / SUBSTANTIATES / IMPACTS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS ; the dead
+        // SUBSTANTIATES / IMPACTS NOT EXISTS clauses (AGE-era proxies for
+        // Symbol↔intent linkage) are dropped — `soll.Traceability` is the
+        // canonical post-Stop A authority for the same relation.
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT DISTINCT s.name
             FROM Symbol s
-            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM SUBSTANTIATES subst
-                    WHERE subst.source_id = s.id OR subst.target_id = s.id
-              )
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM IMPACTS imp
-                    WHERE imp.source_id = s.id OR imp.target_id = s.id
-              )
               AND NOT EXISTS (
                     SELECT 1
                     FROM soll.Traceability t
@@ -665,54 +655,51 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
-        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL WITH RECURSIVE is canonical.
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS ; DuckDB array
+        // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`, array_length).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
             format!(
                 "SELECT c.source_id, c.target_id
-                 FROM CALLS c
+                 FROM public.Edge c
                  JOIN Symbol s ON s.id = c.source_id
-                 WHERE s.project_code = '{}'",
+                 WHERE c.relation_type = 'CALLS' AND s.project_code = '{}'",
                 escaped
             )
         } else {
-            "SELECT source_id, target_id FROM CALLS".to_string()
+            "SELECT source_id, target_id FROM public.Edge WHERE relation_type = 'CALLS'".to_string()
         };
 
         let query = format!(
             "
             WITH RECURSIVE call_paths(source_id, target_id, path_ids, path_names, is_cycle) AS (
-                SELECT 
-                    c.source_id, 
-                    c.target_id, 
-                    [c.source_id], 
-                    [s.name],
+                SELECT
+                    c.source_id,
+                    c.target_id,
+                    ARRAY[c.source_id],
+                    ARRAY[s.name],
                     false
                 FROM ({}) c
                 JOIN Symbol s ON s.id = c.source_id
-                
+
                 UNION ALL
-                
-                SELECT 
-                    p.source_id, 
-                    c.target_id, 
-                    list_append(p.path_ids, c.source_id),
-                    list_append(p.path_names, s.name),
-                    list_contains(p.path_ids, c.target_id)
+
+                SELECT
+                    p.source_id,
+                    c.target_id,
+                    p.path_ids || ARRAY[c.source_id],
+                    p.path_names || ARRAY[s.name],
+                    c.target_id = ANY(p.path_ids)
                 FROM call_paths p
-                JOIN CALLS c ON p.target_id = c.source_id
+                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
                 JOIN Symbol s ON s.id = c.source_id
-                WHERE NOT p.is_cycle AND len(p.path_ids) < 10
+                WHERE NOT p.is_cycle AND array_length(p.path_ids, 1) < 10
             )
-            SELECT array_to_string(list_append(path_names, s_target.name), ' -> ') as cycle_path
+            SELECT array_to_string(p.path_names || ARRAY[s_target.name], ' -> ') AS cycle_path
             FROM call_paths p
             JOIN Symbol s_target ON s_target.id = p.target_id
-            WHERE p.is_cycle = true AND len(p.path_ids) > 1;
+            WHERE p.is_cycle = true AND array_length(p.path_ids, 1) > 1
             ",
             base_calls
         );
@@ -825,10 +812,8 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS ; DuckDB array
+        // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -840,33 +825,34 @@ impl GraphStore {
         let query = format!(
             "
             WITH RECURSIVE call_paths(source_id, target_id, depth, path_ids, initial_name) AS (
-                SELECT 
-                    c.source_id, 
-                    c.target_id, 
-                    1, 
-                    [c.source_id],
+                SELECT
+                    c.source_id,
+                    c.target_id,
+                    1,
+                    ARRAY[c.source_id],
                     s_src.name
-                FROM CALLS c
+                FROM public.Edge c
                 JOIN Symbol s_src ON s_src.id = c.source_id
-                WHERE COALESCE(s_src.is_public, false) = true
+                WHERE c.relation_type = 'CALLS'
+                  AND COALESCE(s_src.is_public, false) = true
                 {scope}
-                
+
                 UNION ALL
-                
-                SELECT 
-                    p.source_id, 
-                    c.target_id, 
+
+                SELECT
+                    p.source_id,
+                    c.target_id,
                     p.depth + 1,
-                    list_append(p.path_ids, c.target_id),
+                    p.path_ids || ARRAY[c.target_id],
                     p.initial_name
                 FROM call_paths p
-                JOIN CALLS c ON p.target_id = c.source_id
-                WHERE NOT list_contains(p.path_ids, c.target_id) AND p.depth < 10
+                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
+                WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 10
             )
             SELECT DISTINCT p.initial_name || ' -> ... -> ' || s_tgt.name
             FROM call_paths p
             JOIN Symbol s_tgt ON s_tgt.id = p.target_id
-            WHERE COALESCE(s_tgt.is_unsafe, false) = true OR lower(s_tgt.name) = 'unwrap';
+            WHERE COALESCE(s_tgt.is_unsafe, false) = true OR lower(s_tgt.name) = 'unwrap'
             ",
             scope = scope
         );
@@ -883,10 +869,8 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-251: SQL CALLS_NIF empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(Vec::new());
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS_NIF / CALLS ;
+        // DuckDB array syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -898,29 +882,29 @@ impl GraphStore {
         let query = format!(
             "
             WITH RECURSIVE call_depths(source_id, target_id, depth, path_ids, initial_target_id, initial_name) AS (
-                SELECT 
-                    c.source_id, 
-                    c.target_id, 
-                    1, 
-                    [c.source_id],
+                SELECT
+                    c.source_id,
+                    c.target_id,
+                    1,
+                    ARRAY[c.source_id],
                     c.target_id,
                     s_nif.name
-                FROM CALLS_NIF c
+                FROM public.Edge c
                 JOIN Symbol s_nif ON s_nif.id = c.target_id
-                WHERE 1=1 {scope}
-                
+                WHERE c.relation_type = 'CALLS_NIF' {scope}
+
                 UNION ALL
-                
-                SELECT 
-                    p.source_id, 
-                    c.target_id, 
+
+                SELECT
+                    p.source_id,
+                    c.target_id,
                     p.depth + 1,
-                    list_append(p.path_ids, c.target_id),
+                    p.path_ids || ARRAY[c.target_id],
                     p.initial_target_id,
                     p.initial_name
                 FROM call_depths p
-                JOIN CALLS c ON p.target_id = c.source_id
-                WHERE NOT list_contains(p.path_ids, c.target_id) AND p.depth < 20
+                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
+                WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 20
             )
             SELECT initial_name || ' (profondeur: ' || max(depth) || ')'
             FROM call_depths
@@ -952,10 +936,18 @@ mod migration_guard_tests {
         let start = src
             .find(fn_signature)
             .unwrap_or_else(|| panic!("{fn_signature} not found in graph_analytics.rs"));
-        let body_end_relative = src[start..]
-            .find("\n    pub fn ")
-            .unwrap_or(src.len() - start);
-        &src[start..start + body_end_relative]
+        let tail = &src[start..];
+        // Terminate at the next sibling `pub fn` OR at the closing `}` of
+        // the `impl GraphStore` block (for the last function in the impl).
+        let next_fn = tail.find("\n    pub fn ");
+        let end_of_impl = tail.find("\n}\n");
+        let body_end_relative = match (next_fn, end_of_impl) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => tail.len(),
+        };
+        &tail[..body_end_relative]
     }
 
     #[test]
@@ -1050,5 +1042,67 @@ mod migration_guard_tests {
         assert!(body.contains("c.relation_type = 'CALLS'"));
         assert!(body.contains("c_domain.relation_type = 'CONTAINS'"));
         assert!(body.contains("c_infra.relation_type = 'CONTAINS'"));
+    }
+
+    // REQ-AXO-350 batch (c) — WITH RECURSIVE rewrites + orphan cleanup.
+
+    #[test]
+    fn batch_c_get_orphan_code_symbols_uses_public_edge_and_drops_dead_tables() {
+        let body = extract_fn_body(SOURCE, "pub fn get_orphan_code_symbols");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("rel.relation_type = 'CONTAINS'"));
+        assert!(
+            !body.contains("FROM SUBSTANTIATES"),
+            "dead SUBSTANTIATES clause must be removed"
+        );
+        assert!(
+            !body.contains("FROM IMPACTS"),
+            "dead IMPACTS clause must be removed"
+        );
+        assert!(
+            body.contains("soll.Traceability"),
+            "canonical Symbol↔intent linkage retained"
+        );
+    }
+
+    #[test]
+    fn batch_c_get_circular_dependencies_uses_public_edge_and_pg_syntax() {
+        let body = extract_fn_body(SOURCE, "pub fn get_circular_dependencies");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("ARRAY[c.source_id]"));
+        assert!(body.contains("|| ARRAY["));
+        assert!(body.contains("= ANY(p.path_ids)"));
+        assert!(body.contains("array_length(p.path_ids, 1)"));
+        // DuckDB residue
+        assert!(!body.contains("list_append"));
+        assert!(!body.contains("list_contains"));
+        assert!(!body.contains("len(p.path_ids)"));
+    }
+
+    #[test]
+    fn batch_c_get_unsafe_exposure_uses_public_edge_and_pg_syntax() {
+        let body = extract_fn_body(SOURCE, "pub fn get_unsafe_exposure");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("ARRAY[c.source_id]"));
+        assert!(body.contains("c.target_id = ANY(p.path_ids)"));
+        assert!(!body.contains("list_append"));
+        assert!(!body.contains("list_contains"));
+    }
+
+    #[test]
+    fn batch_c_get_nif_blocking_risks_uses_public_edge_and_pg_syntax() {
+        let body = extract_fn_body(SOURCE, "pub fn get_nif_blocking_risks");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("c.relation_type = 'CALLS_NIF'"));
+        assert!(body.contains("c.relation_type = 'CALLS'"));
+        assert!(body.contains("ARRAY[c.source_id]"));
+        assert!(body.contains("c.target_id = ANY(p.path_ids)"));
+        assert!(!body.contains("list_append"));
+        assert!(!body.contains("list_contains"));
     }
 }

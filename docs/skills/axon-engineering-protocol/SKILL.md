@@ -7,7 +7,7 @@ description: Use when working in the Axon repository and choosing MCP tools, run
 
 LLM-only doc per CPT-AXO-024 (LLM-only doc methodology); canonical bodies in SOLL via `soll_query_context`; scope `project_code=AXO`, consumer projects use `/axon-driven-development`.
 
-IDs per DEC-AXO-085 (ID format); SQL renamed from cypher per MIL-AXO-017 (AGE retirement); graph traversal tools (`impact`, `path`, `why`, `anomalies`, `retrieve_context`) are thin wrappers on `db/ddl/04_graph_functions.sql` (`public.impact`/`callers_of`/`why_chain`/`blast_radius`/`path`/`retrieve_context_v2`) over `public.Edge` — `relation_type` values are UPPERCASE (`CALLS` / `CALLS_NIF` / `CONTAINS`, written by `stage_a3.rs`) (REQ-AXO-296 + REQ-AXO-297 dual-write + REQ-AXO-299 tool bascule); `documente` / `save observation` → `document_intent` (REQ-AXO-141 (auto-classifier)), never `soll_manager`.
+IDs per DEC-AXO-085 (ID format); SQL renamed from cypher per MIL-AXO-017 (AGE retirement); graph traversal tools (`impact`, `path`, `why`, `anomalies`, `retrieve_context`) are thin wrappers on `db/ddl/04_graph_functions.sql` (`public.impact`/`callers_of`/`why_chain`/`blast_radius`/`path`/`retrieve_context_v2`) over `public.Edge` — `relation_type` values are UPPERCASE (`CALLS` / `CALLS_NIF` / `CONTAINS`, written by `stage_a3.rs`) (REQ-AXO-296 + REQ-AXO-297 dual-write + REQ-AXO-299 tool bascule + REQ-AXO-350 `skip_legacy_relations` retirement / `anomalies` returns real findings); `documente` / `save observation` → `document_intent` (REQ-AXO-141 (auto-classifier)), never `soll_manager`.
 
 ## Boot
 
