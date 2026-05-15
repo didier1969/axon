@@ -1,0 +1,50 @@
+{"id":"Q001","category":"single-lookup","tool":"query","args":{"query":"axon_status_status_impl"},"expected_top_symbols":["axon_status_status_impl"],"expected_concepts":[]}
+{"id":"Q002","category":"single-lookup","tool":"query","args":{"query":"ist_call_graph_coverage_snapshot"},"expected_top_symbols":["ist_call_graph_coverage_snapshot"],"expected_concepts":[]}
+{"id":"Q003","category":"single-lookup","tool":"query","args":{"query":"reciprocal_calls_cycle_count"},"expected_top_symbols":["reciprocal_calls_cycle_count"],"expected_concepts":[]}
+{"id":"Q004","category":"single-lookup","tool":"query","args":{"query":"axon_soll_acyclic_audit"},"expected_top_symbols":["axon_soll_acyclic_audit"],"expected_concepts":[]}
+{"id":"Q005","category":"single-lookup","tool":"query","args":{"query":"GraphStore"},"expected_top_symbols":["GraphStore"],"expected_concepts":[]}
+{"id":"Q006","category":"single-lookup","tool":"query","args":{"query":"IstGraph"},"expected_top_symbols":["IstGraph"],"expected_concepts":[]}
+{"id":"Q007","category":"single-lookup","tool":"query","args":{"query":"McpServer"},"expected_top_symbols":["McpServer"],"expected_concepts":[]}
+{"id":"Q008","category":"structural","tool":"impact","args":{"symbol":"GraphStore","project":"AXO","depth":2},"expected_top_symbols":[],"expected_concepts":["impact_radius>0"]}
+{"id":"Q009","category":"structural","tool":"impact","args":{"symbol":"IstGraph","project":"AXO","depth":2},"expected_top_symbols":[],"expected_concepts":["impact_radius>0"]}
+{"id":"Q010","category":"structural","tool":"impact","args":{"symbol":"McpServer","project":"AXO","depth":2},"expected_top_symbols":[],"expected_concepts":["impact_radius>0"]}
+{"id":"Q011","category":"structural","tool":"path","args":{"from":"axon_status","to":"graph_store","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["path_found"]}
+{"id":"Q012","category":"structural","tool":"ist_centrality_pagerank","args":{"project_code":"AXO","top":10},"expected_top_symbols":[],"expected_concepts":["pagerank_top_10"]}
+{"id":"Q013","category":"structural","tool":"ist_structural_sccs","args":{"project_code":"AXO"},"expected_top_symbols":[],"expected_concepts":["scc_count"]}
+{"id":"Q014","category":"rationale","tool":"why","args":{"target":"REQ-AXO-91485","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["GraphRAG","CSR","ist_snapshot"]}
+{"id":"Q015","category":"rationale","tool":"why","args":{"target":"REQ-AXO-91487","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["LISTEN","NOTIFY","sync"]}
+{"id":"Q016","category":"rationale","tool":"why","args":{"target":"REQ-AXO-91488","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["petgraph","PageRank","Tarjan"]}
+{"id":"Q017","category":"rationale","tool":"retrieve_context","args":{"question":"why was the IST migrated from AGE to public.Edge","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["DEC-AXO-083","MIL-AXO-017","AGE retirement"]}
+{"id":"Q018","category":"rationale","tool":"retrieve_context","args":{"question":"why does soll_work_plan use Kahn waves","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["topological","REQ-AXO-346","petgraph"]}
+{"id":"Q019","category":"rationale","tool":"retrieve_context","args":{"question":"why does the brain probe MCP before init","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["DEC-AXO-060","axon_init_project","recovery"]}
+{"id":"Q020","category":"wiring","tool":"retrieve_context","args":{"question":"where is the call-graph coverage hooked into status","project":"AXO"},"expected_top_symbols":["ist_call_graph_coverage_snapshot","axon_status_status_impl"],"expected_concepts":[]}
+{"id":"Q021","category":"wiring","tool":"retrieve_context","args":{"question":"where is the IstSnapshotCache published","project":"AXO"},"expected_top_symbols":["publish_process_snapshot","axon_ist_snapshot_warm"],"expected_concepts":[]}
+{"id":"Q022","category":"wiring","tool":"retrieve_context","args":{"question":"where is the LISTEN ist_mutated trigger declared","project":"AXO"},"expected_top_symbols":["fn_ist_notify_edge","fn_ist_notify_symbol"],"expected_concepts":[]}
+{"id":"Q023","category":"wiring","tool":"retrieve_context","args":{"question":"where does soll_manager link entities","project":"AXO"},"expected_top_symbols":["link_entities","axon_soll_manager"],"expected_concepts":[]}
+{"id":"Q024","category":"wiring","tool":"retrieve_context","args":{"question":"where is the GPU embedder allocated","project":"AXO"},"expected_top_symbols":["GpuB2Embedder","embedder_gpu"],"expected_concepts":[]}
+{"id":"Q025","category":"wiring","tool":"retrieve_context","args":{"question":"where does pre_flight_check enforce guidelines","project":"AXO"},"expected_top_symbols":["axon_pre_flight_check"],"expected_concepts":[]}
+{"id":"Q026","category":"impact-context","tool":"retrieve_context","args":{"question":"what breaks if I rename axon_status_status_impl","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["status tool","dispatch","axon_status"]}
+{"id":"Q027","category":"impact-context","tool":"retrieve_context","args":{"question":"what breaks if I change the public.edge schema","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["relation_type","graph_analytics","callers_of"]}
+{"id":"Q028","category":"impact-context","tool":"retrieve_context","args":{"question":"what breaks if I drop IstSnapshotCache","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["ist_snapshot_warm","process_view","RAM fast-path"]}
+{"id":"Q029","category":"impact-context","tool":"impact","args":{"symbol":"query_json","project":"AXO","depth":3},"expected_top_symbols":[],"expected_concepts":["graph_store","load_snapshot","sql"]}
+{"id":"Q030","category":"impact-context","tool":"impact","args":{"symbol":"resolve_project_code","project":"AXO","depth":2},"expected_top_symbols":[],"expected_concepts":["soll_manager","tools_soll"]}
+{"id":"Q031","category":"impact-context","tool":"impact","args":{"symbol":"soll_cache","project":"AXO","depth":2},"expected_top_symbols":[],"expected_concepts":["completeness_snapshot","soll_validate"]}
+{"id":"Q032","category":"semantic-only","tool":"retrieve_context","args":{"question":"reciprocal rank fusion","project":"AXO"},"expected_top_symbols":["rrf_fuse","RrfInputs","FusedDoc"],"expected_concepts":["Cormack","k=60","tri-modal"]}
+{"id":"Q033","category":"semantic-only","tool":"retrieve_context","args":{"question":"compressed sparse row graph representation","project":"AXO"},"expected_top_symbols":["IstGraph","build_csr"],"expected_concepts":["CSR","NodePack"]}
+{"id":"Q034","category":"semantic-only","tool":"retrieve_context","args":{"question":"strongly connected components in SOLL","project":"AXO"},"expected_top_symbols":["axon_soll_acyclic_audit","cycle_sets"],"expected_concepts":["Tarjan","SCC","DEC-AXO-098"]}
+{"id":"Q035","category":"semantic-only","tool":"retrieve_context","args":{"question":"bidirectional BFS shortest path","project":"AXO"},"expected_top_symbols":["shortest_path","axon_ist_shortest_path"],"expected_concepts":[]}
+{"id":"Q036","category":"semantic-only","tool":"retrieve_context","args":{"question":"PageRank centrality on IST","project":"AXO"},"expected_top_symbols":["pagerank_top","axon_ist_centrality_pagerank"],"expected_concepts":[]}
+{"id":"Q037","category":"semantic-only","tool":"retrieve_context","args":{"question":"LISTEN NOTIFY pattern PG","project":"AXO"},"expected_top_symbols":["spawn_ist_mutation_listener","notify_listener"],"expected_concepts":["tokio_postgres","LISTEN"]}
+{"id":"Q038","category":"semantic-only","tool":"retrieve_context","args":{"question":"GraphRAG umbrella initiative","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["MIL-AXO-019","PIL-AXO-007","RRF","IstGraph"]}
+{"id":"Q039","category":"anomaly-detection","tool":"anomalies","args":{"project":"AXO"},"expected_top_symbols":[],"expected_concepts":["wrappers","orphan_code","god_objects"]}
+{"id":"Q040","category":"anomaly-detection","tool":"anomalies","args":{"project":"ZCL"},"expected_top_symbols":[],"expected_concepts":["wrappers","orphan_code"]}
+{"id":"Q041","category":"anomaly-detection","tool":"architectural_drift","args":{"project":"AXO"},"expected_top_symbols":[],"expected_concepts":[]}
+{"id":"Q042","category":"anomaly-detection","tool":"soll_acyclic_audit","args":{"project_code":"AXO"},"expected_top_symbols":[],"expected_concepts":["cycle_count","ok|cycles_detected"]}
+{"id":"Q043","category":"anomaly-detection","tool":"soll_validate","args":{"project_code":"AXO"},"expected_top_symbols":[],"expected_concepts":["orphan_requirements","decisions_without_links"]}
+{"id":"Q044","category":"anomaly-detection","tool":"soll_verify_requirements","args":{"project_code":"AXO"},"expected_top_symbols":[],"expected_concepts":["done","partial","missing"]}
+{"id":"Q045","category":"clone-detection","tool":"semantic_clones","args":{"project":"AXO"},"expected_top_symbols":[],"expected_concepts":["clones","clusters"]}
+{"id":"Q046","category":"clone-detection","tool":"semantic_clones","args":{"project":"OPT"},"expected_top_symbols":[],"expected_concepts":[]}
+{"id":"Q047","category":"clone-detection","tool":"semantic_clones","args":{"project":"FSF"},"expected_top_symbols":[],"expected_concepts":[]}
+{"id":"Q048","category":"clone-detection","tool":"semantic_clones","args":{"project":"ZCL"},"expected_top_symbols":[],"expected_concepts":[]}
+{"id":"Q049","category":"clone-detection","tool":"retrieve_context","args":{"question":"duplicated extraction logic across parsers","project":"AXO"},"expected_top_symbols":["walk_for_calls","extract_call"],"expected_concepts":["body_split_lines","parser duplication"]}
+{"id":"Q050","category":"clone-detection","tool":"retrieve_context","args":{"question":"repeated SQL fallback pattern in graph_analytics","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["structural_graph_analytics_available","early-return"]}

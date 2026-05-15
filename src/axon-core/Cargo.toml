@@ -51,6 +51,12 @@ path = "src/bin/axon-bench-writer.rs"
 name = "axon-bench-ist-snapshot"
 path = "src/bin/axon-bench-ist-snapshot.rs"
 
+# REQ-AXO-91490 (MIL-AXO-019 slice 0bis): tool migration bench harness with
+# ~50 questions across 8 CPT-AXO-90007 categories.
+[[bin]]
+name = "axon-bench-tool-migration"
+path = "src/bin/axon-bench-tool-migration.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }
 walkdir = "2.5"
