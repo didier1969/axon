@@ -442,6 +442,45 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "ist_centrality_pagerank",
+                "description": "[IST] REQ-AXO-91488 — PageRank centrality over the in-memory IST CSR. Requires `ist_snapshot_warm` first. Returns top-N nodes by score. Damping default 0.85, iterations default 50.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "top": { "type": "integer", "description": "Top-N nodes returned. Default 20." },
+                        "damping": { "type": "number", "description": "PageRank damping factor. Default 0.85." },
+                        "iterations": { "type": "integer", "description": "PageRank iterations. Default 50." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
+                "name": "ist_structural_sccs",
+                "description": "[IST] REQ-AXO-91488 — Tarjan SCC over the in-memory IST CSR. Returns SCCs with size>1 (true cycles) sorted by descending size. Requires `ist_snapshot_warm` first.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
+                "name": "ist_shortest_path",
+                "description": "[IST] REQ-AXO-91488 — bidirectional BFS shortest path between two canonical IST ids. Requires `ist_snapshot_warm`. Max radius default 20.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "from": { "type": "string", "description": "Source canonical IST id." },
+                        "to": { "type": "string", "description": "Target canonical IST id." },
+                        "max_radius": { "type": "integer", "description": "BFS depth cap. Default 20." }
+                    },
+                    "required": ["project_code", "from", "to"]
+                }
+            },
+            {
                 "name": "job_status",
                 "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`. REQ-AXO-146: pass `wait: true` to block until terminal (completed|failed) or `timeout_ms` elapses, eliminating polling round-trips.",
                 "inputSchema": {

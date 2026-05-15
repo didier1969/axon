@@ -6,6 +6,7 @@
 // Sync to live data (LISTEN/NOTIFY + incremental patches) lives in
 // REQ-AXO-91487 ; this module ships only the cold-load + lookup path.
 
+pub mod algorithms;
 pub mod cache;
 pub mod loader;
 pub mod notify_listener;

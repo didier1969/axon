@@ -36,6 +36,7 @@ mod tools_framework_surface;
 mod tools_framework_validation;
 mod tools_governance;
 mod tools_help;
+mod tools_ist_algorithms;
 mod tools_ist_snapshot;
 mod tools_risk;
 mod tools_soll;
@@ -1171,6 +1172,9 @@ impl McpServer {
             "soll_validate" => self.axon_validate_soll(arguments),
             "soll_acyclic_audit" => self.axon_soll_acyclic_audit(arguments),
             "ist_snapshot_warm" => self.axon_ist_snapshot_warm(arguments),
+            "ist_centrality_pagerank" => self.axon_ist_centrality_pagerank(arguments),
+            "ist_structural_sccs" => self.axon_ist_structural_sccs(arguments),
+            "ist_shortest_path" => self.axon_ist_shortest_path(arguments),
             "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
             "entrench_nuance" => self.axon_entrench_nuance(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),
