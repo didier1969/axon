@@ -14,11 +14,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok((100, "[]".to_string()));
         }
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-        // tables are empty/dropped — degrade audit to neutral (no findings).
-        if self.skip_legacy_relations() {
-            return Ok((100, "[]".to_string()));
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CALLS_NIF (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -30,30 +26,32 @@ impl GraphStore {
             "
             WITH dangerous_paths AS (
                 SELECT s1.name, s2.name AS target_name
-                FROM CALLS c
+                FROM public.Edge c
                 JOIN Symbol s1 ON s1.id = c.source_id
                 JOIN Symbol s2 ON s2.id = c.target_id
-                WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
+                WHERE c.relation_type = 'CALLS'
+                  AND (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
-                FROM CALLS_NIF c
+                FROM public.Edge c
                 JOIN Symbol s1 ON s1.id = c.source_id
                 JOIN Symbol s2 ON s2.id = c.target_id
-                WHERE (s2.is_nif = true OR s2.is_unsafe = true){scope}
+                WHERE c.relation_type = 'CALLS_NIF'
+                  AND (s2.is_nif = true OR s2.is_unsafe = true){scope}
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
                 FROM Symbol s1
-                JOIN CALLS c1 ON c1.source_id = s1.id
+                JOIN public.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS'
                 JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN CALLS c2 ON c2.source_id = mid.id
+                JOIN public.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
                 JOIN Symbol s2 ON s2.id = c2.target_id
                 WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
                 FROM Symbol s1
-                JOIN CALLS_NIF c1 ON c1.source_id = s1.id
+                JOIN public.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS_NIF'
                 JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN CALLS c2 ON c2.source_id = mid.id
+                JOIN public.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
                 JOIN Symbol s2 ON s2.id = c2.target_id
                 WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
             )
@@ -213,18 +211,16 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(100);
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(100);
-        }
+        // REQ-AXO-350 : public.Edge replaces legacy CALLS table (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
-            SELECT count(*) 
-            FROM CALLS call
+            SELECT count(*)
+            FROM public.Edge call
             JOIN Symbol target ON target.id = call.target_id
-            WHERE lower(target.name) IN ('println!', 'dbg!', 'console.log', 'io.puts', 'print', 'printf')
+            WHERE call.relation_type = 'CALLS'
+              AND lower(target.name) IN ('println!', 'dbg!', 'console.log', 'io.puts', 'print', 'printf')
             {}
             ",
             if scoped {
@@ -750,11 +746,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
-        // REQ-AXO-251: SQL CALLS empty/dropped under age-only.
-        if self.skip_legacy_relations() {
-            return Ok(0);
-        }
-        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL self-join is canonical.
+        // REQ-AXO-350 : public.Edge self-join replaces legacy CALLS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -764,11 +756,13 @@ impl GraphStore {
                 SELECT
                     least(c1.source_id, c1.target_id) AS left_id,
                     greatest(c1.source_id, c1.target_id) AS right_id
-                FROM CALLS c1
-                JOIN CALLS c2
+                FROM public.Edge c1
+                JOIN public.Edge c2
                   ON c1.source_id = c2.target_id
                  AND c1.target_id = c2.source_id
-                WHERE c1.source_id != c1.target_id
+                 AND c2.relation_type = 'CALLS'
+                WHERE c1.relation_type = 'CALLS'
+                  AND c1.source_id != c1.target_id
                   {}
                 GROUP BY 1, 2
             ) reciprocal_cycles
@@ -958,5 +952,51 @@ impl GraphStore {
             .into_iter()
             .filter_map(|row| row.first().cloned())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod migration_guard_tests {
+    // REQ-AXO-350 batch (a) — source-level regression guard. Asserts the three
+    // migrated functions no longer carry a `skip_legacy_relations()` early
+    // return and that their SQL bodies reference `public.Edge`. Fast unit
+    // test with no PG fixture (the live PG-backed end-to-end is exercised
+    // by tests::maillon_tests::test_graph_analytics_detects_*).
+    const SOURCE: &str = include_str!("graph_analytics.rs");
+
+    fn extract_fn_body<'a>(src: &'a str, fn_signature: &str) -> &'a str {
+        let start = src
+            .find(fn_signature)
+            .unwrap_or_else(|| panic!("{fn_signature} not found in graph_analytics.rs"));
+        let body_end_relative = src[start..]
+            .find("\n    pub fn ")
+            .unwrap_or(src.len() - start);
+        &src[start..start + body_end_relative]
+    }
+
+    #[test]
+    fn batch_a_get_security_audit_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_security_audit");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("relation_type = 'CALLS'"));
+        assert!(body.contains("relation_type = 'CALLS_NIF'"));
+    }
+
+    #[test]
+    fn batch_a_get_telemetry_score_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_telemetry_score");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("relation_type = 'CALLS'"));
+    }
+
+    #[test]
+    fn batch_a_get_circular_dependency_count_fast_uses_public_edge() {
+        let body = extract_fn_body(SOURCE, "pub fn get_circular_dependency_count_fast");
+        assert!(!body.contains("skip_legacy_relations"));
+        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("c1.relation_type = 'CALLS'"));
+        assert!(body.contains("c2.relation_type = 'CALLS'"));
     }
 }
