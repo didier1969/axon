@@ -1722,7 +1722,7 @@ impl McpServer {
         let query = format!(
             "SELECT target_id, source_id \
              FROM public.Edge \
-             WHERE relation_type = 'contains' \
+             WHERE relation_type = 'CONTAINS' \
                AND source_id IN ({values}){project_filter}",
             project_filter = Self::sql_project_filter_for_fields(project, &["project_code"]),
         );
