@@ -1,5 +1,39 @@
 use super::*;
 
+/// REQ-AXO-323 Fault 2 — `create` MUST NOT silently overwrite an existing
+/// id. Build a canonical error envelope when a pre-check finds the node
+/// already exists. Extracted as a pure formatter so the contract is unit
+/// testable without a live PG backend.
+fn id_exists_envelope(id: &str, entity_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "Cannot create `{}`: id already exists. Use action=update to modify the existing node.",
+                id
+            )
+        }],
+        "isError": true,
+        "data": {
+            "status": "id_exists",
+            "id": id,
+            "entity_type": entity_type,
+            "hint": "create is reserved for new IDs; use action=update for modifications.",
+            "parameter_repair": {
+                "tool": "soll_manager",
+                "category": "id_exists",
+                "invalid_field": "data.id",
+                "supplied_value": id,
+                "follow_up_tools": ["soll_query_context", "soll_manager"],
+                "hint": format!(
+                    "node `{}` already exists. Pick a different id, or call action=update with the same id to modify it.",
+                    id
+                ),
+            }
+        }
+    })
+}
+
 impl McpServer {
     /// REQ-AXO-125 — normalize writer errors so the LLM-visible text
     /// contains only the action kind, category, and a recovery hint —
@@ -393,7 +427,21 @@ impl McpServer {
 
                 meta["updated_at"] = json!(now_unix_ms());
 
-                let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
+                // REQ-AXO-323 Fault 2 — pre-check existence. `create` must
+                // return id_exists error rather than silently overwrite.
+                // Two-step (SELECT + INSERT DO NOTHING) is intentional:
+                // the SELECT gives a deterministic error envelope before
+                // the write, and DO NOTHING is the defensive race-guard
+                // for concurrent creates landing between the two queries.
+                let existence = self.graph_store.query_count_param(
+                    "SELECT COUNT(*) FROM soll.Node WHERE id = ?",
+                    &json!([formatted_id.clone()]),
+                );
+                if existence.unwrap_or(0) > 0 {
+                    return Some(id_exists_envelope(&formatted_id, entity_type_cap));
+                }
+
+                let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING";
                 let attach_to = data.get("attach_to").and_then(|v| v.as_str());
                 let relation_hint = data.get("relation_hint").and_then(|v| v.as_str());
 
@@ -785,5 +833,43 @@ impl McpServer {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::id_exists_envelope;
+
+    #[test]
+    fn id_exists_envelope_returns_canonical_error_shape() {
+        let env = id_exists_envelope("REQ-AXO-001", "Requirement");
+        assert_eq!(env["isError"].as_bool(), Some(true));
+        assert_eq!(env["data"]["status"].as_str(), Some("id_exists"));
+        assert_eq!(env["data"]["id"].as_str(), Some("REQ-AXO-001"));
+        assert_eq!(env["data"]["entity_type"].as_str(), Some("Requirement"));
+        assert_eq!(
+            env["data"]["parameter_repair"]["category"].as_str(),
+            Some("id_exists")
+        );
+        assert_eq!(
+            env["data"]["parameter_repair"]["invalid_field"].as_str(),
+            Some("data.id")
+        );
+        let hint = env["data"]["parameter_repair"]["hint"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            hint.contains("action=update"),
+            "hint must steer caller toward action=update: {hint}"
+        );
+    }
+
+    #[test]
+    fn id_exists_envelope_steers_text_message_toward_update() {
+        let env = id_exists_envelope("DEC-AXO-099", "Decision");
+        let text = env["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("DEC-AXO-099"));
+        assert!(text.contains("action=update"));
+        assert!(text.contains("Cannot create"));
     }
 }

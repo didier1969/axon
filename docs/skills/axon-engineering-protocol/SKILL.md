@@ -56,7 +56,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 ## SOLL writes — `help(tool=X)` for shape
 
 - `soll_apply_plan` — batch (`dry_run=true`, `logical_key`, `author`)
-- `soll_manager create|update|link` — single op
+- `soll_manager create|update|link` — single op ; `create` returns `id_exists` error envelope on existing id (no silent overwrite per REQ-AXO-323 Fault 2 fix) — use `update` for modifications
 - `document_intent` — observation auto-classifier
 - `soll_attach_evidence` — proof file/test/metric/diff
 - `soll_commit_revision` — checkpoint per `preview_id`
