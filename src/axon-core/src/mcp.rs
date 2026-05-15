@@ -1168,6 +1168,7 @@ impl McpServer {
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
+            "soll_acyclic_audit" => self.axon_soll_acyclic_audit(arguments),
             "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
             "entrench_nuance" => self.axon_entrench_nuance(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),

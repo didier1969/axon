@@ -420,6 +420,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_acyclic_audit",
+                "description": "[SOLL] REQ-AXO-91492 — enumerate strongly-connected components (size>1) and self-loops in the SOLL intentional graph for one project. Pre-requisite for activating the DEC-AXO-098 cycle validator on `soll_manager(action=link)`. Read-only ; no mutation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Required." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "job_status",
                 "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`. REQ-AXO-146: pass `wait: true` to block until terminal (completed|failed) or `timeout_ms` elapses, eliminating polling round-trips.",
                 "inputSchema": {

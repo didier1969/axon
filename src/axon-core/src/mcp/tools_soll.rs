@@ -15,6 +15,7 @@ use crate::project_meta::{
 };
 
 mod completeness;
+mod cycle_audit;
 mod docs;
 mod document_intent;
 mod evidence;
