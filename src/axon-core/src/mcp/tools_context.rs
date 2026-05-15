@@ -1711,23 +1711,20 @@ impl McpServer {
         if file_paths.is_empty() {
             return Vec::new();
         }
-        // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
-        // empty/dropped — return no bindings gracefully (the candidate set
-        // simply lacks file→symbol enrichment until an AGE Cypher equivalent
-        // lands). Other context surfaces (vector retrieve, query) keep working.
-        if self.graph_store.skip_legacy_relations() {
-            return Vec::new();
-        }
+        // REQ-AXO-299 / MIL-AXO-017 slice 5 : CONTAINS legacy table superseded
+        // by public.Edge (REQ-AXO-295) with relation_type='contains'. A3
+        // dual-writes the relation since REQ-AXO-297 slice 3.
         let values = file_paths
             .iter()
             .map(|path| format!("'{}'", Self::escape_sql(path)))
             .collect::<Vec<_>>()
             .join(", ");
         let query = format!(
-            "SELECT c.target_id, c.source_id \
-             FROM CONTAINS c \
-             WHERE c.source_id IN ({values}){project_filter}",
-            project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]),
+            "SELECT target_id, source_id \
+             FROM public.Edge \
+             WHERE relation_type = 'contains' \
+               AND source_id IN ({values}){project_filter}",
+            project_filter = Self::sql_project_filter_for_fields(project, &["project_code"]),
         );
         let raw = self
             .graph_store
