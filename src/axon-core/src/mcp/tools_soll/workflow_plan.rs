@@ -36,6 +36,65 @@ impl McpServer {
             }
         };
 
+        // MIL-AXO-020 slice 2 (REQ-AXO-91542) — reject plan items carrying
+        // an explicit `id`. Server allocates canonical ids via
+        // soll.allocate_node_id; logical_key is the right idempotence
+        // mechanism. Visions are exempt because `axon_init_project`
+        // restore flows may legitimately re-insert a known VIS id.
+        if let Some(plan) = args.get("plan").and_then(|v| v.as_object()) {
+            for (collection, items) in plan {
+                if collection == "visions" {
+                    continue;
+                }
+                if let Some(arr) = items.as_array() {
+                    for (index, item) in arr.iter().enumerate() {
+                        let supplied_id = item
+                            .as_object()
+                            .and_then(|obj| obj.get("id"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty());
+                        if let Some(id) = supplied_id {
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "soll_apply_plan rejected: plan.{}[{}] carries explicit id `{}`. Use logical_key for idempotence; the server allocates canonical ids.",
+                                        collection, index, id
+                                    )
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "input_invalid",
+                                    "operator_guidance": {
+                                        "problem_class": "id_field_forbidden",
+                                        "likely_cause": "caller_provided_id_in_plan",
+                                        "follow_up_tools": ["soll_apply_plan"],
+                                        "confidence": "high",
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_apply_plan",
+                                        "category": "id_field_forbidden",
+                                        "invalid_field": format!("plan.{}[{}].id", collection, index),
+                                        "supplied_value": id,
+                                        "accepted_fields": [
+                                            "logical_key",
+                                            "title",
+                                            "description",
+                                            "status",
+                                            "metadata"
+                                        ],
+                                        "hint": "remove the id field; supply logical_key + title and the server returns the allocated id in the result_contract entry",
+                                        "follow_up_tools": ["soll_apply_plan"],
+                                    },
+                                    "canonical_source": "MIL-AXO-020",
+                                },
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
         let operations = self.build_plan_operations(&canonical_project_code, args);
         let preview_id = if let Some(reserved_preview_id) = args
             .get("reserved_preview_id")

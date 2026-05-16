@@ -101,7 +101,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Create/update/link intent entities. Server assigns canonical IDs. Requires: action, entity, data.",
+                "description": "[SOLL] Create/update/link intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -109,7 +109,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "The target entity type." },
                         "data": {
                             "type": "object",
-                            "description": "JSON data. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) with `project_code`; server assigns canonical ID `TYPE-CODE-NNN`.\n- update (canonical id required, status/desc/etc).\n- link (canonical source_id, target_id)."
+                            "description": "JSON data. \n- create: provide `project_code` (+ `attach_to` and `relation_type` once slice 3 lands) only; the server allocates the canonical id `TYPE-CODE-NNN` via soll.allocate_node_id and returns it in the response.\n- update: canonical `id` required, plus the fields being modified (status/title/description/metadata/...).\n- link: canonical `source_id` + `target_id` + `relation_type` (e.g. REFINES, SOLVES, BELONGS_TO, EPITOMIZES, SUPERSEDES). See `soll_relation_schema` for the canonical pair table."
                         }
                     },
                     "required": ["action", "entity", "data"]

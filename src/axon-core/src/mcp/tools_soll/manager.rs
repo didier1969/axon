@@ -237,6 +237,77 @@ impl McpServer {
                     }
                 };
 
+                // MIL-AXO-020 slice 2 (REQ-AXO-91542) — LLM contract scrub.
+                // id is server-allocated via soll.allocate_node_id (slice 1).
+                // Caller-provided `data.id` / `args.reserved_id` is rejected
+                // BEFORE project_code resolution so the LLM gets a recoverable
+                // envelope without burning a Registry counter bump. Test
+                // fixtures may opt in to the legacy reserved_id flow via
+                // `AXON_ALLOW_RESERVED_ID=1`; production never sets it.
+                let allow_reserved_id =
+                    std::env::var("AXON_ALLOW_RESERVED_ID").ok().as_deref() == Some("1");
+                let caller_id = data
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let caller_reserved_id = args
+                    .get("reserved_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                if caller_id.is_some() || (caller_reserved_id.is_some() && !allow_reserved_id) {
+                    let supplied = caller_id.or(caller_reserved_id).unwrap_or("");
+                    let invalid_field = if caller_id.is_some() {
+                        "data.id"
+                    } else {
+                        "reserved_id"
+                    };
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Cannot create with caller-provided id `{}`. Server allocates canonical ids via soll.allocate_node_id; provide `type` + `project_code` only.",
+                                supplied
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "operator_guidance": {
+                                "problem_class": "id_field_forbidden",
+                                "likely_cause": "caller_provided_id",
+                                "follow_up_tools": ["soll_manager"],
+                                "confidence": "high",
+                            },
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "id_field_forbidden",
+                                "invalid_field": invalid_field,
+                                "supplied_value": supplied,
+                                "accepted_fields": [
+                                    "project_code",
+                                    "title",
+                                    "description",
+                                    "status",
+                                    "metadata",
+                                    "attach_to",
+                                    "relation_type",
+                                    "priority",
+                                    "owner",
+                                    "rationale",
+                                    "acceptance_criteria",
+                                    "evidence_refs",
+                                    "context",
+                                    "goal",
+                                    "result"
+                                ],
+                                "hint": "remove the id field and retry; server returns the allocated canonical id in the response",
+                                "follow_up_tools": ["soll_manager"],
+                            },
+                            "canonical_source": "MIL-AXO-020",
+                        },
+                    }));
+                }
+
                 let project_code_raw = args
                     .get("project_code")
                     .and_then(|v| v.as_str())
