@@ -322,6 +322,174 @@ pub fn generate_global_schema() -> Vec<String> {
     // Append the multi-project IST layer (CPT-AXO-039 superseded by
     // multi-project tables, 2026-05-08).
     stmts.extend(ist_ddl_global());
+    // MIL-AXO-020 — append canonical DDL loaded from db/ddl/*.sql so
+    // any object that lives only there (e.g. soll.allocate_node_id,
+    // graph functions, NOTIFY triggers) is provisioned on every fresh
+    // bootstrap. Idempotent: CREATE OR REPLACE / IF NOT EXISTS allow
+    // both paths to coexist while the Rust hard-coded DDL is gradually
+    // deprecated towards a single source-of-truth in db/ddl/.
+    stmts.extend(load_canonical_ddl_files());
+    stmts
+}
+
+/// MIL-AXO-020 — canonical DDL files compiled into the binary via
+/// `include_str!`. Each file is split into top-level statements,
+/// respecting `$tag$ … $tag$` dollar-quoted regions used by PL/pgSQL
+/// function bodies and DO blocks. The split is whitespace-trimmed; an
+/// empty trailing statement is silently dropped.
+///
+/// File order matches numeric prefix (00 → 05) so dependencies resolve
+/// in the same order as `./scripts/start.sh` applies them at runtime.
+pub fn load_canonical_ddl_files() -> Vec<String> {
+    const FILES: &[(&str, &str)] = &[
+        ("00_extensions.sql", include_str!("../../../../db/ddl/00_extensions.sql")),
+        ("01_soll_schema.sql", include_str!("../../../../db/ddl/01_soll_schema.sql")),
+        ("02_axon_runtime.sql", include_str!("../../../../db/ddl/02_axon_runtime.sql")),
+        ("03_ist_schema.sql", include_str!("../../../../db/ddl/03_ist_schema.sql")),
+        ("04_graph_functions.sql", include_str!("../../../../db/ddl/04_graph_functions.sql")),
+        ("05_ist_notify.sql", include_str!("../../../../db/ddl/05_ist_notify.sql")),
+    ];
+    let mut stmts = Vec::new();
+    for (_name, body) in FILES {
+        stmts.extend(split_top_level_statements(body));
+    }
+    stmts
+}
+
+/// Split a multi-statement SQL script on top-level `;` while respecting
+/// PostgreSQL dollar-quoted regions (`$tag$…$tag$`, `$$…$$`) and single-
+/// quoted strings (with `''` escape). Line comments (`--`) and block
+/// comments (`/* … */`) inside the SQL are preserved verbatim — they
+/// just don't get split apart from their surrounding statement.
+pub(crate) fn split_top_level_statements(input: &str) -> Vec<String> {
+    let mut stmts = Vec::new();
+    let mut current = String::new();
+    let bytes: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut dollar_tag: Option<String> = None;
+
+    while i < bytes.len() {
+        let c = bytes[i];
+
+        if in_line_comment {
+            current.push(c);
+            if c == '\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            current.push(c);
+            if c == '*' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
+                current.push(bytes[i + 1]);
+                i += 2;
+                in_block_comment = false;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(tag) = &dollar_tag {
+            current.push(c);
+            if c == '$' {
+                let needed: Vec<char> = tag.chars().chain(std::iter::once('$')).collect();
+                if i + needed.len() < bytes.len() && bytes[i + 1..=i + needed.len()] == needed[..] {
+                    for j in 1..=needed.len() {
+                        current.push(bytes[i + j]);
+                    }
+                    i += needed.len() + 1;
+                    dollar_tag = None;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if in_single_quote {
+            current.push(c);
+            if c == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == '\'' {
+                    current.push(bytes[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Not inside any quoted / commented region.
+        if c == '-' && i + 1 < bytes.len() && bytes[i + 1] == '-' {
+            in_line_comment = true;
+            current.push(c);
+            current.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '*' {
+            in_block_comment = true;
+            current.push(c);
+            current.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '\'' {
+            in_single_quote = true;
+            current.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '$' {
+            // Detect $tag$ where tag matches [A-Za-z_][A-Za-z0-9_]* or is empty.
+            let mut j = i + 1;
+            while j < bytes.len() {
+                let nc = bytes[j];
+                if nc == '$' {
+                    let tag: String = bytes[i + 1..j].iter().collect();
+                    for k in i..=j {
+                        current.push(bytes[k]);
+                    }
+                    i = j + 1;
+                    dollar_tag = Some(tag);
+                    break;
+                }
+                if !(nc.is_ascii_alphanumeric() || nc == '_') {
+                    // Not a dollar-quote start; treat the leading `$` as a literal.
+                    current.push(c);
+                    i += 1;
+                    break;
+                }
+                j += 1;
+            }
+            if dollar_tag.is_none() && i < bytes.len() && bytes[i] == c {
+                // Loop exited without consuming — fall back to literal `$`.
+                current.push(c);
+                i += 1;
+            }
+            continue;
+        }
+        if c == ';' {
+            let stmt = current.trim().to_string();
+            if !stmt.is_empty() {
+                stmts.push(stmt);
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+        current.push(c);
+        i += 1;
+    }
+
+    let trailing = current.trim().to_string();
+    if !trailing.is_empty() {
+        stmts.push(trailing);
+    }
     stmts
 }
 

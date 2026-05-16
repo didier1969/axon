@@ -41,21 +41,57 @@ impl McpServer {
     ) -> anyhow::Result<(String, String, &'static str, u64)> {
         let (canonical_code, project_code) =
             self.resolve_canonical_project_identity_for_mutation(project_code)?;
-        let (prefix, reg_col, table, id_expr) = match kind {
-            "vision" => ("VIS", "last_vis", "soll.Node", "id"),
-            "pillar" => ("PIL", "last_pil", "soll.Node", "id"),
-            "requirement" => ("REQ", "last_req", "soll.Node", "id"),
-            "concept" => ("CPT", "last_cpt", "soll.Node", "id"),
-            "decision" => ("DEC", "last_dec", "soll.Node", "id"),
-            "milestone" => ("MIL", "last_mil", "soll.Node", "id"),
-            "validation" => ("VAL", "last_val", "soll.Node", "id"),
-            "stakeholder" => ("STK", "last_stk", "soll.Node", "id"),
-            "guideline" => ("GUI", "last_gui", "soll.Node", "id"),
-            "preview" => ("PRV", "last_prv", "soll.RevisionPreview", "preview_id"),
-            "revision" => ("REV", "last_rev", "soll.Revision", "revision_id"),
+        let (prefix, reg_col, node_type) = match kind {
+            "vision" => ("VIS", "last_vis", Some("Vision")),
+            "pillar" => ("PIL", "last_pil", Some("Pillar")),
+            "requirement" => ("REQ", "last_req", Some("Requirement")),
+            "concept" => ("CPT", "last_cpt", Some("Concept")),
+            "decision" => ("DEC", "last_dec", Some("Decision")),
+            "milestone" => ("MIL", "last_mil", Some("Milestone")),
+            "validation" => ("VAL", "last_val", Some("Validation")),
+            "stakeholder" => ("STK", "last_stk", Some("Stakeholder")),
+            "guideline" => ("GUI", "last_gui", Some("Guideline")),
+            "preview" => ("PRV", "last_prv", None),
+            "revision" => ("REV", "last_rev", None),
             _ => return Err(anyhow!("Unknown id kind")),
         };
 
+        // MIL-AXO-020 slice 1 — PG fast path. The DDL function ensures
+        // atomic per-(type, project_code) increment in a single round
+        // trip and surfaces unregistered-project errors via RAISE.
+        if let (true, Some(node_type)) = (self.graph_store.is_postgres_backend(), node_type) {
+            let allocated = self
+                .graph_store
+                .query_json_param(
+                    "SELECT soll.allocate_node_id($1, $2)",
+                    &json!([node_type, canonical_code]),
+                )
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("project_code_not_registered") {
+                        anyhow!("project_code_not_registered:{}", canonical_code)
+                    } else {
+                        anyhow!("allocate_node_id failed: {}", msg)
+                    }
+                })?;
+            let rows: Vec<Vec<String>> = serde_json::from_str(&allocated).unwrap_or_default();
+            let id_str = rows
+                .into_iter()
+                .next()
+                .and_then(|r| r.into_iter().next())
+                .ok_or_else(|| anyhow!("allocate_node_id returned no row"))?;
+            let next = id_str
+                .rsplit('-')
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .ok_or_else(|| anyhow!("allocate_node_id returned non-numeric suffix: {id_str}"))?;
+            return Ok((canonical_code, project_code, prefix, next));
+        }
+
+        // Legacy backend fallback: kept for test fixtures that exercise
+        // the in-process plugin. The race window (SELECT then UPDATE) is
+        // tolerable for single-threaded tests but unsafe in production —
+        // hence the PG branch above is canonical.
         self.graph_store.execute_param(
             "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
              VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_code) DO NOTHING",
@@ -74,8 +110,6 @@ impl McpServer {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
 
-        // DEC-AXO-085: counter = soll.Registry, single source of truth.
-        let _ = (table, id_expr);
         let next = current + 1;
         self.graph_store.execute(&format!(
             "UPDATE soll.Registry SET {} = {} WHERE project_code = '{}'",

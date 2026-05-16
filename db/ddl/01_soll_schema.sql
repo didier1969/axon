@@ -262,3 +262,72 @@ CREATE INDEX IF NOT EXISTS soll_traceability_artifact_idx
     ON soll.Traceability (artifact_ref);
 
 -- pg_trgm is created in 00_extensions.sql (loaded first).
+
+-- ── MIL-AXO-020 slice 1 — LLM-blind allocation + id-segment trigger ──
+-- Atomic per-(type, project_code) counter, single round-trip. Supersedes
+-- the read-modify-write SELECT/UPDATE pair in storage.rs that allowed
+-- concurrent callers to read the same value. Ensures the Registry row
+-- exists, bumps the type-specific column, and returns the canonical id.
+CREATE OR REPLACE FUNCTION soll.allocate_node_id(
+    p_type TEXT,
+    p_project_code TEXT
+) RETURNS TEXT LANGUAGE plpgsql AS $allocate_node_id$
+DECLARE
+    v_prefix TEXT;
+    v_col    TEXT;
+    v_next   BIGINT;
+BEGIN
+    v_prefix := CASE p_type
+        WHEN 'Vision'      THEN 'VIS'
+        WHEN 'Pillar'      THEN 'PIL'
+        WHEN 'Requirement' THEN 'REQ'
+        WHEN 'Concept'     THEN 'CPT'
+        WHEN 'Decision'    THEN 'DEC'
+        WHEN 'Milestone'   THEN 'MIL'
+        WHEN 'Validation'  THEN 'VAL'
+        WHEN 'Stakeholder' THEN 'STK'
+        WHEN 'Guideline'   THEN 'GUI'
+        ELSE NULL
+    END;
+    IF v_prefix IS NULL THEN
+        RAISE EXCEPTION 'unknown_node_type:%', p_type;
+    END IF;
+    v_col := 'last_' || lower(v_prefix);
+
+    INSERT INTO soll.Registry (project_code, id)
+    VALUES (p_project_code, 'AXON_GLOBAL')
+    ON CONFLICT (project_code) DO NOTHING;
+
+    EXECUTE format(
+        'UPDATE soll.Registry SET %I = %I + 1 WHERE project_code = $1 RETURNING %I',
+        v_col, v_col, v_col
+    ) INTO v_next USING p_project_code;
+    IF v_next IS NULL THEN
+        RAISE EXCEPTION 'project_code_not_registered:%', p_project_code;
+    END IF;
+
+    RETURN format('%s-%s-%s', v_prefix, p_project_code,
+                  lpad(v_next::TEXT, 3, '0'));
+END
+$allocate_node_id$;
+
+-- Defense-in-depth: any INSERT into soll.Node whose id-segment does not
+-- match the row's project_code is rejected. Brain enforces the LLM
+-- contract first (slice 2) — this trigger catches admin/direct-SQL
+-- bypasses. NOT VALID style: existing legacy rows are not re-checked.
+CREATE OR REPLACE FUNCTION soll.reject_id_project_mismatch()
+RETURNS TRIGGER LANGUAGE plpgsql AS $reject_id_project_mismatch$
+BEGIN
+    IF split_part(NEW.id, '-', 2) <> NEW.project_code THEN
+        RAISE EXCEPTION
+            'id_project_mismatch: id=% project_code=%',
+            NEW.id, NEW.project_code;
+    END IF;
+    RETURN NEW;
+END
+$reject_id_project_mismatch$;
+
+DROP TRIGGER IF EXISTS soll_node_id_segment_check ON soll.Node;
+CREATE TRIGGER soll_node_id_segment_check
+    BEFORE INSERT ON soll.Node
+    FOR EACH ROW EXECUTE FUNCTION soll.reject_id_project_mismatch();

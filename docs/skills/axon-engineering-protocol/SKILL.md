@@ -45,9 +45,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 ## SOLL writes
 
 - `soll_apply_plan` — batch (`dry_run=true`, `logical_key`, `author`) ; `soll_commit_revision` checkpoint per `preview_id`.
-- `soll_manager create|update|link` — single op ; contract details (id_exists, registry seeding, default `status=planned`, validation `result` precedence) : REQ-AXO-323.
-- `document_intent` — canonical for "documente" / "save observation" (REQ-AXO-141).
-- `soll_attach_evidence` — artifact needs `path` or alias `artifact_ref` / `file_path` / `uri`.
+- `soll_manager create|update|link` — single op ; contract details (id_exists, registry seeding, default `status=planned`, validation `result` precedence) : REQ-AXO-323. **MIL-AXO-020** (in flight) : id is DB-allocated via `soll.allocate_node_id(type, project_code)` ; caller-provided `id`/`reserved_id` rejected. `create` (non-Vision) requires `attach_to`+`relation_type` ; Vision creation forbidden outside `axon_init_project`. `link` enforces cycle-free filiation + SUPERSEDES auto-flip status.
 
 Snapshot / async / `soll_work_plan` scoring → `references/graphrag-and-soll-internals.md`.
 
