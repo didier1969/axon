@@ -1029,13 +1029,7 @@ impl McpServer {
                             "VERIFIES",
                         ];
                         if FILIATION.contains(&relation_type) {
-                            let cycle_query = "WITH RECURSIVE ancestors(reachable) AS (\
-                                SELECT target_id FROM soll.Edge WHERE source_id = ? \
-                                  AND relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')\
-                                UNION\
-                                SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable \
-                                  WHERE e.relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')\
-                            ) SELECT COUNT(*) FROM ancestors WHERE reachable = ?";
+                            let cycle_query = "WITH RECURSIVE ancestors(reachable) AS (SELECT target_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES') UNION SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable WHERE e.relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')) SELECT COUNT(*) FROM ancestors WHERE reachable = ?";
                             let cycle_hit = self
                                 .graph_store
                                 .query_count_param(cycle_query, &json!([tgt, src]))
@@ -1167,17 +1161,7 @@ impl McpServer {
                             let target_project = project_code_from_canonical_entity_id(src)
                                 .or_else(|| project_code_from_canonical_entity_id(tgt))
                                 .unwrap_or_default();
-                            let cte = "WITH \
-                                inserted AS (\
-                                    INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
-                                    VALUES (?, ?, 'SUPERSEDES', ?) \
-                                    ON CONFLICT (source_id, target_id, relation_type) DO NOTHING \
-                                    RETURNING source_id\
-                                ), \
-                                src_flip AS (\
-                                    UPDATE soll.Node SET status = 'current' WHERE id = ? RETURNING id\
-                                ) \
-                                UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
+                            let cte = "WITH inserted AS (INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, 'SUPERSEDES', ?) ON CONFLICT (source_id, target_id, relation_type) DO NOTHING RETURNING source_id), src_flip AS (UPDATE soll.Node SET status = 'current' WHERE id = ? RETURNING id) UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
                             let exec = self.graph_store.execute_param(
                                 cte,
                                 &json!([src, tgt, target_project, src, tgt]),
