@@ -1,5 +1,29 @@
 use super::*;
 
+/// REQ-AXO-323 Fault 4 — `soll_manager.create` defaulted `status=''` when
+/// the caller omitted the field, which violated the `soll_node_status_canonical`
+/// CHECK and surfaced a cryptic DB error. This helper resolves the effective
+/// status from the caller's `data` payload : empty / missing → `planned`
+/// (canonical inception status per DEC-PRO-100). For `validation` entities,
+/// the `result` field takes precedence over `status` (existing behavior preserved).
+fn resolve_create_status<'a>(
+    supplied_status: Option<&'a str>,
+    entity: &str,
+    validation_result: Option<&'a str>,
+) -> &'a str {
+    let supplied = supplied_status.unwrap_or("");
+    let candidate = if entity == "validation" {
+        validation_result.unwrap_or(supplied)
+    } else {
+        supplied
+    };
+    if candidate.is_empty() {
+        "planned"
+    } else {
+        candidate
+    }
+}
+
 /// REQ-AXO-323 Fault 2 — `create` MUST NOT silently overwrite an existing
 /// id. Build a canonical error envelope when a pre-check finds the node
 /// already exists. Extracted as a pure formatter so the contract is unit
@@ -316,14 +340,16 @@ impl McpServer {
                     .or_else(|| data.get("explanation"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                let status = if entity == "validation" {
-                    data.get("result")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(status)
-                } else {
-                    status
-                };
+                // REQ-AXO-323 Fault 4 — empty `status` previously bubbled
+                // up to the DB CHECK constraint as a cryptic error. Resolve
+                // the effective status via `resolve_create_status` : empty
+                // / omitted → `planned`. Validation entities keep their
+                // `result`-field precedence (handled inside the helper).
+                let status = resolve_create_status(
+                    data.get("status").and_then(|v| v.as_str()),
+                    entity,
+                    data.get("result").and_then(|v| v.as_str()),
+                );
 
                 // REQ-AXO-325 — server-side validation of `status` against canonical
                 // vocabulary (DEC-PRO-100). Mirror the entity-rejection envelope
@@ -838,7 +864,79 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::id_exists_envelope;
+    use super::{id_exists_envelope, resolve_create_status};
+
+    // REQ-AXO-323 Fault 4 — default status resolution.
+
+    #[test]
+    fn resolve_create_status_defaults_to_planned_when_omitted() {
+        assert_eq!(resolve_create_status(None, "requirement", None), "planned");
+    }
+
+    #[test]
+    fn resolve_create_status_defaults_to_planned_when_empty_string() {
+        assert_eq!(resolve_create_status(Some(""), "concept", None), "planned");
+    }
+
+    #[test]
+    fn resolve_create_status_returns_supplied_canonical_value() {
+        assert_eq!(
+            resolve_create_status(Some("current"), "requirement", None),
+            "current"
+        );
+        assert_eq!(
+            resolve_create_status(Some("delivered"), "decision", None),
+            "delivered"
+        );
+    }
+
+    #[test]
+    fn resolve_create_status_preserves_non_canonical_for_downstream_validator() {
+        // `in_progress` is rejected later by the canonical-vocabulary
+        // validator (DEC-PRO-100). The defaulter must NOT silently rewrite
+        // it to `planned` ; the LLM contract relies on the validator
+        // surfacing the structured `parameter_repair` envelope.
+        assert_eq!(
+            resolve_create_status(Some("in_progress"), "requirement", None),
+            "in_progress"
+        );
+    }
+
+    #[test]
+    fn resolve_create_status_validation_prefers_result_field() {
+        assert_eq!(
+            resolve_create_status(None, "validation", Some("delivered")),
+            "delivered"
+        );
+    }
+
+    #[test]
+    fn resolve_create_status_validation_falls_back_to_supplied_when_no_result() {
+        assert_eq!(
+            resolve_create_status(Some("current"), "validation", None),
+            "current"
+        );
+    }
+
+    #[test]
+    fn resolve_create_status_validation_defaults_when_all_empty() {
+        assert_eq!(resolve_create_status(None, "validation", None), "planned");
+        assert_eq!(
+            resolve_create_status(Some(""), "validation", Some("")),
+            "planned"
+        );
+    }
+
+    #[test]
+    fn resolve_create_status_validation_empty_result_falls_through_to_supplied() {
+        // unwrap_or only kicks in when the Option is None ; an explicit
+        // Some("") returns "" and the defaulter then kicks the empty
+        // candidate to "planned". This documents that contract.
+        assert_eq!(
+            resolve_create_status(Some("current"), "validation", Some("")),
+            "planned"
+        );
+    }
 
     #[test]
     fn id_exists_envelope_returns_canonical_error_shape() {
