@@ -308,6 +308,41 @@ impl McpServer {
                     }));
                 }
 
+                // MIL-AXO-020 slice 3 (REQ-AXO-91543) — Vision creation is
+                // reserved for axon_init_project. Reject here before any
+                // Registry counter bump so the operator gets a clean
+                // recovery hint without burning state.
+                if entity == "vision" {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "soll_manager cannot create a Vision. Visions are seeded by axon_init_project at project registration."
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "operator_guidance": {
+                                "problem_class": "vision_creation_forbidden",
+                                "follow_up_tools": ["axon_init_project"],
+                                "confidence": "high",
+                            },
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "vision_creation_forbidden",
+                                "invalid_field": "entity",
+                                "supplied_value": "vision",
+                                "accepted_values": [
+                                    "pillar", "requirement", "concept", "decision",
+                                    "milestone", "validation", "stakeholder", "guideline"
+                                ],
+                                "hint": "to register a new project with its Vision, call axon_init_project; for downstream entities, choose another entity type",
+                                "follow_up_tools": ["axon_init_project"],
+                            },
+                            "canonical_source": "MIL-AXO-020",
+                        },
+                    }));
+                }
+
                 let project_code_raw = args
                     .get("project_code")
                     .and_then(|v| v.as_str())
@@ -524,118 +559,244 @@ impl McpServer {
 
                 meta["updated_at"] = json!(now_unix_ms());
 
-                // REQ-AXO-323 Fault 2 — pre-check existence. `create` must
-                // return id_exists error rather than silently overwrite.
-                // Two-step (SELECT + INSERT DO NOTHING) is intentional:
-                // the SELECT gives a deterministic error envelope before
-                // the write, and DO NOTHING is the defensive race-guard
-                // for concurrent creates landing between the two queries.
-                let existence = self.graph_store.query_count_param(
-                    "SELECT COUNT(*) FROM soll.Node WHERE id = ?",
-                    &json!([formatted_id.clone()]),
-                );
-                if existence.unwrap_or(0) > 0 {
-                    return Some(id_exists_envelope(&formatted_id, entity_type_cap));
+                // MIL-AXO-020 slice 3 (REQ-AXO-91543) — atomic create+attach.
+                // attach_to + relation_type are REQUIRED for every entity
+                // (Vision was rejected above). The node + edge land in a
+                // single CTE so neither survives in isolation on failure.
+                let attach_to = data
+                    .get("attach_to")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+                let relation_type_raw = data
+                    .get("relation_type")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| data.get("relation_hint").and_then(|v| v.as_str()))
+                    .filter(|s| !s.trim().is_empty());
+
+                let (attach_to, relation_type) = match (attach_to, relation_type_raw) {
+                    (Some(a), Some(r)) => (a, r.to_uppercase()),
+                    (missing_attach, _) => {
+                        let missing_field = if missing_attach.is_none() {
+                            "attach_to"
+                        } else {
+                            "relation_type"
+                        };
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "soll_manager create requires `{}`. Every non-Vision node must attach to a canonical parent in the same transaction (MIL-AXO-020).",
+                                    missing_field
+                                )
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "operator_guidance": {
+                                    "problem_class": "attach_required",
+                                    "follow_up_tools": ["soll_relation_schema", "soll_query_context"],
+                                    "confidence": "high",
+                                },
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "attach_required",
+                                    "invalid_field": format!("data.{}", missing_field),
+                                    "required_fields": ["attach_to", "relation_type"],
+                                    "hint": "supply canonical parent id and the relation type (e.g. REQ→PIL=BELONGS_TO, CPT→REQ=EXPLAINS, DEC→REQ=SOLVES, MIL→REQ=TARGETS, VAL→REQ=VERIFIES, GUI→PIL=BELONGS_TO). Use soll_relation_schema source_id=<your_type>-... for the full table.",
+                                    "follow_up_tools": ["soll_relation_schema"],
+                                },
+                                "canonical_source": "MIL-AXO-020",
+                            },
+                        }));
+                    }
+                };
+
+                // Validate target existence first so the operator gets a
+                // precise envelope instead of a downstream DB error.
+                let target_count = self
+                    .graph_store
+                    .query_count_param(
+                        "SELECT COUNT(*) FROM soll.Node WHERE id = ?",
+                        &json!([attach_to]),
+                    )
+                    .unwrap_or(0);
+                if target_count == 0 {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "attach_to `{}` does not exist. Cannot create `{}` without a valid parent.",
+                                attach_to, entity_type_cap
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "operator_guidance": {
+                                "problem_class": "attach_target_not_found",
+                                "follow_up_tools": ["soll_query_context", "query"],
+                                "confidence": "high",
+                            },
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "attach_target_not_found",
+                                "invalid_field": "data.attach_to",
+                                "supplied_value": attach_to,
+                                "hint": "verify the parent id via `soll_query_context project_code=<code>` or `sql SELECT id FROM soll.Node WHERE id = '<id>'`",
+                                "follow_up_tools": ["soll_query_context"],
+                            },
+                            "canonical_source": "MIL-AXO-020",
+                        },
+                    }));
                 }
 
-                let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING";
-                let attach_to = data.get("attach_to").and_then(|v| v.as_str());
-                let relation_hint = data.get("relation_hint").and_then(|v| v.as_str());
+                // Validate (source_type, relation_type, target_type) per
+                // the canonical relation_policy table.
+                let source_prefix = match entity_type_cap {
+                    "Vision" => "VIS",
+                    "Pillar" => "PIL",
+                    "Requirement" => "REQ",
+                    "Concept" => "CPT",
+                    "Decision" => "DEC",
+                    "Milestone" => "MIL",
+                    "Validation" => "VAL",
+                    "Stakeholder" => "STK",
+                    "Guideline" => "GUI",
+                    other => other,
+                };
+                let target_prefix: String =
+                    attach_to.split('-').next().unwrap_or("").to_string();
+                let policy = relation_policy_for_pair(source_prefix, &target_prefix);
+                match &policy {
+                    Some(p)
+                        if p.allowed
+                            .iter()
+                            .any(|allowed| *allowed == relation_type.as_str()) => {}
+                    _ => {
+                        let allowed: Vec<&str> = policy
+                            .as_ref()
+                            .map(|p| p.allowed.to_vec())
+                            .unwrap_or_default();
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "relation_type `{}` is not canonical for {} → {}. Allowed: {:?}.",
+                                    relation_type, source_prefix, target_prefix, allowed
+                                )
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "operator_guidance": {
+                                    "problem_class": "forbidden_relation_for_type",
+                                    "follow_up_tools": ["soll_relation_schema"],
+                                    "confidence": "high",
+                                },
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "forbidden_relation_for_type",
+                                    "invalid_field": "data.relation_type",
+                                    "supplied_value": relation_type,
+                                    "accepted_values": allowed,
+                                    "source_type": source_prefix,
+                                    "target_type": target_prefix,
+                                    "hint": "pick an allowed relation_type for this (source_type, target_type) pair, or change attach_to to a target whose type fits your relation",
+                                    "follow_up_tools": ["soll_relation_schema"],
+                                },
+                                "canonical_source": "MIL-AXO-020",
+                            },
+                        }));
+                    }
+                }
 
-                let insert_res = self.graph_store.execute_param(
-                    q,
-                    &json!([
-                        formatted_id,
-                        entity_type_cap,
-                        canonical_code,
-                        title,
-                        description,
-                        status,
-                        meta.to_string()
-                    ]),
-                );
+                // Atomic INSERT node + INSERT edge. PG: single CTE so the
+                // node never survives a failed edge insert. Non-PG test
+                // backends: sequential with a best-effort rollback of the
+                // node if the edge insert fails (REQ-AXO-254 documents
+                // why BEGIN/COMMIT is not safe under the PG deadpool).
+                let cte_sql = "WITH new_node AS (\
+                    INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                    VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
+                    RETURNING id\
+                ) \
+                INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                SELECT new_node.id, ?, ?, ? FROM new_node";
+                let fallback_node_sql = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
+                let fallback_edge_sql = "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, ?, ?)";
+
+                let insert_res = if self.graph_store.is_postgres_backend() {
+                    self.graph_store.execute_param(
+                        cte_sql,
+                        &json!([
+                            formatted_id,
+                            entity_type_cap,
+                            canonical_code,
+                            title,
+                            description,
+                            status,
+                            meta.to_string(),
+                            attach_to,
+                            relation_type,
+                            canonical_code
+                        ]),
+                    )
+                } else {
+                    let node_res = self.graph_store.execute_param(
+                        fallback_node_sql,
+                        &json!([
+                            formatted_id,
+                            entity_type_cap,
+                            canonical_code,
+                            title,
+                            description,
+                            status,
+                            meta.to_string()
+                        ]),
+                    );
+                    match node_res {
+                        Ok(()) => {
+                            let edge_res = self.graph_store.execute_param(
+                                fallback_edge_sql,
+                                &json!([
+                                    formatted_id,
+                                    attach_to,
+                                    relation_type,
+                                    canonical_code
+                                ]),
+                            );
+                            if let Err(edge_err) = edge_res {
+                                let _ = self.graph_store.execute_param(
+                                    "DELETE FROM soll.Node WHERE id = ?",
+                                    &json!([formatted_id]),
+                                );
+                                Err(edge_err)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                };
 
                 match insert_res {
-                    Ok(_) => {
+                    Ok(()) => {
                         let created_id = formatted_id.clone();
-                        let mut report = format!("SOLL entity created: `{}`", created_id);
+                        let report = format!(
+                            "SOLL entity created: `{}`\nCanonical link applied: `{}` -> `{}` via `{}`",
+                            created_id, created_id, attach_to, relation_type
+                        );
                         let mut response_data = json!({
                             "created_id": created_id,
                             "entity_type": entity_type_cap,
                             "project_code": canonical_code,
                             "canonical_next_links": self.canonical_next_link_hints(entity_type_cap),
-                            "attach_attempted": attach_to.is_some(),
-                            "attached": false,
-                            "attached_to": attach_to.map(Value::from).unwrap_or(Value::Null),
-                            "applied_relation": Value::Null,
-                            "attach_status": if attach_to.is_some() { Value::from("not_attempted") } else { Value::Null }
+                            "attach_attempted": true,
+                            "attached": true,
+                            "attached_to": attach_to,
+                            "applied_relation": relation_type,
+                            "attach_status": "attached"
                         });
-
-                        if let Some(target_id) = attach_to {
-                            match self.select_relation_type_for_link(
-                                &formatted_id,
-                                target_id,
-                                relation_hint,
-                            ) {
-                                Ok((relation_type, policy)) => {
-                                    match self.insert_validated_relation(
-                                        relation_type,
-                                        &formatted_id,
-                                        target_id,
-                                        policy,
-                                    ) {
-                                        Ok(inserted) => {
-                                            response_data["attached"] = Value::from(true);
-                                            response_data["attached_to"] = Value::from(target_id);
-                                            response_data["applied_relation"] =
-                                                Value::from(relation_type);
-                                            response_data["attach_status"] =
-                                                Value::from(if inserted {
-                                                    "attached"
-                                                } else {
-                                                    "already_present"
-                                                });
-                                            report.push_str(&format!(
-                                                "\nCanonical link applied: `{}` -> `{}` via `{}`",
-                                                formatted_id, target_id, relation_type
-                                            ));
-                                        }
-                                        Err(error) => {
-                                            let error_text = error.to_string();
-                                            response_data["attach_status"] = Value::from(
-                                                self.classify_attach_status_from_error(&error_text),
-                                            );
-                                            response_data["attach_guidance"] = self
-                                                .relation_guidance_for_link(
-                                                    &formatted_id,
-                                                    target_id,
-                                                    relation_hint,
-                                                );
-                                            report.push_str(&format!(
-                                                "\nCanonical attach rejected: {}",
-                                                error_text
-                                            ));
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    let error_text = error.to_string();
-                                    response_data["attach_status"] = Value::from(
-                                        self.classify_attach_status_from_error(&error_text),
-                                    );
-                                    response_data["attach_guidance"] = self
-                                        .relation_guidance_for_link(
-                                            &formatted_id,
-                                            target_id,
-                                            relation_hint,
-                                        );
-                                    report.push_str(&format!(
-                                        "\nCanonical attach rejected: {}",
-                                        error_text
-                                    ));
-                                }
-                            }
-                        }
 
                         if let (Some(before), Ok(after)) = (
                             before_snapshot.as_ref(),
@@ -652,7 +813,7 @@ impl McpServer {
                                 json!({
                                     "nodes_created": 1,
                                     "nodes_updated": 0,
-                                    "edges_created": usize::from(response_data["attached"].as_bool().unwrap_or(false))
+                                    "edges_created": 1
                                 }),
                             );
                         }

@@ -45,7 +45,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 ## SOLL writes
 
 - `soll_apply_plan` — batch (`dry_run=true`, `logical_key`, `author`) ; `soll_commit_revision` checkpoint per `preview_id`.
-- `soll_manager create|update|link` — single op ; contract details (id_exists, registry seeding, default `status=planned`, validation `result` precedence) : REQ-AXO-323. **MIL-AXO-020** : id is DB-allocated via `soll.allocate_node_id(type, project_code)` ; caller-provided `data.id`/`reserved_id` rejected with `id_field_forbidden` envelope (also in `soll_apply_plan` plan items, Vision exempt for restore). `create` (non-Vision) will require `attach_to`+`relation_type` (slice 3 in flight) ; Vision creation forbidden outside `axon_init_project`. `link` enforces cycle-free filiation + SUPERSEDES auto-flip status (slice 4 in flight).
+- `soll_manager create|update|link` — single op ; contract details (id_exists, registry seeding, default `status=planned`, validation `result` precedence) : REQ-AXO-323. **MIL-AXO-020** : id is DB-allocated via `soll.allocate_node_id(type, project_code)` ; caller-provided `data.id`/`reserved_id` rejected with `id_field_forbidden`. `create` (non-Vision) requires `attach_to`+`relation_type` ; node + edge land in a single CTE so neither survives in isolation on failure. Vision creation forbidden outside `axon_init_project` (`vision_creation_forbidden`). Envelopes : `attach_required`, `attach_target_not_found`, `forbidden_relation_for_type`. `link` enforces cycle-free filiation + SUPERSEDES auto-flip status (slice 4 in flight).
 
 Snapshot / async / `soll_work_plan` scoring → `references/graphrag-and-soll-internals.md`.
 
