@@ -63,7 +63,7 @@ impl McpServer {
             let allocated = self
                 .graph_store
                 .query_json_param(
-                    "SELECT soll.allocate_node_id($1, $2)",
+                    "SELECT soll.allocate_node_id(?, ?)",
                     &json!([node_type, canonical_code]),
                 )
                 .map_err(|e| {
