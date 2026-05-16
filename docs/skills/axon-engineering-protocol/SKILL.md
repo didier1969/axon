@@ -61,6 +61,12 @@ Snapshot / async / `soll_work_plan` scoring → `references/graphrag-and-soll-in
 | "I'll delete the bad SOLL node and recreate clean" | SOLL is preserve-always (PIL-AXO-003). Use `soll_rollback_revision`. Mass-deletes destroy intent history. |
 | "I'll log a CPT-AXO-025 issue without picking a branch" | REQ-AXO-129 corrupted CPT-AXO-021 exactly this way. Pick 1 / 2 / 3 first. |
 
+## Examples
+
+**Fix a symbol** : `status mode=brief` (verify `freshness:fresh` + `trust:canonical`) → `query symbol=X` → `inspect symbol=X mode=verbose` → `impact symbol=X` → write fix + test → `axon_pre_flight_check diff_paths=[…]` → `git add …` → `axon_commit_work` → verify `git status`.
+
+**Log a contract bug from a surprising MCP result** : pick CPT-AXO-025 branch 2 → `document_intent intent="<one-line>" body="<repro+evidence>" tags=["axon-bug","llm-contract"]` (server classifies as Requirement, assigns canonical id, status defaults to `planned`) → if needed `soll_manager action=link relation_type=REFINES` to umbrella REQ → `soll_attach_evidence` with `path` to repro file.
+
 ## Delivery — one fix = one commit
 
 1. `status mode=brief` → confirm `freshness:fresh` + `trust:canonical`.
