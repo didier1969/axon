@@ -1017,6 +1017,205 @@ impl McpServer {
                 match self.select_relation_type_for_link(src, tgt, explicit_rel) {
                     Ok((relation_type, policy)) => {
                         let rel_table = relation_table_name(relation_type).unwrap_or(relation_type);
+
+                        // MIL-AXO-020 slice 4 (REQ-AXO-91544) — cycle pre-check
+                        // on filiation relations. Activates DEC-AXO-098.
+                        const FILIATION: [&str; 6] = [
+                            "SOLVES",
+                            "BELONGS_TO",
+                            "REFINES",
+                            "TARGETS",
+                            "EXPLAINS",
+                            "VERIFIES",
+                        ];
+                        if FILIATION.contains(&relation_type) {
+                            let cycle_query = "WITH RECURSIVE ancestors(reachable) AS (\
+                                SELECT target_id FROM soll.Edge WHERE source_id = ? \
+                                  AND relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')\
+                                UNION\
+                                SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable \
+                                  WHERE e.relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')\
+                            ) SELECT COUNT(*) FROM ancestors WHERE reachable = ?";
+                            let cycle_hit = self
+                                .graph_store
+                                .query_count_param(cycle_query, &json!([tgt, src]))
+                                .unwrap_or(0);
+                            if cycle_hit > 0 {
+                                return Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!(
+                                            "Link `{}` -{}-> `{}` would create a filiation cycle (target already reaches source).",
+                                            src, relation_type, tgt
+                                        )
+                                    }],
+                                    "isError": true,
+                                    "data": {
+                                        "status": "input_invalid",
+                                        "operator_guidance": {
+                                            "problem_class": "cycle_detected",
+                                            "follow_up_tools": ["soll_acyclic_audit", "soll_query_context"],
+                                            "confidence": "high",
+                                        },
+                                        "parameter_repair": {
+                                            "tool": "soll_manager",
+                                            "category": "cycle_detected",
+                                            "invalid_field": "data.relation_type",
+                                            "source_id": src,
+                                            "target_id": tgt,
+                                            "relation_type": relation_type,
+                                            "hint": "filiation edges form a DAG ; this link would close a cycle. Use SUPERSEDES if you intended a redirect, or restructure the parent chain.",
+                                            "follow_up_tools": ["soll_acyclic_audit"],
+                                        },
+                                        "canonical_source": "DEC-AXO-098",
+                                    },
+                                }));
+                            }
+                        }
+
+                        // MIL-AXO-020 slice 4 — SUPERSEDES auto-flip. Same
+                        // type endpoints, target not already retired, edge +
+                        // status updates land in one CTE so neither survives.
+                        if relation_type == "SUPERSEDES" {
+                            let mut src_type = String::new();
+                            let mut tgt_type = String::new();
+                            let mut tgt_status = String::new();
+                            let raw = self
+                                .graph_store
+                                .query_json_param(
+                                    "SELECT id, type, status FROM soll.Node WHERE id IN (?, ?)",
+                                    &json!([src, tgt]),
+                                )
+                                .unwrap_or_else(|_| "[]".to_string());
+                            let rows: Vec<Vec<serde_json::Value>> =
+                                serde_json::from_str(&raw).unwrap_or_default();
+                            for row in &rows {
+                                if row.len() < 3 {
+                                    continue;
+                                }
+                                let id = row[0].as_str().unwrap_or("");
+                                let ty = row[1].as_str().unwrap_or("").to_string();
+                                let st = row[2].as_str().unwrap_or("").to_string();
+                                if id == src {
+                                    src_type = ty;
+                                } else if id == tgt {
+                                    tgt_type = ty;
+                                    tgt_status = st;
+                                }
+                            }
+                            if src_type != tgt_type || src_type.is_empty() {
+                                return Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!(
+                                            "SUPERSEDES requires same-type endpoints (got source={} target={}).",
+                                            src_type, tgt_type
+                                        )
+                                    }],
+                                    "isError": true,
+                                    "data": {
+                                        "status": "input_invalid",
+                                        "operator_guidance": {
+                                            "problem_class": "supersedes_type_mismatch",
+                                            "follow_up_tools": ["soll_query_context"],
+                                            "confidence": "high",
+                                        },
+                                        "parameter_repair": {
+                                            "tool": "soll_manager",
+                                            "category": "supersedes_type_mismatch",
+                                            "source_id": src,
+                                            "target_id": tgt,
+                                            "source_type": src_type,
+                                            "target_type": tgt_type,
+                                            "hint": "SUPERSEDES is a same-type retirement marker (DEC→DEC, CPT→CPT, GUI→GUI). Cross-type retirement is not modelled.",
+                                            "follow_up_tools": ["soll_query_context"],
+                                        },
+                                        "canonical_source": "MIL-AXO-020",
+                                    },
+                                }));
+                            }
+                            if tgt_status == "superseded" {
+                                return Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!(
+                                            "SUPERSEDES target `{}` is already retired (status=superseded).",
+                                            tgt
+                                        )
+                                    }],
+                                    "isError": true,
+                                    "data": {
+                                        "status": "input_invalid",
+                                        "operator_guidance": {
+                                            "problem_class": "supersedes_target_already_retired",
+                                            "follow_up_tools": ["soll_query_context"],
+                                            "confidence": "high",
+                                        },
+                                        "parameter_repair": {
+                                            "tool": "soll_manager",
+                                            "category": "supersedes_target_already_retired",
+                                            "target_id": tgt,
+                                            "target_status": "superseded",
+                                            "hint": "find the active replacement via soll_query_context or sql SELECT id FROM soll.Edge WHERE source_id = '<replacement>' AND target_id = '<tgt>' AND relation_type = 'SUPERSEDES'",
+                                            "follow_up_tools": ["soll_query_context"],
+                                        },
+                                        "canonical_source": "MIL-AXO-020",
+                                    },
+                                }));
+                            }
+                            // Single-statement edge + status flips.
+                            let target_project = project_code_from_canonical_entity_id(src)
+                                .or_else(|| project_code_from_canonical_entity_id(tgt))
+                                .unwrap_or_default();
+                            let cte = "WITH \
+                                inserted AS (\
+                                    INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                                    VALUES (?, ?, 'SUPERSEDES', ?) \
+                                    ON CONFLICT (source_id, target_id, relation_type) DO NOTHING \
+                                    RETURNING source_id\
+                                ), \
+                                src_flip AS (\
+                                    UPDATE soll.Node SET status = 'current' WHERE id = ? RETURNING id\
+                                ) \
+                                UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
+                            let exec = self.graph_store.execute_param(
+                                cte,
+                                &json!([src, tgt, target_project, src, tgt]),
+                            );
+                            return match exec {
+                                Ok(()) => Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!(
+                                            "SUPERSEDES applied: `{}` retires `{}` (status flipped).",
+                                            src, tgt
+                                        )
+                                    }],
+                                    "data": {
+                                        "status": "ok",
+                                        "edge": {
+                                            "source_id": src,
+                                            "target_id": tgt,
+                                            "relation_type": "SUPERSEDES"
+                                        },
+                                        "source_status_after": "current",
+                                        "target_status_after": "superseded"
+                                    }
+                                })),
+                                Err(e) => Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!("SUPERSEDES failed: {}", e)
+                                    }],
+                                    "isError": true,
+                                    "data": {
+                                        "status": "internal_error",
+                                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
+                                    }
+                                })),
+                            };
+                        }
+
                         match self.insert_validated_relation(relation_type, src, tgt, policy) {
                             Ok(inserted) => {
                                 let mut payload = json!({
