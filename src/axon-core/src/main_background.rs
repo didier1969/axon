@@ -27,9 +27,7 @@ use axon_core::optimizer::{
     HeuristicPolicyEngine, PolicyEngine,
 };
 use axon_core::queue::{ProcessingMode, QueueStore};
-use axon_core::runtime_observability::{
-    duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
-};
+use axon_core::runtime_observability::process_memory_snapshot;
 use axon_core::runtime_profile::{
     current_admission_controller_state, recommend_admission_controller_profile, RuntimeProfile,
 };
@@ -211,11 +209,6 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub rss_anon_bytes: u64,
     pub rss_file_bytes: u64,
     pub rss_shmem_bytes: u64,
-    pub db_file_bytes: u64,
-    pub db_wal_bytes: u64,
-    pub db_total_bytes: u64,
-    pub duckdb_memory_bytes: u64,
-    pub duckdb_temporary_bytes: u64,
     pub graph_projection_queue_queued: usize,
     pub graph_projection_queue_inflight: usize,
     pub graph_projection_queue_depth: usize,
@@ -958,7 +951,6 @@ mod governor_tests {
             ram_available_ratio: 0.8,
             io_wait_ratio: 0.0,
             process_memory: Default::default(),
-            duckdb_memory: Default::default(),
             vram_used_mb: 512,
             vram_free_mb: 1_024,
             gpu_utilization_ratio: 0.5,
@@ -1452,8 +1444,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or_else(|poison| poison.into_inner())
         .metrics_snapshot();
     let process_memory = process_memory_snapshot();
-    let storage = duckdb_storage_snapshot(store);
-    let duckdb_memory = duckdb_memory_snapshot(store);
     let (graph_projection_queue_queued, graph_projection_queue_inflight) = store
         .fetch_graph_projection_queue_counts()
         .unwrap_or((0, 0));
@@ -1584,11 +1574,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         rss_anon_bytes: process_memory.rss_anon_bytes,
         rss_file_bytes: process_memory.rss_file_bytes,
         rss_shmem_bytes: process_memory.rss_shmem_bytes,
-        db_file_bytes: storage.db_file_bytes,
-        db_wal_bytes: storage.db_wal_bytes,
-        db_total_bytes: storage.db_total_bytes,
-        duckdb_memory_bytes: duckdb_memory.memory_usage_bytes,
-        duckdb_temporary_bytes: duckdb_memory.temporary_storage_bytes,
         graph_projection_queue_queued,
         graph_projection_queue_inflight,
         graph_projection_queue_depth,

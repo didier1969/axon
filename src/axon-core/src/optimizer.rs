@@ -5,9 +5,7 @@ use crate::embedder::{
 use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::graph::GraphStore;
 use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_observability::{
-    duckdb_memory_snapshot, process_memory_snapshot, DuckDbMemorySnapshot, ProcessMemorySnapshot,
-};
+use crate::runtime_observability::{process_memory_snapshot, ProcessMemorySnapshot};
 use crate::runtime_profile::RuntimeProfile;
 use crate::runtime_tuning::{normalize_runtime_tuning_state, RuntimeTuningState};
 use crate::service_guard;
@@ -42,7 +40,6 @@ pub struct RuntimeSignalsWindow {
     pub ram_available_ratio: f64,
     pub io_wait_ratio: f64,
     pub process_memory: ProcessMemorySnapshot,
-    pub duckdb_memory: DuckDbMemorySnapshot,
     pub vram_used_mb: u64,
     pub vram_free_mb: u64,
     pub gpu_utilization_ratio: f64,
@@ -924,7 +921,6 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
     let graph_runtime_enabled = runtime_mode.ingestion_enabled();
     let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
     let memory = process_memory_snapshot();
-    let duckdb_memory = duckdb_memory_snapshot(store);
     let gpu = current_gpu_memory_snapshot().unwrap_or(crate::embedder::GpuMemorySnapshot {
         total_mb: 0,
         used_mb: 0,
@@ -994,7 +990,6 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         ram_available_ratio,
         io_wait_ratio,
         process_memory: memory,
-        duckdb_memory,
         vram_used_mb: gpu.used_mb,
         vram_free_mb: gpu.free_mb,
         gpu_utilization_ratio: gpu_utilization.gpu_utilization_ratio,
@@ -1733,7 +1728,6 @@ mod tests {
             ram_available_ratio: 0.5,
             io_wait_ratio: 0.01,
             process_memory: Default::default(),
-            duckdb_memory: Default::default(),
             vram_used_mb: 1024,
             vram_free_mb: 7168,
             gpu_utilization_ratio: 0.2,

@@ -152,11 +152,6 @@ pub enum BridgeEvent {
         rss_anon_bytes: u64,
         rss_file_bytes: u64,
         rss_shmem_bytes: u64,
-        db_file_bytes: u64,
-        db_wal_bytes: u64,
-        db_total_bytes: u64,
-        duckdb_memory_bytes: u64,
-        duckdb_temporary_bytes: u64,
         graph_projection_queue_queued: usize,
         graph_projection_queue_inflight: usize,
         graph_projection_queue_depth: usize,
@@ -273,11 +268,6 @@ mod tests {
             rss_anon_bytes: 5_120,
             rss_file_bytes: 1_920,
             rss_shmem_bytes: 300,
-            db_file_bytes: 4_096,
-            db_wal_bytes: 512,
-            db_total_bytes: 4_608,
-            duckdb_memory_bytes: 2_048,
-            duckdb_temporary_bytes: 256,
             graph_projection_queue_queued: 12,
             graph_projection_queue_inflight: 3,
             graph_projection_queue_depth: 15,
@@ -395,11 +385,6 @@ mod tests {
         assert!(json.contains("\"rss_anon_bytes\":5120"));
         assert!(json.contains("\"rss_file_bytes\":1920"));
         assert!(json.contains("\"rss_shmem_bytes\":300"));
-        assert!(json.contains("\"db_file_bytes\":4096"));
-        assert!(json.contains("\"db_wal_bytes\":512"));
-        assert!(json.contains("\"db_total_bytes\":4608"));
-        assert!(json.contains("\"duckdb_memory_bytes\":2048"));
-        assert!(json.contains("\"duckdb_temporary_bytes\":256"));
         assert!(json.contains("\"graph_projection_queue_queued\":12"));
         assert!(json.contains("\"graph_projection_queue_inflight\":3"));
         assert!(json.contains("\"graph_projection_queue_depth\":15"));

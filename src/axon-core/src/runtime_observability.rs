@@ -1,24 +1,9 @@
-use crate::graph::GraphStore;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessMemorySnapshot {
     pub rss_bytes: u64,
     pub rss_anon_bytes: u64,
     pub rss_file_bytes: u64,
     pub rss_shmem_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DuckDbStorageSnapshot {
-    pub db_file_bytes: u64,
-    pub db_wal_bytes: u64,
-    pub db_total_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DuckDbMemorySnapshot {
-    pub memory_usage_bytes: u64,
-    pub temporary_storage_bytes: u64,
 }
 
 pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
@@ -35,25 +20,6 @@ pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
         rss_bytes: read_statm_rss_bytes().unwrap_or_default(),
         ..snapshot
     }
-}
-
-/// PG canonical (REQ-AXO-271 slice 4c) : the DuckDB-specific db-file
-/// + WAL telemetry is irrelevant under PG (storage lives server-side
-/// outside the process). Returned as zero-filled for backwards-compat
-/// of the telemetry envelope ; PG storage observability will land in
-/// a follow-up slice via `pg_stat_database` / `pg_database_size`.
-pub fn duckdb_storage_snapshot(_store: &GraphStore) -> DuckDbStorageSnapshot {
-    DuckDbStorageSnapshot::default()
-}
-
-/// PG canonical (REQ-AXO-271 slice 4c) : the DuckDB `duckdb_memory()`
-/// table function does not exist under PG and previously poisoned
-/// connections with aborted-transaction state (REQ-AXO-242). Returned
-/// as zero-filled for backwards-compat of the telemetry envelope ; PG
-/// memory observability will land in a follow-up slice via
-/// `pg_stat_activity` / `pg_buffercache`.
-pub fn duckdb_memory_snapshot(_store: &GraphStore) -> DuckDbMemorySnapshot {
-    DuckDbMemorySnapshot::default()
 }
 
 #[cfg(target_os = "linux")]
