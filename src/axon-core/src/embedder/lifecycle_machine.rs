@@ -158,14 +158,18 @@ pub fn process_lifecycle() -> &'static Arc<EmbedderLifecycle> {
 }
 
 /// Spawn the watchdog. Wakes once per `tick`, evaluates `should_sleep`,
-/// and flips to Sleeping when conditions are met. The actual GPU
-/// session drop lives in the GpuB2Embedder wrapper (Slice 3B) ; the
-/// watchdog only flips the phase atomic and increments the counter so
-/// the wrapper can act on the next embed call.
+/// and flips to Sleeping when conditions are met. The `on_sleep`
+/// callback runs after a successful transition — typically the
+/// `GpuB2Embedder::release_session` call that actually frees VRAM.
+/// Pass a no-op closure (`|| {}`) when only the phase flip is wanted
+/// (Slice 3A observability without the resource drop).
 ///
 /// `t_idle` typical 5 min ; `t_grace` typical 2 s ; `tick` typical
 /// 15 s. Reasonable defaults are baked into the caller (DEC-AXO-086).
-pub fn spawn_idle_watchdog(tick: Duration, t_idle: Duration, t_grace: Duration) {
+pub fn spawn_idle_watchdog<F>(tick: Duration, t_idle: Duration, t_grace: Duration, on_sleep: F)
+where
+    F: Fn() + Send + 'static,
+{
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tick);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -175,6 +179,7 @@ pub fn spawn_idle_watchdog(tick: Duration, t_idle: Duration, t_grace: Duration) 
             if process_lifecycle().should_sleep(now, t_idle, t_grace)
                 && process_lifecycle().request_sleep()
             {
+                on_sleep();
                 tracing::info!(
                     target: "embedder::lifecycle",
                     t_idle_ms = t_idle.as_millis() as u64,
