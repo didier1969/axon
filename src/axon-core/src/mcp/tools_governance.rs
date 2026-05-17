@@ -317,14 +317,9 @@ impl McpServer {
             .ok()?;
         let anchor_rows: Vec<Vec<Value>> = serde_json::from_str(&anchor_res).unwrap_or_default();
         let anchor_id = anchor_rows.first()?.first()?.as_str()?;
-        // MIL-AXO-015 P6: cosine distance dialect — pgvector uses
-        // the `<=>` operator; DuckDB exposes `array_cosine_distance`.
-        // Same column shape on both backends post-CPT-AXO-043.
-        let cosine_expr = if self.graph_store.is_postgres_backend() {
-            "(anchor.embedding <=> peer.embedding)"
-        } else {
-            "array_cosine_distance(anchor.embedding, peer.embedding)"
-        };
+        // REQ-AXO-271 slice 2b : PG canonical only.
+        // pgvector `<=>` returns cosine distance on `vector(N)` columns.
+        let cosine_expr = "(anchor.embedding <=> peer.embedding)";
         let query = format!(
             "
             SELECT other.name, other.kind, {cosine_expr} AS score
@@ -679,16 +674,9 @@ impl McpServer {
 
     pub(crate) fn axon_semantic_clones(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        // MIL-AXO-015 P6: cosine dialect swap (pgvector `<=>` vs
-        // DuckDB `array_cosine_distance`). Symbol.embedding is
-        // `vector(N)` on PG / `FLOAT[N]` on DuckDB; the operator
-        // semantics match since both return cosine distance scaled
-        // identically.
-        let cosine_expr = if self.graph_store.is_postgres_backend() {
-            "(s.embedding <=> other.embedding)"
-        } else {
-            "array_cosine_distance(s.embedding, other.embedding)"
-        };
+        // REQ-AXO-271 slice 2b : PG canonical only.
+        // Symbol.embedding is `vector(N)` ; pgvector `<=>` returns cosine distance.
+        let cosine_expr = "(s.embedding <=> other.embedding)";
         let query = format!(
             "SELECT other.name, other.kind, {cosine_expr} as score \
              FROM Symbol s, Symbol other \
