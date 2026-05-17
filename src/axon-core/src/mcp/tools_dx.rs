@@ -797,7 +797,69 @@ impl McpServer {
                         "high",
                     )
                 );
-                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                // REQ-AXO-91508 — surface results as structured JSON so
+                // LLM clients (and the REQ-AXO-91490 bench harness, which
+                // walks JSON for `name` keys) can route on the data, not
+                // a markdown table embedded in `content[0].text`. GUI-
+                // AXO-1003 condition 5: existing fields preserved,
+                // new fields ADDED. Tri-modal lanes (FTS / graph r=1)
+                // shipped in follow-up commits ; this commit unblocks
+                // the bench precision measurement.
+                let semantic_lane_active = sql.contains("score");
+                let surface_label = if semantic_lane_active {
+                    "symbol_index_semantic"
+                } else {
+                    "symbol_index"
+                };
+                let structured_results: Vec<Value> = rows
+                    .iter()
+                    .map(|row| {
+                        let name = row.first().and_then(Value::as_str).unwrap_or("");
+                        let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
+                        let uri = row.get(2).and_then(Value::as_str).unwrap_or("");
+                        let score = row.get(3).and_then(Value::as_f64);
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("name".to_string(), Value::from(name));
+                        obj.insert("kind".to_string(), Value::from(kind));
+                        obj.insert("uri".to_string(), Value::from(uri));
+                        obj.insert("surface".to_string(), Value::from(surface_label));
+                        if let Some(s) = score {
+                            obj.insert("score".to_string(), json!(s));
+                        }
+                        obj.insert("project".to_string(), Value::from(project));
+                        Value::Object(obj)
+                    })
+                    .collect();
+                let total_available = structured_results.len();
+                let next_call_hint = structured_results
+                    .first()
+                    .and_then(|r| r.get("name").and_then(Value::as_str))
+                    .map(|n| format!("inspect symbol={n}"))
+                    .unwrap_or_else(|| "inspect <name>".to_string());
+                let response = json!({
+                    "content": [{ "type": "text", "text": report }],
+                    "data": {
+                        "results": structured_results,
+                        "surfaces_used": if semantic_lane_active {
+                            vec!["symbol_index", "vector"]
+                        } else {
+                            vec!["symbol_index"]
+                        },
+                        "surfaces_degraded": semantic_fallback_reason
+                            .as_ref()
+                            .map(|reason| json!([{"surface": "vector", "reason": reason}]))
+                            .unwrap_or_else(|| json!([])),
+                        "total_available": total_available,
+                        "next_call_hint": next_call_hint,
+                        "pagination": {
+                            "offset": 0,
+                            "limit": query_limit,
+                            "next_offset": Value::Null,
+                        },
+                        "query": query_text,
+                        "scope": scope.clone(),
+                    }
+                });
                 let guidance = crate::mcp::classify_guidance(&guidance_facts);
                 Some(if Self::mcp_guidance_authoritative_enabled() {
                     crate::mcp::attach_guidance_authoritative(response, guidance)

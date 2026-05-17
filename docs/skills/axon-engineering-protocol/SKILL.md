@@ -45,6 +45,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | soll_manager `category:writer_failed` (was `duckdb_writer` pre-REQ-AXO-341) | inspect `data.diagnostic_excerpt` for PG error ; recovery via `sql SELECT id FROM soll.Node` (post-MIL-AXO-017 canonical) |
 | `status` `trust:degraded` | `data.truth_cockpit.staleness.{last_publish_ts,modified_files_since,oldest_modified_age_seconds,sample_paths[5]}` exposes magnitude (REQ-AXO-231) — route on counts/age, not just the boolean |
 | `soll_relation_schema` returned | `data.canonical_direction` (`"SRC -> TGT"`) + `data.allowed_relation_types` (flat array) + `data.reverse_canonical` (legal inverse when pair forbidden) — REQ-AXO-91495 ; visible text now lists the actual relations, not just "resolved" |
+| `query` results consumption | `data.results[{name,kind,uri,project,surface,score}]` + `data.surfaces_used` + `data.total_available` + `data.next_call_hint` + `data.pagination` — REQ-AXO-91508 (tri-modal migration, FTS+graph lanes pending) ; markdown table in `content[0].text` preserved for backward compat |
 
 ## SOLL writes
 
