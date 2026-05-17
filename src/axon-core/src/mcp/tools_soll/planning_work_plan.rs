@@ -125,6 +125,84 @@ fn descendant_counts_snapshot(
     out
 }
 
+/// REQ-AXO-346 Slice 2 — priority rank for actionable REQ leaves.
+/// Lower rank = higher priority (sorted ascending). Recognized formats :
+/// canonical `P0`..`P3`, legacy `critical`/`high`/`medium`/`low`. Any
+/// unknown value (empty, fixture rows pre-DEC-PRO-100) sorts last.
+fn actionable_priority_rank(priority: &str) -> u8 {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "p0" | "critical" => 0,
+        "p1" | "high" => 1,
+        "p2" | "medium" => 2,
+        "p3" | "low" => 3,
+        _ => 9,
+    }
+}
+
+/// REQ-AXO-346 Slice 2 — build a single synthetic wave of open
+/// Requirement leaves ordered by `(parent_score DESC, priority ASC,
+/// score DESC, id ASC)`. Used when caller passes `actionable=true` so
+/// the LLM gets the *work* (REQs) directly instead of the *intent*
+/// (Decisions / Milestones). Parents are found by walking incoming
+/// edges in the snapshot, filtered to the broader filiation set so a
+/// REQ reached via SOLVES, TARGETS, or REFINES contributes a parent
+/// score. When a REQ has no schedulable parent, `parent_score` falls
+/// back to the REQ's own score so isolated leaves don't sink to the
+/// bottom.
+fn build_actionable_leaves_wave(
+    nodes: &HashMap<String, WorkPlanNode>,
+    snapshot: &SollSnapshot,
+    schedulable_ids: &HashSet<String>,
+) -> WorkPlanWave {
+    let mut items_with_parent: Vec<(WorkPlanNode, i64)> = Vec::new();
+    for (id, node) in nodes.iter() {
+        if !matches!(node.entity_type, WorkPlanEntityType::Requirement) {
+            continue;
+        }
+        if !schedulable_ids.contains(id) {
+            continue;
+        }
+        let mut parent_score: Option<i64> = None;
+        if let Some(idx) = snapshot.node_index(id) {
+            for e in snapshot.graph().edges_directed(idx, Direction::Incoming) {
+                if !is_descendant_relation(e.weight().as_str()) {
+                    continue;
+                }
+                let parent_id = &snapshot.graph()[e.source()];
+                if !schedulable_ids.contains(parent_id) {
+                    continue;
+                }
+                if let Some(parent_node) = nodes.get(parent_id) {
+                    parent_score = Some(
+                        parent_score.map_or(parent_node.score, |cur| cur.max(parent_node.score)),
+                    );
+                }
+            }
+        }
+        let effective_parent_score = parent_score.unwrap_or(node.score);
+        let mut leaf = node.clone();
+        leaf.reasons.insert(
+            0,
+            format!("actionable_leaf (parent_score={})", effective_parent_score),
+        );
+        items_with_parent.push((leaf, effective_parent_score));
+    }
+    items_with_parent.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| {
+                actionable_priority_rank(&a.0.priority)
+                    .cmp(&actionable_priority_rank(&b.0.priority))
+            })
+            .then_with(|| b.0.score.cmp(&a.0.score))
+            .then_with(|| a.0.id.cmp(&b.0.id))
+    });
+    let items: Vec<WorkPlanNode> = items_with_parent.into_iter().map(|(n, _)| n).collect();
+    WorkPlanWave {
+        wave_index: 1,
+        items,
+    }
+}
+
 /// Kahn's topological-wave layering on the filtered snapshot edges,
 /// restricted to schedulable nodes. Replaces the legacy `build_waves`.
 fn build_waves_snapshot(
@@ -245,6 +323,15 @@ impl McpServer {
             .get("half_life_days")
             .and_then(|v| v.as_f64())
             .unwrap_or(DEFAULT_DECAY_HALF_LIFE_DAYS);
+        // REQ-AXO-346 Slice 2 — opt-in REQ-leaf surface. When true, the
+        // returned waves contain open Requirements (status non-terminal)
+        // ordered by `(parent_score DESC, priority ASC, score DESC)`
+        // instead of the parent Decisions/Milestones. Lets LLM callers
+        // skip a SOLVES traversal round-trip.
+        let actionable = args
+            .get("actionable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -318,8 +405,18 @@ impl McpServer {
         }
 
         // REQ-AXO-346 Slice 3 — Kahn's topological waves on the existing
-        // snapshot petgraph.
-        let waves = build_waves_snapshot(&nodes, &snapshot, &schedulable_ids);
+        // snapshot petgraph. Slice 2 swaps this for the REQ-leaf wave
+        // when `actionable=true` so the wave-1 output is the actual work
+        // (REQs) rather than the upstream intent (Decisions).
+        let waves = if actionable {
+            vec![build_actionable_leaves_wave(
+                &nodes,
+                &snapshot,
+                &schedulable_ids,
+            )]
+        } else {
+            build_waves_snapshot(&nodes, &snapshot, &schedulable_ids)
+        };
         let cycles = cycle_sets
             .into_iter()
             .map(|set| {
@@ -419,7 +516,8 @@ impl McpServer {
                 "truncated": truncated,
                 "limit": limit,
                 "top": top,
-                "include_validation_details": include_validation_details
+                "include_validation_details": include_validation_details,
+                "actionable": actionable
             }
         });
 
@@ -845,5 +943,187 @@ mod tests {
         for non in ["SUPERSEDES", "INHERITS_FROM", "RANDOM"] {
             assert!(!is_descendant_relation(non), "{non} should not be filiation");
         }
+    }
+
+    /// REQ-AXO-346 Slice 2 — priority rank covers canonical `P0..P3` AND
+    /// legacy `critical/high/medium/low`. Unknown values sort last.
+    #[test]
+    fn actionable_priority_rank_canonical_and_legacy() {
+        assert_eq!(actionable_priority_rank("P0"), 0);
+        assert_eq!(actionable_priority_rank("critical"), 0);
+        assert_eq!(actionable_priority_rank("P1"), 1);
+        assert_eq!(actionable_priority_rank("high"), 1);
+        assert_eq!(actionable_priority_rank("P2"), 2);
+        assert_eq!(actionable_priority_rank("medium"), 2);
+        assert_eq!(actionable_priority_rank("P3"), 3);
+        assert_eq!(actionable_priority_rank("low"), 3);
+        assert_eq!(actionable_priority_rank(""), 9);
+        assert_eq!(actionable_priority_rank("unknown"), 9);
+    }
+
+    /// REQ-AXO-346 Slice 2 — priority rank trims whitespace + is
+    /// case-insensitive (fixture rows may carry `p0`, ` P1 ` etc.).
+    #[test]
+    fn actionable_priority_rank_normalises_input() {
+        assert_eq!(actionable_priority_rank("p0"), 0);
+        assert_eq!(actionable_priority_rank(" P1 "), 1);
+        assert_eq!(actionable_priority_rank("HIGH"), 1);
+    }
+
+    /// REQ-AXO-346 Slice 2 — verify the actionable-leaves wave only
+    /// emits Requirements, drops terminal ones, and inherits the
+    /// strongest parent_score among schedulable parents. Two DEC parents
+    /// at scores 100 & 60 on the same REQ → expected parent_score = 100.
+    #[test]
+    fn actionable_wave_returns_open_reqs_sorted_by_parent_score() {
+        use crate::soll_snapshot::{SnapshotEdge, SnapshotNode};
+
+        fn mk_node(id: &str, t: &str, status: &str) -> (String, SnapshotNode) {
+            (
+                id.to_string(),
+                SnapshotNode {
+                    id: id.to_string(),
+                    entity_type: t.to_string(),
+                    title: id.to_string(),
+                    status: status.to_string(),
+                    metadata_raw: String::new(),
+                },
+            )
+        }
+        fn mk_edge(src: &str, tgt: &str, rel: &str) -> SnapshotEdge {
+            SnapshotEdge {
+                source_id: src.to_string(),
+                target_id: tgt.to_string(),
+                relation_type: rel.to_string(),
+            }
+        }
+
+        let snapshot_nodes: HashMap<String, SnapshotNode> = [
+            mk_node("DEC-AXO-100", "Decision", "current"),
+            mk_node("DEC-AXO-200", "Decision", "current"),
+            mk_node("DEC-AXO-300", "Decision", "delivered"),
+            mk_node("REQ-AXO-1", "Requirement", "current"),
+            mk_node("REQ-AXO-2", "Requirement", "planned"),
+            mk_node("REQ-AXO-3", "Requirement", "delivered"),
+            mk_node("REQ-AXO-4", "Requirement", "current"),
+        ]
+        .into_iter()
+        .collect();
+        let edges = vec![
+            mk_edge("DEC-AXO-100", "REQ-AXO-1", "SOLVES"),
+            mk_edge("DEC-AXO-200", "REQ-AXO-1", "SOLVES"),
+            mk_edge("DEC-AXO-200", "REQ-AXO-2", "SOLVES"),
+            mk_edge("DEC-AXO-300", "REQ-AXO-3", "SOLVES"),
+        ];
+        let snapshot = SollSnapshot::build("AXO", 1, snapshot_nodes, edges, Vec::new());
+
+        let mut nodes: HashMap<String, WorkPlanNode> = HashMap::new();
+        let add = |nodes: &mut HashMap<String, WorkPlanNode>,
+                   id: &str,
+                   t: WorkPlanEntityType,
+                   status: &str,
+                   priority: &str,
+                   score: i64| {
+            nodes.insert(
+                id.to_string(),
+                WorkPlanNode {
+                    id: id.to_string(),
+                    title: id.to_string(),
+                    entity_type: t,
+                    status: status.to_string(),
+                    priority: priority.to_string(),
+                    requirement_state: None,
+                    evidence_count: 0,
+                    descendants: 0,
+                    ist_degraded_links: 0,
+                    backlog_visible: false,
+                    score,
+                    reasons: Vec::new(),
+                    validation_gates: Vec::new(),
+                    ist_signals: Vec::new(),
+                    updated_at_ms: None,
+                },
+            );
+        };
+        add(&mut nodes, "DEC-AXO-100", WorkPlanEntityType::Decision, "current", "", 100);
+        add(&mut nodes, "DEC-AXO-200", WorkPlanEntityType::Decision, "current", "", 60);
+        add(&mut nodes, "DEC-AXO-300", WorkPlanEntityType::Decision, "delivered", "", 9999);
+        add(&mut nodes, "REQ-AXO-1", WorkPlanEntityType::Requirement, "current", "P1", 50);
+        add(&mut nodes, "REQ-AXO-2", WorkPlanEntityType::Requirement, "planned", "P0", 40);
+        add(&mut nodes, "REQ-AXO-3", WorkPlanEntityType::Requirement, "delivered", "P0", 99);
+        add(&mut nodes, "REQ-AXO-4", WorkPlanEntityType::Requirement, "current", "P2", 70);
+
+        let schedulable: HashSet<String> = [
+            "DEC-AXO-100", "DEC-AXO-200",
+            "REQ-AXO-1", "REQ-AXO-2", "REQ-AXO-4",
+        ]
+        .iter().map(|s| s.to_string()).collect();
+
+        let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable);
+
+        // Only Requirements, all non-terminal, no DEC included.
+        for item in &wave.items {
+            assert!(
+                matches!(item.entity_type, WorkPlanEntityType::Requirement),
+                "{} must be Requirement, got {:?}", item.id, item.entity_type
+            );
+            assert!(
+                item.status != "delivered" && item.status != "superseded",
+                "{} terminal status leaked", item.id
+            );
+        }
+
+        let ids: Vec<&str> = wave.items.iter().map(|n| n.id.as_str()).collect();
+        // Expected order:
+        //   REQ-AXO-1  : parent_score=100 (DEC-100 wins over DEC-200)
+        //   REQ-AXO-4  : parent_score=70 (no parent → falls back to own score 70)
+        //   REQ-AXO-2  : parent_score=60 (DEC-200)
+        // ... so REQ-1 first, REQ-4 second (70 > 60), REQ-2 last.
+        assert_eq!(ids, vec!["REQ-AXO-1", "REQ-AXO-4", "REQ-AXO-2"]);
+
+        // REQ-3 (delivered) must NOT be in output.
+        assert!(!ids.contains(&"REQ-AXO-3"));
+        // DEC-300 (delivered) must NOT be in output.
+        assert!(!ids.contains(&"DEC-AXO-300"));
+    }
+
+    /// REQ-AXO-346 Slice 2 — REQ with no schedulable parent uses its own
+    /// score so isolated leaves don't sink to the bottom.
+    #[test]
+    fn actionable_wave_orphan_uses_own_score_as_parent_score() {
+        use crate::soll_snapshot::SollSnapshot;
+
+        let snapshot = SollSnapshot::build("AXO", 1, HashMap::new(), Vec::new(), Vec::new());
+        let mut nodes: HashMap<String, WorkPlanNode> = HashMap::new();
+        nodes.insert(
+            "REQ-AXO-99".to_string(),
+            WorkPlanNode {
+                id: "REQ-AXO-99".to_string(),
+                title: "orphan".to_string(),
+                entity_type: WorkPlanEntityType::Requirement,
+                status: "current".to_string(),
+                priority: "P0".to_string(),
+                requirement_state: None,
+                evidence_count: 0,
+                descendants: 0,
+                ist_degraded_links: 0,
+                backlog_visible: false,
+                score: 42,
+                reasons: Vec::new(),
+                validation_gates: Vec::new(),
+                ist_signals: Vec::new(),
+                updated_at_ms: None,
+            },
+        );
+        let schedulable: HashSet<String> =
+            ["REQ-AXO-99"].iter().map(|s| s.to_string()).collect();
+        let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable);
+        assert_eq!(wave.items.len(), 1);
+        // Reason annotated with the fall-back parent_score = own score.
+        assert!(
+            wave.items[0].reasons[0].contains("parent_score=42"),
+            "expected own-score fallback in reasons, got {:?}",
+            wave.items[0].reasons
+        );
     }
 }
