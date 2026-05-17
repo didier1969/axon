@@ -91,7 +91,7 @@ axon_env_var_is_derived() {
 # discipline as the parent shell.
 axon_env_var_in_prefix_allowlist() {
     case "$1" in
-        AXON_*|HYDRA_*|OMP_NUM_THREADS|OMP_WAIT_POLICY) return 0 ;;
+        AXON_*|HYDRA_*|OMP_NUM_THREADS|OMP_WAIT_POLICY|MALLOC_*) return 0 ;;
         *) return 1 ;;
     esac
 }
