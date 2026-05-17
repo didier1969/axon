@@ -4374,52 +4374,26 @@ impl GraphStore {
         let safe_source_hash = Self::escape_sql(source_hash);
         let safe_model_id = Self::escape_sql(model_id);
 
-        let backend_is_pg = self.is_postgres_backend();
-        let embedding_literal = if backend_is_pg {
-            crate::postgres::vector::vector_literal(embedding).map_err(|e| {
-                anyhow::anyhow!("upsert_chunk_embedding_v2: vector_literal failed: {e}")
-            })?
-        } else {
-            use crate::embedding_contract::DIMENSION;
-            format!("CAST({embedding:?} AS FLOAT[{DIMENSION}])")
-        };
-
-        // PG carries an extra `project_code` column on ChunkEmbedding
-        // (REQ-AXO-216 schema). The legacy embedded test backend lacks
-        // it — branch on the backend so test paths stay green until
-        // REQ-AXO-271 finishes retiring the legacy plugin.
-        let sql = if backend_is_pg {
-            format!(
-                "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
-                 VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
-                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
-                     source_hash = EXCLUDED.source_hash, \
-                     embedding = EXCLUDED.embedding, \
-                     project_code = EXCLUDED.project_code, \
-                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
-                cid = safe_chunk_id,
-                mid = safe_model_id,
-                pc = safe_project,
-                sh = safe_source_hash,
-                emb = embedding_literal,
-                ts = embedded_at_ms,
-            )
-        } else {
-            format!(
-                "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash, embedding, embedded_at_ms) \
-                 VALUES ('{cid}', '{mid}', '{sh}', {emb}, {ts}) \
-                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
-                     source_hash = EXCLUDED.source_hash, \
-                     embedding = EXCLUDED.embedding, \
-                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
-                cid = safe_chunk_id,
-                mid = safe_model_id,
-                sh = safe_source_hash,
-                emb = embedding_literal,
-                ts = embedded_at_ms,
-            )
-        };
-        let _ = safe_project; // silence unused under non-PG branch
+        // REQ-AXO-271 slice 2l : PG canonical only. pgvector literal +
+        // the PG-shaped INSERT with `project_code` column (REQ-AXO-216).
+        let embedding_literal = crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+            anyhow::anyhow!("upsert_chunk_embedding_v2: vector_literal failed: {e}")
+        })?;
+        let sql = format!(
+            "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+             VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
+             ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                 source_hash = EXCLUDED.source_hash, \
+                 embedding = EXCLUDED.embedding, \
+                 project_code = EXCLUDED.project_code, \
+                 embedded_at_ms = EXCLUDED.embedded_at_ms;",
+            cid = safe_chunk_id,
+            mid = safe_model_id,
+            pc = safe_project,
+            sh = safe_source_hash,
+            emb = embedding_literal,
+            ts = embedded_at_ms,
+        );
         self.execute(&sql)
     }
 
@@ -4440,51 +4414,30 @@ impl GraphStore {
         let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
         let safe_project = Self::escape_sql(project_code);
         let safe_model_id = Self::escape_sql(model_id);
-        let backend_is_pg = self.is_postgres_backend();
 
+        // REQ-AXO-271 slice 2l : PG canonical only.
         let mut queries: Vec<String> = Vec::with_capacity(items.len());
         for (chunk_id, source_hash, embedding, embedded_at_ms) in items {
             let safe_chunk_id = Self::escape_sql(chunk_id);
             let safe_source_hash = Self::escape_sql(source_hash);
-            let embedding_literal = if backend_is_pg {
-                crate::postgres::vector::vector_literal(embedding).map_err(|e| {
-                    anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
-                })?
-            } else {
-                use crate::embedding_contract::DIMENSION;
-                format!("CAST({embedding:?} AS FLOAT[{DIMENSION}])")
-            };
-            let sql = if backend_is_pg {
-                format!(
-                    "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
-                     VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
-                     ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
-                         source_hash = EXCLUDED.source_hash, \
-                         embedding = EXCLUDED.embedding, \
-                         project_code = EXCLUDED.project_code, \
-                         embedded_at_ms = EXCLUDED.embedded_at_ms;",
-                    cid = safe_chunk_id,
-                    mid = safe_model_id,
-                    pc = safe_project,
-                    sh = safe_source_hash,
-                    emb = embedding_literal,
-                    ts = embedded_at_ms,
-                )
-            } else {
-                format!(
-                    "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash, embedding, embedded_at_ms) \
-                     VALUES ('{cid}', '{mid}', '{sh}', {emb}, {ts}) \
-                     ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
-                         source_hash = EXCLUDED.source_hash, \
-                         embedding = EXCLUDED.embedding, \
-                         embedded_at_ms = EXCLUDED.embedded_at_ms;",
-                    cid = safe_chunk_id,
-                    mid = safe_model_id,
-                    sh = safe_source_hash,
-                    emb = embedding_literal,
-                    ts = embedded_at_ms,
-                )
-            };
+            let embedding_literal = crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+                anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
+            })?;
+            let sql = format!(
+                "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+                 VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
+                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                     source_hash = EXCLUDED.source_hash, \
+                     embedding = EXCLUDED.embedding, \
+                     project_code = EXCLUDED.project_code, \
+                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                cid = safe_chunk_id,
+                mid = safe_model_id,
+                pc = safe_project,
+                sh = safe_source_hash,
+                emb = embedding_literal,
+                ts = embedded_at_ms,
+            );
             queries.push(sql);
         }
         let _ = safe_project;
