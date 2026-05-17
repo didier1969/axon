@@ -22,7 +22,7 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Component | Path | Note |
 |---|---|---|
 | Runtime | `src/axon-core/` | Rust |
-| DB | PostgreSQL 17 + pgvector (+ AGE retiring) | canonical IST + SOLL. DuckDB fully purged (REQ-AXO-271). AGE retirement in flight per **MIL-AXO-017 / DEC-AXO-083** — IST edges migrate to `public.Edge` + `WITH RECURSIVE` SQL functions (`db/ddl/04_graph_functions.sql`). Slices 1-5 + 6A shipped, 6B + 7 pending. |
+| DB | PostgreSQL 17 + pgvector | canonical IST + SOLL. AGE retired (MIL-AXO-017 delivered, REQ-AXO-90005). DuckDB purged at user-facing level (REQ-AXO-271 cleanup track remains for residual dual-backend abstractions). IST edges in `public.Edge` + `WITH RECURSIVE` SQL functions (`db/ddl/04_graph_functions.sql`). |
 | Streaming pipeline v2 | `src/axon-core/src/pipeline_v2/` | A1/A2/A3 (graph + chunks + FTS, CPU) → try_send → B1/B2/B3 (GPU embed). REQ-AXO-289 / CPT-AXO-054 (session 19 canonical). Diagram: `docs/architecture/visualize-nexus-pull.html`. |
 | GPU | `src/axon-core/src/embedder/` | ONNX Runtime, CUDA/TensorRT EP, BGE-Large 1024d. `GpuB2Embedder` (pipeline_v2/embedder_gpu.rs) is the v2 wrapper. |
 | MCP server | `src/axon-core/src/mcp/` | live tool count via `status mode=brief` |
