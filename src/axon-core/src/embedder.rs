@@ -1397,280 +1397,27 @@ impl SemanticWorkerPool {
                         pending.len()
                     );
 
-                    let mut to_embed: Vec<(GraphProjectionWork, String, String, String)> =
-                        Vec::new();
-                    let mut failed: HashMap<String, Vec<GraphProjectionWork>> = HashMap::new();
-
-                    // REQ-AXO-269 v1: under PG (`skip_legacy_relations() = true`,
-                    // REQ-AXO-251 / MIL-AXO-015 Stop A), `refresh_file_projection`
-                    // and `refresh_symbol_projection` early-return Ok without
-                    // writing GraphProjectionState. Without this short-circuit,
-                    // every work item flows through refresh→fetch_state(None)
-                    // →failed→mark_failed→re-queued, an infinite loop that
-                    // never drains the queue (VAL-AXO-057 saw 14146 stuck).
-                    //
-                    // Mark every pending work item done immediately and skip
-                    // the embed pass — graph projection cache is meaningless
-                    // under AGE-only mode (authoritative call-graph reads go
-                    // through AGE Cypher primary tools per REQ-AXO-251).
-                    if graph_store.skip_legacy_relations() {
-                        let drained = pending.len();
-                        if let Err(err) = graph_store
-                            .mark_graph_projection_work_done(&pending)
-                        {
-                            error!(
-                                "Semantic Graph Worker [{}]: failed to mark {} projection jobs done under skip_legacy_relations: {:?}",
-                                worker_idx, drained, err
-                            );
-                        } else {
-                            debug!(
-                                "Semantic Graph Worker [{}]: drained {} projection jobs under skip_legacy_relations (AGE-only authoritative)",
-                                worker_idx, drained
-                            );
-                        }
-                        continue;
-                    }
-
-                    for work in pending {
-                        let maybe_state = match work.anchor_type.as_str() {
-                            "file" => {
-                                if let Err(err) = graph_store
-                                    .refresh_file_projection(&work.anchor_id, work.radius as u64)
-                                {
-                                    let reason =
-                                        format!("failed to refresh file projection: {:?}", err);
-                                    failed.entry(reason).or_default().push(work.clone());
-                                    None
-                                } else {
-                                    graph_store
-                                        .fetch_graph_projection_state(
-                                            "file",
-                                            &work.anchor_id,
-                                            work.radius,
-                                        )
-                                        .ok()
-                                        .and_then(|state| match state {
-                                            Some(state) => Some((work.clone(), state)),
-                                            None => {
-                                                failed
-                                                    .entry(format!(
-                                                        "missing projection state for {}",
-                                                        work.anchor_id
-                                                    ))
-                                                    .or_default()
-                                                    .push(work.clone());
-                                                None
-                                            }
-                                        })
-                                }
-                            }
-                            "symbol" => match graph_store
-                                .refresh_symbol_projection(&work.anchor_id, work.radius as u64)
-                            {
-                                Ok(Some(_anchor_id)) => graph_store
-                                    .fetch_graph_projection_state(
-                                        "symbol",
-                                        &work.anchor_id,
-                                        work.radius,
-                                    )
-                                    .ok()
-                                    .and_then(|state| match state {
-                                        Some(state) => Some((work.clone(), state)),
-                                        None => {
-                                            failed
-                                                .entry(format!(
-                                                    "missing projection state for {}",
-                                                    work.anchor_id
-                                                ))
-                                                .or_default()
-                                                .push(work.clone());
-                                            None
-                                        }
-                                    }),
-                                Ok(None) => {
-                                    debug!(
-                                        "Semantic Graph Worker [{}]: symbol projection anchor gone, dropping job {}",
-                                        worker_idx, work.anchor_id
-                                    );
-                                    if let Err(err) = graph_store.mark_graph_projection_work_done(
-                                        std::slice::from_ref(&work),
-                                    ) {
-                                        let reason = format!(
-                                            "failed to drop stale symbol projection job: {:?}",
-                                            err
-                                        );
-                                        failed.entry(reason).or_default().push(work.clone());
-                                    }
-                                    None
-                                }
-                                Err(err) => {
-                                    let reason =
-                                        format!("failed to refresh symbol projection: {:?}", err);
-                                    failed.entry(reason).or_default().push(work.clone());
-                                    None
-                                }
-                            },
-                            anchor_type => {
-                                failed
-                                    .entry(format!("unsupported anchor_type {}", anchor_type))
-                                    .or_default()
-                                    .push(work.clone());
-                                None
-                            }
-                        };
-
-                        if let Some((work, (source_signature, projection_version))) = maybe_state {
-                            match graph_store.has_matching_graph_projection_embedding(
-                                &work.anchor_type,
-                                &work.anchor_id,
-                                work.radius,
-                                GRAPH_MODEL_ID,
-                                &source_signature,
-                                &projection_version,
-                            ) {
-                                Ok(true) => {
-                                    if let Err(err) = graph_store.mark_graph_projection_work_done(
-                                        std::slice::from_ref(&work),
-                                    ) {
-                                        failed
-                                            .entry(format!(
-                                                "failed to clear up-to-date projection job: {:?}",
-                                                err
-                                            ))
-                                            .or_default()
-                                            .push(work.clone());
-                                    }
-                                    continue;
-                                }
-                                Ok(false) => {}
-                                Err(err) => {
-                                    failed
-                                        .entry(format!(
-                                            "failed to check projection freshness: {:?}",
-                                            err
-                                        ))
-                                        .or_default()
-                                        .push(work.clone());
-                                    continue;
-                                }
-                            }
-
-                            match graph_store.graph_projection_embedding_text(
-                                &work.anchor_type,
-                                &work.anchor_id,
-                                work.radius,
-                            ) {
-                                Ok(content) => to_embed.push((
-                                    work,
-                                    source_signature,
-                                    projection_version,
-                                    content,
-                                )),
-                                Err(err) => {
-                                    failed
-                                        .entry(format!(
-                                            "failed to build projection text: {:?}",
-                                            err
-                                        ))
-                                        .or_default()
-                                        .push(work);
-                                }
-                            }
-                        }
-                    }
-
-                    if !to_embed.is_empty() {
-                        let texts: Vec<String> = to_embed
-                            .iter()
-                            .map(|(_, _, _, content)| content.clone())
-                            .collect();
-                        match model
-                            .as_mut()
-                            .expect("graph model should be initialized before embedding")
-                            .embed(texts, None)
-                        {
-                            Ok(embeddings) => {
-                                let updates: Vec<(String, String, i64, String, String, Vec<f32>)> =
-                                    to_embed
-                                        .iter()
-                                        .zip(embeddings)
-                                        .map(
-                                            |(
-                                                (work, source_signature, projection_version, _),
-                                                embedding,
-                                            )| {
-                                                (
-                                                    work.anchor_type.clone(),
-                                                    work.anchor_id.clone(),
-                                                    work.radius,
-                                                    source_signature.clone(),
-                                                    projection_version.clone(),
-                                                    embedding,
-                                                )
-                                            },
-                                        )
-                                        .collect();
-                                let done_works: Vec<GraphProjectionWork> = to_embed
-                                    .iter()
-                                    .map(|(work, _, _, _)| work.clone())
-                                    .collect();
-                                if let Err(err) =
-                                    graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates)
-                                {
-                                    let reason =
-                                        format!("graph embedding DB write failed: {:?}", err);
-                                    for work in done_works {
-                                        failed.entry(reason.clone()).or_default().push(work);
-                                    }
-                                } else if let Err(err) =
-                                    graph_store.mark_graph_projection_work_done(&done_works)
-                                {
-                                    error!(
-                                        "Semantic Graph Worker [{}]: failed to clear done projection jobs: {:?}",
-                                        worker_idx, err
-                                    );
-                                    for work in done_works {
-                                        failed
-                                            .entry(format!(
-                                                "failed to clear done projection jobs: {:?}",
-                                                err
-                                            ))
-                                            .or_default()
-                                            .push(work);
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                if is_fatal_embedding_error(&err) {
-                                    error!(
-                                        "Semantic Graph Worker [{}]: fatal graph embedding error, disabling semantic worker: {:?}",
-                                        worker_idx, err
-                                    );
-                                    return;
-                                }
-                                error!(
-                                    "Semantic Graph Worker [{}]: graph embedding failed: {:?}",
-                                    worker_idx, err
-                                );
-                                for (work, _, _, _) in to_embed {
-                                    failed
-                                        .entry(format!("graph embedding failed: {:?}", err))
-                                        .or_default()
-                                        .push(work);
-                                }
-                            }
-                        }
-                    }
-
-                    for (reason, work) in failed {
-                        if let Err(err) =
-                            graph_store.mark_graph_projection_work_failed(&work, &reason)
-                        {
-                            error!(
-                                "Semantic Graph Worker [{}]: failed to persist projection failure state [{}]: {:?}",
-                                worker_idx, reason, err
-                            );
-                        }
+                    // REQ-AXO-271 slice 2e + REQ-AXO-269 v1 follow-up : under PG
+                    // canonical (post-MIL-AXO-017 AGE retirement),
+                    // `refresh_*_projection` is a no-op (cf graph_query.rs slice
+                    // 2a) and `GraphProjectionState` is never populated. The
+                    // historical refresh→fetch→embed→mark_done cascade collapsed
+                    // to an infinite re-queue loop (VAL-AXO-057 saw 14146 stuck
+                    // entries). Authoritative call-graph reads now route through
+                    // public.Edge + db/ddl/04_graph_functions.sql, so the
+                    // graph-projection embedding cache is structurally obsolete.
+                    // Drain every pending work item and skip the embed pass.
+                    let drained = pending.len();
+                    if let Err(err) = graph_store.mark_graph_projection_work_done(&pending) {
+                        error!(
+                            "Semantic Graph Worker [{}]: failed to mark {} projection jobs done: {:?}",
+                            worker_idx, drained, err
+                        );
+                    } else {
+                        debug!(
+                            "Semantic Graph Worker [{}]: drained {} projection jobs (PG canonical, no projection cache)",
+                            worker_idx, drained
+                        );
                     }
                     continue;
                 }
@@ -2475,29 +2222,25 @@ impl GraphStore {
         }
 
         let now = chrono::Utc::now().timestamp_millis();
-        // MIL-AXO-015 P4 4e: under PG, GraphEmbedding.embedding column
-        // is `vector(N)` (pgvector); render as `'[…]'::vector(N)` text
-        // literal. DuckDB path keeps the legacy FLOAT[N] cast.
-        let backend_is_pg = self.is_postgres_backend();
+        // REQ-AXO-271 slice 2e (PG canonical, post-MIL-AXO-017) :
+        // GraphEmbedding.embedding is `vector(N)` (pgvector) ; render
+        // as a `'[…]'::vector(N)` text literal. The DuckDB
+        // `CAST(... AS FLOAT[N])` arm is dead syntax.
         let values: Vec<String> = updates
             .iter()
             .map(
                 |(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
-                    let embedding_lit = if backend_is_pg {
-                        match crate::postgres::vector::vector_literal(vector) {
-                            Ok(lit) => lit,
-                            Err(e) => {
-                                log::warn!(
-                                    "skipping GraphEmbedding upsert for {}/{} under PG: {}",
-                                    anchor_type,
-                                    anchor_id,
-                                    e
-                                );
-                                "NULL".to_string()
-                            }
+                    let embedding_lit = match crate::postgres::vector::vector_literal(vector) {
+                        Ok(lit) => lit,
+                        Err(e) => {
+                            log::warn!(
+                                "skipping GraphEmbedding upsert for {}/{}: {}",
+                                anchor_type,
+                                anchor_id,
+                                e
+                            );
+                            "NULL".to_string()
                         }
-                    } else {
-                        format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector)
                     };
                     format!(
                         "('{}', '{}', {}, '{}', '{}', '{}', {}, {})",
