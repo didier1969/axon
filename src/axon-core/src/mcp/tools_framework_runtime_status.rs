@@ -453,6 +453,19 @@ impl McpServer {
         // Anchor: CPT-AXO-029 IST freshness invariant.
         let (status_next_action, recovery_hint) =
             derive_recovery_action(&degraded_notes);
+        // REQ-AXO-231 — when freshness is degraded, surface the magnitude
+        // (not just the boolean flag) so the LLM client can route on
+        // quantitative thresholds : how many files behind, how old the
+        // oldest one is, sample of paths impacted. Source : public.File.
+        // Cheap aggregate; only runs on the degraded path so canonical
+        // status calls stay zero-cost. Falls back to Null on query
+        // failure (the rest of the response remains useful).
+        let staleness = if !indexed_projection_fresh {
+            self.compute_staleness_snapshot()
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
         // REQ-AXO-104 — the public_tools list is ~60 names and ~700
         // chars; in brief mode (the default) the LLM client gets a
         // repetitive payload on every status call that does not change
@@ -518,6 +531,22 @@ impl McpServer {
         ));
         if let Some(reason) = recovery_reason {
             evidence.push_str(&format!("**Recovery:** {}\n", reason));
+        }
+        // REQ-AXO-231 — surface staleness magnitude inline so the LLM
+        // does not need to drill into data.truth_cockpit.staleness on
+        // every status call. Empty / Null staleness is rendered as a
+        // single line so the brief mode stays terse.
+        if let Some(count) = staleness.get("modified_files_since").and_then(Value::as_u64) {
+            if count > 0 {
+                let age = staleness
+                    .get("oldest_modified_age_seconds")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                evidence.push_str(&format!(
+                    "**Staleness magnitude:** {} file(s) modified since last publish ; oldest = {}s\n",
+                    count, age
+                ));
+            }
         }
         if !degraded_notes.is_empty() {
             evidence.push_str(&format!(
@@ -899,6 +928,7 @@ impl McpServer {
             },
             "next_best_action": status_next_action,
             "recovery_hint": recovery_hint,
+            "staleness": staleness,
             "confidence": "high",
             "freshness": {
                 "state": if truth_status == "canonical" { "fresh" } else { "degraded" },
@@ -1194,6 +1224,73 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
          FROM fn_per f FULL OUTER JOIN calls_per c USING (project_code, lang) \
          ORDER BY 1, 2";
 
+impl McpServer {
+    /// REQ-AXO-231 — staleness magnitude diagnostic. Returns the
+    /// structured `staleness` object when the IST projection is degraded.
+    /// Source: `public.File` rows. Cheap (4 aggregates over a small
+    /// table). Returns `Err` on query failure ; caller treats `None` as
+    /// "diagnostic unavailable, keep the boolean flag only".
+    pub(crate) fn compute_staleness_snapshot(&self) -> Result<Value, String> {
+        // Single round-trip aggregate (modulo sample_paths CTE).
+        // `mtime` is stored in seconds (matches scanner). `graph_ready_at_ms`
+        // is the indexer's "this file is on disk in the IST" timestamp.
+        let sql = "WITH last_publish AS (\
+                     SELECT COALESCE(MAX(graph_ready_at_ms), 0) AS ts_ms FROM public.File WHERE graph_ready = TRUE\
+                   ),\
+                   stale AS (\
+                     SELECT path, mtime FROM public.File, last_publish \
+                     WHERE mtime * 1000 > last_publish.ts_ms\
+                   )\
+                   SELECT \
+                     (SELECT ts_ms FROM last_publish)::text AS last_publish_ts_ms, \
+                     (SELECT COUNT(*) FROM stale)::text AS modified_count, \
+                     COALESCE((SELECT EXTRACT(EPOCH FROM NOW())::BIGINT - MIN(mtime) FROM stale), 0)::text AS oldest_age_secs, \
+                     COALESCE((SELECT string_agg(path, '|' ORDER BY mtime DESC) FROM (SELECT path, mtime FROM stale ORDER BY mtime DESC LIMIT 5) s), '') AS sample_paths_pipe";
+        let json = self
+            .graph_store
+            .query_json(sql)
+            .map_err(|e| format!("staleness query failed: {e}"))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&json)
+            .map_err(|e| format!("staleness parse failed: {e}"))?;
+        Ok(staleness_from_row(rows.first().map(|r| r.as_slice())))
+    }
+}
+
+/// REQ-AXO-231 — pure assembly from raw row to JSON. Extracted for
+/// unit testing without a PG instance.
+pub(crate) fn staleness_from_row(row: Option<&[String]>) -> Value {
+    let Some(row) = row else {
+        return Value::Null;
+    };
+    let last_publish_ts_ms: i64 = row.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let modified_count: u64 = row.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let oldest_age_secs: i64 = row.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let sample_paths: Vec<String> = row
+        .get(3)
+        .map(|s| {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split('|').map(String::from).collect()
+            }
+        })
+        .unwrap_or_default();
+    let last_publish_iso = if last_publish_ts_ms > 0 {
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(last_publish_ts_ms)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    json!({
+        "last_publish_ts_ms": last_publish_ts_ms,
+        "last_publish_ts": last_publish_iso,
+        "modified_files_since": modified_count,
+        "oldest_modified_age_seconds": oldest_age_secs,
+        "sample_paths": sample_paths,
+    })
+}
+
 /// REQ-AXO-91497 — derive `(next_best_action, recovery_hint)` from
 /// degraded notes. When the first blocker has a known concrete recovery
 /// command, surface it ; otherwise fall back to a non-recursive default.
@@ -1382,6 +1479,60 @@ mod tests {
         let (action, _) = derive_recovery_action(&notes);
         // The bug being fixed: `next_best_action.tool` MUST NEVER be `status` itself.
         assert_ne!(action.get("tool").and_then(Value::as_str), Some("status"));
+    }
+
+    // REQ-AXO-231 — staleness magnitude
+    #[test]
+    fn staleness_from_row_returns_null_for_none() {
+        assert!(staleness_from_row(None).is_null());
+    }
+
+    #[test]
+    fn staleness_from_row_parses_canonical_aggregate() {
+        // last_publish_ts_ms=1700000000000, modified=3, oldest=42s,
+        // sample_paths joined with '|'.
+        let row = vec![
+            "1700000000000".to_string(),
+            "3".to_string(),
+            "42".to_string(),
+            "src/a.rs|src/b.rs|src/c.rs".to_string(),
+        ];
+        let v = staleness_from_row(Some(&row));
+        assert_eq!(v["last_publish_ts_ms"].as_i64(), Some(1_700_000_000_000));
+        assert_eq!(v["modified_files_since"].as_u64(), Some(3));
+        assert_eq!(v["oldest_modified_age_seconds"].as_i64(), Some(42));
+        let paths = v["sample_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0].as_str(), Some("src/a.rs"));
+        // RFC3339 must be present and well-formed.
+        assert!(v["last_publish_ts"]
+            .as_str()
+            .map(|s| s.starts_with("20"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn staleness_from_row_handles_empty_paths() {
+        let row = vec![
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "".to_string(),
+        ];
+        let v = staleness_from_row(Some(&row));
+        assert_eq!(v["sample_paths"].as_array().unwrap().len(), 0);
+        // ts=0 should emit empty RFC3339 (no last publish recorded).
+        assert_eq!(v["last_publish_ts"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn staleness_from_row_clamps_missing_columns() {
+        // Only 2 columns present — others fall through to defaults.
+        let row = vec!["1700000000000".to_string(), "5".to_string()];
+        let v = staleness_from_row(Some(&row));
+        assert_eq!(v["modified_files_since"].as_u64(), Some(5));
+        assert_eq!(v["oldest_modified_age_seconds"].as_i64(), Some(0));
+        assert_eq!(v["sample_paths"].as_array().unwrap().len(), 0);
     }
 
     #[test]
