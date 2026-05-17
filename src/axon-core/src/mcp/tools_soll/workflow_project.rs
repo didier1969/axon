@@ -41,6 +41,25 @@ fn project_workflow_error(
 /// in files that already have inline tests). The sibling-file
 /// patterns from the original matcher are preserved so existing
 /// commits keep passing.
+/// REQ-AXO-91569 — true when the Conventional-Commits message starts
+/// with the `refactor` type token (`refactor:` or `refactor(<scope>):`).
+/// Leading whitespace and a single optional `!` (breaking-change
+/// marker, e.g. `refactor(api)!:`) are tolerated. The check is
+/// case-sensitive per Conventional-Commits 1.0.
+fn commit_message_is_refactor(message: &str) -> bool {
+    let trimmed = message.trim_start();
+    if !trimmed.starts_with("refactor") {
+        return false;
+    }
+    let after = &trimmed["refactor".len()..];
+    let after = after.strip_prefix('!').unwrap_or(after);
+    match after.chars().next() {
+        Some(':') => true,
+        Some('(') => after.contains(')'),
+        _ => false,
+    }
+}
+
 fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
     if path.contains(required_path) {
         return true;
@@ -138,6 +157,21 @@ impl McpServer {
                 .unwrap_or("");
 
             if trigger_path.is_empty() || required_path.is_empty() || enforcement != "strict" {
+                continue;
+            }
+
+            // REQ-AXO-91569 — diff-aware exemption: when the guideline
+            // metadata sets `exempt_for_refactor: true` and the commit
+            // message starts with the Conventional-Commits `refactor`
+            // type (with or without scope), the gate steps aside. The
+            // signal is intentionally narrow: only the `refactor:` /
+            // `refactor(<scope>):` prefix qualifies. `feat:` / `fix:` /
+            // `chore:` / etc. stay strictly gated.
+            let exempt_for_refactor = meta
+                .get("exempt_for_refactor")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if exempt_for_refactor && commit_message_is_refactor(message) {
                 continue;
             }
 
@@ -1253,5 +1287,77 @@ mod commit_work_cwd_tests {
             extract_project_path_arg(&args),
             Some("/path/with'quote/in_it".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod commit_message_refactor_tests {
+    //! REQ-AXO-91569 — diff-aware pre-flight exemption. The helper
+    //! `commit_message_is_refactor` is the single signal the gate
+    //! consults when a guideline carries `exempt_for_refactor: true`.
+    //! Locking the parsing here prevents the gate from being
+    //! accidentally widened (`refactoring`, `refactor without colon`)
+    //! or narrowed (rejecting valid scoped breaking-change prefixes).
+    use super::commit_message_is_refactor;
+
+    #[test]
+    fn plain_refactor_colon_matches() {
+        assert!(commit_message_is_refactor("refactor: tighten loop"));
+    }
+
+    #[test]
+    fn scoped_refactor_matches() {
+        assert!(commit_message_is_refactor(
+            "refactor(governance): collapse cosine_expr"
+        ));
+    }
+
+    #[test]
+    fn scoped_breaking_refactor_matches() {
+        assert!(commit_message_is_refactor("refactor(api)!: rename method"));
+    }
+
+    #[test]
+    fn plain_breaking_refactor_matches() {
+        assert!(commit_message_is_refactor("refactor!: hot-path rewrite"));
+    }
+
+    #[test]
+    fn leading_whitespace_tolerated() {
+        assert!(commit_message_is_refactor("   refactor: with leading ws"));
+    }
+
+    #[test]
+    fn feat_prefix_rejected() {
+        assert!(!commit_message_is_refactor("feat: add API"));
+    }
+
+    #[test]
+    fn refactoring_rejected() {
+        // `refactoring` is not a Conventional-Commits type token ; the
+        // gate must stay strict on near-misses.
+        assert!(!commit_message_is_refactor("refactoring the loop"));
+    }
+
+    #[test]
+    fn refactor_without_separator_rejected() {
+        assert!(!commit_message_is_refactor("refactor the loop"));
+    }
+
+    #[test]
+    fn unclosed_scope_rejected() {
+        assert!(!commit_message_is_refactor("refactor(governance"));
+    }
+
+    #[test]
+    fn empty_message_rejected() {
+        assert!(!commit_message_is_refactor(""));
+    }
+
+    #[test]
+    fn uppercase_rejected() {
+        // Conventional-Commits 1.0 is case-sensitive — `Refactor:` is
+        // not a valid type token, so the gate stays strict.
+        assert!(!commit_message_is_refactor("Refactor: tighten loop"));
     }
 }

@@ -1694,13 +1694,13 @@ impl GraphStore {
                 "GUI-PRO-001",
                 "TDD Obligatoire",
                 "Les tests doivent être écrits avant ou avec le code source.",
-                "{\"phase\": \"pre-code\", \"trigger_path\": \"src/axon-core/src/*\", \"required_path\": \"tests.rs\", \"enforcement\": \"strict\"}"
+                "{\"phase\": \"pre-code\", \"trigger_path\": \"src/axon-core/src/*\", \"required_path\": \"tests.rs\", \"enforcement\": \"strict\", \"exempt_for_refactor\": true}"
             ),
             (
                 "GUI-PRO-002",
                 "Documentation MCP",
                 "Toute modification de src/mcp/tools_*.rs nécessite la mise à jour de SKILL.md",
-                "{\"phase\": \"post-code\", \"trigger_path\": \"src/axon-core/src/mcp/tools_*\", \"required_path\": \"SKILL.md\", \"enforcement\": \"strict\"}"
+                "{\"phase\": \"post-code\", \"trigger_path\": \"src/axon-core/src/mcp/tools_*\", \"required_path\": \"SKILL.md\", \"enforcement\": \"strict\", \"exempt_for_refactor\": true}"
             ),
             (
                 "GUI-PRO-003",
