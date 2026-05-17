@@ -24,61 +24,13 @@ enum ReadRoute {
 }
 
 impl GraphStore {
+    /// REQ-AXO-271 slice 3 (PG canonical only, post-MIL-AXO-017) :
+    /// translate DuckDB-flavored JSON helpers embedded in MCP-tool SQL to
+    /// native Postgres `->` / `->>` operators on JSONB columns. The
+    /// historical DuckDB-ATTACH `soll.X → soll.main.X` rewriter is gone
+    /// (SOLL lives under a single `soll` PG schema ; no nested `main`).
     fn normalize_attached_soll_query<'a>(&self, query: &'a str) -> Cow<'a, str> {
-        // MIL-AXO-015 P3 slice 3d: under PostgreSQL the SOLL layer is
-        // a single PG schema (`soll`), not a DuckDB ATTACH'd database
-        // with a nested `main` schema. The duckdb-only `soll.X →
-        // soll.main.X` rewrite must not run on PG queries; otherwise
-        // statements like `CREATE TABLE soll.Registry` get mangled to
-        // `CREATE TABLE soll.main.Registry` which has no parser
-        // meaning under PG.
-        //
-        // REQ-AXO-249: under PG, also translate the DuckDB-only JSON
-        // helpers MCP tools embed in their queries to native Postgres
-        // operators on JSONB columns (soll.Node.metadata is JSONB per
-        // postgres/ddl.rs). Without this, `json_extract_string`,
-        // `CAST(json_extract(...) AS VARCHAR)`, etc. fail at runtime,
-        // breaking soll_validate / soll_work_plan / completeness reads.
-        if self.pool.symbols.backend == crate::graph::PluginBackend::Postgres {
-            return rewrite_duckdb_json_helpers_for_pg(query);
-        }
-        if !self.soll_attached || !query.contains("soll.") {
-            return Cow::Borrowed(query);
-        }
-
-        fn is_identifier_char(byte: u8) -> bool {
-            byte.is_ascii_alphanumeric() || byte == b'_'
-        }
-
-        let bytes = query.as_bytes();
-        let mut cursor = 0usize;
-        let mut rewritten = String::with_capacity(query.len() + 32);
-        let mut changed = false;
-
-        while let Some(relative) = query[cursor..].find("soll.") {
-            let absolute = cursor + relative;
-            let preceded_by_identifier =
-                absolute > 0 && is_identifier_char(bytes[absolute.saturating_sub(1)]);
-            let already_fully_qualified = query[absolute + 5..].starts_with("main.");
-
-            if preceded_by_identifier || already_fully_qualified {
-                rewritten.push_str(&query[cursor..absolute + 5]);
-                cursor = absolute + 5;
-                continue;
-            }
-
-            rewritten.push_str(&query[cursor..absolute]);
-            rewritten.push_str("soll.main.");
-            cursor = absolute + 5;
-            changed = true;
-        }
-
-        if !changed {
-            return Cow::Borrowed(query);
-        }
-
-        rewritten.push_str(&query[cursor..]);
-        Cow::Owned(rewritten)
+        rewrite_duckdb_json_helpers_for_pg(query)
     }
 }
 
