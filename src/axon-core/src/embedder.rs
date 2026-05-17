@@ -61,6 +61,8 @@ mod gpu_telemetry;
 pub(crate) mod inline_embed;
 #[path = "embedder/lifecycle.rs"]
 pub(crate) mod lifecycle;
+#[path = "embedder/lifecycle_machine.rs"]
+pub(crate) mod lifecycle_machine;
 #[path = "embedder/provider_contract.rs"]
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]

@@ -397,6 +397,17 @@ impl McpServer {
         // NOTIFY listener drop or a missed mark_embedded.
         let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
         let runtime_pending_empty = runtime_pending == 0;
+
+        // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces
+        // the sleep/wake state machine so operators see when the GPU
+        // session is parked vs ready, and how often it has flipped.
+        // Slice 3B will wire the actual session drop ; until then the
+        // counters increment but the GPU remains loaded.
+        let lifecycle = crate::embedder::lifecycle_machine::process_lifecycle();
+        let lifecycle_phase = lifecycle.phase().as_str();
+        let lifecycle_last_used_ms = lifecycle.last_used_ms();
+        let lifecycle_wake_count = lifecycle.wake_count();
+        let lifecycle_sleep_count = lifecycle.sleep_count();
         let report = format!(
             "## Axon Status (project={project})\n\n\
              ### Storage\n\
@@ -420,7 +431,8 @@ impl McpServer {
              - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par cold-start poll)\n\
              - NOTIFY channel:    chunk_pending_embed\n\
              - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\
-             - Runtime idle (pending=0): {runtime_pending_empty}\n\n\
+             - Runtime idle (pending=0): {runtime_pending_empty}\n\
+             - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count})\n\n\
              Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer)."
         );
 
@@ -442,6 +454,10 @@ impl McpServer {
                 "coldstart_poll_interval_secs": 30,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
+                "lifecycle_phase": lifecycle_phase,
+                "lifecycle_last_used_ms": lifecycle_last_used_ms,
+                "lifecycle_wake_count": lifecycle_wake_count,
+                "lifecycle_sleep_count": lifecycle_sleep_count,
             }
         }))
     }
