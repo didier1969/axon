@@ -11,8 +11,6 @@ use tracing::{info, warn};
 use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
 use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_mode::graph_embeddings_enabled;
-use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_topology::current_runtime_process_role;
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
 const IST_SCHEMA_VERSION: &str = "3";
@@ -113,22 +111,6 @@ fn remove_path_if_exists(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn split_brain_ist_reader_soll_writer_mode() -> bool {
-    if matches!(
-        std::env::var("AXON_SPLIT_BRAIN_IST_READER_ONLY")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    ) {
-        return true;
-    }
-    matches!(
-        current_runtime_process_role(),
-        crate::runtime_topology::AxonProcessRole::Brain
-    ) && matches!(AxonRuntimeMode::from_env(), AxonRuntimeMode::BrainOnly)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IstCompatibilityAction {
     Noop,
@@ -148,11 +130,10 @@ enum SollAccessMode {
 #[allow(dead_code)]
 impl GraphStore {
     pub fn new(db_root: &str) -> Result<Self> {
-        Self::new_with_modes(
-            db_root,
-            !db_root.eq(":memory:") && split_brain_ist_reader_soll_writer_mode(),
-            SollAccessMode::ReadWrite,
-        )
+        // Split-brain mode arg is ignored (forced to false in
+        // `new_with_modes` ; PG's MVCC handles reader/writer concurrency
+        // server-side post DuckDB purge — REQ-AXO-271).
+        Self::new_with_modes(db_root, false, SollAccessMode::ReadWrite)
     }
 
     pub fn new_brain_reader_soll_writer(db_root: &str) -> Result<Self> {
