@@ -529,12 +529,9 @@ pub fn estimate_observed_cost_bytes(
 }
 
 fn configured_memory_budget_bytes() -> u64 {
-    if let Ok(bytes) = std::env::var("AXON_QUEUE_MEMORY_BUDGET_BYTES") {
-        if let Ok(parsed) = bytes.parse::<u64>() {
-            return parsed.max(DEFAULT_MEMORY_BUDGET_BYTES / 8);
-        }
-    }
-
+    // AXON_QUEUE_MEMORY_BUDGET_BYTES retired (REQ-AXO-290 S3) ; the
+    // streaming-pipeline v2 bounded channels obviate the global queue
+    // budget. `AXON_MEMORY_LIMIT_GB` remains the single operator knob.
     if let Ok(gb) = std::env::var("AXON_MEMORY_LIMIT_GB") {
         if let Ok(parsed) = gb.parse::<u64>() {
             let bytes = parsed.saturating_mul(1024 * 1024 * 1024);

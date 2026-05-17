@@ -144,21 +144,19 @@ impl RuntimeTopologyStatus {
     }
 }
 
+/// Process-role marker derived from `AXON_RUNTIME_MODE`. The legacy
+/// `AXON_RUNTIME_SHADOW_ROLE` override was a DuckDB-era artefact for
+/// dual-process orchestration ; under PG canonical (REQ-AXO-271) the
+/// declared mode is the single source of truth (REQ-AXO-290 S3).
 pub fn current_runtime_shadow_role() -> String {
-    std::env::var("AXON_RUNTIME_SHADOW_ROLE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            AxonRuntimeMode::from_env()
-                .declared_process_role()
-                .as_str()
-                .to_string()
-        })
+    AxonRuntimeMode::from_env()
+        .declared_process_role()
+        .as_str()
+        .to_string()
 }
 
 pub fn current_runtime_process_role() -> AxonProcessRole {
-    AxonProcessRole::from_runtime_shadow_role(&current_runtime_shadow_role())
-        .unwrap_or_else(|| AxonRuntimeMode::from_env().declared_process_role())
+    AxonRuntimeMode::from_env().declared_process_role()
 }
 
 #[cfg(test)]

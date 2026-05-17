@@ -10,16 +10,9 @@ pub enum AxonRuntimeMode {
 
 impl AxonRuntimeMode {
     pub fn from_env() -> Self {
-        Self::from_str(&std::env::var("AXON_RUNTIME_MODE").unwrap_or_else(|_| {
-            match std::env::var("AXON_RUNTIME_SHADOW_ROLE")
-                .ok()
-                .map(|value| value.trim().to_ascii_lowercase())
-                .as_deref()
-            {
-                Some("brain") => "brain_only".to_string(),
-                _ => "indexer_full".to_string(),
-            }
-        }))
+        Self::from_str(
+            &std::env::var("AXON_RUNTIME_MODE").unwrap_or_else(|_| "indexer_full".to_string()),
+        )
     }
 
     #[allow(clippy::should_implement_trait)]

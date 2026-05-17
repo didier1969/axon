@@ -128,14 +128,6 @@ fn apply_canonical_ort_runtime_env(gpu_execution_requested: bool) {
     }
 }
 
-fn apply_canonical_watcher_runtime_env() {
-    if std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").is_err() {
-        unsafe {
-            std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "128");
-        }
-    }
-}
-
 fn apply_canonical_ort_thread_defaults_from_openmp() {
     if std::env::var("AXON_ORT_INTRA_THREADS").is_ok() {
         return;
@@ -534,7 +526,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     }
     apply_canonical_ort_runtime_env(gpu_execution_requested);
     apply_canonical_ort_thread_defaults_from_openmp();
-    apply_canonical_watcher_runtime_env();
     if provider_requested.eq_ignore_ascii_case("cuda") && !runtime_profile.gpu_present {
         warn!(
             "Embedding provider requested CUDA, but no accessible GPU was detected. Axon will run semantic workloads on CPU until GPU access is restored."
@@ -545,13 +536,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         std::env::set_var(
             "AXON_MEMORY_LIMIT_GB",
             runtime_profile.ram_budget_gb.to_string(),
-        );
-        std::env::set_var(
-            "AXON_QUEUE_MEMORY_BUDGET_BYTES",
-            runtime_profile
-                .ingestion_memory_budget_gb
-                .saturating_mul(1024 * 1024 * 1024)
-                .to_string(),
         );
     }
 
@@ -848,7 +832,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 mod tests {
     use super::{
         apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
-        apply_canonical_ort_thread_defaults_from_openmp, apply_canonical_watcher_runtime_env,
+        apply_canonical_ort_thread_defaults_from_openmp,
         apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
         canonical_embedding_provider_request, graph_first_indexer_lane_sizing,
         RuntimeBootProfile, RuntimeBootRole,
@@ -1167,44 +1151,6 @@ mod tests {
         unsafe {
             std::env::remove_var("OMP_NUM_THREADS");
             std::env::remove_var("AXON_ORT_INTRA_THREADS");
-        }
-    }
-
-    #[test]
-    fn apply_canonical_watcher_runtime_env_sets_default_budget() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
-        }
-
-        apply_canonical_watcher_runtime_env();
-
-        assert_eq!(
-            std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").unwrap(),
-            "128"
-        );
-
-        unsafe {
-            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
-        }
-    }
-
-    #[test]
-    fn apply_canonical_watcher_runtime_env_preserves_explicit_budget() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "32");
-        }
-
-        apply_canonical_watcher_runtime_env();
-
-        assert_eq!(
-            std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET").unwrap(),
-            "32"
-        );
-
-        unsafe {
-            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
         }
     }
 

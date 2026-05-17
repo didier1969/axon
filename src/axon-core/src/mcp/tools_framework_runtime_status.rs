@@ -370,10 +370,6 @@ impl McpServer {
             std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
         let watcher_policy =
             std::env::var("AXON_WATCHER_POLICY").unwrap_or_else(|_| "unknown".to_string());
-        let queue_memory_budget_bytes = std::env::var("AXON_QUEUE_MEMORY_BUDGET_BYTES")
-            .unwrap_or_else(|_| "unknown".to_string());
-        let watcher_subtree_hint_budget = std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
-            .unwrap_or_else(|_| "unknown".to_string());
         let vector_workers =
             std::env::var("AXON_VECTOR_WORKERS").unwrap_or_else(|_| "unknown".to_string());
         let graph_workers =
@@ -413,15 +409,11 @@ impl McpServer {
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
             && runtime_authority_converged;
-        let standalone_brain_only = process_role == "brain"
-            && runtime_mode == AxonRuntimeMode::BrainOnly
-            && !matches!(
-                std::env::var("AXON_SPLIT_SHADOW_ONLY")
-                    .ok()
-                    .as_deref()
-                    .map(str::trim),
-                Some("1") | Some("true") | Some("yes") | Some("on")
-            );
+        // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
+        // under PG canonical (REQ-AXO-271 / REQ-AXO-290 S3) the brain
+        // is always standalone when in BrainOnly mode.
+        let standalone_brain_only =
+            process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly;
         let indexer_feed_degraded = !standalone_brain_only
             && (indexer_feed_state != "fresh" || indexer_feed_reason.as_deref().is_some());
         let mut degraded_notes =
@@ -1020,8 +1012,6 @@ impl McpServer {
                     "gpu_access_policy": gpu_access_policy,
                     "watcher_policy": watcher_policy,
                     "embedding_provider": embedding_provider,
-                    "queue_memory_budget_bytes": queue_memory_budget_bytes,
-                    "watcher_subtree_hint_budget": watcher_subtree_hint_budget,
                     "vector_workers": vector_workers,
                     "graph_workers": graph_workers
                 },

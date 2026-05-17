@@ -694,11 +694,9 @@ fn subtree_hint_retry_budget() -> u64 {
 }
 
 fn watcher_subtree_hint_budget() -> usize {
-    std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(512)
+    // AXON_WATCHER_SUBTREE_HINT_BUDGET retired (REQ-AXO-290 S3) ;
+    // streaming-pipeline v2 watcher uses the constant default.
+    512
 }
 
 impl Default for IngressBuffer {

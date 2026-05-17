@@ -23,16 +23,10 @@ fn tool_available_in_runtime(name: &str) -> bool {
             .ok()
             .as_deref(),
     );
-    let split_brain_public_authority = matches!(
-        current_runtime_process_role(),
-        crate::runtime_topology::AxonProcessRole::Brain
-    ) && matches!(
-        std::env::var("AXON_SPLIT_SHADOW_ONLY")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    );
+    // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
+    // under PG canonical (REQ-AXO-271 / REQ-AXO-290 S3) the brain
+    // never carries indexer authority. Always false.
+    let split_brain_public_authority = false;
 
     if requires_indexed_runtime(name) {
         return split_brain_public_authority

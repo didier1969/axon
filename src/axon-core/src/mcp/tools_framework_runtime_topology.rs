@@ -32,15 +32,9 @@ impl McpServer {
         let reader_snapshot_diagnostics = self.graph_store.reader_snapshot_diagnostics();
         let reader_alias_direct = self.graph_store.reader_snapshot_is_writer_alias();
         let shadow_role = current_runtime_shadow_role();
-        let split_shadow_only = std::env::var("AXON_SPLIT_SHADOW_ONLY")
-            .ok()
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
+        // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
+        // under PG canonical the brain never carries indexer authority.
+        let split_shadow_only = false;
         let mut peer_runtime_version = json!({
             "available": false,
             "release_version": Value::Null,
