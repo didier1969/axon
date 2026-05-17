@@ -130,6 +130,21 @@ pub struct VectorWorkerFault {
     pub restart_attempt: u64,
 }
 
+/// REQ-AXO-91572 option B — cross-process embedder state row read from
+/// `axon_runtime.EmbedderLifecycleHeartbeat`. The brain consumes
+/// indexer-written rows in `embedding_status` so MCP callers see the
+/// real runtime state instead of the brain's own (unused) singleton.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbedderLifecycleHeartbeatRecord {
+    pub process_role: String,
+    pub phase: String,
+    pub last_used_ms: i64,
+    pub wake_count: i64,
+    pub sleep_count: i64,
+    pub pending_count: i64,
+    pub heartbeat_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VectorLaneStateRecord {
     pub lane: String,

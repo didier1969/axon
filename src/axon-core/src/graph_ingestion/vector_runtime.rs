@@ -6,8 +6,8 @@ use crate::service_guard;
 
 use super::{
     next_vector_persist_outbox_claim_token, parse_i64_field, parse_u64_field,
-    FileVectorizationLeaseSnapshot, VectorBatchRun, VectorLaneStateRecord,
-    VectorPersistOutboxPayload, VectorPersistOutboxWork, VectorWorkerFault,
+    EmbedderLifecycleHeartbeatRecord, FileVectorizationLeaseSnapshot, VectorBatchRun,
+    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxWork, VectorWorkerFault,
 };
 
 impl GraphStore {
@@ -549,6 +549,87 @@ impl GraphStore {
             model_id
         ))
     }
+
+    /// REQ-AXO-91572 option B — UPSERT the indexer-local
+    /// `EmbedderLifecycle` snapshot into the cross-process heartbeat
+    /// table. Called every heartbeat tick by the indexer ; readers
+    /// (brain `embedding_status`) treat rows older than ~2× tick as
+    /// stale.
+    pub fn record_lifecycle_heartbeat(
+        &self,
+        process_role: &str,
+        snapshot: &crate::embedder::lifecycle_machine::LifecycleHeartbeatSnapshot,
+    ) -> Result<()> {
+        let sql = build_lifecycle_heartbeat_upsert_sql(process_role, snapshot);
+        self.execute(&sql)
+    }
+
+    /// REQ-AXO-91572 option B — read the latest heartbeat row for a
+    /// given role. Returns `None` if no row exists yet (process hasn't
+    /// published since boot). Freshness is left to the caller : compare
+    /// `heartbeat_ms` against `now - 2 × tick`.
+    pub fn latest_lifecycle_heartbeat(
+        &self,
+        process_role: &str,
+    ) -> Result<Option<EmbedderLifecycleHeartbeatRecord>> {
+        let table_ref = self.axon_runtime_table_ref("EmbedderLifecycleHeartbeat");
+        let raw = self.query_json_writer(&format!(
+            "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms \
+             FROM {table_ref} \
+             WHERE process_role = '{}' \
+             LIMIT 1",
+            Self::escape_sql(process_role)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(EmbedderLifecycleHeartbeatRecord {
+            process_role: row
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            phase: row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            last_used_ms: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
+            wake_count: row.get(3).and_then(parse_i64_field).unwrap_or_default(),
+            sleep_count: row.get(4).and_then(parse_i64_field).unwrap_or_default(),
+            pending_count: row.get(5).and_then(parse_i64_field).unwrap_or_default(),
+            heartbeat_ms: row.get(6).and_then(parse_i64_field).unwrap_or_default(),
+        }))
+    }
+}
+
+/// REQ-AXO-91572 option B — pure SQL builder for the heartbeat UPSERT.
+/// Exposed at module scope so SQL-shape contract tests cover it without
+/// needing a live `GraphStore`.
+fn build_lifecycle_heartbeat_upsert_sql(
+    process_role: &str,
+    snapshot: &crate::embedder::lifecycle_machine::LifecycleHeartbeatSnapshot,
+) -> String {
+    format!(
+        "INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat \
+         (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms) \
+         VALUES ('{}', '{}', {}, {}, {}, {}, {}) \
+         ON CONFLICT (process_role) DO UPDATE SET \
+            phase = EXCLUDED.phase, last_used_ms = EXCLUDED.last_used_ms, \
+            wake_count = EXCLUDED.wake_count, sleep_count = EXCLUDED.sleep_count, \
+            pending_count = EXCLUDED.pending_count, heartbeat_ms = EXCLUDED.heartbeat_ms",
+        GraphStore::escape_sql(process_role),
+        snapshot.phase.as_str(),
+        snapshot.last_used_ms,
+        snapshot.wake_count,
+        snapshot.sleep_count,
+        snapshot.pending_count,
+        snapshot.heartbeat_ms,
+    )
 }
 
 #[cfg(test)]
@@ -658,5 +739,56 @@ mod tests {
                 "PG SQL missing axon_runtime schema qualifier"
             );
         }
+    }
+
+    #[test]
+    fn lifecycle_heartbeat_upsert_sql_shape() {
+        use crate::embedder::lifecycle_machine::{
+            EmbedderPhase, LifecycleHeartbeatSnapshot,
+        };
+        let snapshot = LifecycleHeartbeatSnapshot {
+            phase: EmbedderPhase::Sleeping,
+            last_used_ms: 1_700_000_000_000,
+            wake_count: 3,
+            sleep_count: 4,
+            pending_count: 12,
+            heartbeat_ms: 1_700_000_005_000,
+        };
+        let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
+        // Shape contract.
+        assert!(sql.contains("INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat"));
+        assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
+        for col in [
+            "phase", "last_used_ms", "wake_count", "sleep_count",
+            "pending_count", "heartbeat_ms",
+        ] {
+            assert!(
+                sql.contains(&format!("{col} = EXCLUDED.{col}")),
+                "ON CONFLICT update should refresh column `{col}`"
+            );
+        }
+        // Value plumbing.
+        assert!(sql.contains("'indexer'"));
+        assert!(sql.contains("'sleeping'"));
+        assert!(sql.contains("1700000000000"));
+        assert!(sql.contains("1700000005000"));
+    }
+
+    #[test]
+    fn lifecycle_heartbeat_upsert_sql_escapes_role() {
+        use crate::embedder::lifecycle_machine::{
+            EmbedderPhase, LifecycleHeartbeatSnapshot,
+        };
+        let snapshot = LifecycleHeartbeatSnapshot {
+            phase: EmbedderPhase::Ready,
+            last_used_ms: 0,
+            wake_count: 0,
+            sleep_count: 0,
+            pending_count: 0,
+            heartbeat_ms: 0,
+        };
+        // Pathological role containing single quote must be escaped.
+        let sql = super::build_lifecycle_heartbeat_upsert_sql("ind'exer", &snapshot);
+        assert!(sql.contains("'ind''exer'"));
     }
 }

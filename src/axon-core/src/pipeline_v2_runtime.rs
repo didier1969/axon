@@ -131,6 +131,28 @@ pub fn spawn_pipeline_v2_indexer(
                     std::time::Duration::from_secs(300),
                     std::time::Duration::from_secs(2),
                 );
+                // REQ-AXO-91572 option B — publish the indexer's
+                // EmbedderLifecycle state into the cross-process
+                // `axon_runtime.EmbedderLifecycleHeartbeat` table so
+                // the brain's `embedding_status` MCP tool reads the
+                // actual runtime state instead of its own unused
+                // singleton. Tick 5s : far below the brain freshness
+                // window (~30s) so a single missed tick still leaves
+                // the row fresh enough to trust.
+                let heartbeat_store = store.clone();
+                crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
+                    std::time::Duration::from_secs(5),
+                    move |snapshot| {
+                        if let Err(err) =
+                            heartbeat_store.record_lifecycle_heartbeat("indexer", &snapshot)
+                        {
+                            warn!(
+                                error = %err,
+                                "REQ-AXO-91572: failed to UPSERT EmbedderLifecycleHeartbeat row"
+                            );
+                        }
+                    },
+                );
                 arc_embedder as Arc<dyn crate::pipeline_v2::B2Embedder>
             }
             Err(err) => {

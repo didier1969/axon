@@ -36,9 +36,10 @@ use sql_helpers::{
     parse_file_ingress_row, parse_i64_field, parse_pending_file_row, parse_u64_field,
 };
 pub use types::{
-    FileLifecycleEvent, FileVectorizationLeaseSnapshot, FileVectorizationWork, GraphProjectionWork,
-    IgnoreReconcileStats, VectorBatchRun, VectorLaneStateRecord, VectorPersistOutboxPayload,
-    VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
+    EmbedderLifecycleHeartbeatRecord, FileLifecycleEvent, FileVectorizationLeaseSnapshot,
+    FileVectorizationWork, GraphProjectionWork, IgnoreReconcileStats, VectorBatchRun,
+    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
+    VectorPersistOutboxWork, VectorWorkerFault,
 };
 
 #[derive(Debug, Clone, Copy)]

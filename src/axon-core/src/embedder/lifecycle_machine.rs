@@ -157,6 +157,57 @@ pub fn process_lifecycle() -> &'static Arc<EmbedderLifecycle> {
     LIFE.get_or_init(|| Arc::new(EmbedderLifecycle::new()))
 }
 
+/// Snapshot of the local `EmbedderLifecycle` state for cross-process
+/// publication via `axon_runtime.EmbedderLifecycleHeartbeat`
+/// (REQ-AXO-91572 option B). Captured at heartbeat tick by the
+/// indexer ; consumed by the brain `embedding_status` MCP tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleHeartbeatSnapshot {
+    pub phase: EmbedderPhase,
+    pub last_used_ms: i64,
+    pub wake_count: i64,
+    pub sleep_count: i64,
+    pub pending_count: i64,
+    pub heartbeat_ms: i64,
+}
+
+impl LifecycleHeartbeatSnapshot {
+    /// Capture the process-singleton state. Cheap : 4 atomic loads +
+    /// 1 RwLock read (pending_count) + 1 system-time read.
+    pub fn capture() -> Self {
+        let lc = process_lifecycle();
+        Self {
+            phase: lc.phase(),
+            last_used_ms: lc.last_used_ms(),
+            wake_count: lc.wake_count(),
+            sleep_count: lc.sleep_count(),
+            pending_count: super::lifecycle::process_state().pending_count() as i64,
+            heartbeat_ms: now_unix_ms(),
+        }
+    }
+}
+
+/// Spawn the heartbeat-publisher loop. Captures the local lifecycle
+/// state every `tick` and forwards it via `publish` (typically an
+/// UPSERT into `axon_runtime.EmbedderLifecycleHeartbeat`).
+///
+/// Decoupled from `spawn_idle_watchdog` so the writer cadence + the
+/// sleep threshold can be tuned independently (REQ-AXO-91572 option
+/// B). `tick` typical 5 s.
+pub fn spawn_lifecycle_heartbeat_publisher<F>(tick: Duration, mut publish: F)
+where
+    F: FnMut(LifecycleHeartbeatSnapshot) + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tick);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            publish(LifecycleHeartbeatSnapshot::capture());
+        }
+    });
+}
+
 /// Spawn the watchdog. Wakes once per `tick`, evaluates `should_sleep`,
 /// and flips to Sleeping when conditions are met. The `on_sleep`
 /// callback runs after a successful transition — typically the
