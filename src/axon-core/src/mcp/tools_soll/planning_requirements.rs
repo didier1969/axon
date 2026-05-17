@@ -122,6 +122,13 @@ impl McpServer {
             next_to_close
         );
 
+        // REQ-AXO-91527 (MIL-AXO-019 Tier B) — tri-modal envelope.
+        // Coverage summary reads `RequirementCoverageSummary` (SQL-derived
+        // via `soll.Node` JOIN `soll.Edge` JOIN `soll.Traceability`). Live
+        // PG surface ; a follow-up slice can route through the SOLL
+        // petgraph snapshot (REQ-AXO-322) for sub-ms p99 once the
+        // snapshot exposes coverage scoring.
+        let total_available = summary.entries.len() as u64;
         Some(json!({
             "content": [{"type":"text","text": text}],
             "data": {
@@ -143,7 +150,10 @@ impl McpServer {
                     "implementation_completeness": snapshot.implementation_complete(),
                     "evidence_ready": snapshot.evidence_ready()
                 },
-                "guidance_source": "server-side canonical soll completeness evaluator"
+                "guidance_source": "server-side canonical soll completeness evaluator",
+                "surfaces_used": ["soll_pg"],
+                "total_available": total_available,
+                "next_call_hint": "soll_attach_evidence entity_id=<req-id> for the next missing dimension"
             }
         }))
     }

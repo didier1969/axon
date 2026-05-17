@@ -563,6 +563,14 @@ impl McpServer {
             last_revision_metadata,
         );
 
+        // REQ-AXO-91526 (MIL-AXO-019 Tier B) — `soll_query_context` runs
+        // against the live PG SOLL tables (`soll.Node`, `soll.Revision`).
+        // The SOLL petgraph snapshot (REQ-AXO-322, ~1 MB RAM) is the
+        // analytic surface for `soll_work_plan`/`soll_verify_requirements`
+        // ; this surface returns raw paginated rows. Surface flagged as
+        // `soll_pg` until the snapshot exposes pagination by entity_type.
+        let total_available =
+            (visions.len() + reqs.len() + decisions.len() + revisions.len()) as u64;
         let response = json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
             "data": {
@@ -571,7 +579,10 @@ impl McpServer {
                 "requirements": reqs,
                 "decisions": decisions,
                 "revisions": revisions,
-                "operational_digest": operational_digest
+                "operational_digest": operational_digest,
+                "surfaces_used": ["soll_pg"],
+                "total_available": total_available,
+                "next_call_hint": "soll_work_plan project_code=<code> top=8 for scored execution order"
             }
         });
         Self::write_soll_context_cache(cache_key, now_ms, &response);

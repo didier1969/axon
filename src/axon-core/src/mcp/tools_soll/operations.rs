@@ -505,6 +505,11 @@ impl McpServer {
                 confidence,
             )
         );
+        // REQ-AXO-91528 (MIL-AXO-019 Tier B) — tri-modal envelope. The
+        // completeness snapshot today reads from PG (`soll.Node`+`Edge`)
+        // ; a follow-up slice can move cycle/orphan/relation-policy
+        // detection to the SOLL petgraph snapshot (REQ-AXO-322) +
+        // `petgraph::algo::is_cyclic_directed` for sub-ms runs.
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -526,7 +531,10 @@ impl McpServer {
                     "partial": snapshot.requirement_coverage.partial,
                     "missing": snapshot.requirement_coverage.missing
                 },
-                "guidance_source": "server-side canonical soll validation"
+                "guidance_source": "server-side canonical soll validation",
+                "surfaces_used": ["soll_pg"],
+                "total_available": violation_count as u64,
+                "next_call_hint": "soll_manager action=link <fix one violation at a time>"
             }
         }))
     }
