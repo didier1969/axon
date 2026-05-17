@@ -48,3 +48,8 @@
 {"id":"Q048","category":"clone-detection","tool":"semantic_clones","args":{"project":"ZCL"},"expected_top_symbols":[],"expected_concepts":[]}
 {"id":"Q049","category":"clone-detection","tool":"retrieve_context","args":{"question":"duplicated extraction logic across parsers","project":"AXO"},"expected_top_symbols":["walk_for_calls","extract_call"],"expected_concepts":["body_split_lines","parser duplication"]}
 {"id":"Q050","category":"clone-detection","tool":"retrieve_context","args":{"question":"repeated SQL fallback pattern in graph_analytics","project":"AXO"},"expected_top_symbols":[],"expected_concepts":["structural_graph_analytics_available","early-return"]}
+{"id":"I001","category":"single-lookup","tool":"inspect","args":{"symbol":"axon_query","project":"AXO"},"expected_top_symbols":["axon_query"],"expected_concepts":[]}
+{"id":"I002","category":"single-lookup","tool":"inspect","args":{"symbol":"generate_global_schema","project":"AXO"},"expected_top_symbols":["generate_global_schema"],"expected_concepts":[]}
+{"id":"I003","category":"single-lookup","tool":"inspect","args":{"symbol":"load_canonical_ddl_files","project":"AXO"},"expected_top_symbols":["load_canonical_ddl_files"],"expected_concepts":[]}
+{"id":"I004","category":"single-lookup","tool":"inspect","args":{"symbol":"active_project_hot_targets","project":"AXO"},"expected_top_symbols":["active_project_hot_targets"],"expected_concepts":[]}
+{"id":"I005","category":"single-lookup","tool":"inspect","args":{"symbol":"schema_name_for","project":"AXO"},"expected_top_symbols":["schema_name_for"],"expected_concepts":[]}

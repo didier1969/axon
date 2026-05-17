@@ -46,6 +46,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `status` `trust:degraded` | `data.truth_cockpit.staleness.{last_publish_ts,modified_files_since,oldest_modified_age_seconds,sample_paths[5]}` exposes magnitude (REQ-AXO-231) — route on counts/age, not just the boolean |
 | `soll_relation_schema` returned | `data.canonical_direction` (`"SRC -> TGT"`) + `data.allowed_relation_types` (flat array) + `data.reverse_canonical` (legal inverse when pair forbidden) — REQ-AXO-91495 ; visible text now lists the actual relations, not just "resolved" |
 | `query` results consumption | `data.results[{name,kind,uri,project,surface,score}]` (direct hits only ; `surface` ∈ `symbol_index` / `symbol_index_semantic` / `symbol_index_degraded`) + `data.context.related_symbols_via_graph[]` (string array, 1-hop neighbors via CALLS/CONTAINS) + `data.surfaces_used` + `data.surfaces_degraded` + `data.total_available` + `data.next_call_hint` + `data.pagination` — REQ-AXO-91508 ; markdown table in `content[0].text` preserved for backward compat |
+| `inspect` envelope | Same envelope fields as `query` (`surfaces_used`/`surfaces_degraded`/`total_available`/`next_call_hint`/`pagination`) + `data.context.related_symbols_via_graph[]` ; no `results[]` (single-symbol drill-down preserves `data.symbol` / `data.summary` as canonical shape) — REQ-AXO-91509 |
 
 ## SOLL writes
 

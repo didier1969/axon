@@ -1671,9 +1671,59 @@ impl McpServer {
                     "tool": "impact",
                     "when": "now"
                 });
+                // REQ-AXO-91509 — tri-modal structured envelope for
+                // `inspect` per GUI-AXO-1003 / CPT-AXO-90007. Same
+                // pattern as REQ-AXO-91508 `query` : results[] holds
+                // the inspected symbol only ; graph neighbors live in
+                // `context.*` as flat string arrays so the bench
+                // precision formula is not penalised by false positives.
+                let resolved_name = rows
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or(symbol);
+                let direct_set: HashSet<String> = std::iter::once(resolved_name.to_string()).collect();
+                let neighbors = self.query_graph_r1_neighbors(
+                    &direct_set,
+                    project.unwrap_or("*"),
+                    20,
+                );
+                let related_names: Vec<String> = neighbors
+                    .iter()
+                    .filter_map(|n| {
+                        n.get("name").and_then(Value::as_str).map(String::from)
+                    })
+                    .collect();
+                let graph_lane_active = !related_names.is_empty();
+                let mut surfaces_used: Vec<&str> = vec!["symbol_index"];
+                if graph_lane_active {
+                    surfaces_used.push("graph_r1");
+                }
+                // REQ-AXO-91509 — GUI-AXO-1003 mandates 4 envelope
+                // fields (pagination, surfaces_used, total_available,
+                // next_call_hint) PLUS graph r=1 context. Note: the
+                // `results[]` array is intentionally NOT added here.
+                // `inspect` is a single-symbol drill-down, so the
+                // existing `data.symbol` / `data.summary` shape is the
+                // semantic result ; bolting a `results[]` next to it
+                // would inflate the bench `name`-key denominator and
+                // hurt precision without helping LLM consumers.
                 let response = json!({
                     "content": [{ "type": "text", "text": report }],
                     "data": {
+                        "context": {
+                            "related_symbols_via_graph": related_names,
+                        },
+                        "surfaces_used": surfaces_used,
+                        "surfaces_degraded": [],
+                        "total_available": 1,
+                        "next_call_hint": format!("impact symbol={resolved_name}"),
+                        "pagination": {
+                            "offset": 0,
+                            "limit": 1,
+                            "next_offset": Value::Null,
+                        },
+                        // Existing fields preserved.
                         "symbol": symbol,
                         "project": project,
                         "symbol_id": symbol_id,
