@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use crate::graph::GraphStore;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -39,55 +37,23 @@ pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
     }
 }
 
-pub fn duckdb_storage_snapshot(store: &GraphStore) -> DuckDbStorageSnapshot {
-    let Some(db_path) = store.db_path.as_ref() else {
-        return DuckDbStorageSnapshot::default();
-    };
-
-    let db_file_bytes = file_len(db_path);
-    let db_wal_bytes = file_len(&wal_path_for(db_path));
-
-    DuckDbStorageSnapshot {
-        db_file_bytes,
-        db_wal_bytes,
-        db_total_bytes: db_file_bytes.saturating_add(db_wal_bytes),
-    }
+/// PG canonical (REQ-AXO-271 slice 4c) : the DuckDB-specific db-file
+/// + WAL telemetry is irrelevant under PG (storage lives server-side
+/// outside the process). Returned as zero-filled for backwards-compat
+/// of the telemetry envelope ; PG storage observability will land in
+/// a follow-up slice via `pg_stat_database` / `pg_database_size`.
+pub fn duckdb_storage_snapshot(_store: &GraphStore) -> DuckDbStorageSnapshot {
+    DuckDbStorageSnapshot::default()
 }
 
-pub fn duckdb_memory_snapshot(store: &GraphStore) -> DuckDbMemorySnapshot {
-    // REQ-AXO-242: `duckdb_memory()` is a DuckDB-specific table function;
-    // running it under PG raises `function duckdb_memory() does not exist`
-    // and — because some plugin connections aren't auto-rolled-back on
-    // error — leaves the connection in an aborted-transaction state that
-    // poisons the next AGE `LOAD 'age'; SET search_path …` setup. Skip
-    // the snapshot under the PG backend; PG memory observability lives
-    // in `pg_stat_activity` / `pg_buffercache` which the optimiser will
-    // adopt in a follow-up slice.
-    if matches!(
-        crate::graph::PluginBackend::current(),
-        crate::graph::PluginBackend::Postgres
-    ) {
-        return DuckDbMemorySnapshot::default();
-    }
-
-    let raw = match store.query_json(
-        "SELECT COALESCE(sum(memory_usage_bytes), 0), \
-                COALESCE(sum(temporary_storage_bytes), 0) \
-         FROM duckdb_memory()",
-    ) {
-        Ok(raw) => raw,
-        Err(_) => return DuckDbMemorySnapshot::default(),
-    };
-
-    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-    let Some(row) = rows.first() else {
-        return DuckDbMemorySnapshot::default();
-    };
-
-    DuckDbMemorySnapshot {
-        memory_usage_bytes: parse_u64_value(row.first()).unwrap_or_default(),
-        temporary_storage_bytes: parse_u64_value(row.get(1)).unwrap_or_default(),
-    }
+/// PG canonical (REQ-AXO-271 slice 4c) : the DuckDB `duckdb_memory()`
+/// table function does not exist under PG and previously poisoned
+/// connections with aborted-transaction state (REQ-AXO-242). Returned
+/// as zero-filled for backwards-compat of the telemetry envelope ; PG
+/// memory observability will land in a follow-up slice via
+/// `pg_stat_activity` / `pg_buffercache`.
+pub fn duckdb_memory_snapshot(_store: &GraphStore) -> DuckDbMemorySnapshot {
+    DuckDbMemorySnapshot::default()
 }
 
 #[cfg(target_os = "linux")]
@@ -142,36 +108,9 @@ fn read_statm_rss_bytes() -> Option<u64> {
     Some(rss_pages.saturating_mul(page_size))
 }
 
-fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
-}
-
-fn wal_path_for(db_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.wal", db_path.display()))
-}
-
-fn parse_u64_value(value: Option<&serde_json::Value>) -> Option<u64> {
-    value
-        .and_then(|value| value.as_u64())
-        .or_else(|| {
-            value
-                .and_then(|value| value.as_i64())
-                .map(|value| value.max(0) as u64)
-        })
-        .or_else(|| {
-            value
-                .and_then(|value| value.as_str())
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{duckdb_storage_snapshot, malloc_trim_system_allocator, parse_proc_status_kb};
-    use crate::graph::GraphStore;
-    use tempfile::tempdir;
+    use super::{malloc_trim_system_allocator, parse_proc_status_kb};
 
     #[test]
     fn parse_proc_status_extracts_rss_breakdown() {
@@ -183,22 +122,6 @@ mod tests {
         assert_eq!(snapshot.rss_anon_bytes, 5_120 * 1024);
         assert_eq!(snapshot.rss_file_bytes, 1_920 * 1024);
         assert_eq!(snapshot.rss_shmem_bytes, 300 * 1024);
-    }
-
-    #[test]
-    fn duckdb_storage_snapshot_reports_db_and_wal_sizes() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join("graph_v2");
-        std::fs::create_dir_all(&root).unwrap();
-        let store = GraphStore::new(root.to_string_lossy().as_ref()).unwrap();
-
-        let snapshot = duckdb_storage_snapshot(&store);
-
-        assert!(snapshot.db_file_bytes > 0);
-        assert_eq!(
-            snapshot.db_total_bytes,
-            snapshot.db_file_bytes + snapshot.db_wal_bytes
-        );
     }
 
     #[test]
