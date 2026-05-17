@@ -42,6 +42,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `input_not_found` / `symbol_found=false` | `parameter_repair.suggestions` or widen `query` |
 | `degraded` / `partial` / `rejected_all` | treat partial ; inspect `parameter_repair` ; retry |
 | `trust:degraded` + blocker `indexed_projections_not_fresh` | run `data.truth_cockpit.recovery_hint.command` (REQ-AXO-91497) ; never re-call `status` itself |
+| soll_manager `category:writer_failed` (was `duckdb_writer` pre-REQ-AXO-341) | inspect `data.diagnostic_excerpt` for PG error ; recovery via `sql SELECT id FROM soll.Node` (post-MIL-AXO-017 canonical) |
 
 ## SOLL writes
 

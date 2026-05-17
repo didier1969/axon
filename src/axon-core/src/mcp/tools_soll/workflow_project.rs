@@ -1136,11 +1136,12 @@ impl McpServer {
         // both an empty input AND a list of all-unknown rule IDs, which
         // misled the LLM caller into thinking work happened. Surface the
         // unknown IDs as a recovery contract so the caller can retry with
-        // valid IDs (discoverable via `cypher SELECT id, title FROM
-        // soll.main.Node WHERE type='Guideline' AND project_code='PRO'`).
+        // valid IDs (discoverable via `sql SELECT id, title FROM
+        // soll.Node WHERE type='Guideline' AND project_code='PRO'`).
+        // REQ-AXO-341 — hint retargeted PG canonical post-MIL-AXO-017.
         let empty_input = accepted_ids.is_empty();
         let nothing_applied = applied.is_empty();
-        let recovery_hint = "discover valid IDs via cypher SELECT id, title FROM soll.main.Node WHERE type='Guideline' AND project_code='PRO'";
+        let recovery_hint = "discover valid IDs via sql SELECT id, title FROM soll.Node WHERE type='Guideline' AND project_code='PRO'";
         let text = if empty_input {
             format!(
                 "axon_apply_guidelines requires at least one canonical Guideline ID in `accepted_global_rule_ids`. {recovery_hint}.")

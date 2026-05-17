@@ -61,18 +61,28 @@ fn id_exists_envelope(id: &str, entity_type: &str) -> serde_json::Value {
 impl McpServer {
     /// REQ-AXO-125 — normalize writer errors so the LLM-visible text
     /// contains only the action kind, category, and a recovery hint —
-    /// never the raw SQL or DuckDB internals (which previously leaked
+    /// never the raw SQL or backend internals (which previously leaked
     /// the partially-substituted INSERT statement and bound metadata
     /// JSON to the caller). The full error is surfaced under
     /// `data.diagnostic_excerpt` (truncated to keep response small)
     /// for clients that explicitly want to inspect it.
+    ///
+    /// REQ-AXO-341 — backend hints retargeted to PostgreSQL canonical
+    /// (`sql` tool + `soll.Node`) post-MIL-AXO-017 ; the prior
+    /// `cypher` + `soll.main.Node` + `duckdb_writer` strings referenced
+    /// retired backends.
     fn normalized_soll_writer_error(
         action: &'static str,
         e: anyhow::Error,
     ) -> serde_json::Value {
         let raw = format!("{}", e);
-        let category = if raw.contains("Writer Error") || raw.contains("INSERT INTO") {
-            "duckdb_writer"
+        let category = if raw.contains("Writer Error")
+            || raw.contains("INSERT INTO")
+            || raw.contains("duplicate key value")
+            || raw.contains("violates")
+            || raw.contains("db error:")
+        {
+            "writer_failed"
         } else if raw.contains("forbidden_relation") || raw.contains("No canonical relation allowed") {
             "forbidden_relation"
         } else if raw.contains("not found") {
@@ -83,14 +93,14 @@ impl McpServer {
             "unknown"
         };
         let recovery = match category {
-            "duckdb_writer" => {
-                "If your title/description contains literal `?` characters, strip them and retry — REQ-AXO-091 placeholder bug is fixed in the dev tree but the live brain still ships the pre-fix binary until promotion. Otherwise check that the data fits the column constraints (id collision, schema drift, missing project_code)."
+            "writer_failed" => {
+                "Writer rejected the insert. Check column constraints: id collision, schema drift, missing project_code, or unique-constraint violation. Inspect `data.diagnostic_excerpt` for the PG error text."
             }
             "forbidden_relation" => {
                 "Use a canonical relation type: REQ -BELONGS_TO-> PIL, CPT -EXPLAINS-> REQ, DEC -SOLVES/IMPACTS-> REQ, PIL -EPITOMIZES-> VIS. Run `soll_relation_schema` to discover allowed pairs."
             }
             "target_not_found" => {
-                "Verify the target id exists via `cypher SELECT id FROM soll.main.Node WHERE id = '<id>'`. If the id was just created, ensure it was committed."
+                "Verify the target id exists via `sql SELECT id FROM soll.Node WHERE id = '<id>'`. If the id was just created, ensure it was committed."
             }
             "registry_unknown_id_kind" => {
                 "Use one of the canonical entity types: vision, pillar, requirement, concept, decision, milestone, stakeholder, validation, guideline."
@@ -110,7 +120,7 @@ impl McpServer {
         // existing kind/category fields so the LLM can route on a single
         // shape across all 5 slices of the universal contract.
         let repair_field = match category {
-            "duckdb_writer" => "data.title|description",
+            "writer_failed" => "data.title|description",
             "forbidden_relation" => "relation_type",
             "target_not_found" => "target_id",
             "registry_unknown_id_kind" => "entity",
@@ -141,18 +151,24 @@ impl McpServer {
         })
     }
 
-    /// REQ-AXO-043 / REQ-AXO-125 — strip SQL leakage from link errors
-    /// while preserving the existing flat `data.relation_guidance` shape
-    /// that MCP callers depend on. The `link` path historically returned
-    /// `format!("Link error: {}", e)` which exposed DuckDB writer error
-    /// text including raw INSERT statements. Here we detect the writer
-    /// pattern and substitute a classified message; non-SQL errors (e.g.
-    /// `Cardinality conflict`, `Relation X not found in canonical
-    /// policy`) keep their human-readable form.
+    /// REQ-AXO-043 / REQ-AXO-125 / REQ-AXO-341 — strip SQL leakage from
+    /// link errors while preserving the existing flat
+    /// `data.relation_guidance` shape that MCP callers depend on. The
+    /// `link` path historically returned `format!("Link error: {}", e)`
+    /// which exposed raw INSERT statements. Here we detect the writer
+    /// pattern and substitute a classified message ; non-SQL errors
+    /// (e.g. `Cardinality conflict`, `Relation X not found in canonical
+    /// policy`) keep their human-readable form. Backend hint retargeted
+    /// to PG canonical post-MIL-AXO-017 (`sql` / `soll.Node`).
     pub(super) fn sanitized_link_error_text(e: &anyhow::Error) -> String {
         let raw = format!("{}", e);
-        if raw.contains("Writer Error") || raw.contains("INSERT INTO") {
-            return "Link error: duckdb writer rejected the edge insert. Verify both endpoints exist via `cypher SELECT id FROM soll.main.Node WHERE id IN ('<src>','<tgt>')` and that the relation_type is allowed for the pair via `soll_relation_schema`.".to_string();
+        if raw.contains("Writer Error")
+            || raw.contains("INSERT INTO")
+            || raw.contains("duplicate key value")
+            || raw.contains("violates")
+            || raw.contains("db error:")
+        {
+            return "Link error: writer rejected the edge insert. Verify both endpoints exist via `sql SELECT id FROM soll.Node WHERE id IN ('<src>','<tgt>')` and that the relation_type is allowed for the pair via `soll_relation_schema`.".to_string();
         }
         format!("Link error: {}", raw)
     }
