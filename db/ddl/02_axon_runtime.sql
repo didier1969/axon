@@ -124,3 +124,20 @@ CREATE TABLE IF NOT EXISTS axon_runtime.vector_batch_run (
 -- (instance_kind, runtime_mode) over time windows.
 CREATE INDEX IF NOT EXISTS vector_batch_run_kind_started_idx
     ON axon_runtime.vector_batch_run (instance_kind, runtime_mode, started_at_ms);
+
+-- ── EmbedderLifecycleHeartbeat (REQ-AXO-91572 option B) ──────────────
+-- Cross-process visibility for the GPU embedder sleep/wake state.
+-- The indexer (writer of `public.ChunkEmbedding`) owns the singleton
+-- that actually loads / drops the TensorRT session ; the brain (MCP
+-- server) needs to observe that state without sharing the process.
+-- Each role UPSERTs its row every `heartbeat_tick` ; readers should
+-- treat rows older than ~2x heartbeat_tick as stale.
+CREATE TABLE IF NOT EXISTS axon_runtime.EmbedderLifecycleHeartbeat (
+    process_role TEXT PRIMARY KEY,           -- 'indexer' | 'brain'
+    phase TEXT NOT NULL,                     -- 'ready' | 'sleeping'
+    last_used_ms BIGINT NOT NULL,
+    wake_count BIGINT NOT NULL DEFAULT 0,
+    sleep_count BIGINT NOT NULL DEFAULT 0,
+    pending_count BIGINT NOT NULL DEFAULT 0,
+    heartbeat_ms BIGINT NOT NULL
+);
