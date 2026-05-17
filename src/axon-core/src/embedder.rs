@@ -17,7 +17,6 @@ use crate::graph_ingestion::{
 };
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
-use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
 use crate::runtime_tuning::{
@@ -356,11 +355,7 @@ fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
     EmbeddingLaneConfig {
         query_workers,
         vector_workers,
-        graph_workers: if graph_embeddings_enabled() {
-            env_usize_nonnegative("AXON_GRAPH_WORKERS", 1)
-        } else {
-            0
-        },
+        graph_workers: env_usize_nonnegative("AXON_GRAPH_WORKERS", 1),
         chunk_batch_size: env_usize("AXON_CHUNK_BATCH_SIZE", CHUNK_BATCH_SIZE),
         file_vectorization_batch_size: env_usize(
             "AXON_FILE_VECTORIZATION_BATCH_SIZE",
@@ -1312,13 +1307,6 @@ impl SemanticWorkerPool {
         queue_store: Arc<QueueStore>,
     ) {
         let _liveness = GraphWorkerLivenessGuard::new();
-        if !graph_embeddings_enabled() {
-            info!(
-                "Semantic Graph Worker [{}]: graph embeddings disabled, worker exiting",
-                worker_idx
-            );
-            return;
-        }
         let mut model: Option<TextEmbedding> = None;
         let mut graph_model_registered = false;
 

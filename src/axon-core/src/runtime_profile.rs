@@ -1,4 +1,3 @@
-use crate::runtime_mode::graph_embeddings_enabled;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -210,10 +209,6 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
     } else if vector_workers + graph_workers > available_background_workers {
         vector_workers = available_background_workers.max(1);
         graph_workers = 1;
-    }
-
-    if !graph_embeddings_enabled() {
-        graph_workers = 0;
     }
 
     let (chunk_batch_size, file_vectorization_batch_size, graph_batch_size) = if profile.gpu_present

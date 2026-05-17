@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 use crate::embedding_contract::GRAPH_MODEL_ID;
-use crate::runtime_mode::graph_embeddings_enabled;
 
 impl McpServer {
     fn json_to_i64(value: &Value) -> Option<i64> {
@@ -302,12 +301,6 @@ impl McpServer {
     }
 
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
-        if !graph_embeddings_enabled() {
-            return Some(
-                "\n\n### Similar Graph Neighborhoods\n\n**Status:** temporarily disabled; Axon returns only the clone symbol/chunk signal while `GraphEmbedding` remains off."
-                    .to_string(),
-            );
-        }
         let anchor_res = self
             .graph_store
             .query_json_param(

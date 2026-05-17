@@ -102,19 +102,9 @@ pub fn canonical_embedding_provider_request_for_mode(
         })
 }
 
-pub fn graph_embeddings_enabled() -> bool {
-    !matches!(
-        std::env::var("AXON_GRAPH_EMBEDDINGS_ENABLED")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{graph_embeddings_enabled, AxonRuntimeMode};
+    use super::AxonRuntimeMode;
     use crate::runtime_topology::AxonProcessRole;
 
     #[test]
@@ -148,20 +138,4 @@ mod tests {
         assert_eq!(mode.declared_process_role(), AxonProcessRole::Brain);
     }
 
-    #[test]
-    fn test_graph_embeddings_enabled_defaults_on_and_honors_false_values() {
-        unsafe {
-            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
-        }
-        assert!(graph_embeddings_enabled());
-
-        unsafe {
-            std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "false");
-        }
-        assert!(!graph_embeddings_enabled());
-
-        unsafe {
-            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
-        }
-    }
 }

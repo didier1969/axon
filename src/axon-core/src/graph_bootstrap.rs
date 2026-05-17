@@ -10,7 +10,6 @@ use tracing::{info, warn};
 
 use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
 use crate::graph::{GraphStore, LatticePool};
-use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
 const IST_SCHEMA_VERSION: &str = "3";

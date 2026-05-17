@@ -10,7 +10,6 @@ use crate::main_services;
 use crate::main_telemetry;
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
-use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_profile::{
     recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
@@ -201,10 +200,7 @@ fn graph_first_indexer_lane_sizing(
     runtime_profile: &RuntimeProfile,
     lane_sizing: EmbeddingLaneSizing,
 ) -> EmbeddingLaneSizing {
-    if profile.role != RuntimeBootRole::Indexer
-        || !runtime_profile.gpu_present
-        || !graph_embeddings_enabled()
-    {
+    if profile.role != RuntimeBootRole::Indexer || !runtime_profile.gpu_present {
         return lane_sizing;
     }
 
@@ -1544,9 +1540,8 @@ fn start_indexer_only_services(
     if runtime_mode.semantic_workers_enabled() {
         let lane_config = embedding_lane_config_from_env();
         info!(
-            "Runtime services: semantic workers enabled (mode={}, graph_embeddings_enabled={}, query_workers={}, vector_workers={}, graph_workers={}).",
+            "Runtime services: semantic workers enabled (mode={}, query_workers={}, vector_workers={}, graph_workers={}).",
             runtime_mode.as_str(),
-            graph_embeddings_enabled(),
             lane_config.query_workers,
             lane_config.vector_workers,
             lane_config.graph_workers

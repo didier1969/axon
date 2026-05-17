@@ -11,7 +11,6 @@ use crate::code_chunker::build_symbol_chunks;
 use crate::embedding_contract::CHUNK_MODEL_ID as CHUNK_EMBEDDING_MODEL_ID;
 use crate::graph::{GraphStore, PendingFile};
 use crate::queue::ProcessingMode;
-use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::service_guard;
 
@@ -1822,15 +1821,13 @@ impl GraphStore {
             ),
         ];
 
-        if graph_embeddings_enabled() {
-            for item in work {
-                queries.push(graph_projection_queue_upsert(
-                    "file",
-                    &item.file_path,
-                    projection_radius,
-                    now_ms,
-                ));
-            }
+        for item in work {
+            queries.push(graph_projection_queue_upsert(
+                "file",
+                &item.file_path,
+                projection_radius,
+                now_ms,
+            ));
         }
 
         self.execute_batch(&queries)?;
