@@ -11,16 +11,12 @@ use super::{
 };
 
 impl GraphStore {
-    /// Schema-qualify an `axon_runtime` table under the PG backend.
-    /// Returns the unqualified name under DuckDB. Used by every reader/
-    /// writer hot path that touches the indexer-runtime layer
-    /// (MIL-AXO-015 P4 4e + axon_runtime DDL).
+    /// REQ-AXO-271 slice 2e (PG canonical only, post-MIL-AXO-017) :
+    /// schema-qualify an `axon_runtime` table reference. The DuckDB
+    /// unqualified-name arm is dead syntax under the single-variant
+    /// `PluginBackend::Postgres` plugin.
     fn axon_runtime_table_ref(&self, table: &'static str) -> String {
-        if self.is_postgres_backend() {
-            format!("axon_runtime.{table}")
-        } else {
-            table.to_string()
-        }
+        format!("axon_runtime.{table}")
     }
 
     pub fn record_vector_batch_run(&self, run: &VectorBatchRun) -> Result<()> {
@@ -35,59 +31,37 @@ impl GraphStore {
     }
 
     pub fn record_vector_worker_fault(&self, fault: &VectorWorkerFault) -> Result<()> {
-        // MIL-AXO-015 P4 4e: PG branch — schema-qualified INSERT with
-        // ON CONFLICT DO UPDATE on the fault_id PK; DuckDB keeps
-        // INSERT OR REPLACE on the unqualified table.
+        // REQ-AXO-271 slice 2e : PG canonical only. INSERT ON CONFLICT
+        // refreshes every column on `fault_id` collision.
         let batch_id_lit = fault
             .batch_id
             .as_ref()
             .map(|batch_id| format!("'{}'", Self::escape_sql(batch_id)))
             .unwrap_or_else(|| "NULL".to_string());
-        let sql = if self.is_postgres_backend() {
-            format!(
-                "INSERT INTO axon_runtime.VectorWorkerFault \
-                 (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
-                 VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}) \
-                 ON CONFLICT (fault_id) DO UPDATE SET \
-                    lane = EXCLUDED.lane, worker_id = EXCLUDED.worker_id, fatal_stage = EXCLUDED.fatal_stage, \
-                    fatal_reason_raw = EXCLUDED.fatal_reason_raw, fatal_class = EXCLUDED.fatal_class, \
-                    provider = EXCLUDED.provider, batch_id = EXCLUDED.batch_id, texts_count = EXCLUDED.texts_count, \
-                    input_bytes = EXCLUDED.input_bytes, vram_used_mb = EXCLUDED.vram_used_mb, \
-                    occurred_at_ms = EXCLUDED.occurred_at_ms, restart_attempt = EXCLUDED.restart_attempt",
-                Self::escape_sql(&fault.fault_id),
-                Self::escape_sql(&fault.lane),
-                fault.worker_id,
-                Self::escape_sql(&fault.fatal_stage),
-                Self::escape_sql(&fault.fatal_reason_raw),
-                Self::escape_sql(&fault.fatal_class),
-                Self::escape_sql(&fault.provider),
-                batch_id_lit,
-                fault.texts_count,
-                fault.input_bytes,
-                fault.vram_used_mb,
-                fault.occurred_at_ms,
-                fault.restart_attempt,
-            )
-        } else {
-            format!(
-                "INSERT OR REPLACE INTO VectorWorkerFault \
-                 (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
-                 VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {})",
-                Self::escape_sql(&fault.fault_id),
-                Self::escape_sql(&fault.lane),
-                fault.worker_id,
-                Self::escape_sql(&fault.fatal_stage),
-                Self::escape_sql(&fault.fatal_reason_raw),
-                Self::escape_sql(&fault.fatal_class),
-                Self::escape_sql(&fault.provider),
-                batch_id_lit,
-                fault.texts_count,
-                fault.input_bytes,
-                fault.vram_used_mb,
-                fault.occurred_at_ms,
-                fault.restart_attempt,
-            )
-        };
+        let sql = format!(
+            "INSERT INTO axon_runtime.VectorWorkerFault \
+             (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
+             VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}) \
+             ON CONFLICT (fault_id) DO UPDATE SET \
+                lane = EXCLUDED.lane, worker_id = EXCLUDED.worker_id, fatal_stage = EXCLUDED.fatal_stage, \
+                fatal_reason_raw = EXCLUDED.fatal_reason_raw, fatal_class = EXCLUDED.fatal_class, \
+                provider = EXCLUDED.provider, batch_id = EXCLUDED.batch_id, texts_count = EXCLUDED.texts_count, \
+                input_bytes = EXCLUDED.input_bytes, vram_used_mb = EXCLUDED.vram_used_mb, \
+                occurred_at_ms = EXCLUDED.occurred_at_ms, restart_attempt = EXCLUDED.restart_attempt",
+            Self::escape_sql(&fault.fault_id),
+            Self::escape_sql(&fault.lane),
+            fault.worker_id,
+            Self::escape_sql(&fault.fatal_stage),
+            Self::escape_sql(&fault.fatal_reason_raw),
+            Self::escape_sql(&fault.fatal_class),
+            Self::escape_sql(&fault.provider),
+            batch_id_lit,
+            fault.texts_count,
+            fault.input_bytes,
+            fault.vram_used_mb,
+            fault.occurred_at_ms,
+            fault.restart_attempt,
+        );
         self.execute(&sql)
     }
 
@@ -110,39 +84,24 @@ impl GraphStore {
             .as_ref()
             .map(|fault_id| format!("'{}'", Self::escape_sql(fault_id)))
             .unwrap_or_else(|| "NULL".to_string());
-        let sql = if self.is_postgres_backend() {
-            format!(
-                "INSERT INTO axon_runtime.VectorLaneState \
-                 (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
-                 VALUES ('{}', '{}', {}, {}, {}, {}, {}, {}) \
-                 ON CONFLICT (lane) DO UPDATE SET \
-                    state = EXCLUDED.state, reason = EXCLUDED.reason, updated_at_ms = EXCLUDED.updated_at_ms, \
-                    worker_id = EXCLUDED.worker_id, restart_attempt = EXCLUDED.restart_attempt, \
-                    last_success_at_ms = EXCLUDED.last_success_at_ms, last_fault_id = EXCLUDED.last_fault_id",
-                Self::escape_sql(&state.lane),
-                Self::escape_sql(&state.state),
-                reason_lit,
-                state.updated_at_ms,
-                worker_id_lit,
-                state.restart_attempt,
-                last_success_lit,
-                last_fault_lit,
-            )
-        } else {
-            format!(
-                "INSERT OR REPLACE INTO VectorLaneState \
-                 (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
-                 VALUES ('{}', '{}', {}, {}, {}, {}, {}, {})",
-                Self::escape_sql(&state.lane),
-                Self::escape_sql(&state.state),
-                reason_lit,
-                state.updated_at_ms,
-                worker_id_lit,
-                state.restart_attempt,
-                last_success_lit,
-                last_fault_lit,
-            )
-        };
+        // REQ-AXO-271 slice 2e : PG canonical only.
+        let sql = format!(
+            "INSERT INTO axon_runtime.VectorLaneState \
+             (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
+             VALUES ('{}', '{}', {}, {}, {}, {}, {}, {}) \
+             ON CONFLICT (lane) DO UPDATE SET \
+                state = EXCLUDED.state, reason = EXCLUDED.reason, updated_at_ms = EXCLUDED.updated_at_ms, \
+                worker_id = EXCLUDED.worker_id, restart_attempt = EXCLUDED.restart_attempt, \
+                last_success_at_ms = EXCLUDED.last_success_at_ms, last_fault_id = EXCLUDED.last_fault_id",
+            Self::escape_sql(&state.lane),
+            Self::escape_sql(&state.state),
+            reason_lit,
+            state.updated_at_ms,
+            worker_id_lit,
+            state.restart_attempt,
+            last_success_lit,
+            last_fault_lit,
+        );
         self.execute(&sql)
     }
 
@@ -256,50 +215,32 @@ impl GraphStore {
         let outbox_id = format!("outbox-{}", payload.batch_run.run_id);
         let payload_json = serde_json::to_string(payload)?;
         let now_ms = chrono::Utc::now().timestamp_millis();
-        // MIL-AXO-015 P4 4e: PG branch routes to axon_runtime.VectorPersistOutbox
-        // with ON CONFLICT (outbox_id) DO UPDATE refreshing every column.
-        let sql = if self.is_postgres_backend() {
-            format!(
-                "INSERT INTO axon_runtime.VectorPersistOutbox \
-                 (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
-                 VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}') \
-                 ON CONFLICT (outbox_id) DO UPDATE SET \
-                    run_id = EXCLUDED.run_id, model_id = EXCLUDED.model_id, status = EXCLUDED.status, \
-                    attempts = EXCLUDED.attempts, queued_at_ms = EXCLUDED.queued_at_ms, \
-                    claimed_at_ms = EXCLUDED.claimed_at_ms, completed_at_ms = EXCLUDED.completed_at_ms, \
-                    last_error_reason = EXCLUDED.last_error_reason, claim_token = EXCLUDED.claim_token, \
-                    lease_heartbeat_at_ms = EXCLUDED.lease_heartbeat_at_ms, lease_owner = EXCLUDED.lease_owner, \
-                    lease_epoch = EXCLUDED.lease_epoch, chunk_count = EXCLUDED.chunk_count, \
-                    file_count = EXCLUDED.file_count, input_bytes = EXCLUDED.input_bytes, \
-                    fetch_ms = EXCLUDED.fetch_ms, embed_ms = EXCLUDED.embed_ms, payload_json = EXCLUDED.payload_json",
-                Self::escape_sql(&outbox_id),
-                Self::escape_sql(&payload.batch_run.run_id),
-                Self::escape_sql(&payload.batch_run.model_id),
-                now_ms,
-                payload.batch_run.chunk_count,
-                payload.batch_run.file_count,
-                payload.batch_run.input_bytes,
-                payload.batch_run.fetch_ms,
-                payload.batch_run.embed_ms,
-                Self::escape_sql(&payload_json)
-            )
-        } else {
-            format!(
-                "INSERT OR REPLACE INTO VectorPersistOutbox \
-                 (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
-                 VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}')",
-                Self::escape_sql(&outbox_id),
-                Self::escape_sql(&payload.batch_run.run_id),
-                Self::escape_sql(&payload.batch_run.model_id),
-                now_ms,
-                payload.batch_run.chunk_count,
-                payload.batch_run.file_count,
-                payload.batch_run.input_bytes,
-                payload.batch_run.fetch_ms,
-                payload.batch_run.embed_ms,
-                Self::escape_sql(&payload_json)
-            )
-        };
+        // REQ-AXO-271 slice 2e : PG canonical only. ON CONFLICT (outbox_id)
+        // DO UPDATE refreshes every column on conflict.
+        let sql = format!(
+            "INSERT INTO axon_runtime.VectorPersistOutbox \
+             (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+             VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}') \
+             ON CONFLICT (outbox_id) DO UPDATE SET \
+                run_id = EXCLUDED.run_id, model_id = EXCLUDED.model_id, status = EXCLUDED.status, \
+                attempts = EXCLUDED.attempts, queued_at_ms = EXCLUDED.queued_at_ms, \
+                claimed_at_ms = EXCLUDED.claimed_at_ms, completed_at_ms = EXCLUDED.completed_at_ms, \
+                last_error_reason = EXCLUDED.last_error_reason, claim_token = EXCLUDED.claim_token, \
+                lease_heartbeat_at_ms = EXCLUDED.lease_heartbeat_at_ms, lease_owner = EXCLUDED.lease_owner, \
+                lease_epoch = EXCLUDED.lease_epoch, chunk_count = EXCLUDED.chunk_count, \
+                file_count = EXCLUDED.file_count, input_bytes = EXCLUDED.input_bytes, \
+                fetch_ms = EXCLUDED.fetch_ms, embed_ms = EXCLUDED.embed_ms, payload_json = EXCLUDED.payload_json",
+            Self::escape_sql(&outbox_id),
+            Self::escape_sql(&payload.batch_run.run_id),
+            Self::escape_sql(&payload.batch_run.model_id),
+            now_ms,
+            payload.batch_run.chunk_count,
+            payload.batch_run.file_count,
+            payload.batch_run.input_bytes,
+            payload.batch_run.fetch_ms,
+            payload.batch_run.embed_ms,
+            Self::escape_sql(&payload_json)
+        );
         self.execute(&sql)?;
         service_guard::notify_vector_backlog_activity();
         Ok(outbox_id)
