@@ -717,83 +717,34 @@ impl McpServer {
         let source_layer = args.get("source_layer")?.as_str()?;
         let target_layer = args.get("target_layer")?.as_str()?;
 
-        // MIL-AXO-015 B.3: under PG with AXON_AGE_READ=true, run the
-        // MIL-AXO-017 slice 6B: AGE retired ; drift detection via SQL only.
-        let raw = self
-            .architectural_drift_via_sql(source_layer, target_layer)
-            .unwrap_or_else(|| "[]".to_string());
-
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        let report = if !rows.is_empty() {
-            let paths_str = rows
-                .into_iter()
-                .filter_map(|r| {
-                    r.into_iter()
-                        .next()
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                })
-                .map(|s| format!("* {}", s))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "⚠️ **ARCHITECTURE VIOLATION DETECTED**\n\nLayer '{}' calls directly or indirectly '{}':\n\n{}",
-                source_layer, target_layer, paths_str
-            )
-        } else {
-            format!(
-                "✅ No architectural drift detected between '{}' and '{}'.",
-                source_layer, target_layer
-            )
-        };
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        // REQ-AXO-271 slice 2d invariant : the legacy SQL
+        // CALLS / CONTAINS tables are dropped under PG canonical so
+        // the `WITH RECURSIVE call_paths` translation that powered
+        // this tool pre-MIL-AXO-017 is dead.
+        //
+        // REQ-AXO-91516 (planned) will rewire the surface to the
+        // in-memory `IstGraph` via the new `layer_violations`
+        // algorithm (MIL-AXO-019 vague 1c, commit `787ac797`) — that
+        // migration ships in a follow-up slice. Until then surface a
+        // structured `not_implemented` envelope so the LLM sees the
+        // truth instead of the previous silent "✅ no drift"
+        // (which was the always-empty result of the dead SQL path).
+        let report = format!(
+            "🛠️ **architectural_drift not yet wired to RAM graph**\n\nSource layer: `{}`\nTarget layer: `{}`\n\nThe PG-canonical migration is REQ-AXO-91516 (Tier A, MIL-AXO-019). Until it ships, use `impact` + `path` for ad-hoc layer-crossing analysis.",
+            source_layer, target_layer
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": "not_implemented",
+                "source_layer": source_layer,
+                "target_layer": target_layer,
+                "surfaces_used": ["pending_ram_migration"],
+                "next_call_hint": "impact symbol=<source-layer-entry>",
+                "tracking_req": "REQ-AXO-91516",
+            }
+        }))
     }
-
-    /// MIL-AXO-015 B.3: legacy SQL implementation of architectural
-    /// drift, factored out for the AGE-vs-SQL fallback chain. Returns
-    /// raw query_json string on success, `None` on error so the caller
-    /// can fall back further.
-    ///
-    /// REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-    /// tables are empty/dropped — return `None` immediately so the caller's
-    /// AGE primary path handles the request without a stale SQL fallback.
-    fn architectural_drift_via_sql(
-        &self,
-        source_layer: &str,
-        target_layer: &str,
-    ) -> Option<String> {
-        if self.graph_store.skip_legacy_relations() {
-            return None;
-        }
-        let query = "
-            WITH RECURSIVE call_paths(source_id, target_id, path) AS (
-                SELECT c.source_id, c.target_id, [c.source_id]
-                FROM CALLS c
-                JOIN Symbol s1 ON c.source_id = s1.id
-                JOIN CONTAINS c1 ON s1.id = c1.target_id
-                JOIN File f1 ON f1.path = c1.source_id
-                WHERE f1.path LIKE '%' || $s_layer || '%'
-
-                UNION ALL
-
-                SELECT cp.source_id, c.target_id, list_append(cp.path, cp.target_id)
-                FROM call_paths cp
-                JOIN CALLS c ON cp.target_id = c.source_id
-                WHERE len(cp.path) < 5
-            )
-            SELECT array_to_string(list_append(cp.path, cp.target_id), ' -> ')
-            FROM call_paths cp
-            JOIN Symbol s2 ON cp.target_id = s2.id
-            JOIN CONTAINS c2 ON s2.id = c2.target_id
-            JOIN File f2 ON f2.path = c2.source_id
-            WHERE f2.path LIKE '%' || $t_layer || '%'
-            LIMIT 20
-        "
-        .to_string();
-        let params = json!({"s_layer": source_layer, "t_layer": target_layer});
-        self.graph_store.query_json_param(&query, &params).ok()
-    }
-
-    // MIL-AXO-017 slice 6B: AGE helper architectural_drift_via_age removed ; SQL is canonical.
 }
 
 /// REQ-AXO-212 — render one diagnose_indexing cause as a two-line
