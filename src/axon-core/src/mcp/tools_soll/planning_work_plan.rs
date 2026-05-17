@@ -205,6 +205,56 @@ fn build_actionable_leaves_wave(
 
 /// Kahn's topological-wave layering on the filtered snapshot edges,
 /// restricted to schedulable nodes. Replaces the legacy `build_waves`.
+/// REQ-AXO-91501 — PageRank centrality on the schedulable sub-graph of
+/// the SOLL snapshot. Edges restricted to canonical filiation
+/// relations (`is_descendant_relation`) — same predicate used by
+/// `descendant_counts_snapshot` so the centrality reflects the same
+/// dependency surface. Returns `node_id → score` in [0.0, 1.0],
+/// normalised so the sum across schedulable nodes is ~1.0. Empty
+/// schedulable set ⇒ empty map.
+fn compute_soll_pagerank(
+    snapshot: &SollSnapshot,
+    schedulable_ids: &HashSet<String>,
+) -> HashMap<String, f32> {
+    if schedulable_ids.is_empty() {
+        return HashMap::new();
+    }
+    // Build a side petgraph constrained to schedulable nodes + filiation
+    // edges. petgraph::algo::page_rank operates on `Graph` directly.
+    use petgraph::graph::{DiGraph, NodeIndex};
+    let mut pg: DiGraph<String, ()> = DiGraph::new();
+    let mut idx_of: HashMap<String, NodeIndex> = HashMap::new();
+    for id in schedulable_ids {
+        let nx = pg.add_node(id.clone());
+        idx_of.insert(id.clone(), nx);
+    }
+    for src_id in schedulable_ids {
+        let Some(src_snap_idx) = snapshot.node_index(src_id) else {
+            continue;
+        };
+        let src_pg = idx_of[src_id];
+        for e in snapshot
+            .graph()
+            .edges_directed(src_snap_idx, Direction::Outgoing)
+        {
+            if !is_descendant_relation(e.weight().as_str()) {
+                continue;
+            }
+            let target_id = &snapshot.graph()[e.target()];
+            if let Some(&target_pg) = idx_of.get(target_id) {
+                pg.add_edge(src_pg, target_pg, ());
+            }
+        }
+    }
+    let scores = petgraph::algo::page_rank(&pg, 0.85_f32, 50);
+    let mut out: HashMap<String, f32> = HashMap::new();
+    for (i, score) in scores.into_iter().enumerate() {
+        let id = pg[NodeIndex::new(i)].clone();
+        out.insert(id, score);
+    }
+    out
+}
+
 fn build_waves_snapshot(
     nodes: &HashMap<String, WorkPlanNode>,
     snapshot: &SollSnapshot,
@@ -332,6 +382,19 @@ impl McpServer {
             .get("actionable")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // REQ-AXO-91501 — opt-in PageRank centrality scoring on the
+        // schedulable sub-graph. When true, each node receives a
+        // `centrality_bonus = round(pagerank * 100)` term added to the
+        // base score. Surfaces hub nodes whose absolute descendant
+        // count is modest but whose graph position concentrates many
+        // indirect dependencies. Default false to preserve the
+        // pre-REQ-AXO-91501 wave-1 ordering empirically validated
+        // through session 44. Will flip default true after VAL-AXO-N
+        // confirms ranking improvement on the canonical fixture.
+        let include_centrality = args
+            .get("include_centrality")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -395,8 +458,22 @@ impl McpServer {
         // snapshot petgraph, filtered to SOLVES+BELONGS_TO + schedulable.
         let descendants = descendant_counts_snapshot(&snapshot, &schedulable_ids);
 
+        // REQ-AXO-91501 — PageRank centrality on the schedulable sub-graph.
+        // Run once before per-node scoring ; 50 iterations / damping=0.85
+        // converges well on AXO-scale SOLL graphs (~500 nodes).
+        let centrality_scores: std::collections::HashMap<String, f32> = if include_centrality {
+            compute_soll_pagerank(&snapshot, &schedulable_ids)
+        } else {
+            std::collections::HashMap::new()
+        };
+
         for node in nodes.values_mut() {
             node.descendants = *descendants.get(&node.id).unwrap_or(&0);
+            node.centrality = if include_centrality {
+                centrality_scores.get(&node.id).copied().or(Some(0.0))
+            } else {
+                None
+            };
             let (score, reasons, gates) =
                 score_node(node, include_ist, include_decay, half_life_days, now_ms);
             node.score = score;
@@ -613,6 +690,7 @@ impl McpServer {
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
                             updated_at_ms,
+                            centrality: None,
                         },
                     );
                 }
@@ -637,6 +715,7 @@ impl McpServer {
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
                             updated_at_ms,
+                            centrality: None,
                         },
                     );
                 }
@@ -661,6 +740,7 @@ impl McpServer {
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
                             updated_at_ms,
+                            centrality: None,
                         },
                     );
                 }
@@ -1042,6 +1122,7 @@ mod tests {
                     validation_gates: Vec::new(),
                     ist_signals: Vec::new(),
                     updated_at_ms: None,
+                    centrality: None,
                 },
             );
         };
@@ -1113,6 +1194,7 @@ mod tests {
                 validation_gates: Vec::new(),
                 ist_signals: Vec::new(),
                 updated_at_ms: None,
+                centrality: None,
             },
         );
         let schedulable: HashSet<String> =

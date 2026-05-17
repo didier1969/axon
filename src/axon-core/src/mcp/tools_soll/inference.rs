@@ -48,6 +48,13 @@ pub(super) struct WorkPlanNode {
     /// node metadata. `None` when the node has no `updated_at` field
     /// (older fixtures, hand-inserted rows). Drives temporal score decay.
     pub(super) updated_at_ms: Option<i64>,
+    /// REQ-AXO-91501 — PageRank centrality score on the schedulable
+    /// sub-graph (filtered to non-terminal nodes). `None` when the
+    /// caller did not request centrality scoring (via the
+    /// `include_centrality` arg, default false). When `Some`, the
+    /// value is in [0.0, 1.0]; integrated into `score` as
+    /// `+round(centrality * 100)` by `score_node`.
+    pub(super) centrality: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +197,20 @@ pub(super) fn score_node(
     if matches!(node.entity_type, WorkPlanEntityType::Milestone) && node.descendants == 0 {
         score -= 10;
         reasons.push("isolated milestone".to_string());
+    }
+
+    // REQ-AXO-91501 — PageRank centrality on the schedulable sub-graph.
+    // Surfaces hub nodes whose absolute descendant count is modest but
+    // whose graph position concentrates many indirect dependencies
+    // (Wave 1 hubs that the naïve scorer under-ranks). Range [0.0, 1.0],
+    // multiplied by 100 to align with the other integer score buckets.
+    // Opt-in via `include_centrality=true` arg.
+    if let Some(centrality) = node.centrality {
+        let bonus = (centrality * 100.0).round() as i64;
+        if bonus > 0 {
+            score += bonus;
+            reasons.push(format!("centrality bonus +{bonus} (PageRank {centrality:.3})"));
+        }
     }
 
     // REQ-AXO-144 — apply temporal decay so accepted Decisions and other
