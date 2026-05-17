@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::ffi::CString;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -432,53 +431,6 @@ impl GraphStore {
         Ok("{\"ok\":true}".to_string())
     }
 
-    fn graph_projection_version() -> &'static str {
-        "1"
-    }
-
-    fn projection_signature(entries: &[String]) -> String {
-        let mut normalized = entries.to_vec();
-        normalized.sort();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        normalized.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    }
-
-    fn graph_projection_state_matches(
-        &self,
-        anchor_type: &str,
-        anchor_id: &str,
-        radius: i64,
-        signature: &str,
-        version: &str,
-    ) -> Result<bool> {
-        let res = self.query_json_param_with_freshness(
-            "SELECT source_signature, projection_version \
-             FROM GraphProjectionState \
-             WHERE anchor_type = $anchor_type \
-               AND anchor_id = $anchor_id \
-               AND radius = $radius \
-             LIMIT 1",
-            &serde_json::json!({
-                "anchor_type": anchor_type,
-                "anchor_id": anchor_id,
-                "radius": radius,
-            }),
-            ReadFreshness::FreshRequired,
-        )?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        let Some(row) = rows.first() else {
-            return Ok(false);
-        };
-        let Some(existing_signature) = row.first().and_then(|value| value.as_str()) else {
-            return Ok(false);
-        };
-        let Some(existing_version) = row.get(1).and_then(|value| value.as_str()) else {
-            return Ok(false);
-        };
-        Ok(existing_signature == signature && existing_version == version)
-    }
-
     fn resolve_symbol_anchor_id(&self, symbol: &str) -> Result<Option<String>> {
         let res = self.query_json_param_with_freshness(
             "SELECT id FROM Symbol WHERE id = $sym OR name = $sym LIMIT 1",
@@ -493,217 +445,26 @@ impl GraphStore {
             .map(|value| value.to_string()))
     }
 
-    pub fn refresh_symbol_projection(&self, symbol: &str, radius: u64) -> Result<Option<String>> {
-        let Some(anchor_id) = self.resolve_symbol_anchor_id(symbol)? else {
-            return Ok(None);
-        };
-
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-        // tables are empty/dropped — the GraphProjection cache cannot be
-        // refreshed via SQL. Skip the refresh; downstream consumers either
-        // (a) still see the previously-cached projection or (b) get an empty
-        // projection (acceptable because authoritative call-graph reads now
-        // go through AGE primary tools). An AGE Cypher equivalent for the
-        // projection refresh is tracked separately on REQ-AXO-251.
-        if self.skip_legacy_relations() {
-            return Ok(Some(anchor_id));
-        }
-
-        let radius = radius.max(1) as i64;
-        let params = serde_json::json!({
-            "anchor": anchor_id,
-            "radius": radius,
-        });
-        let query = "WITH RECURSIVE \
-                call_edges(source_id, target_id) AS ( \
-                    SELECT source_id, target_id FROM CALLS \
-                    UNION ALL \
-                    SELECT source_id, target_id FROM CALLS_NIF \
-                    UNION ALL \
-                    SELECT target_id, source_id FROM CALLS \
-                    UNION ALL \
-                    SELECT target_id, source_id FROM CALLS_NIF \
-                ), \
-                traverse(node_id, distance) AS ( \
-                    SELECT $anchor AS node_id, 0 AS distance \
-                    UNION ALL \
-                    SELECT e.target_id, t.distance + 1 \
-                    FROM call_edges e JOIN traverse t ON e.source_id = t.node_id \
-                    WHERE t.distance < $radius \
-                ) \
-            SELECT node_id, MIN(distance) \
-            FROM traverse \
-            GROUP BY node_id";
-        let res =
-            self.query_json_param_with_freshness(query, &params, ReadFreshness::FreshRequired)?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        let created_at = chrono::Utc::now().timestamp_millis();
-        let anchor_escaped = anchor_id.replace('\'', "''");
-        let version = Self::graph_projection_version();
-        let mut signature_entries = vec![format!(
-            "symbol|{}|symbol|{}|anchor|0",
-            anchor_id, anchor_id
-        )];
-
-        for row in &rows {
-            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
-            if node_id == anchor_id {
-                continue;
-            }
-            signature_entries.push(format!(
-                "symbol|{}|symbol|{}|call-neighborhood|{}",
-                anchor_id, node_id, distance
-            ));
-        }
-        let signature = Self::projection_signature(&signature_entries);
-
-        if self.graph_projection_state_matches("symbol", &anchor_id, radius, &signature, version)? {
-            return Ok(Some(anchor_id));
-        }
-
-        let mut queries = vec![format!(
-            "DELETE FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = '{}' AND radius = {};",
-            anchor_escaped, radius
-        )];
-        queries.push(format!(
-            "DELETE FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = '{}' AND radius = {};",
-            anchor_escaped, radius
-        ));
-
-        queries.push(format!(
-            "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('symbol', '{}', 'symbol', '{}', 'anchor', 0, {}, '{}', {});",
-            anchor_escaped, anchor_escaped, radius, version, created_at
-        ));
-
-        for row in rows {
-            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
-            if node_id == anchor_id {
-                continue;
-            }
-            queries.push(format!(
-                "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('symbol', '{}', 'symbol', '{}', 'call-neighborhood', {}, {}, '{}', {});",
-                anchor_escaped,
-                node_id.replace('\'', "''"),
-                distance,
-                radius,
-                version,
-                created_at
-            ));
-        }
-        queries.push(format!(
-            "INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', '{}', {}, '{}', '{}', {});",
-            anchor_escaped, radius, signature, version, created_at
-        ));
-
-        self.execute_batch(&queries)?;
-        Ok(Some(anchor_id))
+    pub fn refresh_symbol_projection(
+        &self,
+        symbol: &str,
+        _radius: u64,
+    ) -> Result<Option<String>> {
+        // REQ-AXO-271 slice 2 (post-MIL-AXO-017 / DEC-AXO-083 AGE retirement) :
+        // the legacy GraphProjection cache refresh via SQL CALLS / CALLS_NIF
+        // tables was conditional on `skip_legacy_relations()`, which always
+        // returns true under PG canonical. Authoritative call-graph reads
+        // now route through `public.Edge` + db/ddl/04_graph_functions.sql
+        // (`callers_of`, `path`, etc.). This function is reduced to anchor
+        // resolution: callers receive the resolved id for downstream
+        // bookkeeping but no row is written into GraphProjection.
+        self.resolve_symbol_anchor_id(symbol)
     }
 
-    pub fn refresh_file_projection(&self, file_path: &str, radius: u64) -> Result<()> {
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-        // tables are empty/dropped — skip the projection refresh (mirrors
-        // refresh_symbol_projection). Authoritative file-call traversal goes
-        // through AGE primary tools (axon_path / axon_impact).
-        if self.skip_legacy_relations() {
-            return Ok(());
-        }
-        let radius = radius.max(1) as i64;
-        let params = serde_json::json!({
-            "file": file_path,
-            "radius": radius,
-        });
-        let query = "WITH RECURSIVE \
-                call_edges(source_id, target_id) AS ( \
-                    SELECT source_id, target_id FROM CALLS \
-                    UNION ALL \
-                    SELECT target_id, source_id FROM CALLS \
-                ), \
-                seed(node_id, distance) AS ( \
-                    SELECT target_id, 1 AS distance FROM CONTAINS WHERE source_id = $file \
-                    UNION ALL \
-                    SELECT e.target_id, s.distance + 1 \
-                    FROM call_edges e JOIN seed s ON e.source_id = s.node_id \
-                    WHERE s.distance < $radius \
-                ) \
-            SELECT node_id, MIN(distance) \
-            FROM seed \
-            GROUP BY node_id";
-        let res =
-            self.query_json_param_with_freshness(query, &params, ReadFreshness::FreshRequired)?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        let created_at = chrono::Utc::now().timestamp_millis();
-        let file_escaped = file_path.replace('\'', "''");
-        let version = Self::graph_projection_version();
-        let mut signature_entries = vec![format!("file|{}|file|{}|file|0", file_path, file_path)];
-
-        for row in &rows {
-            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
-            let edge_kind = if distance == 1 {
-                "contains"
-            } else {
-                "call-neighborhood"
-            };
-            signature_entries.push(format!(
-                "file|{}|symbol|{}|{}|{}",
-                file_path, node_id, edge_kind, distance
-            ));
-        }
-        let signature = Self::projection_signature(&signature_entries);
-
-        if self.graph_projection_state_matches("file", file_path, radius, &signature, version)? {
-            return Ok(());
-        }
-
-        let mut queries = vec![format!(
-            "DELETE FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '{}' AND radius = {};",
-            file_escaped, radius
-        )];
-        queries.push(format!(
-            "DELETE FROM GraphProjectionState WHERE anchor_type = 'file' AND anchor_id = '{}' AND radius = {};",
-            file_escaped, radius
-        ));
-
-        queries.push(format!(
-            "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'file', '{}', 'file', 0, {}, '{}', {});",
-            file_escaped, file_escaped, radius, version, created_at
-        ));
-
-        for row in rows {
-            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
-            let edge_kind = if distance == 1 {
-                "contains"
-            } else {
-                "call-neighborhood"
-            };
-            queries.push(format!(
-                "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'symbol', '{}', '{}', {}, {}, '{}', {});",
-                file_escaped,
-                node_id.replace('\'', "''"),
-                edge_kind,
-                distance,
-                radius,
-                version,
-                created_at
-            ));
-        }
-        queries.push(format!(
-            "INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('file', '{}', {}, '{}', '{}', {});",
-            file_escaped, radius, signature, version, created_at
-        ));
-
-        self.execute_batch(&queries)
+    pub fn refresh_file_projection(&self, _file_path: &str, _radius: u64) -> Result<()> {
+        // REQ-AXO-271 slice 2 : see refresh_symbol_projection rationale.
+        // File-call projection refresh via SQL is a no-op under PG canonical.
+        Ok(())
     }
 
     pub fn query_graph_projection(
