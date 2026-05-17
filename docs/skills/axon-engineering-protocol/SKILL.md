@@ -54,6 +54,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `embedding_status` runtime heartbeat | `structuredContent.runtime_pending_count` = process-global `EmbedderRuntimeState::pending_count()` ; `structuredContent.runtime_idle` = `pending_count == 0`. Compare against `pending_chunks` (DB-derived ground truth) — wide divergence flags NOTIFY listener drop or missed `mark_embedded`. Surface needed by Slice 3 `EmbedderLifecycle` T_idle sleep decision — REQ-AXO-90009 Slice 2 |
 | `embedding_status` lifecycle phase | `structuredContent.lifecycle_phase` ∈ `{"ready","sleeping"}` (`EmbedderPhase`). `lifecycle_wake_count` / `lifecycle_sleep_count` count transitions. `lifecycle_last_used_ms` epoch ms of last `request_wake`. Slice 3A surfaces the state machine ; Slice 3B will wire the actual GpuB2Embedder session drop — REQ-AXO-90009 Slice 3 |
 | `axon_init_project` kickoff_bundle timeouts | `read_recent_req_commits` bounds the `git log --grep=…` shell-out to 2 s ; over-budget returns `[]` so the rest of the bundle still assembles. Prevents MCP gateway 30-s timeout under WSL2 fs latency / parallel build lock contention — REQ-AXO-287 |
+| `change_safety` envelope | Tri-modal envelope (`surfaces_used:["symbol_index","soll_traceability"]` / `surfaces_degraded` / `total_available:1` / `next_call_hint` / `pagination`) ; no `results[]` (single-verdict shape preserved, same logic as inspect). Both surfaces stay PG-backed — RAM IST snapshot doesn't carry the `tested` flag — REQ-AXO-91514 |
 
 ## SOLL writes
 

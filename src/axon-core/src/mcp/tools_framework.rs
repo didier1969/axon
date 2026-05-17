@@ -574,9 +574,29 @@ impl McpServer {
                 confidence,
             )
         );
+        // REQ-AXO-91514 — tri-modal envelope per GUI-AXO-1003. `change_safety`
+        // is an impact-context tool that joins two surfaces : the IST
+        // Symbol index (coverage signal `tested`) and the SOLL Traceability
+        // table (link count). Both are PG-backed today ; the RAM IST
+        // snapshot doesn't carry the `tested` flag, so a RAM-only path
+        // would lose signal — surfacing the PG provenance honestly via
+        // `surfaces_used = ["symbol_index","soll_traceability"]`. No
+        // results[] array : the response shape is already a single
+        // verdict (`change_safety`+`reasoning`) ; adding a parallel
+        // results[] would inflate bench precision denominators without
+        // helping LLM consumers (same logic as inspect REQ-AXO-91509).
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
+                "surfaces_used": ["symbol_index", "soll_traceability"],
+                "surfaces_degraded": [],
+                "total_available": 1,
+                "next_call_hint": format!("impact symbol={target}"),
+                "pagination": {
+                    "offset": 0,
+                    "limit": 1,
+                    "next_offset": Value::Null,
+                },
                 "project_code": project_code,
                 "target": target,
                 "target_type": target_type,

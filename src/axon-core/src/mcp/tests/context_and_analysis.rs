@@ -776,6 +776,67 @@ fn test_conception_view_rejects_unregistered_project_code() {
 }
 
 #[test]
+fn test_change_safety_exposes_trimodal_envelope_on_happy_path() {
+    // REQ-AXO-91514 — happy-path change_safety call returns the
+    // GUI-AXO-1003 envelope (surfaces_used, surfaces_degraded,
+    // total_available, next_call_hint, pagination) alongside the
+    // existing verdict shape. Bug : a fixture row may not exist for
+    // the target ; that's fine — the envelope must populate
+    // regardless of whether the verdict is `safe`, `unsafe`, or
+    // `unknown`.
+    let server = create_test_server();
+    super::delete_fixture_symbols(&server, &["axo::cs_target"]);
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES \
+             ('axo::cs_target', 'cs_target_fn', 'function', true, true, false, 'AXO')",
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "change_safety",
+                "arguments": {
+                    "project_code": "AXO",
+                    "target": "cs_target_fn",
+                    "target_type": "symbol"
+                }
+            })),
+            id: Some(json!(23012)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("data");
+    let surfaces: Vec<&str> = data["surfaces_used"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(surfaces.contains(&"symbol_index"));
+    assert!(surfaces.contains(&"soll_traceability"));
+    assert!(data["surfaces_degraded"]
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(false));
+    assert_eq!(data["total_available"].as_u64(), Some(1));
+    assert_eq!(
+        data["next_call_hint"].as_str(),
+        Some("impact symbol=cs_target_fn")
+    );
+    assert_eq!(data["pagination"]["offset"].as_u64(), Some(0));
+    assert_eq!(data["pagination"]["limit"].as_u64(), Some(1));
+    assert!(data["pagination"]["next_offset"].is_null());
+    // Verdict fields still present (additive contract).
+    assert!(data["change_safety"].as_str().is_some());
+    assert!(data["coverage_signals"].is_object());
+}
+
+#[test]
 fn test_change_safety_rejects_unregistered_project_code() {
     let server = create_test_server();
     let response = server
