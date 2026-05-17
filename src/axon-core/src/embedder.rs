@@ -59,6 +59,8 @@ mod gpu_policy;
 mod gpu_telemetry;
 #[path = "embedder/inline_embed.rs"]
 pub(crate) mod inline_embed;
+#[path = "embedder/lifecycle.rs"]
+pub(crate) mod lifecycle;
 #[path = "embedder/provider_contract.rs"]
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]

@@ -28,6 +28,7 @@ use chrono::Utc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
+use crate::embedder::lifecycle::process_state as embedder_state;
 use crate::graph::GraphStore;
 
 use super::metrics::StageMetrics;
@@ -229,7 +230,17 @@ pub fn spawn_a3_batched_worker(
                         for (parsed, chunk_ids) in
                             group_batch.into_iter().zip(chunk_ids_per_file.into_iter())
                         {
+                            // REQ-AXO-90009 Slice 1 (DEC-AXO-086) — mark each
+                            // chunk as pending in the process-global embedder
+                            // state BEFORE we try_send to B1. `retrieve_context`
+                            // freshness gate consults this set in O(1) without
+                            // hitting PG. The B1 try_send remains best-effort ;
+                            // a dropped try_send is still recoverable via the
+                            // reconcile loop (Slice 2) because the chunk_id
+                            // stays in pending until B3 marks it embedded.
+                            let state = embedder_state();
                             for cid in &chunk_ids {
+                                state.mark_pending(cid.clone());
                                 let _ = b1_inbox_tx.try_send(cid.clone());
                             }
                             let receipt = EnrolledFile {

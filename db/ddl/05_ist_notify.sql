@@ -81,3 +81,24 @@ DROP TRIGGER IF EXISTS trg_ist_notify_edge ON public.edge;
 CREATE TRIGGER trg_ist_notify_edge
 AFTER INSERT OR UPDATE OR DELETE ON public.edge
 FOR EACH ROW EXECUTE FUNCTION public.fn_ist_notify_edge();
+
+-- ── chunk_pending_embed trigger (REQ-AXO-90009 Slice 1, DEC-AXO-086) ──────
+-- Fires on every Chunk INSERT or content_hash UPDATE. Payload is the
+-- bare chunk id so the Rust listener can `EmbedderRuntimeState::mark_pending`
+-- without parsing JSON. Zero row writes (`PERFORM` only) ; design goal is
+-- "1 trigger, 0 row writes" per DEC-AXO-086 to keep the embedding pipeline
+-- additive on the WAL.
+CREATE OR REPLACE FUNCTION public.fn_notify_chunk_pending()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_notify('chunk_pending_embed', NEW.id);
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_chunk_notify_pending ON public.Chunk;
+CREATE TRIGGER trg_chunk_notify_pending
+AFTER INSERT OR UPDATE OF content_hash ON public.Chunk
+FOR EACH ROW EXECUTE FUNCTION public.fn_notify_chunk_pending();

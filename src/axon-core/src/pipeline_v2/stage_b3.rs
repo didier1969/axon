@@ -19,6 +19,7 @@ use chrono::Utc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::warn;
 
+use crate::embedder::lifecycle::process_state as embedder_state;
 use crate::graph::GraphStore;
 
 use super::metrics::StageMetrics;
@@ -67,6 +68,11 @@ pub async fn b3_persist_embedding(
         )
     })
     .await??;
+
+    // REQ-AXO-90009 Slice 1 — clear pending state AFTER the embedding
+    // row is committed. Pre-commit would risk a half-state where the
+    // chunk is "not pending" yet has no ChunkEmbedding row.
+    embedder_state().mark_embedded(&chunk_id);
 
     Ok(PersistedEmbedding {
         chunk_id,
@@ -172,10 +178,17 @@ pub fn spawn_b3_batched_worker(
                 let group_len = group_batch.len();
                 match join_result {
                     Ok(Ok(())) => {
+                        // REQ-AXO-90009 Slice 1 — clear pending state for
+                        // every chunk just committed. Batched UPSERT
+                        // succeeded for the whole group atomically, so it
+                        // is safe to drop all chunk_ids from the pending
+                        // set in one pass.
+                        let state = embedder_state();
                         let elapsed_us =
                             started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         for embedded in group_batch {
+                            state.mark_embedded(&embedded.chunk_id);
                             metrics.record_finished(per_item_us);
                             let receipt = PersistedEmbedding {
                                 chunk_id: embedded.chunk_id,
