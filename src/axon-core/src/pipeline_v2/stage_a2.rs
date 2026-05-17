@@ -25,6 +25,31 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     // REQ-AXO-345 — A2 in/out trace.
     info!(target: "pipeline_v2::a2", "A2 in: {}", prep.path.display());
     let path_for_log = prep.path.clone();
+    // REQ-AXO-347 — defensive empty-file fast-path. Some language
+    // parsers (Elixir, Python with eager AST walks, etc.) error or
+    // panic on empty input, and the worker pool propagates the stage
+    // error to the orchestrator's `errors_total`. Empty content has
+    // zero symbols by definition, so short-circuit before parser
+    // dispatch : no parser lookup, no spawn_blocking, no risk of a
+    // language-specific edge case. Also covers the corner where the
+    // file extension has no parser registered (today returns an
+    // error) but the file is empty anyway — no useful work was lost.
+    if prep.content.is_empty() {
+        info!(
+            target: "pipeline_v2::a2",
+            "A2 out: {} symbols=0 relations=0 (empty-file fast-path)",
+            path_for_log.display()
+        );
+        return Ok(ParsedFile {
+            path: prep.path,
+            content: prep.content,
+            content_hash: prep.content_hash,
+            mtime_ms: prep.mtime_ms,
+            size_bytes: prep.size_bytes,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        });
+    }
     let result = tokio::task::spawn_blocking(move || {
         let parser = crate::parser::get_parser_for_file(&prep.path).ok_or_else(|| {
             anyhow::anyhow!("A2: no parser registered for {}", prep.path.display())
@@ -109,5 +134,32 @@ mod tests {
         let parsed = a2_transform(prep).await.unwrap();
         // No symbols expected from an empty file — but the call must succeed.
         assert!(parsed.symbols.iter().all(|s| !s.name.is_empty()));
+    }
+
+    /// REQ-AXO-347 — empty-file fast-path returns successfully even when
+    /// the file extension has no registered parser. Pre-fix this branch
+    /// surfaced an `A2: no parser registered for …` error to the worker
+    /// pool ; the fast-path now short-circuits before parser dispatch.
+    #[tokio::test]
+    async fn a2_transform_empty_file_with_unknown_extension_yields_zero_symbols() {
+        let prep = prep_with("/tmp/empty.unknown_ext_xyzzy", "");
+        let parsed = a2_transform(prep).await.unwrap();
+        assert!(parsed.symbols.is_empty());
+        assert!(parsed.relations.is_empty());
+        assert_eq!(parsed.content, "");
+        assert_eq!(parsed.size_bytes, 0);
+    }
+
+    /// REQ-AXO-347 — empty file with a known extension returns the same
+    /// fast-path shape (no parser invocation, no symbols, no relations).
+    /// Locks the invariant for parsers that might evolve later (Elixir,
+    /// Python, TS) to ensure they never see empty input.
+    #[tokio::test]
+    async fn a2_transform_empty_rust_file_uses_fast_path() {
+        let prep = prep_with("/tmp/empty.rs", "");
+        let parsed = a2_transform(prep).await.unwrap();
+        assert!(parsed.symbols.is_empty());
+        assert!(parsed.relations.is_empty());
+        assert_eq!(parsed.content_hash, "deadbeef");
     }
 }
