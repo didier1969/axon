@@ -28,41 +28,12 @@ pub(crate) type QueryCountFunc =
 pub(crate) type FreeStrFunc = unsafe extern "C" fn(ptr: *mut std::os::raw::c_char);
 pub(crate) type CloseDbFunc = unsafe extern "C" fn(ctx: *mut c_void);
 
-/// PostgreSQL is the canonical (and only) storage backend (REQ-AXO-271,
-/// operator directive 2026-05-12 — purge of DuckDB). The
-/// `PluginBackend` enum is retained as a single-variant marker so the
-/// existing FFI plumbing keeps compiling while the deeper refactor
-/// lands in a follow-up sweep.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PluginBackend {
-    Postgres,
-}
-
-impl PluginBackend {
-    /// PostgreSQL is the only backend. `AXON_DB_BACKEND` is ignored
-    /// and may be removed entirely once every reference is purged.
-    pub(crate) fn current() -> Self {
-        PluginBackend::Postgres
-    }
-
-    pub(crate) fn plugin_filename(self) -> &'static str {
-        "libaxon_plugin_postgres.so"
-    }
-
-    pub(crate) fn crate_dir(self) -> &'static str {
-        "src/axon-plugin-postgres"
-    }
-}
-
 /// MIL-AXO-015 P3 slice 3a: cached FFI fn pointers for the loaded
-/// plugin. Resolved once at `LatticePool` construction; all subsequent
-/// hot-path call sites read directly from these fields rather than
-/// hitting `Library::get` again per call. Slice 3b adds the `backend`
-/// discriminator + `resolve_postgres` so the same surface can be
-/// fronted by either axon-plugin-duckdb or axon-plugin-postgres.
+/// `axon-plugin-postgres` cdylib. Resolved once at `LatticePool`
+/// construction; all subsequent hot-path call sites read directly
+/// from these fields rather than hitting `Library::get` again per call.
 #[derive(Copy, Clone)]
 pub(crate) struct PluginSymbols {
-    pub(crate) backend: PluginBackend,
     pub(crate) init_fn: InitDbFunc,
     pub(crate) close_fn: CloseDbFunc,
     pub(crate) exec_fn: ExecFunc,
@@ -72,19 +43,6 @@ pub(crate) struct PluginSymbols {
 }
 
 impl PluginSymbols {
-    /// Resolve every plugin symbol up-front against the loaded
-    /// dynamic library, dispatching by backend.
-    ///
-    /// # Safety
-    ///
-    /// `lib` must remain alive for the lifetime of the returned
-    /// `PluginSymbols` because the cached fn pointers reference
-    /// addresses inside the loaded image. `LatticePool` enforces this
-    /// by owning the `Arc<Library>` alongside the symbols.
-    pub(crate) unsafe fn resolve(lib: &Library, _backend: PluginBackend) -> anyhow::Result<Self> {
-        Self::resolve_postgres(lib)
-    }
-
     /// Resolve the pg_* C symbols. `init_fn` is the `pg_init_db_compat`
     /// shim defined in axon-plugin-postgres; the first argument is
     /// reinterpreted as a `DATABASE_URL`; the `read_only` flag is
@@ -92,10 +50,12 @@ impl PluginSymbols {
     ///
     /// # Safety
     ///
-    /// See `PluginSymbols::resolve`.
-    pub(crate) unsafe fn resolve_postgres(lib: &Library) -> anyhow::Result<Self> {
+    /// `lib` must remain alive for the lifetime of the returned
+    /// `PluginSymbols` because the cached fn pointers reference
+    /// addresses inside the loaded image. `LatticePool` enforces this
+    /// by owning the `Arc<Library>` alongside the symbols.
+    pub(crate) unsafe fn resolve(lib: &Library) -> anyhow::Result<Self> {
         Ok(Self {
-            backend: PluginBackend::Postgres,
             init_fn: *lib.get::<InitDbFunc>(b"pg_init_db_compat\0")?,
             close_fn: *lib.get::<CloseDbFunc>(b"pg_close_db\0")?,
             exec_fn: *lib.get::<ExecFunc>(b"pg_execute\0")?,

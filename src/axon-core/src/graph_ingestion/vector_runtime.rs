@@ -12,9 +12,7 @@ use super::{
 
 impl GraphStore {
     /// REQ-AXO-271 slice 2e (PG canonical only, post-MIL-AXO-017) :
-    /// schema-qualify an `axon_runtime` table reference. The DuckDB
-    /// unqualified-name arm is dead syntax under the single-variant
-    /// `PluginBackend::Postgres` plugin.
+    /// schema-qualify an `axon_runtime` table reference.
     fn axon_runtime_table_ref(&self, table: &'static str) -> String {
         format!("axon_runtime.{table}")
     }

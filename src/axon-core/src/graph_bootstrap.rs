@@ -176,10 +176,9 @@ impl GraphStore {
         split_brain_mode: bool,
         soll_access_mode: SollAccessMode,
     ) -> Result<Self> {
-        let backend = crate::graph::PluginBackend::current();
-        let plugin_path = Self::find_plugin_path_for(backend)?;
+        let plugin_path = Self::find_plugin_path()?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
-        let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib, backend) }?;
+        let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib) }?;
         let init_fn = symbols.init_fn;
         let close_fn = symbols.close_fn;
         let is_memory = db_root == ":memory:";
@@ -188,8 +187,8 @@ impl GraphStore {
         // backend.
         let split_brain_mode = false;
         info!(
-            "GraphStore init modes: backend={:?}, db_root={}, split_brain_mode={}, soll_access_mode={:?}",
-            backend, db_root, split_brain_mode, soll_access_mode
+            "GraphStore init modes: db_root={}, split_brain_mode={}, soll_access_mode={:?}",
+            db_root, split_brain_mode, soll_access_mode
         );
 
         // Under PostgreSQL the "DB path" is a DATABASE_URL passed
@@ -758,14 +757,12 @@ impl GraphStore {
             .store(now_ms, Ordering::Relaxed);
     }
 
+    /// `axon-plugin-postgres` cdylib discovery. Searches the standard
+    /// cargo target directories under the workspace root + cwd.
     fn find_plugin_path() -> Result<String> {
-        Self::find_plugin_path_for(crate::graph::PluginBackend::current())
-    }
+        const CRATE_DIR: &str = "src/axon-plugin-postgres";
+        const SO: &str = "libaxon_plugin_postgres.so";
 
-    /// MIL-AXO-015 P3 slice 3b: backend-aware plugin discovery.
-    /// Picks `libaxon_plugin_duckdb.so` or `libaxon_plugin_postgres.so`
-    /// based on `AXON_DB_BACKEND`, defaulting to duckdb when unset.
-    fn find_plugin_path_for(backend: crate::graph::PluginBackend) -> Result<String> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir
             .parent()
@@ -773,17 +770,14 @@ impl GraphStore {
             .ok_or_else(|| anyhow!("Unable to resolve repository root from CARGO_MANIFEST_DIR"))?
             .to_path_buf();
 
-        let crate_dir = backend.crate_dir();
-        let so = backend.plugin_filename();
-
         let mut candidates = vec![
-            repo_root.join(format!("{crate_dir}/target/release/{so}")),
-            repo_root.join(format!("{crate_dir}/target/debug/{so}")),
+            repo_root.join(format!("{CRATE_DIR}/target/release/{SO}")),
+            repo_root.join(format!("{CRATE_DIR}/target/debug/{SO}")),
         ];
 
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join(format!("{crate_dir}/target/release/{so}")));
-            candidates.push(cwd.join(format!("{crate_dir}/target/debug/{so}")));
+            candidates.push(cwd.join(format!("{CRATE_DIR}/target/release/{SO}")));
+            candidates.push(cwd.join(format!("{CRATE_DIR}/target/debug/{SO}")));
         }
 
         for path in candidates {
@@ -791,11 +785,7 @@ impl GraphStore {
                 return Ok(path.to_string_lossy().to_string());
             }
         }
-        Err(anyhow!(
-            "Plugin not found for backend {:?} (expected {})",
-            backend,
-            so
-        ))
+        Err(anyhow!("Plugin not found (expected {})", SO))
     }
 
     /// MIL-AXO-015 P3 slice 3c: PostgreSQL global schema bootstrap.
