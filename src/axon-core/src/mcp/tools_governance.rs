@@ -717,7 +717,26 @@ impl McpServer {
                 if let Some(section) = self.build_graph_clone_section(symbol) {
                     report.push_str(&section);
                 }
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                // REQ-AXO-91518 (MIL-AXO-019 Tier A) — tri-modal
+                // envelope. Vector cosine k-NN top 5 surface today
+                // (pgvector `<=>`). Slice 2 will pre-filter via
+                // vector, then confirm structural similarity via
+                // `vf2_subgraph_match` (MIL-AXO-019 vague 1c, ready
+                // in `ist_snapshot::algorithms`) on the per-candidate
+                // call sub-graph. The current surface stays sound
+                // for symbol-name clones — the structural-clone
+                // upgrade is additive when ChunkEmbedding clusters
+                // become the input.
+                Some(json!({
+                    "content": [{ "type": "text", "text": report }],
+                    "data": {
+                        "symbol": symbol,
+                        "clone_count": rows.len(),
+                        "surfaces_used": ["vector_pgvector"],
+                        "total_available": rows.len() as u64,
+                        "next_call_hint": "impact symbol=<clone> to review blast radius before dedup"
+                    }
+                }))
             }
             Err(e) => Some(json!({
                 "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }],
