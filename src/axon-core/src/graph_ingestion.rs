@@ -1945,28 +1945,22 @@ impl GraphStore {
             return Ok(());
         }
         let mut queries = Vec::new();
-        // MIL-AXO-015 P4 4e: under PG, render the embedding via the
-        // pgvector text literal (`'[…]'::vector(N)`) instead of the
-        // DuckDB FLOAT[N] cast. Symbol.embedding column type is
-        // `vector(1024)` per CPT-AXO-043 multi-project tables.
-        let is_pg = self.is_postgres_backend();
-
+        // REQ-AXO-271 slice 2i : PG canonical (post-MIL-AXO-017). Render
+        // via pgvector `'[…]'::vector(N)` text literal ; Symbol.embedding
+        // is `vector(1024)` (CPT-AXO-043). The DuckDB `CAST AS FLOAT[N]`
+        // arm is dead syntax.
         for chunk in updates.chunks(100) {
             for (id, vector) in chunk {
-                let embedding_sql = if is_pg {
-                    match crate::postgres::vector::vector_literal(vector) {
-                        Ok(lit) => lit,
-                        Err(e) => {
-                            log::warn!(
-                                "skipping update_symbol_embeddings for {} under PG: {}",
-                                id,
-                                e
-                            );
-                            continue;
-                        }
+                let embedding_sql = match crate::postgres::vector::vector_literal(vector) {
+                    Ok(lit) => lit,
+                    Err(e) => {
+                        log::warn!(
+                            "skipping update_symbol_embeddings for {}: {}",
+                            id,
+                            e
+                        );
+                        continue;
                     }
-                } else {
-                    format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector)
                 };
                 queries.push(format!(
                     "UPDATE Symbol SET embedding = {} WHERE id = '{}';",
