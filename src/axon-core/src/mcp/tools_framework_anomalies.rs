@@ -576,6 +576,55 @@ impl McpServer {
             )
         );
 
+        // REQ-AXO-91517 (MIL-AXO-019 vague 1c follow-up) — cognitive
+        // signals on the in-memory IST snapshot : bridges (single-edge
+        // failure points), articulation points (single-node failure
+        // points), and structural SCCs (> 1 node mutual recursion
+        // clusters). All three run in O(N+M) on the IstGraph CSR
+        // (`ist_snapshot::algorithms`) without any PG roundtrip ;
+        // empty result when the per-project cache is cold or
+        // `project == "*"` (the algos are per-project scoped).
+        let mut surfaces_used: Vec<&'static str> = vec!["graph_pg"];
+        let cognitive_signals: Value = if project != "*" {
+            let view = crate::ist_snapshot::process_view();
+            if view.is_warm(project) {
+                surfaces_used.push("graph_ram_cognitive");
+                let cache = view.cache_handle();
+                if let Some(snap) = cache.get(project) {
+                    let (bridges_raw, ap_raw) =
+                        crate::ist_snapshot::algorithms::bridges_and_articulation(&snap);
+                    let sccs_raw = crate::ist_snapshot::algorithms::structural_sccs(&snap);
+                    let bridge_cap = if brief_mode { 10 } else { 50 };
+                    let scc_cap = if brief_mode { 5 } else { 20 };
+                    let ap_cap = if brief_mode { 10 } else { 50 };
+                    let bridges: Vec<Value> = bridges_raw
+                        .into_iter()
+                        .take(bridge_cap)
+                        .map(|(a, b)| json!({"source": a, "target": b}))
+                        .collect();
+                    let articulation_points: Vec<Value> =
+                        ap_raw.into_iter().take(ap_cap).map(Value::from).collect();
+                    let strongly_connected: Vec<Value> = sccs_raw
+                        .into_iter()
+                        .take(scc_cap)
+                        .map(|members| json!({"size": members.len(), "members": members}))
+                        .collect();
+                    json!({
+                        "bridges": bridges,
+                        "articulation_points": articulation_points,
+                        "strongly_connected_components": strongly_connected,
+                        "algo_provenance": "petgraph_tarjan_lowlink",
+                    })
+                } else {
+                    json!({})
+                }
+            } else {
+                json!({})
+            }
+        } else {
+            json!({})
+        };
+
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -614,7 +663,9 @@ impl McpServer {
                     "semantic_boundary": "heuristic anomaly overlays must not silently override canonical SOLL completeness"
                 },
                 "findings": findings,
-                "recommendations": recommendations
+                "recommendations": recommendations,
+                "cognitive_signals": cognitive_signals,
+                "surfaces_used": surfaces_used,
             }
         });
         cache_write(Self::anomalies_cache(), cache_key, now_ms, &response);
