@@ -306,8 +306,15 @@ BEGIN
         RAISE EXCEPTION 'project_code_not_registered:%', p_project_code;
     END IF;
 
+    -- MIL-AXO-020 rule 7: `N` zéro-paddé 3 chiffres min, largeur naturelle
+    -- au-delà de 999. `lpad(text, 3, '0')` TRUNCATES inputs longer than 3
+    -- chars (PG semantics: "If string is already longer than length then
+    -- it is truncated"), so guard with a length check before padding to
+    -- preserve the natural width past 999.
     RETURN format('%s-%s-%s', v_prefix, p_project_code,
-                  lpad(v_next::TEXT, 3, '0'));
+                  CASE WHEN v_next > 999 THEN v_next::TEXT
+                       ELSE lpad(v_next::TEXT, 3, '0')
+                  END);
 END
 $allocate_node_id$;
 
