@@ -1,4 +1,4 @@
-use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
+use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::service_guard::ServicePressure;
 use ignore::WalkBuilder;
 use serde_json::{json, Value};
@@ -1860,13 +1860,8 @@ impl McpServer {
     ) -> Vec<ChunkCandidate> {
         // MIL-AXO-015 P4 slice 4d (post-CPT-AXO-039 supersedure
         // 2026-05-08): IST tables live in `public` with `project_code`
-        // as a row column, identical to the DuckDB layout. Under PG we
-        // only swap the *vector* dialect (pgvector `<=>` instead of
-        // `array_cosine_distance`, `'[..]'::vector(N)` instead of
-        // `CAST(... AS FLOAT[N])`). Table names + project_code filters
-        // stay the same as the DuckDB path.
-        let is_pg = self.graph_store.is_postgres_backend();
-
+        // as a row column. pgvector `<=>` is the canonical
+        // cosine-distance operator with `'[..]'::vector(N)` literals.
         let entry_ids = entry_candidates
             .iter()
             .map(|candidate| candidate.id.clone())
@@ -2029,25 +2024,16 @@ impl McpServer {
         let project_filter =
             Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]);
 
-        // Vector dialect swap (PG vs DuckDB) — same table layout, same
-        // filter clauses; only the cosine-distance expression differs.
         let cosine_expr = if let Some(embedding) = semantic.as_ref() {
-            if is_pg {
-                match crate::postgres::vector::vector_literal(embedding) {
-                    Ok(lit) => Some(format!("(ce.embedding <=> {lit})")),
-                    Err(err) => {
-                        excluded_because.push(format!(
-                            "pg_semantic_vector_literal_error:{}",
-                            Self::truncate(&err.to_string(), 120)
-                        ));
-                        return Vec::new();
-                    }
+            match crate::postgres::vector::vector_literal(embedding) {
+                Ok(lit) => Some(format!("(ce.embedding <=> {lit})")),
+                Err(err) => {
+                    excluded_because.push(format!(
+                        "pg_semantic_vector_literal_error:{}",
+                        Self::truncate(&err.to_string(), 120)
+                    ));
+                    return Vec::new();
                 }
-            } else {
-                let vector = format!("{embedding:?}");
-                Some(format!(
-                    "array_cosine_distance(ce.embedding, CAST({vector} AS FLOAT[{DIMENSION}]))"
-                ))
             }
         } else {
             None
@@ -2100,9 +2086,7 @@ impl McpServer {
         let mut rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         if rows.is_empty() {
             // Repo-root fallback: drop project_code filter, post-filter
-            // by repo_root prefix. Works identically on PG and DuckDB
-            // since post-CPT-AXO-039 the table layout is the same.
-            let _ = is_pg; // suppress unused-warn when fallback reached
+            // by repo_root prefix.
             if let Some(repo_root) = Self::project_repo_root(project) {
                 let fallback_query = query.replacen(
                     &Self::sql_project_filter_for_fields(
@@ -2203,9 +2187,6 @@ impl McpServer {
         question: &str,
         limit: usize,
     ) -> Vec<ChunkCandidate> {
-        if !self.graph_store.is_postgres_backend() {
-            return Vec::new();
-        }
         // Rollback knobs: legacy `AXON_IST_FTS_DISABLED` (slice 1)
         // stays for backwards-compat; new `AXON_HYBRID_RETRIEVAL_DISABLED`
         // (slice 2) is the canonical superset knob disabling the

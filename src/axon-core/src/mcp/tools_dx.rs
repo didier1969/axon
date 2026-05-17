@@ -1,4 +1,3 @@
-use crate::embedding_contract::DIMENSION;
 use crate::ist_snapshot::process_view;
 use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
@@ -702,25 +701,15 @@ impl McpServer {
             10
         };
 
-        // Post-CPT-AXO-039 supersedure (2026-05-08): IST tables are
-        // multi-project under both backends. Only the cosine-distance
-        // expression differs between PG and DuckDB — same table layout,
-        // same project_code filter clauses.
-        let is_pg = self.graph_store.is_postgres_backend();
-
+        // IST tables are multi-project under PG (post-CPT-AXO-039
+        // supersedure 2026-05-08). pgvector `<=>` is the canonical
+        // cosine-distance operator; on dimension mismatch we fall
+        // through to lexical-only.
         let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
-            // Build the cosine-distance expression in the right dialect.
-            let cosine_expr = if is_pg {
-                match crate::postgres::vector::vector_literal(&emb) {
-                    Ok(vec_lit) => Some(format!("(s.embedding <=> {vec_lit})")),
-                    Err(_) => None, // fall through to lexical-only
-                }
-            } else {
-                let vec_str = format!("{:?}", emb);
-                Some(format!(
-                    "array_cosine_distance(s.embedding, {vec_str}::FLOAT[{DIMENSION}])"
-                ))
+            let cosine_expr = match crate::postgres::vector::vector_literal(&emb) {
+                Ok(vec_lit) => Some(format!("(s.embedding <=> {vec_lit})")),
+                Err(_) => None,
             };
 
             if let Some(cosine_expr) = cosine_expr.as_ref() {
