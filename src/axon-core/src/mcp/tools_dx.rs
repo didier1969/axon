@@ -1889,76 +1889,16 @@ impl McpServer {
                 materialize_symbol_rows(self, &callees_ids),
             )
         } else {
+            // MIL-AXO-019 vague 1d : the legacy `WITH RECURSIVE` PG
+            // fallback over `public.CALLS` is dead under PG canonical
+            // (REQ-AXO-271 slice 2d : the CALLS / CALLS_NIF tables are
+            // dropped, `skip_legacy_relations` invariantly true). When
+            // the IstGraphView cache is cold the bidi_trace surface
+            // returns empty + flags the degraded surface so the LLM
+            // sees the truth instead of silently empty results.
             surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
-            let scoped_filter = if project.is_some() {
-                "WHERE src.project_code = $project AND dst.project_code = $project"
-            } else {
-                ""
-            };
-
-            let up_query = format!(
-                "WITH RECURSIVE scoped_calls AS (
-                    SELECT c.source_id, c.target_id
-                    FROM CALLS c
-                    JOIN Symbol src ON src.id = c.source_id
-                    JOIN Symbol dst ON dst.id = c.target_id
-                    {}
-                ),
-                callers(sym, depth) AS (
-                    SELECT source_id, 1 FROM scoped_calls WHERE target_id = $target_id
-                    UNION ALL
-                    SELECT c.source_id, callers.depth + 1
-                    FROM scoped_calls c
-                    JOIN callers ON c.target_id = callers.sym
-                    WHERE callers.depth < {}
-                )
-                SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
-                JOIN Symbol s ON s.id = callers.sym",
-                scoped_filter, depth,
-            );
-
-            let down_query = format!(
-                "WITH RECURSIVE scoped_calls AS (
-                    SELECT c.source_id, c.target_id
-                    FROM CALLS c
-                    JOIN Symbol src ON src.id = c.source_id
-                    JOIN Symbol dst ON dst.id = c.target_id
-                    {}
-                ),
-                callees(sym, depth) AS (
-                    SELECT target_id, 1 FROM scoped_calls WHERE source_id = $target_id
-                    UNION ALL
-                    SELECT c.target_id, callees.depth + 1
-                    FROM scoped_calls c
-                    JOIN callees ON c.source_id = callees.sym
-                    WHERE callees.depth < {}
-                )
-                SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
-                JOIN Symbol s ON s.id = callees.sym",
-                scoped_filter, depth,
-            );
-
-            let params = if let Some(project) = project {
-                json!({"target_id": target_id, "project": project})
-            } else {
-                json!({"target_id": target_id})
-            };
-            // MIL-AXO-017 slice 6B: AGE retired ; up/down via SQL only.
-            let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-            if skip_legacy_relations {
-                ("[]".to_string(), "[]".to_string())
-            } else {
-                let up = self
-                    .graph_store
-                    .query_json_param(&up_query, &params)
-                    .unwrap_or_else(|_| "[]".to_string());
-                let down = self
-                    .graph_store
-                    .query_json_param(&down_query, &params)
-                    .unwrap_or_else(|_| "[]".to_string());
-                (up, down)
-            }
+            ("[]".to_string(), "[]".to_string())
         };
 
         let up_rows: Vec<Vec<Value>> = serde_json::from_str(&up_res).unwrap_or_default();
