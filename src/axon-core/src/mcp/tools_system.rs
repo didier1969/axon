@@ -401,13 +401,49 @@ impl McpServer {
         // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces
         // the sleep/wake state machine so operators see when the GPU
         // session is parked vs ready, and how often it has flipped.
-        // Slice 3B will wire the actual session drop ; until then the
-        // counters increment but the GPU remains loaded.
-        let lifecycle = crate::embedder::lifecycle_machine::process_lifecycle();
-        let lifecycle_phase = lifecycle.phase().as_str();
-        let lifecycle_last_used_ms = lifecycle.last_used_ms();
-        let lifecycle_wake_count = lifecycle.wake_count();
-        let lifecycle_sleep_count = lifecycle.sleep_count();
+        // REQ-AXO-91572 option B : when running as the brain (MCP
+        // server, no embedder), the local singleton is fresh-from-boot
+        // and uninformative. Try the cross-process heartbeat table
+        // first — the indexer UPSERTs its real state every 5 s. Stale
+        // rows (> 30 s) fall back to the local singleton.
+        const HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        let indexer_heartbeat = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten()
+            .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
+        let lifecycle_source = if indexer_heartbeat.is_some() {
+            "indexer_heartbeat"
+        } else {
+            "brain_local_singleton"
+        };
+        let local_lifecycle = crate::embedder::lifecycle_machine::process_lifecycle();
+        let (lifecycle_phase, lifecycle_last_used_ms, lifecycle_wake_count, lifecycle_sleep_count) =
+            match indexer_heartbeat.as_ref() {
+                Some(row) => (
+                    row.phase.as_str(),
+                    row.last_used_ms,
+                    row.wake_count,
+                    row.sleep_count,
+                ),
+                None => (
+                    local_lifecycle.phase().as_str(),
+                    local_lifecycle.last_used_ms(),
+                    local_lifecycle.wake_count(),
+                    local_lifecycle.sleep_count(),
+                ),
+            };
+        let lifecycle_heartbeat_age_ms = indexer_heartbeat
+            .as_ref()
+            .map(|row| (now_ms - row.heartbeat_ms).max(0));
+        let heartbeat_age_suffix = lifecycle_heartbeat_age_ms
+            .map(|age| format!(", heartbeat_age_ms={age}"))
+            .unwrap_or_default();
         let report = format!(
             "## Axon Status (project={project})\n\n\
              ### Storage\n\
@@ -432,7 +468,7 @@ impl McpServer {
              - NOTIFY channel:    chunk_pending_embed\n\
              - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
-             - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count})\n\n\
+             - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\n\
              Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer)."
         );
 
@@ -458,6 +494,8 @@ impl McpServer {
                 "lifecycle_last_used_ms": lifecycle_last_used_ms,
                 "lifecycle_wake_count": lifecycle_wake_count,
                 "lifecycle_sleep_count": lifecycle_sleep_count,
+                "lifecycle_source": lifecycle_source,
+                "lifecycle_heartbeat_age_ms": lifecycle_heartbeat_age_ms,
             }
         }))
     }
