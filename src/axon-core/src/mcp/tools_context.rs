@@ -695,6 +695,18 @@ impl McpServer {
                 "phase_a_version": "v2",
             },
             "legacy_passthrough": inner_data,
+            // REQ-AXO-91524 (MIL-AXO-019 Tier A) — tri-modal envelope.
+            // `retrieve_context_layered` wraps `retrieve_context` (which
+            // already exposes its own RRF tri-modal surface via
+            // REQ-AXO-91489) and re-organises the output into intent /
+            // code / recent bands constrained by token budgets. The
+            // "layered" semantics here is band-budget, NOT graph-layer
+            // BFS (cf. `ist_snapshot::algorithms::bfs_layers` which
+            // would be a different feature). Surfaces inherit from the
+            // inner retrieve_context envelope.
+            "surfaces_used": ["retrieve_context_rrf", "token_budget_bands"],
+            "total_available": total_tokens,
+            "next_call_hint": "increase bands.<band>.max_tokens or call retrieve_context directly for unbudgeted view"
         });
 
         let summary = format!(

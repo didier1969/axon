@@ -435,7 +435,13 @@ impl McpServer {
                 "confidence": conception.get("confidence").cloned().unwrap_or_else(|| json!("medium")),
                 "evidence_sources": ["File", "Symbol", "CALLS", "CONTAINS"],
                 "safe_to_act": false,
-                "needs_human_confirmation": true
+                "needs_human_confirmation": true,
+                "surfaces_used": ["graph_pg", "soll_pg"],
+                "total_available": conception.get("module_count").and_then(Value::as_u64).unwrap_or(0)
+                    + conception.get("interface_count").and_then(Value::as_u64).unwrap_or(0)
+                    + conception.get("contract_count").and_then(Value::as_u64).unwrap_or(0)
+                    + conception.get("flow_count").and_then(Value::as_u64).unwrap_or(0),
+                "next_call_hint": "why symbol=<flow-or-module-id> to inspect rationale"
             }
         }))
     }

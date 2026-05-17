@@ -287,7 +287,27 @@ impl McpServer {
                 &["Counter", "Canonical(writer)", "Reader-path", "Delta"]
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        // REQ-AXO-91523 (MIL-AXO-019 Tier A) — tri-modal envelope.
+        // `truth_check` compares writer-side vs reader-side counters
+        // for the canonical IST tables ; surface stays on
+        // `graph_pg_writer` + `graph_pg_reader` (publication freshness
+        // contract — CPT-AXO-029). Adding RAM cross-checks against
+        // `IstSnapshotCache::approximate_bytes` is a follow-up slice.
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": status,
+                "drift_count": drift_count,
+                "checks": rows,
+                "surfaces_used": ["graph_pg_writer", "graph_pg_reader"],
+                "total_available": drift_count,
+                "next_call_hint": if drift_count > 0 {
+                    "diagnose_indexing for replica freshness investigation"
+                } else {
+                    "status mode=verbose to confirm IST projection freshness"
+                }
+            }
+        }))
     }
 
     /// DEC-AXO-086 slice 2 — operator health snapshot (renamed conceptually

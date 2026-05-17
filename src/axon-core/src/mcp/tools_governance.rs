@@ -590,7 +590,29 @@ impl McpServer {
                 },
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        // REQ-AXO-91525 (MIL-AXO-019 Tier A aggregator) — tri-modal
+        // envelope. `audit` composes security audit, coverage,
+        // technical debt, god objects, telemetry, dead code, hygiene —
+        // all from `graph_store` SQL aggregators today. Adding the
+        // RAM cognitive overlay (bridges, SCCs, articulation points)
+        // is a follow-up slice ; the algos are ready
+        // (`ist_snapshot::algorithms`, vague 1c) and the wiring
+        // pattern is the same as `anomalies` REQ-AXO-91517 commit
+        // `6ac5e3cc`.
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "project": project,
+                "security_score": sec_score,
+                "coverage_score": cov_score,
+                "telemetry_score": telemetry_score,
+                "hygiene_score": hygiene_score,
+                "overall_score": overall_score,
+                "surfaces_used": ["graph_pg"],
+                "total_available": 1,
+                "next_call_hint": "anomalies project=<code> mode=verbose for structural findings + cognitive_signals"
+            }
+        }))
     }
 
     pub(crate) fn axon_health(&self, args: &Value) -> Option<Value> {
