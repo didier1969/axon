@@ -726,11 +726,8 @@ impl McpServer {
                     }
                 }
 
-                // Atomic INSERT node + INSERT edge. PG: single CTE so the
-                // node never survives a failed edge insert. Non-PG test
-                // backends: sequential with a best-effort rollback of the
-                // node if the edge insert fails (REQ-AXO-254 documents
-                // why BEGIN/COMMIT is not safe under the PG deadpool).
+                // Atomic INSERT node + INSERT edge via single CTE so the
+                // node never survives a failed edge insert.
                 let cte_sql = "WITH new_node AS (\
                     INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
                     VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
@@ -738,62 +735,22 @@ impl McpServer {
                 ) \
                 INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
                 SELECT new_node.id, ?, ?, ? FROM new_node";
-                let fallback_node_sql = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
-                let fallback_edge_sql = "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, ?, ?)";
 
-                let insert_res = if self.graph_store.is_postgres_backend() {
-                    self.graph_store.execute_param(
-                        cte_sql,
-                        &json!([
-                            formatted_id,
-                            entity_type_cap,
-                            canonical_code,
-                            title,
-                            description,
-                            status,
-                            meta.to_string(),
-                            attach_to,
-                            relation_type,
-                            canonical_code
-                        ]),
-                    )
-                } else {
-                    let node_res = self.graph_store.execute_param(
-                        fallback_node_sql,
-                        &json!([
-                            formatted_id,
-                            entity_type_cap,
-                            canonical_code,
-                            title,
-                            description,
-                            status,
-                            meta.to_string()
-                        ]),
-                    );
-                    match node_res {
-                        Ok(()) => {
-                            let edge_res = self.graph_store.execute_param(
-                                fallback_edge_sql,
-                                &json!([
-                                    formatted_id,
-                                    attach_to,
-                                    relation_type,
-                                    canonical_code
-                                ]),
-                            );
-                            if let Err(edge_err) = edge_res {
-                                let _ = self.graph_store.execute_param(
-                                    "DELETE FROM soll.Node WHERE id = ?",
-                                    &json!([formatted_id]),
-                                );
-                                Err(edge_err)
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        Err(e) => Err(e),
-                    }
-                };
+                let insert_res = self.graph_store.execute_param(
+                    cte_sql,
+                    &json!([
+                        formatted_id,
+                        entity_type_cap,
+                        canonical_code,
+                        title,
+                        description,
+                        status,
+                        meta.to_string(),
+                        attach_to,
+                        relation_type,
+                        canonical_code
+                    ]),
+                );
 
                 match insert_res {
                     Ok(()) => {

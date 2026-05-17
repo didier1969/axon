@@ -13,12 +13,10 @@ impl McpServer {
         let rows_raw = self.graph_store.query_json(&query).ok()?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
 
-        // REQ-AXO-254: skip BEGIN/COMMIT pairing under PG (FFI
-        // connection-pinning bug, see workflow_plan.rs commit notes).
-        let use_explicit_transaction = !self.graph_store.is_postgres_backend();
-        if use_explicit_transaction {
-            let _ = self.graph_store.execute("BEGIN TRANSACTION");
-        }
+        // REQ-AXO-254: deadpool serves a fresh connection per `pg_execute`,
+        // so a wrapping BEGIN/COMMIT lands on different sessions and leaves
+        // the first one "idle in transaction". Each INSERT auto-commits;
+        // partial revisions can be cleaned up via `soll_rollback_revision`.
         for row in rows {
             if row.len() < 5 {
                 continue;
@@ -36,9 +34,6 @@ impl McpServer {
             };
 
             if let Err(e) = self.apply_rollback_operation(&op) {
-                if use_explicit_transaction {
-                    let _ = self.graph_store.execute("ROLLBACK");
-                }
                 return Some(json!({
                     "content":[{"type":"text","text": format!("Rollback failed: {}", e)}],
                     "isError": true,
@@ -57,9 +52,6 @@ impl McpServer {
             }
         }
 
-        if use_explicit_transaction {
-            let _ = self.graph_store.execute("COMMIT");
-        }
         let _ = self.graph_store.execute(&format!(
             "UPDATE soll.Revision SET status = 'rolled_back' WHERE revision_id = '{}'",
             escape_sql(revision_id)

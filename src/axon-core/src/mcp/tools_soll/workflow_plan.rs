@@ -219,29 +219,18 @@ impl McpServer {
             format!("REV-{}-{:03}", project_code, next_revision)
         };
         let now = now_unix_ms();
-        // REQ-AXO-254: under PG the BEGIN/COMMIT pairing is broken by the
-        // FFI connection-pinning bug — each `pg_execute` pulls a fresh
-        // connection from deadpool, so BEGIN ends on conn A and the
-        // following INSERTs/COMMIT land on conns B/C/D, leaving conn A
-        // "idle in transaction" indefinitely with row locks held. The
-        // accepted workaround until a `with_pinned_connection` primitive
-        // ships (REQ-AXO-254 acceptance criteria #1) is to skip the
-        // wrapping transaction under PG. Each INSERT auto-commits; if a
-        // step fails the partial revision stays in place and the operator
-        // can clean up via `soll_rollback_revision`. DuckDB keeps the
-        // single-connection BEGIN/COMMIT pairing (no deadpool there).
-        let use_explicit_transaction = !self.graph_store.is_postgres_backend();
-        if use_explicit_transaction {
-            let _ = self.graph_store.execute("BEGIN TRANSACTION");
-        }
+        // REQ-AXO-254: deadpool serves a fresh connection per `pg_execute`,
+        // so a wrapping BEGIN/COMMIT lands on different sessions and leaves
+        // the first one "idle in transaction" with row locks held. Each
+        // INSERT auto-commits; on partial failure the operator cleans up
+        // via `soll_rollback_revision` (which inverts the captured
+        // RevisionChange rows). A `with_pinned_connection` primitive that
+        // restores real txn semantics is tracked by REQ-AXO-254 AC#1.
 
         if let Err(e) = self.graph_store.execute_param(
             "INSERT INTO soll.Revision (revision_id, author, source, summary, status, created_at, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             &json!([revision_id, author, "mcp", "SOLL plan commit", "committed", now, now]),
         ) {
-            if use_explicit_transaction {
-                let _ = self.graph_store.execute("ROLLBACK");
-            }
             return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (revision row): {}", e)}],"isError": true}));
         }
 
@@ -344,9 +333,6 @@ impl McpServer {
                     }
                 }
                 Err(e) => {
-                    if use_explicit_transaction {
-                        let _ = self.graph_store.execute("ROLLBACK");
-                    }
                     return Some(
                         json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}),
                     );
@@ -354,9 +340,6 @@ impl McpServer {
             }
         }
 
-        if use_explicit_transaction {
-            let _ = self.graph_store.execute("COMMIT");
-        }
         let _ = self.graph_store.execute(&format!(
             "DELETE FROM soll.RevisionPreview WHERE preview_id = '{}'",
             escape_sql(preview_id)
