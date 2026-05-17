@@ -751,56 +751,69 @@ impl McpServer {
                 }));
             }
         };
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS for the
-        // blast-radius probe (MIL-AXO-017).
-        let query = format!(
-            "WITH RECURSIVE traverse(caller, callee, depth) AS ( \
-                SELECT source_id, target_id, 1 AS depth FROM public.Edge \
-                  WHERE relation_type = 'CALLS' AND target_id = $target_id \
-                UNION ALL \
-                SELECT c.source_id, c.target_id, t.depth + 1 \
-                FROM public.Edge c JOIN traverse t ON c.target_id = t.caller \
-                WHERE c.relation_type = 'CALLS' AND t.depth < {} \
-            ) \
-            SELECT count(DISTINCT caller) FROM traverse",
-            depth
-        );
-        let params = json!({"target_id": target_id});
+        // REQ-AXO-91515 (MIL-AXO-019 vague 1d) — RAM-first via
+        // IstGraphView. The blast-radius probe is a reverse BFS of
+        // CALLS edges up to `depth`; the in-memory CSR walks that
+        // in O(N+M) without a PG roundtrip, then falls back to
+        // `public.callers_of` SQL when the per-project cache is cold.
+        let view = crate::ist_snapshot::process_view();
+        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        let mut surfaces_used: Vec<&'static str> = Vec::new();
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        match self.graph_store.query_json_param(&query, &params) {
-            Ok(res) => {
-                let count: i64 = res.trim().parse().unwrap_or(0);
-                let report = format!(
-                    "## 🔮 Dry-Run Mutation: {}\n\n{}",
-                    symbol,
-                    format_standard_contract(
-                        "ok",
-                        "mutation blast-radius estimated",
-                        &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
-                        &evidence_by_mode(
-                            &format!("Modifying '{}' will cascade-impact ~{} components in the architecture.", symbol, count),
-                            mode,
-                        ),
-                        &["review impact output for precise affected components"],
-                        "high",
-                    )
-                );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        let count: i64 = if ram_attempted {
+            surfaces_used.push("graph_ram");
+            let project_key = project.unwrap_or("");
+            let depth_u32 = depth.clamp(1, 10) as u32;
+            let callers = view
+                .reverse_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
+                .unwrap_or_default();
+            callers.len() as i64
+        } else {
+            // REQ-AXO-271 slice 2d : legacy CALLS table dropped ;
+            // public.Edge is canonical. `public.callers_of` SQL
+            // function (MIL-AXO-017 slice 4) wraps the WITH RECURSIVE
+            // walk over `public.Edge WHERE relation_type='CALLS'`.
+            surfaces_used.push("graph_pg");
+            surfaces_degraded.push("graph_ram_unavailable");
+            let depth_i = depth.clamp(1, 10) as i64;
+            let safe_target = target_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT count(*) FROM public.callers_of('{safe_target}', {depth_i}, NULL)"
+            );
+            self.graph_store
+                .query_count(&sql)
+                .unwrap_or(0)
+        };
+
+        let report = format!(
+            "## 🔮 Dry-Run Mutation: {}\n\n{}",
+            symbol,
+            format_standard_contract(
+                "ok",
+                "mutation blast-radius estimated",
+                &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
+                &evidence_by_mode(
+                    &format!("Modifying '{}' will cascade-impact ~{} components in the architecture.", symbol, count),
+                    mode,
+                ),
+                &["review impact output for precise affected components"],
+                "high",
+            )
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "symbol": symbol,
+                "project": project,
+                "impact_radius": count,
+                "depth": depth,
+                "surfaces_used": surfaces_used,
+                "surfaces_degraded": surfaces_degraded,
+                "total_available": count,
+                "next_call_hint": "impact symbol=<symbol> for precise affected components",
             }
-            Err(e) => Some(json!({
-                "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }],
-                "isError": true,
-                "data": {
-                    "status": "internal_error",
-                    "parameter_repair": {
-                        "invalid_field": "symbol",
-                        "follow_up_tools": ["inspect", "impact", "status"],
-                        "hint": "mutation simulation failed; verify symbol resolves via `inspect`, runtime is healthy via `status`, and depth is reasonable (≤6 typical)"
-                    },
-                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
-                }
-            })),
-        }
+        }))
     }
 
     /// MIL-AXO-015 B.3: AGE Cypher implementation of axon_impact's
