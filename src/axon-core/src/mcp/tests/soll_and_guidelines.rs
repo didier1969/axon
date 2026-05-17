@@ -150,51 +150,6 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
 }
 
 #[test]
-fn test_axon_soll_apply_plan_under_duckdb_uses_explicit_transaction() {
-    // REQ-AXO-254: verifies the test harness backend is DuckDB so the
-    // BEGIN/COMMIT pairing in `axon_soll_commit_revision` and
-    // `axon_soll_rollback_revision` runs through the DuckDB single-
-    // connection path. Under PG the FFI deadpool fresh-conn-per-call
-    // breaks the pairing, leaving conn A "idle in transaction" with
-    // row locks held — the patched code branches on
-    // `is_postgres_backend()` to skip the wrapping transaction.
-    let server = create_test_server();
-    assert!(
-        !server.graph_store.is_postgres_backend(),
-        "test harness MUST run under DuckDB so the BEGIN/COMMIT branch covers the txn-aware path"
-    );
-
-    // Smoke that apply_plan still commits when the explicit txn path
-    // is exercised (sanity check post-patch).
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "soll_apply_plan",
-            "arguments": {
-                "project_code": "AXO",
-                "dry_run": false,
-                "author": "test-req-axo-254",
-                "plan": {
-                    "requirements": [{
-                        "logical_key": "req-axo-254-txn-skip-coverage",
-                        "title": "REQ-AXO-254 txn skip coverage",
-                        "description": "Smoke that explicit BEGIN/COMMIT works on DuckDB harness",
-                        "priority": "P3",
-                        "status": "current"
-                    }]
-                }
-            }
-        })),
-        id: Some(json!(20254)),
-    };
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.unwrap();
-    let content = result["content"][0]["text"].as_str().unwrap();
-    assert!(content.contains("SOLL revision committed"), "{content}");
-}
-
-#[test]
 fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     let server = create_test_server();
 

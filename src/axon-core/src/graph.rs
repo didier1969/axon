@@ -164,15 +164,6 @@ pub(crate) struct ReaderSnapshotDiagnostics {
 }
 
 impl GraphStore {
-    /// MIL-AXO-015 P3 slice 3f: is this `GraphStore` backed by the
-    /// PostgreSQL plugin? Callers (`axon_init_project`,
-    /// `bootstrap_global_pg_schema`, etc.) branch on this rather than
-    /// re-reading the env var so the answer stays consistent within a
-    /// single store's lifetime.
-    pub fn is_postgres_backend(&self) -> bool {
-        self.pool.symbols.backend == PluginBackend::Postgres
-    }
-
     /// REQ-AXO-271 slice 2d : under PG canonical (post-MIL-AXO-017 / AGE
     /// retirement), the legacy SQL relation tables (CALLS, CALLS_NIF,
     /// CONTAINS, IMPACTS, SUBSTANTIATES) are dropped or empty. Callers
