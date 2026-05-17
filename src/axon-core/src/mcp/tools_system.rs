@@ -389,6 +389,14 @@ impl McpServer {
             crate::pipeline_v2::channels::A3_TO_B1_BUFFER_CAP_DEFAULT,
         );
 
+        // REQ-AXO-90009 Slice 2 — in-memory pending set heartbeat.
+        // `runtime_pending` reflects what THIS process's
+        // `EmbedderRuntimeState` is tracking ; `pending_chunks` above
+        // is the DB-derived ground truth. The two should converge
+        // within `reconcile_interval` ; a wide divergence flags a
+        // NOTIFY listener drop or a missed mark_embedded.
+        let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
+        let runtime_pending_empty = runtime_pending == 0;
         let report = format!(
             "## Axon Status (project={project})\n\n\
              ### Storage\n\
@@ -400,7 +408,8 @@ impl McpServer {
              | Edge           | {edges:>12} |\n\
              | IndexedFile    | {indexed_files:>12} |\n\
              | Project        | {projects:>12} |\n\n\
-             **Embedding coverage** : {embedded_chunks} / {total_chunks} = {coverage_pct:.2}%  (pending = {pending_chunks})\n\n\
+             **Embedding coverage** : {embedded_chunks} / {total_chunks} = {coverage_pct:.2}%  (pending = {pending_chunks})\n\
+             **Runtime pending set** : {runtime_pending} (in-memory ; syncé via NOTIFY + reconcile)\n\n\
              ### Pipeline A — CPU (graph + chunks + FTS)\n\
              - Workers:           a1={a1}  a2={a2}  a3={a3}\n\
              - A3 batch:          {a3_batch} chunks, timeout {a3_timeout} ms\n\n\
@@ -410,7 +419,8 @@ impl McpServer {
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
              - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par cold-start poll)\n\
              - NOTIFY channel:    chunk_pending_embed\n\
-             - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\n\
+             - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\
+             - Runtime idle (pending=0): {runtime_pending_empty}\n\n\
              Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer)."
         );
 
@@ -430,6 +440,8 @@ impl McpServer {
                 "pipeline_b": { "b1": b1, "b2": b2, "b3": b3, "b2_batch_size": b2_batch, "b2_batch_timeout_ms": b2_timeout, "b3_batch_size": b3_batch, "b3_batch_timeout_ms": b3_timeout, "a3_to_b1_buffer_cap": a3_to_b1_cap, "coldstart_batch_size": coldstart_batch },
                 "notify_channel": "chunk_pending_embed",
                 "coldstart_poll_interval_secs": 30,
+                "runtime_pending_count": runtime_pending,
+                "runtime_idle": runtime_pending_empty,
             }
         }))
     }
