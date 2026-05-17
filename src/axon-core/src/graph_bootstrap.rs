@@ -1002,6 +1002,22 @@ impl GraphStore {
     /// `crate::postgres::seed::load_seed_if_needed` so fresh
     /// deployments come up with canonical SOLL nodes preloaded.
     fn bootstrap_global_pg_schema(&self) -> Result<()> {
+        // REQ-AXO-91562 — serialize bootstrap across parallel callers
+        // (cargo test threads, concurrent embedded instances, etc.).
+        // The PG catalog operations triggered by `CREATE OR REPLACE
+        // FUNCTION`, `CREATE EXTENSION`, `CREATE TABLE IF NOT EXISTS`
+        // are individually idempotent but DEAD-LOCK or fail on the
+        // "already exists" path when two threads race on the same
+        // shared catalog rows. A process-wide Mutex held for the
+        // ~50 statements is much cheaper than the PG advisory-lock
+        // alternative (one round-trip vs N) and is the canonical
+        // pattern (mirrors `embedder_env_lock`).
+        static BOOTSTRAP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+            std::sync::OnceLock::new();
+        let _guard = BOOTSTRAP_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         for stmt in crate::postgres::ddl::generate_global_schema() {
             let trimmed = stmt.trim_start();
             let is_optional_extension = trimmed

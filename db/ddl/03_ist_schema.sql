@@ -204,8 +204,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_chunk_notify_pending ON public.Chunk;
-CREATE TRIGGER trg_chunk_notify_pending
+-- REQ-AXO-91562 — atomic CREATE OR REPLACE TRIGGER (PG 14+) replaces
+-- the legacy DROP + CREATE pair so concurrent bootstrap calls don't
+-- race (one thread's CREATE used to fail after another thread's
+-- CREATE landed between this thread's DROP and CREATE).
+CREATE OR REPLACE TRIGGER trg_chunk_notify_pending
     AFTER INSERT OR UPDATE OF content_hash ON public.Chunk
     FOR EACH ROW EXECUTE FUNCTION public.fn_notify_chunk_pending();
 

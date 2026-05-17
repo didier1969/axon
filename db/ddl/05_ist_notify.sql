@@ -42,8 +42,11 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_ist_notify_symbol ON public.symbol;
-CREATE TRIGGER trg_ist_notify_symbol
+-- REQ-AXO-91562 — `CREATE OR REPLACE TRIGGER` (PG 14+) is atomic ; the
+-- legacy `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER` pair raced under
+-- parallel test threads (thread B's CREATE failed after thread A's
+-- CREATE landed between B's DROP and B's CREATE).
+CREATE OR REPLACE TRIGGER trg_ist_notify_symbol
 AFTER INSERT OR UPDATE OR DELETE ON public.symbol
 FOR EACH ROW EXECUTE FUNCTION public.fn_ist_notify_symbol();
 
@@ -77,28 +80,14 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_ist_notify_edge ON public.edge;
-CREATE TRIGGER trg_ist_notify_edge
+-- REQ-AXO-91562 — atomic CREATE OR REPLACE TRIGGER, see symbol comment.
+CREATE OR REPLACE TRIGGER trg_ist_notify_edge
 AFTER INSERT OR UPDATE OR DELETE ON public.edge
 FOR EACH ROW EXECUTE FUNCTION public.fn_ist_notify_edge();
 
--- ── chunk_pending_embed trigger (REQ-AXO-90009 Slice 1, DEC-AXO-086) ──────
--- Fires on every Chunk INSERT or content_hash UPDATE. Payload is the
--- bare chunk id so the Rust listener can `EmbedderRuntimeState::mark_pending`
--- without parsing JSON. Zero row writes (`PERFORM` only) ; design goal is
--- "1 trigger, 0 row writes" per DEC-AXO-086 to keep the embedding pipeline
--- additive on the WAL.
-CREATE OR REPLACE FUNCTION public.fn_notify_chunk_pending()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  PERFORM pg_notify('chunk_pending_embed', NEW.id);
-  RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_chunk_notify_pending ON public.Chunk;
-CREATE TRIGGER trg_chunk_notify_pending
-AFTER INSERT OR UPDATE OF content_hash ON public.Chunk
-FOR EACH ROW EXECUTE FUNCTION public.fn_notify_chunk_pending();
+-- REQ-AXO-90009 Slice 1 + REQ-AXO-91562 — `trg_chunk_notify_pending`
+-- + `fn_notify_chunk_pending` are co-located with the `public.Chunk`
+-- DDL in `03_ist_schema.sql` (the canonical home) to keep
+-- trigger/function adjacent to the table they observe. Do NOT redefine
+-- here ; a duplicate `CREATE OR REPLACE TRIGGER` would lose the
+-- atomicity guarantee that REQ-AXO-91562 relies on.

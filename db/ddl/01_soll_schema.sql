@@ -334,7 +334,9 @@ BEGIN
 END
 $reject_id_project_mismatch$;
 
-DROP TRIGGER IF EXISTS soll_node_id_segment_check ON soll.Node;
-CREATE TRIGGER soll_node_id_segment_check
+-- REQ-AXO-91562 — atomic CREATE OR REPLACE TRIGGER (PG 14+) replaces
+-- the legacy DROP + CREATE pair so concurrent test bootstrap calls
+-- don't race on the "trigger already exists" symptom.
+CREATE OR REPLACE TRIGGER soll_node_id_segment_check
     BEFORE INSERT ON soll.Node
     FOR EACH ROW EXECUTE FUNCTION soll.reject_id_project_mismatch();
