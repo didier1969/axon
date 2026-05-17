@@ -413,6 +413,82 @@ impl IstGraph {
         out
     }
 
+    /// REQ-AXO-91510 — Bounded-radius BFS shortest path source→sink.
+    /// Returns `Some((node_ids, relation_types))` where `node_ids[0] == source`
+    /// and `node_ids.last() == sink`, walking the predecessor chain. The
+    /// relation_types vector is aligned with the edge taken to reach each
+    /// node, with `RelationType::Calls` placeholder at index 0 (the source
+    /// has no incoming edge inside the path). Returns `None` when either
+    /// endpoint is unknown or no path exists within `max_depth`. Honors
+    /// `rel_filter` (empty ⇒ all relations).
+    pub fn bfs_shortest_path(
+        &self,
+        source_id: &str,
+        sink_id: &str,
+        max_depth: u32,
+        rel_filter: &[RelationType],
+    ) -> Option<(Vec<String>, Vec<RelationType>)> {
+        let start = self.index_of(source_id)?;
+        let goal = self.index_of(sink_id)?;
+        if start == goal {
+            return Some((vec![self.id_of(start).to_string()], vec![RelationType::Calls]));
+        }
+        // parents[idx] = (predecessor_idx, edge_relation)
+        let mut parents: std::collections::HashMap<u32, (u32, RelationType)> =
+            std::collections::HashMap::new();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(start);
+        let mut frontier: Vec<u32> = vec![start];
+        for _ in 0..max_depth {
+            let mut next_frontier: Vec<u32> = Vec::new();
+            for node in &frontier {
+                for (target, rel) in self.forward_neighbors(*node) {
+                    if !rel_filter.is_empty() && !rel_filter.contains(&rel) {
+                        continue;
+                    }
+                    if visited.insert(target) {
+                        parents.insert(target, (*node, rel));
+                        if target == goal {
+                            // Reconstruct path by walking predecessors.
+                            // Each `parents[c] = (pred, edge_rel)` exposes
+                            // the edge `pred -> c`, so we accumulate one
+                            // relation_type per hop. chain_rel grows by
+                            // one less than chain_idx ; a placeholder is
+                            // prepended at index 0 to align lengths with
+                            // the source slot (which has no incoming edge
+                            // inside the path).
+                            let mut chain_idx: Vec<u32> = vec![goal];
+                            let mut chain_rel: Vec<RelationType> = Vec::new();
+                            let mut cursor = goal;
+                            while let Some((pred, edge_rel)) = parents.get(&cursor) {
+                                chain_idx.push(*pred);
+                                chain_rel.push(*edge_rel);
+                                if *pred == start {
+                                    break;
+                                }
+                                cursor = *pred;
+                            }
+                            chain_idx.reverse();
+                            chain_rel.reverse();
+                            chain_rel.insert(0, RelationType::Calls);
+                            let names: Vec<String> = chain_idx
+                                .iter()
+                                .map(|i| self.id_of(*i).to_string())
+                                .collect();
+                            return Some((names, chain_rel));
+                        }
+                        next_frontier.push(target);
+                    }
+                }
+            }
+            if next_frontier.is_empty() {
+                break;
+            }
+            frontier = next_frontier;
+        }
+        None
+    }
+
     /// REQ-AXO-91486 — count reciprocal CALLS cycles (A→B + B→A) used by
     /// `get_circular_dependency_count_fast`. Linear in edges, dedup via
     /// canonical pair ordering. Self-loops (A→A) are excluded.
@@ -698,6 +774,102 @@ mod tests {
         let set: std::collections::HashSet<&str> = callers.iter().map(String::as_str).collect();
         assert!(set.contains("a"));
         assert!(set.contains("b"));
+    }
+
+    #[test]
+    fn bfs_shortest_path_three_node_chain() {
+        // REQ-AXO-91510 — a→b→c, shortest path a→c is [a,b,c].
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let (names, rels) = g
+            .bfs_shortest_path("a", "c", 6, &[])
+            .expect("path must exist");
+        assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        // rels has one slot per node: source placeholder + 2 edge rels.
+        assert_eq!(rels.len(), 3);
+        assert!(matches!(rels[0], RelationType::Calls)); // placeholder
+        assert!(matches!(rels[1], RelationType::Calls)); // a→b
+        assert!(matches!(rels[2], RelationType::Calls)); // b→c
+    }
+
+    #[test]
+    fn bfs_shortest_path_unreachable_returns_none() {
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+        ];
+        // No edges → no path.
+        let g = IstGraph::build(nodes, Vec::new());
+        assert!(g.bfs_shortest_path("a", "b", 6, &[]).is_none());
+    }
+
+    #[test]
+    fn bfs_shortest_path_picks_shorter_when_two_routes_exist() {
+        // a→b→d (len 3) vs a→c→x→d (len 4). BFS must return the 3-node path.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+            node("x", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "d", RelationType::Calls),
+            edge("a", "c", RelationType::Calls),
+            edge("c", "x", RelationType::Calls),
+            edge("x", "d", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let (names, _) = g.bfs_shortest_path("a", "d", 6, &[]).expect("path");
+        assert_eq!(names, vec!["a".to_string(), "b".to_string(), "d".to_string()]);
+    }
+
+    #[test]
+    fn bfs_shortest_path_respects_max_depth() {
+        // a→b→c→d, max_depth=2 ⇒ cannot reach d.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+            edge("c", "d", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert!(g.bfs_shortest_path("a", "d", 2, &[]).is_none());
+        assert!(g.bfs_shortest_path("a", "d", 3, &[]).is_some());
+    }
+
+    #[test]
+    fn bfs_shortest_path_filters_relation_types() {
+        // a-(CONTAINS)→b-(CALLS)→c. With CALLS-only filter, no path.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Contains),
+            edge("b", "c", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert!(g
+            .bfs_shortest_path("a", "c", 6, &[RelationType::Calls])
+            .is_none());
+        // Without filter, path exists.
+        assert!(g.bfs_shortest_path("a", "c", 6, &[]).is_some());
     }
 
     #[test]

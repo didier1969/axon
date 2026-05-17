@@ -60,6 +60,44 @@ impl IstGraphView {
         Some(snap.bfs_reverse(source_id, max_radius, max_neighbors, rel_filter))
     }
 
+    /// REQ-AXO-91512 — Relation type of a direct edge source → target,
+    /// when one exists in the snapshot. Used by `impact` to break down
+    /// caller counts by edge kind (CALLS / CALLS_NIF) without touching
+    /// PG. Returns `None` when no such direct edge exists or the cache
+    /// is cold.
+    pub fn direct_edge_relation(
+        &self,
+        project: &str,
+        source_id: &str,
+        target_id: &str,
+    ) -> Option<RelationType> {
+        let snap = self.try_snapshot(project)?;
+        let source_idx = snap.index_of(source_id)?;
+        let target_idx = snap.index_of(target_id)?;
+        for (idx, rel) in snap.forward_neighbors(source_idx) {
+            if idx == target_idx {
+                return Some(rel);
+            }
+        }
+        None
+    }
+
+    /// REQ-AXO-91510 — RAM shortest path source→sink. `None` ⇒ caller
+    /// falls back to PG (`public.path` SQL). `Some((names, rels))` ⇒
+    /// canonical names along the shortest path, with relation_type per
+    /// node (placeholder `Calls` for the source slot — see snapshot.rs).
+    pub fn shortest_path(
+        &self,
+        project: &str,
+        source_id: &str,
+        sink_id: &str,
+        max_depth: u32,
+        rel_filter: &[RelationType],
+    ) -> Option<(Vec<String>, Vec<RelationType>)> {
+        let snap = self.try_snapshot(project)?;
+        snap.bfs_shortest_path(source_id, sink_id, max_depth, rel_filter)
+    }
+
     /// REQ-AXO-91486 — Reciprocal CALLS cycle count (A↔B pairs). Migrates
     /// `get_circular_dependency_count_fast` from a SQL self-join to an
     /// in-memory linear scan.

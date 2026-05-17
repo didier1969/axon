@@ -870,6 +870,171 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert_eq!(rendered, vec!["source_fn", "mid_fn", "sink_fn"]);
+
+    // REQ-AXO-91510 — tri-modal envelope conformance (GUI-AXO-1003).
+    // Cache is cold in this test → PG fallback surface = "graph_pg" +
+    // "graph_ram_unavailable" in degraded. RAM-warm case is covered by
+    // test_path_uses_ram_snapshot_when_warm below.
+    let surfaces: Vec<&str> = data["surfaces_used"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        surfaces.contains(&"graph_pg") || surfaces.contains(&"graph_ram"),
+        "surfaces_used must contain graph_pg or graph_ram, got {surfaces:?}"
+    );
+    assert_eq!(data["total_available"].as_u64(), Some(1));
+    assert_eq!(data["next_call_hint"].as_str(), Some("impact symbol=sink_fn"));
+    assert_eq!(data["pagination"]["offset"].as_u64(), Some(0));
+    assert_eq!(data["pagination"]["limit"].as_u64(), Some(3));
+    assert!(data["pagination"]["next_offset"].is_null());
+}
+
+#[test]
+fn test_path_not_found_branch_exposes_trimodal_envelope() {
+    // REQ-AXO-91510 — envelope must populate on the no-path branch too.
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_a', 'isolated_a', 'function', true, true, false, 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_b', 'isolated_b', 'function', true, true, false, 'BKS')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "path",
+                "arguments": {
+                    "source": "isolated_a",
+                    "sink": "isolated_b",
+                    "project": "BKS",
+                    "depth": 3
+                }
+            })),
+            id: Some(json!(2206)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    assert_eq!(data["path_found"].as_bool(), Some(false));
+    let surfaces: Vec<&str> = data["surfaces_used"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        surfaces.contains(&"graph_pg") || surfaces.contains(&"graph_ram"),
+        "surfaces_used must contain graph_pg or graph_ram, got {surfaces:?}"
+    );
+    assert_eq!(data["total_available"].as_u64(), Some(0));
+    assert_eq!(data["next_call_hint"].as_str(), Some("inspect symbol=isolated_a"));
+    assert_eq!(data["pagination"]["offset"].as_u64(), Some(0));
+    assert!(data["pagination"]["next_offset"].is_null());
+}
+
+#[test]
+fn test_path_uses_ram_snapshot_when_warm() {
+    // REQ-AXO-91510 — when IstGraphView is warm for the project, the
+    // BFS runs in RAM (PIL-AXO-9002, feedback_trimodal_use_ram_graph_
+    // not_pg) and `surfaces_used` reports `graph_ram` with empty
+    // `surfaces_degraded`.
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
+    use std::sync::Arc;
+
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::source', 'ram_source_fn', 'function', true, true, false, 'RAM')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::mid', 'ram_mid_fn', 'function', true, false, false, 'RAM')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::sink', 'ram_sink_fn', 'function', true, true, false, 'RAM')").unwrap();
+
+    // Warm the process-level IstGraphView cache directly.
+    let nodes = vec![
+        NodeRecord {
+            id: "ram::source".into(),
+            project_code: "RAM".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        },
+        NodeRecord {
+            id: "ram::mid".into(),
+            project_code: "RAM".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        },
+        NodeRecord {
+            id: "ram::sink".into(),
+            project_code: "RAM".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        },
+    ];
+    let edges = vec![
+        EdgeTriple {
+            source: "ram::source".into(),
+            target: "ram::mid".into(),
+            rel: RelationType::Calls,
+        },
+        EdgeTriple {
+            source: "ram::mid".into(),
+            target: "ram::sink".into(),
+            rel: RelationType::Calls,
+        },
+    ];
+    let graph = Arc::new(IstGraph::build(nodes, edges));
+    crate::ist_snapshot::publish_process_snapshot("RAM".into(), graph);
+    std::env::set_var("AXON_IST_RAM_ENABLED", "1");
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "path",
+                "arguments": {
+                    "source": "ram_source_fn",
+                    "sink": "ram_sink_fn",
+                    "project": "RAM",
+                    "depth": 4
+                }
+            })),
+            id: Some(json!(2207)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    std::env::remove_var("AXON_IST_RAM_ENABLED");
+    crate::ist_snapshot::evict_process_snapshot("RAM");
+
+    let data = response.get("data").unwrap();
+    assert_eq!(data["path_found"].as_bool(), Some(true));
+    let surfaces: Vec<&str> = data["surfaces_used"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        surfaces,
+        vec!["graph_ram"],
+        "warm RAM cache must serve via graph_ram surface, not PG fallback"
+    );
+    assert!(
+        data["surfaces_degraded"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "RAM-served path must report empty surfaces_degraded"
+    );
+    let path: Vec<&str> = data["path"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(path, vec!["ram_source_fn", "ram_mid_fn", "ram_sink_fn"]);
+    let provenance = data["provenance"].as_str().unwrap_or_default();
+    assert!(
+        provenance.contains("IstGraph::bfs_shortest_path"),
+        "provenance must reference RAM BFS, got: {provenance}"
+    );
 }
 
 #[test]

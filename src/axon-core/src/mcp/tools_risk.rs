@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use crate::ist_snapshot::{process_view, RelationType};
 
 #[allow(dead_code)]
 type ImpactCache = BTreeMap<String, (i64, Value)>;
@@ -108,15 +109,36 @@ impl McpServer {
             return self.axon_impact_without_calls(symbol, project, depth);
         };
 
-        // REQ-AXO-350 : caller traversal goes through `public.callers_of`
-        // (REQ-AXO-296 SQL fn over public.Edge). The historical WITH
-        // RECURSIVE on legacy CALLS / CALLS_NIF / CONTAINS tables and
-        // its skip_legacy_relations guard are retired. AGE Cypher
-        // alternative was removed in MIL-AXO-017 slice 6B.
-        let query_outcome: Result<String, anyhow::Error> = self
-            .impact_callers_via_public_edge(&target_id, project, depth)
-            .map(Ok)
-            .unwrap_or_else(|| Ok("[]".to_string()));
+        // REQ-AXO-91512 — RAM-first via IstGraphView (PIL-AXO-9002,
+        // feedback_trimodal_use_ram_graph_not_pg). When the cache is
+        // warm, the reverse-traversal runs entirely in RAM ; the PG
+        // path (`impact_callers_via_public_edge` → REQ-AXO-296 SQL fn)
+        // is the degraded fallback for cold cache or unscoped queries.
+        // Inferred `bridge_name` edges are a PG-text-matching artifact
+        // not represented in the IST snapshot ; when RAM serves the
+        // query, `inferred_bridge_edges` is reported as 0 and a
+        // `surfaces_degraded` hint flags the gap.
+        let view = process_view();
+        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        let mut surfaces_used: Vec<&'static str> = Vec::new();
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+
+        let query_outcome: Result<String, anyhow::Error> = if ram_attempted {
+            surfaces_used.push("graph_ram");
+            surfaces_degraded.push("inferred_bridge_edges_unavailable_in_ram_v1");
+            Ok(self.build_impact_rows_from_ram(
+                &view,
+                project.unwrap_or(""),
+                &target_id,
+                depth,
+            ))
+        } else {
+            surfaces_used.push("graph_pg");
+            surfaces_degraded.push("graph_ram_unavailable");
+            self.impact_callers_via_public_edge(&target_id, project, depth)
+                .map(Ok)
+                .unwrap_or_else(|| Ok("[]".to_string()))
+        };
 
         match query_outcome {
             Ok(res) => {
@@ -315,9 +337,20 @@ impl McpServer {
                     "tool": "simulate_mutation",
                     "when": "now"
                 });
+                // REQ-AXO-91512 — tri-modal envelope (GUI-AXO-1003).
+                let total_available = impact_radius as u64;
                 let response = json!({
                     "content": [{ "type": "text", "text": report }],
                     "data": {
+                        "surfaces_used": surfaces_used,
+                        "surfaces_degraded": surfaces_degraded,
+                        "total_available": total_available,
+                        "next_call_hint": format!("simulate_mutation symbol={symbol}"),
+                        "pagination": {
+                            "offset": 0,
+                            "limit": total_available,
+                            "next_offset": Value::Null,
+                        },
                         "symbol": symbol,
                         "project": project,
                         "depth": depth,
@@ -785,6 +818,89 @@ impl McpServer {
     /// covers AGE empty (dual-write opt-in not enabled), schema gaps,
     /// or AGE quirks we haven't covered yet.
     /// MIL-AXO-017 slice 5 (REQ-AXO-299) — query `public.callers_of`
+    /// REQ-AXO-91512 — RAM-first counterpart of
+    /// `impact_callers_via_public_edge`. Performs the reverse traversal
+    /// in the in-memory IST snapshot (PIL-AXO-9002), classifies each
+    /// caller's direct edge to the target via
+    /// `IstGraphView::direct_edge_relation`, and materialises the
+    /// 5-column row shape downstream parsers expect (`[caller_id,
+    /// edge_type, origin, name, kind]`). The origin column is set to
+    /// the project_code (Symbol-level granularity ; per-chunk file
+    /// path materialisation stays a PG-only feature for v1).
+    fn build_impact_rows_from_ram(
+        &self,
+        view: &crate::ist_snapshot::IstGraphView,
+        project: &str,
+        target_id: &str,
+        depth: u64,
+    ) -> String {
+        let depth_u32 = depth.clamp(1, 10) as u32;
+        let callers = view
+            .reverse_at_radius(project, target_id, depth_u32, 10_000, &[])
+            .unwrap_or_default();
+        if callers.is_empty() {
+            return "[]".to_string();
+        }
+        // Per-caller direct-edge classification (CALLS / CALLS_NIF).
+        // Indirect callers (distance > 1) have no direct edge to the
+        // target ; we mark them `calls` to preserve the legacy
+        // confidence-label arithmetic (`direct_edges + nif_edges > 0
+        // ⇒ high confidence`), since the RAM snapshot guarantees a
+        // real graph path (no text-matching heuristic).
+        let mut edge_type_by_caller: std::collections::HashMap<String, &'static str> =
+            std::collections::HashMap::new();
+        for caller in &callers {
+            let label = match view.direct_edge_relation(project, caller, target_id) {
+                Some(RelationType::CallsNif) => "calls_nif",
+                Some(RelationType::Calls) => "calls",
+                Some(_) | None => "calls",
+            };
+            edge_type_by_caller.insert(caller.clone(), label);
+        }
+        // Single batch SQL to materialise name + kind + project.
+        let escaped: Vec<String> = callers
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect();
+        let sql = format!(
+            "SELECT id, name, kind, COALESCE(project_code, 'unknown') \
+             FROM public.Symbol WHERE id IN ({})",
+            escaped.join(", ")
+        );
+        let raw = self
+            .graph_store
+            .query_json(&sql)
+            .unwrap_or_else(|_| "[]".to_string());
+        let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut meta_by_id: std::collections::HashMap<String, (String, String, String)> =
+            std::collections::HashMap::new();
+        for row in &lookup_rows {
+            let id = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let name = row.get(1).and_then(Value::as_str).unwrap_or("-").to_string();
+            let kind = row.get(2).and_then(Value::as_str).unwrap_or("-").to_string();
+            let proj = row.get(3).and_then(Value::as_str).unwrap_or("unknown").to_string();
+            if !id.is_empty() {
+                meta_by_id.insert(id, (name, kind, proj));
+            }
+        }
+        // Build the 5-column row format the downstream parser expects.
+        let rows: Vec<Value> = callers
+            .iter()
+            .map(|caller_id| {
+                let edge_type = edge_type_by_caller
+                    .get(caller_id)
+                    .copied()
+                    .unwrap_or("calls");
+                let (name, kind, origin) = meta_by_id
+                    .get(caller_id)
+                    .cloned()
+                    .unwrap_or_else(|| ("-".to_string(), "-".to_string(), project.to_string()));
+                json!([caller_id, edge_type, origin, name, kind])
+            })
+            .collect();
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// SQL function (REQ-AXO-296) for reverse-traversal callers. Joins
     /// with `public.Symbol` + `public.Chunk` to surface the 5-column
     /// shape `axon_impact` expects (caller_id, edge_type, origin, name,

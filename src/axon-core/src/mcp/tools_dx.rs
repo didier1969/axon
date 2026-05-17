@@ -1,4 +1,5 @@
 use crate::embedding_contract::DIMENSION;
+use crate::ist_snapshot::process_view;
 use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -20,6 +21,30 @@ pub(crate) struct ProjectScopeSummary {
     pub(crate) indexing_files: i64,
     pub(crate) backlog_files: i64,
     pub(crate) pending_reasons: Vec<(String, i64)>,
+}
+
+/// REQ-AXO-91511 — materialize IST symbol ids into the JSON row-of-row
+/// format `format_table_from_json` consumes (`[[name, kind, project], ...]`).
+/// One round-trip on public.Symbol for display ; the BFS itself already
+/// ran in RAM via IstGraphView. Returns `"[]"` when ids is empty so the
+/// downstream string parser is happy.
+fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String {
+    if ids.is_empty() {
+        return "[]".to_string();
+    }
+    let escaped: Vec<String> = ids
+        .iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect();
+    let sql = format!(
+        "SELECT name, kind, COALESCE(project_code, 'unknown') \
+         FROM public.Symbol WHERE id IN ({})",
+        escaped.join(", ")
+    );
+    server
+        .graph_store
+        .query_json(&sql)
+        .unwrap_or_else(|_| "[]".to_string())
 }
 
 fn json_i64(value: &Value) -> Option<i64> {
@@ -1847,73 +1872,104 @@ impl McpServer {
             }));
         };
 
-        let scoped_filter = if project.is_some() {
-            "WHERE src.project_code = $project AND dst.project_code = $project"
-        } else {
-            ""
-        };
+        // REQ-AXO-91511 — RAM-first traversal via IstGraphView (PIL-AXO-9002,
+        // feedback_trimodal_use_ram_graph_not_pg). The `WITH RECURSIVE` PG
+        // path remains as the degraded fallback when the cache is cold or
+        // the query is project-unscoped (cache is per-project).
+        let view = process_view();
+        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        let mut surfaces_used: Vec<&'static str> = Vec::new();
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        let up_query = format!(
-            "WITH RECURSIVE scoped_calls AS (
-                SELECT c.source_id, c.target_id
-                FROM CALLS c
-                JOIN Symbol src ON src.id = c.source_id
-                JOIN Symbol dst ON dst.id = c.target_id
-                {}
-            ),
-            callers(sym, depth) AS (
-                SELECT source_id, 1 FROM scoped_calls WHERE target_id = $target_id
-                UNION ALL
-                SELECT c.source_id, callers.depth + 1
-                FROM scoped_calls c
-                JOIN callers ON c.target_id = callers.sym
-                WHERE callers.depth < {}
+        let (up_res, down_res) = if ram_attempted {
+            surfaces_used.push("graph_ram");
+            let project_key = project.unwrap_or("");
+            let depth_u32 = depth as u32;
+            // max_neighbors is bounded above by the depth-budget cap ; we
+            // honour the historical SQL behaviour of unbounded breadth
+            // within depth by setting a high ceiling (10_000) — far higher
+            // than any realistic project produces but cheap on a CSR walk.
+            let callers_ids = view
+                .reverse_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
+                .unwrap_or_default();
+            let callees_ids = view
+                .forward_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
+                .unwrap_or_default();
+            (
+                materialize_symbol_rows(self, &callers_ids),
+                materialize_symbol_rows(self, &callees_ids),
             )
-            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
-            JOIN Symbol s ON s.id = callers.sym",
-            scoped_filter, depth,
-        );
-
-        let down_query = format!(
-            "WITH RECURSIVE scoped_calls AS (
-                SELECT c.source_id, c.target_id
-                FROM CALLS c
-                JOIN Symbol src ON src.id = c.source_id
-                JOIN Symbol dst ON dst.id = c.target_id
-                {}
-            ),
-            callees(sym, depth) AS (
-                SELECT target_id, 1 FROM scoped_calls WHERE source_id = $target_id
-                UNION ALL
-                SELECT c.target_id, callees.depth + 1
-                FROM scoped_calls c
-                JOIN callees ON c.source_id = callees.sym
-                WHERE callees.depth < {}
-            )
-            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
-            JOIN Symbol s ON s.id = callees.sym",
-            scoped_filter, depth,
-        );
-
-        let params = if let Some(project) = project {
-            json!({"target_id": target_id, "project": project})
         } else {
-            json!({"target_id": target_id})
-        };
-        // MIL-AXO-017 slice 6B: AGE retired ; up/down via SQL only.
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        let (up_res, down_res) = if skip_legacy_relations {
-            ("[]".to_string(), "[]".to_string())
-        } else {
-            let up = self
-                .graph_store
-                .query_json_param(&up_query, &params)
-                .unwrap_or_else(|_| "[]".to_string());
-            let down = self
-                .graph_store
-                .query_json_param(&down_query, &params)
-                .unwrap_or_else(|_| "[]".to_string());
-            (up, down)
+            surfaces_used.push("graph_pg");
+            surfaces_degraded.push("graph_ram_unavailable");
+            let scoped_filter = if project.is_some() {
+                "WHERE src.project_code = $project AND dst.project_code = $project"
+            } else {
+                ""
+            };
+
+            let up_query = format!(
+                "WITH RECURSIVE scoped_calls AS (
+                    SELECT c.source_id, c.target_id
+                    FROM CALLS c
+                    JOIN Symbol src ON src.id = c.source_id
+                    JOIN Symbol dst ON dst.id = c.target_id
+                    {}
+                ),
+                callers(sym, depth) AS (
+                    SELECT source_id, 1 FROM scoped_calls WHERE target_id = $target_id
+                    UNION ALL
+                    SELECT c.source_id, callers.depth + 1
+                    FROM scoped_calls c
+                    JOIN callers ON c.target_id = callers.sym
+                    WHERE callers.depth < {}
+                )
+                SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
+                JOIN Symbol s ON s.id = callers.sym",
+                scoped_filter, depth,
+            );
+
+            let down_query = format!(
+                "WITH RECURSIVE scoped_calls AS (
+                    SELECT c.source_id, c.target_id
+                    FROM CALLS c
+                    JOIN Symbol src ON src.id = c.source_id
+                    JOIN Symbol dst ON dst.id = c.target_id
+                    {}
+                ),
+                callees(sym, depth) AS (
+                    SELECT target_id, 1 FROM scoped_calls WHERE source_id = $target_id
+                    UNION ALL
+                    SELECT c.target_id, callees.depth + 1
+                    FROM scoped_calls c
+                    JOIN callees ON c.source_id = callees.sym
+                    WHERE callees.depth < {}
+                )
+                SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
+                JOIN Symbol s ON s.id = callees.sym",
+                scoped_filter, depth,
+            );
+
+            let params = if let Some(project) = project {
+                json!({"target_id": target_id, "project": project})
+            } else {
+                json!({"target_id": target_id})
+            };
+            // MIL-AXO-017 slice 6B: AGE retired ; up/down via SQL only.
+            let skip_legacy_relations = self.graph_store.skip_legacy_relations();
+            if skip_legacy_relations {
+                ("[]".to_string(), "[]".to_string())
+            } else {
+                let up = self
+                    .graph_store
+                    .query_json_param(&up_query, &params)
+                    .unwrap_or_else(|_| "[]".to_string());
+                let down = self
+                    .graph_store
+                    .query_json_param(&down_query, &params)
+                    .unwrap_or_else(|_| "[]".to_string());
+                (up, down)
+            }
         };
 
         let up_rows: Vec<Vec<Value>> = serde_json::from_str(&up_res).unwrap_or_default();
@@ -1963,9 +2019,20 @@ impl McpServer {
             )
         );
 
+        // REQ-AXO-91511 — tri-modal envelope (GUI-AXO-1003).
+        let total_available = (up_rows.len() + down_rows.len()) as u64;
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
+                "surfaces_used": surfaces_used,
+                "surfaces_degraded": surfaces_degraded,
+                "total_available": total_available,
+                "next_call_hint": format!("impact symbol={symbol}"),
+                "pagination": {
+                    "offset": 0,
+                    "limit": total_available,
+                    "next_offset": Value::Null,
+                },
                 "symbol": symbol,
                 "project": project.unwrap_or("*"),
                 "depth": depth,
