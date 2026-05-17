@@ -55,8 +55,39 @@ axon_resolve_ort_runtime() {
                 else
                     axon_log_warn "Ignoring invalid external CUDA artifact manifest: $ORT_ARTIFACT_MANIFEST"
                 fi
-                echo "   Falling back to nixpkgs materialization."
                 ORT_DYLIB_PATH=""
+
+                # REQ-AXO-91564 — when the cuda-only manifest points to a
+                # nix-store path the GC already swept, attempt a sibling
+                # fallback to the tensorrt manifest (same `core_lib` +
+                # `cuda_provider_lib` layout, just contains the TRT
+                # provider too). Saves a 30-60 min nixpkgs#onnxruntime
+                # rebuild whenever the cuda-only artifact's store path
+                # gets garbage-collected but the tensorrt one survives.
+                # Only attempted when caller did NOT request tensorrt
+                # explicitly (because the tensorrt branch already reads
+                # this same manifest).
+                local sibling_manifest
+                if [[ "$gpu_service_tensorrt_requested" != "1" ]]; then
+                    sibling_manifest="$project_root/.axon/ort-artifacts/onnxruntime-tensorrt-${cuda_package_label}/current.json"
+                    if [[ -f "$sibling_manifest" ]]; then
+                        local sibling_core
+                        local sibling_cuda
+                        sibling_core="$(axon_manifest_value "$sibling_manifest" "core_lib")"
+                        sibling_cuda="$(axon_manifest_value "$sibling_manifest" "cuda_provider_lib")"
+                        if [[ -n "${sibling_core:-}" && -f "$sibling_core" && -n "${sibling_cuda:-}" && -f "$sibling_cuda" ]]; then
+                            echo "♻️ CUDA manifest stale ; reusing sibling TensorRT artifact for cuda provider (REQ-AXO-91564)."
+                            echo "   Sibling manifest: $sibling_manifest"
+                            ORT_DYLIB_PATH="$sibling_core"
+                            CUDA_PROVIDER_PATH="$sibling_cuda"
+                            ORT_OUT_PATH="$(dirname "$(dirname "$ORT_DYLIB_PATH")")"
+                        fi
+                    fi
+                fi
+
+                if [[ -z "${ORT_DYLIB_PATH:-}" ]]; then
+                    echo "   Falling back to nixpkgs materialization."
+                fi
             fi
         fi
 
