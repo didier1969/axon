@@ -564,25 +564,24 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     })?;
 
     let workspace_size = cuda_memory_limit_bytes();
-    // REQ-AXO-262 (operator 2026-05-10) — explicit dynamic-shape
-    // profile so a single TRT engine covers the full bench / production
-    // range. Without these, every batch-size or seq-len change triggers
-    // an engine rebuild (observed: bench stalls 20+ min on first
-    // batch-size transition during sweep).
+    // REQ-AXO-262 (operator 2026-05-10) + REQ-AXO-91570 (operator
+    // 2026-05-17) — explicit dynamic-shape profile so a single TRT
+    // engine covers the full bench / production range. Without these,
+    // every batch-size or seq-len change triggers an engine rebuild.
     //
     // Format per ORT TRT EP docs: `"name:DxD,name:DxD,..."`.
     // BGE-Large inputs: input_ids[batch, seq], attention_mask[batch, seq],
     // token_type_ids[batch, seq] (when present in the model graph).
     //
-    // Range chosen 2026-05-11 (REQ-AXO-262 follow-up):
+    // Range chosen 2026-05-17 (REQ-AXO-91570 — operator directive
+    // 2026-05-17 to cap VRAM at production batch headroom) :
     //   min  = (1, 1)        // smallest legal shape
     //   opt  = (64, 256)     // matches AXON_CHUNK_BATCH_SIZE=64 production point
-    //   max  = (256, 512)    // batch headroom + BGE-Large max_length
+    //   max  = (64, 512)     // capped at production batch (was 256 → -1-2GB VRAM)
     //
-    // The opt point now matches the production batch size (64) so TRT
-    // tunes layers for the shape actually executed at runtime. seq=256 is
-    // the median of the {128,256,384,512} bucketed shapes that the
-    // embedder now feeds (see `parse_seq_buckets_from_env`).
+    // Production batch is 24 (operator 2026-05-17), so max=64 gives 2.6×
+    // headroom while shaving ~1-2GB VRAM versus the previous 256-wide max.
+    // seq=512 stays at BGE-Large's max_length.
     //
     // Override via AXON_TRT_PROFILE_{MIN,OPT,MAX}_SHAPES if a different
     // range is required (e.g. for a smaller VRAM budget).
@@ -593,7 +592,7 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
         "input_ids:64x256,attention_mask:64x256,token_type_ids:64x256".to_string()
     });
     let trt_profile_max = std::env::var("AXON_TRT_PROFILE_MAX_SHAPES").unwrap_or_else(|_| {
-        "input_ids:256x512,attention_mask:256x512,token_type_ids:256x512".to_string()
+        "input_ids:64x512,attention_mask:64x512,token_type_ids:64x512".to_string()
     });
     let provider = ep::TensorRT::default()
         .with_device_id(0)
