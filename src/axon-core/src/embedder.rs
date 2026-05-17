@@ -3210,6 +3210,15 @@ mod tests {
         ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    // REQ-AXO-291 — cross-module test serialization for tests that
+    // mutate `service_guard` global atomics (record_vector_*,
+    // reset_for_tests). The local `ENV_TEST_GUARD` only serializes
+    // env-var-affecting tests within this mod ; the crate-level
+    // `service_guard::lock_for_tests` synchronises across modules.
+    fn lock_service_guard() -> parking_lot::MutexGuard<'static, ()> {
+        crate::service_guard::lock_for_tests()
+    }
+
     fn lane_test_prepared_batch(texts: &[&str]) -> PreparedVectorEmbedBatch {
         let mut prepared = PreparedVectorEmbedBatch {
             batch_id: "lane-test".to_string(),
@@ -3260,6 +3269,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_runs_when_system_is_healthy() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(8);
@@ -3275,6 +3285,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(8);
@@ -3357,6 +3368,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_pauses_when_live_service_is_critical() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         let policy = semantic_policy(100, ServicePressure::Critical);
@@ -3367,6 +3379,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_throttles_without_pausing_when_service_is_degraded() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
@@ -3381,6 +3394,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_stays_throttled_while_service_recovers() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
@@ -3558,6 +3572,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_pauses_while_interactive_priority_is_active() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::mcp_request_started();
@@ -3571,6 +3586,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_respects_runtime_tuning_scale_pct() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         unsafe {
@@ -3629,6 +3645,7 @@ mod tests {
     #[test]
     fn test_semantic_policy_prefers_drain_mode_when_mcp_is_idle() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(4);
@@ -3646,6 +3663,7 @@ mod tests {
     #[test]
     fn test_vector_feed_backpressure_control_keeps_balanced_drain_even_with_graph_backlog() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -3666,6 +3684,7 @@ mod tests {
     fn test_vector_feed_backpressure_control_prefers_refill_when_underfed_even_with_graph_backlog()
     {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(0);
@@ -3685,6 +3704,7 @@ mod tests {
     #[test]
     fn test_vector_feed_backpressure_control_uses_full_ready_reserve_target_for_underfeed() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -3704,6 +3724,7 @@ mod tests {
     #[test]
     fn test_vector_feed_backpressure_control_does_not_let_graph_backlog_override_ready_supply() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         reset_utility_first_scheduler_for_tests();
         crate::service_guard::record_vector_ready_queue_depth(20);
@@ -3748,6 +3769,7 @@ mod tests {
     #[test]
     fn test_symbol_embedding_allowed_only_as_residual_background_work() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         unsafe {
             std::env::remove_var("AXON_VECTOR_ENABLE_SYMBOL_EMBEDDING");
@@ -3772,6 +3794,7 @@ mod tests {
     #[test]
     fn test_vector_worker_admission_throttles_gpu_background_under_pressure() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         assert!(vector_worker_admitted(
             0,
@@ -3819,6 +3842,7 @@ mod tests {
     #[test]
     fn test_vector_worker_admission_pauses_gpu_background_when_interactive_priority_is_active() {
         let _guard = lock_env_guard();
+        let _guard_sg = lock_service_guard();
         crate::service_guard::reset_for_tests();
         crate::service_guard::mcp_request_started();
         assert!(vector_worker_admitted(

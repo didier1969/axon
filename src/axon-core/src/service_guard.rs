@@ -1534,6 +1534,17 @@ pub fn vector_pipeline_stage_telemetry() -> VectorPipelineStageTelemetry {
     }
 }
 
+/// REQ-AXO-291 — crate-level test serialization mutex. Any test
+/// (anywhere in the workspace) that calls `record_*` / `reset_for_tests`
+/// or reads the runtime-pressure global state must hold this guard
+/// for its critical section, otherwise parallel `cargo test`
+/// invocations across modules race against each other on the shared
+/// atomics. Returns a guard ; drop releases.
+pub fn lock_for_tests() -> parking_lot::MutexGuard<'static, ()> {
+    static TEST_SERIAL_GUARD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    TEST_SERIAL_GUARD.lock()
+}
+
 pub fn reset_for_tests() {
     LAST_SQL_LATENCY_MS.store(0, Ordering::Relaxed);
     LAST_MCP_LATENCY_MS.store(0, Ordering::Relaxed);
