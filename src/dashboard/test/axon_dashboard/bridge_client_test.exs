@@ -89,11 +89,6 @@ defmodule AxonDashboard.BridgeClientTest do
            "rss_anon_bytes" => 5_120,
            "rss_file_bytes" => 1_920,
            "rss_shmem_bytes" => 300,
-           "db_file_bytes" => 4_096,
-           "db_wal_bytes" => 512,
-           "db_total_bytes" => 4_608,
-           "duckdb_memory_bytes" => 2_048,
-           "duckdb_temporary_bytes" => 256,
            "vector_chunks_embedded_total" => 96,
            "chunk_embeddings_per_second" => 32.0,
            "chunk_embeddings_rate_window_ms" => 5_000,
@@ -138,8 +133,6 @@ defmodule AxonDashboard.BridgeClientTest do
     assert stats[:host_state] == "healthy"
     assert stats[:host_guidance_slots] == 6
     assert stats[:rss_anon_bytes] == 5_120
-    assert stats[:db_total_bytes] == 4_608
-    assert stats[:duckdb_memory_bytes] == 2_048
     assert stats[:vector_chunks_embedded_total] == 96
     assert stats[:chunk_embeddings_per_second] == 32.0
     assert stats[:prepare_inflight_chunks_current] == 7

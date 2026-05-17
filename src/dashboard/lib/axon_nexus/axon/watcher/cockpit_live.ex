@@ -785,14 +785,6 @@ defmodule Axon.Watcher.CockpitLive do
               <span class="band-kicker">{memory_dominant(@runtime)}</span>
             </div>
 
-            <%!--
-              REQ-AXO-284: DuckDB-era stats (db_file_bytes, db_wal_bytes,
-              db_total_bytes, duckdb_memory_bytes, duckdb_temporary_bytes)
-              are not produced by the PG runtime. They are dropped here to
-              avoid surfacing 0 MB phantom rows. PG-equivalent metrics
-              (pg_database_size, buffer_cache hit ratio, etc.) are tracked
-              in the `Postgres health` band below when available.
-            --%>
             <div class="detail-grid">
               <.signal_stat label="RSS" value={"#{format_mib(@runtime.rss_bytes)} MB"} />
               <.signal_stat label="RssAnon" value={"#{format_mib(@runtime.rss_anon_bytes)} MB"} />
@@ -1256,11 +1248,6 @@ defmodule Axon.Watcher.CockpitLive do
       rss_anon_bytes: Map.get(stats, :rss_anon_bytes, 0) || 0,
       rss_file_bytes: Map.get(stats, :rss_file_bytes, 0) || 0,
       rss_shmem_bytes: Map.get(stats, :rss_shmem_bytes, 0) || 0,
-      db_file_bytes: Map.get(stats, :db_file_bytes, 0) || 0,
-      db_wal_bytes: Map.get(stats, :db_wal_bytes, 0) || 0,
-      db_total_bytes: Map.get(stats, :db_total_bytes, 0) || 0,
-      duckdb_memory_bytes: Map.get(stats, :duckdb_memory_bytes, 0) || 0,
-      duckdb_temporary_bytes: Map.get(stats, :duckdb_temporary_bytes, 0) || 0,
       graph_projection_queue_queued: Map.get(stats, :graph_projection_queue_queued, 0) || 0,
       graph_projection_queue_inflight: Map.get(stats, :graph_projection_queue_inflight, 0) || 0,
       graph_projection_queue_depth: Map.get(stats, :graph_projection_queue_depth, 0) || 0,
