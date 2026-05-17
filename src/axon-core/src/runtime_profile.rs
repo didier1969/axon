@@ -78,8 +78,7 @@ impl RuntimeProfile {
         let ingestion_memory_budget_gb = detect_ingestion_memory_budget_gb(ram_budget_gb);
         let gpu_present = detect_gpu_presence();
         let sizing = recommend_sizing(cpu_cores, ram_total_gb, gpu_present);
-        let max_workers = configured_max_worker_cap().unwrap_or(sizing.recommended_workers);
-        let recommended_workers = sizing.recommended_workers.min(max_workers).max(1);
+        let recommended_workers = sizing.recommended_workers.max(1);
 
         Self {
             cpu_cores,
@@ -111,13 +110,6 @@ fn detect_total_ram_gb() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     Some((kb / 1024 / 1024).max(1))
-}
-
-fn configured_max_worker_cap() -> Option<usize> {
-    std::env::var("MAX_AXON_WORKERS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|workers| *workers >= 1)
 }
 
 fn detect_ram_budget_gb(total_gb: u64) -> u64 {
@@ -387,7 +379,7 @@ pub fn current_vector_downstream_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_watcher_first_priority_lanes, configured_max_worker_cap,
+        canonical_watcher_first_priority_lanes,
         current_admission_controller_state, current_graph_production_state,
         current_runtime_priority_contract_state, current_vector_downstream_state,
         detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
@@ -446,13 +438,6 @@ mod tests {
             "6.6.87.2-microsoft-standard-WSL2",
             false
         ));
-    }
-
-    #[test]
-    fn test_max_worker_cap_reads_positive_integer() {
-        std::env::set_var("MAX_AXON_WORKERS", "1");
-        assert_eq!(configured_max_worker_cap(), Some(1));
-        std::env::remove_var("MAX_AXON_WORKERS");
     }
 
     #[test]

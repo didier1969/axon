@@ -370,8 +370,6 @@ impl McpServer {
             std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
         let watcher_policy =
             std::env::var("AXON_WATCHER_POLICY").unwrap_or_else(|_| "unknown".to_string());
-        let max_axon_workers =
-            std::env::var("MAX_AXON_WORKERS").unwrap_or_else(|_| "unknown".to_string());
         let queue_memory_budget_bytes = std::env::var("AXON_QUEUE_MEMORY_BUDGET_BYTES")
             .unwrap_or_else(|_| "unknown".to_string());
         let watcher_subtree_hint_budget = std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
@@ -1022,7 +1020,6 @@ impl McpServer {
                     "gpu_access_policy": gpu_access_policy,
                     "watcher_policy": watcher_policy,
                     "embedding_provider": embedding_provider,
-                    "max_axon_workers": max_axon_workers,
                     "queue_memory_budget_bytes": queue_memory_budget_bytes,
                     "watcher_subtree_hint_budget": watcher_subtree_hint_budget,
                     "vector_workers": vector_workers,

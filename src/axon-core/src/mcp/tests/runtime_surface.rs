@@ -3809,7 +3809,6 @@ fn test_status_exposes_resource_policy_identity() {
         std::env::set_var("AXON_GPU_ACCESS_POLICY", "preferred");
         std::env::set_var("AXON_WATCHER_POLICY", "full");
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cpu");
-        std::env::set_var("MAX_AXON_WORKERS", "8");
         std::env::set_var("AXON_QUEUE_MEMORY_BUDGET_BYTES", "3221225472");
         std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "128");
         std::env::set_var("AXON_VECTOR_WORKERS", "2");
@@ -3841,10 +3840,6 @@ fn test_status_exposes_resource_policy_identity() {
         Some("cpu")
     );
     assert_eq!(
-        data["resource_policy"]["max_axon_workers"].as_str(),
-        Some("8")
-    );
-    assert_eq!(
         data["resource_policy"]["queue_memory_budget_bytes"].as_str(),
         Some("3221225472")
     );
@@ -3864,7 +3859,6 @@ fn test_status_exposes_resource_policy_identity() {
         std::env::remove_var("AXON_GPU_ACCESS_POLICY");
         std::env::remove_var("AXON_WATCHER_POLICY");
         std::env::remove_var("AXON_EMBEDDING_PROVIDER");
-        std::env::remove_var("MAX_AXON_WORKERS");
         std::env::remove_var("AXON_QUEUE_MEMORY_BUDGET_BYTES");
         std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
         std::env::remove_var("AXON_VECTOR_WORKERS");
