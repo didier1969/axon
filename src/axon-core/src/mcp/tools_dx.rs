@@ -1258,6 +1258,32 @@ impl McpServer {
                 "project constraint unreliable while CONTAINS is empty"
             };
             let table_json = serde_json::to_string(&rows).unwrap_or(fallback_res);
+            // REQ-AXO-91508 — structured envelope on the degraded
+            // fallback path too. The bench harness walks JSON for
+            // `name` keys ; without this, single-lookup queries
+            // returning via the CONTAINS-empty fallback yielded 0 %
+            // precision even when the matching symbol was present.
+            let structured_results: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let name = row.first().and_then(Value::as_str).unwrap_or("");
+                    let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
+                    let proj = row.get(2).and_then(Value::as_str).unwrap_or("");
+                    json!({
+                        "name": name,
+                        "kind": kind,
+                        "project": proj,
+                        "uri": Value::Null,
+                        "surface": "symbol_index_degraded",
+                    })
+                })
+                .collect();
+            let total = structured_results.len();
+            let next_hint = structured_results
+                .first()
+                .and_then(|r| r.get("name").and_then(Value::as_str))
+                .map(|n| format!("inspect symbol={n}"))
+                .unwrap_or_else(|| "inspect <name>".to_string());
             Some(json!({
                 "content": [{
                     "type": "text",
@@ -1271,7 +1297,20 @@ impl McpServer {
                         degraded_note.unwrap_or_default(),
                         format_table_from_json(&table_json, &["Name", "Type", "Project"])
                     )
-                }]
+                }],
+                "data": {
+                    "results": structured_results,
+                    "surfaces_used": ["symbol_index_degraded"],
+                    "surfaces_degraded": [{"surface": "graph_r1", "reason": "containment_graph_empty"}],
+                    "total_available": total,
+                    "next_call_hint": next_hint,
+                    "query": query_text,
+                    "scope": if project == "*" {
+                        "workspace:*".to_string()
+                    } else {
+                        format!("project:{project}")
+                    },
+                }
             }))
         }
     }
