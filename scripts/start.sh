@@ -553,7 +553,12 @@ fi
 STARTUP_TIMEOUT_S="${AXON_STARTUP_TIMEOUT_S:-}"
 if [[ -z "$STARTUP_TIMEOUT_S" ]]; then
     if [[ "$RUNTIME_MODE" == "indexer_full" ]]; then
-        STARTUP_TIMEOUT_S=240
+        # REQ-AXO-91570 : bumped 240 → 900 s. Defense-in-depth pour
+        # absorber un cold-compile TensorRT BGE-Large (5-15 min typique
+        # quand le hash d'engine cache change : profile bump, ORT/TRT
+        # upgrade, model file change). Cache HIT = 30-60 s usual.
+        # Override via `AXON_STARTUP_TIMEOUT_S`.
+        STARTUP_TIMEOUT_S=900
     else
         STARTUP_TIMEOUT_S=120
     fi
