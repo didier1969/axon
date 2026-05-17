@@ -818,16 +818,21 @@ fn test_change_safety_rejects_unregistered_project_code() {
 #[test]
 fn test_path_returns_bounded_call_path_between_symbols() {
     let server = create_test_server();
+    // REQ-AXO-91562 workaround — tests share live PG, wipe fixture ids
+    // before INSERT to avoid PK collisions from prior runs.
+    super::delete_fixture_symbols(&server, &["bks::source", "bks::mid", "bks::sink"]);
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::source', 'source_fn', 'function', true, true, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::mid', 'mid_fn', 'function', true, false, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::sink', 'sink_fn', 'function', true, true, false, 'BKS')").unwrap();
+    // MIL-AXO-017 / REQ-AXO-216 — legacy CALLS table dropped, edges
+    // now live in unified public.Edge with relation_type='CALLS'.
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('bks::source', 'bks::mid', 'BKS')")
+        .execute("INSERT INTO public.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::source', 'bks::mid', 'CALLS', 'BKS', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('bks::mid', 'bks::sink', 'BKS')")
+        .execute("INSERT INTO public.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::mid', 'bks::sink', 'CALLS', 'BKS', 0)")
         .unwrap();
 
     let response = server
@@ -894,6 +899,7 @@ fn test_path_returns_bounded_call_path_between_symbols() {
 fn test_path_not_found_branch_exposes_trimodal_envelope() {
     // REQ-AXO-91510 — envelope must populate on the no-path branch too.
     let server = create_test_server();
+    super::delete_fixture_symbols(&server, &["bks::isolated_a", "bks::isolated_b"]);
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_a', 'isolated_a', 'function', true, true, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_b', 'isolated_b', 'function', true, true, false, 'BKS')").unwrap();
 
@@ -944,6 +950,7 @@ fn test_path_uses_ram_snapshot_when_warm() {
     use std::sync::Arc;
 
     let server = create_test_server();
+    super::delete_fixture_symbols(&server, &["ram::source", "ram::mid", "ram::sink"]);
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::source', 'ram_source_fn', 'function', true, true, false, 'RAM')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::mid', 'ram_mid_fn', 'function', true, false, false, 'RAM')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('ram::sink', 'ram_sink_fn', 'function', true, true, false, 'RAM')").unwrap();

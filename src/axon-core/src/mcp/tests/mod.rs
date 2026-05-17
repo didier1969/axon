@@ -110,6 +110,41 @@ fn create_test_server() -> McpServer {
     McpServer::new(store)
 }
 
+/// REQ-AXO-91562 short-term workaround — tests run against the shared
+/// live PG (`AXON_LIVE_DATABASE_URL` default) because `GraphStore::new`
+/// ignores `db_root` under the PG backend. The proper fix is per-test
+/// schema isolation (REQ-AXO-91562 slice 2+) ; until then, callers that
+/// INSERT hardcoded fixture ids MUST first wipe them, or PK collisions
+/// from prior runs poison the test. Pass the symbol ids you are about
+/// to insert — order matches the `IN (...)` clause exactly so chunks /
+/// edges referencing those ids are removed too.
+#[allow(dead_code)]
+pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
+    if ids.is_empty() {
+        return;
+    }
+    let quoted: Vec<String> = ids
+        .iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect();
+    let list = quoted.join(", ");
+    // Order matters : ChunkEmbedding → Chunk → Edge → Symbol
+    // (foreign-key cascades aren't declared on every table).
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM public.ChunkEmbedding WHERE chunk_id IN \
+         (SELECT id FROM public.Chunk WHERE source_id IN ({list}))"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM public.Chunk WHERE source_id IN ({list})"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM public.Edge WHERE source_id IN ({list}) OR target_id IN ({list})"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM public.Symbol WHERE id IN ({list})"
+    ));
+}
+
 fn create_test_server_with_distinct_reader(db_root: &Path) -> McpServer {
     let store = Arc::new(GraphStore::new(db_root.to_str().unwrap()).unwrap());
     let server = McpServer::new(store);
