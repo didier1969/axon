@@ -568,8 +568,32 @@ impl McpServer {
                 payload["source_id"] = source_id.map(Value::from).unwrap_or(Value::Null);
                 payload["target_id"] = target_id.map(Value::from).unwrap_or(Value::Null);
                 if !payload["pair_allowed"].as_bool().unwrap_or(false) && !reverse_hint.is_null() {
-                    payload["did_you_mean"] = reverse_hint;
+                    payload["did_you_mean"] = reverse_hint.clone();
                 }
+                // REQ-AXO-91495 — surface 3 terse AC fields at the top
+                // level so the LLM doesn't have to drill into nested
+                // policy structures :
+                //   * canonical_direction: "SRC -> TGT"
+                //   * allowed_relation_types: flat list (subset of the
+                //     `allowed` field already inside policy_payload)
+                //   * reverse_canonical: when forbidden, the reverse
+                //     direction that IS canonical (alias for did_you_mean)
+                payload["canonical_direction"] = Value::from(format!(
+                    "{} -> {}",
+                    source_kind, target_kind
+                ));
+                payload["allowed_relation_types"] = payload
+                    .get("allowed_relations")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(vec![]));
+                payload["reverse_canonical"] = if payload["pair_allowed"]
+                    .as_bool()
+                    .unwrap_or(false)
+                {
+                    Value::Null
+                } else {
+                    reverse_hint
+                };
                 payload
             }
             (Some(source_kind), None) => relation_schema_summary_for_kind(source_kind),
@@ -588,8 +612,31 @@ impl McpServer {
             (None, None) => unreachable!(),
         };
 
+        // REQ-AXO-91495 — surface canonical_direction + allowed
+        // relation_types inline so the LLM-visible text matches the
+        // promise made by the tool name (no more "resolved" claim
+        // without the actual guidance).
+        let visible_text = match (
+            data.get("canonical_direction").and_then(Value::as_str),
+            data.get("allowed_relation_types")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                }),
+        ) {
+            (Some(direction), Some(allowed)) if !allowed.is_empty() => format!(
+                "Canonical SOLL relation: {direction} via [{}]",
+                allowed.join(", ")
+            ),
+            (Some(direction), _) => format!(
+                "Direction {direction} has no canonical relation (check `reverse_canonical` for the legal inverse, or `recommended_incoming_links_to_target_kind`)"
+            ),
+            _ => "Canonical SOLL relation policy resolved — inspect `data` for kind-scoped guidance.".to_string(),
+        };
         Some(json!({
-            "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved with explicit directional guidance." }],
+            "content": [{ "type": "text", "text": visible_text }],
             "data": data
         }))
     }

@@ -44,6 +44,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `trust:degraded` + blocker `indexed_projections_not_fresh` | run `data.truth_cockpit.recovery_hint.command` (REQ-AXO-91497) ; never re-call `status` itself |
 | soll_manager `category:writer_failed` (was `duckdb_writer` pre-REQ-AXO-341) | inspect `data.diagnostic_excerpt` for PG error ; recovery via `sql SELECT id FROM soll.Node` (post-MIL-AXO-017 canonical) |
 | `status` `trust:degraded` | `data.truth_cockpit.staleness.{last_publish_ts,modified_files_since,oldest_modified_age_seconds,sample_paths[5]}` exposes magnitude (REQ-AXO-231) — route on counts/age, not just the boolean |
+| `soll_relation_schema` returned | `data.canonical_direction` (`"SRC -> TGT"`) + `data.allowed_relation_types` (flat array) + `data.reverse_canonical` (legal inverse when pair forbidden) — REQ-AXO-91495 ; visible text now lists the actual relations, not just "resolved" |
 
 ## SOLL writes
 
