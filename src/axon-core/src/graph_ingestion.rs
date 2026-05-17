@@ -3990,15 +3990,12 @@ impl GraphStore {
         };
         use std::collections::HashSet;
 
-        let backend_is_pg = self.is_postgres_backend();
-        // MIL-AXO-017 slice 6 phase A — AGE writes retired. Legacy SQL
-        // relation tables were dropped by REQ-AXO-216 (Stop A) and AGE
-        // Cypher writes are deleted now that `public.Edge` (REQ-AXO-295
-        // schema, REQ-AXO-297 dual-write) is the canonical structural
-        // edge storage. Non-PG dev fixtures still use the legacy
-        // renderer for symmetry.
-        let skip_legacy_relations = backend_is_pg;
-
+        // REQ-AXO-271 slice 2k : PG canonical only. The legacy SQL
+        // relation render block (render_contains_pg / render_calls_pg /
+        // render_calls_nif_pg) was gated on `!skip_legacy_relations`
+        // which is always false under PG → that whole block was dead
+        // code. `public.Edge` (REQ-AXO-295 / REQ-AXO-297) is the sole
+        // structural edge storage.
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
         let mut chunk_rows: Vec<ChunkRow> = Vec::new();
         let mut contains_rows: Vec<RelationRow> = Vec::new();
@@ -4099,17 +4096,9 @@ impl GraphStore {
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
         queries.extend(acc.render_chunks_pg());
-        if !skip_legacy_relations {
-            queries.extend(acc.render_contains_pg());
-            queries.extend(acc.render_calls_pg());
-            queries.extend(acc.render_calls_nif_pg());
-        }
-        // MIL-AXO-017 slice 6 — AGE writes retired. `public.Edge`
-        // (REQ-AXO-295 schema, REQ-AXO-297 UPSERTs) is now the sole
-        // structural edge storage on PG.
-        if backend_is_pg {
-            queries.extend(acc.render_unified_edge_pg(last_seen_ms));
-        }
+        // `public.Edge` (REQ-AXO-295 / REQ-AXO-297 UPSERTs) is the sole
+        // structural edge storage post-MIL-AXO-017.
+        queries.extend(acc.render_unified_edge_pg(last_seen_ms));
 
         let safe_path = Self::escape_sql(path);
         let safe_hash = Self::escape_sql(content_hash);
@@ -4159,11 +4148,10 @@ impl GraphStore {
             return Ok(Vec::new());
         }
 
-        let backend_is_pg = self.is_postgres_backend();
-        // MIL-AXO-017 slice 3 — see upsert_graph_v2 comment above for
-        // rationale (legacy SQL relation tables dropped by REQ-AXO-216,
-        // unified public.Edge replaces them).
-        let skip_legacy_relations = backend_is_pg;
+        // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph_v2).
+        // legacy relation render block + public.file fallback gate
+        // collapsed below ; `public.Edge` (REQ-AXO-295 / REQ-AXO-297) is
+        // the sole structural edge storage.
 
         // Per-file chunk_ids preserved for the return value.
         let mut chunk_ids_per_file: Vec<Vec<String>> = Vec::with_capacity(files.len());
@@ -4294,16 +4282,9 @@ impl GraphStore {
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
         queries.extend(acc.render_chunks_pg());
-        if !skip_legacy_relations {
-            queries.extend(acc.render_contains_pg());
-            queries.extend(acc.render_calls_pg());
-            queries.extend(acc.render_calls_nif_pg());
-        }
-        // MIL-AXO-017 slice 6 — AGE writes retired.
-        if backend_is_pg {
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            queries.extend(acc.render_unified_edge_pg(now_ms));
-        }
+        // `public.Edge` is the sole structural edge storage post-MIL-AXO-017.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        queries.extend(acc.render_unified_edge_pg(now_ms));
 
         // REQ-AXO-295 Phase 2 — IndexedFile multi-row INSERT instead
         // of one statement per file. Same shape as the multi-row
@@ -4334,7 +4315,7 @@ impl GraphStore {
         // REQ-AXO-345 — multi-row UPSERT into `public.file` so the legacy
         // lifecycle table reflects what pipeline v2 committed. Restores
         // FileIngressGuard.hydrate_from_store on next process restart.
-        if backend_is_pg && !file_rows.is_empty() {
+        if !file_rows.is_empty() {
             let safe_project = Self::escape_sql(project_code);
             let mut values_buf = String::with_capacity(file_rows.len() * 120);
             for (i, (path, size, mtime, ts)) in file_rows.iter().enumerate() {
