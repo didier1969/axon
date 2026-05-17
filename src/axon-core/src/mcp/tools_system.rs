@@ -505,63 +505,20 @@ impl McpServer {
         let q = sql.trim();
         let ql = q.to_ascii_lowercase();
 
-        // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
-        // (CALLS / CALLS_NIF) are empty/dropped — bypass the SQL translation
-        // and let the AGE Cypher path handle the query natively.
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        // Minimal robust support for common multi-hop CALLS checks.
-        if !skip_legacy_relations
-            && ql.contains("match")
-            && ql.contains("[:calls")
-            && ql.contains("return count(*)")
-        {
-            if ql.contains("[:calls*1..3]") {
-                let sql = "WITH RECURSIVE hops(source_id, target_id, depth) AS (
-                             SELECT source_id, target_id, 1 FROM CALLS
-                             UNION ALL
-                             SELECT h.source_id, c.target_id, h.depth + 1
-                             FROM hops h
-                             JOIN CALLS c ON c.source_id = h.target_id
-                             WHERE h.depth < 3
-                           )
-                           SELECT count(*) FROM hops WHERE depth BETWEEN 1 AND 3";
-                return match self.graph_store.query_json(sql) {
-                    Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
-                    Err(e) => Some(json!({
-                        "content": [{ "type": "text", "text": format!("Cypher Translation Error: {}", e) }],
-                        "isError": true
-                    })),
-                };
-            }
-
-            if ql.matches("[:calls]").count() >= 2 {
-                let sql = "SELECT count(*) \
-                           FROM CALLS c1 \
-                           JOIN CALLS c2 ON c2.source_id = c1.target_id";
-                return match self.graph_store.query_json(sql) {
-                    Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
-                    Err(e) => Some(json!({
-                        "content": [{ "type": "text", "text": format!("Cypher Translation Error: {}", e) }],
-                        "isError": true
-                    })),
-                };
-            }
-        }
+        // REQ-AXO-271 slice 2d invariant : `skip_legacy_relations` is
+        // always true under PG canonical (the SQL relation tables
+        // CALLS / CALLS_NIF are dropped — `public.Edge` + the
+        // `WITH RECURSIVE` SQL graph functions handle traversal).
+        // REQ-AXO-91501 vague 1d : the legacy `WITH RECURSIVE hops`
+        // translation layer for `MATCH [:CALLS*1..3]` Cypher-style
+        // queries is dead code under this invariant ; dropped. The
+        // raw `query_json` path below handles every consumer.
 
         match self.graph_store.query_json(q) {
             Ok(result) => {
                 if result.trim() == "[]" && ql.contains("match") {
-                    let calls_count = if skip_legacy_relations {
-                        0
-                    } else {
-                        self.graph_store
-                            .query_count("SELECT count(*) FROM CALLS")
-                            .unwrap_or(0)
-                    };
-                    let note = format!(
-                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use `MATCH ... [:CALLS*1..3] ... RETURN count(*)` or `query_examples`.\nCALLS_count={}",
-                        calls_count
-                    );
+                    let note =
+                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use the SQL graph functions in `public.path` or `query_examples`.";
                     Some(json!({ "content": [{ "type": "text", "text": note }] }))
                 } else {
                     Some(json!({ "content": [{ "type": "text", "text": result }] }))
