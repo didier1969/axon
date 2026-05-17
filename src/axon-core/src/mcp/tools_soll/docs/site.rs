@@ -392,7 +392,15 @@ impl McpServer {
             site_root.as_deref(),
             &project_output_root,
         ) {
-            Ok(summary) => Some(json!({
+            Ok(summary) => {
+                // REQ-AXO-91530 (MIL-AXO-019 Tier B) — tri-modal
+                // envelope. Doc generator reads `soll.Node`+`Edge` via
+                // SQL JOINs ; a follow-up slice can drive section
+                // ordering from PageRank on the SOLL petgraph snapshot
+                // (REQ-AXO-322), matching the `soll_work_plan` 91501
+                // slice 1a centrality signal.
+                let total_available = summary.pages_total;
+                Some(json!({
                 "content": [{ "type": "text", "text": format!(
                     "Generated navigable SOLL docs for `{}`.\nSite root: {}\nProject root: {}\nRefresh mode: {}\nPages total: {}\nPages written: {}\nPages unchanged: {}\nPages deleted: {}\nProject manifest: {}\nRoot index: {}",
                     summary.project_code,
@@ -421,9 +429,13 @@ impl McpServer {
                     "deleted_paths": summary.deleted_paths,
                     "root_written": summary.root_written,
                     "stale_docs": summary.stale_docs,
-                    "canonical_boundary": "Derived human docs only. Live SOLL and SOLL_EXPORT remain canonical."
+                    "canonical_boundary": "Derived human docs only. Live SOLL and SOLL_EXPORT remain canonical.",
+                    "surfaces_used": ["soll_pg", "filesystem"],
+                    "total_available": total_available,
+                    "next_call_hint": "soll_validate project_code=<code> if pages_unchanged is unexpectedly high"
                 }
-            })),
+            }))
+            }
             Err(error) => Some(json!({
                 "content": [{ "type": "text", "text": error.clone() }],
                 "isError": true,

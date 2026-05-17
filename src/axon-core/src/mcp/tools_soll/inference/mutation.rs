@@ -288,7 +288,15 @@ impl McpServer {
             return Some(self.wrong_project_scope_response(project_code, "infer_soll_mutation"));
         }
         match self.infer_soll_mutation_internal(project_code, statement) {
-            Ok(inference) => Some(json!({
+            Ok(inference) => {
+                // REQ-AXO-91529 (MIL-AXO-019 Tier B) — tri-modal
+                // envelope. Pattern match + SOLL traceability scoring
+                // run against the live PG `soll.Node` ; a follow-up
+                // slice can re-route through the snapshot's vector
+                // similarity once SOLL nodes carry embeddings
+                // (REQ-AXO-91501 slice 2 dependency).
+                let total_available = inference.impacted_candidates.len() as u64;
+                Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
@@ -323,9 +331,17 @@ impl McpServer {
                             "confirm the target_ids and call `entrench_nuance` with `confirm=true`".to_string(),
                             "override target_ids explicitly if the proposed scope is too broad".to_string()
                         ]
+                    },
+                    "surfaces_used": ["soll_pg"],
+                    "total_available": total_available,
+                    "next_call_hint": if inference.impacted_candidates.is_empty() {
+                        "soll_query_context project_code=<code> to inspect candidates manually"
+                    } else {
+                        "entrench_nuance with confirm=true once target_ids reviewed"
                     }
                 }
-            })),
+            }))
+            }
             Err(error) => Some(entrench_internal_error_response(
                 "inference",
                 None,
