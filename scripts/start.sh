@@ -478,6 +478,18 @@ if [[ "$RUNTIME_MODE" == "brain_only" ]]; then
     export AXON_DUCKDB_MEMORY_LIMIT_GB="${AXON_DUCKDB_MEMORY_LIMIT_GB:-2}"
 fi
 
+# REQ-AXO-91563 slice 1 — cap glibc per-thread mmap arenas. Without this,
+# 170+ threads (Tokio + ORT inference + watcher + ingester) trigger glibc
+# to create up to 64 arenas × 64 MB each (~10 GB virtual, mostly resident
+# under bursty allocation). Once allocated, glibc NEVER returns these
+# arenas to the OS, so RSS climbs monotonically and never recovers in
+# idle. Session 42 measurement (graph-only, T+9m) : 4.39 GB → 2.59 GB
+# (-41 %), 111 → 5 × 64MB arenas (-95 %). Indexer_full equivalent saving
+# is expected ~5-7 GB. Override only if profiling identifies arena
+# contention as a bottleneck (multi-threaded malloc-heavy workloads —
+# not the case here, ORT + Rust runtime allocate large chunks rarely).
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
 RUNTIME_REACTIVATION_PATH="default"
 RUNTIME_EXECUTABLE_NAME="$(axon_runtime_binary_name "$RUNTIME_SHADOW_ROLE")"
 
