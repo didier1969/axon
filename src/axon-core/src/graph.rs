@@ -173,31 +173,20 @@ impl GraphStore {
         self.pool.symbols.backend == PluginBackend::Postgres
     }
 
-    /// REQ-AXO-251: when true, the SQL relation tables (CALLS, CALLS_NIF,
-    /// CONTAINS, IMPACTS, SUBSTANTIATES) are no longer the canonical edge
-    /// store. Readers must short-circuit to AGE Cypher (preferred) or
-    /// graceful-empty (diagnostic counts) instead of querying the SQL
-    /// tables — those are slated for `DROP TABLE` once Stop A flips.
-    ///
-    /// Post-A.5 (REQ-AXO-216): once the SQL relation tables are physically
-    /// dropped, ANY query against them errors. Callers MUST short-circuit
-    /// under PG even when the env knob is unset. Hence: PG ⇒ skip
-    /// (regardless of AXON_AGE_ONLY_RELATIONS). DuckDB ⇒ unchanged.
+    /// REQ-AXO-271 slice 2d : under PG canonical (post-MIL-AXO-017 / AGE
+    /// retirement), the legacy SQL relation tables (CALLS, CALLS_NIF,
+    /// CONTAINS, IMPACTS, SUBSTANTIATES) are dropped or empty. Callers
+    /// uniformly short-circuit reads to `public.Edge` + the SQL graph
+    /// function library (`callers_of`, `path`). The function is kept as
+    /// a stable read-path predicate ; the value is now invariantly `true`.
     pub fn skip_legacy_relations(&self) -> bool {
-        self.is_postgres_backend()
+        true
     }
 
-    /// MIL-AXO-015 post-promote helper: 3-part name `soll.main.X` is
-    /// DuckDB-only (catalog.schema.table). PostgreSQL parses it as
-    /// cross-database `db.schema.table` and rejects it. Use this helper
-    /// to qualify SOLL tables in SQL strings that must work on both
-    /// backends.
+    /// REQ-AXO-271 slice 2d : SOLL lives in a single PG schema (`soll`) ;
+    /// the historical DuckDB ATTACH'd `soll.main.X` 3-part form is gone.
     pub fn soll_table(&self, name: &str) -> String {
-        if self.is_postgres_backend() {
-            format!("soll.{name}")
-        } else {
-            format!("soll.main.{name}")
-        }
+        format!("soll.{name}")
     }
 }
 
