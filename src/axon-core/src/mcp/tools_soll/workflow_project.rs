@@ -584,7 +584,13 @@ impl McpServer {
     }
 
     fn read_recent_req_commits(project_path: &str, limit: usize) -> serde_json::Value {
-        let output = match std::process::Command::new("git")
+        // REQ-AXO-287 — bound the git shell-out so a slow repo (large
+        // pack, lock contention, fs latency) can't trip the MCP
+        // gateway 30-s timeout on `axon_init_project`. 2-second budget
+        // is generous for a `--max-count=20` filtered log on any
+        // reasonable repo ; over-budget = return empty so the rest of
+        // the kickoff bundle still completes.
+        let mut child = match std::process::Command::new("git")
             .arg("-C")
             .arg(project_path)
             .arg("log")
@@ -592,10 +598,36 @@ impl McpServer {
             .arg(format!("--max-count={}", limit * 4))
             .arg("-E")
             .arg("--grep=REQ-[A-Z]+-[0-9]+")
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
         {
-            Ok(o) if o.status.success() => o,
-            _ => return serde_json::json!([]),
+            Ok(c) => c,
+            Err(_) => return serde_json::json!([]),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<std::process::Output>>();
+        // Move `child` into the wait thread ; if the timeout fires we
+        // kill the process via a separate handle obtained before the
+        // move. `Child::id()` gives us the pid for a signal-based kill.
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+
+        let output = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Ok(o)) if o.status.success() => o,
+            Ok(_) => return serde_json::json!([]),
+            Err(_) => {
+                // Timed out — best-effort kill via shell. The dangling
+                // thread will eventually exit when `git log` finishes
+                // or the kill takes effect.
+                let _ = std::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .output();
+                return serde_json::json!([]);
+            }
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         serde_json::Value::Array(
