@@ -113,26 +113,6 @@ fn remove_path_if_exists(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn build_soll_attach_query(path: &std::path::Path, mode: SollAccessMode) -> String {
-    match mode {
-        SollAccessMode::ReadWrite => format!(
-            "ATTACH '{}' AS soll;",
-            path.to_string_lossy().replace('\'', "''")
-        ),
-        SollAccessMode::ReadOnlyOrEmptySchema => {
-            if path.exists() {
-                format!(
-                    "ATTACH '{}' AS soll (READ_ONLY);",
-                    path.to_string_lossy().replace('\'', "''")
-                )
-            } else {
-                "CREATE SCHEMA IF NOT EXISTS soll;".to_string()
-            }
-        }
-        SollAccessMode::Detached => String::new(),
-    }
-}
-
 fn split_brain_ist_reader_soll_writer_mode() -> bool {
     if matches!(
         std::env::var("AXON_SPLIT_BRAIN_IST_READER_ONLY")
@@ -338,22 +318,9 @@ impl GraphStore {
                 *reader_guard = _reader_ptr;
             }
 
-            if !is_memory
-                && store.soll_attached
-                && !cfg!(test)
-                && !_reader_ptr.is_null()
-                && _reader_ptr != writer_ptr
-            {
-                let soll_path = canonical_soll_db_path(db_root)
-                    .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
-                let attach_q = build_soll_attach_query(&soll_path, soll_access_mode);
-                let r_guard = store
-                    .pool
-                    .reader_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                store.setup_session(*r_guard, &attach_q)?;
-            }
+            // Under PG the reader_ctx points at the same connection
+            // pool as the writer (db_path is None, MVCC handles
+            // concurrency). No DuckDB SOLL ATTACH dance needed.
             info!("GraphStore startup: reader session setup complete.");
             store.sync_reader_epoch_to_commit();
             if !split_brain_mode && !is_memory {
@@ -413,25 +380,8 @@ impl GraphStore {
 
             let new_reader = init_fn(c_path.as_ptr(), true);
             if new_reader.is_null() {
-                Err(anyhow!("Failed to init refreshed DuckDB Reader"))
+                Err(anyhow!("Failed to init refreshed reader"))
             } else {
-                if self.soll_attached {
-                    let mut soll_path = db_path
-                        .parent()
-                        .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
-                        .to_path_buf();
-                    soll_path.push("soll.db");
-                    let attach_q = build_soll_attach_query(
-                        &soll_path,
-                        if self.soll_read_only_mode {
-                            SollAccessMode::ReadOnlyOrEmptySchema
-                        } else {
-                            SollAccessMode::ReadWrite
-                        },
-                    );
-                    self.setup_session(new_reader, &attach_q)?;
-                }
-
                 let writer_ctx = *self
                     .pool
                     .writer_ctx
@@ -806,44 +756,6 @@ impl GraphStore {
             .store(now_ms, Ordering::Relaxed);
         self.last_reader_refresh_epoch_ms
             .store(now_ms, Ordering::Relaxed);
-    }
-
-    fn setup_session(&self, ctx: *mut c_void, attach_query: &str) -> Result<()> {
-        let duckdb_memory_limit_gb = std::env::var("AXON_DUCKDB_MEMORY_LIMIT_GB")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(0);
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
-            // DEC-AXO-072 follow-up: vector pipeline profiling (2026-05-05)
-            // showed the Writer Actor commit_ms growing from 132ms to 12298ms
-            // (100x slowdown) over 80s on the Axon repo because the prior
-            // `SET checkpoint_threshold = '1GB'` lets the WAL accumulate to
-            // ~1 GB before compaction, dragging every subsequent commit/SELECT
-            // through ever-longer WAL replay. Lowering the threshold to 64MB
-            // forces ~16x more checkpoints (each cheap) but caps the per-op
-            // cost. Standard for OLTP-heavy DuckDB workloads.
-            exec_fn(
-                ctx,
-                CString::new("SET checkpoint_threshold = '64MB';")?.as_ptr(),
-            );
-            if duckdb_memory_limit_gb > 0 {
-                exec_fn(
-                    ctx,
-                    CString::new(format!(
-                        "SET memory_limit = '{}GB';",
-                        duckdb_memory_limit_gb
-                    ))?
-                    .as_ptr(),
-                );
-            }
-            if !attach_query.is_empty() {
-                exec_fn(ctx, CString::new(attach_query)?.as_ptr());
-            }
-            Ok(())
-        }
     }
 
     fn find_plugin_path() -> Result<String> {
