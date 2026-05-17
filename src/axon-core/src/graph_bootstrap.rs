@@ -280,116 +280,19 @@ impl GraphStore {
                 reader_refresh_notify: std::sync::Condvar::new(),
             };
 
-            if backend == crate::graph::PluginBackend::Postgres {
-                // MIL-AXO-015 P3 slice 3c: bootstrap the PG global
-                // schema (extensions + soll layer) via the canonical
-                // DDL generator. Per-project IST schemas are deferred
-                // to axon_init_project (P5). The duckdb-specific
-                // ATTACH / additive-schema dance is intentionally
-                // skipped — those code paths emit DuckDB dialect SQL
-                // (FLOAT[1024], INSTALL json, ALTER TABLE quirks) that
-                // is not portable to PostgreSQL. The PG dialect
-                // equivalents live in `crate::postgres::ddl`.
-                store.bootstrap_global_pg_schema()?;
-                info!(
-                    "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
-                );
-            } else if !is_memory && store.soll_attached {
-                let soll_path = canonical_soll_db_path(db_root)
-                    .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
-                let attach_q = build_soll_attach_query(&soll_path, soll_access_mode);
-                {
-                    let w_guard = store
-                        .pool
-                        .writer_ctx
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    store.setup_session(*w_guard, &attach_q)?;
-                }
-            } else {
-                let _ = store.execute("CREATE SCHEMA IF NOT EXISTS soll;");
-            }
+            // MIL-AXO-015 P3 slice 3c: bootstrap the PG global schema
+            // (extensions + soll layer) via the canonical DDL generator.
+            // Per-project IST schemas are deferred to axon_init_project
+            // (P5). PG dialect lives in `crate::postgres::ddl`.
+            store.bootstrap_global_pg_schema()?;
+            info!(
+                "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
+            );
 
-            if backend == crate::graph::PluginBackend::Postgres {
-                // PG runtime compatibility / per-project IST recovery
-                // are owned by separate sub-phases (P3 slices 3d-3e).
-                // Skipping here keeps the boot path linear without
-                // emitting duckdb-shaped SQL against PostgreSQL.
-            } else if split_brain_mode {
-                store.ensure_additive_soll_schema()?;
-                info!(
-                    "GraphStore startup: split brain mode active; IST writer bootstrap skipped and SOLL writer attached separately."
-                );
-            } else {
-                store.init_schema(is_memory)?;
-                store.ensure_additive_schema()?;
-                store.ensure_additive_soll_schema()?;
-                store.ensure_runtime_compatibility()?;
-                info!("GraphStore startup: runtime compatibility checks complete.");
-                store.recover_interrupted_indexing()?;
-                info!("GraphStore startup: interrupted indexing recovery complete.");
-                let _ = store.clear_stale_inflight_graph_projection_work();
-                info!("GraphStore startup: stale graph projection inflight cleanup complete.");
-                let _ = store.clear_stale_inflight_file_vectorization_work();
-                info!("GraphStore startup: stale file vectorization inflight cleanup complete.");
-                if graph_embeddings_enabled() {
-                    match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
-                        Ok(count) if count > 0 => {
-                            info!(
-                                "Backfilled {} graph projection queue entries for graph embeddings",
-                                count
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            warn!(
-                                "Unable to backfill graph projection queue at startup: {:?}",
-                                err
-                            );
-                        }
-                    }
-                } else {
-                    info!(
-                        "Skipping graph embedding queue backfill at startup because graph embeddings are disabled."
-                    );
-                }
-                info!("GraphStore startup: graph projection backfill complete.");
-                if AxonRuntimeMode::from_env().background_vectorization_enabled() {
-                    let structural_graph_backlog_depth =
-                        store.count_persisted_file_pending().unwrap_or(0)
-                            + store.count_graph_wip_files().unwrap_or(0);
-                    let graph_ready_depth = store
-                        .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE AND vector_ready = FALSE")
-                        .unwrap_or(0) as usize;
-                    let vector_backfill_limit = startup_vector_backfill_limit(
-                        structural_graph_backlog_depth,
-                        graph_ready_depth,
-                    );
-                    match store.rebuild_file_vectorization_queue_with_limit(vector_backfill_limit) {
-                        Ok(count) if count > 0 => {
-                            info!(
-                                "Backfilled {} file vectorization queue entries for chunk embeddings with startup floor {} while structural graph backlog remained {} and graph_ready stock was {}",
-                                count, vector_backfill_limit, structural_graph_backlog_depth, graph_ready_depth
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            warn!(
-                                "Unable to backfill file vectorization queue at startup: {:?}",
-                                err
-                            );
-                        }
-                    }
-                } else {
-                    info!(
-                        "Skipping file vectorization queue backfill at startup because runtime mode is {}.",
-                        AxonRuntimeMode::from_env().as_str()
-                    );
-                }
-                info!("GraphStore startup: file vectorization backfill complete.");
-                store.execute("CHECKPOINT;")?;
-                info!("GraphStore startup: writer checkpoint complete.");
-            }
+            // PG runtime compatibility / per-project IST recovery are
+            // owned by separate sub-phases (P3 slices 3d-3e). The boot
+            // path stays linear ; no DuckDB-shaped init_schema /
+            // additive-schema / recover / backfill chain.
 
             let reader_db_available = reader_db_exists(&store.db_path);
             let _reader_ptr = if is_memory || !reader_db_available {
