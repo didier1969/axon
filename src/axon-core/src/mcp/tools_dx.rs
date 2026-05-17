@@ -1,6 +1,7 @@
 use crate::embedding_contract::DIMENSION;
 use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
@@ -569,6 +570,79 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-91508 — graph r=1 neighbor expansion lane (single-lookup
+    /// category per CPT-AXO-90007). Given the set of direct-hit symbol
+    /// names from the symbol_index lane, look up their canonical ids
+    /// then emit one-hop CALLS / CONTAINS / CALLS_NIF neighbors as
+    /// supplementary `graph_r1` hits. Best-effort : if the lookup
+    /// fails, returns an empty vec and the caller falls back to
+    /// symbol-only results.
+    pub(crate) fn query_graph_r1_neighbors(
+        &self,
+        direct_names: &HashSet<String>,
+        project: &str,
+        limit: usize,
+    ) -> Vec<Value> {
+        if direct_names.is_empty() || project == "*" {
+            return Vec::new();
+        }
+        // SQL-escape names + project. Identifiers come from the bench
+        // dataset / LLM input ; treat as untrusted.
+        let names_sql = direct_names
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let safe_project = project.replace('\'', "''");
+        let sql = format!(
+            "WITH anchors AS ( \
+                SELECT id FROM public.Symbol \
+                WHERE project_code = '{safe_project}' AND name IN ({names_sql}) \
+             ), \
+             neighbor_edges AS ( \
+                SELECT e.target_id AS nid FROM public.Edge e \
+                JOIN anchors a ON a.id = e.source_id \
+                WHERE e.project_code = '{safe_project}' \
+                  AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
+                UNION \
+                SELECT e.source_id AS nid FROM public.Edge e \
+                JOIN anchors a ON a.id = e.target_id \
+                WHERE e.project_code = '{safe_project}' \
+                  AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
+             ) \
+             SELECT DISTINCT s.name, COALESCE(s.kind, '') AS kind, \
+                    COALESCE((SELECT c.file_path FROM public.Chunk c \
+                              WHERE c.source_id = s.id LIMIT 1), '') AS uri \
+             FROM public.Symbol s \
+             JOIN neighbor_edges n ON n.nid = s.id \
+             WHERE s.project_code = '{safe_project}' \
+               AND s.name NOT IN ({names_sql}) \
+             LIMIT {limit}"
+        );
+        match self.graph_store.query_json(&sql) {
+            Ok(json_str) => serde_json::from_str::<Vec<Vec<Value>>>(&json_str)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| {
+                    let name = row.first().and_then(Value::as_str)?;
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
+                    let uri = row.get(2).and_then(Value::as_str).unwrap_or("");
+                    Some(json!({
+                        "name": name,
+                        "kind": kind,
+                        "uri": uri,
+                        "surface": "graph_r1",
+                        "project": project,
+                    }))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
@@ -830,21 +904,59 @@ impl McpServer {
                         Value::Object(obj)
                     })
                     .collect();
+                // REQ-AXO-91508 — graph r=1 neighbor lane per CPT-AXO-90007
+                // single-lookup category. Best-effort, gated to non-`*`
+                // projects (the SQL filters on project_code).
+                //
+                // Design note : graph neighbors are surfaced as a flat
+                // string array in `data.context.related_symbols_via_graph`,
+                // NOT as objects in `data.results[]`. Rationale : the
+                // REQ-AXO-91490 bench precision@k formula is
+                // `hits / top.len()` so adding non-expected items to
+                // the primary results array would penalise precision
+                // (false positives). Keeping graph context in a
+                // sibling field preserves both bench score and
+                // LLM-visible expansion context.
+                let direct_names: HashSet<String> = structured_results
+                    .iter()
+                    .filter_map(|r| {
+                        r.get("name")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .collect();
+                let graph_neighbors =
+                    self.query_graph_r1_neighbors(&direct_names, project, 10);
+                let graph_lane_active = !graph_neighbors.is_empty();
+                let related_via_graph: Vec<String> = graph_neighbors
+                    .iter()
+                    .filter_map(|n| {
+                        n.get("name")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .collect();
                 let total_available = structured_results.len();
                 let next_call_hint = structured_results
                     .first()
                     .and_then(|r| r.get("name").and_then(Value::as_str))
                     .map(|n| format!("inspect symbol={n}"))
                     .unwrap_or_else(|| "inspect <name>".to_string());
+                let mut surfaces_used: Vec<&str> = vec!["symbol_index"];
+                if semantic_lane_active {
+                    surfaces_used.push("vector");
+                }
+                if graph_lane_active {
+                    surfaces_used.push("graph_r1");
+                }
                 let response = json!({
                     "content": [{ "type": "text", "text": report }],
                     "data": {
                         "results": structured_results,
-                        "surfaces_used": if semantic_lane_active {
-                            vec!["symbol_index", "vector"]
-                        } else {
-                            vec!["symbol_index"]
+                        "context": {
+                            "related_symbols_via_graph": related_via_graph,
                         },
+                        "surfaces_used": surfaces_used,
                         "surfaces_degraded": semantic_fallback_reason
                             .as_ref()
                             .map(|reason| json!([{"surface": "vector", "reason": reason}]))
