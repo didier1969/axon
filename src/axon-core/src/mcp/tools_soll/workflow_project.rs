@@ -125,11 +125,33 @@ impl McpServer {
                 project_code_arg.and_then(|code| self.lookup_project_path_by_code(code))
             });
 
+        // REQ-AXO-91571 — gate scope to `PRO` (cross-project canonical
+        // guidelines) + the effective project's own guidelines. Without
+        // this filter, every other project's duplicates of GUI-PRO-001
+        // / GUI-PRO-002 (TDD / Documentation MCP) would fire on every
+        // AXO commit (observed session 43 : GUI-FSF-002, GUI-MLD-002,
+        // GUI-NEX-001, GUI-TE2-001 leaking from sibling projects).
+        let effective_project_code: Option<String> = project_code_arg
+            .map(str::to_string)
+            .or_else(|| {
+                resolved_project_path
+                    .as_ref()
+                    .and_then(|p| self.lookup_project_code_by_path(p))
+            });
+        let guideline_scope_filter = match effective_project_code.as_deref() {
+            Some(code) => format!(
+                "AND project_code IN ('PRO', '{}')",
+                escape_sql(code)
+            ),
+            None => "AND project_code = 'PRO'".to_string(),
+        };
         let rows_raw = self
             .graph_store
-            .query_json(
-                "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND status='active'",
-            )
+            .query_json(&format!(
+                "SELECT id, title, description, metadata FROM soll.Node \
+                 WHERE type='Guideline' AND status='active' {}",
+                guideline_scope_filter
+            ))
             .unwrap_or_else(|_| "[]".to_string());
 
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
@@ -336,6 +358,31 @@ impl McpServer {
     // that has only Axon MCP access can call axon_init_project once and
     // have everything it needs to begin productive work without
     // re-discovering the bootstrap protocol from scratch.
+
+    /// REQ-AXO-91571 — reverse of `lookup_project_path_by_code`. Maps
+    /// an absolute repo path back to its canonical project_code via
+    /// the registry. Used by the pre-flight gate to scope guideline
+    /// queries to (`PRO`, effective_project) so sibling-project
+    /// duplicates don't leak into commit validation.
+    fn lookup_project_code_by_path(&self, path: &std::path::Path) -> Option<String> {
+        let path_str = path.to_str()?;
+        let escaped = escape_sql(path_str);
+        let raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT project_code FROM {} WHERE project_path = '{}'",
+                self.graph_store.soll_table("ProjectCodeRegistry"),
+                escaped
+            ))
+            .ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
+        let code = rows.into_iter().next()?.into_iter().next()?;
+        if code.trim().is_empty() {
+            None
+        } else {
+            Some(code)
+        }
+    }
 
     /// REQ-AXO-191 — resolve a project_code to its absolute
     /// `project_path` via the registry. Used by `axon_commit_work` to
