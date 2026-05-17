@@ -115,9 +115,12 @@ mod doc_invariants {
     #[test]
     fn channel_caps_match_session_19_canonical_table() {
         // Numbers cited in CPT-AXO-054 + the module docstring.
+        // REQ-AXO-91567 — B1_COLDSTART_BATCH_SIZE_DEFAULT bumped from
+        // 256 → 4096 to drain larger boot-time backlogs in a single
+        // poll. Other caps unchanged.
         assert_eq!(super::INTERNAL_CHANNEL_CAP_DEFAULT, 1024);
         assert_eq!(super::A3_TO_B1_BUFFER_CAP_DEFAULT, 10_000);
-        assert_eq!(super::B1_COLDSTART_BATCH_SIZE_DEFAULT, 256);
+        assert_eq!(super::B1_COLDSTART_BATCH_SIZE_DEFAULT, 4096);
         assert_eq!(super::channels::B2_BATCH_SIZE_DEFAULT, 64);
         assert_eq!(super::channels::B2_BATCH_TIMEOUT_MS_DEFAULT, 200);
     }

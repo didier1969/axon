@@ -192,10 +192,14 @@ mod tests {
 
     #[test]
     fn defaults_match_canonical_session_19_decisions() {
+        // REQ-AXO-91567 — `B1_COLDSTART_BATCH_SIZE_DEFAULT` was bumped
+        // from 256 (original session-19 figure) to 4096 to absorb
+        // larger boot-time backlogs in one query. Test value updated
+        // in step.
         let caps = PipelineChannelCaps::default();
         assert_eq!(caps.internal, 1024);
         assert_eq!(caps.a3_to_b1, 10_000);
-        assert_eq!(caps.b1_coldstart_batch_size, 256);
+        assert_eq!(caps.b1_coldstart_batch_size, 4096);
         assert_eq!(caps.b2_batch_size, 64);
         assert_eq!(caps.b2_batch_timeout_ms, 200);
     }
