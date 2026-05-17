@@ -558,23 +558,11 @@ impl WriterStats {
 
 pub trait WriterSink: Send + Sync + 'static {
     fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()>;
-
-    /// REQ-AXO-250: lets the writer thread know whether the sink runs
-    /// against PostgreSQL (where AGE Cypher dual-write applies) or
-    /// DuckDB (relation SQL only). Default `false` keeps test sinks
-    /// trivial — only `GraphStore` overrides.
-    fn is_postgres_backend(&self) -> bool {
-        false
-    }
 }
 
 impl WriterSink for GraphStore {
     fn execute_batch(&self, queries: &[String]) -> anyhow::Result<()> {
         GraphStore::execute_batch(self, queries)
-    }
-
-    fn is_postgres_backend(&self) -> bool {
-        GraphStore::is_postgres_backend(self)
     }
 }
 
@@ -691,13 +679,10 @@ fn flush<S: WriterSink>(
     stats: &Arc<WriterStats>,
 ) {
     let drained = accumulator.row_count();
-    // REQ-AXO-250: compute the PG-aware gates at flush time so the
-    // writer stays in lockstep with the synchronous producer's
-    // dual-write contract (graph_ingestion.rs:1148-1181). Under DuckDB
-    // both gates collapse to false and the rendered SQL is identical
-    // to the legacy path.
-    // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL relation tables canonical.
-    let _ = sink.is_postgres_backend();
+    // REQ-AXO-271 slice 2c : SQL relation tables (public.Edge + legacy CALLS/CONTAINS)
+    // are emitted unconditionally now that AGE is retired (MIL-AXO-017 / DEC-AXO-083)
+    // and PG is the only backend. `skip_legacy_relations` argument stays at `false` —
+    // the contract is kept for the parameterised render API used by tests.
     let queries = accumulator.render_bulk_queries_with(false);
     if !queries.is_empty() {
         if let Err(e) = sink.execute_batch(&queries) {
