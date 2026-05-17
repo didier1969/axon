@@ -508,16 +508,16 @@ impl GraphStore {
         let mut contains_rows: Vec<self::async_writer::RelationRow> = Vec::new();
         let mut calls_rows: Vec<self::async_writer::RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<self::async_writer::RelationRow> = Vec::new();
-        // MIL-AXO-015 P4 4e: backend selector for the Symbol.embedding
-        // inline render. PG stores `vector(1024)` (pgvector); DuckDB
-        // stores FLOAT[1024]. Captured once per call to avoid the
-        // is_postgres_backend probe per-symbol.
-        let backend_is_pg = self.is_postgres_backend();
-        // MIL-AXO-015 B.4 prep: under AXON_AGE_ONLY_RELATIONS, skip
-        // the SQL relation writes — AGE dual-write remains the sole
-        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL relation tables
-        // canonical. `skip_legacy_relations` stays as false (no skipping).
-        let _ = backend_is_pg;
+        // REQ-AXO-271 slice 2h : `backend_is_pg` dropped — invariantly
+        // true under PG canonical (post-MIL-AXO-017). The 4 callsites
+        // below (bulk_writer gate + symbol/chunk/relation renderers)
+        // collapse to the PG arm directly.
+        //
+        // MIL-AXO-017 slice 6B Phase C : AGE retired ; SQL relation
+        // tables canonical. `skip_legacy_relations` stays as `false`
+        // (hardcoded — relation writes are intentionally preserved at
+        // this site even under PG-only, distinct from the global
+        // `graph_store.skip_legacy_relations()` which IS true).
         let skip_legacy_relations = false;
         let mut symbol_vertices: Vec<(String, serde_json::Value)> = Vec::new();
         let mut file_vertices: Vec<(String, serde_json::Value)> = Vec::new();
@@ -931,8 +931,7 @@ impl GraphStore {
         // every table cleanly; the FVQ retry contract restores the
         // file. Default OFF preserves the legacy SQL-string path
         // bit-for-bit.
-        let use_bulk_writer =
-            backend_is_pg && crate::postgres::bulk_writer::bulk_writer_enabled();
+        let use_bulk_writer = crate::postgres::bulk_writer::bulk_writer_enabled();
         // REQ-AXO-244 follow-up: under bulk_writer, the typed Symbol /
         // Chunk / relation rows go through `flush_batch` (own tx) AFTER
         // `execute_batch(&queries)` so the DELETE-then-INSERT ordering
@@ -979,27 +978,16 @@ impl GraphStore {
                 symbol_acc.absorb(self::async_writer::WriteDiff::Symbols(std::mem::take(
                     &mut symbol_rows,
                 )));
-                if backend_is_pg {
-                    queries.extend(symbol_acc.render_symbols_pg());
-                } else {
-                    queries.extend(symbol_acc.render_symbols_duckdb());
-                }
+                queries.extend(symbol_acc.render_symbols_pg());
             }
             if !chunk_rows.is_empty() {
                 let mut chunk_acc = self::async_writer::WriteAccumulator::new();
                 chunk_acc.absorb(self::async_writer::WriteDiff::Chunks(std::mem::take(
                     &mut chunk_rows,
                 )));
-                // Backend-aware renderer pick (mirrors the Symbol path
-                // at commit `50b980b`). Today the PG and DuckDB
-                // renderers emit identical SQL for Chunk; the
-                // divergence point is the REQ-AXO-238 bulk_writer COPY
-                // BINARY fast path above.
-                if backend_is_pg {
-                    queries.extend(chunk_acc.render_chunks_pg());
-                } else {
-                    queries.extend(chunk_acc.render_chunks_duckdb());
-                }
+                // REQ-AXO-271 slice 2h : PG canonical only. The DuckDB
+                // chunk renderer is dead syntax post-MIL-AXO-017.
+                queries.extend(chunk_acc.render_chunks_pg());
             }
             // (relation inserts intentionally split out below — see
             // `relation_queries` block — so they can route through
@@ -1039,15 +1027,9 @@ impl GraphStore {
                     calls_nif_rows.clone(),
                 ));
             }
-            if backend_is_pg {
-                relation_queries.extend(relation_acc.render_contains_pg());
-                relation_queries.extend(relation_acc.render_calls_pg());
-                relation_queries.extend(relation_acc.render_calls_nif_pg());
-            } else {
-                relation_queries.extend(relation_acc.render_contains_duckdb());
-                relation_queries.extend(relation_acc.render_calls_duckdb());
-                relation_queries.extend(relation_acc.render_calls_nif_duckdb());
-            }
+            relation_queries.extend(relation_acc.render_contains_pg());
+            relation_queries.extend(relation_acc.render_calls_pg());
+            relation_queries.extend(relation_acc.render_calls_nif_pg());
         }
         let mut enqueued_vectorization = false;
         // DEC-AXO-071 H.2: paths that will skip the queue and be embedded
