@@ -41,6 +41,7 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `input_invalid` / `invalid_arguments` / `wrong_project_scope` | `parameter_repair` + `help(tool=X)` or `project_registry_lookup` |
 | `input_not_found` / `symbol_found=false` | `parameter_repair.suggestions` or widen `query` |
 | `degraded` / `partial` / `rejected_all` | treat partial ; inspect `parameter_repair` ; retry |
+| `trust:degraded` + blocker `indexed_projections_not_fresh` | run `data.truth_cockpit.recovery_hint.command` (REQ-AXO-91497) ; never re-call `status` itself |
 
 ## SOLL writes
 

@@ -447,20 +447,12 @@ impl McpServer {
         } else {
             "degraded"
         };
-        let status_next_action = if degraded_notes.is_empty() {
-            json!({
-                "kind": "read_project_truth",
-                "tool": "project_status",
-                "when": "now"
-            })
-        } else {
-            json!({
-                "kind": "inspect_runtime_status",
-                "tool": "status",
-                "arguments": { "mode": "full" },
-                "when": "now"
-            })
-        };
+        // REQ-AXO-91497 — when blocker is `indexed_projections_not_fresh`,
+        // emit a concrete operator command instead of looping on `status`
+        // itself. The prior fallback (`status mode=full`) was recursive.
+        // Anchor: CPT-AXO-029 IST freshness invariant.
+        let (status_next_action, recovery_hint) =
+            derive_recovery_action(&degraded_notes);
         // REQ-AXO-104 — the public_tools list is ~60 names and ~700
         // chars; in brief mode (the default) the LLM client gets a
         // repetitive payload on every status call that does not change
@@ -505,15 +497,28 @@ impl McpServer {
         // this, an LLM reading the markdown text has to compute the next
         // best action from low-level fields (truth_status, drain_state,
         // ist freshness) when the server has already derived it.
-        let next_best_tool = status_next_action
-            .get("tool")
+        let next_best_kind = status_next_action
+            .get("kind")
             .and_then(|value| value.as_str())
-            .unwrap_or("status");
+            .unwrap_or("inspect_runtime_status");
+        let recovery_command = recovery_hint
+            .get("command")
+            .and_then(|value| value.as_str());
+        let recovery_reason = recovery_hint
+            .get("reason")
+            .and_then(|value| value.as_str());
         evidence.push_str(&format!(
-            "**Trust boundary:** `{}` (use `next_best_action` to recover when degraded)\n\
-**Next best action:** `{}`\n",
-            truth_status, next_best_tool,
+            "**Trust boundary:** `{}`\n\
+**Next best action:** `{}`{}\n",
+            truth_status,
+            next_best_kind,
+            recovery_command
+                .map(|cmd| format!(" → `{}`", cmd))
+                .unwrap_or_default(),
         ));
+        if let Some(reason) = recovery_reason {
+            evidence.push_str(&format!("**Recovery:** {}\n", reason));
+        }
         if !degraded_notes.is_empty() {
             evidence.push_str(&format!(
                 "**Current blocker:** {}\n",
@@ -893,6 +898,7 @@ impl McpServer {
                 json!(degraded_notes.first().cloned().unwrap_or_else(|| "runtime_truth_degraded".to_string()))
             },
             "next_best_action": status_next_action,
+            "recovery_hint": recovery_hint,
             "confidence": "high",
             "freshness": {
                 "state": if truth_status == "canonical" { "fresh" } else { "degraded" },
@@ -1188,6 +1194,47 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
          FROM fn_per f FULL OUTER JOIN calls_per c USING (project_code, lang) \
          ORDER BY 1, 2";
 
+/// REQ-AXO-91497 — derive `(next_best_action, recovery_hint)` from
+/// degraded notes. When the first blocker has a known concrete recovery
+/// command, surface it ; otherwise fall back to a non-recursive default.
+/// `next_best_action.tool` MUST NEVER be `status` itself (the prior bug).
+pub(crate) fn derive_recovery_action(degraded_notes: &[String]) -> (Value, Value) {
+    let first = degraded_notes.first().map(String::as_str).unwrap_or("");
+    match first {
+        "" => (
+            json!({
+                "kind": "read_project_truth",
+                "tool": "project_status",
+                "when": "now"
+            }),
+            Value::Null,
+        ),
+        "indexed_projections_not_fresh" => (
+            json!({
+                "kind": "start_indexer",
+                "tool": "axon-live",
+                "arguments": { "command": "start --indexer-graph" },
+                "when": "now"
+            }),
+            json!({
+                "action": "start_indexer",
+                "command": "./scripts/axon-live start --indexer-graph",
+                "reason": "brain alone serves frozen IST snapshot; indexer process required for freshness (CPT-AXO-029)",
+                "verification": "status mode=brief should report freshness=fresh after ~30s"
+            }),
+        ),
+        _ => (
+            json!({
+                "kind": "inspect_runtime_status",
+                "tool": "status",
+                "arguments": { "mode": "full" },
+                "when": "now"
+            }),
+            Value::Null,
+        ),
+    }
+}
+
 fn ist_call_graph_coverage_build(rows: &[Vec<String>]) -> Value {
     let mut per_project = serde_json::Map::new();
     let mut alerts: Vec<String> = Vec::new();
@@ -1304,5 +1351,51 @@ mod tests {
             out.pointer("/per_project/OPT/python/fns").and_then(Value::as_u64),
             Some(10)
         );
+    }
+
+    // REQ-AXO-91497 — recovery action contract
+    #[test]
+    fn recovery_action_canonical_when_no_blockers() {
+        let (action, hint) = derive_recovery_action(&[]);
+        assert_eq!(action.get("kind").and_then(Value::as_str), Some("read_project_truth"));
+        assert_eq!(action.get("tool").and_then(Value::as_str), Some("project_status"));
+        assert!(hint.is_null());
+    }
+
+    #[test]
+    fn recovery_action_emits_concrete_command_for_stale_ist() {
+        let notes = vec!["indexed_projections_not_fresh".to_string()];
+        let (action, hint) = derive_recovery_action(&notes);
+        assert_eq!(action.get("kind").and_then(Value::as_str), Some("start_indexer"));
+        assert_eq!(action.get("tool").and_then(Value::as_str), Some("axon-live"));
+        assert_eq!(
+            hint.get("command").and_then(Value::as_str),
+            Some("./scripts/axon-live start --indexer-graph")
+        );
+        assert!(hint.get("reason").is_some());
+        assert!(hint.get("verification").is_some());
+    }
+
+    #[test]
+    fn recovery_action_never_recurses_into_status_for_known_blocker() {
+        let notes = vec!["indexed_projections_not_fresh".to_string()];
+        let (action, _) = derive_recovery_action(&notes);
+        // The bug being fixed: `next_best_action.tool` MUST NEVER be `status` itself.
+        assert_ne!(action.get("tool").and_then(Value::as_str), Some("status"));
+    }
+
+    #[test]
+    fn recovery_action_unknown_blocker_falls_back_to_status_full() {
+        // For unknown blockers we still fall back to `status mode=full`. This is
+        // the prior behaviour, intentional: the LLM bumps to a richer report to
+        // diagnose. Not recursive in spirit (different mode produces different output).
+        let notes = vec!["runtime_authority_not_converged".to_string()];
+        let (action, hint) = derive_recovery_action(&notes);
+        assert_eq!(action.get("kind").and_then(Value::as_str), Some("inspect_runtime_status"));
+        assert_eq!(
+            action.pointer("/arguments/mode").and_then(Value::as_str),
+            Some("full")
+        );
+        assert!(hint.is_null());
     }
 }
