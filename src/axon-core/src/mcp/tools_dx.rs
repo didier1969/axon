@@ -2000,44 +2000,71 @@ impl McpServer {
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         };
 
-        let query = if project.is_some() {
-            "
-            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_code, 'unknown')
-            FROM CALLS c
-            JOIN Symbol s ON s.id = c.source_id
-            LEFT JOIN CONTAINS con ON s.id = con.target_id
-            LEFT JOIN File f ON f.path = con.source_id
-            JOIN Symbol target ON target.id = c.target_id
-            WHERE target.id = $target_id AND target.is_public = true AND s.project_code = $project
-        "
+        // REQ-AXO-91513 (MIL-AXO-019 vague 1d) — RAM-first via IstGraphView.
+        // Direct callers (depth=1, reverse_at_radius) of the resolved
+        // symbol = the surface of API consumers. Fallback to
+        // `public.callers_of` SQL function when the cache is cold.
+        let view = crate::ist_snapshot::process_view();
+        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        let mut surfaces_used: Vec<&'static str> = Vec::new();
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+
+        let consumer_ids: Vec<String> = if ram_attempted {
+            surfaces_used.push("graph_ram");
+            view.reverse_at_radius(project.unwrap_or(""), &target_id, 1, 10_000, &[])
+                .unwrap_or_default()
         } else {
-            "
-            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_code, 'unknown')
-            FROM CALLS c
-            JOIN Symbol s ON s.id = c.source_id
-            LEFT JOIN CONTAINS con ON s.id = con.target_id
-            LEFT JOIN File f ON f.path = con.source_id
-            JOIN Symbol target ON target.id = c.target_id
-            WHERE target.id = $target_id AND target.is_public = true
-        "
-        };
-        let params = if let Some(project) = project {
-            json!({ "target_id": target_id, "project": project })
-        } else {
-            json!({ "target_id": target_id })
+            surfaces_used.push("graph_pg");
+            surfaces_degraded.push("graph_ram_unavailable");
+            let safe_target = target_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT caller_id FROM public.callers_of('{safe_target}', 1, NULL)"
+            );
+            self.graph_store
+                .query_json(&sql)
+                .ok()
+                .and_then(|raw| {
+                    serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+                        .ok()
+                        .map(|rows| {
+                            rows.into_iter()
+                                .filter_map(|r| {
+                                    r.into_iter()
+                                        .next()
+                                        .and_then(|v| v.as_str().map(String::from))
+                                })
+                                .collect()
+                        })
+                })
+                .unwrap_or_default()
         };
 
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-        // tables are empty/dropped — return the no-consumers branch directly
-        // so we don't issue a SQL query against a missing relation table.
-        // Authoritative consumer-traversal lives on AGE; api_break_check is a
-        // diagnostic surface that degrades gracefully here until it gains an
-        // AGE-native equivalent.
-        let sql_result = if self.graph_store.skip_legacy_relations() {
-            Ok::<String, anyhow::Error>("[]".to_string())
+        // Materialise display rows : [caller_name, caller_kind, caller_project_code]
+        let res = if consumer_ids.is_empty() {
+            "[]".to_string()
         } else {
-            self.graph_store.query_json_param(query, &params)
+            let id_list = consumer_ids
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let project_filter = if let Some(p) = project {
+                format!(
+                    " AND project_code = '{}'",
+                    p.replace('\'', "''")
+                )
+            } else {
+                String::new()
+            };
+            let sql = format!(
+                "SELECT name, kind, COALESCE(project_code, 'unknown') FROM Symbol WHERE id IN ({id_list}){project_filter}"
+            );
+            self.graph_store
+                .query_json(&sql)
+                .unwrap_or_else(|_| "[]".to_string())
         };
+
+        let sql_result: Result<String, anyhow::Error> = Ok(res);
 
         match sql_result {
             Ok(res) => {
@@ -2066,14 +2093,25 @@ impl McpServer {
                             "high",
                         )
                     );
-                    Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                    Some(json!({
+                        "content": [{ "type": "text", "text": report }],
+                        "data": {
+                            "symbol": symbol,
+                            "project": project,
+                            "consumer_count": 0,
+                            "surfaces_used": surfaces_used,
+                            "surfaces_degraded": surfaces_degraded,
+                            "total_available": 0,
+                            "next_call_hint": "impact symbol=<symbol> for deeper dependency view",
+                        }
+                    }))
                 } else {
                     evidence.push_str(
                         "Changing this public symbol will directly impact the following consumers:\n\n",
                     );
                     evidence.push_str(&format_table_from_json(
                         &res,
-                        &["Consumer", "Symbol", "Type", "Project"],
+                        &["Symbol", "Type", "Project"],
                     ));
                     let report = format!(
                         "## 🧯 API Break Check : {}\n\n{}",
@@ -2090,7 +2128,19 @@ impl McpServer {
                             "high",
                         )
                     );
-                    Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                    let total_available = rows.len() as u64;
+                    Some(json!({
+                        "content": [{ "type": "text", "text": report }],
+                        "data": {
+                            "symbol": symbol,
+                            "project": project,
+                            "consumer_count": total_available,
+                            "surfaces_used": surfaces_used,
+                            "surfaces_degraded": surfaces_degraded,
+                            "total_available": total_available,
+                            "next_call_hint": "inspect symbol=<consumer-name> for callsite detail",
+                        }
+                    }))
                 }
             }
             Err(e) => Some(
