@@ -109,6 +109,19 @@ impl McpServer {
             .get("anomaly_summary")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        // REQ-AXO-91519 — GUI-AXO-1003 tri-modal envelope. The diff
+        // operates on persisted anomaly-summary JSON snapshots
+        // (project_status), not on live IstGraph edge sets ; the
+        // `surfaces_used` reflects this (`structural_history_files`
+        // — derived non-canonical). A future slice can layer an
+        // additional `data.edge_delta` block populated from
+        // `ist_snapshot::algorithms::snapshot_edge_diff` if/when
+        // structural snapshots start persisting a graph fingerprint.
+        let metric_delta = diff_metric_summaries(&to_summary, &from_summary);
+        let total_available = metric_delta
+            .as_object()
+            .map(|obj| obj.len() as u64)
+            .unwrap_or(0);
         json!({
             "content": [{ "type": "text", "text": format!(
                 "snapshot_diff compared {} -> {}",
@@ -119,7 +132,7 @@ impl McpServer {
                 "project_code": project_code,
                 "from_snapshot_id": from_snapshot.get("snapshot_id").cloned().unwrap_or(Value::Null),
                 "to_snapshot_id": to_snapshot.get("snapshot_id").cloned().unwrap_or(Value::Null),
-                "metric_delta": diff_metric_summaries(&to_summary, &from_summary),
+                "metric_delta": metric_delta,
                 "storage": {
                     "scope": "derived_non_canonical",
                     "path": structural_history_path(project_code).to_string_lossy().to_string()
@@ -128,7 +141,10 @@ impl McpServer {
                 "confidence": "high",
                 "evidence_sources": ["project_status_snapshots"],
                 "safe_to_act": false,
-                "needs_human_confirmation": false
+                "needs_human_confirmation": false,
+                "surfaces_used": ["structural_history_files"],
+                "total_available": total_available,
+                "next_call_hint": "anomalies project=<code> for deeper structural review"
             }
         })
     }

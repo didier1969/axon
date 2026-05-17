@@ -660,7 +660,23 @@ impl McpServer {
                 if truncated { "medium" } else { "high" },
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        // REQ-AXO-91520 — GUI-AXO-1003 tri-modal envelope. `axon_diff`
+        // parses a git diff and resolves the touched files to Symbol
+        // rows via batched `Symbol JOIN CONTAINS JOIN File` queries —
+        // a workspace-wide PG scan. RAM migration would require an
+        // `IstGraph::symbols_in_file(path)` reverse index (file →
+        // symbols) which the current snapshot does not maintain ;
+        // additive surface for a follow-up slice. Envelope flags the
+        // PG surface honestly.
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "surfaces_used": ["graph_pg"],
+                "total_available": all_results.len() as u64,
+                "truncated": truncated,
+                "next_call_hint": "impact symbol=<diff-touched-symbol> for blast radius"
+            }
+        }))
     }
 
     pub(crate) fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
