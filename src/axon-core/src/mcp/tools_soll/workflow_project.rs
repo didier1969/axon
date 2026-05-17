@@ -1035,22 +1035,17 @@ impl McpServer {
             ));
         }
 
-        // MIL-AXO-015: under PG, IST tables are now multi-project
-        // (post-CPT-AXO-039 supersedure 2026-05-08) and provisioned
-        // once by `bootstrap_global_pg_schema`. `generate_project_schema`
-        // is preserved for API stability (still validates the
-        // project_code shape) but emits zero DDL — there's no per-project
-        // schema to materialise. The call is kept here so any future
-        // per-project setup hooks (e.g., AGE label registration) have a
-        // clear extension point.
-        if self.graph_store.is_postgres_backend() {
-            if let Err(e) = crate::postgres::ddl::generate_project_schema(&project_code) {
-                tracing::warn!(
-                    project_code = %project_code,
-                    error = %e,
-                    "axon_init_project: project_code validation failed; registry entry created"
-                );
-            }
+        // IST tables are multi-project under PG (post-CPT-AXO-039
+        // supersedure 2026-05-08), provisioned once by
+        // `bootstrap_global_pg_schema`. `generate_project_schema` emits
+        // zero DDL — it only validates project_code shape — and is
+        // preserved as an extension point for future per-project setup.
+        if let Err(e) = crate::postgres::ddl::generate_project_schema(&project_code) {
+            tracing::warn!(
+                project_code = %project_code,
+                error = %e,
+                "axon_init_project: project_code validation failed; registry entry created"
+            );
         }
 
         let rows_raw = self.graph_store.query_json(

@@ -56,10 +56,10 @@ impl McpServer {
             _ => return Err(anyhow!("Unknown id kind")),
         };
 
-        // MIL-AXO-020 slice 1 — PG fast path. The DDL function ensures
-        // atomic per-(type, project_code) increment in a single round
-        // trip and surfaces unregistered-project errors via RAISE.
-        if let (true, Some(node_type)) = (self.graph_store.is_postgres_backend(), node_type) {
+        // MIL-AXO-020 slice 1 — DDL function ensures atomic
+        // per-(type, project_code) increment in a single round trip and
+        // surfaces unregistered-project errors via RAISE.
+        if let Some(node_type) = node_type {
             let allocated = self
                 .graph_store
                 .query_json_param(
@@ -88,10 +88,8 @@ impl McpServer {
             return Ok((canonical_code, project_code, prefix, next));
         }
 
-        // Legacy backend fallback: kept for test fixtures that exercise
-        // the in-process plugin. The race window (SELECT then UPDATE) is
-        // tolerable for single-threaded tests but unsafe in production —
-        // hence the PG branch above is canonical.
+        // `preview` / `revision` have no Node row → they don't go through
+        // `soll.allocate_node_id` ; allocate from the Registry directly.
         self.graph_store.execute_param(
             "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
              VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_code) DO NOTHING",
@@ -181,21 +179,12 @@ impl McpServer {
     ) -> Option<String> {
         let node_type = Self::soll_node_type_for_entity(entity)?;
 
-        let by_metadata = if self.graph_store.is_postgres_backend() {
-            format!(
-                "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata->>'logical_key' = '{}' ORDER BY id DESC LIMIT 1",
-                escape_sql(node_type),
-                escape_sql(project_code),
-                escape_sql(logical_key)
-            )
-        } else {
-            format!(
-                "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
-                escape_sql(node_type),
-                escape_sql(project_code),
-                escape_sql(logical_key)
-            )
-        };
+        let by_metadata = format!(
+            "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata->>'logical_key' = '{}' ORDER BY id DESC LIMIT 1",
+            escape_sql(node_type),
+            escape_sql(project_code),
+            escape_sql(logical_key)
+        );
         if let Some(found) = query_first_sql_cell(self, &by_metadata) {
             return Some(found);
         }
