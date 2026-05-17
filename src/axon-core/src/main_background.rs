@@ -1289,7 +1289,7 @@ pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
 
 pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
     tokio::spawn(async move {
-        info!("Autonomous Ingestor: Ignition. Monitoring DuckDB for work...");
+        info!("Autonomous Ingestor: Ignition. Monitoring PostgreSQL for work...");
         let memory_limit = memory_limit_bytes();
         let mut last_mode: Option<ClaimMode> = None;
         let mut idle = true;

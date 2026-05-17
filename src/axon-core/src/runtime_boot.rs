@@ -660,7 +660,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     let graph_store = match graph_store_result {
         Ok(store) => Arc::new(store),
         Err(e) => {
-            error!("Fatal Error initializing DuckDB: {:?}", e);
+            error!("Fatal Error initializing GraphStore: {:?}", e);
             return Err(e);
         }
     };

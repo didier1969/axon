@@ -233,7 +233,7 @@ impl GraphStore {
         unsafe {
             let writer_ptr = init_fn(writer_c_path.as_ptr(), false);
             if writer_ptr.is_null() {
-                return Err(anyhow!("Failed to init DuckDB Writer"));
+                return Err(anyhow!("Failed to init PostgreSQL writer"));
             }
 
             let pool = Arc::new(LatticePool {
@@ -288,7 +288,7 @@ impl GraphStore {
             } else {
                 let ptr = init_fn(reader_c_path.as_ptr(), true);
                 if ptr.is_null() {
-                    return Err(anyhow!("Failed to init DuckDB Reader"));
+                    return Err(anyhow!("Failed to init PostgreSQL reader"));
                 }
                 ptr
             };
