@@ -882,10 +882,11 @@ mod tests {
 
     #[test]
     fn relation_table_sql_names_match_ddl_targets() {
-        // Sanity gate: the SQL names line up with the schema in
-        // `crate::postgres::ddl::ist_ddl_global` so a future rename of
-        // either side fails the test instead of silently routing
-        // COPY BINARY into a phantom table.
+        // Sanity gate: the SQL names line up with the canonical DDL in
+        // `db/ddl/03_ist_schema.sql` (loaded via
+        // `crate::postgres::ddl::load_canonical_ddl_files`) so a future
+        // rename of either side fails the test instead of silently
+        // routing COPY BINARY into a phantom table.
         assert_eq!(RelationTable::Contains.sql_name(), "public.CONTAINS");
         assert_eq!(RelationTable::Calls.sql_name(), "public.CALLS");
         assert_eq!(RelationTable::CallsNif.sql_name(), "public.CALLS_NIF");
