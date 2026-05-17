@@ -2430,6 +2430,41 @@ pub(crate) fn spawn_ingress_promoter(
     });
 }
 
+/// REQ-AXO-91561 — directory name segments that MUST never be subscribed to
+/// recursively by the FS watcher. Cargo `target/`, Mix `_build/`, NPM
+/// `node_modules/`, etc. emit millions of inotify events during normal
+/// build cycles ; under broad `AXON_WATCH_DIR` (e.g. `$HOME/projects`)
+/// the debouncer buffer + ingress_buffer balloon and the indexer was
+/// OOM-killed at ~24 GB anon-rss on a 31 GB host (3 kernel-level kills
+/// observed 2026-05-17). The gitignore-aware scanner filters these
+/// directories *after* events arrive ; we must filter them BEFORE
+/// subscribing or while routing events.
+pub(crate) const EXCLUDED_BUILD_DIR_SEGMENTS: &[&str] = &[
+    "target",        // Rust
+    "_build",        // Elixir / Mix
+    "node_modules",  // Node / npm / yarn / pnpm
+    "build",         // Generic build output
+    "dist",          // Bundled output
+    "out",           // Generic
+    "vendor",        // Go
+    "__pycache__",   // Python bytecode
+    "coverage",      // Test coverage output
+    "cargo-target",  // Custom Cargo target dirs
+];
+
+/// REQ-AXO-91561 — true when any path segment matches an entry in
+/// `EXCLUDED_BUILD_DIR_SEGMENTS`. Used both at watch-subscription time
+/// (skip recursive watch on these subtrees) and at event-routing time
+/// (drop events whose path crosses one of these segments anywhere).
+pub(crate) fn path_in_excluded_build_dir(path: &Path) -> bool {
+    path.components().any(|comp| {
+        comp.as_os_str()
+            .to_str()
+            .map(|seg| EXCLUDED_BUILD_DIR_SEGMENTS.contains(&seg))
+            .unwrap_or(false)
+    })
+}
+
 fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
     let Some(preferred_root) = preferred_root else {
         return Vec::new();
@@ -2455,6 +2490,11 @@ fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget>
             continue;
         };
         if name.starts_with('.') {
+            continue;
+        }
+        // REQ-AXO-91561 — exclude build-artefact directories from
+        // recursive watch. See module-level constant for rationale.
+        if EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
             continue;
         }
         if std::fs::read_dir(&path).is_err() {
@@ -2728,12 +2768,32 @@ fn handle_watcher_events(
         Ok(events) => {
             let mut paths = Vec::new();
             let mut rescan_requested = false;
+            let mut excluded_paths: u64 = 0;
 
             for event in events {
                 if event.need_rescan() {
                     rescan_requested = true;
                 }
-                paths.extend(event.paths.iter().cloned());
+                // REQ-AXO-91561 — drop paths that cross any excluded
+                // build-artefact directory segment (target/, _build/,
+                // node_modules/, …). Nested build dirs inside watched
+                // subtrees are filtered here even when the top-level
+                // subscription couldn't avoid them.
+                for raw_path in event.paths.iter() {
+                    if path_in_excluded_build_dir(raw_path) {
+                        excluded_paths += 1;
+                        continue;
+                    }
+                    paths.push(raw_path.clone());
+                }
+            }
+
+            if excluded_paths > 0 {
+                watcher_probe::record(
+                    "watcher.excluded_build_dir",
+                    None,
+                    format!("excluded={excluded_paths}"),
+                );
             }
 
             let cold_arm_completed_at = cold_arm_completed_at.lock().ok().and_then(|guard| *guard);
@@ -3188,6 +3248,8 @@ pub(crate) fn spawn_scope_reconciliation_orchestrator(
 mod tests {
     use super::{
         active_project_hot_targets, admission_controller_decision, bootstrap_salvage_paths,
+        path_in_excluded_build_dir, EXCLUDED_BUILD_DIR_SEGMENTS,
+        // legacy alphabetical pull-up continued below ;
         claim_policy, enqueue_claimed_files, federation_orchestration_candidates_from_identities,
         federation_orchestrator_enabled, filter_orchestration_candidates_by_watch_root,
         flush_ingress_buffer_once, handle_watcher_events, ingress_flush_batch_size,
@@ -3211,7 +3273,7 @@ mod tests {
     use notify_debouncer_full::notify::Error;
     use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::DebouncedEvent;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -4717,5 +4779,81 @@ mod tests {
         // path that breaks DEC-AXO-066 if not honoured)
         let kept = filter_orchestration_candidates_by_watch_root(candidates, "/var/empty");
         assert!(kept.is_empty());
+    }
+
+    // ── REQ-AXO-91561 — watcher build-dir exclusion ──
+    #[test]
+    fn excluded_build_dir_segments_include_canonical_artefact_dirs() {
+        for seg in ["target", "_build", "node_modules", "build", "dist", "vendor"] {
+            assert!(
+                EXCLUDED_BUILD_DIR_SEGMENTS.contains(&seg),
+                "{seg} must be in the canonical exclusion list"
+            );
+        }
+    }
+
+    #[test]
+    fn path_in_excluded_build_dir_detects_top_level_segment() {
+        assert!(path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/axon/target/debug/foo.o"
+        )));
+        assert!(path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/Fiscaly/_build/dev/lib"
+        )));
+        assert!(path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/web/node_modules/react/index.js"
+        )));
+    }
+
+    #[test]
+    fn path_in_excluded_build_dir_detects_nested_segment() {
+        // Monorepo subpackage with its own target dir.
+        assert!(path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/axon/crates/x/target/foo"
+        )));
+    }
+
+    #[test]
+    fn path_in_excluded_build_dir_lets_source_paths_through() {
+        assert!(!path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/axon/src/axon-core/src/main_background.rs"
+        )));
+        assert!(!path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/axon/docs/skills/SKILL.md"
+        )));
+        // `target` as a *substring* of a non-excluded segment must NOT
+        // trigger the filter — only exact segment matches.
+        assert!(!path_in_excluded_build_dir(Path::new(
+            "/home/dstadel/projects/axon/src/target_extractor.rs"
+        )));
+    }
+
+    #[test]
+    fn active_project_hot_targets_excludes_build_dirs_at_top_level() {
+        // Build a fake projects root with one source child + one build child.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("axon")).unwrap();
+        std::fs::create_dir(tmp.path().join("target")).unwrap();
+        std::fs::create_dir(tmp.path().join("_build")).unwrap();
+        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let targets = active_project_hot_targets(Some(tmp.path()));
+        let names: Vec<String> = targets
+            .iter()
+            .filter_map(|t| {
+                t.path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(String::from)
+            })
+            .collect();
+
+        // The root itself + only the non-build, non-hidden child.
+        assert!(names.iter().any(|n| n == "axon"));
+        assert!(!names.iter().any(|n| n == "target"));
+        assert!(!names.iter().any(|n| n == "_build"));
+        assert!(!names.iter().any(|n| n == "node_modules"));
+        assert!(!names.iter().any(|n| n == ".git"));
     }
 }
