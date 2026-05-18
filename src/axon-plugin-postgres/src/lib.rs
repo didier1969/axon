@@ -99,6 +99,19 @@ fn empty_array_cstr() -> *mut c_char {
     CString::new("[]").unwrap().into_raw()
 }
 
+/// Resolve the per-statement timeout (milliseconds) from the env var
+/// `AXON_PG_STATEMENT_TIMEOUT_MS`, defaulting to 30000 (30s). The value
+/// 0 disables the timeout. REQ-AXO-91494 — surfaces planner stalls and
+/// hash-agg/JOIN pathologies as a structured PG error envelope
+/// (`statement_timeout` SQLSTATE 57014) instead of an indistinguishable
+/// silent `[]`.
+fn statement_timeout_ms() -> u64 {
+    std::env::var("AXON_PG_STATEMENT_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30_000)
+}
+
 /// Build the per-connection session-setup SQL, given an optional
 /// validated schema name and whether AGE is loaded in this database.
 ///
@@ -111,8 +124,8 @@ fn empty_array_cstr() -> *mut c_char {
 /// - The project schema goes FIRST so unqualified table names
 ///   (e.g. `File`) resolve to `<schema>.File` exactly as the duckdb
 ///   plugin does today.
-///
-/// Returns `None` when there is nothing to run (no schema, no AGE).
+/// - REQ-AXO-91494 : `SET statement_timeout` ALWAYS runs (independent
+///   of schema/AGE) so silent planner stalls surface as errors.
 fn build_session_setup_sql(schema: Option<&str>, age_enabled: bool) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if age_enabled {
@@ -122,10 +135,20 @@ fn build_session_setup_sql(schema: Option<&str>, age_enabled: bool) -> Option<St
         (Some(s), true) => vec![s, "ag_catalog", "public"],
         (Some(s), false) => vec![s, "public"],
         (None, true) => vec!["ag_catalog", "public"],
-        (None, false) => return None,
+        (None, false) => vec![],
     };
-    parts.push(format!("SET search_path TO {}", path.join(", ")));
-    Some(parts.join("; "))
+    if !path.is_empty() {
+        parts.push(format!("SET search_path TO {}", path.join(", ")));
+    }
+    let timeout_ms = statement_timeout_ms();
+    if timeout_ms > 0 {
+        parts.push(format!("SET statement_timeout TO {timeout_ms}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
 }
 
 /// Run session-setup statements on a freshly acquired connection.
@@ -657,6 +680,16 @@ fn decode_params(json_str: &str) -> Result<Vec<OwnedParam>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-var mutations across parallel test threads. Each
+    // test that flips `AXON_PG_STATEMENT_TIMEOUT_MS` must hold this
+    // lock for the whole set+assert+unset cycle.
+    fn env_lock() -> &'static Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn schema_validation_rejects_injection() {
@@ -737,20 +770,29 @@ mod tests {
 
     #[test]
     fn session_setup_sql_combinations_are_well_formed() {
-        // No schema, no AGE — nothing to do.
-        assert_eq!(build_session_setup_sql(None, false), None);
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Lock env var to a deterministic value so the assertions
+        // below remain stable regardless of test-process env.
+        std::env::set_var("AXON_PG_STATEMENT_TIMEOUT_MS", "30000");
 
-        // Schema only — preserves the duckdb plugin's prior contract.
+        // No schema, no AGE — still emits the timeout setting (REQ-AXO-91494).
+        assert_eq!(
+            build_session_setup_sql(None, false).unwrap(),
+            "SET statement_timeout TO 30000"
+        );
+
+        // Schema only — preserves the duckdb plugin's prior search_path
+        // contract, then appends the timeout (REQ-AXO-91494).
         assert_eq!(
             build_session_setup_sql(Some("axo"), false).unwrap(),
-            "SET search_path TO axo, public"
+            "SET search_path TO axo, public; SET statement_timeout TO 30000"
         );
 
         // AGE only — `LOAD 'age'` precedes the SET, ag_catalog first
         // so unqualified cypher() / agtype operators resolve.
         assert_eq!(
             build_session_setup_sql(None, true).unwrap(),
-            "LOAD 'age'; SET search_path TO ag_catalog, public"
+            "LOAD 'age'; SET search_path TO ag_catalog, public; SET statement_timeout TO 30000"
         );
 
         // Schema + AGE — project schema first (so unqualified table
@@ -758,7 +800,24 @@ mod tests {
         // visible for cypher() / agtype.
         assert_eq!(
             build_session_setup_sql(Some("axo"), true).unwrap(),
-            "LOAD 'age'; SET search_path TO axo, ag_catalog, public"
+            "LOAD 'age'; SET search_path TO axo, ag_catalog, public; SET statement_timeout TO 30000"
         );
+
+        std::env::remove_var("AXON_PG_STATEMENT_TIMEOUT_MS");
+    }
+
+    #[test]
+    fn session_setup_omits_timeout_when_env_zero() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // REQ-AXO-91494 — `AXON_PG_STATEMENT_TIMEOUT_MS=0` disables the
+        // timeout (test/dev override). With no other setup needed, the
+        // builder returns None.
+        std::env::set_var("AXON_PG_STATEMENT_TIMEOUT_MS", "0");
+        assert_eq!(build_session_setup_sql(None, false), None);
+        assert_eq!(
+            build_session_setup_sql(Some("axo"), false).unwrap(),
+            "SET search_path TO axo, public"
+        );
+        std::env::remove_var("AXON_PG_STATEMENT_TIMEOUT_MS");
     }
 }
