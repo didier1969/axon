@@ -31,6 +31,7 @@ Live 44127-44132 / dev 44137-44142. Brain = MCP + SOLL writer. Indexer = IST wri
 | SOLL intent / relation | `soll_query_context` / `soll_relation_schema` |
 | Raw SQL (after `schema_overview`) | `sql` |
 | SOLL batch / single | `soll_apply_plan` (`dry_run=true`) / `soll_manager` |
+| Methodology surface (REQ-AXO-91580/81/82) | `skill_list` → `skill_invoke` ; `prompt_template_get` ; `re_anchor reason=<signal>` for single-call context refresh |
 
 ## Recovery
 
