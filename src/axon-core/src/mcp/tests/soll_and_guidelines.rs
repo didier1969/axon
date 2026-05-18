@@ -8495,9 +8495,11 @@ fn test_status_returns_methodology_drift_warnings_field() {
     );
     assert_eq!(
         drift.get("tracking_version").and_then(|v| v.as_str()),
-        Some("v0_no_audit"),
-        "v0 tracking flag must be explicit"
+        Some("v1_inmemory_audit"),
+        "v1 tracking flag must be explicit"
     );
+    assert!(drift.get("recently_invoked").is_some());
+    assert!(drift.get("drift_warnings").is_some());
 }
 
 

@@ -11,8 +11,60 @@
 // (re-anchor pattern) for the LLM-autonomy story this surface enables.
 
 use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
 
 use super::McpServer;
+
+// REQ-AXO-91583 slice 2 — in-process ring buffer logging recent skill_invoke
+// calls. Used by methodology_drift_warnings to compute the diff
+// `mandated_skills - invoked_in_last_K_turns` and surface drift via status().
+// Per-process, capped at 256 entries (rolling). Reset on brain restart by
+// design — a fresh process is a fresh session.
+const SKILL_AUDIT_RING_CAP: usize = 256;
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillInvocationAuditEntry {
+    pub(crate) id: String,
+    pub(crate) at_unix_ms: u128,
+}
+
+fn skill_audit_ring() -> &'static Mutex<VecDeque<SkillInvocationAuditEntry>> {
+    static RING: OnceLock<Mutex<VecDeque<SkillInvocationAuditEntry>>> = OnceLock::new();
+    RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(SKILL_AUDIT_RING_CAP)))
+}
+
+pub(crate) fn record_skill_invocation(id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut ring) = skill_audit_ring().lock() {
+        if ring.len() >= SKILL_AUDIT_RING_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(SkillInvocationAuditEntry {
+            id: id.to_string(),
+            at_unix_ms: now_ms,
+        });
+    }
+}
+
+pub(crate) fn recent_skill_invocations(window_ms: u128) -> Vec<SkillInvocationAuditEntry> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(ring) = skill_audit_ring().lock() {
+        let threshold = now_ms.saturating_sub(window_ms);
+        ring.iter()
+            .filter(|entry| entry.at_unix_ms >= threshold)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
 
 impl McpServer {
     /// REQ-AXO-91580 — `mcp__axon__skill_list(applicable_to?, mode_filter?, project_code?)`.
@@ -269,6 +321,10 @@ impl McpServer {
         let project_code = row[5].clone();
 
         let context = arguments.get("context").cloned().unwrap_or_else(|| json!({}));
+
+        // REQ-AXO-91583 slice 2 — record this invocation in the per-process
+        // ring buffer so methodology_drift_warnings can compute real diffs.
+        record_skill_invocation(&id);
 
         let display = format!(
             "## 🛠️ Skill `{}` — {}\n\n**Status** : {} · **Project** : {}\n\n{}",

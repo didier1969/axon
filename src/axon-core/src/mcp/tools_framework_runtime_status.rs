@@ -1123,10 +1123,12 @@ impl McpServer {
         Some(response)
     }
 
-    /// REQ-AXO-91583 — v0 drift surface : list MANDATED SKI ids for the
-    /// cross-tenant PRO namespace. Returns `{mandated_skills:[...], tracking_version:"v0_no_audit"}`.
-    /// Future slice instruments skill_invoke audit and computes the diff
-    /// `mandated_set - invoked_in_last_K_turns`.
+    /// REQ-AXO-91583 — methodology drift surface. v1 reads the SOLL MANDATED
+    /// SKI set + the per-process skill_invoke audit ring buffer
+    /// (super::tools_skill::recent_skill_invocations) and computes the diff
+    /// `mandated_set - invoked_in_last_window_ms`. Default window = 30 min.
+    /// Returns `{mandated_skills, recently_invoked, drift_warnings,
+    /// tracking_version: "v1_inmemory_audit"}`.
     fn methodology_drift_warnings_v0(&self) -> Value {
         let rows = self
             .graph_store
@@ -1140,15 +1142,47 @@ impl McpServer {
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
             .unwrap_or_default();
-        let mandated: Vec<Value> = rows
+        let mandated: Vec<(String, String)> = rows
             .into_iter()
             .filter(|r| r.len() >= 2)
-            .map(|r| json!({ "id": r[0], "title": r[1] }))
+            .map(|r| (r[0].clone(), r[1].clone()))
             .collect();
+
+        // REQ-AXO-91583 slice 2 — read the audit ring buffer for the last 30min window.
+        const DRIFT_WINDOW_MS: u128 = 30 * 60 * 1000;
+        let recent = super::tools_skill::recent_skill_invocations(DRIFT_WINDOW_MS);
+        let recent_ids: std::collections::HashSet<String> =
+            recent.iter().map(|e| e.id.clone()).collect();
+
+        let drift_warnings: Vec<Value> = mandated
+            .iter()
+            .filter(|(id, _)| !recent_ids.contains(id))
+            .map(|(id, title)| {
+                json!({
+                    "skill_id": id,
+                    "title": title,
+                    "warning": "MANDATED skill not invoked in last 30 min — methodology drift signal",
+                })
+            })
+            .collect();
+
+        let mandated_json: Vec<Value> = mandated
+            .iter()
+            .map(|(id, title)| json!({ "id": id, "title": title }))
+            .collect();
+
+        let recently_invoked_json: Vec<Value> = recent
+            .iter()
+            .map(|e| json!({ "id": e.id, "at_unix_ms": e.at_unix_ms }))
+            .collect();
+
         json!({
-            "mandated_skills": mandated,
-            "tracking_version": "v0_no_audit",
-            "llm_instruction": "Verify your session has invoked each MANDATED skill at least once. Real audit tracking ships in REQ-AXO-91583 slice 2.",
+            "mandated_skills": mandated_json,
+            "recently_invoked": recently_invoked_json,
+            "drift_warnings": drift_warnings,
+            "window_minutes": 30,
+            "tracking_version": "v1_inmemory_audit",
+            "llm_instruction": "drift_warnings is non-empty when MANDATED skills haven't been invoked in the audit window — invoke them via mcp__axon__skill_invoke or re_anchor for canonical state.",
         })
     }
 
