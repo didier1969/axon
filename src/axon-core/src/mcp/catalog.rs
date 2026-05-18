@@ -89,15 +89,15 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Create/update/link intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`.",
+                "description": "[SOLL] Create/update/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.Revision + soll.RevisionChange) — symmetric to action=link.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["create", "update", "link"], "description": "The operation to perform." },
+                        "action": { "type": "string", "enum": ["create", "update", "link", "unlink"], "description": "The operation to perform." },
                         "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline", "skill", "prompt_template"], "description": "The target entity type." },
                         "data": {
                             "type": "object",
-                            "description": "JSON data. \n- create: provide `project_code` (+ `attach_to` and `relation_type` once slice 3 lands) only; the server allocates the canonical id `TYPE-CODE-NNN` via soll.allocate_node_id and returns it in the response.\n- update: canonical `id` required, plus the fields being modified (status/title/description/metadata/...).\n- link: canonical `source_id` + `target_id` + `relation_type` (e.g. REFINES, SOLVES, BELONGS_TO, EPITOMIZES, SUPERSEDES). See `soll_relation_schema` for the canonical pair table."
+                            "description": "JSON data. \n- create: provide `project_code` + `attach_to` + `relation_type`; the server allocates the canonical id `TYPE-CODE-NNN` via soll.allocate_node_id and returns it in the response.\n- update: canonical `id` required, plus the fields being modified (status/title/description/metadata/...).\n- link: canonical `source_id` + `target_id` + `relation_type` (e.g. REFINES, SOLVES, BELONGS_TO, EPITOMIZES, SUPERSEDES). See `soll_relation_schema` for the canonical pair table.\n- unlink: canonical `source_id` + `target_id` + `relation_type` (all required ; no inference). Optional `force` (bool, default false) — required for protected edges (EPITOMIZES Pillar→Vision). Records soll.Revision + soll.RevisionChange with before_json for audit."
                         }
                     },
                     "required": ["action", "entity", "data"]

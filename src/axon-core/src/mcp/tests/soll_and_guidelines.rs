@@ -8774,6 +8774,280 @@ fn test_status_returns_methodology_drift_warnings_field() {
     assert!(drift.get("drift_warnings").is_some());
 }
 
+// REQ-AXO-91592 — soll_manager(action=unlink) round-trip : create + link
+// then unlink ; the edge disappears and an audit revision is recorded.
+#[test]
+fn test_soll_manager_unlink_round_trip() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE source_id IN ('DEC-AXO-901592','REQ-AXO-901592')");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('DEC-AXO-901592','REQ-AXO-901592')");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-901592', 'Decision', 'AXO', 'Test Decision', 'context', 'current', '{\"context\":\"ctx\",\"rationale\":\"r\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-901592', 'Requirement', 'AXO', 'Test Req', 'd', 'planned', '{\"priority\":\"P1\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('DEC-AXO-901592', 'REQ-AXO-901592', 'SOLVES', 'AXO') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING")
+        .unwrap();
 
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "unlink",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-901592",
+                    "target_id": "REQ-AXO-901592",
+                    "relation_type": "SOLVES"
+                }
+            }
+        })),
+        id: Some(json!(91592)),
+    };
+    let resp = server.handle_request(req).unwrap();
+    let result = resp.result.unwrap();
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        data.get("edges_removed").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+
+    // Edge gone.
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='DEC-AXO-901592' AND target_id='REQ-AXO-901592' AND relation_type='SOLVES'"
+            )
+            .unwrap(),
+        0,
+        "edge must be removed"
+    );
+    // Audit row present.
+    let revision_id = data
+        .get("revision_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(revision_id.starts_with("unlink-"), "revision_id format");
+    let count_changes = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.RevisionChange WHERE revision_id='{}' AND action='unlink' AND entity_type='edge'",
+            revision_id.replace('\'', "''")
+        ))
+        .unwrap();
+    assert_eq!(count_changes, 1, "RevisionChange row must be recorded");
+}
+
+// REQ-AXO-91592 — unlink on a non-existent edge returns `edge_not_found`.
+#[test]
+fn test_soll_manager_unlink_edge_not_found() {
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "unlink",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-919999",
+                    "target_id": "REQ-AXO-919999",
+                    "relation_type": "SOLVES"
+                }
+            }
+        })),
+        id: Some(json!(91592)),
+    };
+    let resp = server.handle_request(req).unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let data = result.get("data").unwrap();
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("edge_not_found")
+    );
+    let repair = data.get("parameter_repair").unwrap();
+    assert_eq!(
+        repair.get("category").and_then(|v| v.as_str()),
+        Some("edge_not_found")
+    );
+}
+
+// REQ-AXO-91592 — missing relation_type is structured input_invalid (no
+// inference ; the caller MUST identify the exact edge).
+#[test]
+fn test_soll_manager_unlink_requires_relation_type() {
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "unlink",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-901",
+                    "target_id": "REQ-AXO-901"
+                }
+            }
+        })),
+        id: Some(json!(91592)),
+    };
+    let resp = server.handle_request(req).unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let data = result.get("data").unwrap();
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("input_invalid")
+    );
+    assert_eq!(
+        data.get("parameter_repair")
+            .and_then(|p| p.get("invalid_field"))
+            .and_then(|v| v.as_str()),
+        Some("data.relation_type")
+    );
+}
+
+// REQ-AXO-91592 — EPITOMIZES is protected ; unlink without force=true is
+// refused with the `protected_edge` envelope.
+#[test]
+fn test_soll_manager_unlink_protected_without_force() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE relation_type='EPITOMIZES' AND source_id='PIL-AXO-902' AND target_id='VIS-AXO-902'");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('PIL-AXO-902','VIS-AXO-902')");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-902', 'Vision', 'AXO', 'Test Vision', 'd', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-902', 'Pillar', 'AXO', 'Test Pillar', 'd', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('PIL-AXO-902', 'VIS-AXO-902', 'EPITOMIZES', 'AXO') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "unlink",
+                "entity": "pillar",
+                "data": {
+                    "source_id": "PIL-AXO-902",
+                    "target_id": "VIS-AXO-902",
+                    "relation_type": "EPITOMIZES"
+                }
+            }
+        })),
+        id: Some(json!(91592)),
+    };
+    let resp = server.handle_request(req).unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let data = result.get("data").unwrap();
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("input_invalid")
+    );
+    assert_eq!(
+        data.get("parameter_repair")
+            .and_then(|p| p.get("category"))
+            .and_then(|v| v.as_str()),
+        Some("protected_edge")
+    );
+    // Edge MUST still be present.
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='PIL-AXO-902' AND target_id='VIS-AXO-902' AND relation_type='EPITOMIZES'"
+            )
+            .unwrap(),
+        1,
+        "protected edge must NOT be removed without force"
+    );
+}
+
+// REQ-AXO-91592 — EPITOMIZES with explicit force=true is honoured ; the
+// edge is removed and audit recorded.
+#[test]
+fn test_soll_manager_unlink_protected_with_force() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE relation_type='EPITOMIZES' AND source_id='PIL-AXO-903' AND target_id='VIS-AXO-903'");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('PIL-AXO-903','VIS-AXO-903')");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-903', 'Vision', 'AXO', 'Test Vision', 'd', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-903', 'Pillar', 'AXO', 'Test Pillar', 'd', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('PIL-AXO-903', 'VIS-AXO-903', 'EPITOMIZES', 'AXO') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "unlink",
+                "entity": "pillar",
+                "data": {
+                    "source_id": "PIL-AXO-903",
+                    "target_id": "VIS-AXO-903",
+                    "relation_type": "EPITOMIZES",
+                    "force": true
+                }
+            }
+        })),
+        id: Some(json!(91592)),
+    };
+    let resp = server.handle_request(req).unwrap();
+    let result = resp.result.unwrap();
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='PIL-AXO-903' AND target_id='VIS-AXO-903' AND relation_type='EPITOMIZES'"
+            )
+            .unwrap(),
+        0,
+        "force=true must allow removal of the protected edge"
+    );
+}
 
 

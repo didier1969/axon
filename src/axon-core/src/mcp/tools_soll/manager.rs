@@ -1251,6 +1251,252 @@ impl McpServer {
                     })),
                 }
             }
+            // REQ-AXO-91592 — symmetric counterpart of action=link. Removes
+            // a single SOLL edge (one row in soll.Edge) and records the
+            // operation in soll.Revision + soll.RevisionChange for audit.
+            // Required: data.source_id, data.target_id, data.relation_type.
+            // Optional: data.force (bool, default false) — required for the
+            // canonical EPITOMIZES Pillar→Vision structural edge.
+            "unlink" => {
+                let src = match data.get("source_id").and_then(|v| v.as_str()) {
+                    Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+                    _ => {
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "soll_manager(unlink): required `data.source_id` is missing."
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "required_field_missing",
+                                    "invalid_field": "data.source_id",
+                                    "hint": "supply data.source_id (canonical SOLL id, e.g. GUI-AXO-1005)",
+                                }
+                            }
+                        }));
+                    }
+                };
+                let tgt = match data.get("target_id").and_then(|v| v.as_str()) {
+                    Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+                    _ => {
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "soll_manager(unlink): required `data.target_id` is missing."
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "required_field_missing",
+                                    "invalid_field": "data.target_id",
+                                    "hint": "supply data.target_id (canonical SOLL id)",
+                                }
+                            }
+                        }));
+                    }
+                };
+                let relation_type = match data.get("relation_type").and_then(|v| v.as_str()) {
+                    Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+                    _ => {
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "soll_manager(unlink): required `data.relation_type` is missing — unlink does not infer; identify the exact edge to remove."
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "required_field_missing",
+                                    "invalid_field": "data.relation_type",
+                                    "hint": "supply data.relation_type (e.g. INHERITS_FROM, BELONGS_TO). Use `sql SELECT relation_type FROM soll.Edge WHERE source_id='<src>' AND target_id='<tgt>'` to discover the existing label.",
+                                }
+                            }
+                        }));
+                    }
+                };
+                let force = data.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                // Protection — EPITOMIZES is the canonical Pillar→Vision
+                // structural edge that EPITOMIZES the Vision; removing it
+                // silently would orphan a Pillar from its anchor. Require
+                // explicit force=true.
+                const PROTECTED_RELATIONS: [&str; 1] = ["EPITOMIZES"];
+                if PROTECTED_RELATIONS.contains(&relation_type.as_str()) && !force {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "soll_manager(unlink): `{}` is a protected relation type; supply data.force=true to confirm removal.",
+                                relation_type
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "protected_edge",
+                                "invalid_field": "data.force",
+                                "source_id": src,
+                                "target_id": tgt,
+                                "relation_type": relation_type,
+                                "hint": "EPITOMIZES anchors Pillars to the Vision (PIL→VIS). Set data.force=true if you really intend to break that anchor.",
+                            }
+                        }
+                    }));
+                }
+
+                let match_count = self
+                    .graph_store
+                    .query_count_param(
+                        "SELECT count(*) FROM soll.Edge WHERE source_id=? AND target_id=? AND relation_type=?",
+                        &json!([src, tgt, relation_type]),
+                    )
+                    .unwrap_or(0);
+
+                if match_count == 0 {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "soll_manager(unlink): no edge matches `{}` -[{}]-> `{}`.",
+                                src, relation_type, tgt
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "edge_not_found",
+                            "parameter_repair": {
+                                "tool": "soll_manager",
+                                "category": "edge_not_found",
+                                "source_id": src,
+                                "target_id": tgt,
+                                "relation_type": relation_type,
+                                "hint": "verify the edge exists via `sql SELECT * FROM soll.Edge WHERE source_id='<src>' AND target_id='<tgt>'`",
+                            }
+                        }
+                    }));
+                }
+
+                // Audit + delete. soll.Edge has a (source_id, target_id,
+                // relation_type) PK so match_count is always 0 or 1 in
+                // practice ; we still parameterise on count for forward
+                // compat with any seed buggy enough to bypass the PK.
+                let project_code = project_code_from_canonical_entity_id(&src)
+                    .or_else(|| project_code_from_canonical_entity_id(&tgt))
+                    .unwrap_or_else(|| "AXO".to_string());
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let revision_id = format!("unlink-{}-{}", now_ms, src);
+                let entity_id = format!("{}:{}:{}", src, relation_type, tgt);
+                let before_json = json!({
+                    "source_id": src,
+                    "target_id": tgt,
+                    "relation_type": relation_type,
+                });
+                let summary = format!("unlink: {} -[{}]-> {}", src, relation_type, tgt);
+
+                // Two separate INSERTs + one DELETE — kept as three calls
+                // because the existing graph_store API does not expose a
+                // multi-statement transaction handle. The PG plugin runs
+                // each call in implicit-commit mode ; the failure window is
+                // tiny and the audit row would surface a half-applied
+                // unlink (revision present, edge still there) which the
+                // operator can re-execute idempotently. A future REQ may
+                // wrap this in an explicit BEGIN/COMMIT.
+                if let Err(e) = self.graph_store.execute_param(
+                    "INSERT INTO soll.Revision (revision_id, project_code, author, source, summary, status, created_at, committed_at) \
+                     VALUES (?, ?, 'soll_manager', 'mcp.unlink', ?, 'committed', ?, ?)",
+                    &json!([
+                        revision_id,
+                        project_code,
+                        summary,
+                        now_ms,
+                        now_ms,
+                    ]),
+                ) {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("soll_manager(unlink): revision insert failed: {}", e)
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "internal_error",
+                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                        }
+                    }));
+                }
+                if let Err(e) = self.graph_store.execute_param(
+                    "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, project_code, action, before_json, after_json, created_at) \
+                     VALUES (?, 'edge', ?, ?, 'unlink', ?::jsonb, NULL, ?)",
+                    &json!([
+                        revision_id,
+                        entity_id,
+                        project_code,
+                        before_json.to_string(),
+                        now_ms,
+                    ]),
+                ) {
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("soll_manager(unlink): revision_change insert failed: {}", e)
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "internal_error",
+                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                        }
+                    }));
+                }
+                match self.graph_store.execute_param(
+                    "DELETE FROM soll.Edge WHERE source_id=? AND target_id=? AND relation_type=?",
+                    &json!([src, tgt, relation_type]),
+                ) {
+                    Ok(()) => Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Edge removed: `{}` -[{}]-> `{}` (revision {})",
+                                src, relation_type, tgt, revision_id
+                            )
+                        }],
+                        "data": {
+                            "status": "ok",
+                            "edges_removed": match_count,
+                            "revision_id": revision_id,
+                            "source_id": src,
+                            "target_id": tgt,
+                            "relation_type": relation_type,
+                        }
+                    })),
+                    Err(e) => Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("soll_manager(unlink): delete failed: {}", e)
+                        }],
+                        "isError": true,
+                        "data": {
+                            "status": "internal_error",
+                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                            "audit_warning": format!(
+                                "revision row {} was inserted before the DELETE failed ; re-run the unlink to converge",
+                                revision_id
+                            ),
+                        }
+                    })),
+                }
+            }
             _ => None,
         }
     }
