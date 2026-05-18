@@ -401,4 +401,206 @@ impl McpServer {
             }
         }))
     }
+
+    /// REQ-AXO-91582 — `mcp__axon__re_anchor(reason?, project_code?)`.
+    ///
+    /// Single-call "where am I" packet for LLM autonomy + memory refresh.
+    /// Per CPT-AXO-90018 (re-anchor pattern), returns the canonical state
+    /// snapshot an LLM needs to recover orientation after context drift,
+    /// long pause, or compact. Replaces 4-6 sequential MCP calls (status +
+    /// soll_query_context + soll_work_plan + session_pointer read) with
+    /// one envelope. Cheap (~10ms localhost via SOLL-RAM) so the LLM can
+    /// invoke it periodically without economic penalty.
+    ///
+    /// Returned packet :
+    ///   - `active_methodology` : current Pillars + recent Decisions
+    ///   - `mandated_skills` : SKI nodes with invocation_mode='MANDATED'
+    ///   - `recent_revisions` : last N soll.Revision rows for the project
+    ///   - `session_pointer` : body of the canonical CPT-{P}-NNN session_pointer
+    ///   - `work_plan_top` : top of soll_work_plan (unblockers)
+    ///   - `reason` : echo of caller's reason (for audit / telemetry)
+    pub(crate) fn axon_re_anchor(&self, arguments: &Value) -> Option<Value> {
+        let reason = arguments
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unspecified")
+            .to_string();
+        let project_code = arguments
+            .get("project_code")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| "AXO".to_string());
+        let escaped_code = project_code.replace('\'', "''");
+
+        let query_string = |sql: &str| -> Vec<Vec<String>> {
+            self.graph_store
+                .query_json(sql)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+                .unwrap_or_default()
+        };
+
+        // Active Pillars + recent Decisions.
+        let pillar_rows = query_string(&format!(
+            "SELECT id, COALESCE(title, ''), COALESCE(status, '') \
+             FROM soll.Node \
+             WHERE type='Pillar' AND status='current' AND project_code='{}' \
+             ORDER BY id",
+            escaped_code
+        ));
+        let pillars: Vec<Value> = pillar_rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| {
+                json!({ "id": r[0], "title": r[1], "status": r[2] })
+            })
+            .collect();
+
+        let decision_rows = query_string(&format!(
+            "SELECT id, COALESCE(title, ''), COALESCE(status, '') \
+             FROM soll.Node \
+             WHERE type='Decision' AND status IN ('current','delivered') AND project_code='{}' \
+             ORDER BY id DESC LIMIT 10",
+            escaped_code
+        ));
+        let recent_decisions: Vec<Value> = decision_rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| json!({ "id": r[0], "title": r[1], "status": r[2] }))
+            .collect();
+
+        // MANDATED skills (and OPTIONAL/RECOMMENDED — operator can filter).
+        let skill_rows = query_string(&format!(
+            "SELECT id, COALESCE(title, ''), COALESCE(metadata::text, '{{}}') \
+             FROM soll.Node \
+             WHERE type='Skill' AND status='current' AND project_code='{}' \
+             ORDER BY id",
+            escaped_code
+        ));
+        let mut mandated_skills: Vec<Value> = Vec::new();
+        for row in &skill_rows {
+            if row.len() < 3 {
+                continue;
+            }
+            let metadata: Value = serde_json::from_str(&row[2]).unwrap_or_else(|_| json!({}));
+            let mode = metadata
+                .get("invocation_mode")
+                .and_then(Value::as_str)
+                .unwrap_or("OPTIONAL")
+                .to_ascii_uppercase();
+            mandated_skills.push(json!({
+                "id": row[0],
+                "title": row[1],
+                "invocation_mode": mode,
+                "applicable_to": metadata.get("applicable_to").cloned().unwrap_or(json!([])),
+            }));
+        }
+
+        // Recent SOLL revisions (last 10).
+        let revision_rows = query_string(&format!(
+            "SELECT revision_id, COALESCE(summary, ''), committed_at \
+             FROM soll.Revision \
+             WHERE project_code='{}' \
+             ORDER BY committed_at DESC LIMIT 10",
+            escaped_code
+        ));
+        let recent_revisions: Vec<Value> = revision_rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| {
+                json!({
+                    "revision_id": r[0],
+                    "summary": r[1],
+                    "committed_at": r[2],
+                })
+            })
+            .collect();
+
+        // Session pointer body — `CPT-{P}-NNN` canonical (default CPT-AXO-052 for AXO).
+        let pointer_id = format!("CPT-{}-052", project_code);
+        let pointer_rows = query_string(&format!(
+            "SELECT id, COALESCE(title, ''), COALESCE(description, '') \
+             FROM soll.Node \
+             WHERE id='{}'",
+            pointer_id.replace('\'', "''")
+        ));
+        let session_pointer = pointer_rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| {
+                json!({
+                    "id": r[0],
+                    "title": r[1],
+                    "body": r[2],
+                })
+            })
+            .next()
+            .unwrap_or(json!(null));
+
+        // Work plan top (just IDs + titles — full scoring lives in soll_work_plan).
+        let work_plan_rows = query_string(&format!(
+            "SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(type, '') \
+             FROM soll.Node \
+             WHERE type IN ('Requirement','Milestone') \
+               AND status='current' AND project_code='{}' \
+             ORDER BY id DESC LIMIT 8",
+            escaped_code
+        ));
+        let work_plan_top: Vec<Value> = work_plan_rows
+            .iter()
+            .filter(|r| r.len() >= 4)
+            .map(|r| {
+                json!({
+                    "id": r[0],
+                    "title": r[1],
+                    "status": r[2],
+                    "type": r[3],
+                })
+            })
+            .collect();
+
+        let summary_text = format!(
+            "## 🧭 Re-anchor `{}` (reason: {})\n\n\
+             - **Active Pillars** : {} ({})\n\
+             - **Recent Decisions** : {} (last 10 current+delivered)\n\
+             - **MANDATED-tagged Skills** : {} (full list in `data.mandated_skills`)\n\
+             - **Recent SOLL revisions** : {} (last 10)\n\
+             - **Work plan top** : {} (current REQ/MIL)\n\
+             - **Session pointer** : {}\n\n\
+             Call `skill_invoke` next per methodology mandate, or `soll_work_plan` for full scoring.",
+            project_code,
+            reason,
+            pillars.len(),
+            pillars
+                .iter()
+                .filter_map(|p| p.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", "),
+            recent_decisions.len(),
+            mandated_skills.len(),
+            recent_revisions.len(),
+            work_plan_top.len(),
+            session_pointer
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("(none)"),
+        );
+
+        Some(json!({
+            "content": [{ "type": "text", "text": summary_text }],
+            "data": {
+                "status": "ok",
+                "project_code": project_code,
+                "reason": reason,
+                "active_methodology": {
+                    "pillars": pillars,
+                    "recent_decisions": recent_decisions,
+                },
+                "mandated_skills": mandated_skills,
+                "recent_revisions": recent_revisions,
+                "session_pointer": session_pointer,
+                "work_plan_top": work_plan_top,
+            }
+        }))
+    }
 }

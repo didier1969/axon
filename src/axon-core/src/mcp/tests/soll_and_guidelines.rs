@@ -8434,4 +8434,38 @@ fn test_prompt_template_get_returns_raw_body() {
     );
 }
 
+// REQ-AXO-91582 — re_anchor MCP tool single-call recovery packet.
+#[test]
+fn test_re_anchor_returns_canonical_state_packet() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "re_anchor",
+            "arguments": { "reason": "test_drift_signal", "project_code": "AXO" }
+        },
+        "id": 91582
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(data.get("project_code").and_then(|v| v.as_str()), Some("AXO"));
+    assert_eq!(
+        data.get("reason").and_then(|v| v.as_str()),
+        Some("test_drift_signal")
+    );
+    // The envelope MUST contain these 5 load-bearing sections per CPT-AXO-90018.
+    assert!(data.get("active_methodology").is_some());
+    assert!(data.get("mandated_skills").is_some());
+    assert!(data.get("recent_revisions").is_some());
+    assert!(data.get("session_pointer").is_some());
+    assert!(data.get("work_plan_top").is_some());
+}
+
+
 

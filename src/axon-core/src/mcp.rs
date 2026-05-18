@@ -1238,6 +1238,8 @@ impl McpServer {
             "skill_list" => self.axon_skill_list(arguments),
             "skill_invoke" => self.axon_skill_invoke(arguments),
             "prompt_template_get" => self.axon_prompt_template_get(arguments),
+            // REQ-AXO-91582 — re_anchor for LLM autonomy + memory refresh.
+            "re_anchor" => self.axon_re_anchor(arguments),
             _ => Some(
                 json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
             ),

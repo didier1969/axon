@@ -306,6 +306,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "re_anchor",
+                "description": "[SOLL] Single-call 'where am I' packet for LLM autonomy + memory refresh per CPT-AXO-90018 design (re-anchor pattern). REQ-AXO-91582. Returns active Pillars + recent Decisions + MANDATED skills + recent SOLL revisions + canonical session_pointer body + work_plan_top in ONE envelope. Replaces 4-6 sequential MCP calls. Cheap (~10ms localhost via SOLL-RAM). LLM should call when context degrades (fill %, repeated errors, drift signal) OR periodically every K turns.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "reason": { "type": "string", "description": "Audit string — why the re-anchor is requested (drift_detected, periodic, completion_check, etc.). Echoed in response for telemetry." },
+                        "project_code": { "type": "string", "description": "Defaults to auto-resolved project (cwd-based)." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "soll_query_context",
                 "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready.",
                 "inputSchema": {
