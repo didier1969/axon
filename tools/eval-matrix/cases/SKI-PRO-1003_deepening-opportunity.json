@@ -1,0 +1,14 @@
+{
+  "ski_id": "SKI-PRO-1003",
+  "title": "deepening-opportunity audit of a codebase",
+  "invocation_hint": "Invoke SKI-PRO-1003 (deepening-opportunity) and produce a deepening audit of the codebase pattern below.",
+  "task_description": "A Rust project has 12 modules under src/services/ each implementing a different external API integration (Stripe, Sendgrid, Twilio, GitHub, ...). Each module has its own HTTP client setup, retry logic, and error mapping. Apply deepening-opportunity to identify where to extract shared abstractions.",
+  "params": {
+    "domain": "Rust microservice codebase"
+  },
+  "output_contract": {
+    "format": "FREE_TEXT",
+    "min_tokens": 200,
+    "max_tokens": 2000
+  }
+}

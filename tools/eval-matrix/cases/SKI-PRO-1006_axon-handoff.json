@@ -1,0 +1,19 @@
+{
+  "ski_id": "SKI-PRO-1006",
+  "title": "axon-handoff systematic 5-step procedure",
+  "invocation_hint": "Invoke SKI-PRO-1006 (axon-handoff) and execute the 5-step procedure for the session state below.",
+  "task_description": "A session delivered REQ-AXO-91592 (soll_manager unlink) + 16 broken-evidence cleanups + 3 RAM-first planning REQs. Produce the GUI-PRO-028 hand-off deliverable.",
+  "params": {
+    "session_id": "session-46",
+    "commits": ["b94d291a", "16fe15ef"],
+    "promote_live_cycles": 2
+  },
+  "output_contract": {
+    "format": "CHECKLIST",
+    "min_items": 5,
+    "max_items": 12,
+    "min_tokens": 250,
+    "max_tokens": 2000
+  },
+  "expected_steps": ["session_pointer", "SOLL cleanup", "boot-docs prune", "SKILL.md consolidation", "working-notes audit"]
+}

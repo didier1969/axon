@@ -1,0 +1,16 @@
+{
+  "ski_id": "SKI-PRO-1001",
+  "title": "prd-synthesis from grilled requirements",
+  "invocation_hint": "Invoke SKI-PRO-1001 (prd-synthesis) and produce a PRD body for the feature below.",
+  "task_description": "Following a grill-design-tree session, the operator confirmed : in-app banner notifications, opt-in via settings page, retention 30 days, no email channel, dismiss-once persistent. Apply prd-synthesis to produce a structured PRD body.",
+  "params": {
+    "feature_name": "in-app notifications",
+    "domain": "consumer web app"
+  },
+  "output_contract": {
+    "format": "FREE_TEXT",
+    "min_tokens": 400,
+    "max_tokens": 3000
+  },
+  "expected_sections": ["context", "scope", "success criteria", "out of scope"]
+}

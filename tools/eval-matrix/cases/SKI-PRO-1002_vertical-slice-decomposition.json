@@ -1,0 +1,16 @@
+{
+  "ski_id": "SKI-PRO-1002",
+  "title": "vertical-slice decomposition of a feature",
+  "invocation_hint": "Invoke SKI-PRO-1002 (vertical-slice-decomposition) and decompose the feature below into shippable slices.",
+  "task_description": "Decompose 'in-app notification banner with opt-in settings + 30-day retention + dismiss-once persistence' into vertical slices. Each slice must be independently shippable, observable in production, and ordered by smallest-first.",
+  "params": {
+    "feature_name": "in-app notifications"
+  },
+  "output_contract": {
+    "format": "CHECKLIST",
+    "min_items": 3,
+    "max_items": 12,
+    "min_tokens": 300,
+    "max_tokens": 2500
+  }
+}

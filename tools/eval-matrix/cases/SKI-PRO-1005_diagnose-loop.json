@@ -1,0 +1,15 @@
+{
+  "ski_id": "SKI-PRO-1005",
+  "title": "diagnose-loop on a failing system",
+  "invocation_hint": "Invoke SKI-PRO-1005 (diagnose-loop) and walk through the reproduce → minimise → hypothesise → instrument loop for the symptom below.",
+  "task_description": "A Rust web server has 8% of requests returning 502 after a recent deploy. Apply diagnose-loop to produce the first 3 cycles of the disciplined diagnosis loop.",
+  "params": {
+    "symptom": "8% requests return 502 ; started after 2026-05-15 deploy",
+    "stack": "Rust + actix-web + nginx upstream"
+  },
+  "output_contract": {
+    "format": "FREE_TEXT",
+    "min_tokens": 300,
+    "max_tokens": 2500
+  }
+}

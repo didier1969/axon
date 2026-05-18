@@ -1,0 +1,16 @@
+{
+  "ski_id": "SKI-PRO-1000",
+  "title": "grill-design-tree clarification interview",
+  "invocation_hint": "Invoke SKI-PRO-1000 (grill-design-tree) and produce 5-10 follow-up questions for the operator about the design below.",
+  "task_description": "The operator says : 'we need a notification system for our app'. Apply the grill-design-tree skill to surface the ambiguities, decision branches, and missing constraints before any design.",
+  "params": {
+    "domain": "feature scoping"
+  },
+  "output_contract": {
+    "format": "CHECKLIST",
+    "min_items": 5,
+    "max_items": 15,
+    "min_tokens": 200,
+    "max_tokens": 2000
+  }
+}

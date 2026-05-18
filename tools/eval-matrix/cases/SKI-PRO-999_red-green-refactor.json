@@ -1,0 +1,18 @@
+{
+  "ski_id": "SKI-PRO-999",
+  "title": "red-green-refactor TDD",
+  "invocation_hint": "Invoke SKI-PRO-999 (red-green-refactor) and produce a TDD plan for the task below. Use `skill_invoke(SKI-PRO-999)` first to load the skill, then apply it.",
+  "task_description": "Add a function `slugify(text: &str) -> String` to a Rust crate that converts arbitrary text into a URL-safe slug (lowercase, ASCII only, hyphen separators, collapse runs of separators, trim leading/trailing hyphens). The crate already has `cargo test` configured.",
+  "params": {
+    "language": "rust",
+    "test_runner": "cargo test"
+  },
+  "output_contract": {
+    "format": "CHECKLIST",
+    "min_items": 5,
+    "max_items": 20,
+    "min_tokens": 150,
+    "max_tokens": 1500
+  },
+  "expected_phases": ["RED", "GREEN", "REFACTOR"]
+}

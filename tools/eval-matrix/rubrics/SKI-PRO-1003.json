@@ -1,0 +1,30 @@
+{
+  "ski_id": "SKI-PRO-1003",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "identifies_repetition",
+      "weight": 0.3,
+      "description": "Identifies the repetition pattern across modules",
+      "must_match": ["(repeat|same|duplicat|across\\s+(all|each)\\s+modules)"]
+    },
+    {
+      "name": "proposes_abstraction",
+      "weight": 0.3,
+      "description": "Proposes a concrete shared abstraction (trait, struct, function)",
+      "must_match": ["(trait|abstract|shared|extract|common|generic)"]
+    },
+    {
+      "name": "evaluates_cost",
+      "weight": 0.2,
+      "description": "Weighs the cost of abstraction vs status quo",
+      "must_match": ["(cost|trade-?off|complexity|premature)"]
+    },
+    {
+      "name": "actionable_next_step",
+      "weight": 0.2,
+      "description": "Proposes a concrete next step (refactor target / experiment)",
+      "must_match": ["(next\\s+step|first refactor|start with|begin)"]
+    }
+  ]
+}

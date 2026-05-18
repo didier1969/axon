@@ -1,0 +1,14 @@
+{
+  "ski_id": "SKI-PRO-1004",
+  "title": "throwaway-prototype framing for a design question",
+  "invocation_hint": "Invoke SKI-PRO-1004 (throwaway-prototype) and decide whether the design question below warrants a prototype, and if yes, scope it.",
+  "task_description": "The team is debating whether to use server-sent events vs WebSockets for a real-time notifications stream. Apply throwaway-prototype to scope the smallest experiment that resolves the tradeoff.",
+  "params": {
+    "domain": "real-time transport choice"
+  },
+  "output_contract": {
+    "format": "FREE_TEXT",
+    "min_tokens": 200,
+    "max_tokens": 1500
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "ski_id": "SKI-PRO-1002",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "independently_shippable",
+      "weight": 0.3,
+      "description": "Each slice is independently shippable",
+      "must_match": ["(independently\\s+(ship|deploy)|on its own|standalone)"]
+    },
+    {
+      "name": "observable",
+      "weight": 0.25,
+      "description": "Slices include observable signals (metric / log)",
+      "must_match": ["(observ|metric|telemetry|log|dashboard)"]
+    },
+    {
+      "name": "smallest_first",
+      "weight": 0.25,
+      "description": "Ordering is smallest-first or risk-aware",
+      "must_match": ["(smallest|simplest|MVP|first slice|minimum)"]
+    },
+    {
+      "name": "user_visible_value",
+      "weight": 0.2,
+      "description": "Each slice has user-visible value (not internal refactor only)",
+      "must_match": ["(user|customer)"],
+      "must_not_match": ["internal refactor only|pure refactor"]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "ski_id": "SKI-PRO-1004",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "prototype_decision_explicit",
+      "weight": 0.3,
+      "description": "Explicit yes/no on whether prototype is warranted",
+      "must_match": ["(prototype\\s+is|recommend|warrants?\\s+a\\s+prototype|skip\\s+the\\s+prototype|no prototype)"]
+    },
+    {
+      "name": "smallest_experiment",
+      "weight": 0.3,
+      "description": "Scopes the smallest experiment that resolves the tradeoff",
+      "must_match": ["(smallest|minimum|simplest)\\s+(experiment|test|probe|prototype)"]
+    },
+    {
+      "name": "resolves_the_tradeoff",
+      "weight": 0.2,
+      "description": "Specifies the metric / observation that resolves SSE vs WebSocket",
+      "must_match": ["(latency|throughput|reconnect|connection\\s+count|metric|measure)"]
+    },
+    {
+      "name": "throwaway_explicit",
+      "weight": 0.2,
+      "description": "Marks the prototype as throwaway / not production code",
+      "must_match": ["(throwaway|discard|not\\s+production|will\\s+be\\s+rewritten)"]
+    }
+  ]
+}

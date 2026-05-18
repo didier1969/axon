@@ -1,0 +1,30 @@
+{
+  "ski_id": "SKI-PRO-999",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "red_phase_present",
+      "weight": 0.3,
+      "description": "Response identifies a RED phase (failing test before code)",
+      "must_match": ["\\bRED\\b", "(failing|fails)\\s+test"]
+    },
+    {
+      "name": "green_phase_present",
+      "weight": 0.3,
+      "description": "Response identifies a GREEN phase (minimum code to pass)",
+      "must_match": ["\\bGREEN\\b", "(minimum|simplest)\\s+(code|implementation|impl)"]
+    },
+    {
+      "name": "refactor_phase_present",
+      "weight": 0.2,
+      "description": "Response identifies a REFACTOR phase",
+      "must_match": ["\\bREFACTOR\\b"]
+    },
+    {
+      "name": "no_implementation_before_test",
+      "weight": 0.2,
+      "description": "Order : test before implementation",
+      "must_not_match": ["impl(ement)?(ation)?\\s+(first|before)\\s+test"]
+    }
+  ]
+}

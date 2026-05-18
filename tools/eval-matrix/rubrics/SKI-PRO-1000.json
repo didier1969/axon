@@ -1,0 +1,30 @@
+{
+  "ski_id": "SKI-PRO-1000",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "asks_about_users",
+      "weight": 0.25,
+      "description": "Questions about WHO uses notifications",
+      "must_match": ["(who|which)\\s+(users|audience|recipients?)"]
+    },
+    {
+      "name": "asks_about_channels",
+      "weight": 0.25,
+      "description": "Questions about delivery channels (email/SMS/in-app/push)",
+      "must_match": ["(in-app|email|push|sms|channel)"]
+    },
+    {
+      "name": "asks_about_persistence",
+      "weight": 0.2,
+      "description": "Questions about retention / dismissal / read state",
+      "must_match": ["(retention|dismiss|read|persist)"]
+    },
+    {
+      "name": "branches_visible",
+      "weight": 0.3,
+      "description": "Decision branches surfaced (e.g. 'if X then ... else ...')",
+      "must_match": ["(if|when|otherwise|else|depending|either)"]
+    }
+  ]
+}

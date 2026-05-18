@@ -1,0 +1,36 @@
+{
+  "ski_id": "SKI-PRO-1005",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "reproduce_step",
+      "weight": 0.25,
+      "description": "Reproduce step explicitly defined",
+      "must_match": ["(reproduce|reproduction)"]
+    },
+    {
+      "name": "minimise_step",
+      "weight": 0.2,
+      "description": "Minimise step (shrink to MVR)",
+      "must_match": ["(minim|narrow|reduce|isolate)"]
+    },
+    {
+      "name": "hypothesise_step",
+      "weight": 0.25,
+      "description": "Hypothesise step with concrete hypotheses",
+      "must_match": ["(hypothes|theory|candidate cause|might be)"]
+    },
+    {
+      "name": "instrument_step",
+      "weight": 0.2,
+      "description": "Instrument step (logs/metrics to gather evidence)",
+      "must_match": ["(instrument|log|trace|metric|monitor)"]
+    },
+    {
+      "name": "no_premature_fix",
+      "weight": 0.1,
+      "description": "No fix proposed before hypothesis is tested",
+      "must_not_match": ["just\\s+(fix|patch)\\s+it|fix\\s+immediately"]
+    }
+  ]
+}

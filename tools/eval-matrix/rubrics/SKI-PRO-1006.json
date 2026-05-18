@@ -1,0 +1,36 @@
+{
+  "ski_id": "SKI-PRO-1006",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "step_session_pointer",
+      "weight": 0.2,
+      "description": "Step 1 — session_pointer refresh",
+      "must_match": ["session[- ]?pointer", "CPT-AXO-052"]
+    },
+    {
+      "name": "step_soll_cleanup",
+      "weight": 0.2,
+      "description": "Step 2 — SOLL cleanup + replan",
+      "must_match": ["SOLL\\s+(cleanup|hygiene)", "replan|soll_work_plan"]
+    },
+    {
+      "name": "step_boot_docs_prune",
+      "weight": 0.2,
+      "description": "Step 3 — boot-docs prune / compact",
+      "must_match": ["boot[- ]?docs?|MEMORY\\.md|CLAUDE\\.md"]
+    },
+    {
+      "name": "step_skill_consolidation",
+      "weight": 0.2,
+      "description": "Step 4 — SKILL.md consolidation",
+      "must_match": ["SKILL\\.md"]
+    },
+    {
+      "name": "step_working_notes_audit",
+      "weight": 0.2,
+      "description": "Step 5 — working-notes audit",
+      "must_match": ["working[- ]?notes?"]
+    }
+  ]
+}

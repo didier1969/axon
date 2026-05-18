@@ -1,0 +1,36 @@
+{
+  "ski_id": "SKI-PRO-1001",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "context_section",
+      "weight": 0.2,
+      "description": "PRD has a context / problem section",
+      "must_match": ["##\\s*Context|#\\s*Context|Context\\s*:"]
+    },
+    {
+      "name": "scope_section",
+      "weight": 0.25,
+      "description": "PRD has a scope section",
+      "must_match": ["##\\s*Scope|#\\s*Scope|In\\s+scope|In-scope"]
+    },
+    {
+      "name": "success_criteria",
+      "weight": 0.25,
+      "description": "PRD has measurable success criteria",
+      "must_match": ["##\\s*Success|Acceptance|Definition\\s+of\\s+Done|Success criteria"]
+    },
+    {
+      "name": "out_of_scope",
+      "weight": 0.15,
+      "description": "PRD explicitly lists out-of-scope items",
+      "must_match": ["[Oo]ut\\s*of\\s*[Ss]cope|Non-goals|NOT\\s+in\\s+scope"]
+    },
+    {
+      "name": "actionable_constraints",
+      "weight": 0.15,
+      "description": "PRD references the grilled constraints (banner / 30 days / opt-in)",
+      "must_match": ["banner", "30\\s*days?", "opt[- ]?in"]
+    }
+  ]
+}
