@@ -689,100 +689,402 @@ impl McpServer {
 
     pub(crate) fn axon_semantic_clones(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let project = args.get("project").and_then(|v| v.as_str());
+        // GUI-AXO-1004 pagination contract.
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .clamp(1, 1000) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .clamp(1, 3) as u32;
+        // Over-fetch from vector layer so VF2 has more candidates to confirm.
+        let pre_filter_k = (limit + offset).saturating_mul(4).max(20);
+
         // REQ-AXO-271 slice 2b : PG canonical only.
         // Symbol.embedding is `vector(N)` ; pgvector `<=>` returns cosine distance.
         let cosine_expr = "(s.embedding <=> other.embedding)";
+        let project_filter = match project {
+            Some(p) if !p.is_empty() && p != "*" => format!(
+                " AND other.project_code = '{}'",
+                p.replace('\'', "''")
+            ),
+            _ => String::new(),
+        };
         let query = format!(
-            "SELECT other.name, other.kind, {cosine_expr} as score \
+            "SELECT other.id, other.name, other.kind, {cosine_expr} as score \
              FROM Symbol s, Symbol other \
-             WHERE s.name = '{}' AND s.name <> other.name AND {cosine_expr} < 0.05 \
-             ORDER BY score ASC LIMIT 5",
-            symbol.replace("'", "''")
+             WHERE s.name = '{}' AND s.name <> other.name{project_filter} AND {cosine_expr} < 0.10 \
+             ORDER BY score ASC LIMIT {pre_filter_k}",
+            symbol.replace('\'', "''")
         );
-        match self.graph_store.query_json(&query) {
-            Ok(res) => {
-                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-                let mut report = if !rows.is_empty() {
-                    format!(
-                        "### 👯 Semantic Clones detected for '{}'\n\n{}",
-                        symbol,
-                        format_table_from_json(&res, &["Name", "Type", "Similarity"])
-                    )
-                } else {
-                    format!(
-                        "✅ No obvious semantic clone (similarity > 95%) found for '{}'.",
-                        symbol
-                    )
-                };
-                if let Some(section) = self.build_graph_clone_section(symbol) {
-                    report.push_str(&section);
-                }
-                // REQ-AXO-91518 (MIL-AXO-019 Tier A) — tri-modal
-                // envelope. Vector cosine k-NN top 5 surface today
-                // (pgvector `<=>`). Slice 2 will pre-filter via
-                // vector, then confirm structural similarity via
-                // `vf2_subgraph_match` (MIL-AXO-019 vague 1c, ready
-                // in `ist_snapshot::algorithms`) on the per-candidate
-                // call sub-graph. The current surface stays sound
-                // for symbol-name clones — the structural-clone
-                // upgrade is additive when ChunkEmbedding clusters
-                // become the input.
-                Some(json!({
-                    "content": [{ "type": "text", "text": report }],
+        let raw = match self.graph_store.query_json(&query) {
+            Ok(r) => r,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }],
+                    "isError": true,
                     "data": {
-                        "symbol": symbol,
-                        "clone_count": rows.len(),
-                        "surfaces_used": ["vector_pgvector"],
-                        "total_available": rows.len() as u64,
-                        "next_call_hint": "impact symbol=<clone> to review blast radius before dedup"
+                        "status": "internal_error",
+                        "parameter_repair": {
+                            "invalid_field": "symbol",
+                            "follow_up_tools": ["inspect", "query", "status"],
+                            "hint": "semantic-clones computation failed; verify the symbol resolves via `inspect` and runtime is healthy"
+                        },
+                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
                     }
-                }))
+                }));
             }
-            Err(e) => Some(json!({
-                "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }],
-                "isError": true,
-                "data": {
-                    "status": "internal_error",
-                    "parameter_repair": {
-                        "invalid_field": "symbol",
-                        "follow_up_tools": ["inspect", "query", "status"],
-                        "hint": "semantic-clones computation failed; verify the symbol resolves via `inspect` and runtime is healthy"
-                    },
-                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
-                }
-            })),
+        };
+        let candidates: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+
+        // REQ-AXO-91518 slice 2 — structural confirmation via VF2 on each
+        // candidate's neighborhood sub-graph. Requires a warm IstGraphView
+        // for `project` ; falls back to vector-only ranking otherwise.
+        let view = crate::ist_snapshot::process_view();
+        let project_for_graph = project.unwrap_or("");
+        let ram_warm = !project_for_graph.is_empty() && view.is_warm(project_for_graph);
+
+        let mut surfaces_used: Vec<&'static str> = vec!["vector_pgvector"];
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+
+        // Resolve the source symbol's canonical IST id so we can extract its
+        // own neighborhood. Use the same name + optional project filter as
+        // the vector pre-filter.
+        let source_id: Option<String> = {
+            let proj_pred = match project {
+                Some(p) if !p.is_empty() && p != "*" => format!(
+                    " AND project_code = '{}'",
+                    p.replace('\'', "''")
+                ),
+                _ => String::new(),
+            };
+            let sql = format!(
+                "SELECT id FROM Symbol WHERE name = '{}'{proj_pred} LIMIT 1",
+                symbol.replace('\'', "''")
+            );
+            self.graph_store
+                .query_json(&sql)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .next()
+                        .and_then(|r| r.into_iter().next())
+                        .and_then(|v| v.as_str().map(String::from))
+                })
+        };
+
+        let (structural_flags, vf2_attempted) = if ram_warm && source_id.is_some() {
+            surfaces_used.push("graph_vf2_isomorphism");
+            let snap_opt = view.cache_handle().get(project_for_graph);
+            if let Some(snap) = snap_opt {
+                let src_nbhd = snap.neighborhood_subgraph(source_id.as_deref().unwrap_or(""), max_depth);
+                let flags: Vec<bool> = candidates
+                    .iter()
+                    .map(|c| {
+                        let cand_id = c.first().and_then(|v| v.as_str()).unwrap_or("");
+                        if cand_id.is_empty() {
+                            return false;
+                        }
+                        let Some(src) = src_nbhd.as_ref() else {
+                            return false;
+                        };
+                        let Some(cand_nbhd) = snap.neighborhood_subgraph(cand_id, max_depth) else {
+                            return false;
+                        };
+                        let matches = crate::ist_snapshot::algorithms::vf2_subgraph_match(
+                            src,
+                            &cand_nbhd,
+                            1,
+                        );
+                        !matches.is_empty()
+                    })
+                    .collect();
+                (flags, true)
+            } else {
+                surfaces_degraded.push("graph_ram_unavailable");
+                (vec![false; candidates.len()], false)
+            }
+        } else {
+            if !ram_warm {
+                surfaces_degraded.push("graph_ram_unavailable");
+            }
+            (vec![false; candidates.len()], false)
+        };
+
+        // Sort: structural matches first (VF2 confirmed), then by cosine score ascending.
+        let mut scored: Vec<(usize, bool, f64)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let score = c.get(3).and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let structural = structural_flags.get(i).copied().unwrap_or(false);
+                (i, structural, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| match b.1.cmp(&a.1) {
+            std::cmp::Ordering::Equal => {
+                a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            other => other,
+        });
+
+        let total_available = scored.len() as u64;
+        let paginated: Vec<&(usize, bool, f64)> =
+            scored.iter().skip(offset).take(limit).collect();
+        let returned = paginated.len() as u64;
+        let has_more = (offset as u64).saturating_add(returned) < total_available;
+
+        // Build the human-readable section.
+        let display_rows: Vec<Vec<Value>> = paginated
+            .iter()
+            .map(|(idx, structural, _)| {
+                let row = &candidates[*idx];
+                let name = row.get(1).cloned().unwrap_or(Value::Null);
+                let kind = row.get(2).cloned().unwrap_or(Value::Null);
+                let score = row.get(3).cloned().unwrap_or(Value::Null);
+                let marker = if *structural {
+                    "✓ VF2"
+                } else if vf2_attempted {
+                    "—"
+                } else {
+                    "n/a"
+                };
+                vec![name, kind, score, Value::String(marker.to_string())]
+            })
+            .collect();
+        let display_json =
+            serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
+
+        let mut report = if !display_rows.is_empty() {
+            format!(
+                "### 👯 Semantic Clones detected for '{}'\n\n{}",
+                symbol,
+                format_table_from_json(
+                    &display_json,
+                    &["Name", "Type", "Cosine", "Structural"]
+                )
+            )
+        } else {
+            format!(
+                "✅ No obvious semantic clone (cosine < 0.10) found for '{}'.",
+                symbol
+            )
+        };
+        if let Some(section) = self.build_graph_clone_section(symbol) {
+            report.push_str(&section);
         }
+
+        let next_call_hint = if has_more {
+            json!({
+                "params": { "symbol": symbol, "limit": limit, "offset": offset + paginated.len(), "max_depth": max_depth },
+                "reason": "more candidates available; bump offset to paginate"
+            })
+        } else {
+            json!({
+                "params": { "follow_up": "impact symbol=<clone>" },
+                "reason": "review blast radius of confirmed clone before dedup"
+            })
+        };
+
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "symbol": symbol,
+                "project": project.unwrap_or("*"),
+                "clone_count": display_rows.len(),
+                "data": display_rows,
+                "total_available": total_available,
+                "returned": returned,
+                "has_more": has_more,
+                "surfaces_used": surfaces_used,
+                "surfaces_degraded": surfaces_degraded,
+                "structural_confirmed": structural_flags.iter().filter(|f| **f).count(),
+                "vf2_attempted": vf2_attempted,
+                "truncation_strategy": "pgvector_topk_then_vf2",
+                "truncation_applied": pre_filter_k < total_available as usize,
+                "next_call_hint": next_call_hint,
+                "sort_by": "structural_then_cosine"
+            }
+        }))
     }
 
     pub(crate) fn axon_architectural_drift(&self, args: &Value) -> Option<Value> {
         let source_layer = args.get("source_layer")?.as_str()?;
         let target_layer = args.get("target_layer")?.as_str()?;
+        let project = args.get("project").and_then(|v| v.as_str());
+        // GUI-AXO-1004 pagination contract.
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20)
+            .clamp(1, 1000) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let sort_by = args
+            .get("sort_by")
+            .and_then(|v| v.as_str())
+            .unwrap_or("severity");
 
-        // REQ-AXO-271 slice 2d invariant : the legacy SQL
-        // CALLS / CONTAINS tables are dropped under PG canonical so
-        // the `WITH RECURSIVE call_paths` translation that powered
-        // this tool pre-MIL-AXO-017 is dead.
-        //
-        // REQ-AXO-91516 (planned) will rewire the surface to the
-        // in-memory `IstGraph` via the new `layer_violations`
-        // algorithm (MIL-AXO-019 vague 1c, commit `787ac797`) — that
-        // migration ships in a follow-up slice. Until then surface a
-        // structured `not_implemented` envelope so the LLM sees the
-        // truth instead of the previous silent "✅ no drift"
-        // (which was the always-empty result of the dead SQL path).
-        let report = format!(
-            "🛠️ **architectural_drift not yet wired to RAM graph**\n\nSource layer: `{}`\nTarget layer: `{}`\n\nThe PG-canonical migration is REQ-AXO-91516 (Tier A, MIL-AXO-019). Until it ships, use `impact` + `path` for ad-hoc layer-crossing analysis.",
-            source_layer, target_layer
-        );
+        // REQ-AXO-91516 (MIL-AXO-019 vague 1d) — RAM-first via
+        // IstGraphView. `layer_violations` (vague 1c, commit `787ac797`)
+        // scans the in-memory CSR for edges that cross the user-declared
+        // forbidden boundary in O(N + M). Falls back to a structured
+        // not_warm envelope when the snapshot for `project` is cold so
+        // the LLM sees the truth instead of the previous silent stub.
+        let view = crate::ist_snapshot::process_view();
+        let project_for_graph = project.unwrap_or("");
+        let ram_warm = !project_for_graph.is_empty() && view.is_warm(project_for_graph);
+
+        let mut surfaces_used: Vec<&'static str> = Vec::new();
+        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+
+        if !ram_warm {
+            surfaces_used.push("graph_ram_pending");
+            surfaces_degraded.push("graph_ram_unavailable");
+            let report = format!(
+                "🛠️ **architectural_drift requires a warm IstGraph snapshot for project `{}`**\n\nSource layer: `{source_layer}`\nTarget layer: `{target_layer}`\n\nLoad the snapshot via `ist_snapshot_warm project={}` then retry. Pre-warm path uses `public.symbol` + `public.edge` (PG canonical).",
+                project_for_graph,
+                project_for_graph
+            );
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "status": "warn_ram_cold",
+                    "source_layer": source_layer,
+                    "target_layer": target_layer,
+                    "project": project_for_graph,
+                    "surfaces_used": surfaces_used,
+                    "surfaces_degraded": surfaces_degraded,
+                    "total_available": 0u64,
+                    "returned": 0u64,
+                    "has_more": false,
+                    "next_call_hint": {
+                        "params": { "tool": "ist_snapshot_warm", "project": project_for_graph },
+                        "reason": "warm the RAM snapshot before calling architectural_drift"
+                    },
+                }
+            }));
+        }
+
+        // Resolve snapshot via cache_handle (view.is_warm guarantees Some).
+        let snap = match view.cache_handle().get(project_for_graph) {
+            Some(s) => s,
+            None => {
+                surfaces_used.push("graph_ram_pending");
+                surfaces_degraded.push("graph_ram_unavailable");
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "architectural_drift: snapshot race — RAM warm but absent at fetch; retry."  }],
+                    "data": {
+                        "status": "internal_race",
+                        "surfaces_used": surfaces_used,
+                        "surfaces_degraded": surfaces_degraded
+                    }
+                }));
+            }
+        };
+
+        surfaces_used.push("graph_ram");
+        let layer_def: Vec<(&str, u32)> = vec![(source_layer, 0), (target_layer, 1)];
+        let mut violations =
+            crate::ist_snapshot::algorithms::layer_violations(&snap, &layer_def);
+
+        // sort_by selectors per GUI-AXO-1004 ; default "severity" =
+        // edges where the layer gap is biggest, then alphabetic for
+        // determinism.
+        match sort_by {
+            "alphabetical" => violations.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str()))),
+            _ => violations.sort_by(|a, b| {
+                let sev_b = (b.3 as i64 - b.2 as i64).abs();
+                let sev_a = (a.3 as i64 - a.2 as i64).abs();
+                sev_b.cmp(&sev_a).then_with(|| a.0.cmp(&b.0))
+            }),
+        }
+
+        let total_available = violations.len() as u64;
+        let paginated: Vec<&(String, String, u32, u32)> =
+            violations.iter().skip(offset).take(limit).collect();
+        let returned = paginated.len() as u64;
+        let has_more = (offset as u64).saturating_add(returned) < total_available;
+
+        let display_rows: Vec<Vec<Value>> = paginated
+            .iter()
+            .map(|(src, tgt, src_l, tgt_l)| {
+                vec![
+                    Value::String(src.clone()),
+                    Value::String(tgt.clone()),
+                    Value::String(format!("{src_l}")),
+                    Value::String(format!("{tgt_l}")),
+                ]
+            })
+            .collect();
+        let display_json =
+            serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
+
+        let report = if display_rows.is_empty() {
+            format!(
+                "✅ No architectural drift detected from `{source_layer}` → `{target_layer}` in project `{project_for_graph}`.",
+            )
+        } else {
+            format!(
+                "### 🚨 Architectural drift `{source_layer}` → `{target_layer}` ({total_available} violations)\n\n{}",
+                format_table_from_json(
+                    &display_json,
+                    &["Source", "Target", "Src Layer", "Tgt Layer"]
+                )
+            )
+        };
+
+        let next_call_hint = if has_more {
+            json!({
+                "params": {
+                    "source_layer": source_layer,
+                    "target_layer": target_layer,
+                    "project": project_for_graph,
+                    "limit": limit,
+                    "offset": offset + paginated.len(),
+                    "sort_by": sort_by
+                },
+                "reason": "more violations available; bump offset to paginate"
+            })
+        } else if display_rows.is_empty() {
+            json!({
+                "params": { "follow_up": "architectural_drift source_layer=<other> target_layer=<other>" },
+                "reason": "boundary is clean ; consider checking adjacent layers"
+            })
+        } else {
+            json!({
+                "params": { "follow_up": "impact symbol=<first-violation-source>" },
+                "reason": "drill into a specific drift edge to assess blast radius"
+            })
+        };
+
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
-                "status": "not_implemented",
                 "source_layer": source_layer,
                 "target_layer": target_layer,
-                "surfaces_used": ["pending_ram_migration"],
-                "next_call_hint": "impact symbol=<source-layer-entry>",
-                "tracking_req": "REQ-AXO-91516",
+                "project": project_for_graph,
+                "data": display_rows,
+                "total_available": total_available,
+                "returned": returned,
+                "has_more": has_more,
+                "surfaces_used": surfaces_used,
+                "surfaces_degraded": surfaces_degraded,
+                "truncation_strategy": "topk_then_paginate",
+                "truncation_applied": false,
+                "sort_by": sort_by,
+                "next_call_hint": next_call_hint
             }
         }))
     }

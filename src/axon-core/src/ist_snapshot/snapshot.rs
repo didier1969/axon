@@ -6,7 +6,7 @@
 // O(deg). NodePack carries one byte per categorical attribute (kind / project
 // / flags) to keep cache lines warm during BFS-style traversals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// IST relation_type domain (mirrors public.edge.relation_type post-AGE
 /// retirement, before REQ-AXO-91505 broadens it). Stored as u8 in the CSR
@@ -76,6 +76,24 @@ impl NodeKind {
             "section" => Self::Section,
             "element" => Self::Element,
             "config_key" => Self::ConfigKey,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn from_u8(byte: u8) -> Self {
+        match byte {
+            0 => Self::File,
+            1 => Self::Function,
+            2 => Self::Method,
+            3 => Self::Class,
+            4 => Self::Struct,
+            5 => Self::Module,
+            6 => Self::Trait,
+            7 => Self::Enum,
+            8 => Self::Field,
+            9 => Self::Section,
+            10 => Self::Element,
+            11 => Self::ConfigKey,
             _ => Self::Other,
         }
     }
@@ -221,6 +239,63 @@ impl IstGraph {
                 relation_from_u8(self.rev_rel[slot]),
             )
         })
+    }
+
+    /// REQ-AXO-91518 — Extract the `depth`-bounded neighborhood of `root_id`
+    /// as a self-contained `IstGraph` (both forward + reverse directions).
+    /// Used by VF2 isomorphism on per-symbol sub-graphs (semantic_clones
+    /// slice 2) without copying the full snapshot. Returns `None` when the
+    /// root id is unknown.
+    pub fn neighborhood_subgraph(&self, root_id: &str, depth: u32) -> Option<IstGraph> {
+        let root_idx = self.index_of(root_id)?;
+        let mut visited: HashSet<u32> = HashSet::from([root_idx]);
+        let mut frontier: Vec<u32> = vec![root_idx];
+
+        for _ in 0..depth {
+            let mut next: Vec<u32> = Vec::new();
+            for &idx in &frontier {
+                for (n, _) in self.forward_neighbors(idx) {
+                    if visited.insert(n) {
+                        next.push(n);
+                    }
+                }
+                for (n, _) in self.reverse_neighbors(idx) {
+                    if visited.insert(n) {
+                        next.push(n);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+
+        let mut nodes: Vec<NodeRecord> = Vec::with_capacity(visited.len());
+        for &idx in &visited {
+            let (kind_byte, project, flags) = self.node_meta(idx);
+            nodes.push(NodeRecord {
+                id: self.id_of(idx).to_string(),
+                project_code: project.to_string(),
+                kind: NodeKind::from_u8(kind_byte),
+                flags,
+            });
+        }
+
+        let mut edges: Vec<EdgeTriple> = Vec::new();
+        for &src_idx in &visited {
+            for (tgt, rel) in self.forward_neighbors(src_idx) {
+                if visited.contains(&tgt) {
+                    edges.push(EdgeTriple {
+                        source: self.id_of(src_idx).to_string(),
+                        target: self.id_of(tgt).to_string(),
+                        rel,
+                    });
+                }
+            }
+        }
+
+        Some(IstGraph::build(nodes, edges))
     }
 
     /// Build a CSR snapshot from `nodes` + `edges`. Edge endpoints not present
@@ -909,5 +984,75 @@ mod tests {
         assert!(!f.public());
         assert!(f.nif());
         assert!(!f.unsafe_());
+    }
+
+    #[test]
+    fn node_kind_from_u8_round_trip_for_canonical_variants() {
+        assert_eq!(NodeKind::from_u8(0), NodeKind::File);
+        assert_eq!(NodeKind::from_u8(1), NodeKind::Function);
+        assert_eq!(NodeKind::from_u8(2), NodeKind::Method);
+        assert_eq!(NodeKind::from_u8(3), NodeKind::Class);
+        assert_eq!(NodeKind::from_u8(11), NodeKind::ConfigKey);
+        assert_eq!(NodeKind::from_u8(42), NodeKind::Other);
+        assert_eq!(NodeKind::from_u8(255), NodeKind::Other);
+    }
+
+    #[test]
+    fn neighborhood_subgraph_returns_none_for_unknown_root() {
+        let nodes = vec![node("a", "AXO", NodeKind::Function)];
+        let g = IstGraph::build(nodes, vec![]);
+        assert!(g.neighborhood_subgraph("missing", 1).is_none());
+    }
+
+    #[test]
+    fn neighborhood_subgraph_depth_0_returns_singleton_no_edges() {
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![edge("a", "b", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let sub = g.neighborhood_subgraph("a", 0).expect("root exists");
+        assert_eq!(sub.node_count(), 1);
+        assert_eq!(sub.edge_count(), 0);
+        assert_eq!(sub.index_of("a"), Some(0));
+    }
+
+    #[test]
+    fn neighborhood_subgraph_depth_1_captures_both_directions() {
+        let nodes = vec![
+            node("caller", "AXO", NodeKind::Function),
+            node("root", "AXO", NodeKind::Function),
+            node("callee", "AXO", NodeKind::Function),
+            node("unrelated", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("caller", "root", RelationType::Calls),
+            edge("root", "callee", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let sub = g.neighborhood_subgraph("root", 1).expect("root exists");
+        assert_eq!(sub.node_count(), 3, "caller + root + callee");
+        assert_eq!(sub.edge_count(), 2);
+        assert!(sub.index_of("caller").is_some());
+        assert!(sub.index_of("callee").is_some());
+        assert!(
+            sub.index_of("unrelated").is_none(),
+            "depth=1 must not include unrelated"
+        );
+    }
+
+    #[test]
+    fn neighborhood_subgraph_preserves_node_kind_via_from_u8() {
+        let nodes = vec![
+            node("root", "AXO", NodeKind::Method),
+            node("callee", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![edge("root", "callee", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let sub = g.neighborhood_subgraph("root", 1).expect("root exists");
+        let root_idx = sub.index_of("root").unwrap();
+        let (kind, _, _) = sub.node_meta(root_idx);
+        assert_eq!(kind, NodeKind::Method as u8);
     }
 }

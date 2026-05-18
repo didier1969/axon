@@ -804,23 +804,31 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "semantic_clones",
-                "description": "[GOVERNANCE] Finds semantically similar functions (logic clones) in the project.",
+                "description": "[GOVERNANCE] Finds semantically similar functions (logic clones). Tri-modal envelope: pgvector cosine pre-filter + VF2 graph isomorphism confirmation on per-symbol neighborhood sub-graph (REQ-AXO-91518 slice 2).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Source symbol name" }
+                        "symbol":    { "type": "string",  "description": "Source symbol name" },
+                        "project":   { "type": "string",  "description": "Optional project_code filter (e.g. 'AXO'). When provided + RAM snapshot warm, enables VF2 structural confirmation." },
+                        "limit":     { "type": "integer", "description": "Max clones returned (default 5, max 1000).", "default": 5 },
+                        "offset":    { "type": "integer", "description": "Pagination offset.", "default": 0 },
+                        "max_depth": { "type": "integer", "description": "Neighborhood radius for VF2 sub-graph extraction (default 1, max 3).", "default": 1 }
                     },
                     "required": ["symbol"]
                 }
             },
             {
                 "name": "architectural_drift",
-                "description": "[GOVERNANCE] Checks architecture violations between two layers (e.g. 'ui' directly calling 'db').",
+                "description": "[GOVERNANCE] Checks architecture violations between two layers (e.g. 'ui' directly calling 'db'). RAM-first via IstGraphView + `layer_violations` algorithm (REQ-AXO-91516, MIL-AXO-019).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "source_layer": { "type": "string", "description": "Source layer (e.g. 'ui', 'frontend')" },
-                        "target_layer": { "type": "string", "description": "Forbidden layer (e.g. 'db', 'repository')" }
+                        "source_layer": { "type": "string",  "description": "Source layer prefix (e.g. 'ui', 'frontend')" },
+                        "target_layer": { "type": "string",  "description": "Forbidden target layer prefix (e.g. 'db', 'repository')" },
+                        "project":      { "type": "string",  "description": "Project code (required for RAM snapshot lookup, e.g. 'AXO')" },
+                        "limit":        { "type": "integer", "description": "Max violations returned (default 20, max 1000).", "default": 20 },
+                        "offset":       { "type": "integer", "description": "Pagination offset.", "default": 0 },
+                        "sort_by":      { "type": "string",  "description": "Sort key: 'severity' (default — biggest layer gap first) or 'alphabetical'.", "default": "severity" }
                     },
                     "required": ["source_layer", "target_layer"]
                 }
