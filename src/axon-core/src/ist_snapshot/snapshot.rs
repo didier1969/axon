@@ -17,15 +17,25 @@ pub enum RelationType {
     Contains = 0,
     Calls = 1,
     CallsNif = 2,
+    Implements = 3,
+    Imports = 4,
+    Uses = 5,
     Other = 255,
 }
 
 impl RelationType {
+    /// REQ-AXO-91505 — accept canonical DB strings case-insensitively.
+    /// Parsers emit lowercase (`imports`, `implements`, `uses`, `calls`)
+    /// while legacy code paths emit uppercase. Both must map to the
+    /// canonical variant so IstGraph reads cleanly from public.edge.
     pub fn from_db(s: &str) -> Self {
-        match s {
+        match s.to_ascii_uppercase().as_str() {
             "CONTAINS" => Self::Contains,
             "CALLS" => Self::Calls,
             "CALLS_NIF" => Self::CallsNif,
+            "IMPLEMENTS" => Self::Implements,
+            "IMPORTS" => Self::Imports,
+            "USES" => Self::Uses,
             _ => Self::Other,
         }
     }
@@ -35,6 +45,9 @@ impl RelationType {
             Self::Contains => "CONTAINS",
             Self::Calls => "CALLS",
             Self::CallsNif => "CALLS_NIF",
+            Self::Implements => "IMPLEMENTS",
+            Self::Imports => "IMPORTS",
+            Self::Uses => "USES",
             Self::Other => "OTHER",
         }
     }
@@ -645,6 +658,9 @@ fn relation_from_u8(value: u8) -> RelationType {
         0 => RelationType::Contains,
         1 => RelationType::Calls,
         2 => RelationType::CallsNif,
+        3 => RelationType::Implements,
+        4 => RelationType::Imports,
+        5 => RelationType::Uses,
         _ => RelationType::Other,
     }
 }
@@ -770,10 +786,58 @@ mod tests {
 
     #[test]
     fn relation_type_from_db_round_trips_known_values() {
-        for s in ["CONTAINS", "CALLS", "CALLS_NIF"] {
+        for s in [
+            "CONTAINS",
+            "CALLS",
+            "CALLS_NIF",
+            "IMPLEMENTS",
+            "IMPORTS",
+            "USES",
+        ] {
             assert_eq!(RelationType::from_db(s).as_db(), s);
         }
         assert_eq!(RelationType::from_db("UNKNOWN"), RelationType::Other);
+    }
+
+    #[test]
+    fn relation_type_from_db_accepts_lowercase_parser_output() {
+        // REQ-AXO-91505 — parsers emit lowercase ("imports", "implements",
+        // "uses", "calls") ; reading from public.edge must canonicalize.
+        assert_eq!(RelationType::from_db("imports"), RelationType::Imports);
+        assert_eq!(
+            RelationType::from_db("implements"),
+            RelationType::Implements
+        );
+        assert_eq!(RelationType::from_db("uses"), RelationType::Uses);
+        assert_eq!(RelationType::from_db("calls"), RelationType::Calls);
+        assert_eq!(
+            RelationType::from_db("calls_nif"),
+            RelationType::CallsNif
+        );
+    }
+
+    #[test]
+    fn relation_type_round_trips_through_csr_u8_storage() {
+        // CSR stores the relation_type as u8 ; the round-trip via
+        // relation_from_u8 must preserve the new IMPLEMENTS/IMPORTS/USES
+        // variants alongside the legacy three.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Module),
+            node("b", "AXO", NodeKind::Trait),
+            node("c", "AXO", NodeKind::Module),
+            node("d", "AXO", NodeKind::Module),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Implements),
+            edge("a", "c", RelationType::Imports),
+            edge("a", "d", RelationType::Uses),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let a = g.index_of("a").unwrap();
+        let rels: Vec<RelationType> = g.forward_neighbors(a).map(|(_, r)| r).collect();
+        assert!(rels.contains(&RelationType::Implements));
+        assert!(rels.contains(&RelationType::Imports));
+        assert!(rels.contains(&RelationType::Uses));
     }
 
     #[test]

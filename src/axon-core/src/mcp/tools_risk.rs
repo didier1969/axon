@@ -879,9 +879,17 @@ impl McpServer {
         let mut edge_type_by_caller: std::collections::HashMap<String, &'static str> =
             std::collections::HashMap::new();
         for caller in &callers {
+            // REQ-AXO-91505 — surface the new IMPLEMENTS / IMPORTS / USES
+            // edge kinds emitted by the parsers (Rust traits, Elixir
+            // protocols, every-language import/use lines). Falls back to
+            // "calls" so the legacy confidence-label arithmetic (direct +
+            // nif > 0 ⇒ high confidence) still works for unknown edges.
             let label = match view.direct_edge_relation(project, caller, target_id) {
                 Some(RelationType::CallsNif) => "calls_nif",
                 Some(RelationType::Calls) => "calls",
+                Some(RelationType::Implements) => "implements",
+                Some(RelationType::Imports) => "imports",
+                Some(RelationType::Uses) => "uses",
                 Some(_) | None => "calls",
             };
             edge_type_by_caller.insert(caller.clone(), label);
