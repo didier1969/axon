@@ -94,7 +94,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["create", "update", "link"], "description": "The operation to perform." },
-                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "The target entity type." },
+                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline", "skill", "prompt_template"], "description": "The target entity type." },
                         "data": {
                             "type": "object",
                             "description": "JSON data. \n- create: provide `project_code` (+ `attach_to` and `relation_type` once slice 3 lands) only; the server allocates the canonical id `TYPE-CODE-NNN` via soll.allocate_node_id and returns it in the response.\n- update: canonical `id` required, plus the fields being modified (status/title/description/metadata/...).\n- link: canonical `source_id` + `target_id` + `relation_type` (e.g. REFINES, SOLVES, BELONGS_TO, EPITOMIZES, SUPERSEDES). See `soll_relation_schema` for the canonical pair table."
@@ -266,6 +266,43 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "author": { "type": "string" }
                     },
                     "required": ["preview_id"]
+                }
+            },
+            {
+                "name": "skill_list",
+                "description": "[SOLL/SKI] List available SKI (Skill) entities for invocation. REQ-AXO-91580. Filter by `applicable_to` (task domain) or `mode_filter` (MANDATED|RECOMMENDED|OPTIONAL). Default project_code=PRO (cross-tenant methodology surface per PIL-AXO-9003 Two-Sided Identity). Cheap discovery — call FIRST in a session before invoking skills.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Defaults to 'PRO' (cross-tenant)." },
+                        "applicable_to": { "type": "string", "description": "Optional task-domain filter (intersection with metadata.applicable_to)." },
+                        "mode_filter": { "type": "string", "enum": ["MANDATED", "RECOMMENDED", "OPTIONAL"], "description": "Optional invocation_mode filter." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "skill_invoke",
+                "description": "[SOLL/SKI] Resolve a SKI (Skill) by canonical id and return its body + metadata. REQ-AXO-91580. Pass `id` (e.g. SKI-PRO-001) ; LLM reads body and executes procedure. Optional `context` captured for audit (future : mid-task drift telemetry per REQ-AXO-91583).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Canonical SKI id (e.g. SKI-PRO-001). Call `skill_list` to enumerate." },
+                        "context": { "type": "object", "description": "Optional opaque invocation context (captured for audit)." }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "prompt_template_get",
+                "description": "[SOLL/PRT] Resolve a PRT (PromptTemplate) by canonical id and return the rendered text. REQ-AXO-91581. First cut returns raw template body (Mustache rendering is slice 2 per CPT-AXO-90017 — logic-less + typed parameter sidecar). Pass `id` (e.g. PRT-PRO-001) + optional `params` object.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Canonical PRT id (e.g. PRT-PRO-001)." },
+                        "params": { "type": "object", "description": "Parameter values for Mustache substitution (captured in v0 ; rendered in slice 2)." }
+                    },
+                    "required": ["id"]
                 }
             },
             {

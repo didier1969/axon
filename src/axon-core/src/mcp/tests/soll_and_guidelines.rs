@@ -8308,3 +8308,130 @@ fn test_prompt_template_entity_type_create_with_canonical_inherit_from_guideline
     );
 }
 
+// REQ-AXO-91580 — skill_list + skill_invoke MCP tools.
+#[test]
+fn test_skill_list_and_invoke_round_trip() {
+    let server = create_test_server();
+
+    // Seed a SKI directly (faster than going through soll_manager).
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('SKI-PRO-998', 'Skill', 'PRO', 'Test TDD skill', 'Body : red green refactor. Test fixture for SKI MCP surface.', 'current', '{\"invocation_mode\":\"MANDATED\",\"applicable_to\":[\"delivery\"]}'::jsonb) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    // skill_list (no filter) — should include our SKI-PRO-998.
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "skill_list",
+            "arguments": {}
+        },
+        "id": 91580
+    });
+    let list_resp = server
+        .handle_request(serde_json::from_value(list_req).unwrap())
+        .unwrap();
+    let list_result = list_resp.result.unwrap();
+    let list_text = list_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        list_text.contains("SKI-PRO-998"),
+        "skill_list output should contain seeded id, got: {list_text}"
+    );
+
+    // skill_invoke by id — should return body.
+    let invoke_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "skill_invoke",
+            "arguments": { "id": "SKI-PRO-998" }
+        },
+        "id": 91580
+    });
+    let invoke_resp = server
+        .handle_request(serde_json::from_value(invoke_req).unwrap())
+        .unwrap();
+    let invoke_result = invoke_resp.result.unwrap();
+    let invoke_text = invoke_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let is_error = invoke_result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(!is_error, "skill_invoke should succeed, got: {invoke_text}");
+    assert!(
+        invoke_text.contains("Body : red green refactor"),
+        "skill_invoke should return body, got: {invoke_text}"
+    );
+
+    // skill_invoke not_found — should reject cleanly.
+    let nf_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "skill_invoke",
+            "arguments": { "id": "SKI-PRO-doesnotexist" }
+        },
+        "id": 91580
+    });
+    let nf_resp = server
+        .handle_request(serde_json::from_value(nf_req).unwrap())
+        .unwrap();
+    let nf_result = nf_resp.result.unwrap();
+    let nf_is_error = nf_result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(nf_is_error, "skill_invoke should reject unknown id");
+}
+
+// REQ-AXO-91581 — prompt_template_get raw passthrough v0.
+#[test]
+fn test_prompt_template_get_returns_raw_body() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('PRT-PRO-998', 'PromptTemplate', 'PRO', 'Test brief', 'You are a {{role}}. Context: {{context}}. Output: {{schema}}.', 'current', '{}'::jsonb) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-998", "params": {"role": "reviewer"} }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    let text = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("{{role}}"),
+        "prompt_template_get v0 returns raw body (no Mustache yet), got: {text}"
+    );
+}
+
+

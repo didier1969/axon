@@ -39,6 +39,7 @@ mod tools_help;
 mod tools_ist_algorithms;
 mod tools_ist_snapshot;
 mod tools_risk;
+mod tools_skill;
 mod tools_soll;
 mod tools_system;
 mod tools_system_debug;
@@ -1233,6 +1234,10 @@ impl McpServer {
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
             "job_status" => self.axon_job_status(arguments),
+            // REQ-AXO-91580/91581 — SKI + PRT MCP surface.
+            "skill_list" => self.axon_skill_list(arguments),
+            "skill_invoke" => self.axon_skill_invoke(arguments),
+            "prompt_template_get" => self.axon_prompt_template_get(arguments),
             _ => Some(
                 json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
             ),
