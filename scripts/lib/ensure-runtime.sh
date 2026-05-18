@@ -234,6 +234,41 @@ apply_canonical_ddl() {
     fi
 }
 
+apply_canonical_seed() {
+    # REQ-AXO-91577 — DEC-AXO-082 seed half. Applies db/seed/[0-9][0-9]_*.sql
+    # in lexical order after canonical DDL. Each file is idempotent
+    # (INSERT ... ON CONFLICT DO NOTHING / UPDATE-only-on-current-mismatch),
+    # so re-running on a warm DB is a few-ms no-op. The seed files own data
+    # that must exist on every runtime start (cross-tenant `PRO` sentinel
+    # row, future canonical methodology bundle), retiring the Rust-string
+    # seed path in `graph_bootstrap::seed_*` per DEC-AXO-082.
+    local instance="$1"  # "live" or "dev"
+    local dbname="axon_${instance}"
+    local repo_root="${AXON_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local seed_root="${repo_root}/db/seed"
+    if [[ ! -d "$seed_root" ]]; then
+        echo "ℹ️ ${dbname}: no db/seed directory at ${seed_root}; skip canonical seed apply"
+        return 0
+    fi
+    local file applied=0
+    local seed_log="/tmp/axon-seed-apply.${instance}.log"
+    : > "$seed_log"
+    for file in "$seed_root"/[0-9][0-9]_*.sql; do
+        [[ -f "$file" ]] || continue
+        if ! "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
+                -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >>"$seed_log" 2>&1; then
+            echo "❌ ${dbname}: applying canonical seed $(basename "$file") failed." >&2
+            echo "   psql stderr/stdout captured at ${seed_log}" >&2
+            tail -20 "$seed_log" >&2
+            return 1
+        fi
+        applied=$((applied + 1))
+    done
+    if [[ "$applied" -gt 0 ]]; then
+        echo "✅ ${dbname}: applied ${applied} canonical seed file(s) from db/seed/"
+    fi
+}
+
 ensure_runtime_ready() {
     local instance="${1:-${AXON_INSTANCE_KIND:-live}}"
     if [[ -z "$PSQL_BIN" || -z "$PG_ISREADY_BIN" ]]; then
@@ -245,4 +280,5 @@ ensure_runtime_ready() {
     ensure_axon_role_exists || return 1
     ensure_database_seeded "$instance" || return 1
     apply_canonical_ddl "$instance" || return 1
+    apply_canonical_seed "$instance" || return 1
 }
