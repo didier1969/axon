@@ -70,6 +70,7 @@ fn sample_chunk(idx: usize) -> BulkWriterChunkRow {
         part_index: 0,
         part_count: 1,
         chunk_path: format!("/tmp/file_{idx}.rs#alpha_{idx}"),
+        token_count: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn flush_batch_cross_table_round_trip() {
             part_index: 0,
             part_count: 1,
             chunk_path: "/tmp/partial.rs#partial".to_string(),
+            token_count: None,
         }],
         contains: vec![],
         calls: vec![],

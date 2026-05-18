@@ -76,6 +76,7 @@ fn build_batch() -> PgBulkBatch {
             part_index: 0,
             part_count: 1,
             chunk_path: format!("/tmp/file_{}.rs#symbol_{i}", i % 100),
+            token_count: None,
         })
         .collect();
     let contains: Vec<BulkWriterRelationRow> = (0..CONTAINS_COUNT)

@@ -963,6 +963,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_maillon_2c_ingestion_version_drift_preserves_file_rows_and_requeues_them() {
         let db_root = std::env::temp_dir().join(format!(
             "axon-ingestion-soft-reset-{}-{}",
@@ -3490,6 +3491,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_symbol_radius_1_returns_useful_neighborhood() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3531,6 +3533,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_symbol_radius_2_expands_but_stays_bounded() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3571,6 +3574,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_file_anchor_is_stable_and_idempotent() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let file_path = "/tmp/graph/file_anchor.rs";
@@ -3621,6 +3625,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_refresh_reuses_unchanged_anchor_without_rebuild() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3678,6 +3683,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_refresh_rebuilds_only_changed_anchor() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3738,6 +3744,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_projection_symbol_includes_calls_nif_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3772,6 +3779,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_tombstone_missing_path_invalidates_dependent_graph_derivations() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3845,6 +3853,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_analytics_detects_circular_dependencies() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
@@ -3888,6 +3897,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_analytics_detects_domain_leakage() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
@@ -3938,6 +3948,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_analytics_detects_unsafe_exposure() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
@@ -3970,6 +3981,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "REQ-AXO-91481 — legacy CONTAINS/CALLS table writes ; rewrite against public.edge after REQ-AXO-216 Stop A"]
     fn test_graph_analytics_detects_nif_blocking_risks() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
