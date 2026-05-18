@@ -1,5 +1,27 @@
 use super::*;
 
+/// REQ-AXO-91577 — Sentinel project_codes represent cross-tenant logical
+/// scopes that have no concrete `project_path`. They must remain usable for
+/// SOLL mutations even when the registry row is missing (live regression
+/// recovery). The allowlist is closed: only these codes self-heal.
+///
+/// - `PRO` : cross-project methodology surface (Pillar PIL-AXO-9003
+///   Two-Sided Identity). Holds `GUI-PRO-*`, `SKI-PRO-*`, `PRT-PRO-*` etc.
+fn is_sentinel_project_code(code: &str) -> bool {
+    matches!(code, "PRO")
+}
+
+/// Sentinel registry metadata: (project_path placeholder, project_name).
+fn sentinel_project_metadata(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "PRO" => (
+            "(sentinel:cross-project-methodology)",
+            "System Global Namespace",
+        ),
+        _ => ("(sentinel)", "sentinel"),
+    }
+}
+
 /// REQ-AXO-323 Fault 3 — registry counter seed.
 ///
 /// Returns an idempotent UPDATE that bumps each `last_*` counter in
@@ -169,6 +191,21 @@ impl McpServer {
     ) -> anyhow::Result<String> {
         let canonical_code =
             self.validate_explicit_canonical_project_code(project_code, action_label)?;
+
+        // REQ-AXO-91577 — Sentinel project_codes (PRO, ...) self-heal when the
+        // registry row is missing. Without this, a live regression that drops
+        // the row (or a deployment that never seeded it) makes the whole
+        // cross-tenant methodology surface uncreatable via the canonical API
+        // while grandfathered nodes remain. Idempotent: `sync_project_registry_entry`
+        // uses ON CONFLICT DO UPDATE, so calling on every sentinel mutation
+        // is cheap and keeps metadata canonical.
+        if is_sentinel_project_code(&canonical_code) {
+            let (path, name) = sentinel_project_metadata(&canonical_code);
+            self.graph_store
+                .sync_project_registry_entry(&canonical_code, Some(name), Some(path))?;
+            self.ensure_soll_registry_row(&canonical_code)?;
+            return Ok(canonical_code);
+        }
 
         let _ = self.sync_project_code_registry_from_meta();
         let escaped = escape_sql(&canonical_code);
