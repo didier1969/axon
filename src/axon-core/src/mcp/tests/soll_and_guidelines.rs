@@ -8467,5 +8467,39 @@ fn test_re_anchor_returns_canonical_state_packet() {
     assert!(data.get("work_plan_top").is_some());
 }
 
+// REQ-AXO-91583 — status() returns methodology_drift_warnings field.
+#[test]
+fn test_status_returns_methodology_drift_warnings_field() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "status",
+            "arguments": { "mode": "brief" }
+        },
+        "id": 91583
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    let data = result.get("data").unwrap();
+    let drift = data.get("methodology_drift_warnings").expect(
+        "status() must include methodology_drift_warnings field per REQ-AXO-91583",
+    );
+    assert!(
+        drift.get("mandated_skills").is_some(),
+        "drift envelope must contain mandated_skills list"
+    );
+    assert_eq!(
+        drift.get("tracking_version").and_then(|v| v.as_str()),
+        Some("v0_no_audit"),
+        "v0 tracking flag must be explicit"
+    );
+}
+
+
 
 

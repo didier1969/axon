@@ -1107,8 +1107,49 @@ impl McpServer {
                 );
             }
         }
+        // REQ-AXO-91583 — mid-task methodology drift warnings. v0 surfaces
+        // the canonical MANDATED SKI set (cross-tenant PRO namespace) so
+        // an LLM calling status() can verify which procedural skills it is
+        // expected to invoke this session against its own context. Real
+        // invocation-tracking via skill_invoke audit log = slice 2 (a
+        // future REQ adds the audit ring buffer + diff computation).
+        if let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert(
+                "methodology_drift_warnings".to_string(),
+                self.methodology_drift_warnings_v0(),
+            );
+        }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
+    }
+
+    /// REQ-AXO-91583 — v0 drift surface : list MANDATED SKI ids for the
+    /// cross-tenant PRO namespace. Returns `{mandated_skills:[...], tracking_version:"v0_no_audit"}`.
+    /// Future slice instruments skill_invoke audit and computes the diff
+    /// `mandated_set - invoked_in_last_K_turns`.
+    fn methodology_drift_warnings_v0(&self) -> Value {
+        let rows = self
+            .graph_store
+            .query_json(
+                "SELECT id, COALESCE(title, '') \
+                 FROM soll.Node \
+                 WHERE type='Skill' AND status='current' \
+                   AND COALESCE(metadata->>'invocation_mode', 'OPTIONAL') = 'MANDATED' \
+                 ORDER BY id",
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .unwrap_or_default();
+        let mandated: Vec<Value> = rows
+            .into_iter()
+            .filter(|r| r.len() >= 2)
+            .map(|r| json!({ "id": r[0], "title": r[1] }))
+            .collect();
+        json!({
+            "mandated_skills": mandated,
+            "tracking_version": "v0_no_audit",
+            "llm_instruction": "Verify your session has invoked each MANDATED skill at least once. Real audit tracking ships in REQ-AXO-91583 slice 2.",
+        })
     }
 
     // REQ-AXO-91484 — surface per-project/per-language call-graph coverage so
