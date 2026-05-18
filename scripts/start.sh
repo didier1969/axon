@@ -125,14 +125,11 @@ case "${AXON_INSTANCE_KIND:-live}" in
     *)    AXON_INSTANCE_STATE_FILE="$PROJECT_ROOT/.axon/instance-state.json" ;;
 esac
 
-# MIL-AXO-015 Stop C persistence (REQ-AXO-216 prep): per-instance env-var
-# overrides loaded from a sourced config file. Holds the AXON_DB_BACKEND /
-# AXON_LIVE_DATABASE_URL / AXON_SOLL_SEED_PATH triple that flips the brain
-# from DuckDB to PostgreSQL — and any future runtime-flag persistence.
-# Files are .gitignore'd because AXON_LIVE_DATABASE_URL contains
-# credentials. Operator writes them once via the canonical wrapper or
-# manually; start.sh propagates them to the brain process automatically
-# on every start, so the flip survives reboot / promote / manual restart.
+# Per-instance env-var overrides loaded from a sourced config file. Holds
+# AXON_LIVE_DATABASE_URL / AXON_SOLL_SEED_PATH and any future runtime-flag
+# persistence. Files are .gitignore'd because AXON_LIVE_DATABASE_URL contains
+# credentials. Operator writes them once via the canonical wrapper or manually;
+# start.sh propagates them to the brain process automatically on every start.
 case "${AXON_INSTANCE_KIND:-live}" in
     live) AXON_RUNTIME_CONFIG_FILE="$PROJECT_ROOT/.axon/runtime-config.live.env" ;;
     dev)  AXON_RUNTIME_CONFIG_FILE="$PROJECT_ROOT/.axon-dev/runtime-config.dev.env" ;;
@@ -152,10 +149,8 @@ fi
 # recovery. ensure_runtime_ready is idempotent — safe to call on every
 # start. Runs inline (no devenv shell wrap) by resolving psql /
 # pg_isready / devenv from /nix/store + PATH directly, saving the
-# ~10-15s cost of a devenv shell entry on this machine. Skipped only
-# when the backend is explicitly not Postgres.
-if [[ "${AXON_DB_BACKEND:-postgres}" == "postgres" \
-      && "${AXON_SKIP_RUNTIME_BOOTSTRAP:-0}" != "1" ]]; then
+# ~10-15s cost of a devenv shell entry on this machine.
+if [[ "${AXON_SKIP_RUNTIME_BOOTSTRAP:-0}" != "1" ]]; then
     if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
         echo "❌ Runtime bootstrap (ensure_runtime_ready) failed; refusing to start." >&2
         exit 1
@@ -466,16 +461,12 @@ fi
 # REQ-AXO-102 — apply the brain-only resource defaults from start-brain.sh
 # directly when `--brain-only` is selected via the unified entrypoint, so
 # `./scripts/axon start --brain-only` is contractually equivalent to
-# `bash scripts/lib/start-brain.sh`. Without this block, the unified
-# path runs a brain with default GPU/IST/memory tunings that diverge
-# from the wrapper's intent (no GPU avoidance, no IST-reader-only
-# split, default DuckDB memory budget). All defaults use `:-` so any
-# explicit override (env var or wrapper) wins.
+# `bash scripts/lib/start-brain.sh`. Without this block, the unified path
+# runs a brain with default GPU tunings that diverge from the wrapper's
+# intent (no GPU avoidance). All defaults use `:-` so any explicit override
+# (env var or wrapper) wins.
 if [[ "$RUNTIME_MODE" == "brain_only" ]]; then
     export AXON_GPU_ACCESS_POLICY="${AXON_GPU_ACCESS_POLICY:-avoid}"
-    export AXON_SPLIT_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
-    export AXON_SPLIT_BRAIN_IST_READER_ONLY="${AXON_SPLIT_BRAIN_IST_READER_ONLY:-1}"
-    export AXON_DUCKDB_MEMORY_LIMIT_GB="${AXON_DUCKDB_MEMORY_LIMIT_GB:-2}"
 fi
 
 # REQ-AXO-91563 slice 1 — cap glibc per-thread mmap arenas. Without this,
@@ -718,18 +709,7 @@ rebuild_tunnel_release() {
 
 verify_sql_gateway() {
     local response
-    # MIL-AXO-015 post-promote: SHOW TABLES is DuckDB syntax. Under PG
-    # the gateway's normalize_attached_soll_query rewrites legacy
-    # statements but SHOW TABLES has no PG analogue (PG reads
-    # `SHOW <param>` and returns "unrecognized configuration parameter").
-    # The IST schema reads `axon` schema (or public when DuckDB), and
-    # information_schema is portable across both backends.
-    local probe_query
-    if [[ "${AXON_DB_BACKEND:-duckdb}" == "postgres" ]]; then
-        probe_query="SELECT table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema','soll','axon_runtime','ag_catalog')"
-    else
-        probe_query="SHOW TABLES"
-    fi
+    local probe_query="SELECT table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema','soll','axon_runtime','ag_catalog')"
     response="$(curl -sS -X POST http://127.0.0.1:$HYDRA_HTTP_PORT/sql \
         -H 'content-type: application/json' \
         -d "{\"query\":\"$probe_query\"}" 2>/dev/null || true)"
@@ -844,7 +824,7 @@ if [[ "$RUNTIME_SHADOW_ONLY" == "1" ]]; then
 fi
 echo "🧩 Instance kind: $AXON_INSTANCE_KIND"
 echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGROUND_BUDGET_CLASS gpu=$AXON_GPU_ACCESS_POLICY watcher=$AXON_WATCHER_POLICY"
-echo "🛠️ Worker cap: ${MAX_AXON_WORKERS:-auto} / Queue budget bytes: ${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
+echo "🛠️ Per-stage workers: A=${AXON_A_WORKERS:-auto}/B=${AXON_B_WORKERS:-auto}"
 echo "🏷️ Release version: $AXON_RELEASE_VERSION"
 echo "🧱 Build id: $AXON_BUILD_ID"
 if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
@@ -876,11 +856,8 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_BACKGROUND_BUDGET_CLASS "$AXON_BACKGROUND_BUDGET_CLASS" \
   AXON_GPU_ACCESS_POLICY "$AXON_GPU_ACCESS_POLICY" \
   AXON_WATCHER_POLICY "$AXON_WATCHER_POLICY" \
-  MAX_AXON_WORKERS "${MAX_AXON_WORKERS:-}" \
-  AXON_QUEUE_MEMORY_BUDGET_BYTES "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" \
-  AXON_WATCHER_SUBTREE_HINT_BUDGET "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" \
-  AXON_SPLIT_BRAIN_IST_READER_ONLY "${AXON_SPLIT_BRAIN_IST_READER_ONLY:-}" \
-  AXON_DUCKDB_MEMORY_LIMIT_GB "${AXON_DUCKDB_MEMORY_LIMIT_GB:-}" \
+  AXON_A_WORKERS "${AXON_A_WORKERS:-}" \
+  AXON_B_WORKERS "${AXON_B_WORKERS:-}" \
   AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}" \
   AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
   AXON_BUILD_ID "$AXON_BUILD_ID" \
@@ -893,13 +870,6 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_SQL_PUBLIC_URL "${AXON_SQL_PUBLIC_URL:-}" \
   AXON_DASHBOARD_PUBLIC_URL "${AXON_DASHBOARD_PUBLIC_URL:-}"
 
-# Never discard DuckDB WAL during a normal restart. WAL replay is required to recover
-# recent committed work when the main database file has not been checkpointed yet.
-if [[ "${AXON_DROP_WAL_ON_START:-0}" == "1" ]]; then
-  axon_log_warn "AXON_DROP_WAL_ON_START=1 set: deleting DuckDB WAL files before start."
-  rm -f "$AXON_DB_ROOT/"*.wal 2>/dev/null || true
-fi
-
 # Create TMUX session
 if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     tmux new-session -d -s "$TMUX_SESSION" -n "core"
@@ -908,10 +878,6 @@ fi
 # Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-WORKER_CAP_EXPORT=""
-if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
-    WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
-fi
 EMBEDDING_PROVIDER_EXPORT=""
 if [[ -n "${EMBEDDING_PROVIDER_REQUEST:-}" ]]; then
     EMBEDDING_PROVIDER_EXPORT="export AXON_EMBEDDING_PROVIDER=\"$EMBEDDING_PROVIDER_REQUEST\"; "
