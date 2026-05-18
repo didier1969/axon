@@ -1,4 +1,4 @@
-use crate::ist_snapshot::process_view;
+use crate::ist_snapshot::{process_view, RelationType};
 use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -1539,6 +1539,32 @@ impl McpServer {
         // (canonical caller/callee facts live in AGE; this tool falls back to
         // the AGE-aware path/impact tools for full traversal). Skip the join
         // shape entirely so the query stays valid against both backends.
+        // REQ-AXO-901594 — RAM-first callers/callees count via IstGraphView
+        // (PIL-AXO-9002). When the in-memory CSR snapshot is warm for this
+        // project we compute the 1-hop reverse / forward CALLS reachability
+        // sets entirely in RAM (~O(degree) per node) and skip the PG
+        // subquery roundtrip. PG fallback preserves the existing behaviour
+        // when the cache is cold OR the project is unspecified.
+        let inspect_view = process_view();
+        let ram_attempted_inspect = project
+            .map(|p| inspect_view.is_warm(p))
+            .unwrap_or(false);
+        let inspect_call_rels: [RelationType; 2] =
+            [RelationType::Calls, RelationType::CallsNif];
+        let (ram_callers_count, ram_callees_count): (Option<i64>, Option<i64>) =
+            if ram_attempted_inspect {
+                let project_key = project.unwrap_or("");
+                let callers = inspect_view
+                    .reverse_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
+                    .map(|v| v.len() as i64);
+                let callees = inspect_view
+                    .forward_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
+                    .map(|v| v.len() as i64);
+                (callers, callees)
+            } else {
+                (None, None)
+            };
+
         let skip_legacy_relations = self.graph_store.skip_legacy_relations();
         let query = if skip_legacy_relations {
             if project.is_some() {
@@ -1626,16 +1652,18 @@ impl McpServer {
                     .and_then(|row| row.get(2))
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let callers = rows
-                    .first()
-                    .and_then(|row| row.get(3))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                let callees = rows
-                    .first()
-                    .and_then(|row| row.get(4))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                let callers = ram_callers_count.unwrap_or_else(|| {
+                    rows.first()
+                        .and_then(|row| row.get(3))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                });
+                let callees = ram_callees_count.unwrap_or_else(|| {
+                    rows.first()
+                        .and_then(|row| row.get(4))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                });
                 let kind = rows
                     .first()
                     .and_then(|row| row.get(1))
@@ -1713,6 +1741,20 @@ impl McpServer {
                 if graph_lane_active {
                     surfaces_used.push("graph_r1");
                 }
+                // REQ-AXO-901594 — surface the RAM vs PG decision so qualify
+                // tools can verify the IST-first migration without grepping
+                // the response text.
+                let mut surfaces_degraded: Vec<&str> = Vec::new();
+                if ram_callers_count.is_some() || ram_callees_count.is_some() {
+                    surfaces_used.push("graph_ram");
+                } else if ram_attempted_inspect {
+                    // Cache warm but BFS returned None for both directions —
+                    // very rare ; record the degraded surface for telemetry.
+                    surfaces_degraded.push("graph_ram_partial");
+                } else {
+                    surfaces_used.push("graph_pg");
+                    surfaces_degraded.push("graph_ram_unavailable");
+                }
                 // REQ-AXO-91509 — GUI-AXO-1003 mandates 4 envelope
                 // fields (pagination, surfaces_used, total_available,
                 // next_call_hint) PLUS graph r=1 context. Note: the
@@ -1729,7 +1771,7 @@ impl McpServer {
                             "related_symbols_via_graph": related_names,
                         },
                         "surfaces_used": surfaces_used,
-                        "surfaces_degraded": [],
+                        "surfaces_degraded": surfaces_degraded,
                         "total_available": 1,
                         "next_call_hint": format!("impact symbol={resolved_name}"),
                         "pagination": {
