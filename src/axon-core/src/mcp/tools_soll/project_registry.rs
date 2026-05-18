@@ -35,6 +35,7 @@ fn seed_registry_counters_sql(project_code: &str) -> String {
         ("last_stk", "STK"),
         ("last_gui", "GUI"),
         ("last_ski", "SKI"), // REQ-AXO-91578 — Skill entity counter
+        ("last_prt", "PRT"), // REQ-AXO-91579 — PromptTemplate entity counter
         ("last_prv", "PRV"),
         ("last_rev", "REV"),
     ]
@@ -81,8 +82,8 @@ impl McpServer {
 
     pub(super) fn ensure_soll_registry_row(&self, project_code: &str) -> anyhow::Result<()> {
         self.graph_store.execute_param(
-            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_ski, last_prv, last_rev)
-             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_ski, last_prt, last_prv, last_rev)
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
              ON CONFLICT (project_code) DO NOTHING",
             &json!([project_code]),
         )?;

@@ -55,8 +55,8 @@ pub(crate) struct RelationPolicy {
 }
 
 pub(super) const SOLL_RELATION_ENDPOINT_KINDS: &[&str] = &[
-    // REQ-AXO-91578 — SKI added to canonical endpoint kinds.
-    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "SKI", "ART",
+    // REQ-AXO-91578/91579 — SKI + PRT added to canonical endpoint kinds.
+    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "SKI", "PRT", "ART",
 ];
 
 pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
@@ -65,8 +65,8 @@ pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> 
 
 pub(super) fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     match prefix {
-        // REQ-AXO-91578 — SKI added to canonical entity prefix set.
-        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" | "SKI" => {
+        // REQ-AXO-91578/91579 — SKI + PRT added to canonical entity prefix set.
+        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" | "SKI" | "PRT" => {
             Some("soll.Node")
         }
         _ => None,
@@ -286,6 +286,56 @@ pub(super) fn relation_policy_for_pair(
                 role: ProjectionRole::Lateral,
                 parent_preference_rank: 80,
                 child_order_rank: 65,
+            },
+        }),
+        // REQ-AXO-91579 — PRT (PromptTemplate) entity canonical relations.
+        // A PromptTemplate is parametrized text rendered by SKI procedures
+        // (or directly by an LLM via mcp__axon__prompt_template_get). It
+        // BELONGS_TO a Pillar (organizational scope), INHERITS_FROM a
+        // Guideline (methodology rule it implements), and is USED_BY skills
+        // via the (SKI, PRT) USES edge. PRT composition is via same-type
+        // EXTENDS / REFINES / SUPERSEDES edges.
+        ("PRT", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 14,
+                child_order_rank: 67,
+            },
+        }),
+        ("PRT", "GUI") => Some(RelationPolicy {
+            allowed: &["INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 22,
+                child_order_rank: 72,
+            },
+        }),
+        ("PRT", "PRT") => Some(RelationPolicy {
+            allowed: &["EXTENDS", "REFINES", "SUPERSEDES", "INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 82,
+                child_order_rank: 67,
+            },
+        }),
+        // REQ-AXO-91579 — SKI USES PRT : the canonical edge for a skill
+        // that injects a prompt template's rendered output (sub-agent brief,
+        // PRD body, error message, etc.).
+        ("SKI", "PRT") => Some(RelationPolicy {
+            allowed: &["USES"],
+            default: Some("USES"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 90,
+                child_order_rank: 80,
             },
         }),
         ("DEC", "DEC") => Some(RelationPolicy {

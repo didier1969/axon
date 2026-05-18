@@ -336,6 +336,7 @@ pub(super) fn normalize_traceability_entity_type(entity_type: &str) -> String {
         "stakeholder" | "stk" => "stakeholder".to_string(),
         "guideline" | "gui" => "guideline".to_string(),
         "skill" | "ski" => "skill".to_string(), // REQ-AXO-91578
+        "prompt_template" | "prompttemplate" | "prt" => "prompt_template".to_string(), // REQ-AXO-91579
         other => other.to_string(),
     }
 }
@@ -355,6 +356,7 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
         "concept" => vec!["document", "file", "symbol", "rationale"],
         "guideline" => vec!["document", "file", "symbol", "diff"],
         "skill" => vec!["document", "file", "symbol", "test", "diff"], // REQ-AXO-91578
+        "prompt_template" => vec!["document", "file", "symbol", "test"], // REQ-AXO-91579
         "vision" | "pillar" | "milestone" | "stakeholder" => {
             vec!["document", "file", "symbol", "metric"]
         }

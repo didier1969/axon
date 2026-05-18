@@ -55,12 +55,15 @@ CREATE TABLE IF NOT EXISTS soll.Registry (
     last_stk BIGINT NOT NULL DEFAULT 0,
     last_gui BIGINT NOT NULL DEFAULT 0,
     last_ski BIGINT NOT NULL DEFAULT 0,
+    last_prt BIGINT NOT NULL DEFAULT 0,
     last_prv BIGINT NOT NULL DEFAULT 0,
     last_rev BIGINT NOT NULL DEFAULT 0
 );
 -- REQ-AXO-91578: SKI (Skill) entity type counter — additive migration
 -- for existing live DBs where Registry was created before SKI was added.
 ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_ski BIGINT NOT NULL DEFAULT 0;
+-- REQ-AXO-91579: PRT (PromptTemplate) entity type counter.
+ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prt BIGINT NOT NULL DEFAULT 0;
 
 -- Intent graph: nodes + edges. Both carry `project_code` so a single
 -- DB hosts multi-tenant SOLL.
@@ -292,6 +295,7 @@ BEGIN
         WHEN 'Stakeholder'    THEN 'STK'
         WHEN 'Guideline'      THEN 'GUI'
         WHEN 'Skill'          THEN 'SKI'  -- REQ-AXO-91578
+        WHEN 'PromptTemplate' THEN 'PRT'  -- REQ-AXO-91579
         ELSE NULL
     END;
     IF v_prefix IS NULL THEN

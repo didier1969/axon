@@ -8246,3 +8246,65 @@ fn test_skill_entity_rejects_non_canonical_attach_target() {
         "SKI→MIL should reject (no canonical policy), got: {content}"
     );
 }
+
+// REQ-AXO-91579 — PRT (PromptTemplate) entity type addition.
+#[test]
+fn test_prompt_template_entity_type_create_with_canonical_inherit_from_guideline() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "prompt_template",
+                "data": {
+                    "project_code": "PRO",
+                    "title": "Test PRD body template",
+                    "description": "Mustache template for PRD body sections, rendered by SKI-PRO-prd-synthesis. Parameters: project_code, acceptance_criteria, user_stories.",
+                    "attach_to": "GUI-PRO-001",
+                    "relation_type": "INHERITS_FROM",
+                    "status": "current"
+                }
+            }
+        },
+        "id": 91579
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    let is_error = result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    assert!(
+        !is_error,
+        "PRT entity create should succeed, got: {content}"
+    );
+    assert!(
+        content.contains("PRT-PRO-"),
+        "Response should include canonical PRT id, got: {content}"
+    );
+
+    let count = server
+        .graph_store
+        .query_count(
+            "SELECT count(*) FROM soll.Node WHERE type='PromptTemplate' AND project_code='PRO'",
+        )
+        .unwrap();
+    assert!(
+        count >= 1,
+        "at least one PRT-PRO row expected after create, got {count}"
+    );
+}
+
