@@ -23,15 +23,9 @@ impl McpServer {
                 .ok()
                 .as_deref(),
         );
-        // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
-        // under PG canonical (REQ-AXO-271 / REQ-AXO-290 S3) the brain
-        // never carries indexer authority. Always false.
-        let split_brain_public_authority = false;
-
         let resume_vectorization_unavailable = normalized_name == "resume_vectorization"
             && matches!(runtime_mode, AxonRuntimeMode::BrainOnly);
         if (requires_indexed_runtime(normalized_name) || resume_vectorization_unavailable)
-            && !split_brain_public_authority
             && !matches!(
                 runtime_profile,
                 AxonRuntimeOperationalProfile::IndexerFullAutonomous

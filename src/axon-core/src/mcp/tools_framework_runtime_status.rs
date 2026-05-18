@@ -409,9 +409,6 @@ impl McpServer {
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
             && runtime_authority_converged;
-        // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
-        // under PG canonical (REQ-AXO-271 / REQ-AXO-290 S3) the brain
-        // is always standalone when in BrainOnly mode.
         let standalone_brain_only =
             process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly;
         let indexer_feed_degraded = !standalone_brain_only

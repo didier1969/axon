@@ -23,17 +23,11 @@ fn tool_available_in_runtime(name: &str) -> bool {
             .ok()
             .as_deref(),
     );
-    // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
-    // under PG canonical (REQ-AXO-271 / REQ-AXO-290 S3) the brain
-    // never carries indexer authority. Always false.
-    let split_brain_public_authority = false;
-
     if requires_indexed_runtime(name) {
-        return split_brain_public_authority
-            || matches!(
-                runtime_profile,
-                AxonRuntimeOperationalProfile::IndexerFullAutonomous
-            );
+        return matches!(
+            runtime_profile,
+            AxonRuntimeOperationalProfile::IndexerFullAutonomous
+        );
     }
 
     match runtime_mode {

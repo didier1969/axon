@@ -32,9 +32,6 @@ impl McpServer {
         let reader_snapshot_diagnostics = self.graph_store.reader_snapshot_diagnostics();
         let reader_alias_direct = self.graph_store.reader_snapshot_is_writer_alias();
         let shadow_role = current_runtime_shadow_role();
-        // AXON_SPLIT_SHADOW_ONLY was a DuckDB-era split-process knob ;
-        // under PG canonical the brain never carries indexer authority.
-        let split_shadow_only = false;
         let mut peer_runtime_version = json!({
             "available": false,
             "release_version": Value::Null,
@@ -92,7 +89,7 @@ impl McpServer {
         status.indexer_ready = indexer_ready;
         status.ist_snapshot = ist_snapshot.clone();
         status.system_converged = if split_process_role.is_some() {
-            !split_shadow_only && split_ready
+            split_ready
         } else {
             match runtime_mode.declared_process_role() {
                 AxonProcessRole::Brain => brain_ready,

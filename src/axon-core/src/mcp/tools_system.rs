@@ -545,47 +545,15 @@ impl McpServer {
                 }
             }
             Err(e) => {
+                // REQ-AXO-139 binder-error parsing was DuckDB-specific (matched
+                // `Candidate bindings: "X", "Y"` strings emitted by DuckDB).
+                // PG produces a different error format (`column "x" does not
+                // exist` + `HINT:`) ; the DuckDB-format parser was retired with
+                // REQ-AXO-271 slice 7. A PG-equivalent structured repair is
+                // tracked separately (REQ-AXO-91494 surface fixes).
                 let raw = e.to_string();
-                // REQ-AXO-139 — universal parameter_repair contract slice for
-                // cypher binder errors. DuckDB already emits the candidate
-                // column list inside its error text (`Candidate bindings:
-                // "X", "Y"`). Surface it as structured `data.parameter_repair`
-                // + `data.next_action` so the LLM can fix the column name in
-                // one round-trip instead of guessing or re-running schema_overview.
-                if let Some((missing_col, candidates)) = parse_duckdb_binder_error(&raw) {
-                    let candidates_csv = candidates.join(", ");
-                    return Some(json!({
-                        "content": [{ "type": "text", "text": format!(
-                            "Cypher binder error: column '{}' not found. Candidates: [{}]",
-                            missing_col, candidates_csv
-                        )}],
-                        "isError": true,
-                        "data": {
-                            "status": "input_invalid",
-                            "next_action": {
-                                "kind": "fix_column_then_retry",
-                                "tool": "sql",
-                                "when": "after_replacing_invalid_column"
-                            },
-                            "operator_guidance": {
-                                "problem_class": "input_invalid",
-                                "follow_up_tools": ["schema_overview", "list_labels_tables", "query_examples"],
-                            },
-                            "parameter_repair": {
-                                "invalid_field": "sql",
-                                "missing_column": missing_col,
-                                "available_columns": candidates,
-                                "hint": format!(
-                                    "Replace '{}' with one of [{}], or run `schema_overview` for the full column list.",
-                                    missing_col, candidates_csv
-                                )
-                            },
-                            "diagnostic_excerpt": raw.chars().take(240).collect::<String>()
-                        }
-                    }));
-                }
                 Some(json!({
-                    "content": [{ "type": "text", "text": format!("Cypher Error: {}", raw) }],
+                    "content": [{ "type": "text", "text": format!("SQL Error: {}", raw) }],
                     "isError": true,
                     "data": {
                         "status": "input_invalid",
@@ -630,85 +598,3 @@ impl McpServer {
     }
 }
 
-/// Parse a DuckDB binder error message into (missing_column, candidate_columns).
-///
-/// DuckDB's binder errors follow the pattern:
-///   `Binder Error: Referenced column "X" not found in FROM clause!  Candidate bindings: "A", "B", "C"`
-/// Returns None when the error doesn't match this pattern (REQ-AXO-139 slice).
-pub(crate) fn parse_duckdb_binder_error(raw: &str) -> Option<(String, Vec<String>)> {
-    let referenced_marker = "Referenced column \"";
-    let candidate_marker = "Candidate bindings: ";
-    let ref_start = raw.find(referenced_marker)? + referenced_marker.len();
-    let ref_end = raw[ref_start..].find('"')?;
-    let missing = raw[ref_start..ref_start + ref_end].to_string();
-    let cand_start = raw.find(candidate_marker)? + candidate_marker.len();
-    // DuckDB appends `LINE N: ...` location markers AFTER the candidate list.
-    // Terminate the block at the first newline to avoid swallowing the
-    // location pointer into the last candidate (REQ-AXO-139 follow-up:
-    // single-candidate edge case where there's no comma to split on).
-    let cand_tail = &raw[cand_start..];
-    let cand_block = match cand_tail.find('\n') {
-        Some(nl) => &cand_tail[..nl],
-        None => cand_tail,
-    };
-    // Split candidates on commas, trim quotes/whitespace.
-    let candidates: Vec<String> = cand_block
-        .split(',')
-        .filter_map(|seg| {
-            let trimmed = seg.trim();
-            let no_punct = trimmed.trim_end_matches('.').trim();
-            let inner = no_punct.trim_matches('"').trim();
-            if inner.is_empty() {
-                None
-            } else {
-                Some(inner.to_string())
-            }
-        })
-        .collect();
-    if candidates.is_empty() {
-        return None;
-    }
-    Some((missing, candidates))
-}
-
-#[cfg(test)]
-mod parse_duckdb_binder_error_tests {
-    use super::parse_duckdb_binder_error;
-
-    #[test]
-    fn parses_canonical_binder_error() {
-        let raw = "DuckDB plugin error: prepare: Binder Error: Referenced column \"callee\" not found in FROM clause!\nCandidate bindings: \"target_id\", \"source_id\", \"project_code\"";
-        let (missing, candidates) = parse_duckdb_binder_error(raw).expect("must parse");
-        assert_eq!(missing, "callee");
-        assert_eq!(candidates, vec!["target_id", "source_id", "project_code"]);
-    }
-
-    #[test]
-    fn returns_none_for_non_binder_errors() {
-        let raw = "DuckDB plugin error: Catalog Error: Table 'Nonexistent' does not exist";
-        assert!(parse_duckdb_binder_error(raw).is_none());
-    }
-
-    #[test]
-    fn handles_single_candidate() {
-        let raw = "Binder Error: Referenced column \"foo\" not found in FROM clause! Candidate bindings: \"bar\"";
-        let (missing, candidates) = parse_duckdb_binder_error(raw).expect("must parse");
-        assert_eq!(missing, "foo");
-        assert_eq!(candidates, vec!["bar"]);
-    }
-
-    #[test]
-    fn ignores_duckdb_line_marker_after_candidates() {
-        // DuckDB appends `LINE N: ... \n  ^` location pointers after the
-        // candidate list. Earlier parser swallowed the marker into the
-        // last candidate when there was no comma to split on.
-        let raw = "Binder Error: Referenced column \"callee\" not found in FROM clause!\nCandidate bindings: \"target_id\"\n\nLINE 1: SELECT callee FROM main.CALLS LIMIT 1\n               ^";
-        let (missing, candidates) = parse_duckdb_binder_error(raw).expect("must parse");
-        assert_eq!(missing, "callee");
-        assert_eq!(
-            candidates,
-            vec!["target_id"],
-            "LINE marker must NOT contaminate the candidate"
-        );
-    }
-}
