@@ -963,6 +963,29 @@ impl McpServer {
                 if graph_lane_active {
                     surfaces_used.push("graph_r1");
                 }
+                // REQ-AXO-901596 — declare the RAM-vs-PG decision for the
+                // lexical lane. Today the lexical match runs on PG (Symbol
+                // table + CONTAINS join). When the IST cache is warm we
+                // could in theory route the regex match through the in-
+                // memory CSR after extending IstGraphView with a
+                // name-keyed index. Until that lands, emit a
+                // `graph_ram_lexical_deferred` tag so qualify-mcp can
+                // surface the gap without grepping the code path.
+                let mut surfaces_degraded_lexical: Vec<Value> = Vec::new();
+                if !semantic_lane_active && project != "*" {
+                    let view = crate::ist_snapshot::process_view();
+                    if view.is_warm(project) {
+                        surfaces_degraded_lexical.push(json!({
+                            "surface": "graph_ram_lexical",
+                            "reason": "lexical regex match still routed via PG ; RAM lexical migration deferred (REQ-AXO-901596 follow-up)"
+                        }));
+                    }
+                }
+                let mut surfaces_degraded: Vec<Value> = surfaces_degraded_lexical;
+                if let Some(reason) = semantic_fallback_reason.as_ref() {
+                    surfaces_degraded
+                        .push(json!({"surface": "vector", "reason": reason}));
+                }
                 let response = json!({
                     "content": [{ "type": "text", "text": report }],
                     "data": {
@@ -971,10 +994,7 @@ impl McpServer {
                             "related_symbols_via_graph": related_via_graph,
                         },
                         "surfaces_used": surfaces_used,
-                        "surfaces_degraded": semantic_fallback_reason
-                            .as_ref()
-                            .map(|reason| json!([{"surface": "vector", "reason": reason}]))
-                            .unwrap_or_else(|| json!([])),
+                        "surfaces_degraded": surfaces_degraded,
                         "total_available": total_available,
                         "next_call_hint": next_call_hint,
                         "pagination": {

@@ -89,13 +89,29 @@ impl McpServer {
             .as_ref()
             .map(|snapshot| snapshot.canonical_orphan_intent_ids())
             .unwrap_or_default();
+        // REQ-AXO-901595 — RAM-first reciprocal-CALLS cycle count via
+        // IstGraphView (PIL-AXO-9002). When the per-project CSR cache is
+        // warm, `view.reciprocal_calls_cycle_count` walks the in-memory
+        // graph in O(N+M) without a PG roundtrip ; falls back to the
+        // existing `get_circular_dependency_count_fast` SQL when cold OR
+        // when `project == "*"` (the RAM walk is per-project scoped).
+        let ram_cycle_count: Option<usize> = if project != "*" {
+            let view = crate::ist_snapshot::process_view();
+            if view.is_warm(project) {
+                view.reciprocal_calls_cycle_count(project)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let (circular_deps, cycle_count) = if brief_mode {
-            (
-                Vec::new(),
+            let count = ram_cycle_count.unwrap_or_else(|| {
                 self.graph_store
                     .get_circular_dependency_count_fast(project)
-                    .unwrap_or(0) as usize,
-            )
+                    .unwrap_or(0) as usize
+            });
+            (Vec::new(), count)
         } else {
             let cycles = self
                 .graph_store
@@ -585,6 +601,11 @@ impl McpServer {
         // empty result when the per-project cache is cold or
         // `project == "*"` (the algos are per-project scoped).
         let mut surfaces_used: Vec<&'static str> = vec!["graph_pg"];
+        if ram_cycle_count.is_some() {
+            // REQ-AXO-901595 — declare the RAM cycle-count surface for
+            // qualify-mcp telemetry and post-hoc PIL-AXO-9002 audit.
+            surfaces_used.push("graph_ram_cycles");
+        }
         let cognitive_signals: Value = if project != "*" {
             let view = crate::ist_snapshot::process_view();
             if view.is_warm(project) {
