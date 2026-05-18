@@ -207,10 +207,11 @@ impl McpServer {
                     "stakeholder" => "Stakeholder",
                     "validation" => "Validation",
                     "guideline" => "Guideline",
+                    "skill" => "Skill", // REQ-AXO-91578
                     other => {
                         let accepted = [
                             "vision", "pillar", "requirement", "concept", "decision",
-                            "milestone", "stakeholder", "validation", "guideline",
+                            "milestone", "stakeholder", "validation", "guideline", "skill",
                         ];
                         return Some(json!({
                             "content": [{
@@ -349,7 +350,7 @@ impl McpServer {
                                 "supplied_value": "vision",
                                 "accepted_values": [
                                     "pillar", "requirement", "concept", "decision",
-                                    "milestone", "validation", "stakeholder", "guideline"
+                                    "milestone", "validation", "stakeholder", "guideline", "skill"
                                 ],
                                 "hint": "to register a new project with its Vision, call axon_init_project; for downstream entities, choose another entity type",
                                 "follow_up_tools": ["axon_init_project"],
@@ -678,6 +679,7 @@ impl McpServer {
                     "Validation" => "VAL",
                     "Stakeholder" => "STK",
                     "Guideline" => "GUI",
+                    "Skill" => "SKI", // REQ-AXO-91578
                     other => other,
                 };
                 let target_prefix: String =

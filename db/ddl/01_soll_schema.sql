@@ -54,9 +54,13 @@ CREATE TABLE IF NOT EXISTS soll.Registry (
     last_val BIGINT NOT NULL DEFAULT 0,
     last_stk BIGINT NOT NULL DEFAULT 0,
     last_gui BIGINT NOT NULL DEFAULT 0,
+    last_ski BIGINT NOT NULL DEFAULT 0,
     last_prv BIGINT NOT NULL DEFAULT 0,
     last_rev BIGINT NOT NULL DEFAULT 0
 );
+-- REQ-AXO-91578: SKI (Skill) entity type counter — additive migration
+-- for existing live DBs where Registry was created before SKI was added.
+ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_ski BIGINT NOT NULL DEFAULT 0;
 
 -- Intent graph: nodes + edges. Both carry `project_code` so a single
 -- DB hosts multi-tenant SOLL.
@@ -278,15 +282,16 @@ DECLARE
     v_next   BIGINT;
 BEGIN
     v_prefix := CASE p_type
-        WHEN 'Vision'      THEN 'VIS'
-        WHEN 'Pillar'      THEN 'PIL'
-        WHEN 'Requirement' THEN 'REQ'
-        WHEN 'Concept'     THEN 'CPT'
-        WHEN 'Decision'    THEN 'DEC'
-        WHEN 'Milestone'   THEN 'MIL'
-        WHEN 'Validation'  THEN 'VAL'
-        WHEN 'Stakeholder' THEN 'STK'
-        WHEN 'Guideline'   THEN 'GUI'
+        WHEN 'Vision'         THEN 'VIS'
+        WHEN 'Pillar'         THEN 'PIL'
+        WHEN 'Requirement'    THEN 'REQ'
+        WHEN 'Concept'        THEN 'CPT'
+        WHEN 'Decision'       THEN 'DEC'
+        WHEN 'Milestone'      THEN 'MIL'
+        WHEN 'Validation'     THEN 'VAL'
+        WHEN 'Stakeholder'    THEN 'STK'
+        WHEN 'Guideline'      THEN 'GUI'
+        WHEN 'Skill'          THEN 'SKI'  -- REQ-AXO-91578
         ELSE NULL
     END;
     IF v_prefix IS NULL THEN

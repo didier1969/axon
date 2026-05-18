@@ -55,7 +55,8 @@ pub(crate) struct RelationPolicy {
 }
 
 pub(super) const SOLL_RELATION_ENDPOINT_KINDS: &[&str] = &[
-    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "ART",
+    // REQ-AXO-91578 — SKI added to canonical endpoint kinds.
+    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "SKI", "ART",
 ];
 
 pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
@@ -64,7 +65,10 @@ pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> 
 
 pub(super) fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     match prefix {
-        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" => Some("soll.Node"),
+        // REQ-AXO-91578 — SKI added to canonical entity prefix set.
+        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" | "SKI" => {
+            Some("soll.Node")
+        }
         _ => None,
     }
 }
@@ -245,6 +249,43 @@ pub(super) fn relation_policy_for_pair(
                 role: ProjectionRole::Lateral,
                 parent_preference_rank: 90,
                 child_order_rank: 999,
+            },
+        }),
+        // REQ-AXO-91578 — SKI (Skill) entity canonical relations.
+        // A Skill is a procedure invocable by an LLM via MCP. It anchors
+        // organizationally on a Pillar (BELONGS_TO) and methodologically
+        // on a Guideline that mandates its invocation (INHERITS_FROM,
+        // the canonical "mandated by" semantic per CPT-AXO-90019 triad).
+        // Skill composition is via same-type REFINES / COMPOSES_WITH /
+        // SUPERSEDES / INHERITS_FROM edges.
+        ("SKI", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 12,
+                child_order_rank: 65,
+            },
+        }),
+        ("SKI", "GUI") => Some(RelationPolicy {
+            allowed: &["INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 20,
+                child_order_rank: 70,
+            },
+        }),
+        ("SKI", "SKI") => Some(RelationPolicy {
+            allowed: &["REFINES", "COMPOSES_WITH", "SUPERSEDES", "INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 80,
+                child_order_rank: 65,
             },
         }),
         ("DEC", "DEC") => Some(RelationPolicy {

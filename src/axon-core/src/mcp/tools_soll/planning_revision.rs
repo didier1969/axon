@@ -187,6 +187,11 @@ impl McpServer {
                 "DELETE FROM soll.Node WHERE type='Milestone' AND id = '{}'",
                 escape_sql(entity_id)
             ))?,
+            // REQ-AXO-91578 — Skill entity rollback support.
+            ("delete", "skill") => self.graph_store.execute(&format!(
+                "DELETE FROM soll.Node WHERE type='Skill' AND id = '{}'",
+                escape_sql(entity_id)
+            ))?,
             ("restore", _) => {
                 let before = op.get("before").cloned().unwrap_or(json!({}));
                 let mut data = before;
@@ -227,6 +232,10 @@ impl McpServer {
                 "SELECT title, description, status, metadata FROM soll.Node WHERE type='Guideline' AND id = '{}'",
                 escape_sql(entity_id)
             ),
+            "skill" => format!(
+                "SELECT title, description, status, metadata FROM soll.Node WHERE type='Skill' AND id = '{}'",
+                escape_sql(entity_id)
+            ),
             _ => return None,
         };
         let raw = self.graph_store.query_json(&query).ok()?;
@@ -262,6 +271,13 @@ impl McpServer {
                 "title": first.first().cloned().unwrap_or_default(),
                 "status": first.get(1).cloned().unwrap_or_default(),
                 "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
+            })),
+            // REQ-AXO-91578 — Skill rollback snapshot.
+            "skill" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "description": first.get(1).cloned().unwrap_or_default(),
+                "status": first.get(2).cloned().unwrap_or_default(),
+                "metadata": first.get(3).cloned().unwrap_or_else(|| "{}".to_string())
             })),
             _ => None,
         }

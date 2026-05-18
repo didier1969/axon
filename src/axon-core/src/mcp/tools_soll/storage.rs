@@ -51,6 +51,7 @@ impl McpServer {
             "validation" => ("VAL", "last_val", Some("Validation")),
             "stakeholder" => ("STK", "last_stk", Some("Stakeholder")),
             "guideline" => ("GUI", "last_gui", Some("Guideline")),
+            "skill" => ("SKI", "last_ski", Some("Skill")), // REQ-AXO-91578
             "preview" => ("PRV", "last_prv", None),
             "revision" => ("REV", "last_rev", None),
             _ => return Err(anyhow!("Unknown id kind")),
@@ -91,8 +92,8 @@ impl McpServer {
         // `preview` / `revision` have no Node row → they don't go through
         // `soll.allocate_node_id` ; allocate from the Registry directly.
         self.graph_store.execute_param(
-            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
-             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_code) DO NOTHING",
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_ski, last_prv, last_rev) \
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_code) DO NOTHING",
             &json!([canonical_code]),
         )?;
 
@@ -166,6 +167,7 @@ impl McpServer {
             "stakeholder" => Some("Stakeholder"),
             "validation" => Some("Validation"),
             "guideline" => Some("Guideline"),
+            "skill" => Some("Skill"), // REQ-AXO-91578
             _ => None,
         }
     }

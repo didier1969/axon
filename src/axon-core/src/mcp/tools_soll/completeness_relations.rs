@@ -61,6 +61,7 @@ impl McpServer {
                 "VAL" => "VAL",
                 "STK" => "STK",
                 "GUI" => "GUI",
+                "SKI" => "SKI", // REQ-AXO-91578
                 _ => return Err(anyhow!("Unsupported SOLL prefix `{}`", prefix)),
             };
             return Ok(LinkEndpointKind::Soll(canonical_prefix));

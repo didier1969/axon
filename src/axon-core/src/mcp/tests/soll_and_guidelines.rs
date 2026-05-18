@@ -8131,3 +8131,118 @@ fn test_axon_apply_methodology_bundle_dry_run_returns_summary() {
     );
     std::fs::remove_dir_all(&tmp_dir).ok();
 }
+
+// REQ-AXO-91578 — SKI (Skill) entity type addition.
+// Verifies that soll_manager(create, entity='skill', project_code='PRO')
+// successfully allocates a SKI-PRO-NNN id, inserts the row with type='Skill',
+// and rejects creation when attach_to/relation_type pair has no canonical
+// policy.
+#[test]
+fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "skill",
+                "data": {
+                    "project_code": "PRO",
+                    "title": "Test skill — TDD obligatoire procedure",
+                    "description": "Procedural body invoked by LLM via mcp__axon__skill_invoke. Implements GUI-PRO-001 (TDD obligatoire) as an executable skill : red → green → refactor loop using Axon MCP for query/inspect/commit.",
+                    "attach_to": "GUI-PRO-001",
+                    "relation_type": "INHERITS_FROM",
+                    "status": "current"
+                }
+            }
+        },
+        "id": 91578
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    let is_error = result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    assert!(
+        !is_error,
+        "SKI entity create should succeed, got: {content}"
+    );
+    assert!(
+        content.contains("SKI-PRO-"),
+        "Response should include canonical SKI id, got: {content}"
+    );
+
+    let count = server
+        .graph_store
+        .query_count(
+            "SELECT count(*) FROM soll.Node WHERE type='Skill' AND project_code='PRO'",
+        )
+        .unwrap();
+    assert!(
+        count >= 1,
+        "at least one SKI-PRO row expected after create, got {count}"
+    );
+}
+
+// REQ-AXO-91578 — SKI entity must reject create when no canonical relation
+// exists for (SKI, target_type). Validates closed-policy enforcement.
+#[test]
+fn test_skill_entity_rejects_non_canonical_attach_target() {
+    let server = create_test_server();
+
+    // GUI-PRO-001 is seeded at bootstrap. SKI→GUI is allowed via
+    // INHERITS_FROM ; but trying COMPLIES_WITH should reject (not in
+    // the policy's allowed list for SKI→GUI).
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "skill",
+                "data": {
+                    "project_code": "PRO",
+                    "title": "Test skill — should reject COMPLIES_WITH",
+                    "description": "SKI→GUI allows only INHERITS_FROM ; COMPLIES_WITH must reject.",
+                    "attach_to": "GUI-PRO-001",
+                    "relation_type": "COMPLIES_WITH",
+                    "status": "current"
+                }
+            }
+        },
+        "id": 91578
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    let is_error = result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    assert!(
+        is_error,
+        "SKI→MIL should reject (no canonical policy), got: {content}"
+    );
+}
