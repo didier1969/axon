@@ -156,6 +156,66 @@ pub struct SeedTraceability {
     pub created_at: Option<i64>,
 }
 
+/// DEC-AXO-082 seed half (REQ-AXO-91577) — apply canonical SQL seed files
+/// from a directory (typically `db/seed/`) in lexical order. Each file is
+/// idempotent (INSERT ... ON CONFLICT DO NOTHING), so re-running on a warm
+/// DB is a few-ms no-op. Returns the count of statements executed.
+///
+/// Production : the same files are applied by `scripts/lib/ensure-runtime.sh
+/// apply_canonical_seed` via `psql -f` before the brain starts ; the Rust
+/// path here exists for the test harness where bootstrap runs in-process
+/// (no shell wrapper).
+///
+/// Statement splitter strips line comments (`-- ...`) and splits on `;\n`,
+/// which is safe for our canonical seed format emitted by the psql
+/// `format()` generator : multi-line INSERTs end with `;` followed by a
+/// newline, embedded `;` inside string literals never appears at line end.
+pub fn apply_canonical_seed_dir(store: &GraphStore, seed_dir: &Path) -> Result<usize> {
+    if !seed_dir.is_dir() {
+        return Ok(0);
+    }
+    let mut files: Vec<_> = std::fs::read_dir(seed_dir)
+        .with_context(|| format!("read_dir {}", seed_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().map(|x| x == "sql").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.chars().take(2).all(|c| c.is_ascii_digit()))
+                    .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    let mut applied = 0usize;
+    for path in &files {
+        let sql = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        for stmt in split_canonical_sql_statements(&sql) {
+            store
+                .execute(&stmt)
+                .with_context(|| format!("apply seed stmt from {}: {}", path.display(), stmt.chars().take(80).collect::<String>()))?;
+            applied += 1;
+        }
+    }
+    Ok(applied)
+}
+
+fn split_canonical_sql_statements(sql: &str) -> Vec<String> {
+    let cleaned: String = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    cleaned
+        .split(";\n")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| if s.ends_with(';') { s } else { format!("{};", s) })
+        .collect()
+}
+
 /// Idempotent entry point: load the seed at `path` ONLY if `soll.Node`
 /// is empty. Returns the number of rows inserted across all SOLL
 /// tables. When the file is missing, returns Ok(0) without error so

@@ -1249,10 +1249,56 @@ impl GraphStore {
         self.execute("CREATE INDEX IF NOT EXISTS soll_revision_change_project_idx ON soll.RevisionChange(project_code, revision_id)")?;
 
         self.normalize_project_code_registry()?;
-        self.seed_project_code_registry()?;
         self.normalize_soll_registry()?;
         self.normalize_revision_preview_schema()?;
-        self.seed_global_guidelines()?;
+        // DEC-AXO-082 seed half (REQ-AXO-91577) — replaces the legacy
+        // `seed_project_code_registry` + `seed_global_guidelines` Rust
+        // paths. Canonical PRO seed (registry row, Pillars, Concepts,
+        // Decisions, Guidelines, edges) lives in `db/seed/01_global_soll.sql`
+        // and is applied by `scripts/lib/ensure-runtime.sh` in production ;
+        // the Rust path here gives the test harness consistent data via
+        // the same SQL file. Idempotent — INSERT ... ON CONFLICT DO NOTHING.
+        self.apply_canonical_seed_files()?;
+        Ok(())
+    }
+
+    /// DEC-AXO-082 seed half (REQ-AXO-91577) — apply canonical SQL seed
+    /// files from `db/seed/[0-9][0-9]_*.sql` in lexical order.
+    ///
+    /// Path resolution :
+    ///   1. `AXON_SEED_DIR` env var (operator override)
+    ///   2. Repo-root via `CARGO_MANIFEST_DIR/../../db/seed` (works in tests
+    ///      and in cargo-run from source)
+    ///   3. If neither resolves : log info and skip — the production binary
+    ///      relies on `scripts/lib/ensure-runtime.sh apply_canonical_seed`
+    ///      to psql-apply the same files before brain start.
+    fn apply_canonical_seed_files(&self) -> Result<()> {
+        let seed_dir = if let Ok(env_path) = std::env::var("AXON_SEED_DIR") {
+            PathBuf::from(env_path)
+        } else {
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            manifest
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|repo| repo.join("db").join("seed"))
+                .unwrap_or_default()
+        };
+        if !seed_dir.is_dir() {
+            info!(
+                seed_dir = %seed_dir.display(),
+                "apply_canonical_seed_files: no db/seed directory found; relying on ensure-runtime.sh"
+            );
+            return Ok(());
+        }
+        let applied = crate::postgres::seed::apply_canonical_seed_dir(self, &seed_dir)
+            .with_context(|| format!("apply canonical seed from {}", seed_dir.display()))?;
+        if applied > 0 {
+            info!(
+                applied = applied,
+                seed_dir = %seed_dir.display(),
+                "DEC-AXO-082 seed applied"
+            );
+        }
         Ok(())
     }
 
@@ -1473,131 +1519,28 @@ impl GraphStore {
         Ok(())
     }
 
+    /// DEC-AXO-082 seed half (REQ-AXO-91577) — retired. The global
+    /// GUI-PRO-* guidelines (and the rest of the PRO methodology surface :
+    /// Pillars, Concepts, Decisions, registry rows, edges) now live in
+    /// `db/seed/01_global_soll.sql`, applied via `apply_canonical_seed_files`
+    /// (or `scripts/lib/ensure-runtime.sh` in production). Signature
+    /// retained for binary-API stability per DEC-AXO-082 consequence ;
+    /// body removed. The hardcoded array of ~17 guidelines that lived here
+    /// drifted over time vs. live SOLL (which carried 33 GUI-PRO entries
+    /// post-soll_manager mutations) — the SQL seed captures the canonical
+    /// state and removes the drift-by-Rust-fork failure mode.
     fn seed_global_guidelines(&self) -> Result<()> {
-        let guidelines = [
-            (
-                "GUI-PRO-001",
-                "TDD Obligatoire",
-                "Les tests doivent être écrits avant ou avec le code source.",
-                "{\"phase\": \"pre-code\", \"trigger_path\": \"src/axon-core/src/*\", \"required_path\": \"tests.rs\", \"enforcement\": \"strict\", \"exempt_for_refactor\": true}"
-            ),
-            (
-                "GUI-PRO-002",
-                "Documentation MCP",
-                "Toute modification de src/mcp/tools_*.rs nécessite la mise à jour de SKILL.md",
-                "{\"phase\": \"post-code\", \"trigger_path\": \"src/axon-core/src/mcp/tools_*\", \"required_path\": \"SKILL.md\", \"enforcement\": \"strict\", \"exempt_for_refactor\": true}"
-            ),
-            (
-                "GUI-PRO-003",
-                "Zéro Warning & Fail-Fast",
-                "Tout code doit compiler et passer l'analyse statique avec formellement zéro avertissement (ex: deny(warnings) en Rust, --strict en TS). La CI doit échouer immédiatement au premier avertissement détecté.",
-                "{\"phase\": \"compile\", \"trigger_path\": \"*\", \"enforcement\": \"strict\"}"
-            ),
-            (
-                "GUI-PRO-004",
-                "Vérité Physique (Zéro Mock I/O)",
-                "Interdiction stricte d'utiliser des mocks ou stubs pour simuler les entrées/sorties (Réseau, FS, DB). Les tests d'intégration doivent instancier des ressources physiques isolées et éphémères (ex: DB temporaires sur disque) pour valider les comportements réels (verrous, WAL, concurrence).",
-                "{\"phase\": \"test\", \"trigger_path\": \"*\", \"enforcement\": \"strict\"}"
-            ),
-            (
-                "GUI-PRO-005",
-                "Séparation des Plans (Control vs Data Plane)",
-                "Isolation architecturale obligatoire entre les processus gérant l'état/routage (Control Plane, asynchrone, faible latence) et les processus exécutant les calculs lourds ou la logique métier complexe (Data Plane, synchrone, intensif). Le Control Plane ne doit exécuter aucune logique bloquante.",
-                "{\"phase\": \"architecture\", \"trigger_path\": \"*\", \"enforcement\": \"strict\"}"
-            ),
-            (
-                "GUI-PRO-006",
-                "Builds Déterministes & Hermétiques",
-                "La compilation d'un commit doit produire un artefact dont l'empreinte (SHA-256) est strictement identique partout (Tolérance 0%). 100% des dépendances (système et applicatives) doivent être épinglées via un fichier de verrouillage avec hash cryptographique. Le build doit réussir en isolation réseau (Air-Gap).",
-                "{\"phase\": \"build\", \"trigger_path\": \"*\", \"enforcement\": \"strict\"}"
-            ),
-            (
-                "GUI-PRO-007",
-                "Télémétrie Structurée Native",
-                "100% des événements applicatifs doivent être émis au format structuré (JSON/OTLP). Interdiction absolue des logs textuels bruts sur stdout nécessitant un parsing par regex. Propagation obligatoire des trace_id dans tous les appels RPC/IPC.",
-                "{\"phase\": \"runtime\", \"trigger_path\": \"*\", \"enforcement\": \"strict\"}"
-            ),
-            (
-                "GUI-PRO-008",
-                "Résilience Mécanique (Design for Failure)",
-                "Les systèmes distribués doivent intégrer des patterns de résilience (Circuit Breakers, Back-pressure, Dégradation Gracieuse). Les seuils et mécanismes de défaillance doivent être spécifiés explicitement par des Décisions (DEC) ou Exigences (REQ) au niveau du projet.",
-                "{\"phase\": \"architecture\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-009",
-                "Performance comme Propriété Native",
-                "La performance ne s'optimise pas a posteriori. Les budgets de latence (SLO/p99) et les contraintes de ressources (CPU/RAM) doivent être quantifiés et testés en CI pour chaque composant critique via des Exigences (REQ) locales du projet.",
-                "{\"phase\": \"architecture\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-010",
-                "Sécurité Shift-Left & Moindre Privilège",
-                "La sécurité (scan de vulnérabilités, gestion des secrets) est automatisée dès la CI. L'accès aux ressources s'opère par RBAC granulaire. Les politiques exactes de rotation des secrets et d'authentification doivent être définies par les Décisions (DEC) du projet.",
-                "{\"phase\": \"security\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-011",
-                "Évolutivité Humaine & Accessibilité Cognitive",
-                "L'architecture modulaire doit limiter la charge cognitive (DDD, Clean Architecture). Le nommage est un acte de design reflétant le métier. Le versioning des API doit être explicite. Les choix d'implémentation de ces frontières sont délégués aux projets.",
-                "{\"phase\": \"design\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-012",
-                "Infrastructure as Code (IaC) & Reproductibilité d'Environnement",
-                "Les environnements doivent être éphémères et recréables à la demande. L'état de l'infrastructure est versionné (GitOps). L'outil d'automatisation (Nix, Terraform, Docker) est défini par les Décisions (DEC) spécifiques du projet.",
-                "{\"phase\": \"infrastructure\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-013",
-                "DRY (Don't Repeat Yourself) & Single Source of Truth",
-                "Éviter de décrire deux fois la même chose. Chaque connaissance, logique ou règle métier doit posséder une représentation unique et non ambiguë dans le système pour éviter la désynchronisation.",
-                "{\"phase\": \"coding\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": false}"
-            ),
-            (
-                "GUI-PRO-014",
-                "SRP (Single Responsibility Principle) & Cohésion",
-                "Une fonction, une classe ou un fichier ne doit avoir qu'une seule raison de changer. Les 'God Objects' (fichiers monolithiques) sont proscrits. Les responsabilités doivent être isolées.",
-                "{\"phase\": \"coding\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": false}"
-            ),
-            (
-                "GUI-PRO-015",
-                "KISS (Keep It Simple, Stupid) & YAGNI",
-                "Ne pas sur-ingénieriser. Ne pas écrire de code 'au cas où' (You Aren't Gonna Need It) pour un besoin futur hypothétique. Privilégier la solution la plus simple et lisible permettant de résoudre le problème actuel.",
-                "{\"phase\": \"coding\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": false}"
-            ),
-            (
-                "GUI-PRO-016",
-                "Limites Cognitives & Complexité Cyclomatique",
-                "Limitation stricte de l'imbrication et de la longueur des fonctions/fichiers. Une fonction doit idéalement être lisible sur un seul écran sans défilement mental complexe. Les seuils précis doivent être validés par les linters du projet.",
-                "{\"phase\": \"coding\", \"trigger_path\": \"*\", \"enforcement\": \"advisory\", \"requires_local_decision\": true}"
-            ),
-            (
-                "GUI-PRO-017",
-                "Clean-As-You-Go (Zéro Code Mort)",
-                "Le code obsolète, commenté ou remplacé doit être immédiatement supprimé une fois la nouvelle implémentation testée. La base de code ne doit contenir aucun code mort (fonctions sans appelants actifs).",
-                "{\"phase\": \"refactoring\", \"trigger_path\": \"*\", \"enforcement\": \"strict\", \"requires_local_decision\": false}"
-            )
-        ];
-
-        for (id, title, desc, meta) in guidelines.iter() {
-            match self.execute_param(
-                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
-                 VALUES (?, 'Guideline', 'PRO', ?, ?, 'active', ?)
-                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
-                &serde_json::json!([id, title, desc, meta])
-            ) {
-                Ok(_) => {},
-                Err(e) => {
-                    println!("🚨 SEED GUIDELINE ERROR for {}: {:?}", id, e);
-                    log::error!("SEED GUIDELINE ERROR for {}: {:?}", id, e);
-                }
-            }
-        }
+        info!("seed_global_guidelines: retired (DEC-AXO-082 — see db/seed/01_global_soll.sql)");
         Ok(())
     }
 
+    /// DEC-AXO-082 seed half (REQ-AXO-91577) — retired. The PRO sentinel
+    /// row now lives in `db/seed/01_global_soll.sql`, applied via
+    /// `apply_canonical_seed_files` (or `scripts/lib/ensure-runtime.sh`
+    /// in production). Signature retained for binary-API stability per
+    /// DEC-AXO-082 consequence.
     fn seed_project_code_registry(&self) -> Result<()> {
-        self.sync_project_registry_entry("PRO", Some("System Global Namespace"), None)?;
+        info!("seed_project_code_registry: retired (DEC-AXO-082 — see db/seed/01_global_soll.sql)");
         Ok(())
     }
 
