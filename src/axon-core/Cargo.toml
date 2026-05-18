@@ -138,6 +138,11 @@ postgres-types = { version = "0.2", features = ["derive"] }
 pgvector = { version = "0.4", features = ["postgres"] }
 # refinery for versioned schema migrations (sqlx-migrate replacement).
 refinery = { version = "0.8", features = ["tokio-postgres"] }
+# REQ-AXO-91581 slice 2 — Mustache logic-less templating for PRT
+# (PromptTemplate) bodies per CPT-AXO-90017. Logic-less = no execution
+# surface = no prompt-injection vector (arxiv 2601.17549). Cross-language
+# parity (Rust/TS/Python) keeps PRT templates portable across consumers.
+mustache = "0.9"
 
 [dev-dependencies]
 rand = "0.8"

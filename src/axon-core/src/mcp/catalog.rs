@@ -295,12 +295,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "prompt_template_get",
-                "description": "[SOLL/PRT] Resolve a PRT (PromptTemplate) by canonical id and return the rendered text. REQ-AXO-91581. First cut returns raw template body (Mustache rendering is slice 2 per CPT-AXO-90017 — logic-less + typed parameter sidecar). Pass `id` (e.g. PRT-PRO-001) + optional `params` object.",
+                "description": "[SOLL/PRT] Resolve a PRT (PromptTemplate) by canonical id, validate `params` against the typed `metadata.parameters` sidecar (CPT-AXO-90017), and return the Mustache-rendered text. REQ-AXO-91581 slice 2 — required/type/default/validation_rule enforcement + Mustache logic-less rendering (engine=mustache_v1). Validation failures surface as isError with a structured `parameter_repair.errors` envelope.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "id": { "type": "string", "description": "Canonical PRT id (e.g. PRT-PRO-001)." },
-                        "params": { "type": "object", "description": "Parameter values for Mustache substitution (captured in v0 ; rendered in slice 2)." }
+                        "params": { "type": "object", "description": "Mustache substitution scope. Validated against metadata.parameters (required/type/default/validation_rule). Extra keys not in the sidecar are passed through unchanged." }
                     },
                     "required": ["id"]
                 }

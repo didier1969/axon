@@ -66,6 +66,154 @@ pub(crate) fn recent_skill_invocations(window_ms: u128) -> Vec<SkillInvocationAu
     }
 }
 
+// REQ-AXO-91581 slice 2 — typed parameter validation + Mustache rendering
+// helpers backing `axon_prompt_template_get`. Kept module-private + free
+// functions so unit tests can exercise the validation/rendering pipeline
+// without spinning up a full MCP server.
+
+fn json_type_label(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn type_matches(declared: &str, value: &Value) -> bool {
+    let declared = declared.to_ascii_lowercase();
+    match declared.as_str() {
+        "string" | "str" => value.is_string(),
+        "number" | "num" | "float" => value.is_number(),
+        "integer" | "int" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "bool" | "boolean" => value.is_boolean(),
+        "list" | "array" => value.is_array(),
+        "object" | "map" | "dict" => value.is_object(),
+        // Unknown declared type — accept any value (forward-compat).
+        _ => true,
+    }
+}
+
+/// Validates `supplied` against the typed `parameters` sidecar from
+/// `metadata.parameters` and returns the effective param map (with
+/// declared defaults applied) plus a list of validation errors. When the
+/// error list is non-empty the caller MUST short-circuit and surface a
+/// `parameter_repair` envelope rather than render the template.
+pub(crate) fn validate_and_resolve_prompt_params(
+    spec: &[Value],
+    supplied: &Value,
+) -> (Value, Vec<Value>) {
+    let supplied_map = supplied.as_object().cloned().unwrap_or_default();
+    let mut effective = supplied_map.clone();
+    let mut errors: Vec<Value> = Vec::new();
+
+    for entry in spec {
+        let Some(name) = entry.get("name").and_then(Value::as_str) else {
+            errors.push(json!({
+                "rule": "spec_invalid",
+                "hint": "each metadata.parameters entry must declare `name` (string)",
+                "spec_entry": entry,
+            }));
+            continue;
+        };
+        let declared_type = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        let required = entry
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let default = entry.get("default").cloned();
+        let validation_rule = entry.get("validation_rule").and_then(Value::as_str);
+
+        let supplied_value = supplied_map.get(name).cloned();
+
+        let value_to_check = match supplied_value {
+            Some(v) => Some(v),
+            None => {
+                if let Some(d) = default.clone() {
+                    effective.insert(name.to_string(), d.clone());
+                    Some(d)
+                } else if required {
+                    errors.push(json!({
+                        "param": name,
+                        "rule": "required_missing",
+                        "expected_type": declared_type,
+                        "hint": format!("supply `params.{}` (declared required, no default)", name),
+                    }));
+                    None
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(value) = value_to_check {
+            if !type_matches(declared_type, &value) {
+                errors.push(json!({
+                    "param": name,
+                    "rule": "type_mismatch",
+                    "expected_type": declared_type,
+                    "actual_type": json_type_label(&value),
+                    "hint": format!("supply `params.{}` as `{}`", name, declared_type),
+                }));
+                continue;
+            }
+            if let (Some(pattern), Some(text)) = (validation_rule, value.as_str()) {
+                match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        if !re.is_match(text) {
+                            errors.push(json!({
+                                "param": name,
+                                "rule": "validation_rule_violated",
+                                "pattern": pattern,
+                                "supplied_value": text,
+                                "hint": format!("`params.{}` must match regex `{}`", name, pattern),
+                            }));
+                        }
+                    }
+                    Err(re_err) => {
+                        errors.push(json!({
+                            "param": name,
+                            "rule": "spec_invalid",
+                            "pattern": pattern,
+                            "hint": format!(
+                                "validation_rule in metadata.parameters is not a valid regex: {}",
+                                re_err
+                            ),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    (Value::Object(effective), errors)
+}
+
+/// Renders `template` through the `mustache` crate using `params` as the
+/// substitution scope. Errors propagate as `String` so the MCP envelope
+/// can surface them without leaking crate-specific types.
+pub(crate) fn render_mustache_template(
+    template: &str,
+    params: &Value,
+) -> Result<String, String> {
+    let compiled = mustache::compile_str(template)
+        .map_err(|e| format!("compile error: {}", e))?;
+    compiled
+        .render_to_string(params)
+        .map_err(|e| format!("render error: {}", e))
+}
+
 impl McpServer {
     /// REQ-AXO-91580 — `mcp__axon__skill_list(applicable_to?, mode_filter?, project_code?)`.
     ///
@@ -348,13 +496,24 @@ impl McpServer {
 
     /// REQ-AXO-91581 — `mcp__axon__prompt_template_get(id, params?)`.
     ///
-    /// Resolves a PRT node by canonical id and returns the rendered body.
-    /// This first cut returns the raw template body without parameter
-    /// substitution — Mustache rendering is a followup slice (full design
-    /// in CPT-AXO-90017 : Mustache logic-less + typed parameter sidecar +
-    /// validation rules). The `params` argument is captured for audit ;
-    /// future iteration will validate against metadata.parameters spec and
-    /// render via the Mustache engine.
+    /// Resolves a PRT node by canonical id, validates supplied `params`
+    /// against the `metadata.parameters` typed sidecar (CPT-AXO-90017),
+    /// applies declared defaults, then renders the body through the
+    /// Mustache logic-less engine. Validation errors are surfaced as
+    /// `isError: true` with a structured `parameter_repair` envelope so
+    /// the LLM can self-correct without a second round-trip.
+    ///
+    /// Slice 2 scope (delivered) :
+    ///   - required-field enforcement
+    ///   - JSON-type check (string/number/boolean/integer/array/object)
+    ///   - default-value application when caller omits a declared param
+    ///   - `validation_rule` regex enforcement (strings only)
+    ///   - Mustache rendering via the `mustache` crate
+    ///
+    /// Deferred (slice 3+) : enum/list-of-allowed-values, JSON-schema
+    /// fragments, expected_output.schema validation, golden_examples CI
+    /// gate. PRTs with no `metadata.parameters` array render through
+    /// Mustache unconditionally (backwards-compat with raw passthrough).
     pub(crate) fn axon_prompt_template_get(&self, arguments: &Value) -> Option<Value> {
         let id = match arguments.get("id").and_then(Value::as_str) {
             Some(value) if !value.trim().is_empty() => value.trim().to_string(),
@@ -430,14 +589,69 @@ impl McpServer {
         let status = row[3].clone();
         let metadata: Value = serde_json::from_str(&row[4]).unwrap_or_else(|_| json!({}));
         let project_code = row[5].clone();
-        let params = arguments.get("params").cloned().unwrap_or_else(|| json!({}));
+        let supplied_params = arguments.get("params").cloned().unwrap_or_else(|| json!({}));
 
-        // First cut : return raw body (no Mustache substitution yet — slice 2).
-        // Capture params for future rendering + audit.
-        let rendered_text = body_template.clone();
+        // Slice 2 — typed parameter validation + Mustache rendering.
+        let spec_array = metadata
+            .get("parameters")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let (effective_params, validation_errors) =
+            validate_and_resolve_prompt_params(&spec_array, &supplied_params);
+        if !validation_errors.is_empty() {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "prompt_template_get: parameter validation failed for PRT `{}` ({} error{}). See data.parameter_repair.errors.",
+                        id,
+                        validation_errors.len(),
+                        if validation_errors.len() == 1 { "" } else { "s" }
+                    )
+                }],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "id": id,
+                    "parameter_repair": {
+                        "tool": "prompt_template_get",
+                        "category": "param_validation_failed",
+                        "errors": validation_errors,
+                        "hint": "fix each entry in `errors` and retry ; consult metadata.parameters for the expected sidecar contract (CPT-AXO-90017)",
+                    }
+                }
+            }));
+        }
+
+        let rendered_text = match render_mustache_template(&body_template, &effective_params) {
+            Ok(text) => text,
+            Err(err) => {
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "prompt_template_get: Mustache rendering failed for PRT `{}`: {}",
+                            id, err
+                        )
+                    }],
+                    "isError": true,
+                    "data": {
+                        "status": "tool_error",
+                        "id": id,
+                        "parameter_repair": {
+                            "tool": "prompt_template_get",
+                            "category": "mustache_render_failed",
+                            "rendering_engine": "mustache_v1",
+                            "hint": "check the template body for unbalanced `{{` / `}}` or invalid Mustache syntax",
+                        }
+                    }
+                }));
+            }
+        };
 
         let display = format!(
-            "## 📝 Prompt template `{}` — {}\n\n**Status** : {} · **Project** : {}\n\n```\n{}\n```\n\n_Note: Mustache parameter substitution is a follow-up slice (REQ-AXO-91581 slice 2). Raw template returned ; params captured in data._",
+            "## 📝 Prompt template `{}` — {}\n\n**Status** : {} · **Project** : {} · **Engine** : mustache_v1\n\n```\n{}\n```",
             id, title, status, project_code, rendered_text
         );
 
@@ -449,11 +663,12 @@ impl McpServer {
                 "title": title,
                 "rendered_text": rendered_text,
                 "body_template": body_template,
-                "params_used": params,
+                "params_used": effective_params,
+                "params_supplied": supplied_params,
                 "status_field": status,
                 "project_code": project_code,
                 "metadata": metadata,
-                "rendering_engine": "raw_passthrough_v0",
+                "rendering_engine": "mustache_v1",
             }
         }))
     }

@@ -8397,16 +8397,19 @@ fn test_skill_list_and_invoke_round_trip() {
     assert!(nf_is_error, "skill_invoke should reject unknown id");
 }
 
-// REQ-AXO-91581 — prompt_template_get raw passthrough v0.
+// REQ-AXO-91581 slice 2 — prompt_template_get applies Mustache substitution
+// when no metadata.parameters sidecar is declared (backwards-compat path).
 #[test]
-fn test_prompt_template_get_returns_raw_body() {
+fn test_prompt_template_get_renders_mustache_without_param_spec() {
     let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='PRT-PRO-998'");
     server
         .graph_store
         .execute(
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-             VALUES ('PRT-PRO-998', 'PromptTemplate', 'PRO', 'Test brief', 'You are a {{role}}. Context: {{context}}. Output: {{schema}}.', 'current', '{}'::jsonb) \
-             ON CONFLICT (id) DO NOTHING",
+             VALUES ('PRT-PRO-998', 'PromptTemplate', 'PRO', 'Test brief', 'You are a {{role}}. Context: {{context}}.', 'current', '{}'::jsonb)",
         )
         .unwrap();
 
@@ -8415,7 +8418,10 @@ fn test_prompt_template_get_returns_raw_body() {
         "method": "tools/call",
         "params": {
             "name": "prompt_template_get",
-            "arguments": { "id": "PRT-PRO-998", "params": {"role": "reviewer"} }
+            "arguments": {
+                "id": "PRT-PRO-998",
+                "params": {"role": "reviewer", "context": "code-audit"}
+            }
         },
         "id": 91581
     });
@@ -8423,15 +8429,281 @@ fn test_prompt_template_get_returns_raw_body() {
         .handle_request(serde_json::from_value(req).unwrap())
         .unwrap();
     let result = resp.result.unwrap();
-    let text = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        data.get("rendering_engine").and_then(|v| v.as_str()),
+        Some("mustache_v1"),
+        "slice 2 must advertise mustache_v1 rendering engine"
+    );
+    let rendered = data.get("rendered_text").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        !rendered.contains("{{role}}") && rendered.contains("reviewer"),
+        "Mustache substitution must replace {{{{role}}}} with `reviewer`, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("code-audit"),
+        "Mustache substitution must replace {{{{context}}}} with `code-audit`, got: {rendered}"
+    );
+}
+
+// REQ-AXO-91581 slice 2 — typed parameter sidecar enforces required fields.
+#[test]
+fn test_prompt_template_get_rejects_missing_required_param() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='PRT-PRO-997'");
+    let metadata = r#"{
+        "parameters": [
+            {"name": "role", "type": "string", "required": true, "description": "Reviewer role"},
+            {"name": "tone", "type": "string", "required": false, "default": "neutral"}
+        ]
+    }"#;
+    let insert_sql = format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('PRT-PRO-997', 'PromptTemplate', 'PRO', 'Reviewer brief', 'You are a {{{{role}}}} ({{{{tone}}}}).', 'current', '{}'::jsonb)",
+        metadata.replace('\'', "''")
+    );
+    server.graph_store.execute(&insert_sql).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-997", "params": {} }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let data = result.get("data").unwrap();
+    assert_eq!(
+        data.get("status").and_then(|v| v.as_str()),
+        Some("input_invalid")
+    );
+    let repair = data.get("parameter_repair").unwrap();
+    assert_eq!(
+        repair.get("category").and_then(|v| v.as_str()),
+        Some("param_validation_failed")
+    );
+    let errors = repair.get("errors").and_then(|v| v.as_array()).unwrap();
+    assert!(
+        errors.iter().any(|e| {
+            e.get("rule").and_then(|v| v.as_str()) == Some("required_missing")
+                && e.get("param").and_then(|v| v.as_str()) == Some("role")
+        }),
+        "must emit `required_missing` for `role`, got: {errors:?}"
+    );
+}
+
+// REQ-AXO-91581 slice 2 — declared defaults applied when caller omits them.
+#[test]
+fn test_prompt_template_get_applies_param_default() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='PRT-PRO-996'");
+    let metadata = r#"{
+        "parameters": [
+            {"name": "tone", "type": "string", "required": false, "default": "neutral"}
+        ]
+    }"#;
+    let insert_sql = format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('PRT-PRO-996', 'PromptTemplate', 'PRO', 'Tone brief', 'Tone: {{{{tone}}}}.', 'current', '{}'::jsonb)",
+        metadata.replace('\'', "''")
+    );
+    server.graph_store.execute(&insert_sql).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-996", "params": {} }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    let data = result.get("data").unwrap();
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
+    let rendered = data.get("rendered_text").and_then(|v| v.as_str()).unwrap();
+    assert!(
+        rendered.contains("Tone: neutral."),
+        "declared default must populate rendering, got: {rendered}"
+    );
+    let used = data.get("params_used").unwrap();
+    assert_eq!(
+        used.get("tone").and_then(|v| v.as_str()),
+        Some("neutral"),
+        "effective params must echo the resolved default"
+    );
+}
+
+// REQ-AXO-91581 slice 2 — type mismatch is a structured validation error.
+#[test]
+fn test_prompt_template_get_rejects_type_mismatch() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='PRT-PRO-995'");
+    let metadata = r#"{
+        "parameters": [
+            {"name": "iterations", "type": "integer", "required": true}
+        ]
+    }"#;
+    let insert_sql = format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('PRT-PRO-995', 'PromptTemplate', 'PRO', 'Iter brief', 'Run {{{{iterations}}}} times.', 'current', '{}'::jsonb)",
+        metadata.replace('\'', "''")
+    );
+    server.graph_store.execute(&insert_sql).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-995", "params": { "iterations": "many" } }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let errors = result
+        .get("data")
+        .and_then(|d| d.get("parameter_repair"))
+        .and_then(|p| p.get("errors"))
+        .and_then(|v| v.as_array())
         .unwrap();
     assert!(
-        text.contains("{{role}}"),
-        "prompt_template_get v0 returns raw body (no Mustache yet), got: {text}"
+        errors.iter().any(|e| {
+            e.get("rule").and_then(|v| v.as_str()) == Some("type_mismatch")
+                && e.get("param").and_then(|v| v.as_str()) == Some("iterations")
+        }),
+        "must emit `type_mismatch` for `iterations`, got: {errors:?}"
     );
+}
+
+// REQ-AXO-91581 slice 2 — validation_rule regex is enforced for strings.
+#[test]
+fn test_prompt_template_get_enforces_validation_rule_regex() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='PRT-PRO-994'");
+    let metadata = r#"{
+        "parameters": [
+            {"name": "slug", "type": "string", "required": true, "validation_rule": "^[a-z][a-z0-9-]*$"}
+        ]
+    }"#;
+    let insert_sql = format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('PRT-PRO-994', 'PromptTemplate', 'PRO', 'Slug brief', 'Slug: {{{{slug}}}}.', 'current', '{}'::jsonb)",
+        metadata.replace('\'', "''")
+    );
+    server.graph_store.execute(&insert_sql).unwrap();
+
+    // Bad input — uppercase letters.
+    let bad = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-994", "params": { "slug": "BadSlug" } }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(bad).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let errors = result
+        .get("data")
+        .and_then(|d| d.get("parameter_repair"))
+        .and_then(|p| p.get("errors"))
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert!(
+        errors.iter().any(|e| {
+            e.get("rule").and_then(|v| v.as_str()) == Some("validation_rule_violated")
+        }),
+        "must emit `validation_rule_violated`, got: {errors:?}"
+    );
+
+    // Good input — same template renders cleanly.
+    let good = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "prompt_template_get",
+            "arguments": { "id": "PRT-PRO-994", "params": { "slug": "good-slug" } }
+        },
+        "id": 91581
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(good).unwrap())
+        .unwrap();
+    let result = resp.result.unwrap();
+    assert_ne!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let rendered = result
+        .get("data")
+        .and_then(|d| d.get("rendered_text"))
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(
+        rendered.contains("Slug: good-slug."),
+        "validation_rule must accept matching input, got: {rendered}"
+    );
+}
+
+// REQ-AXO-91581 slice 2 — unit-level coverage of the helper directly so
+// rendering / validation can evolve without spinning up the MCP server.
+#[test]
+fn test_validate_and_resolve_prompt_params_helper_paths() {
+    use crate::mcp::tools_skill::{
+        render_mustache_template, validate_and_resolve_prompt_params,
+    };
+
+    let spec = serde_json::json!([
+        {"name": "role", "type": "string", "required": true},
+        {"name": "tone", "type": "string", "required": false, "default": "neutral"},
+        {"name": "n", "type": "integer", "required": false},
+    ]);
+    let spec_array = spec.as_array().unwrap();
+
+    // Missing required → error surfaced ; default still applied.
+    let supplied = serde_json::json!({});
+    let (effective, errors) = validate_and_resolve_prompt_params(spec_array, &supplied);
+    assert!(
+        errors.iter().any(|e| e["rule"] == "required_missing" && e["param"] == "role")
+    );
+    assert_eq!(effective["tone"], serde_json::json!("neutral"));
+
+    // All good → no errors, render succeeds.
+    let supplied = serde_json::json!({ "role": "reviewer", "n": 3 });
+    let (effective, errors) = validate_and_resolve_prompt_params(spec_array, &supplied);
+    assert!(errors.is_empty(), "valid input must produce zero errors, got: {errors:?}");
+    assert_eq!(effective["tone"], serde_json::json!("neutral"));
+
+    let rendered = render_mustache_template(
+        "You are a {{role}} ({{tone}}). Iterations: {{n}}.",
+        &effective,
+    )
+    .unwrap();
+    assert_eq!(rendered, "You are a reviewer (neutral). Iterations: 3.");
 }
 
 // REQ-AXO-91582 — re_anchor MCP tool single-call recovery packet.
