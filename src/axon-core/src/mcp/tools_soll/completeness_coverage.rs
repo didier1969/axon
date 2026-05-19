@@ -241,7 +241,7 @@ impl McpServer {
         &self,
         project_code: Option<&str>,
     ) -> anyhow::Result<SollCompletenessSnapshot> {
-        self.soll_completeness_snapshot_with_cached_coverage(project_code, None)
+        self.soll_completeness_snapshot_filtered(project_code, None, None)
     }
 
     /// Memoized variant: when the caller has already computed
@@ -254,6 +254,32 @@ impl McpServer {
         project_code: Option<&str>,
         cached_coverage: Option<&RequirementCoverageSummary>,
     ) -> anyhow::Result<SollCompletenessSnapshot> {
+        self.soll_completeness_snapshot_filtered(project_code, None, cached_coverage)
+    }
+
+    /// REQ-AXO-901602 — filtered variant supporting `statuses_to_check`.
+    ///
+    /// When `statuses_to_check` is `None`, behaviour matches the original
+    /// snapshot (only `archived` excluded for orphan/uncovered checks ; no
+    /// status filter on decisions/duplicate-titles). This preserves
+    /// backward compatibility for the dozens of existing callers (anomalies,
+    /// inference/mutation before/after deltas, work_plan, manager, etc.).
+    ///
+    /// When `Some(&statuses)` is provided, every status-scoped check
+    /// (orphan_requirements, decisions_without_links, uncovered_requirements,
+    /// duplicate_title_rows) only considers nodes whose `status` is in the
+    /// allow-list. The sentinel value `"*"` inside the list disables the
+    /// filter entirely (back-compat full sweep).
+    ///
+    /// `axon_validate_soll` opts in with `["current","planned"]` by default,
+    /// suppressing the 75+ terminal-status false positives observed on AXO
+    /// post-session-46 (cf. CPT-AXO-052 session 47 audit).
+    pub(crate) fn soll_completeness_snapshot_filtered(
+        &self,
+        project_code: Option<&str>,
+        statuses_to_check: Option<&[String]>,
+        cached_coverage: Option<&RequirementCoverageSummary>,
+    ) -> anyhow::Result<SollCompletenessSnapshot> {
         let resolved_project_code = match project_code {
             Some(code) => Some(self.resolve_project_code(code)?),
             None => None,
@@ -262,6 +288,22 @@ impl McpServer {
             .clone()
             .map(|code| format!("project:{code}"))
             .unwrap_or_else(|| "workspace:*".to_string());
+
+        // REQ-AXO-901602 — closure used by every status-scoped check below.
+        // Returns true if the node should be included in the coherence audit.
+        // - filter=None  → legacy behaviour (only `archived` excluded for
+        //   orphan/uncovered, no filter on decisions/duplicates).
+        // - filter=Some(["*"]) → no filter (back-compat full sweep).
+        // - filter=Some(list) → only nodes whose `status` is in the list.
+        let status_allowed = |status: &str, legacy_archived_only: bool| -> bool {
+            match statuses_to_check {
+                None if legacy_archived_only => status != "archived",
+                None => true,
+                Some(allowed) if allowed.iter().any(|s| s == "*") => true,
+                Some(allowed) => allowed.iter().any(|s| s == status),
+            }
+        };
+
         // DEC-AXO-091 / REQ-AXO-322 (v2) — when a project_code is in
         // scope, derive total_nodes and the 4 ID lists (orphan_req,
         // validation_without_verifies, decision_without_links,
@@ -276,12 +318,12 @@ impl McpServer {
         let total_nodes = if let Some(code) = resolved_project_code.as_deref() {
             let snapshot = self.soll_cache().snapshot(code)?;
 
-            // orphan_requirement: Requirement, status <> archived, no edges.
+            // orphan_requirement: Requirement, status filter, no edges.
             for id in snapshot.node_ids_of_type("Requirement") {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
-                if node.status == "archived" {
+                if !status_allowed(&node.status, true) {
                     continue;
                 }
                 if !snapshot.has_any_edge(id) {
@@ -304,7 +346,14 @@ impl McpServer {
             }
 
             // decision_without_links: Decision with no SOLVES/IMPACTS.
+            // REQ-AXO-901602 — apply status filter when caller opts in.
             for id in snapshot.node_ids_of_type("Decision") {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                if !status_allowed(&node.status, false) {
+                    continue;
+                }
                 let has_links = snapshot
                     .outgoing_edges(id)
                     .any(|(_, rel)| matches!(rel, "SOLVES" | "IMPACTS"))
@@ -316,7 +365,7 @@ impl McpServer {
                 }
             }
 
-            // uncovered_requirement: Requirement, status <> archived,
+            // uncovered_requirement: Requirement, status filter,
             // no traceability AND no acceptance_criteria. The legacy
             // SQL grouped on metadata; we evaluate the same predicate
             // on the in-memory metadata_raw JSON.
@@ -324,7 +373,7 @@ impl McpServer {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
-                if node.status == "archived" {
+                if !status_allowed(&node.status, true) {
                     continue;
                 }
                 if snapshot.traceability_rows_for("requirement", id).next().is_some() {
@@ -355,14 +404,44 @@ impl McpServer {
             // Workspace-wide (no project_code) — keep SQL since the
             // snapshot is per-project. This branch is rare (only the
             // unscoped public wrapper).
+            //
+            // REQ-AXO-901602 — derive a SQL status filter from the
+            // optional `statuses_to_check` list. Legacy default (None)
+            // keeps the original `<> 'archived'` semantics for
+            // orphan/uncovered; no filter on decision/validation.
+            // Opt-in (Some) applies a positive IN-list to all of
+            // orphan/decision/uncovered (validations excluded — VAL
+            // nodes are proofs, not subject to status hygiene).
+            let req_status_sql = match statuses_to_check {
+                None => "COALESCE(r.status, '') <> 'archived'".to_string(),
+                Some(allowed) if allowed.iter().any(|s| s == "*") => "1=1".to_string(),
+                Some(allowed) => {
+                    let parts: Vec<String> = allowed
+                        .iter()
+                        .map(|s| format!("'{}'", escape_sql(s)))
+                        .collect();
+                    format!("COALESCE(r.status, '') IN ({})", parts.join(", "))
+                }
+            };
+            let decision_status_sql = match statuses_to_check {
+                None => "1=1".to_string(),
+                Some(allowed) if allowed.iter().any(|s| s == "*") => "1=1".to_string(),
+                Some(allowed) => {
+                    let parts: Vec<String> = allowed
+                        .iter()
+                        .map(|s| format!("'{}'", escape_sql(s)))
+                        .collect();
+                    format!("COALESCE(d.status, '') IN ({})", parts.join(", "))
+                }
+            };
             let total = self
                 .graph_store
                 .query_count("SELECT count(*) FROM soll.Node")
                 .unwrap_or(0) as usize;
-            let fused_sql =
+            let fused_sql = format!(
                 "SELECT 'orphan_requirement' AS category, id FROM soll.Node r \
                  WHERE type = 'Requirement' \
-                   AND COALESCE(r.status, '') <> 'archived' \
+                   AND {req_status_sql} \
                    AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id) \
                  UNION ALL \
                  SELECT 'validation_without_verifies' AS category, id FROM soll.Node v \
@@ -371,6 +450,7 @@ impl McpServer {
                  UNION ALL \
                  SELECT 'decision_without_links' AS category, id FROM soll.Node d \
                  WHERE type = 'Decision' \
+                   AND {decision_status_sql} \
                    AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS')) \
                  UNION ALL \
                  SELECT 'uncovered_requirement' AS category, r.id FROM soll.Node r \
@@ -378,12 +458,13 @@ impl McpServer {
                    ON lower(t.soll_entity_type) = lower(r.type) \
                   AND t.soll_entity_id = r.id \
                  WHERE r.type = 'Requirement' \
-                   AND COALESCE(r.status, '') <> 'archived' \
+                   AND {req_status_sql} \
                  GROUP BY r.id, r.status, r.metadata \
                  HAVING COUNT(t.id) = 0 \
                     AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]') \
-                 ORDER BY 1, 2";
-            let fused_raw = self.graph_store.query_json(fused_sql)?;
+                 ORDER BY 1, 2"
+            );
+            let fused_raw = self.graph_store.query_json(&fused_sql)?;
             let fused_rows: Vec<Vec<String>> = serde_json::from_str(&fused_raw).unwrap_or_default();
             for row in fused_rows {
                 if row.len() < 2 {
@@ -401,15 +482,33 @@ impl McpServer {
             total
         };
 
+        // REQ-AXO-901602 — restrict duplicate-title detection to the
+        // statuses_to_check allow-list so superseded/delivered/rejected
+        // siblings don't inflate the duplicate count. Legacy (None) keeps
+        // the original behaviour: every status counted (this is the very
+        // bug we're closing for the 4× `Indexer fails on empty file`
+        // cluster on AXO).
+        let dup_status_clause = match statuses_to_check {
+            None => String::new(),
+            Some(allowed) if allowed.iter().any(|s| s == "*") => String::new(),
+            Some(allowed) => {
+                let parts: Vec<String> = allowed
+                    .iter()
+                    .map(|s| format!("'{}'", escape_sql(s)))
+                    .collect();
+                format!(" AND COALESCE(status, '') IN ({})", parts.join(", "))
+            }
+        };
         let duplicate_title_rows_raw = self.graph_store.query_json(&format!(
             "SELECT type, title, string_agg(id, ', ' ORDER BY id)
              FROM soll.Node
              WHERE type IN ('Requirement', 'Decision', 'Concept')
-               AND COALESCE(title, '') <> ''{}
+               AND COALESCE(title, '') <> ''{}{}
              GROUP BY type, title
              HAVING COUNT(*) > 1
              ORDER BY type, title",
-            scoped_query_filter(resolved_project_code.as_deref(), "")
+            scoped_query_filter(resolved_project_code.as_deref(), ""),
+            dup_status_clause
         ))?;
         let duplicate_title_rows: Vec<Vec<String>> =
             serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();

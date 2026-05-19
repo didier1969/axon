@@ -452,7 +452,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Filters validation to the requested project." }
+                        "project_code": { "type": "string", "description": "Filters validation to the requested project." },
+                        "statuses_to_check": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "REQ-AXO-901602 — restrict coherence checks (orphan_requirements / decisions_without_links / uncovered_requirements / duplicate_titles) to nodes whose `status` is in this list. Default: `['current','planned']` (terminal statuses delivered/superseded/rejected/completed/accepted/archived excluded as noise). Pass `['*']` for the legacy full sweep."
+                        }
                     },
                     "required": []
                 }

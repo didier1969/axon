@@ -319,9 +319,24 @@ impl McpServer {
                 return Some(self.wrong_project_scope_response(code, "soll_validate"));
             }
         }
-        let snapshot = match self
-            .soll_completeness_snapshot_with_cached_coverage(project_code, cached_coverage)
-        {
+        // REQ-AXO-901602 — accept optional `statuses_to_check` array. The
+        // default (`["current","planned"]`) suppresses the ~75
+        // terminal-status false positives the validator previously raised
+        // on AXO. Operators can opt into the full audit via `["*"]`.
+        let statuses_to_check: Vec<String> = args
+            .get("statuses_to_check")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["current".to_string(), "planned".to_string()]);
+        let snapshot = match self.soll_completeness_snapshot_filtered(
+            project_code,
+            Some(&statuses_to_check),
+            cached_coverage,
+        ) {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 return Some(json!({
