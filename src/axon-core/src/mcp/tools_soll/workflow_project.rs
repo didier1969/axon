@@ -930,6 +930,128 @@ impl McpServer {
         serde_json::Value::Array(hits)
     }
 
+    /// REQ-AXO-901606 — auto-seed minimal Vision + Pillar so the bootstrap
+    /// flow is not blocked by `soll_manager(action=create, entity=vision)`
+    /// rejection (manager.rs:334 reserves Vision creation to this path).
+    ///
+    /// Idempotent : returns `false` (no-op) when the project already has at
+    /// least one Vision row. Otherwise allocates canonical IDs via
+    /// `soll.allocate_node_id`, inserts Vision + Pillar with `status='draft'`
+    /// so the operator/LLM can refine via `soll_manager(action=update)`
+    /// without a special bootstrap codepath. The Pillar EPITOMIZES the
+    /// Vision (canonical PIL→VIS edge per soll_relation_schema).
+    ///
+    /// Failure modes are best-effort : individual write errors log via
+    /// `tracing::warn` and the function returns `false`. The init flow does
+    /// NOT abort on seed failure since the project registry entry is the
+    /// real critical resource.
+    fn seed_default_vision_and_pillar(
+        &self,
+        project_code: &str,
+        concept_text: Option<&str>,
+    ) -> bool {
+        let escaped_code = escape_sql(project_code);
+        let vision_count = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT COUNT(*) FROM soll.Node WHERE type='Vision' AND project_code='{}'",
+                escaped_code
+            ))
+            .unwrap_or(0);
+        if vision_count > 0 {
+            return false;
+        }
+
+        // Allocate canonical Vision id via PG function (REQ-AXO-90006 gap-skip aware)
+        let vis_id = match self
+            .graph_store
+            .query_json(&format!(
+                "SELECT soll.allocate_node_id('Vision', '{}')",
+                escaped_code
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+        {
+            Some(id) if !id.is_empty() => id,
+            _ => {
+                tracing::warn!(project_code = %project_code, "Vision id allocation failed; skipping auto-seed");
+                return false;
+            }
+        };
+
+        let description = concept_text.unwrap_or(
+            "North-star draft — auto-seeded by axon_init_project. Edit via `soll_manager(action=update, entity=vision, data={id, description, ...})` to populate. Resolved REQ-AXO-901606 bootstrap blocker."
+        );
+        let metadata = serde_json::json!({
+            "auto_seeded": true,
+            "seeded_by": "axon_init_project",
+            "req_ref": "REQ-AXO-901606"
+        })
+        .to_string();
+
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+             VALUES (?, 'Vision', ?, ?, ?, 'draft', ?)",
+            &serde_json::json!([
+                vis_id.clone(),
+                project_code,
+                "Project north-star (draft)",
+                description,
+                metadata.clone()
+            ]),
+        ) {
+            tracing::warn!(project_code = %project_code, vis_id = %vis_id, error = %e, "Vision auto-seed insert failed");
+            return false;
+        }
+
+        // Allocate canonical Pillar id
+        let pil_id = match self
+            .graph_store
+            .query_json(&format!(
+                "SELECT soll.allocate_node_id('Pillar', '{}')",
+                escaped_code
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+        {
+            Some(id) if !id.is_empty() => id,
+            _ => {
+                tracing::warn!(project_code = %project_code, "Pillar id allocation failed; Vision created without companion Pillar");
+                return true; // Vision is the critical artefact, Pillar best-effort
+            }
+        };
+
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+             VALUES (?, 'Pillar', ?, ?, ?, 'draft', ?)",
+            &serde_json::json!([
+                pil_id.clone(),
+                project_code,
+                "Project north-star pillar (draft)",
+                "Default Pillar EPITOMIZES the Vision. Split into multiple Pillars via soll_manager(action=create) once project intent crystallizes. Auto-seeded by axon_init_project (REQ-AXO-901606).",
+                metadata
+            ]),
+        ) {
+            tracing::warn!(project_code = %project_code, pil_id = %pil_id, error = %e, "Pillar auto-seed insert failed");
+            return true;
+        }
+
+        // Pillar EPITOMIZES Vision (canonical per soll_relation_schema)
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code)
+             VALUES (?, ?, 'EPITOMIZES', ?)",
+            &serde_json::json!([pil_id, vis_id, project_code]),
+        ) {
+            tracing::warn!(project_code = %project_code, error = %e, "EPITOMIZES edge insert failed");
+        }
+
+        true
+    }
+
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let project_path = match args.get("project_path").and_then(|value| value.as_str()) {
             Some(path) if !path.trim().is_empty() => path.trim(),
@@ -1035,6 +1157,14 @@ impl McpServer {
             ));
         }
 
+        // REQ-AXO-901606 — auto-seed Vision + Pillar (draft) so a fresh
+        // project is immediately usable for Pillar/REQ creation via
+        // soll_manager. Without this, callers hit the rejection
+        // « soll_manager cannot create a Vision » (manager.rs:334) AND
+        // « Pillars exigent EPITOMIZES → Vision » constraint, blocking
+        // bootstrap. Idempotent : no-op if project already has a Vision.
+        let vision_auto_seeded = self.seed_default_vision_and_pillar(&project_code, concept_text);
+
         // IST tables are multi-project under PG (post-CPT-AXO-039
         // supersedure 2026-05-08), provisioned once by
         // `bootstrap_global_pg_schema`. `generate_project_schema` emits
@@ -1065,9 +1195,21 @@ impl McpServer {
             project_name, project_code
         );
 
-        if concept_text.is_some() {
+        // REQ-AXO-901606 — Vision auto-seed messaging. The legacy text
+        // « Extract the Vision and Pillars, then use `soll_manager` to
+        // create them » was misleading because soll_manager.create vision
+        // is rejected. Now we either confirm the auto-seed (with the
+        // exact draft IDs) or note that a pre-existing Vision was kept.
+        if vision_auto_seeded {
             response_text.push_str(&format!(
-                "📄 A concept document was detected. Extract the Vision and Pillars, then use `soll_manager` to create them under project {}.\n\n",
+                "🌟 Vision + Pillar auto-seeded (draft).\n\
+                 - `VIS-{code}-001` Project north-star (draft) — edit via `soll_manager(action=update, entity=vision, data={{id:'VIS-{code}-001', description:'...', status:'current'}})`\n\
+                 - `PIL-{code}-001` Project north-star pillar (draft) EPITOMIZES Vision — split into specific Pillars via `soll_manager(action=create, entity=pillar, data={{project_code:'{code}', attach_to:'VIS-{code}-001', relation_type:'EPITOMIZES', ...}})`\n\n",
+                code = project_code
+            ));
+        } else if concept_text.is_some() {
+            response_text.push_str(&format!(
+                "📄 A concept document was provided but Vision auto-seed was skipped (project already has a Vision). Inspect existing intent via `soll_query_context project_code={}` then edit via `soll_manager(action=update)`.\n\n",
                 project_code
             ));
         }
