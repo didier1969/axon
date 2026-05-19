@@ -32,6 +32,25 @@ const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
 /// to `axon_live`. Reproduced 2026-05-14: dev counts stayed 0 while
 /// live grew under a dev-instance indexer.
 fn resolve_pg_database_url() -> Result<String> {
+    resolve_pg_database_url_with_override(None)
+}
+
+/// REQ-AXO-91562 / DEC-AXO-901594 Slice 1 — accept an explicit override so
+/// per-test harnesses can target a freshly-cloned database without leaking
+/// state via the global env-var chain.
+///
+/// Resolution priority :
+///   1. Explicit `override_url` (Slice 2 test harness will pass `Some(...)`)
+///   2. `AXON_INSTANCE_KIND`-specific (`AXON_DEV_DATABASE_URL` or
+///      `AXON_LIVE_DATABASE_URL`)
+///   3. `DATABASE_URL` fallback
+fn resolve_pg_database_url_with_override(override_url: Option<&str>) -> Result<String> {
+    if let Some(url) = override_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
     let kind = std::env::var("AXON_INSTANCE_KIND")
         .unwrap_or_else(|_| "live".to_string())
         .to_lowercase();
@@ -132,29 +151,51 @@ impl GraphStore {
         // Split-brain mode arg is ignored (forced to false in
         // `new_with_modes` ; PG's MVCC handles reader/writer concurrency
         // server-side post DuckDB purge — REQ-AXO-271).
-        Self::new_with_modes(db_root, false, SollAccessMode::ReadWrite)
+        Self::new_with_modes(db_root, false, SollAccessMode::ReadWrite, None)
     }
 
     pub fn new_brain_reader_soll_writer(db_root: &str) -> Result<Self> {
-        Self::new_with_modes(db_root, db_root != ":memory:", SollAccessMode::ReadWrite)
+        Self::new_with_modes(db_root, db_root != ":memory:", SollAccessMode::ReadWrite, None)
     }
 
     pub fn new_indexer_ist_writer_soll_reader(db_root: &str) -> Result<Self> {
-        Self::new_with_modes(db_root, false, SollAccessMode::ReadOnlyOrEmptySchema)
+        Self::new_with_modes(db_root, false, SollAccessMode::ReadOnlyOrEmptySchema, None)
     }
 
     pub fn new_indexer_ist_writer_without_soll(db_root: &str) -> Result<Self> {
-        Self::new_with_modes(db_root, false, SollAccessMode::Detached)
+        Self::new_with_modes(db_root, false, SollAccessMode::Detached, None)
     }
 
     pub fn new_indexer_ist_writer_split(db_root: &str) -> Result<Self> {
         Self::new_indexer_ist_writer_without_soll(db_root)
     }
 
+    /// REQ-AXO-91562 / DEC-AXO-901594 Slice 1 — explicit DATABASE_URL
+    /// override factory.
+    ///
+    /// Per-test harnesses (Slice 2 follow-up) call this with a URL pointing
+    /// to a freshly-cloned database (e.g. `postgresql://...:44144/test_<uuid>`)
+    /// instead of relying on the global `AXON_LIVE_DATABASE_URL` /
+    /// `AXON_DEV_DATABASE_URL` env vars. This bypasses the shared-state
+    /// pollution that today causes the soll_and_guidelines cluster
+    /// (REQ-AXO-915 / 91560 / 91562) to fail 106/147.
+    ///
+    /// `db_root` is still respected for split-brain / reader-only paths
+    /// where applicable. `database_url` overrides ALL env-var resolution.
+    pub fn new_with_database(db_root: &str, database_url: &str) -> Result<Self> {
+        Self::new_with_modes(
+            db_root,
+            false,
+            SollAccessMode::ReadWrite,
+            Some(database_url),
+        )
+    }
+
     fn new_with_modes(
         db_root: &str,
         split_brain_mode: bool,
         soll_access_mode: SollAccessMode,
+        database_url_override: Option<&str>,
     ) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
@@ -174,9 +215,10 @@ impl GraphStore {
         // Under PostgreSQL the "DB path" is a DATABASE_URL passed
         // verbatim to pg_init_db_compat. SOLL + per-project IST live
         // inside the same database via schema namespacing
-        // (CPT-AXO-039).
+        // (CPT-AXO-039). DEC-AXO-901594 Slice 1 : caller can override
+        // the env-var resolution to target a per-test database.
         let pg_database_url: Option<String> = Some(
-            resolve_pg_database_url().with_context(|| {
+            resolve_pg_database_url_with_override(database_url_override).with_context(|| {
                 "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
                  AXON_DEV_DATABASE_URL, or DATABASE_URL"
             })?,
