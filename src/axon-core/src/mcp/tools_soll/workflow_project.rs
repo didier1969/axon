@@ -936,10 +936,13 @@ impl McpServer {
     ///
     /// Idempotent : returns `false` (no-op) when the project already has at
     /// least one Vision row. Otherwise allocates canonical IDs via
-    /// `soll.allocate_node_id`, inserts Vision + Pillar with `status='draft'`
-    /// so the operator/LLM can refine via `soll_manager(action=update)`
-    /// without a special bootstrap codepath. The Pillar EPITOMIZES the
-    /// Vision (canonical PIL→VIS edge per soll_relation_schema).
+    /// `soll.allocate_node_id`, inserts Vision + Pillar with
+    /// `status='planned'` (canonical DEC-PRO-100 vocabulary ; closer to
+    /// « draft » semantically while honoring the soll_node_status_canonical
+    /// check constraint) so the operator/LLM can refine via
+    /// `soll_manager(action=update)` without a special bootstrap codepath.
+    /// The Pillar EPITOMIZES the Vision (canonical PIL→VIS edge per
+    /// soll_relation_schema).
     ///
     /// Failure modes are best-effort : individual write errors log via
     /// `tracing::warn` and the function returns `false`. The init flow does
@@ -993,7 +996,7 @@ impl McpServer {
 
         if let Err(e) = self.graph_store.execute_param(
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
-             VALUES (?, 'Vision', ?, ?, ?, 'draft', ?)",
+             VALUES (?, 'Vision', ?, ?, ?, 'planned', ?)",
             &serde_json::json!([
                 vis_id.clone(),
                 project_code,
@@ -1027,7 +1030,7 @@ impl McpServer {
 
         if let Err(e) = self.graph_store.execute_param(
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
-             VALUES (?, 'Pillar', ?, ?, ?, 'draft', ?)",
+             VALUES (?, 'Pillar', ?, ?, ?, 'planned', ?)",
             &serde_json::json!([
                 pil_id.clone(),
                 project_code,
@@ -1202,9 +1205,9 @@ impl McpServer {
         // exact draft IDs) or note that a pre-existing Vision was kept.
         if vision_auto_seeded {
             response_text.push_str(&format!(
-                "🌟 Vision + Pillar auto-seeded (draft).\n\
-                 - `VIS-{code}-001` Project north-star (draft) — edit via `soll_manager(action=update, entity=vision, data={{id:'VIS-{code}-001', description:'...', status:'current'}})`\n\
-                 - `PIL-{code}-001` Project north-star pillar (draft) EPITOMIZES Vision — split into specific Pillars via `soll_manager(action=create, entity=pillar, data={{project_code:'{code}', attach_to:'VIS-{code}-001', relation_type:'EPITOMIZES', ...}})`\n\n",
+                "🌟 Vision + Pillar auto-seeded (status=planned).\n\
+                 - `VIS-{code}-001` Project north-star — edit via `soll_manager(action=update, entity=vision, data={{id:'VIS-{code}-001', description:'...', status:'current'}})`\n\
+                 - `PIL-{code}-001` Project north-star pillar EPITOMIZES Vision — split into specific Pillars via `soll_manager(action=create, entity=pillar, data={{project_code:'{code}', attach_to:'VIS-{code}-001', relation_type:'EPITOMIZES', ...}})`\n\n",
                 code = project_code
             ));
         } else if concept_text.is_some() {
