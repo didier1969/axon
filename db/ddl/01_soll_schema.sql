@@ -280,9 +280,11 @@ CREATE OR REPLACE FUNCTION soll.allocate_node_id(
     p_project_code TEXT
 ) RETURNS TEXT LANGUAGE plpgsql AS $allocate_node_id$
 DECLARE
-    v_prefix TEXT;
-    v_col    TEXT;
-    v_next   BIGINT;
+    v_prefix    TEXT;
+    v_col       TEXT;
+    v_next      BIGINT;
+    v_candidate TEXT;
+    v_attempts  INT := 0;
 BEGIN
     v_prefix := CASE p_type
         WHEN 'Vision'         THEN 'VIS'
@@ -307,23 +309,42 @@ BEGIN
     VALUES (p_project_code, 'AXON_GLOBAL')
     ON CONFLICT (project_code) DO NOTHING;
 
-    EXECUTE format(
-        'UPDATE soll.Registry SET %I = %I + 1 WHERE project_code = $1 RETURNING %I',
-        v_col, v_col, v_col
-    ) INTO v_next USING p_project_code;
-    IF v_next IS NULL THEN
-        RAISE EXCEPTION 'project_code_not_registered:%', p_project_code;
-    END IF;
+    -- REQ-AXO-90006 — gap-skipping allocator. The counter may have been
+    -- polluted by past fixtures (e.g. REQ-AXO-9001/9999/90001) leaving
+    -- gaps. After resetting the counter to a low canonical value, the
+    -- loop transparently skips any slot already occupied by a soll.Node
+    -- (rejected or otherwise) so callers always get a free id without
+    -- PK collisions. Bounded at 1000 attempts to avoid runaway loops on
+    -- a fully saturated counter range — well above any realistic gap
+    -- cluster (AXO max fixture cluster = 6 ids).
+    LOOP
+        EXECUTE format(
+            'UPDATE soll.Registry SET %I = %I + 1 WHERE project_code = $1 RETURNING %I',
+            v_col, v_col, v_col
+        ) INTO v_next USING p_project_code;
+        IF v_next IS NULL THEN
+            RAISE EXCEPTION 'project_code_not_registered:%', p_project_code;
+        END IF;
 
-    -- MIL-AXO-020 rule 7: `N` zéro-paddé 3 chiffres min, largeur naturelle
-    -- au-delà de 999. `lpad(text, 3, '0')` TRUNCATES inputs longer than 3
-    -- chars (PG semantics: "If string is already longer than length then
-    -- it is truncated"), so guard with a length check before padding to
-    -- preserve the natural width past 999.
-    RETURN format('%s-%s-%s', v_prefix, p_project_code,
-                  CASE WHEN v_next > 999 THEN v_next::TEXT
-                       ELSE lpad(v_next::TEXT, 3, '0')
-                  END);
+        -- MIL-AXO-020 rule 7: `N` zéro-paddé 3 chiffres min, largeur
+        -- naturelle au-delà de 999. `lpad(text, 3, '0')` TRUNCATES
+        -- inputs longer than 3 chars (PG semantics), so guard with a
+        -- length check before padding to preserve the natural width
+        -- past 999.
+        v_candidate := format('%s-%s-%s', v_prefix, p_project_code,
+                      CASE WHEN v_next > 999 THEN v_next::TEXT
+                           ELSE lpad(v_next::TEXT, 3, '0')
+                      END);
+
+        EXIT WHEN NOT EXISTS (SELECT 1 FROM soll.Node WHERE id = v_candidate);
+
+        v_attempts := v_attempts + 1;
+        IF v_attempts > 1000 THEN
+            RAISE EXCEPTION 'allocate_node_id: too many collisions for %, last candidate=%', p_type, v_candidate;
+        END IF;
+    END LOOP;
+
+    RETURN v_candidate;
 END
 $allocate_node_id$;
 
