@@ -9,11 +9,12 @@
 //!     - [`stage_a1::a1_prepare`] — read file + sha256 + mtime → [`PreparedFile`]
 //!     - [`stage_a2::a2_transform`] — tree-sitter parse → [`ParsedFile`]
 //!     - [`stage_a3::a3_enroll`] → [`crate::graph::GraphStore::upsert_graph_v2`] :
-//!       Symbol + Chunk (full content) + CONTAINS/CALLS/CALLS_NIF (SQL + AGE
-//!       dual-write) + IndexedFile UPSERT in a single transaction. PG FTS
-//!       lights up automatically via the [REQ-AXO-292] `content_tsv`
-//!       `GENERATED ALWAYS AS STORED` column on `public.Chunk`. Lexical
-//!       retrieval works **without GPU**.
+//!       Symbol + Chunk (full content) + CONTAINS/CALLS/CALLS_NIF persisted
+//!       to `public.Edge` (REQ-AXO-295 / REQ-AXO-297 unified storage,
+//!       AGE retired per MIL-AXO-017 / REQ-AXO-90005) + IndexedFile UPSERT
+//!       in a single transaction. PG FTS lights up automatically via the
+//!       [REQ-AXO-292] `content_tsv` `GENERATED ALWAYS AS STORED` column
+//!       on `public.Chunk`. Lexical retrieval works **without GPU**.
 //! * **Pipeline B — GPU enrichment** :
 //!     - [`stage_b1::b1_fetch_for_embedding`] — SELECT chunk content from
 //!       PG by `chunk_id` (writer ctx — see read-after-write contract below).

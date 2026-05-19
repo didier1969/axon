@@ -180,10 +180,12 @@ impl WriteAccumulator {
     /// that depend on the typed INSERTs already taking effect within
     /// the same writer transaction.
     pub fn render_bulk_queries(&self) -> Vec<String> {
-        // Backwards-compatible default: DuckDB-only path (no SQL relation
-        // skip, no AGE dual-write). Writer-thread callers should prefer
-        // `render_bulk_queries_with` so they can flip the gates from the
-        // sink + env at flush time.
+        // Backwards-compatible default: legacy renderer set (Symbols +
+        // Chunks + CONTAINS/CALLS/CALLS_NIF). Post-MIL-AXO-017 the v2
+        // hot path goes through [`upsert_graph_v2`] → `render_unified_edge_pg`
+        // and never touches this entrypoint ; it remains for the legacy
+        // `upsert_graph` callers until they're retired alongside the
+        // per-type relation tables.
         self.render_bulk_queries_with(false)
     }
 
@@ -367,10 +369,11 @@ impl WriteAccumulator {
     /// REQ-AXO-297 (MIL-AXO-017 slice 3) — render accumulated CONTAINS /
     /// CALLS / CALLS_NIF rows as UPSERTs into the unified `public.Edge`
     /// table (REQ-AXO-295 schema). Replaces the per-type tables retired
-    /// by REQ-AXO-216 (Stop A) and runs IN PARALLEL with AGE Cypher
-    /// during the MIL-AXO-017 transition — A3 dual-writes so MCP tools
-    /// can be bascule onto `public.Edge` (REQ-AXO-299) before AGE is
-    /// dropped (REQ-AXO-300).
+    /// by REQ-AXO-216 (Stop A). Post-MIL-AXO-017 / REQ-AXO-90005 (AGE
+    /// retired) this is the SOLE structural edge write path — no AGE
+    /// Cypher dual-write remains. The RAM IstGraphView (PIL-AXO-9002)
+    /// refreshes from `public.Edge` via the LISTEN/NOTIFY listener so
+    /// reads stay RAM-canonical while writes stay PG-canonical.
     ///
     /// Batched at 500 rows per INSERT (matches the per-renderer cadence
     /// of `render_symbols_duckdb` / `render_chunks_duckdb`).
