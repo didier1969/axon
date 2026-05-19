@@ -1,0 +1,2 @@
+id,type,project_code,title,description,status,metadata
+GUI-REQ145-001,Guideline,AXO,REQ-145 fixture rule,Diffs touching src/req145_fixture/ must include req145_marker.rs,active,"{""enforcement"": ""strict"", ""trigger_path"": ""src/req145_fixture/"", ""required_path"": ""req145_marker.rs""}"
