@@ -68,6 +68,61 @@ axon_pg_listener_is_devenv() {
         || [[ "$exe" == *postgres-wrapp* ]]
 }
 
+purge_stale_postmaster_pid() {
+    # Post-crash recovery: Postgres' postmaster.pid lingers after an unclean
+    # shutdown (WSL crash, PC power loss, kill -9). If the recorded PID is
+    # dead, `devenv up postgres -d` either refuses to boot or binds the port
+    # without serving connections (we observed both on 2026-05-19 session 48).
+    # Sub-100ms detect+cleanup; never purges a live PID, so safe under parallel
+    # starts. See docs/working-notes/2026-05-19-session-48-* for the incident.
+    local proj="${PROJECT_ROOT:-${PWD}}"
+    local pid_file="$proj/.devenv/state/postgres/postmaster.pid"
+    [[ -f "$pid_file" ]] || return 0
+    local pg_pid
+    pg_pid="$(head -n 1 "$pid_file" 2>/dev/null | tr -d ' \t')"
+    if [[ -n "$pg_pid" ]] && kill -0 "$pg_pid" 2>/dev/null; then
+        return 0
+    fi
+    echo "🧹 Purging stale postmaster.pid (recorded PID=${pg_pid:-?} not running)"
+    rm -f "$pid_file"
+}
+
+purge_stale_writer_locks() {
+    # Post-crash recovery: .axon-{soll,ist}.writer.lock survive process death
+    # under WSL2 (flock state isn't always reclaimed on power loss). The lock
+    # file records its owner via `pid=N`; if N is dead, the lock is orphaned
+    # and blocks future starts at probe_writer_guard. Sub-100ms detect+cleanup.
+    # Live writer PID = no-op; safe under parallel starts.
+    local proj="${PROJECT_ROOT:-${PWD}}"
+    local lock
+    for lock in "$proj"/.axon/graph_v2/.axon-soll.writer.lock \
+                "$proj"/.axon/graph_v2/.axon-ist.writer.lock; do
+        [[ -f "$lock" ]] || continue
+        # Pure-bash regex extraction (no pipeline — WSL2 + set -u + grep|head|cut
+        # returned empty in 2026-05-19 testing; BASH_REMATCH is robust).
+        local owner_pid=""
+        local line
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ pid=([0-9]+) ]]; then
+                owner_pid="${BASH_REMATCH[1]}"
+                break
+            fi
+        done < "$lock"
+        # Safe default : if we can't extract a numeric PID, leave the lock
+        # alone. Rust startup enforcement will surface a real conflict ;
+        # we'd rather refuse to start than silently delete a lock we don't
+        # understand.
+        if [[ -z "$owner_pid" ]]; then
+            continue
+        fi
+        if kill -0 "$owner_pid" 2>/dev/null; then
+            continue
+        fi
+        echo "🧹 Purging stale writer lock $(basename "$lock") (recorded PID=${owner_pid} not running)"
+        rm -f "$lock"
+    done
+}
+
 ensure_no_competing_pg_listener() {
     local pid exe
     pid="$(axon_pg_port_listener_pid)"
@@ -275,6 +330,8 @@ ensure_runtime_ready() {
         echo "❌ psql/pg_isready not resolvable from /nix/store or PATH." >&2
         return 1
     fi
+    purge_stale_postmaster_pid
+    purge_stale_writer_locks
     ensure_no_competing_pg_listener || return 1
     ensure_devenv_pg_running || return 1
     ensure_axon_role_exists || return 1
