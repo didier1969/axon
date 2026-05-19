@@ -106,9 +106,14 @@ pub fn spawn_b3_batched_worker(
         let mut buffer: Vec<EmbeddedChunk> = Vec::with_capacity(batch_size);
 
         loop {
+            // REQ-AXO-901608 — t_recv timing (starvation indicator).
+            let recv_started = Instant::now();
             let flush_now = tokio::select! {
                 biased;
                 received = rx.recv() => {
+                    let recv_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_us);
                     match received {
                         Some(item) => {
                             buffer.push(item);
@@ -123,6 +128,9 @@ pub fn spawn_b3_batched_worker(
                     }
                 }
                 _ = tick.tick() => {
+                    let recv_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_us);
                     !buffer.is_empty()
                 }
             };
@@ -195,7 +203,13 @@ pub fn spawn_b3_batched_worker(
                                 source_hash: embedded.source_hash,
                                 embedded_at_ms: now_ms,
                             };
-                            if tx.send(receipt).await.is_err() {
+                            // REQ-AXO-901608 — t_send timing (backpressure indicator).
+                            let send_started = Instant::now();
+                            let send_result = tx.send(receipt).await;
+                            let send_us =
+                                send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                            metrics.record_send_wait(send_us);
+                            if send_result.is_err() {
                                 return;
                             }
                         }

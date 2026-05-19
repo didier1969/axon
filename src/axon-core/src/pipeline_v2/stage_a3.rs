@@ -145,9 +145,17 @@ pub fn spawn_a3_batched_worker(
         let mut buffer: Vec<ParsedFile> = Vec::with_capacity(batch_size);
 
         loop {
+            // REQ-AXO-901608 — measure t_recv (starvation indicator). Captures
+            // the time this worker spent awaiting either a new item OR the
+            // next batch-flush tick. Cumulative high value = upstream slow OR
+            // no material available (machine de décolletage sans barres).
+            let recv_started = Instant::now();
             let flush_now = tokio::select! {
                 biased;
                 received = rx.recv() => {
+                    let recv_elapsed_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_elapsed_us);
                     match received {
                         Some(item) => {
                             buffer.push(item);
@@ -164,6 +172,9 @@ pub fn spawn_a3_batched_worker(
                     }
                 }
                 _ = tick.tick() => {
+                    let recv_elapsed_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_elapsed_us);
                     !buffer.is_empty()
                 }
             };
@@ -252,7 +263,13 @@ pub fn spawn_a3_batched_worker(
                                 chunk_ids,
                             };
                             metrics.record_finished(per_item_us);
-                            if tx.send(receipt).await.is_err() {
+                            // REQ-AXO-901608 — t_send timing (backpressure indicator).
+                            let send_started = Instant::now();
+                            let send_result = tx.send(receipt).await;
+                            let send_elapsed_us =
+                                send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                            metrics.record_send_wait(send_elapsed_us);
+                            if send_result.is_err() {
                                 return;
                             }
                         }

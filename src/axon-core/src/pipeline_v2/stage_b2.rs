@@ -129,10 +129,17 @@ pub fn spawn_b2_batched_worker(
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
         loop {
+            // REQ-AXO-901608 — t_recv timing (starvation indicator).
+            let recv_started = Instant::now();
             // Wait without timeout for the first item — when idle, the
             // worker should be cheap.
             let first = match rx.recv().await {
-                Some(item) => item,
+                Some(item) => {
+                    let recv_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_us);
+                    item
+                }
                 None => break,
             };
             let mut batch: Vec<ChunkForEmbedding> = Vec::with_capacity(batch_size);
@@ -145,14 +152,29 @@ pub fn spawn_b2_batched_worker(
                 if remaining.is_zero() {
                     break;
                 }
+                let recv_started = Instant::now();
                 match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(item)) => batch.push(item),
+                    Ok(Some(item)) => {
+                        let recv_us = recv_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64;
+                        metrics.record_recv_wait(recv_us);
+                        batch.push(item);
+                    }
                     Ok(None) => {
                         // Upstream closed mid-drain — flush this batch
                         // then break the outer loop after embed.
                         break;
                     }
-                    Err(_) => break, // timeout: flush partial batch
+                    Err(_) => {
+                        let recv_us = recv_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64;
+                        metrics.record_recv_wait(recv_us);
+                        break;
+                    }
                 }
             }
 
@@ -179,7 +201,13 @@ pub fn spawn_b2_batched_worker(
                             embedding,
                         };
                         metrics.record_finished(per_item_us);
-                        if tx.send(emb).await.is_err() {
+                        // REQ-AXO-901608 — t_send timing (backpressure indicator).
+                        let send_started = Instant::now();
+                        let send_result = tx.send(emb).await;
+                        let send_us =
+                            send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        metrics.record_send_wait(send_us);
+                        if send_result.is_err() {
                             return; // downstream closed; cease worker
                         }
                     }

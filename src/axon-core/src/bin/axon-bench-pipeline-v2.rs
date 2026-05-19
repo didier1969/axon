@@ -29,7 +29,7 @@ use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
     const_resolver, spawn_pipeline_a, spawn_pipeline_b_full, B2Embedder, GpuB2Embedder,
     NoOpEmbedder,
-    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
+    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -381,6 +381,39 @@ async fn run() -> Result<()> {
             _ => (-1.0, -1.0),
         };
 
+    // REQ-AXO-901608 / CPT-AXO-90025 — Goldratt-canonical drum detection.
+    // Identify the stage with the highest t_work_ratio across all six stages
+    // (capacity-bound = "le drum"). Stages with high t_recv_ratio are
+    // starved (machine de décolletage sans barres) ; stages with high
+    // t_send_ratio are backpressured (drum aval bouché).
+    let snaps_all: [&StageSnapshot; 6] = [
+        &snap_a1, &snap_a2, &snap_a3, &snap_b1, &snap_b2, &snap_b3,
+    ];
+    let drum = snaps_all
+        .iter()
+        .max_by(|a, b| {
+            a.t_work_ratio()
+                .partial_cmp(&b.t_work_ratio())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+        .unwrap();
+    let drum_name = drum.name;
+    let drum_ratio = drum.t_work_ratio();
+
+    // Little's Law sanity check per stage : L = λ · W
+    // L = items currently in flight (inflight)
+    // λ = throughput (items_out / elapsed_secs)
+    // W = mean latency (mean_duration_us / 1e6)
+    // L_predicted ≈ λ · W ; |L_predicted - L_measured| / L_measured small → steady-state
+    // We compute L_predicted ; the human output displays the comparison.
+    let elapsed_secs = elapsed.as_secs_f64().max(0.000_001);
+    let little_law_l_predicted = |snap: &StageSnapshot| -> f64 {
+        let lambda = snap.items_out_total as f64 / elapsed_secs;
+        let w_s = snap.mean_duration_us as f64 / 1_000_000.0;
+        lambda * w_s
+    };
+
     match args.output {
         OutputMode::Csv => {
             println!(
@@ -388,10 +421,23 @@ async fn run() -> Result<()> {
                  sustained_files_per_sec,sustained_chunks_per_sec,sustained_elapsed_ms,\
                  a1_in,a1_out,a1_err,a1_bp,a2_in,a2_out,a2_err,a2_bp,\
                  a3_in,a3_out,a3_err,a3_bp,b1_in,b1_out,b1_err,b1_bp,\
-                 b2_in,b2_out,b2_err,b2_bp,b3_in,b3_out,b3_err,b3_bp"
+                 b2_in,b2_out,b2_err,b2_bp,b3_in,b3_out,b3_err,b3_bp,\
+                 a1_t_recv_us,a1_t_work_us,a1_t_send_us,\
+                 a2_t_recv_us,a2_t_work_us,a2_t_send_us,\
+                 a3_t_recv_us,a3_t_work_us,a3_t_send_us,\
+                 b1_t_recv_us,b1_t_work_us,b1_t_send_us,\
+                 b2_t_recv_us,b2_t_work_us,b2_t_send_us,\
+                 b3_t_recv_us,b3_t_work_us,b3_t_send_us,\
+                 a1_work_ratio,a2_work_ratio,a3_work_ratio,\
+                 b1_work_ratio,b2_work_ratio,b3_work_ratio,\
+                 drum_identified,drum_work_ratio,pool_size"
             );
             println!(
-                "v2-bench,{},{},{:.0},{:.2},{:.2},{:.2},{:.2},{:.0},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "v2-bench,{},{},{:.0},{:.2},{:.2},{:.2},{:.2},{:.0},\
+                 {},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
+                 {},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
+                 {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
+                 {},{:.4},{}",
                 a_count, b_count, elapsed.as_millis(), files_per_sec, chunks_per_sec,
                 sustained_files_per_sec, sustained_chunks_per_sec,
                 sustained_elapsed.map(|d| d.as_millis() as f64).unwrap_or(-1.0),
@@ -401,31 +447,53 @@ async fn run() -> Result<()> {
                 snap_b1.items_in_total, snap_b1.items_out_total, snap_b1.errors_total, snap_b1.backpressure_blocks_total,
                 snap_b2.items_in_total, snap_b2.items_out_total, snap_b2.errors_total, snap_b2.backpressure_blocks_total,
                 snap_b3.items_in_total, snap_b3.items_out_total, snap_b3.errors_total, snap_b3.backpressure_blocks_total,
+                snap_a1.t_recv_total_us, snap_a1.t_work_total_us, snap_a1.t_send_total_us,
+                snap_a2.t_recv_total_us, snap_a2.t_work_total_us, snap_a2.t_send_total_us,
+                snap_a3.t_recv_total_us, snap_a3.t_work_total_us, snap_a3.t_send_total_us,
+                snap_b1.t_recv_total_us, snap_b1.t_work_total_us, snap_b1.t_send_total_us,
+                snap_b2.t_recv_total_us, snap_b2.t_work_total_us, snap_b2.t_send_total_us,
+                snap_b3.t_recv_total_us, snap_b3.t_work_total_us, snap_b3.t_send_total_us,
+                snap_a1.t_work_ratio(), snap_a2.t_work_ratio(), snap_a3.t_work_ratio(),
+                snap_b1.t_work_ratio(), snap_b2.t_work_ratio(), snap_b3.t_work_ratio(),
+                drum_name, drum_ratio, total_files,
             );
         }
         OutputMode::Human => {
+            // Goldratt drum identification + Little's Law sanity per stage.
+            // Three canonical values per operator (machine de décolletage):
+            //   pool_size = matière disponible, a_count = matière traitée par A,
+            //   b_count = matière traitée par B.
+            let row = |snap: &StageSnapshot| -> String {
+                let l_pred = little_law_l_predicted(snap);
+                format!(
+                    "  {:<4} in/out/err/bp = {}/{}/{}/{} · t_recv/work/send μs = {}/{}/{} · t_work_ratio = {:>6.2}% · L_pred ≈ {:>5.2} (inflight={})",
+                    snap.name,
+                    snap.items_in_total, snap.items_out_total, snap.errors_total, snap.backpressure_blocks_total,
+                    snap.t_recv_total_us, snap.t_work_total_us, snap.t_send_total_us,
+                    snap.t_work_ratio() * 100.0,
+                    l_pred,
+                    snap.inflight,
+                )
+            };
             println!(
-                "axon-bench-pipeline-v2: {} files / {} chunks in {:.1}s\n\
+                "axon-bench-pipeline-v2: {} files / {} chunks in {:.1}s · pool_size = {} (matière disponible)\n\
                  → wall    : {:.2} files/s · {:.2} chunks/s\n\
                  → sustained (post-warmup): {} files/s · {} chunks/s\n\
-                 a1 in/out/err/bp = {}/{}/{}/{}\n\
-                 a2 in/out/err/bp = {}/{}/{}/{}\n\
-                 a3 in/out/err/bp = {}/{}/{}/{}\n\
-                 b1 in/out/err/bp = {}/{}/{}/{}\n\
-                 b2 in/out/err/bp = {}/{}/{}/{}\n\
-                 b3 in/out/err/bp = {}/{}/{}/{}\n\
+                 \n\
+                 Goldratt drum (max t_work_ratio): {} @ {:.2}%\n\
+                 \n\
+                 Per-stage (in/out/err/bp · t_recv/work/send μs · t_work_ratio · Little's Law L_pred):\n\
+                 {}\n{}\n{}\n{}\n{}\n{}\n\
+                 \n\
                  PG rows: Symbol={} Chunk={} IndexedFile={} ChunkEmbedding={}\n\
                  cycle={cycle} duration_secs={duration_secs} warmup_secs={warmup_secs} pool_size={total_files}",
-                a_count, b_count, elapsed.as_secs_f64(),
+                a_count, b_count, elapsed.as_secs_f64(), total_files,
                 files_per_sec, chunks_per_sec,
                 if sustained_files_per_sec >= 0.0 { format!("{:.2}", sustained_files_per_sec) } else { "n/a".to_string() },
                 if sustained_chunks_per_sec >= 0.0 { format!("{:.2}", sustained_chunks_per_sec) } else { "n/a".to_string() },
-                snap_a1.items_in_total, snap_a1.items_out_total, snap_a1.errors_total, snap_a1.backpressure_blocks_total,
-                snap_a2.items_in_total, snap_a2.items_out_total, snap_a2.errors_total, snap_a2.backpressure_blocks_total,
-                snap_a3.items_in_total, snap_a3.items_out_total, snap_a3.errors_total, snap_a3.backpressure_blocks_total,
-                snap_b1.items_in_total, snap_b1.items_out_total, snap_b1.errors_total, snap_b1.backpressure_blocks_total,
-                snap_b2.items_in_total, snap_b2.items_out_total, snap_b2.errors_total, snap_b2.backpressure_blocks_total,
-                snap_b3.items_in_total, snap_b3.items_out_total, snap_b3.errors_total, snap_b3.backpressure_blocks_total,
+                drum_name, drum_ratio * 100.0,
+                row(&snap_a1), row(&snap_a2), row(&snap_a3),
+                row(&snap_b1), row(&snap_b2), row(&snap_b3),
                 symbol_rows, chunk_rows, indexed_rows, embedding_rows,
                 cycle = cycle,
                 duration_secs = args.duration_secs,

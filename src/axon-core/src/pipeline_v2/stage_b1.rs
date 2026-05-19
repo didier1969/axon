@@ -137,8 +137,15 @@ pub fn spawn_b1_batched_worker(
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
         loop {
+            // REQ-AXO-901608 — t_recv timing (starvation indicator).
+            let recv_started = std::time::Instant::now();
             let first = match rx.recv().await {
-                Some(item) => item,
+                Some(item) => {
+                    let recv_us =
+                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    metrics.record_recv_wait(recv_us);
+                    item
+                }
                 None => break,
             };
             let mut batch: Vec<String> = Vec::with_capacity(batch_size);
@@ -150,10 +157,28 @@ pub fn spawn_b1_batched_worker(
                 if remaining.is_zero() {
                     break;
                 }
+                // REQ-AXO-901608 — accumulate intra-batch recv wait too.
+                let recv_started = std::time::Instant::now();
                 match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(item)) => batch.push(item),
+                    Ok(Some(item)) => {
+                        let recv_us = recv_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64;
+                        metrics.record_recv_wait(recv_us);
+                        batch.push(item);
+                    }
                     Ok(None) => break,
-                    Err(_) => break, // timeout
+                    Err(_) => {
+                        // Timeout means upstream is starved relative to
+                        // batch_timeout — count this too.
+                        let recv_us = recv_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64;
+                        metrics.record_recv_wait(recv_us);
+                        break;
+                    }
                 }
             }
 
@@ -184,7 +209,13 @@ pub fn spawn_b1_batched_worker(
                             content,
                             content_hash,
                         };
-                        if tx.send(payload).await.is_err() {
+                        // REQ-AXO-901608 — t_send timing (backpressure indicator).
+                        let send_started = std::time::Instant::now();
+                        let send_result = tx.send(payload).await;
+                        let send_us =
+                            send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        metrics.record_send_wait(send_us);
+                        if send_result.is_err() {
                             return; // downstream closed
                         }
                     }
