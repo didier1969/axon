@@ -1,0 +1,29 @@
+- [ ] **Set up test module scaffolding**: Add a `#[cfg(test)] mod tests` block in the target file (e.g., `src/lib.rs` or a dedicated `src/slug.rs`) with `use super::*;` so failing tests can be written before any implementation exists.
+
+- [ ] **Write a failing test for basic lowercase conversion**: Assert `slugify("Hello World") == "hello-world"` to lock in the lowercase + single-space-to-hyphen contract. Run `cargo test` and confirm it fails to compile (function missing) — this is the red phase baseline.
+
+- [ ] **Create minimal stub to make the project compile**: Add `pub fn slugify(text: &str) -> String { String::new() }` so the test fails on assertion (not compilation), confirming the test harness wires through correctly.
+
+- [ ] **Write a failing test for multiple whitespace collapsing**: Assert `slugify("foo   bar\t\nbaz") == "foo-bar-baz"`. Covers runs of arbitrary whitespace collapsing into one hyphen.
+
+- [ ] **Write a failing test for leading/trailing trimming**: Assert `slugify("  hello  ") == "hello"` and `slugify("---hello---") == "hello"`. Locks in the trim rule for both spaces and pre-existing hyphens.
+
+- [ ] **Write a failing test for punctuation stripping**: Assert `slugify("Hello, World!") == "hello-world"` and `slugify("a.b/c:d") == "a-b-c-d"`. Confirms non-alphanumerics become separators.
+
+- [ ] **Write a failing test for consecutive separator collapsing**: Assert `slugify("foo---bar___baz!!!qux") == "foo-bar-baz-qux"`. Validates the collapse-runs invariant after substitution.
+
+- [ ] **Write a failing test for non-ASCII transliteration / stripping**: Assert `slugify("Café au lait") == "cafe-au-lait"` (if transliteration is desired) OR `slugify("Café 北京") == "caf-au-lait"`-style stripping. Decide policy now and lock it via the test before coding.
+
+- [ ] **Write a failing test for digits and mixed alphanumerics**: Assert `slugify("Rust 2024 Edition") == "rust-2024-edition"`. Ensures digits are preserved.
+
+- [ ] **Write a failing edge-case test for empty and separator-only input**: Assert `slugify("") == ""` and `slugify("!!!---   ") == ""`. Locks behavior for degenerate inputs.
+
+- [ ] **Implement minimal slugify to pass tests (green phase)**: Iterate chars → lowercase ASCII → map non-alphanumerics to `-` → collapse adjacent hyphens via a `prev_was_hyphen` flag → trim leading/trailing `-`. Run `cargo test` after each change; commit only when all green.
+
+- [ ] **Refactor for clarity without breaking tests**: Extract helpers if needed (e.g., `is_slug_char`), consider `String::with_capacity(text.len())` for allocation, ensure single-pass O(n). Re-run `cargo test` after refactor to confirm green.
+
+- [ ] **Add property-style robustness tests**: Assert invariants on arbitrary inputs — output contains only `[a-z0-9-]`, never starts/ends with `-`, never contains `--`. Use a handful of hand-crafted adversarial strings (emoji, control chars, very long input, all-punctuation).
+
+- [ ] **Run `cargo test` final pass + `cargo clippy -- -D warnings`**: Confirm zero failures, zero warnings. Document the chosen non-ASCII policy in a `///` doc comment with a `# Examples` block so `cargo test --doc` also exercises the behavior.
+
+__END__

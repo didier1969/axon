@@ -1,0 +1,19 @@
+- [ ] Invoke `skill_invoke(SKI-PRO-999)` to load red-green-refactor TDD body; confirm cycle contract (one failing test -> minimum impl -> refactor -> repeat) before touching code.
+- [ ] Run `soll_query_context(project_code=AXO)` to surface any existing Vision/Pillar/REQ touching string normalization, URL/slug helpers, or text utilities; if none, draft a new REQ node (`requirement`, tags `text-utility` `url-safe`) via `soll_manager(action=create)` to anchor the slot.
+- [ ] `query("slugify")` then `query("to_slug")` / `query("normalize_ascii")` / `query("ascii_fold")` to detect prior art; if a symbol exists, `inspect(<symbol>)` for source + callers and either extend it (keep contract) or alias new `slugify` to avoid duplication.
+- [ ] `query("unicode")` / `query("deunicode")` in the crate to discover Cargo deps already available (`unicode-normalization`, `deunicode`); decide ASCII-folding strategy from existing pattern, not new dep, unless REQ justifies.
+- [ ] RED 1 — write `tests/slugify.rs` (or `#[cfg(test)] mod` in `lib.rs`) with one failing test: `assert_eq!(slugify("Hello World"), "hello-world");`. Run `cargo test slugify` to confirm RED (compile error or assertion fail) before any impl.
+- [ ] GREEN 1 — add minimal `pub fn slugify(text: &str) -> String` in the crate's `lib.rs` (or a new `slug` module re-exported); lowercase + replace whitespace with `-`. Run `cargo test slugify` → green. No extra behavior yet.
+- [ ] RED 2 — add test for ASCII-only: `assert_eq!(slugify("Café Niño"), "cafe-nino");`. Confirm fail.
+- [ ] GREEN 2 — extend impl with Unicode→ASCII fold (NFD + strip combining marks, or `deunicode`). Re-run full `cargo test` to confirm no regression.
+- [ ] RED 3 — add test for non-alphanumeric → separator and collapse: `assert_eq!(slugify("Hello, World!!! Foo___bar"), "hello-world-foo-bar");`. Confirm fail.
+- [ ] GREEN 3 — map non-alphanumeric ASCII to `-`, then collapse consecutive `-` runs via single-pass loop (avoid `.replace("--", "-")` regex chains). Verify all prior tests still green.
+- [ ] RED 4 — add test for trim leading/trailing separators + empty input edge cases: `assert_eq!(slugify("  ---hello---  "), "hello"); assert_eq!(slugify(""), ""); assert_eq!(slugify("!!!"), "");`. Confirm fail.
+- [ ] GREEN 4 — trim leading/trailing `-` from the built string before return; ensure empty-input path returns `String::new()` without panic.
+- [ ] REFACTOR — single-pass implementation: iterate chars once, push folded ASCII or `-`, dedupe `-` via "last pushed was hyphen" flag, trim at end. Add `#[inline]` only if benched; keep allocation = one `String::with_capacity(text.len())`. Re-run `cargo test` → all green.
+- [ ] Run `cargo test --all-features` + `cargo clippy --all-targets -- -D warnings` + `cargo fmt --check` to satisfy Nexus zero-warning credo before commit.
+- [ ] `axon_pre_flight_check(diff_paths=["src/lib.rs", "tests/slugify.rs", "Cargo.toml"])` to verify SKILL.md / SOLL alignment; resolve any flagged guideline before staging.
+- [ ] `git add` the specific files (no `-A`), then `axon_commit_work` with structured message referencing the REQ id (e.g. `feat(text): REQ-AXO-XXXXX — slugify() url-safe normalizer (TDD red-green-refactor)`).
+- [ ] `soll_manager(action=update, id=<REQ>, status=delivered)` then `soll_attach_evidence(id=<REQ>, evidence=[commit_sha, "tests/slugify.rs"])` to persist outcome per SKI-PRO-999 step 5.
+- [ ] Post-delivery probe: `query("slugify")` + `inspect("slugify")` to confirm IST picked up the new symbol (freshness=fresh, trust=canonical) — closes the structural-intelligence loop.
+__END__

@@ -1,0 +1,18 @@
+- [ ] Red 1: Write failing test `slugify("hello") == "hello"` to drive the function signature `pub fn slugify(text: &str) -> String` into existence. Run `cargo test slugify` and observe compile failure, then assertion failure once stub returns `String::new()`.
+- [ ] Green 1: Implement minimal body returning the input lowercased (`text.to_lowercase()`). Confirm the single test passes; no other behavior added.
+- [ ] Refactor 1: Move `slugify` into its own module (e.g. `src/slug.rs`), re-export from `lib.rs`, ensure `cargo test` stays green and `cargo clippy` is clean.
+- [ ] Red 2: Add failing test `slugify("Hello World") == "hello-world"` to force whitespace-to-hyphen conversion. Observe failure showing `"hello world"` vs expected.
+- [ ] Green 2: Replace whitespace runs with `'-'` (iterate chars, push `'-'` on `c.is_whitespace()`, else push `c.to_ascii_lowercase()`). Keep change minimal; both tests green.
+- [ ] Red 3: Add failing test `slugify("Café Déjà Vu") == "cafe-deja-vu"` to drive ASCII folding of diacritics. Failure shows non-ASCII bytes retained.
+- [ ] Green 3: Add a `fold_ascii(c: char) -> Option<char>` helper (NFD decompose via `unicode-normalization` crate, drop combining marks, keep ASCII alphanumerics). Wire into the main loop. Update `Cargo.toml` dependency.
+- [ ] Red 4: Add failing test `slugify("foo!!!bar??baz") == "foo-bar-baz"` to drive non-alphanumeric punctuation → separator behavior.
+- [ ] Green 4: Treat any char that is neither ASCII alphanumeric (post-fold) nor digit as a separator-producing char. All four tests green.
+- [ ] Red 5: Add failing test `slugify("a   b___c---d") == "a-b-c-d"` to force collapsing runs of separators into a single hyphen.
+- [ ] Green 5: Track a `prev_was_sep` flag; only push `'-'` when previous emitted char was not already `'-'`. Tests green.
+- [ ] Red 6: Add failing test `slugify("---hello---") == "hello"` (and `slugify("  spaced  ") == "spaced"`) to drive trimming of leading/trailing hyphens.
+- [ ] Green 6: After building the buffer, `trim_matches('-')` and collect into `String`. All tests green.
+- [ ] Red 7: Add edge-case failing tests: `slugify("") == ""`, `slugify("###") == ""`, `slugify("123 ABC") == "123-abc"`. Observe which currently fail.
+- [ ] Green 7: Adjust loop / trim order so all-separator input yields `""` and digits survive. All tests green.
+- [ ] Refactor final: Extract the char-classification predicate into a named helper (`is_slug_char`), add doc-comment with examples (`/// # Examples`), run `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`. Confirm zero warnings.
+- [ ] Verification: Run full `cargo test` (lib + bins + doctests) one final time; capture output line `test result: ok. N passed; 0 failed` as evidence before claiming completion (per `verification-before-completion`).
+__END__
