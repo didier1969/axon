@@ -182,6 +182,13 @@ fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> ExitCode {
+    // REQ-AXO-901608 follow-up — opt-in tokio-console for live async runtime
+    // observability. Active only when the binary is built with
+    // `--features tokio-console` AND `RUSTFLAGS="--cfg tokio_unstable"`.
+    // No-op otherwise (zero overhead on the canonical release path).
+    #[cfg(feature = "tokio-console")]
+    console_subscriber::init();
+
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

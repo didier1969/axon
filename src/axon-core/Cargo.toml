@@ -57,8 +57,24 @@ path = "src/bin/axon-bench-ist-snapshot.rs"
 name = "axon-bench-tool-migration"
 path = "src/bin/axon-bench-tool-migration.rs"
 
+[features]
+default = []
+# REQ-AXO-901608 follow-up — opt-in tokio-console support for async runtime
+# observability on the bench binary. Requires `RUSTFLAGS="--cfg
+# tokio_unstable"` at build time. Build with:
+#   RUSTFLAGS="--cfg tokio_unstable" cargo build --release \
+#     --features tokio-console --bin axon-bench-pipeline-v2
+# Then run `tokio-console` CLI in another shell to connect.
+# Not enabled by default to avoid pulling the dep + tokio_unstable on
+# production binaries (axon-brain, axon-indexer).
+tokio-console = ["dep:console-subscriber"]
+
 [dependencies]
-tokio = { version = "1.36", features = ["full", "net"] }
+# REQ-AXO-901608 follow-up — `tracing` feature enables tokio's
+# instrumentation hooks consumed by console-subscriber. Inert when the
+# `tokio-console` feature is off.
+tokio = { version = "1.36", features = ["full", "net", "tracing"] }
+console-subscriber = { version = "0.4", optional = true }
 walkdir = "2.5"
 ignore = "0.4"
 notify-debouncer-full = "0.7.0"
