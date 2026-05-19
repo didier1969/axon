@@ -1,3 +1,11 @@
 raw/*.md
 !raw/.gitkeep
 report/out/
+
+# REQ-AXO-91586 P3.2 — operator-driven batch artifacts
+# inputs/README.md is canonical (committed) ; everything else is
+# regenerated via `python run.py --export-prompts inputs/` and
+# operator paste-collected responses (volumineux, ne pollue pas git)
+inputs/prompts/
+inputs/results/
+inputs/*.txt
