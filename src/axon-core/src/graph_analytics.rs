@@ -621,6 +621,63 @@ impl GraphStore {
             .collect())
     }
 
+    /// REQ-AXO-901599 / DEC-AXO-901593 (option B) — lazy PG Traceability
+    /// crosswalk for RAM-first orphan_code analytic.
+    ///
+    /// Given a small list of structural-orphan candidate symbol names
+    /// (produced by `IstGraphView::orphan_code_symbols`, RAM CSR scan
+    /// in O(N+M) without SOLL knowledge), filter out those that ARE
+    /// referenced by `soll.Traceability` (Symbol entity_type, matched
+    /// by id or name). Returns the surviving canonical-orphan subset.
+    ///
+    /// Cost : 1 PG SELECT with `IN (...)` clause on the candidate list,
+    /// negligible vs the full `get_orphan_code_symbols` scan (which
+    /// joins Symbol + Edge + Traceability across the entire project).
+    /// Empty candidate list short-circuits with no PG call.
+    pub fn filter_orphans_by_traceability(
+        &self,
+        project: &str,
+        candidates: &[String],
+    ) -> Result<Vec<String>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let quoted: Vec<String> = candidates
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect();
+        let candidate_list = quoted.join(", ");
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "SELECT DISTINCT s.name
+             FROM Symbol s
+             WHERE s.name IN ({list})
+               AND s.kind IN ('function', 'method')
+               AND COALESCE(s.is_public, false) = false
+               AND NOT EXISTS (
+                     SELECT 1
+                     FROM soll.Traceability t
+                     WHERE t.artifact_type = 'Symbol'
+                       AND (t.artifact_ref = s.id OR t.artifact_ref = s.name)
+               )
+               {project_filter}
+             ORDER BY s.name ASC",
+            list = candidate_list,
+            project_filter = if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
+    }
+
     pub fn get_orphan_intent_nodes(&self, project: &str) -> Result<Vec<String>> {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");

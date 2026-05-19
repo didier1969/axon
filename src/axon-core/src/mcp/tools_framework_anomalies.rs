@@ -92,24 +92,35 @@ impl McpServer {
             .graph_store
             .get_abstraction_detour_candidates(project)
             .unwrap_or_default();
-        // RAM orphan_code is a strict superset of the PG result (PG also
-        // filters by soll.Traceability). When RAM returns an empty list,
-        // PG would too — short-circuit. When non-empty, still defer to PG
-        // for the canonical SOLL-aware filter ; the RAM call is therefore
-        // used only as a fast `is_empty` probe today and the canonical
-        // list still comes from PG. A future sub-wave can lift the SOLL
-        // crosswalk into RAM (REQ-AXO-901595 follow-up).
-        let ram_orphan_empty = ram_view
+        // REQ-AXO-901599 / DEC-AXO-901593 (option B) — RAM-first orphan_code
+        // with lazy PG Traceability crosswalk. RAM scans IstGraph CSR in
+        // O(N+M) for structural candidates (no callers + non-public +
+        // non-test) without SOLL awareness. We then apply a batch
+        // `filter_orphans_by_traceability` PG query on JUST those
+        // candidates (small list, IN-clause), filtering out symbols
+        // already referenced by soll.Traceability. Cost : 1 small PG
+        // SELECT vs the full Symbol+Edge+Traceability scan in the
+        // legacy `get_orphan_code_symbols` path. Cold cache OR
+        // workspace-wide (project='*') falls back to canonical PG.
+        let ram_candidates: Option<Vec<String>> = ram_view
             .as_ref()
-            .and_then(|view| view.orphan_code_symbols(project, 20))
-            .map(|v| v.is_empty())
-            .unwrap_or(false);
-        let orphan_code = if ram_orphan_empty {
-            Vec::new()
-        } else {
-            self.graph_store
+            .filter(|_| project != "*")
+            .and_then(|view| view.orphan_code_symbols(project, 20));
+        let orphan_code = match ram_candidates {
+            Some(candidates) if candidates.is_empty() => Vec::new(),
+            Some(candidates) => self
+                .graph_store
+                .filter_orphans_by_traceability(project, &candidates)
+                .unwrap_or_else(|_| {
+                    // PG filter failed — fall back to canonical full scan
+                    self.graph_store
+                        .get_orphan_code_symbols(project)
+                        .unwrap_or_default()
+                }),
+            None => self
+                .graph_store
                 .get_orphan_code_symbols(project)
-                .unwrap_or_default()
+                .unwrap_or_default(),
         };
         let orphan_intent = self
             .graph_store
