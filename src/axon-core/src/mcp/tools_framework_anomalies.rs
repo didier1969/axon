@@ -58,14 +58,32 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
-        let wrappers = self
-            .graph_store
-            .get_wrapper_candidates(project)
-            .unwrap_or_default();
-        let feature_envy = self
-            .graph_store
-            .get_feature_envy_candidates(project)
-            .unwrap_or_default();
+        // REQ-AXO-901595 — RAM-first analytics via IstGraphView when the
+        // per-project CSR cache is warm. Each `view.*_candidates` returns
+        // `Some(vec)` when the snapshot is warm (PIL-AXO-9002), else
+        // `None` and we fall through to the canonical PG path. `project="*"`
+        // (workspace-wide) bypasses RAM because the cache is per-project.
+        let ram_view = if project != "*" {
+            Some(crate::ist_snapshot::process_view())
+        } else {
+            None
+        };
+        let wrappers = ram_view
+            .as_ref()
+            .and_then(|view| view.wrapper_candidates(project, 20))
+            .unwrap_or_else(|| {
+                self.graph_store
+                    .get_wrapper_candidates(project)
+                    .unwrap_or_default()
+            });
+        let feature_envy = ram_view
+            .as_ref()
+            .and_then(|view| view.feature_envy_candidates(project, 20))
+            .unwrap_or_else(|| {
+                self.graph_store
+                    .get_feature_envy_candidates(project)
+                    .unwrap_or_default()
+            });
         let detours = self
             .graph_store
             .get_detour_candidates(project)
@@ -74,10 +92,25 @@ impl McpServer {
             .graph_store
             .get_abstraction_detour_candidates(project)
             .unwrap_or_default();
-        let orphan_code = self
-            .graph_store
-            .get_orphan_code_symbols(project)
-            .unwrap_or_default();
+        // RAM orphan_code is a strict superset of the PG result (PG also
+        // filters by soll.Traceability). When RAM returns an empty list,
+        // PG would too — short-circuit. When non-empty, still defer to PG
+        // for the canonical SOLL-aware filter ; the RAM call is therefore
+        // used only as a fast `is_empty` probe today and the canonical
+        // list still comes from PG. A future sub-wave can lift the SOLL
+        // crosswalk into RAM (REQ-AXO-901595 follow-up).
+        let ram_orphan_empty = ram_view
+            .as_ref()
+            .and_then(|view| view.orphan_code_symbols(project, 20))
+            .map(|v| v.is_empty())
+            .unwrap_or(false);
+        let orphan_code = if ram_orphan_empty {
+            Vec::new()
+        } else {
+            self.graph_store
+                .get_orphan_code_symbols(project)
+                .unwrap_or_default()
+        };
         let orphan_intent = self
             .graph_store
             .get_orphan_intent_nodes(project)
@@ -120,10 +153,24 @@ impl McpServer {
             let cycle_count = cycles.len();
             (cycles, cycle_count)
         };
-        let god_objects = self
-            .graph_store
-            .get_god_objects(project)
-            .unwrap_or_default();
+        // REQ-AXO-901595 — RAM-first god-objects via IstGraphView. Same
+        // warm-cache contract as the analytics above.
+        let god_objects = ram_view
+            .as_ref()
+            .and_then(|view| view.god_objects(project))
+            .map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(name, count)| {
+                        (name, serde_json::Value::Number((count as i64).into()))
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>()
+            })
+            .unwrap_or_else(|| {
+                self.graph_store
+                    .get_god_objects(project)
+                    .unwrap_or_default()
+            });
         let validation_coverage_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
         let total_intent_nodes = if project == "*" {
             self.graph_store

@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::ist_snapshot::cache::IstSnapshotCache;
+use crate::ist_snapshot::code_smells;
 use crate::ist_snapshot::snapshot::{IstGraph, RelationType};
 
 pub struct IstGraphView {
@@ -112,6 +113,71 @@ impl IstGraphView {
 
     pub fn cache_handle(&self) -> Arc<IstSnapshotCache> {
         Arc::clone(&self.cache)
+    }
+
+    /// REQ-AXO-901595 — RAM wrapper candidates. `None` ⇒ caller falls back
+    /// to `GraphStore::get_wrapper_candidates`. Result format mirrors the
+    /// PG path : `"source_name -> target_name"`.
+    pub fn wrapper_candidates(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::wrapper_candidates(&snap, project, limit))
+    }
+
+    /// REQ-AXO-901595 — RAM feature-envy candidates. `None` ⇒ caller falls
+    /// back to `GraphStore::get_feature_envy_candidates`. Result format
+    /// mirrors the PG path : `"source -> dominant_foreign_path (foreign/total)"`.
+    pub fn feature_envy_candidates(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::feature_envy_candidates(&snap, project, limit))
+    }
+
+    /// REQ-AXO-901595 — RAM god-object candidates (fan-in ≥ 20). `None` ⇒
+    /// caller falls back to `GraphStore::get_god_objects`. Returns the same
+    /// `(name, fan_in)` pairs the PG path produces, sorted by fan_in desc
+    /// then name asc.
+    pub fn god_objects(
+        &self,
+        project: &str,
+    ) -> Option<Vec<(String, usize)>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::god_objects(&snap, project))
+    }
+
+    /// REQ-AXO-901595 — RAM structural orphan_code (no callers, non-public,
+    /// non-test path). Strict superset of `GraphStore::get_orphan_code_symbols`
+    /// which additionally excludes symbols carrying a soll.Traceability
+    /// link — that filter requires SOLL state outside the IstGraph, so
+    /// callers requiring the canonical orphan_code set must keep the PG
+    /// path.
+    pub fn orphan_code_symbols(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::orphan_code_symbols(&snap, project, limit))
+    }
+
+    /// REQ-AXO-901596 — RAM lexical match over symbol names. Implements the
+    /// same fuzzy predicate as `tools_dx.rs::symbol_search_predicate`
+    /// (substring + separator-normalised + wildcard + compact). Returns
+    /// `(name, kind_str, file_path)` triples.
+    pub fn lexical_symbol_search(
+        &self,
+        project: &str,
+        query_text: &str,
+        limit: usize,
+    ) -> Option<Vec<(String, &'static str, String)>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::lexical_symbol_search(&snap, project, query_text, limit))
     }
 }
 

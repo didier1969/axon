@@ -899,7 +899,7 @@ impl McpServer {
                 } else {
                     "symbol_index"
                 };
-                let structured_results: Vec<Value> = rows
+                let mut structured_results: Vec<Value> = rows
                     .iter()
                     .map(|row| {
                         let name = row.first().and_then(Value::as_str).unwrap_or("");
@@ -918,6 +918,47 @@ impl McpServer {
                         Value::Object(obj)
                     })
                     .collect();
+                // REQ-AXO-901596 — RAM-first lexical lane. When the
+                // per-project CSR cache is warm AND the semantic lane is
+                // not active (semantic results take priority), augment the
+                // structured_results with RAM matches NOT already in the
+                // PG-derived set. The match runs the same fuzzy predicate
+                // family as the PG `symbol_search_predicate` (substring +
+                // separator-normalised + wildcard + compact). Capped at
+                // `query_limit` cumulative to preserve the bench
+                // precision@k contract.
+                let mut ram_lexical_lane_active = false;
+                if !semantic_lane_active && project != "*" {
+                    let ram_view = crate::ist_snapshot::process_view();
+                    if let Some(ram_hits) =
+                        ram_view.lexical_symbol_search(project, query_text, query_limit)
+                    {
+                        let existing: HashSet<String> = structured_results
+                            .iter()
+                            .filter_map(|r| {
+                                r.get("name").and_then(Value::as_str).map(String::from)
+                            })
+                            .collect();
+                        for (name, kind, uri) in ram_hits {
+                            if existing.contains(&name)
+                                || structured_results.len() >= query_limit
+                            {
+                                continue;
+                            }
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("name".to_string(), Value::from(name));
+                            obj.insert("kind".to_string(), Value::from(kind));
+                            obj.insert("uri".to_string(), Value::from(uri));
+                            obj.insert(
+                                "surface".to_string(),
+                                Value::from("graph_ram_lexical"),
+                            );
+                            obj.insert("project".to_string(), Value::from(project));
+                            structured_results.push(Value::Object(obj));
+                            ram_lexical_lane_active = true;
+                        }
+                    }
+                }
                 // REQ-AXO-91508 — graph r=1 neighbor lane per CPT-AXO-90007
                 // single-lookup category. Best-effort, gated to non-`*`
                 // projects (the SQL filters on project_code).
@@ -963,25 +1004,10 @@ impl McpServer {
                 if graph_lane_active {
                     surfaces_used.push("graph_r1");
                 }
-                // REQ-AXO-901596 — declare the RAM-vs-PG decision for the
-                // lexical lane. Today the lexical match runs on PG (Symbol
-                // table + CONTAINS join). When the IST cache is warm we
-                // could in theory route the regex match through the in-
-                // memory CSR after extending IstGraphView with a
-                // name-keyed index. Until that lands, emit a
-                // `graph_ram_lexical_deferred` tag so qualify-mcp can
-                // surface the gap without grepping the code path.
-                let mut surfaces_degraded_lexical: Vec<Value> = Vec::new();
-                if !semantic_lane_active && project != "*" {
-                    let view = crate::ist_snapshot::process_view();
-                    if view.is_warm(project) {
-                        surfaces_degraded_lexical.push(json!({
-                            "surface": "graph_ram_lexical",
-                            "reason": "lexical regex match still routed via PG ; RAM lexical migration deferred (REQ-AXO-901596 follow-up)"
-                        }));
-                    }
+                if ram_lexical_lane_active {
+                    surfaces_used.push("graph_ram_lexical");
                 }
-                let mut surfaces_degraded: Vec<Value> = surfaces_degraded_lexical;
+                let mut surfaces_degraded: Vec<Value> = Vec::new();
                 if let Some(reason) = semantic_fallback_reason.as_ref() {
                     surfaces_degraded
                         .push(json!({"surface": "vector", "reason": reason}));
