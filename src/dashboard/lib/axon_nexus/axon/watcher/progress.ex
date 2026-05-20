@@ -822,13 +822,14 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp global_links_query do
+    # MIL-AXO-017 / REQ-AXO-90005 — les 4 tables relation par-type
+    # (CALLS, CONTAINS, IMPACTS, SUBSTANTIATES) ont été retirées avec
+    # AGE. Le storage canonique est désormais public.Edge avec colonne
+    # `relation_type` discriminante.
     """
-    SELECT (
-      COALESCE((SELECT COUNT(*) FROM CALLS), 0) +
-      COALESCE((SELECT COUNT(*) FROM CONTAINS), 0) +
-      COALESCE((SELECT COUNT(*) FROM IMPACTS), 0) +
-      COALESCE((SELECT COUNT(*) FROM SUBSTANTIATES), 0)
-    ) AS links_count
+    SELECT COUNT(*) AS links_count
+    FROM public.Edge
+    WHERE relation_type IN ('CALLS', 'CONTAINS', 'IMPACTS', 'SUBSTANTIATES')
     """
   end
 
@@ -837,19 +838,13 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp project_links_query do
+    # MIL-AXO-017 / REQ-AXO-90005 — public.Edge unifié remplace les 4
+    # tables relation par-type (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES).
     """
-    WITH edge_sources AS (
-      SELECT source_id FROM CALLS
-      UNION ALL
-      SELECT source_id FROM CONTAINS
-      UNION ALL
-      SELECT source_id FROM IMPACTS
-      UNION ALL
-      SELECT source_id FROM SUBSTANTIATES
-    )
     SELECT COALESCE(s.project_code, '(unscoped)'), COUNT(*)
-    FROM edge_sources e
+    FROM public.Edge e
     LEFT JOIN Symbol s ON s.id = e.source_id
+    WHERE e.relation_type IN ('CALLS', 'CONTAINS', 'IMPACTS', 'SUBSTANTIATES')
     GROUP BY 1
     """
   end

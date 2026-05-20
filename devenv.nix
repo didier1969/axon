@@ -24,20 +24,23 @@ in
   languages.elixir.enable = true;
   languages.elixir.package = beamPackages.elixir_1_18;
 
-  # MIL-AXO-015 P1: PostgreSQL 17 + Apache AGE + pgvector
+  # MIL-AXO-015 P1: PostgreSQL 17 + pgvector + pgmq
   # Replaces DuckDB as the canonical Axon storage layer (DEC-AXO-075).
-  # CPT-AXO-039 per-project schema namespace, CPT-AXO-040 AGE Cypher,
-  # CPT-AXO-041 pgvector HNSW. Single dev instance for Axon team; live/dev
-  # process separation handled at runtime via 2 different DATABASE_URLs
-  # (different DBs on this single instance, or 2 separate PG instances in
-  # production - client choice per CPT-AXO-042 distribution model).
+  # CPT-AXO-039 per-project schema namespace, CPT-AXO-041 pgvector HNSW.
+  # Single dev instance for Axon team; live/dev process separation handled
+  # at runtime via 2 different DATABASE_URLs (different DBs on this single
+  # instance, or 2 separate PG instances in production - client choice per
+  # CPT-AXO-042 distribution model).
+  # AGE retired MIL-AXO-017 / REQ-AXO-90005 — Apache AGE extension removed
+  # (was the legacy Cypher overlay, replaced by public.Edge + WITH RECURSIVE
+  # SQL functions in 04_graph_functions.sql, REQ-AXO-296).
   services.postgres = {
     enable = true;
     package = pkgs.postgresql_17;
     # REQ-AXO-901624 — pgmq fournit la queue-PG-native qui découple le
     # calcul `content_tsv` du chemin critique A3 (sub-drum identifié
     # session 48). `exts.pgmq` est le pkg nixpkgs canonique.
-    extensions = exts: [ exts.age exts.pgvector exts.pgmq ];
+    extensions = exts: [ exts.pgvector exts.pgmq ];
     initialDatabases = [
       { name = "axon_dev"; }
       { name = "axon_live"; }
@@ -48,9 +51,6 @@ in
       # Axon's hot path benefits from generous shared_buffers; client tunes
       # for their own scale via standard PG ops procedures (CPT-AXO-038).
       shared_buffers = "512MB";
-      # AGE requires loading via session_preload_libraries so cypher() is
-      # available without per-connection LOAD 'age'.
-      session_preload_libraries = "age";
       # pgvector index build benefits from larger maintenance memory.
       maintenance_work_mem = "256MB";
     };
@@ -159,7 +159,7 @@ in
     echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')" >&2
     echo "Plane B (Runtime + Postgres): Rust $(rustc --version | awk '{print $2}')" >&2
     echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')" >&2
-    echo "Storage:                 PostgreSQL 17 + AGE + pgvector @ 127.0.0.1:44144" >&2
+    echo "Storage:                 PostgreSQL 17 + pgvector + pgmq @ 127.0.0.1:44144" >&2
     echo "HydraDB:                 detached legacy workflow" >&2
     echo "---------------------------------------" >&2
 

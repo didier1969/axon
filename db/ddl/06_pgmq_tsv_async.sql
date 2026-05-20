@@ -113,20 +113,17 @@ BEGIN
     $exec$;
 
     -- 7. REQ-AXO-91562 — atomic CREATE OR REPLACE TRIGGER (PG 14+).
-    --    REQ-AXO-901624 review fix : le WHEN guard évite la cascade de
-    --    fake-dirty enqueues qui auraient lieu sinon. A3 UPSERT fait
-    --    `ON CONFLICT DO UPDATE SET content = EXCLUDED.content` ce qui
-    --    set content unconditionnellement → `UPDATE OF content` se
-    --    déclencherait à chaque ré-index même si content n'a pas
-    --    bougé. Le content_hash (déjà filé par A3) est l'invariant qui
-    --    distingue real-change vs no-op. Sur INSERT (OLD=NULL) on fire
-    --    toujours.
-    EXECUTE $exec$
-        CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv
-            AFTER INSERT OR UPDATE OF content ON public.Chunk
-            FOR EACH ROW
-            WHEN (TG_OP = 'INSERT' OR NEW.content_hash IS DISTINCT FROM OLD.content_hash)
-            EXECUTE FUNCTION public.fn_chunk_enqueue_tsv()
-    $exec$;
+    --    REQ-AXO-901624 review fix : on split en deux triggers parce
+    --    que PG interdit (a) `TG_OP` dans la clause WHEN, et (b) toute
+    --    référence à OLD dans un trigger INSERT. Le WHEN guard sur
+    --    UPDATE évite la cascade de fake-dirty enqueues qui aurait
+    --    lieu sinon — A3 UPSERT fait `ON CONFLICT DO UPDATE SET
+    --    content = EXCLUDED.content` ce qui set content
+    --    unconditionnellement → `UPDATE OF content` fire à chaque
+    --    ré-index même si content n'a pas bougé. content_hash (déjà
+    --    filé par A3) est l'invariant qui distingue real-change vs
+    --    no-op. INSERT enqueue toujours.
+    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_insert AFTER INSERT ON public.Chunk FOR EACH ROW EXECUTE FUNCTION public.fn_chunk_enqueue_tsv()';
+    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_update AFTER UPDATE OF content ON public.Chunk FOR EACH ROW WHEN (NEW.content_hash IS DISTINCT FROM OLD.content_hash) EXECUTE FUNCTION public.fn_chunk_enqueue_tsv()';
 END;
 $migration$;
