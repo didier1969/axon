@@ -34,7 +34,10 @@ in
   services.postgres = {
     enable = true;
     package = pkgs.postgresql_17;
-    extensions = exts: [ exts.age exts.pgvector ];
+    # REQ-AXO-901624 — pgmq fournit la queue-PG-native qui découple le
+    # calcul `content_tsv` du chemin critique A3 (sub-drum identifié
+    # session 48). `exts.pgmq` est le pkg nixpkgs canonique.
+    extensions = exts: [ exts.age exts.pgvector exts.pgmq ];
     initialDatabases = [
       { name = "axon_dev"; }
       { name = "axon_live"; }

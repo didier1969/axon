@@ -60,6 +60,7 @@ pub mod stage_a3;
 pub mod stage_b1;
 pub mod stage_b2;
 pub mod stage_b3;
+pub mod tsv_worker;
 pub mod types;
 pub mod worker_pool;
 
@@ -85,6 +86,7 @@ pub use embedder_gpu::GpuB2Embedder;
 pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
 pub use stage_b2::{b2_embed, spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::{b3_persist_embedding, PersistedEmbedding};
+pub use tsv_worker::{spawn_tsv_workers, DrainStats, TsvWorkerConfig};
 pub use types::{ParsedFile, PreparedFile};
 pub use worker_pool::spawn_stage_workers;
 

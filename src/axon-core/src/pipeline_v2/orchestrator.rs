@@ -191,6 +191,19 @@ pub fn spawn_pipeline_a(
     let metrics_a2 = StageMetrics::new("A2");
     let metrics_a3 = StageMetrics::new("A3");
 
+    // REQ-AXO-901624 — P4 Lazy Async TSV Build. Spawn the TsvBuilderWorker
+    // pool alongside A1/A2/A3 ; it drains `pgmq.tsv_pending` out of band
+    // and back-fills `Chunk.content_tsv`. Handles are intentionally
+    // leaked : workers loop forever, lifetime = process. Disabled when
+    // `AXON_TSV_WORKER_CONCURRENCY=0` for bench A/B comparisons against
+    // the pre-P4 baseline.
+    {
+        let cfg = super::tsv_worker::TsvWorkerConfig::from_env();
+        if cfg.concurrency > 0 {
+            let _ = super::tsv_worker::spawn_tsv_workers(store.clone(), cfg);
+        }
+    }
+
     spawn_stage_workers(
         counts.a1,
         input_rx,
