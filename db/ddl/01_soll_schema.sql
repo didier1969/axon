@@ -95,41 +95,14 @@ BEGIN
 END
 $canonical_id$;
 
--- DEC-AXO-085: project_code invariant across SOLL tables.
-DO $project_code_canonical$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_node_project_code_canonical') THEN
-        ALTER TABLE soll.Node ADD CONSTRAINT soll_node_project_code_canonical
-            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_edge_project_code_canonical') THEN
-        ALTER TABLE soll.Edge ADD CONSTRAINT soll_edge_project_code_canonical
-            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_revision_project_code_canonical') THEN
-        ALTER TABLE soll.Revision ADD CONSTRAINT soll_revision_project_code_canonical
-            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_revchange_project_code_canonical') THEN
-        ALTER TABLE soll.RevisionChange ADD CONSTRAINT soll_revchange_project_code_canonical
-            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_revprev_project_code_canonical') THEN
-        ALTER TABLE soll.RevisionPreview ADD CONSTRAINT soll_revprev_project_code_canonical
-            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
-                   WHERE constraint_schema='soll' AND constraint_name='soll_mcpjob_project_code_canonical') THEN
-        ALTER TABLE soll.McpJob ADD CONSTRAINT soll_mcpjob_project_code_canonical
-            CHECK (project_code IS NULL OR project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
-    END IF;
-END
-$project_code_canonical$;
+-- REQ-AXO-901631: the DEC-AXO-085 project_code invariant DO block used
+-- to live here, but it ALTERs soll.Edge / soll.Revision /
+-- soll.RevisionChange / soll.RevisionPreview / soll.McpJob — tables
+-- that are CREATE'd further down. Fresh `psql -v ON_ERROR_STOP=1`
+-- applies on a virgin DB therefore failed with `relation "soll.edge"
+-- does not exist`. The block now lives after all CREATE TABLE
+-- statements (see "ALTER + constraints" section below) so the order
+-- is CREATE → ALTER → INDEX on first apply.
 
 CREATE TABLE IF NOT EXISTS soll.Edge (
     source_id TEXT NOT NULL,
@@ -212,6 +185,48 @@ CREATE TABLE IF NOT EXISTS soll.McpJob (
     error_text TEXT,
     project_code TEXT
 );
+
+-- ── ALTER + constraints (post-CREATE TABLE; REQ-AXO-901631) ──────────
+
+-- DEC-AXO-085: project_code invariant across SOLL tables. Moved here
+-- from above the CREATE TABLE soll.Edge so a fresh `psql -v
+-- ON_ERROR_STOP=1` apply does not crash on `relation "soll.edge" does
+-- not exist`. CREATE → ALTER → INDEX is the canonical ordering for
+-- idempotent fresh installs.
+DO $project_code_canonical$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_node_project_code_canonical') THEN
+        ALTER TABLE soll.Node ADD CONSTRAINT soll_node_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_edge_project_code_canonical') THEN
+        ALTER TABLE soll.Edge ADD CONSTRAINT soll_edge_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revision_project_code_canonical') THEN
+        ALTER TABLE soll.Revision ADD CONSTRAINT soll_revision_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revchange_project_code_canonical') THEN
+        ALTER TABLE soll.RevisionChange ADD CONSTRAINT soll_revchange_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_revprev_project_code_canonical') THEN
+        ALTER TABLE soll.RevisionPreview ADD CONSTRAINT soll_revprev_project_code_canonical
+            CHECK (project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                   WHERE constraint_schema='soll' AND constraint_name='soll_mcpjob_project_code_canonical') THEN
+        ALTER TABLE soll.McpJob ADD CONSTRAINT soll_mcpjob_project_code_canonical
+            CHECK (project_code IS NULL OR project_code ~ '^[A-Z][A-Z0-9]{2}$') NOT VALID;
+    END IF;
+END
+$project_code_canonical$;
 
 -- ── Indexes for hot SOLL multi-tenant lookups ────────────────────────
 

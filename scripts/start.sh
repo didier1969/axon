@@ -719,7 +719,15 @@ verify_sql_gateway() {
         return 1
     fi
 
-    for table in File Symbol RuntimeMetadata; do
+    # REQ-AXO-901633 — canonical names are lowercase post-MIL-AXO-017
+    # (Apache AGE retired, IST tables renamed). PostgreSQL identifiers
+    # are case-folded unless quoted, so the legacy `File`/`Symbol`/
+    # `RuntimeMetadata` here produced a 100 %-false-negative warning on
+    # every boot. `file` capital is also being retired alongside
+    # FileVectorizationQueue (REQ-AXO-901632) — `indexedfile` is the
+    # canonical post-REQ-AXO-289 name and already present in every live
+    # DB. Aligned here so the check survives the legacy `file` drop.
+    for table in indexedfile symbol runtimemetadata; do
         if [[ "$response" != *"\"$table\""* ]]; then
             echo "❌ SQL Gateway is up but missing required table '$table'."
             echo "   Response: $response"
