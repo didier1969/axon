@@ -173,11 +173,19 @@ fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
     // directive 2026-05-12). Every embedder mode — including --noop —
     // writes through real PG so the bench characterises production
     // behaviour, never a phantom embedded-store ceiling.
+    //
+    // REQ-AXO-901626 — explicit override of pg backend resolution so the
+    // URL surfaced by `--help` (AXON_DEV_DATABASE_URL / DATABASE_URL) is
+    // honoured verbatim. Without `new_with_database`, GraphStore::new
+    // ignored the url and fell back to resolve_pg_database_url() which
+    // privileges AXON_LIVE_DATABASE_URL when AXON_INSTANCE_KIND is unset
+    // — silently routing bench writes to axon_live in any devenv shell
+    // that exports both URLs (the canonical dev config).
     std::env::set_var("AXON_DB_BACKEND", "postgres");
     let url = std::env::var("AXON_DEV_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .context("set AXON_DEV_DATABASE_URL or DATABASE_URL — PG is the canonical store")?;
-    GraphStore::new(&url)
+    GraphStore::new_with_database(&url, &url)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
