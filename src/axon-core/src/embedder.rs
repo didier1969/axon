@@ -1229,19 +1229,34 @@ impl SemanticWorkerPool {
         // persist → finalize, all in one thread per worker. Channels and the
         // 5-loop pipeline are gone. Maintenance loop (stale-inflight recovery)
         // remains as a separate thread.
+        //
+        // REQ-AXO-901632 — pipeline_v2 (CPT-AXO-054 / DEC-AXO-081 / REQ-AXO-289)
+        // is the canonical vectorization path under the live runtime. The
+        // legacy DuckDB-era `vector_lane_worker` is gated behind the explicit
+        // opt-in `AXON_LEGACY_VECTOR_WORKER_LOOP=1` so the live indexer stops
+        // emitting the session 49 log spam (`FROM FileVectorizationQueue ...`
+        // / `LEFT JOIN File ...` against tables that no longer exist or are
+        // being retired). Tests that exercise the legacy lane set the flag
+        // explicitly. Default = no spawn ; `config.vector_workers` and
+        // `embedding_lane_config_from_env()` honor env knobs unchanged for
+        // backward compatibility and tuning telemetry.
         let mut vector_workers = Vec::new();
         let mut vector_maintenance_workers = Vec::new();
-        if config.vector_workers > 0 {
+        let legacy_vector_loop_enabled = std::env::var("AXON_LEGACY_VECTOR_WORKER_LOOP")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        if legacy_vector_loop_enabled && config.vector_workers > 0 {
             let maintenance_graph_store = Arc::clone(&graph_store);
             vector_maintenance_workers.push(thread::spawn(move || {
                 vector_maintenance_loop::vector_maintenance_worker_loop(maintenance_graph_store);
             }));
-        }
-        for worker_idx in 0..config.vector_workers {
-            let lane_graph_store = Arc::clone(&graph_store);
-            vector_workers.push(thread::spawn(move || {
-                vector_worker_loop::vector_lane_worker(worker_idx, lane_graph_store);
-            }));
+            for worker_idx in 0..config.vector_workers {
+                let lane_graph_store = Arc::clone(&graph_store);
+                vector_workers.push(thread::spawn(move || {
+                    vector_worker_loop::vector_lane_worker(worker_idx, lane_graph_store);
+                }));
+            }
         }
 
         let mut graph_workers = Vec::new();
