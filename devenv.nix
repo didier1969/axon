@@ -74,6 +74,18 @@ in
     emscripten
     # Postgres CLI for hand inspection / migration scripts
     postgresql_17
+
+    # REQ-AXO-901630 — DO NOT add `pkgs.onnxruntime` here. The nixpkgs
+    # default onnxruntime ships without TensorRT/CUDA provider libs and,
+    # when present in `packages`, leaks its `lib/` into devenv shell's
+    # composite LD_LIBRARY_PATH. The indexer would then dlopen that
+    # rather than the TensorRT-enabled artifact resolved by
+    # `scripts/lib/axon-ort-runtime.sh` from
+    # `.axon/ort-artifacts/onnxruntime-tensorrt-cudaPackages/current.json`
+    # and silently fall back to NoOpEmbedder (junk vectors). The artifact
+    # is built once via `scripts/build_ort_tensorrt_artifact.sh` and
+    # consumed at runtime through `ORT_STRATEGY=system` +
+    # `ORT_DYLIB_PATH`. No shell-level ORT dependency required.
   ];
 
   env = {

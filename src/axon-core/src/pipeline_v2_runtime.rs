@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -156,6 +156,19 @@ pub fn spawn_pipeline_v2_indexer(
                 arc_embedder as Arc<dyn crate::pipeline_v2::B2Embedder>
             }
             Err(err) => {
+                // REQ-AXO-901630 — fail-fast when the operator has
+                // explicitly requested a GPU provider. Silent NoOp
+                // fallback produced junk embeddings ((1,0,…,0) vectors)
+                // in session 49, breaking semantic retrieval downstream
+                // while the indexer kept reporting healthy. Only the
+                // `cpu`/unset branch is allowed to substitute NoOp.
+                if gpu_provider_explicitly_requested() {
+                    return Err(anyhow!(
+                        "pipeline_v2: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
+                         requests a GPU provider (NoOpEmbedder fallback would silently \
+                         produce junk vectors): {err}"
+                    ));
+                }
                 warn!(error = %err, "pipeline_v2: GPU embedder init failed, falling back to NoOpEmbedder");
                 Arc::new(NoOpEmbedder)
             }
@@ -320,6 +333,32 @@ pub fn spawn_pipeline_v2_indexer(
     Ok(())
 }
 
+/// REQ-AXO-901630 — returns true iff the operator has explicitly
+/// requested a GPU embedding provider via `AXON_EMBEDDING_PROVIDER` or
+/// the TensorRT service flag. Used by the embedder init path to refuse
+/// the silent `NoOpEmbedder` fallback when a real GPU embedder was
+/// asked for ; the alternative (session 49 incident) was 1 178 chunks
+/// indexed with junk `(1, 0, …, 0)` vectors that broke semantic
+/// retrieval downstream while the indexer reported healthy.
+fn gpu_provider_explicitly_requested() -> bool {
+    if matches!(
+        std::env::var("AXON_EMBEDDING_PROVIDER")
+            .ok()
+            .map(|v| v.to_lowercase())
+            .as_deref(),
+        Some("tensorrt") | Some("cuda")
+    ) {
+        return true;
+    }
+    matches!(
+        std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT")
+            .ok()
+            .map(|v| v.to_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 /// DEC-AXO-086 slice 1B helper : pick the PostgreSQL connection string
 /// for the running instance. Honors `AXON_LIVE_DATABASE_URL` /
 /// `AXON_DEV_DATABASE_URL` then `DATABASE_URL`, gated by
@@ -338,6 +377,7 @@ fn resolve_listener_database_url() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::gpu_provider_explicitly_requested;
     use crate::postgres::{database_url_for, AxonInstance};
 
     /// REQ-AXO-90009 Slice 3C — `resolve_listener_database_url` honours
@@ -365,6 +405,59 @@ mod tests {
     /// uses 5-min idle / 2-s grace / 15-s tick defaults per DEC-AXO-086.
     /// Lock the numbers here so a silent regression on the constants
     /// gets caught by a unit test instead of a 5-min wait at runtime.
+    /// REQ-AXO-901630 — `gpu_provider_explicitly_requested` flips true
+    /// only when the operator unambiguously asked for a GPU provider.
+    /// Locks the env-var matrix so a future refactor cannot weaken the
+    /// fail-fast contract that prevents NoOpEmbedder + junk vectors.
+    /// Pattern mirrors postgres::tests::ENV_LOCK + EnvGuard — `std::env`
+    /// is process-global and cargo runs tests multi-threaded.
+    #[test]
+    fn gpu_provider_explicitly_requested_env_matrix() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prov_key = "AXON_EMBEDDING_PROVIDER";
+        let trt_key = "AXON_GPU_EMBED_SERVICE_TENSORRT";
+        let saved_prov = std::env::var(prov_key).ok();
+        let saved_trt = std::env::var(trt_key).ok();
+
+        struct Restore<'a>(&'a str, Option<String>);
+        impl<'a> Drop for Restore<'a> {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _r1 = Restore(prov_key, saved_prov);
+        let _r2 = Restore(trt_key, saved_trt);
+
+        std::env::remove_var(prov_key);
+        std::env::remove_var(trt_key);
+        assert!(!gpu_provider_explicitly_requested(), "unset → false");
+
+        std::env::set_var(prov_key, "cpu");
+        assert!(!gpu_provider_explicitly_requested(), "cpu → false");
+
+        std::env::set_var(prov_key, "tensorrt");
+        assert!(gpu_provider_explicitly_requested(), "tensorrt → true");
+
+        std::env::set_var(prov_key, "CUDA");
+        assert!(gpu_provider_explicitly_requested(), "CUDA (case) → true");
+
+        std::env::remove_var(prov_key);
+        std::env::set_var(trt_key, "1");
+        assert!(gpu_provider_explicitly_requested(), "TRT flag=1 → true");
+
+        std::env::set_var(trt_key, "true");
+        assert!(gpu_provider_explicitly_requested(), "TRT flag=true → true");
+
+        std::env::set_var(trt_key, "0");
+        assert!(!gpu_provider_explicitly_requested(), "TRT flag=0 → false");
+    }
+
     #[test]
     fn lifecycle_watchdog_defaults_match_dec_axo_086() {
         use std::time::Duration;

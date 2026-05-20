@@ -48,6 +48,20 @@ axon_resolve_ort_runtime() {
                     echo "♻️ Using external CUDA ONNX Runtime artifact from manifest..."
                 fi
                 echo "   Manifest: $ORT_ARTIFACT_MANIFEST"
+                # REQ-AXO-901630 — log the resolved provider paths so the
+                # operator can verify at boot which `.so` files the
+                # indexer will dlopen. Diagnosing session 49's silent
+                # NoOpEmbedder fallback required reading these from a
+                # stack trace ; surfacing them here turns it into a
+                # one-line check.
+                echo "   core_lib:               $ORT_DYLIB_PATH"
+                echo "   cuda_provider_lib:      $CUDA_PROVIDER_PATH"
+                if [[ "$gpu_service_tensorrt_requested" == "1" ]]; then
+                    echo "   tensorrt_provider_lib:  $TENSORRT_PROVIDER_PATH"
+                    if [[ -n "${TENSORRT_LIB_DIR:-}" && -d "$TENSORRT_LIB_DIR" ]]; then
+                        echo "   tensorrt_lib_dir:       $TENSORRT_LIB_DIR"
+                    fi
+                fi
             else
                 if [[ "$gpu_service_tensorrt_requested" == "1" ]]; then
                     axon_log_warn "Ignoring invalid external TensorRT artifact manifest: $ORT_ARTIFACT_MANIFEST"
