@@ -14,10 +14,21 @@ defmodule AxonDashboardWeb.Router do
     plug :accepts, ["json"]
   end
 
-  scope "/", Axon.Watcher do
+  # REQ-AXO-901647: new 3-page cockpit (pipeline / projects / mcp).
+  # Old single-page Axon.Watcher.CockpitLive is kept reachable at /legacy
+  # for one session's worth of comparison, then will be retired.
+  scope "/", AxonDashboardWeb.Live do
+    pipe_through :browser
+
+    live "/", PipelineLive, :index
+    live "/cockpit", PipelineLive, :index
+    live "/projects", ProjectsLive, :index
+    live "/mcp", McpLive, :index
+  end
+
+  scope "/legacy", Axon.Watcher do
     pipe_through :browser
     live "/", CockpitLive, :index
-    live "/cockpit", CockpitLive, :index
   end
 
   # Other scopes may use custom stacks.

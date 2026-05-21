@@ -16,8 +16,13 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.Telemetry,
       Axon.Watcher.Repo,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
-      # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
-      # {AxonDashboard.Worker, arg},
+      # REQ-AXO-901647: dashboard rebuild — pipeline cockpit needs a 1Hz heartbeat
+      # broadcast over `bridge_events` so PipelineLive can push_event to the JS
+      # SVG hook without polling.
+      Axon.Watcher.IndexerHeartbeat,
+      # REQ-AXO-901647: poll MCP status verbose every 30s for the catalog page
+      # and embedding_status every 5s for the cockpit's worker config snapshot.
+      Axon.Watcher.McpPoller,
       AxonDashboard.BridgeClient,
       # REQ-AXO-094 — install the BEAM alarm relay AFTER BridgeClient
       # so a `:set_alarm` fired during startup has a connected (or

@@ -181,11 +181,166 @@ const WorkspacePipelineFlow = {
   }
 }
 
+// REQ-AXO-901647: pipeline V2 topology renderer.
+// Renders the canonical CPT-AXO-054 flow:
+//   A1 read+hash → A2 parse-TS → A3 graph-UPSERT
+//     ─try_send (A3→B1 cap)──▶
+//   B1 fetch → B2 embed-GPU → B3 write-emb
+//
+// Pure SVG (no echarts) to keep the topology static + crisp. The hook
+// listens to a `pipeline_state` push_event from PipelineLive and updates
+// the live values (worker counts, rate, buffer fill, GPU badge).
+const PipelineTopology = {
+  mounted() {
+    this.el.innerHTML = this.buildSvgShell()
+    this.handleEvent("pipeline_state", (state) => this.update(state))
+  },
+  destroyed() {
+    this.el.innerHTML = ""
+  },
+  buildSvgShell() {
+    const W = 1200
+    const H = 320
+    const stageY = 150
+    const stageW = 130
+    const stageH = 70
+    const aXs = [60, 220, 380]
+    const bXs = [700, 860, 1020]
+
+    const stageBox = (x, id, label, group) => {
+      const accent = group === "A" ? "#22d3ee" : "#34d399"
+      const bg = group === "A" ? "rgba(34, 211, 238, 0.08)" : "rgba(52, 211, 153, 0.08)"
+      return `
+        <g id="stage-${id}" class="stage" data-group="${group}">
+          <rect x="${x}" y="${stageY}" width="${stageW}" height="${stageH}" rx="10"
+            fill="${bg}" stroke="${accent}" stroke-opacity="0.4" stroke-width="1.5"></rect>
+          <text x="${x + stageW/2}" y="${stageY + 22}" text-anchor="middle"
+            class="stage-name" fill="${accent}" font-family="ui-monospace, monospace"
+            font-size="14" font-weight="700" letter-spacing="0.08em">${id.toUpperCase()}</text>
+          <text x="${x + stageW/2}" y="${stageY + 40}" text-anchor="middle"
+            class="stage-label" fill="#cbd5e1" font-family="ui-monospace, monospace"
+            font-size="10">${label}</text>
+          <text id="stage-${id}-workers" x="${x + stageW/2}" y="${stageY + 58}" text-anchor="middle"
+            class="stage-workers" fill="#f8fafc" font-family="ui-monospace, monospace"
+            font-size="11" font-weight="600">— workers</text>
+          <circle cx="${x + stageW - 12}" cy="${stageY + 12}" r="3"
+            id="stage-${id}-led" fill="${accent}" opacity="0.7">
+            <animate attributeName="opacity" values="0.3;1;0.3" dur="1.8s" repeatCount="indefinite"/>
+          </circle>
+        </g>
+      `
+    }
+
+    const arrow = (x1, x2, y) => `
+      <line x1="${x1}" y1="${y}" x2="${x2 - 8}" y2="${y}" stroke="rgba(148,163,184,0.45)" stroke-width="1.5"/>
+      <polygon points="${x2 - 8},${y - 4} ${x2 - 2},${y} ${x2 - 8},${y + 4}" fill="rgba(148,163,184,0.45)"/>
+    `
+
+    // try_send buffer between A3 and B1
+    const bufX1 = aXs[2] + stageW + 10
+    const bufX2 = bXs[0] - 10
+    const bufW = bufX2 - bufX1
+    const bufY = stageY + stageH/2 - 14
+    const bufH = 28
+
+    const groupHeader = (x, label, color) => `
+      <text x="${x}" y="100" fill="${color}" font-family="ui-monospace, monospace"
+        font-size="11" font-weight="600" letter-spacing="0.2em">${label}</text>
+    `
+
+    return `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" width="100%" height="100%"
+        style="background: radial-gradient(circle at 20% 30%, rgba(34,211,238,0.04), transparent 40%), radial-gradient(circle at 80% 70%, rgba(52,211,153,0.04), transparent 40%);">
+      <defs>
+        <linearGradient id="bufGrad" x1="0" x2="1">
+          <stop offset="0%" stop-color="#fbbf24" stop-opacity="0.6"/>
+          <stop offset="100%" stop-color="#10b981" stop-opacity="0.6"/>
+        </linearGradient>
+      </defs>
+
+      ${groupHeader(60, "PIPELINE A · CPU (graph + chunks + FTS)", "#22d3ee")}
+      ${groupHeader(700, "PIPELINE B · GPU embedding", "#34d399")}
+
+      ${stageBox(aXs[0], "a1", "read + hash", "A")}
+      ${stageBox(aXs[1], "a2", "parse TS", "A")}
+      ${stageBox(aXs[2], "a3", "graph UPSERT", "A")}
+      ${stageBox(bXs[0], "b1", "fetch", "B")}
+      ${stageBox(bXs[1], "b2", "embed GPU", "B")}
+      ${stageBox(bXs[2], "b3", "write embeddings", "B")}
+
+      ${arrow(aXs[0] + stageW, aXs[1], stageY + stageH/2)}
+      ${arrow(aXs[1] + stageW, aXs[2], stageY + stageH/2)}
+      ${arrow(bXs[0] + stageW, bXs[1], stageY + stageH/2)}
+      ${arrow(bXs[1] + stageW, bXs[2], stageY + stageH/2)}
+
+      <g id="buffer">
+        <rect x="${bufX1}" y="${bufY}" width="${bufW}" height="${bufH}" rx="6"
+          fill="rgba(15,23,42,0.6)" stroke="rgba(148,163,184,0.3)" stroke-dasharray="4 3"></rect>
+        <rect x="${bufX1 + 2}" y="${bufY + 2}" width="0" height="${bufH - 4}" rx="4"
+          id="buffer-fill" fill="url(#bufGrad)"></rect>
+        <text x="${bufX1 + bufW/2}" y="${bufY - 6}" text-anchor="middle"
+          fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9" letter-spacing="0.15em">
+          try_send · A3→B1
+        </text>
+        <text id="buffer-label" x="${bufX1 + bufW/2}" y="${bufY + bufH + 14}" text-anchor="middle"
+          fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="10">cap —</text>
+      </g>
+
+      <g id="rate-badge" transform="translate(${bXs[1] + stageW/2 - 50}, ${stageY + stageH + 24})">
+        <rect x="0" y="0" width="100" height="32" rx="6" fill="rgba(15,23,42,0.7)" stroke="rgba(52,211,153,0.4)"/>
+        <text id="rate-value" x="50" y="14" text-anchor="middle" fill="#34d399"
+          font-family="ui-monospace, monospace" font-size="14" font-weight="700">—</text>
+        <text x="50" y="27" text-anchor="middle" fill="#94a3b8"
+          font-family="ui-monospace, monospace" font-size="8" letter-spacing="0.18em">CHUNKS/SEC</text>
+      </g>
+
+      <g id="gpu-badge" transform="translate(${bXs[1] + stageW/2 - 50}, ${stageY - 50})">
+        <rect x="0" y="0" width="100" height="26" rx="6" id="gpu-rect"
+          fill="rgba(245,158,11,0.15)" stroke="rgba(245,158,11,0.5)"/>
+        <text x="50" y="12" text-anchor="middle" fill="#94a3b8"
+          font-family="ui-monospace, monospace" font-size="8" letter-spacing="0.2em">PROVIDER</text>
+        <text id="gpu-label" x="50" y="22" text-anchor="middle" fill="#f59e0b"
+          font-family="ui-monospace, monospace" font-size="11" font-weight="700">—</text>
+      </g>
+    </svg>`
+  },
+  update(state) {
+    if (!state || !state.stages) return
+    state.stages.forEach((s) => {
+      const el = this.el.querySelector(`#stage-${s.id}-workers`)
+      if (el) el.textContent = `${s.workers} workers`
+    })
+    // Buffer
+    const bufLabel = this.el.querySelector("#buffer-label")
+    const bufFill = this.el.querySelector("#buffer-fill")
+    if (bufLabel) bufLabel.textContent = `cap ${(state.buffer.cap || 0).toLocaleString()}`
+    if (bufFill && state.buffer.cap > 0) {
+      const w = Math.max(0, Math.min(1, (state.buffer.fill || 0) / state.buffer.cap))
+      const bufX1 = 622 // matches shell
+      const bufW = 78
+      bufFill.setAttribute("width", String(bufW * w))
+    }
+    // Rate
+    const rate = this.el.querySelector("#rate-value")
+    if (rate) rate.textContent = (state.rate || 0).toFixed(1)
+    // GPU
+    const gpuLabel = this.el.querySelector("#gpu-label")
+    const gpuRect = this.el.querySelector("#gpu-rect")
+    if (gpuLabel) gpuLabel.textContent = (state.gpu || "?").toUpperCase()
+    if (gpuRect) {
+      const isOk = state.gpu === "cuda" || state.gpu === "tensorrt"
+      gpuRect.setAttribute("fill", isOk ? "rgba(52,211,153,0.15)" : "rgba(245,158,11,0.15)")
+      gpuRect.setAttribute("stroke", isOk ? "rgba(52,211,153,0.5)" : "rgba(245,158,11,0.5)")
+      if (gpuLabel) gpuLabel.setAttribute("fill", isOk ? "#34d399" : "#f59e0b")
+    }
+  }
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: false,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, LiveViewWitness, WorkspacePipelineFlow},
+  hooks: {...colocatedHooks, LiveViewWitness, WorkspacePipelineFlow, PipelineTopology},
 })
 
 // Show progress bar on live navigation and form submits
