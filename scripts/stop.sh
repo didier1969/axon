@@ -80,14 +80,24 @@ if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
     source "$AXON_RUNTIME_STATE_FILE"
 fi
 
+# DEC-AXO-901598 + REQ-AXO-901636 : canonical/derived TCP port split.
+# Canonical ports belong to PIL-AXO-008 sub-products (brain + indexer).
+# Derived ports belong to PIL-AXO-009 non-canonical surfaces (dashboard).
+# --verify mode (audit-only) checks AXON_CANONICAL_TCP_PORTS only ;
+# normal stop path does not actively touch derived surfaces either
+# (axonctl manages brain + indexer ; dashboard runs out-of-band).
 if [[ "$STOP_ROLE" == "all" ]]; then
-    # Brain ports — indexer has no TCP listeners
-    AXON_TCP_PORTS=("$PHX_PORT" "$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
+    AXON_CANONICAL_TCP_PORTS=("$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
+    AXON_DERIVED_TCP_PORTS=("$PHX_PORT")
 elif axon_role_is_indexer "$STOP_ROLE"; then
-    AXON_TCP_PORTS=()
+    AXON_CANONICAL_TCP_PORTS=()
+    AXON_DERIVED_TCP_PORTS=()
 else
-    AXON_TCP_PORTS=("$PHX_PORT" "$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
+    AXON_CANONICAL_TCP_PORTS=("$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
+    AXON_DERIVED_TCP_PORTS=("$PHX_PORT")
 fi
+# Backward-compat union for the existing kill path (normal stop mode).
+AXON_TCP_PORTS=("${AXON_CANONICAL_TCP_PORTS[@]}" "${AXON_DERIVED_TCP_PORTS[@]:+${AXON_DERIVED_TCP_PORTS[@]}}")
 
 HARD_MODE=0
 VERIFY_ONLY=0
@@ -154,6 +164,47 @@ selected_writer_guards() {
 pid_exists() {
     local pid="$1"
     [ -e "/proc/$pid" ]
+}
+
+canonical_axon_processes_alive_pids() {
+    # REQ-AXO-901637 + DEC-AXO-901598 rule 2 (binary-anchored process identity).
+    # Match cmdlines ending in ${PROJECT_ROOT}/bin/axon-brain or ${PROJECT_ROOT}/bin/axon-indexer
+    # (regex `( |$)` = followed by space or end). Excludes :
+    #   - axon-bench-* / axon-mcp-tunnel-static (other binaries in bin/)
+    #   - dashboard BEAM (different cmdline shape entirely)
+    #   - third-party processes whose cmdline contains 'axon' but not in $PROJECT_ROOT/bin/
+    # Also matches the axonctl supervisor (its cmdline ends with `-- bin/axon-brain`
+    # or `-- bin/axon-indexer`), which is correct : supervisor alive == canonical
+    # sub-product still managed.
+    pgrep -af "${PROJECT_ROOT}/bin/axon-brain( |\$)|${PROJECT_ROOT}/bin/axon-indexer( |\$)|(^|[[:space:]])bin/axon-brain\$|(^|[[:space:]])bin/axon-indexer\$" \
+        2>/dev/null | awk '{print $1}' | sort -u
+}
+
+collect_canonical_listener_pids() {
+    # REQ-AXO-901636 : verify scope = canonical TCP ports only.
+    local pids=""
+    local port
+    local port_pids
+
+    [[ "${#AXON_CANONICAL_TCP_PORTS[@]}" -gt 0 ]] || return 0
+
+    for port in "${AXON_CANONICAL_TCP_PORTS[@]}"; do
+        port_pids="$(ss -ltnp 2>/dev/null | awk -v p="$port" '
+            $1 == "LISTEN" {
+                split($4, addr_parts, ":")
+                if (addr_parts[length(addr_parts)] != p) {
+                    next
+                }
+                match($0, /pid=([0-9]+)/, m)
+                if (m[1] != "") print m[1]
+            }' || true)"
+        if [ -n "$port_pids" ]; then
+            pids="$pids
+$port_pids"
+        fi
+    done
+
+    echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
 }
 
 collect_listener_pids() {
@@ -297,50 +348,61 @@ verify_writer_guard_release() {
 }
 
 verify_only_exit_if_needed() {
-    local patterns_ref="$1"
-    local process_pids
-    local listener_pids
+    # DEC-AXO-901598 + REQ-AXO-901636 + REQ-AXO-901637 :
+    # Canonical-only scope for `--verify` audit.
+    # Identity = binary-anchored cmdline match in ${PROJECT_ROOT}/bin/.
+    # Listener scope = AXON_CANONICAL_TCP_PORTS (PHX_PORT excluded —
+    # dashboard PIL-AXO-009 non-canonical never blocks runtime verify).
+    local _unused_patterns_ref="$1"  # kept for backward call signature
+    local canonical_pids
+    local canonical_listener_pids
     local stale=""
     local pid
 
-    process_pids="$(collect_process_pids "$patterns_ref")"
-    listener_pids="$(collect_listener_pids)"
+    canonical_pids="$(canonical_axon_processes_alive_pids)"
+    canonical_listener_pids="$(collect_canonical_listener_pids)"
 
-    for pid in $listener_pids; do
+    for pid in $canonical_listener_pids; do
         if ! pid_exists "$pid"; then
             stale="$stale $pid"
         fi
     done
 
-    if [ -z "$process_pids" ] && [ -z "$listener_pids" ]; then
+    if [ -z "$canonical_pids" ] && [ -z "$canonical_listener_pids" ]; then
         local guard_failed=0
         while read -r guard_label guard_path; do
             [[ -n "${guard_label:-}" ]] || continue
             # After a clean shutdown, the runtime may leave no lockfile behind.
-            # Verification should accept both "released existing guard" and
+            # Verification accepts both "released existing guard" and
             # "guard file absent because nothing still owns it".
             verify_writer_guard_release "$guard_label" "$guard_path" 0 || guard_failed=1
         done < <(selected_writer_guards)
         if [ "$guard_failed" -eq 1 ]; then
             return 1
         fi
-        echo "✅ Stop verification OK: no visible Axon processes/listeners."
+        echo "✅ Stop verification OK: no canonical Axon processes/listeners (PIL-AXO-008 scope)."
         return 0
     fi
 
-    echo "⚠️ Stop verification failed:"
-    [ -n "$process_pids" ] && echo "Process-match pids: $process_pids"
-    if [ "${AXON_STOP_DEBUG_MATCH:-0}" = "1" ] && [ -n "$process_pids" ]; then
-        echo "Matched process command lines:"
-        for pid in $process_pids; do
-            ps -p "$pid" -o pid=,cmd= || true
-        done
+    echo "⚠️ Stop verification failed (canonical scope PIL-AXO-008):"
+    if [ -n "$canonical_pids" ]; then
+        echo "Canonical process pids: $canonical_pids"
+        if [ "${AXON_STOP_DEBUG_MATCH:-0}" = "1" ]; then
+            echo "Matched canonical command lines:"
+            for pid in $canonical_pids; do
+                ps -p "$pid" -o pid=,cmd= || true
+            done
+        fi
     fi
-    [ -n "$listener_pids" ] && echo "Port listener pids: $listener_pids"
+    [ -n "$canonical_listener_pids" ] && echo "Canonical port listener pids: $canonical_listener_pids"
     if [ -n "$stale" ]; then
         echo "⚠️ Non-visible/stale listener pids (namespace-shifted): $stale"
     fi
-    ss -ltnp 2>/dev/null | rg "$(port_regex)" || true
+    if [[ "${#AXON_CANONICAL_TCP_PORTS[@]}" -gt 0 ]]; then
+        local canonical_regex
+        canonical_regex="$(IFS='|'; echo "${AXON_CANONICAL_TCP_PORTS[*]}")"
+        ss -ltnp 2>/dev/null | rg "$canonical_regex" || true
+    fi
     return 1
 }
 
