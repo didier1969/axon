@@ -226,13 +226,21 @@ fi
 # matches the staged pending manifest before reaching this point, so the
 # preflight bin/integrity guarantee is preserved by a different path.
 
-# REQ-AXO-286: under --finalize-only the manifest already carries its own
-# install_generation (set during the original staging attempt). Reuse it so
-# the live brain (started with AXON_LIVE_RELEASE_MANIFEST pointing at this
-# manifest) keeps reporting a generation that matches current.json.
-if [[ "$FINALIZE_ONLY" -eq 1 ]]; then
-  export MANIFEST_FIELD="runtime_version.install_generation"
-  install_generation="$(read_manifest_field)"
+# REQ-AXO-286 + REQ-AXO-901638 : both --finalize-only and --resume must reuse
+# the existing pending manifest's install_generation. Brain started with
+# AXON_LIVE_RELEASE_MANIFEST=<pending> reports the install_generation embedded
+# in that manifest ; the post-check (check_live_runtime_version.py) compares
+# brain's reported value to the script's $install_generation. Generating a
+# fresh timestamp here in --resume mode would cause a perpetual post-check
+# mismatch — visible as a 150s polling timeout despite a healthy brain.
+if [[ "$FINALIZE_ONLY" -eq 1 || "$RESUME" -eq 1 ]]; then
+  if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" ]]; then
+    MANIFEST_FIELD="runtime_version.install_generation" RELEASE_MANIFEST="$ROOT_DIR/.axon/live-release/pending.json" \
+      install_generation="$(read_manifest_field)"
+  else
+    export MANIFEST_FIELD="runtime_version.install_generation"
+    install_generation="$(read_manifest_field)"
+  fi
   if [[ -z "$install_generation" || "$install_generation" == "None" ]]; then
     install_generation="live-$(date -u +%Y%m%dT%H%M%SZ)"
   fi
