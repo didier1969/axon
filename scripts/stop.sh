@@ -418,10 +418,27 @@ if [ "$VERIFY_ONLY" = "1" ]; then
 fi
 
 # Graceful Elixir shutdown via RPC before axonctl takes over process killing.
+# REQ-AXO-901638 polling discipline : replace the legacy `sleep 0.20` defensive
+# wait with a bounded poll loop on `epmd -names` (returns the live Elixir node
+# list). Most shutdowns settle in ~20-100ms ; cap at 2s to fail loud if the BEAM
+# refuses to release the node name.
 if command -v elixir >/dev/null 2>&1; then
     echo "Sending shutdown signal to Axon Nexus node..."
     elixir --name stop_script@127.0.0.1 --cookie axon_secret --rpc "${ELIXIR_NODE_NAME}@127.0.0.1" :init :stop >/dev/null 2>&1 || true
-    sleep 0.20
+    if command -v epmd >/dev/null 2>&1; then
+        _elixir_node_short="${ELIXIR_NODE_NAME%%@*}"
+        _stop_end_ms=$(( $(date +%s%N) / 1000000 + 2000 ))
+        while true; do
+            if ! epmd -names 2>/dev/null | grep -q "name ${_elixir_node_short} "; then
+                break
+            fi
+            (( $(date +%s%N) / 1000000 >= _stop_end_ms )) && break
+            sleep 0.05
+        done
+    else
+        # epmd absent (unusual) — fall back to a single conservative sleep.
+        sleep 0.20
+    fi
 fi
 
 # Delegate all process termination, lock cleanup, and verification to axonctl.

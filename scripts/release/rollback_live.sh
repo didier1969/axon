@@ -14,12 +14,42 @@ MANIFEST_PATH=""
 RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
+# DEC-AXO-901598 + REQ-AXO-901638 polling discipline (shared with promote_live.sh).
+ASSERT_STOPPED_TIMEOUT_S="${PROMOTE_LIVE_ASSERT_STOPPED_TIMEOUT_S:-5}"
+ASSERT_STOPPED_INTERVAL_S="${PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S:-0.1}"
+
+poll_until() {
+  local desc="$1" timeout_s="$2" interval_s="$3"; shift 3
+  local now_ms end_ms
+  end_ms=$(( $(date +%s%N) / 1000000 + ${timeout_s%.*} * 1000 ))
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    now_ms=$(( $(date +%s%N) / 1000000 ))
+    (( now_ms >= end_ms )) && return 1
+    sleep "$interval_s"
+  done
+}
 
 assert_live_stopped() {
-  if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
-    echo "Live hard-stop verification failed; refusing restart." >&2
-    return 1
+  # DEC-AXO-901598 + REQ-AXO-901638 : caller-side polling absorbs OS
+  # cleanup window after `axonctl stop`. scripts/stop.sh --verify stays
+  # atomic. Diagnostic output preserved on failure for triage.
+  local last_log
+  last_log="$(mktemp)"
+  if poll_until "live canonical fully stopped" \
+       "$ASSERT_STOPPED_TIMEOUT_S" "$ASSERT_STOPPED_INTERVAL_S" \
+       bash -c "bash '$ROOT_DIR/scripts/stop.sh' --verify > '$last_log' 2>&1"; then
+    rm -f "$last_log"
+    return 0
   fi
+  echo "Live hard-stop verification failed after ${ASSERT_STOPPED_TIMEOUT_S}s of polling; refusing restart." >&2
+  echo "--- last stop.sh --verify output ---" >&2
+  cat "$last_log" >&2 || true
+  echo "--- end stop.sh --verify output ---" >&2
+  rm -f "$last_log"
+  return 1
 }
 
 usage() {
@@ -168,21 +198,24 @@ PY
     elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-      for attempt in {1..12}; do
-        if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+      # REQ-AXO-901638 : poll_until replaces 12*5s=60s legacy fixed-sleep loop.
+      POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-150}"
+      POSTCHECK_INTERVAL_S="${PROMOTE_LIVE_POSTCHECK_INTERVAL_S:-2}"
+      _rollback_postcheck_predicate() {
+        python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
-          --install-generation "$install_generation" \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null; then
-          verified=1
-          break
-        fi
-        echo "Live MCP runtime post-check not ready yet (attempt $attempt/12); retrying..." >&2
-        sleep 5
-      done
-      if [[ "$verified" -ne 1 ]]; then
+          --install-generation "$install_generation" >/dev/null 2>&1 \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null 2>&1 \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null 2>&1
+      }
+      export -f _rollback_postcheck_predicate 2>/dev/null || true
+      if poll_until "live MCP runtime post-check" "$POSTCHECK_TIMEOUT_S" "$POSTCHECK_INTERVAL_S" \
+           _rollback_postcheck_predicate; then
+        verified=1
+      else
         postcheck_failed=1
+        echo "Post-check timed out after ${POSTCHECK_TIMEOUT_S}s (interval ${POSTCHECK_INTERVAL_S}s)." >&2
       fi
     fi
   fi

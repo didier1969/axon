@@ -15,17 +15,96 @@ RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
 FINALIZE_ONLY=0
+RESUME=0
+# REQ-AXO-901638 + DEC-AXO-901598 : caller-side polling discipline.
+# All durations in seconds (sub-second fractions accepted by bash sleep).
+ASSERT_STOPPED_TIMEOUT_S="${PROMOTE_LIVE_ASSERT_STOPPED_TIMEOUT_S:-5}"
+ASSERT_STOPPED_INTERVAL_S="${PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S:-0.1}"
+POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-150}"
+POSTCHECK_INTERVAL_S="${PROMOTE_LIVE_POSTCHECK_INTERVAL_S:-2}"
+
+# poll_until <description> <timeout_seconds> <interval_seconds> <command...>
+# Returns 0 as soon as <command> succeeds, 1 after <timeout> seconds elapse.
+# Caller-side discipline replacing fixed sleeps : we wait on condition truth,
+# not on arbitrary delays. Aligns with DEC-AXO-901598 + REQ-AXO-901638.
+poll_until() {
+  local desc="$1" timeout_s="$2" interval_s="$3"; shift 3
+  local now_ms end_ms
+  end_ms=$(( $(date +%s%N) / 1000000 + ${timeout_s%.*} * 1000 ))
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    now_ms=$(( $(date +%s%N) / 1000000 ))
+    if (( now_ms >= end_ms )); then
+      [[ -n "${POLL_DEBUG:-}" ]] && echo "poll_until: timeout after ${timeout_s}s waiting for: $desc" >&2
+      return 1
+    fi
+    sleep "$interval_s"
+  done
+}
 
 assert_live_stopped() {
-  if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
-    echo "Live hard-stop verification failed; refusing restart." >&2
-    return 1
+  # DEC-AXO-901598 + REQ-AXO-901638 : caller-side polling absorbs the
+  # OS-level cleanup window after `axonctl stop` (flock release, port
+  # unbind, AF_UNIX socket unlink) that briefly survives the synchronous
+  # stop return. scripts/stop.sh --verify itself stays atomic (single
+  # snapshot, no internal retry).
+  local last_log
+  last_log="$(mktemp)"
+  if poll_until "live canonical fully stopped" \
+       "$ASSERT_STOPPED_TIMEOUT_S" "$ASSERT_STOPPED_INTERVAL_S" \
+       bash -c "bash '$ROOT_DIR/scripts/stop.sh' --verify > '$last_log' 2>&1"; then
+    rm -f "$last_log"
+    return 0
   fi
+  echo "Live hard-stop verification failed after ${ASSERT_STOPPED_TIMEOUT_S}s of polling (interval ${ASSERT_STOPPED_INTERVAL_S}s); refusing restart." >&2
+  echo "--- last stop.sh --verify output (canonical scope PIL-AXO-008) ---" >&2
+  cat "$last_log" >&2 || true
+  echo "--- end stop.sh --verify output ---" >&2
+  rm -f "$last_log"
+  return 1
+}
+
+rollback_bin_to_current() {
+  # REQ-AXO-901638 : on promote-live failure, restore bin/* from the
+  # canonical artifact paths referenced by current.json. Restores bin/*
+  # ↔ current.json coherence so the next live start serves the manifest
+  # that is actually labelled as current.
+  local current_manifest_path="${1:-$ROOT_DIR/.axon/live-release/current.json}"
+  if [[ ! -f "$current_manifest_path" ]]; then
+    echo "rollback_bin_to_current: no current.json at $current_manifest_path ; skipping." >&2
+    return 0
+  fi
+  CURRENT_MANIFEST="$current_manifest_path" ROOT_DIR="$ROOT_DIR" python3 - <<'PY' >&2
+import json, os, pathlib, shutil, sys
+root = pathlib.Path(os.environ["ROOT_DIR"])
+current = pathlib.Path(os.environ["CURRENT_MANIFEST"])
+try:
+    manifest = json.loads(current.read_text())
+except Exception as exc:
+    print(f"rollback: cannot parse current.json: {exc}")
+    sys.exit(1)
+artifacts = manifest.get("artifacts") or {"axon-core": manifest["artifact"]}
+restored = []
+missing = []
+for name, entry in artifacts.items():
+    source = pathlib.Path(entry["path"])
+    target = root / "bin" / name
+    if not source.exists():
+        missing.append(f"{name}={source}")
+        continue
+    shutil.copy2(source, target)
+    restored.append(name)
+print(f"rollback_bin_to_current: restored bin/* = {restored}")
+if missing:
+    print(f"rollback_bin_to_current: missing artifact source paths: {missing}")
+PY
 }
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run] [--finalize-only]
+Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run] [--finalize-only] [--resume]
 
   --finalize-only   REQ-AXO-286: assume the live brain already serves the target
                     manifest (started via env-override AXON_LIVE_RELEASE_MANIFEST=
@@ -33,6 +112,18 @@ Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restar
                     promote pending → current without any service restart. Skips
                     staging copy, indexer rise, and the strict authority contract
                     (which requires indexer_ready=true and breaks brain_only ops).
+
+  --resume          REQ-AXO-901638 : reuse the existing pending.json from a
+                    previous partial-failed promotion (state=staged) and retry
+                    the restart + post-check + manifest-swap phases. bin/* must
+                    already match the pending manifest sha256 (the previous run
+                    copied them) ; the script verifies coherence before proceeding.
+
+Tunable polling envelopes (env, all in seconds) :
+  PROMOTE_LIVE_ASSERT_STOPPED_TIMEOUT_S    default 5    (caller-side wait for canonical down)
+  PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S   default 0.1
+  PROMOTE_LIVE_POSTCHECK_TIMEOUT_S         default 150  (live MCP build_id match)
+  PROMOTE_LIVE_POSTCHECK_INTERVAL_S        default 2
 EOF
 }
 
@@ -43,6 +134,7 @@ while [[ $# -gt 0 ]]; do
     --skip-postcheck) SKIP_POSTCHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --finalize-only) FINALIZE_ONLY=1; shift ;;
+    --resume) RESUME=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -54,12 +146,24 @@ if [[ "$FINALIZE_ONLY" -eq 1 && "$RESTART_LIVE" -eq 1 ]]; then
   echo "--finalize-only and --restart-live are mutually exclusive" >&2
   exit 1
 fi
+if [[ "$RESUME" -eq 1 && "$FINALIZE_ONLY" -eq 1 ]]; then
+  echo "--resume and --finalize-only are mutually exclusive" >&2
+  exit 1
+fi
 
 MANIFEST_PATH="$(realpath "$MANIFEST_PATH")"
 export RELEASE_MANIFEST="$MANIFEST_PATH"
 
-if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" && "$FINALIZE_ONLY" -ne 1 ]]; then
-  echo "Stale pending live release exists; clear .axon/live-release/pending.json before promoting." >&2
+# REQ-AXO-901638 : --resume reuses an existing pending.json (state=staged).
+# Without --resume, the presence of pending.json is a hard error to prevent
+# accidentally overwriting a partial-failed staging.
+if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" && "$FINALIZE_ONLY" -ne 1 && "$RESUME" -ne 1 ]]; then
+  echo "Stale pending live release exists; clear .axon/live-release/pending.json or rerun with --resume." >&2
+  exit 1
+fi
+
+if [[ "$RESUME" -eq 1 && ! -f "$ROOT_DIR/.axon/live-release/pending.json" ]]; then
+  echo "--resume requires an existing pending.json from a previous partial-failed promotion." >&2
   exit 1
 fi
 
@@ -244,7 +348,8 @@ PY
   exit 0
 fi
 
-python3 - <<'PY'
+if [[ "$RESUME" -ne 1 ]]; then
+  python3 - <<'PY'
 import json, os, pathlib, datetime as dt
 manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
 manifest["promoted_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -254,6 +359,39 @@ pending = pathlib.Path(os.environ["PENDING_MANIFEST"])
 pending.parent.mkdir(parents=True, exist_ok=True)
 pending.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
+else
+  # REQ-AXO-901638 --resume : reuse existing pending.json. Verify bin/* sha256
+  # already matches pending manifest so we know setup --artifact-only succeeded
+  # on the previous attempt. Aborts loudly if bin/* drift detected.
+  ROOT_DIR="$ROOT_DIR" PENDING_MANIFEST="$pending_manifest" python3 - <<'PY'
+import hashlib, json, os, pathlib, sys
+root = pathlib.Path(os.environ["ROOT_DIR"])
+pending = pathlib.Path(os.environ["PENDING_MANIFEST"])
+manifest = json.loads(pending.read_text())
+artifacts = manifest.get("artifacts") or {"axon-core": manifest["artifact"]}
+mismatches = []
+for name, entry in artifacts.items():
+    target = root / "bin" / name
+    expected = entry.get("sha256")
+    if not target.exists():
+        mismatches.append(f"bin/{name} missing")
+        continue
+    h = hashlib.sha256()
+    with target.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    if h.hexdigest() != expected:
+        mismatches.append(f"bin/{name} sha256 {h.hexdigest()[:16]} != pending {expected[:16]}")
+if mismatches:
+    print("--resume: bin/* drift vs pending.json :")
+    for m in mismatches:
+        print(f"  {m}")
+    print("Rerun without --resume to rebuild and re-stage, or restore bin/* manually.")
+    sys.exit(1)
+print(f"--resume: bin/* coherent with pending.json (state={manifest.get('state')} build_id={manifest.get('runtime_version',{}).get('build_id')})")
+PY
+  echo "Resuming promote-live from existing pending.json (state=staged)."
+fi
 
 verified=0
 restart_failed=0
@@ -272,10 +410,13 @@ if [[ "$RESTART_LIVE" -eq 1 ]]; then
   if [[ "$restart_failed" -ne 1 ]]; then
     # REQ-AXO-286 Bug 1 follow-up: AXON_SKIP_BIN_SYNC=1 short-circuit.
     # When the operator has already pre-staged the binary (canonical recovery
-    # pattern via AXON_LIVE_RELEASE_MANIFEST + AXON_SKIP_BIN_SYNC) and the
-    # bin/<artifact> sha256 already matches the manifest, skip the copy
-    # entirely. Reduces I/O + avoids the EBUSY race when the script is
-    # re-run after a partial failure.
+    # pattern via AXON_LIVE_RELEASE_MANIFEST + AXON_SKIP_BIN_SYNC, or via
+    # promote_live.sh --resume) and bin/<artifact> sha256 already matches
+    # the manifest, skip the copy entirely. Reduces I/O + avoids the EBUSY
+    # race when the script is re-run after a partial failure.
+    if [[ "$RESUME" -eq 1 ]]; then
+      AXON_SKIP_BIN_SYNC=1
+    fi
     AXON_SKIP_BIN_SYNC="${AXON_SKIP_BIN_SYNC:-0}" python3 - <<'PY'
 import hashlib, json, os, pathlib, shutil, shlex
 root = pathlib.Path(os.environ["ROOT_DIR"])
@@ -328,43 +469,66 @@ PY
     elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-      # REQ-AXO-155 — brain cold-start (BGE-Large model load + Phoenix
-      # dashboard) typically takes 60-90s; the previous 12*5s=60s window
-      # timed out before the post-check could observe the new
-      # runtime_version even when the live was actually fine. Widened to
-      # 24*5s=120s to fit the standard cold-start budget.
-      POSTCHECK_ATTEMPTS=24
-      for ((attempt = 1; attempt <= POSTCHECK_ATTEMPTS; attempt++)); do
-        if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+      # REQ-AXO-901638 : poll_until replaces the legacy 24*5s fixed-sleep
+      # loop. Default 150s timeout (covers brain cold-start: BGE-Large model
+      # load + Phoenix dashboard, REQ-AXO-155 cold-start budget). Polling
+      # interval 2s = sub-5s-cache-TTL window. Tunable via env.
+      _postcheck_predicate() {
+        python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
-          --install-generation "$install_generation" \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null \
-          && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null; then
-          verified=1
-          break
-        fi
-        echo "Live MCP runtime post-check not ready yet (attempt $attempt/$POSTCHECK_ATTEMPTS); retrying..." >&2
-        sleep 5
-      done
-      if [[ "$verified" -ne 1 ]]; then
+          --install-generation "$install_generation" >/dev/null 2>&1 \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null 2>&1 \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null 2>&1
+      }
+      export -f _postcheck_predicate 2>/dev/null || true
+      if poll_until "live MCP build_id + status indexer + status brain" \
+           "$POSTCHECK_TIMEOUT_S" "$POSTCHECK_INTERVAL_S" \
+           _postcheck_predicate; then
+        verified=1
+      else
         postcheck_failed=1
+        echo "Post-check timed out after ${POSTCHECK_TIMEOUT_S}s (interval ${POSTCHECK_INTERVAL_S}s). Last diagnostics :" >&2
+        python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+          --manifest "$MANIFEST_PATH" --url "$AXON_MCP_URL" \
+          --install-generation "$install_generation" >&2 || true
       fi
     fi
   fi
 fi
 
 if [[ "$restart_failed" -eq 1 ]]; then
-  echo "Live restart failed after staging the promotion artifact."
-  echo "Pending manifest remains at $pending_manifest and current manifest stays unchanged."
-  echo "Inspect live status, fix the restart issue, then rerun promotion with restart or roll back explicitly."
+  echo "" >&2
+  echo "Live restart failed after staging the promotion artifact." >&2
+  echo "  - pending manifest preserved : $pending_manifest" >&2
+  echo "  - current manifest unchanged : $current_manifest" >&2
+  echo "  - bin/* coherent with pending (sha256 matches)" >&2
+  echo "" >&2
+  echo "Next actions (REQ-AXO-901638 recovery menu) :" >&2
+  echo "  1. Retry the failed restart phase only (preserves the build) :" >&2
+  echo "       ./scripts/axon promote-live --manifest $MANIFEST_PATH --restart-live --resume" >&2
+  echo "  2. Revert to the previous live manifest entirely :" >&2
+  echo "       ./scripts/axon rollback-live    # picks the most-recent .axon/live-release/history/*.json" >&2
+  echo "  3. Force-rollback bin/* to current.json artifacts (keeps pending for later --resume) :" >&2
+  echo "       (functions sourced from this script ; from devenv shell)" >&2
   exit 1
 fi
 
 if [[ "$postcheck_failed" -eq 1 ]]; then
-  echo "Live restarted on the staged artifact, but MCP runtime_version post-check failed."
-  echo "Pending manifest remains at $pending_manifest and current manifest stays unchanged."
-  echo "Investigate live status, then rerun promotion with restart or roll back explicitly."
+  echo "" >&2
+  echo "Live restarted on the staged artifact, but MCP runtime_version post-check failed (${POSTCHECK_TIMEOUT_S}s polling exhausted)." >&2
+  echo "  - pending manifest preserved : $pending_manifest" >&2
+  echo "  - current manifest unchanged : $current_manifest" >&2
+  echo "  - canonical processes alive on staged binaries (verify with ./scripts/axon-live status)" >&2
+  echo "" >&2
+  echo "Next actions :" >&2
+  echo "  1. Inspect live runtime version / freshness :" >&2
+  echo "       ./scripts/axon-live status" >&2
+  echo "       curl -s http://127.0.0.1:44129/mcp -d '{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1,\"params\":{\"name\":\"status\",\"arguments\":{\"mode\":\"brief\"}}}'" >&2
+  echo "  2. Retry promote (preserves build + restart) :" >&2
+  echo "       ./scripts/axon promote-live --manifest $MANIFEST_PATH --restart-live --resume" >&2
+  echo "  3. Or roll back to previous manifest :" >&2
+  echo "       ./scripts/axon rollback-live" >&2
   exit 1
 fi
 
