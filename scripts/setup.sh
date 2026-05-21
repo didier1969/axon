@@ -12,11 +12,12 @@ source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 ARTIFACT_ONLY=0
 WITH_TENSORRT=0
 TENSORRT_QUALIFY=0
+DRY_RUN=0
 TENSORRT_ARGS=()
 
 usage() {
     cat <<'EOF'
-Usage: bash scripts/setup.sh [--artifact-only] [--with-tensorrt] [--tensorrt-qualify]
+Usage: bash scripts/setup.sh [--artifact-only] [--with-tensorrt] [--tensorrt-qualify] [--dry-run]
 
 Options:
   --artifact-only  Build only the canonical Rust release artifact and build-info, then exit.
@@ -25,6 +26,8 @@ Options:
                    With --with-tensorrt, run bounded cold TensorRT qualification.
   --tensorrt-arg ARG
                    Forward one argument to scripts/setup-tensorrt.sh.
+  --dry-run        Print the bootstrap plan without executing devenv shell,
+                   cargo build, mix deps, or TensorRT steps. REQ-AXO-901644.
 
 TensorRT requires the NVIDIA-approved local tarball:
   .axon/downloads/TensorRT-10.14.1.48.Linux.x86_64-gnu.cuda-12.9.tar.gz
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
             TENSORRT_ARGS+=("${1#*=}")
             shift
             ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -67,6 +74,59 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "🚀 Starting Axon bootstrap..."
+
+# REQ-AXO-901644 — dry-run prints the bootstrap plan without executing.
+# Use this on a fresh client clone to validate that every step's prerequisites
+# are present before paying the multi-minute devenv-shell + cargo + mix cost.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    cat <<EOF
+DRY RUN: Axon bootstrap plan (no action taken)
+
+PROJECT_ROOT       = $PROJECT_ROOT
+ARTIFACT_ONLY      = $ARTIFACT_ONLY
+WITH_TENSORRT      = $WITH_TENSORRT
+TENSORRT_QUALIFY   = $TENSORRT_QUALIFY
+TENSORRT_ARGS      = ${TENSORRT_ARGS[*]:-<none>}
+
+Planned steps:
+  1. devenv presence check (command -v devenv)
+  2. devenv shell -- bash -lc './scripts/validate-devenv.sh'
+  3. devenv shell -- cargo build --release --bins
+       cwd=$PROJECT_ROOT/src/axon-core
+  4. install_release_bin axon-core / axon-brain / axon-indexer / axonctl
+       target=$PROJECT_ROOT/bin/<name>
+EOF
+    if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
+        echo "  5. SKIP dashboard + tests (--artifact-only)"
+    else
+        echo "  5. devenv shell -- mix deps.get && mix compile (Elixir dashboard)"
+        echo "  6. devenv shell -- cargo test (Rust unit tests)"
+        echo "  7. devenv shell -- mix test (Elixir dashboard tests)"
+    fi
+    if [[ "$WITH_TENSORRT" -eq 1 ]]; then
+        if [[ "$TENSORRT_QUALIFY" -eq 1 ]]; then
+            echo "  8. scripts/setup-tensorrt.sh --qualify ${TENSORRT_ARGS[*]:-}"
+        else
+            echo "  8. scripts/setup-tensorrt.sh ${TENSORRT_ARGS[*]:-}"
+        fi
+    fi
+    echo ""
+    echo "Prerequisite probes:"
+    if command -v devenv >/dev/null 2>&1; then
+        echo "  devenv : $(command -v devenv) (OK)"
+    else
+        echo "  devenv : NOT FOUND on PATH (install required before real run)"
+    fi
+    if [[ "$WITH_TENSORRT" -eq 1 ]]; then
+        _tarball="$PROJECT_ROOT/.axon/downloads/TensorRT-10.14.1.48.Linux.x86_64-gnu.cuda-12.9.tar.gz"
+        if [[ -f "$_tarball" ]]; then
+            echo "  TensorRT tarball : $_tarball (OK)"
+        else
+            echo "  TensorRT tarball : NOT FOUND at $_tarball (NVIDIA download required)"
+        fi
+    fi
+    exit 0
+fi
 
 # 1. Environment Check (Devenv)
 if ! command -v devenv &> /dev/null; then

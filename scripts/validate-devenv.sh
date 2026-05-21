@@ -39,7 +39,14 @@ done
 
 echo ""
 echo "Toolchain origins:"
-required_tools=(python uv cargo rustc mix elixir tmux nc curl)
+# REQ-AXO-901642 — extended canonical tool set required by lifecycle scripts.
+# Every entry here is invoked by scripts/start.sh, scripts/stop.sh, scripts/release/*,
+# or scripts/lib/*.sh. Missing tool on a fresh client = silent or noisy script failure.
+required_tools=(
+  python uv cargo rustc mix elixir tmux nc curl
+  jq rg ss flock epmd psql sha256sum realpath
+  awk sed grep ip git tr head tail
+)
 missing_tools=0
 for tool in "${required_tools[@]}"; do
   path="$(command -v "$tool" || true)"

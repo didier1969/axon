@@ -189,6 +189,34 @@ detect_accessible_gpu() {
     return 1
 }
 
+# REQ-AXO-901641 — resolve NVML library across WSL2 + native Linux without
+# pinning a maintainer-specific default. Returns the first existing candidate ;
+# empty string if no NVML library found (caller decides whether that's fatal).
+resolve_nvml_library_path() {
+    local candidate
+    for candidate in \
+        "${AXON_NVML_LIBRARY_PATH:-}" \
+        "/usr/lib/wsl/lib/libnvidia-ml.so.1" \
+        "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1" \
+        "/usr/lib64/libnvidia-ml.so.1" \
+        "/usr/lib/libnvidia-ml.so.1"
+    do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    # Last resort : ldconfig cache (covers nix-store paths or non-standard installs).
+    if command -v ldconfig >/dev/null 2>&1; then
+        candidate="$(ldconfig -p 2>/dev/null | awk '/libnvidia-ml\.so\.1/ { print $NF; exit }')"
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 instance_runtime_pids() {
     local pids=""
     local pid=""
@@ -448,7 +476,18 @@ if [[ "$REQUEST_TENSORRT" == "1" ]]; then
     export AXON_GPU_EMBED_SERVICE_TENSORRT=1
     export AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH="${AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH:-0}"
     export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
-    export AXON_NVML_LIBRARY_PATH="${AXON_NVML_LIBRARY_PATH:-/usr/lib/wsl/lib/libnvidia-ml.so.1}"
+    # REQ-AXO-901641 — resolve NVML lib across WSL/native Linux. If nothing
+    # found, leave the var unset and let the runtime fall back per its own
+    # discipline (TensorRT path requires NVML — operator gets a clear error
+    # from the embedder, not a silent dlopen of a non-existent WSL path).
+    if [[ -z "${AXON_NVML_LIBRARY_PATH:-}" ]]; then
+        _resolved_nvml="$(resolve_nvml_library_path 2>/dev/null || true)"
+        if [[ -n "$_resolved_nvml" ]]; then
+            export AXON_NVML_LIBRARY_PATH="$_resolved_nvml"
+        fi
+    else
+        export AXON_NVML_LIBRARY_PATH
+    fi
     export AXON_OPT_MAX_VRAM_USED_MB="${AXON_OPT_MAX_VRAM_USED_MB:-2048}"
     export AXON_CUDA_MEMORY_SOFT_LIMIT_MB="${AXON_CUDA_MEMORY_SOFT_LIMIT_MB:-$AXON_OPT_MAX_VRAM_USED_MB}"
     export AXON_CUDA_MEMORY_LIMIT_MB="${AXON_CUDA_MEMORY_LIMIT_MB:-1024}"

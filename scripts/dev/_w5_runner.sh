@@ -9,12 +9,13 @@
 
 set -euo pipefail
 
-SCOPE="${1:-/home/dstadel/projects/axon/src}"
-DURATION="${2:-90}"
-LABEL="${3:-pg-async-bulk-w5}"
-
+# REQ-AXO-901640 — derive defaults from $ROOT, not the maintainer's machine.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+
+SCOPE="${1:-$ROOT/src}"
+DURATION="${2:-90}"
+LABEL="${3:-pg-async-bulk-w5}"
 
 # Pick up persistent live runtime config (DB_BACKEND + DATABASE_URL + SOLL_SEED + AGE_ONLY).
 set -a

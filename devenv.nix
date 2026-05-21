@@ -75,6 +75,40 @@ in
     # Postgres CLI for hand inspection / migration scripts
     postgresql_17
 
+    # REQ-AXO-901642 — canonical lifecycle tools required by scripts/*
+    # on a fresh client machine. Without these, devenv shell falls back to
+    # /usr/bin which may not exist on minimal NixOS / fresh Debian / fresh
+    # WSL2 hosts. Pinned here = reproducible across every client.
+    #   jq         : scripts/release/* + scripts/lib/* JSON manipulation
+    #   curl       : scripts/start.sh + scripts/qualify_*.py MCP probes
+    #   netcat     : scripts/start.sh readiness probes (nc -z)
+    #   ripgrep    : scripts/lib/axon-ort-runtime.sh + scripts/stop.sh
+    #   iproute2   : ss (used by ensure-runtime.sh + stop.sh + start.sh)
+    #   tmux       : scripts/start.sh runtime session multiplexer
+    #   util-linux : flock (writer-guard verify in stop.sh)
+    #   git        : axon-version.sh build_id resolution
+    #   coreutils  : realpath / sha256sum (used everywhere)
+    #   gawk + gnused : awk / sed (canonical text processing)
+    #   gnugrep    : grep
+    jq
+    curl
+    netcat
+    ripgrep
+    iproute2
+    tmux
+    util-linux
+    git
+    coreutils
+    gawk
+    gnused
+    gnugrep
+    # REQ-AXO-901643 — expose Erlang explicitly so epmd is on PATH from
+    # nix-store, not from a user-specific ~/.local/share/mise install.
+    # `languages.elixir.enable` (above) pulls Elixir but does not always
+    # surface a stable epmd on PATH ; declaring beamPackages.erlang here
+    # is explicit and version-pinned (erlang_27 — see `beamPackages` let).
+    beamPackages.erlang
+
     # REQ-AXO-901630 — DO NOT add `pkgs.onnxruntime` here. The nixpkgs
     # default onnxruntime ships without TensorRT/CUDA provider libs and,
     # when present in `packages`, leaks its `lib/` into devenv shell's
