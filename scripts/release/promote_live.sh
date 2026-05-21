@@ -217,10 +217,14 @@ export MANIFEST_FIELD="artifact.path"; artifact_path="$(read_manifest_field)"
 export MANIFEST_FIELD="artifact.sha256"; artifact_digest="$(read_manifest_field)"
 export ROOT_DIR RELEASE_VERSION="$release_version" PACKAGE_VERSION="$package_version" BUILD_ID="$build_id"
 
-if [[ "$FINALIZE_ONLY" -ne 1 ]]; then
+if [[ "$FINALIZE_ONLY" -ne 1 && "$RESUME" -ne 1 ]]; then
   bash "$ROOT_DIR/scripts/release/preflight.sh" \
     --check-pending
 fi
+# REQ-AXO-901638 --resume: pending.json existence is expected (and required) ;
+# preflight --check-pending would reject it. We already validated bin/* sha256
+# matches the staged pending manifest before reaching this point, so the
+# preflight bin/integrity guarantee is preserved by a different path.
 
 # REQ-AXO-286: under --finalize-only the manifest already carries its own
 # install_generation (set during the original staging attempt). Reuse it so
