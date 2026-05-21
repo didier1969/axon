@@ -176,8 +176,13 @@ canonical_axon_processes_alive_pids() {
     # Also matches the axonctl supervisor (its cmdline ends with `-- bin/axon-brain`
     # or `-- bin/axon-indexer`), which is correct : supervisor alive == canonical
     # sub-product still managed.
-    pgrep -af "${PROJECT_ROOT}/bin/axon-brain( |\$)|${PROJECT_ROOT}/bin/axon-indexer( |\$)|(^|[[:space:]])bin/axon-brain\$|(^|[[:space:]])bin/axon-indexer\$" \
-        2>/dev/null | awk '{print $1}' | sort -u
+    # Note: pgrep returns 1 on no-match, which would trip `set -euo pipefail` when
+    # this function is captured via $(...). Catch the no-match case explicitly so
+    # the helper always returns 0 with an empty stdout when nothing is alive.
+    local pg_out
+    pg_out="$(pgrep -af "${PROJECT_ROOT}/bin/axon-brain( |\$)|${PROJECT_ROOT}/bin/axon-indexer( |\$)|(^|[[:space:]])bin/axon-brain\$|(^|[[:space:]])bin/axon-indexer\$" 2>/dev/null || true)"
+    [[ -z "$pg_out" ]] && return 0
+    printf '%s\n' "$pg_out" | awk '{print $1}' | sort -u
 }
 
 collect_canonical_listener_pids() {
@@ -189,6 +194,9 @@ collect_canonical_listener_pids() {
     [[ "${#AXON_CANONICAL_TCP_PORTS[@]}" -gt 0 ]] || return 0
 
     for port in "${AXON_CANONICAL_TCP_PORTS[@]}"; do
+        # `|| true` on the whole pipeline absorbs ss exit codes (when no listener
+        # matches) so the no-match path returns 0 with empty stdout instead of
+        # tripping `set -euo pipefail`.
         port_pids="$(ss -ltnp 2>/dev/null | awk -v p="$port" '
             $1 == "LISTEN" {
                 split($4, addr_parts, ":")
@@ -197,14 +205,15 @@ collect_canonical_listener_pids() {
                 }
                 match($0, /pid=([0-9]+)/, m)
                 if (m[1] != "") print m[1]
-            }' || true)"
+            }' 2>/dev/null || true)"
         if [ -n "$port_pids" ]; then
             pids="$pids
 $port_pids"
         fi
     done
 
-    echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
+    [[ -z "$pids" ]] && return 0
+    printf '%s\n' "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
 }
 
 collect_listener_pids() {
