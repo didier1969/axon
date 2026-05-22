@@ -342,7 +342,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "include_validation_details": { "type": "boolean", "description": "Default false to preserve LLM context. Set true only if full `soll_verify_requirements` details are needed." },
                         "include_decay": { "type": "boolean", "description": "REQ-AXO-144: temporal score decay. Default true. Set false to disable (benchmarking, A/B). Decays score by exp(-age_days/half_life_days) when the node carries `updated_at` metadata." },
                         "half_life_days": { "type": "number", "description": "REQ-AXO-144: half-life (in days) for the temporal decay curve. Default 30." },
-                        "actionable": { "type": "boolean", "description": "REQ-AXO-346 Slice 2: when true, return open Requirement leaves ordered by (parent_score DESC, priority ASC, score DESC) instead of the parent Decisions/Milestones. Default false (parent-Decision surface)." },
+                        "actionable": { "type": "boolean", "description": "REQ-AXO-346 Slice 2 + REQ-AXO-901617: when true (default), return open Requirement leaves ordered by (parent_score DESC, priority ASC, score DESC). Pass false explicitly to surface parent Decisions/Milestones (audit / priority-debug surface)." },
                         "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
                     },
                     "required": ["project_code"]

@@ -1425,6 +1425,63 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     assert_eq!(data["summary"]["cycle_health_score"].as_f64(), Some(100.0));
 }
 
+/// REQ-AXO-901617 — `actionable` flag defaults to true so wave-1 surfaces
+/// REQ leaves rather than parent Decisions. Without the flip, accepted
+/// Decisions with no evidence dominated wave-1 over the actual work items.
+#[test]
+fn test_soll_work_plan_actionable_defaults_true_emits_req_leaves() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'work item', '', 'planned', '{\"priority\":\"P1\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'intent', '', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json" }
+        })),
+        id: Some(json!(901617)),
+    };
+    let response = server.handle_request(req);
+    let data = response
+        .unwrap()
+        .result
+        .expect("result")
+        .get("data")
+        .cloned()
+        .expect("data");
+    assert_eq!(
+        data["metadata"]["actionable"].as_bool(),
+        Some(true),
+        "default must be actionable=true: {data:?}"
+    );
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let ids: Vec<&str> = waves
+        .iter()
+        .flat_map(|w| w["items"].as_array().unwrap().iter())
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"REQ-AXO-001"),
+        "REQ leaf must surface with default actionable=true: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"DEC-AXO-001"),
+        "Decision must NOT surface with default actionable=true: {ids:?}"
+    );
+}
+
 #[test]
 fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let server = create_test_server();
@@ -1451,7 +1508,10 @@ fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json" }
+            // REQ-AXO-901617: actionable now defaults true. This test asserts
+            // legacy parent-Decision/Milestone ordering, so opt back into the
+            // pre-flip behavior via actionable=false.
+            "arguments": { "project_code": "AXO", "format": "json", "actionable": false }
         })),
         id: Some(json!(501)),
     };
@@ -1484,7 +1544,7 @@ fn test_soll_work_plan_groups_parallel_ready_nodes_in_same_wave() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json" }
+            "arguments": { "project_code": "AXO", "format": "json", "actionable": false }
         })),
         id: Some(json!(502)),
     };
@@ -1534,7 +1594,7 @@ fn test_soll_work_plan_reports_cycles_and_blocks_dependents() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json" }
+            "arguments": { "project_code": "AXO", "format": "json", "actionable": false }
         })),
         id: Some(json!(503)),
     };
@@ -1568,7 +1628,7 @@ fn test_soll_work_plan_returns_contract_fields() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json", "include_ist": true }
+            "arguments": { "project_code": "AXO", "format": "json", "include_ist": true, "actionable": false }
         })),
         id: Some(json!(504)),
     };
@@ -1619,7 +1679,7 @@ fn test_soll_work_plan_respects_limit_and_marks_truncated() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json", "limit": 2 }
+            "arguments": { "project_code": "AXO", "format": "json", "limit": 2, "actionable": false }
         })),
         id: Some(json!(505)),
     };
@@ -1656,7 +1716,7 @@ fn test_soll_work_plan_returns_top_recommendations() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json", "top": 1 }
+            "arguments": { "project_code": "AXO", "format": "json", "top": 1, "actionable": false }
         })),
         id: Some(json!(506)),
     };
@@ -1724,7 +1784,7 @@ fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json" }
+            "arguments": { "project_code": "AXO", "format": "json", "actionable": false }
         })),
         id: Some(json!(550)),
     };
@@ -1811,7 +1871,7 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json" }
+            "arguments": { "project_code": "AXO", "format": "json", "actionable": false }
         })),
         id: Some(json!(701)),
     };
@@ -1864,7 +1924,7 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json", "include_decay": false }
+            "arguments": { "project_code": "AXO", "format": "json", "include_decay": false, "actionable": false }
         })),
         id: Some(json!(702)),
     };
@@ -1916,7 +1976,7 @@ fn test_soll_work_plan_counts_decision_evidence() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_work_plan",
-            "arguments": { "project_code": "AXO", "format": "json", "top": 1 }
+            "arguments": { "project_code": "AXO", "format": "json", "top": 1, "actionable": false }
         })),
         id: Some(json!(507)),
     };

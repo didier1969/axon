@@ -373,15 +373,20 @@ impl McpServer {
             .get("half_life_days")
             .and_then(|v| v.as_f64())
             .unwrap_or(DEFAULT_DECAY_HALF_LIFE_DAYS);
-        // REQ-AXO-346 Slice 2 — opt-in REQ-leaf surface. When true, the
-        // returned waves contain open Requirements (status non-terminal)
-        // ordered by `(parent_score DESC, priority ASC, score DESC)`
-        // instead of the parent Decisions/Milestones. Lets LLM callers
-        // skip a SOLVES traversal round-trip.
+        // REQ-AXO-346 Slice 2 + REQ-AXO-901617 — default-on REQ-leaf surface.
+        // When true (default since REQ-AXO-901617), the returned waves
+        // contain open Requirements (status non-terminal) ordered by
+        // `(parent_score DESC, priority ASC, score DESC)` instead of the
+        // parent Decisions/Milestones. The default flipped to `true` after
+        // observation that wave-1 was dominated by accepted Decisions whose
+        // children are delivered (cosmetic "no evidence attached" boosts)
+        // ahead of genuinely actionable Requirements. Pass `actionable=false`
+        // explicitly to get the legacy parent-Decision surface (audit /
+        // priority-debug).
         let actionable = args
             .get("actionable")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(true);
         // REQ-AXO-91501 — opt-in PageRank centrality scoring on the
         // schedulable sub-graph. When true, each node receives a
         // `centrality_bonus = round(pagerank * 100)` term added to the
@@ -486,11 +491,16 @@ impl McpServer {
         // when `actionable=true` so the wave-1 output is the actual work
         // (REQs) rather than the upstream intent (Decisions).
         let waves = if actionable {
-            vec![build_actionable_leaves_wave(
-                &nodes,
-                &snapshot,
-                &schedulable_ids,
-            )]
+            // REQ-AXO-901617 — skip emitting an empty wave so callers that
+            // expect `ordered_waves` to be empty (no schedulable REQ leaves,
+            // e.g. project entirely blocked on cycles) keep the same shape
+            // as the non-actionable path.
+            let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable_ids);
+            if wave.items.is_empty() {
+                Vec::new()
+            } else {
+                vec![wave]
+            }
         } else {
             build_waves_snapshot(&nodes, &snapshot, &schedulable_ids)
         };
