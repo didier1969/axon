@@ -207,25 +207,27 @@ impl McpServer {
     }
 
     pub(crate) fn axon_query_examples(&self, _args: &Value) -> Option<Value> {
+        // REQ-AXO-901653 slice-5d — examples migrated from public.File to
+        // pipeline_v2 canonical (IndexedFile + Chunk + ChunkEmbedding).
         let examples = r#"## 📚 Query Examples (SQL gateway / cypher tool)
 
-1) Workspace status
-`SELECT status, count(*) FROM File GROUP BY 1 ORDER BY 2 DESC;`
+1) Workspace size (canonical pipeline_v2)
+`SELECT count(*) AS indexed_files FROM public.IndexedFile;`
 
-2) Project health
-`SELECT project_code, count(*) AS known, SUM(CASE WHEN status IN ('indexed','indexed_degraded','skipped','deleted') THEN 1 ELSE 0 END) AS completed FROM File GROUP BY 1 ORDER BY known DESC;`
+2) Project health (Chunk = canonical per-file per-project pivot)
+`SELECT project_code, count(DISTINCT file_path) AS files, count(*) AS chunks FROM public.Chunk GROUP BY project_code ORDER BY chunks DESC;`
 
-3) Top backlog reasons
-`SELECT COALESCE(status_reason,'unknown'), count(*) FROM File WHERE status IN ('pending','indexing') GROUP BY 1 ORDER BY 2 DESC LIMIT 10;`
+3) Vector embedding coverage
+`SELECT c.project_code, count(DISTINCT c.file_path) AS files_with_embeddings FROM public.Chunk c JOIN public.ChunkEmbedding e ON e.chunk_id = c.id GROUP BY c.project_code ORDER BY 2 DESC;`
 
-4) Parser/ingestion failures
-`SELECT COALESCE(last_error_reason,'unknown'), count(*) FROM File WHERE last_error_reason IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;`
+4) Per-file chunk distribution
+`SELECT file_path, count(*) AS chunks FROM public.Chunk GROUP BY file_path ORDER BY chunks DESC LIMIT 20;`
 
-5) Inter-language bridge visibility
-`SELECT COUNT(*) AS calls, (SELECT COUNT(*) FROM CALLS_NIF) AS calls_nif FROM CALLS;`
+5) Inter-language bridge visibility (Edge canonical)
+`SELECT relation_type, count(*) FROM public.Edge GROUP BY relation_type ORDER BY 2 DESC;`
 
 6) Symbol lookup by project
-`SELECT id, name, kind FROM Symbol WHERE project_code = 'BookingSystem' ORDER BY name LIMIT 50;`
+`SELECT id, name, kind FROM public.Symbol WHERE project_code = 'AXO' ORDER BY name LIMIT 50;`
 "#;
         Some(json!({ "content": [{ "type": "text", "text": examples }] }))
     }
@@ -246,9 +248,11 @@ impl McpServer {
         let reader_count =
             |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
 
+        // REQ-AXO-901653 slice-5d — `File` invariant replaced by `IndexedFile`
+        // (canonical pipeline_v2 per-file pivot).
         let mut checks: Vec<(&str, &str)> = vec![
-            ("File", "SELECT count(*) FROM File"),
-            ("Symbol", "SELECT count(*) FROM Symbol"),
+            ("IndexedFile", "SELECT count(*) FROM public.IndexedFile"),
+            ("Symbol", "SELECT count(*) FROM public.Symbol"),
         ];
         if !skip_legacy_relations {
             checks.extend([

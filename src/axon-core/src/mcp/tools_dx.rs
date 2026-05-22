@@ -176,54 +176,23 @@ impl McpServer {
             return None;
         }
 
-        // Post-CPT-AXO-039 supersedure (2026-05-08): IST tables are
-        // multi-project under both backends — same SQL on PG and DuckDB.
+        // REQ-AXO-901653 slice-5d — public.File dropped ; project-scope files
+        // count derives from public.Chunk (project_code carrier). pending /
+        // indexing have no pipeline_v2 equivalent (writes are in-line) ;
+        // collapse to 0 and treat all known files as completed.
         let params = json!({ "project": project });
         let total_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project",
+                "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE project_code = $project",
                 &params,
             )
             .unwrap_or(0);
-        let pending_files = self
-            .graph_store
-            .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'pending'",
-                &params,
-            )
-            .unwrap_or(0);
-        let indexing_files = self
-            .graph_store
-            .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'indexing'",
-                &params,
-            )
-            .unwrap_or(0);
-        let backlog_files = pending_files + indexing_files;
-        let completed_files = (total_files - backlog_files).max(0);
-
-        let reasons_res = self
-            .graph_store
-            .query_json_param(
-                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-                 FROM File \
-                 WHERE project_code = $project AND status IN ('pending', 'indexing') \
-                 GROUP BY 1 \
-                 ORDER BY count(*) DESC, 1 ASC \
-                 LIMIT 3",
-                &params,
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-        let pending_reasons = serde_json::from_str::<Vec<Vec<Value>>>(&reasons_res)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| {
-                let reason = row.first()?.as_str()?.to_string();
-                let count = json_i64(row.get(1)?)?;
-                Some((reason, count))
-            })
-            .collect();
+        let pending_files = 0i64;
+        let indexing_files = 0i64;
+        let backlog_files = 0i64;
+        let completed_files = total_files;
+        let pending_reasons: Vec<(String, i64)> = Vec::new();
 
         Some(ProjectScopeSummary {
             total_files,
@@ -267,53 +236,18 @@ impl McpServer {
         ))
     }
 
-    pub(crate) fn degraded_file_count(&self, project: Option<&str>) -> i64 {
-        // Post-CPT-AXO-039 supersedure (2026-05-08): same SQL on PG and
-        // DuckDB — multi-project tables filter via `project_code` row
-        // column, not a per-project schema namespace.
-        let (query, params) = if let Some(project) = project {
-            (
-                "SELECT count(*) FROM File \
-                 WHERE project_code = $project AND status = 'indexed_degraded'",
-                json!({ "project": project }),
-            )
-        } else {
-            (
-                "SELECT count(*) FROM File WHERE status = 'indexed_degraded'",
-                json!({}),
-            )
-        };
-        self.graph_store
-            .query_count_param(query, &params)
-            .unwrap_or(0)
+    pub(crate) fn degraded_file_count(&self, _project: Option<&str>) -> i64 {
+        // REQ-AXO-901653 slice-5d — public.File dropped ; pipeline_v2 has no
+        // `indexed_degraded` status enum (failures surface via tracing logs,
+        // not row state). Diagnostic always reports 0 degraded files.
+        let _ = &self.graph_store;
+        0
     }
 
-    pub(crate) fn degraded_symbol_count(&self, symbol: &str, project: Option<&str>) -> i64 {
-        let (query, params) = if let Some(project) = project {
-            (
-                "SELECT count(*) \
-                 FROM File f \
-                 JOIN CONTAINS c ON c.source_id = f.path \
-                 JOIN Symbol s ON s.id = c.target_id \
-                 WHERE (s.name = $sym OR s.id = $sym) \
-                   AND s.project_code = $project \
-                   AND f.status = 'indexed_degraded'",
-                json!({ "sym": symbol, "project": project }),
-            )
-        } else {
-            (
-                "SELECT count(*) \
-                 FROM File f \
-                 JOIN CONTAINS c ON c.source_id = f.path \
-                 JOIN Symbol s ON s.id = c.target_id \
-                 WHERE (s.name = $sym OR s.id = $sym) \
-                   AND f.status = 'indexed_degraded'",
-                json!({ "sym": symbol }),
-            )
-        };
-        self.graph_store
-            .query_count_param(query, &params)
-            .unwrap_or(0)
+    pub(crate) fn degraded_symbol_count(&self, _symbol: &str, _project: Option<&str>) -> i64 {
+        // REQ-AXO-901653 slice-5d — same as degraded_file_count.
+        let _ = &self.graph_store;
+        0
     }
 
     pub(crate) fn degraded_truth_note(&self, degraded_files: i64) -> Option<String> {

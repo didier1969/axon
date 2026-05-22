@@ -1031,108 +1031,10 @@ fn spawn_background_checkpoint_thread(graph_store: Arc<GraphStore>) {
     info!("Background CHECKPOINT thread spawned (10s cadence)");
 }
 
-/// DEC-AXO-072 J.2: hydrate the hot status cache from FileVectorizationQueue
-/// and spawn the periodic flush thread (100ms timer). Called only when
-/// `AXON_HOT_STATUS_CACHE_ENABLED=true`.
-fn spawn_hot_status_cache_workers(
-    graph_store: Arc<GraphStore>,
-    cache: Arc<crate::hot_status_cache::HotStatusCache>,
-) {
-    use crate::hot_status_cache::{
-        parse_fvq_status, render_flush_queries, FileHotState, FvqStatus,
-    };
-
-    // Boot hydration: load existing FVQ rows so the lane sees pending
-    // work after a restart. Only hydrate live rows (queued/inflight) —
-    // done/failed are terminal and stay in DB only.
-    match graph_store.query_json(
-        "SELECT file_path, status, COALESCE(claim_token, ''), COALESCE(lease_epoch, 0), \
-                COALESCE(lease_owner, ''), COALESCE(queued_at, 0), COALESCE(claimed_at_ms, 0), \
-                COALESCE(last_error_reason, '') \
-         FROM FileVectorizationQueue \
-         WHERE status IN ('queued', 'inflight')",
-    ) {
-        Ok(raw) => {
-            let rows: Vec<Vec<serde_json::Value>> =
-                serde_json::from_str(&raw).unwrap_or_default();
-            let mut hydrated = 0usize;
-            for row in rows {
-                let path = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if path.is_empty() {
-                    continue;
-                }
-                let status_s = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                let Some(status) = parse_fvq_status(status_s) else {
-                    continue;
-                };
-                let claim_token = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
-                let lease_epoch = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
-                let lease_owner = row
-                    .get(4)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
-                let enqueued_at_ms = row.get(5).and_then(|v| v.as_i64()).unwrap_or(0);
-                let claimed_at_ms = row.get(6).and_then(|v| v.as_i64()).filter(|v| *v > 0);
-                let last_error = row
-                    .get(7)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
-                let started_at_ms = if matches!(status, FvqStatus::Inflight) {
-                    claimed_at_ms
-                } else {
-                    None
-                };
-                let state = FileHotState {
-                    status,
-                    claim_token,
-                    lease_epoch,
-                    lease_owner,
-                    enqueued_at_ms,
-                    started_at_ms,
-                    last_error,
-                    last_change_at_ms: enqueued_at_ms.max(claimed_at_ms.unwrap_or(0)),
-                };
-                cache.upsert_from_db(&path, state);
-                hydrated += 1;
-            }
-            info!("Hot status cache: hydrated {} entries from FVQ", hydrated);
-        }
-        Err(e) => {
-            warn!("Hot status cache: hydration failed: {:?}", e);
-        }
-    }
-
-    // Periodic flush thread: snapshot dirty entries every 100ms, render
-    // a single batched UPSERT, execute. Runs forever; the indexer
-    // process is the only owner.
-    let flush_store = graph_store;
-    let flush_cache = cache;
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(100));
-        let snap = flush_cache.snapshot_dirty();
-        if snap.is_empty() {
-            continue;
-        }
-        let queries = render_flush_queries(&snap);
-        if queries.is_empty() {
-            continue;
-        }
-        if let Err(e) = flush_store.execute_batch(&queries) {
-            warn!(
-                "Hot status cache flush: execute_batch failed for {} entries: {:?}",
-                snap.len(),
-                e
-            );
-        }
-    });
-    info!("Hot status cache: flush thread spawned (100ms cadence)");
-}
+// REQ-AXO-901653 slice-5d — `spawn_hot_status_cache_workers` deleted.
+// Subsystem hydrated from + flushed to public.FileVectorizationQueue
+// (dropped slice-5a). Pipeline_v2 (REQ-AXO-289) owns chunk-state directly
+// via the in-memory IstGraphView + Chunk/ChunkEmbedding rows.
 
 impl SemanticWorkerPool {
     pub fn new(graph_store: Arc<GraphStore>, _queue_store: Arc<QueueStore>) -> Self {
@@ -1164,19 +1066,7 @@ impl SemanticWorkerPool {
         // but render_bulk_queries returns empty (no DB writes occur).
         let _ = crate::graph_ingestion::async_writer::install_global(Arc::clone(&graph_store));
 
-        // DEC-AXO-072 J.2: install hot status cache singleton; enable per
-        // env. Cache disabled by default — the flush thread below
-        // does nothing and graph_ingestion / vector_lane fall through to
-        // direct-DB paths (commit G + H.2 behavior preserved).
-        let _ = crate::hot_status_cache::install(std::sync::Arc::new(
-            crate::hot_status_cache::HotStatusCache::new(),
-        ));
-        if let Some(cache) = crate::hot_status_cache::cache() {
-            cache.set_enabled(crate::hot_status_cache::parse_env_enabled());
-            if cache.is_enabled() {
-                spawn_hot_status_cache_workers(Arc::clone(&graph_store), cache);
-            }
-        }
+        // REQ-AXO-901653 slice-5d — hot status cache install block deleted.
 
         // DEC-AXO-072 follow-up VAL-AXO-034: background CHECKPOINT thread
         // every 10s. Profiling showed commit_ms grows to 22s+ as the WAL
@@ -1727,65 +1617,6 @@ fn vector_claimable_supply_poll_interval_ms() -> u64 {
     )
 }
 
-fn desired_vector_claimable_supply_depth(
-    metrics: service_guard::VectorRuntimeMetrics,
-    claimable_file_backlog_depth: usize,
-    inflight_file_backlog_depth: usize,
-) -> usize {
-    let controller = current_vector_batch_controller_diagnostics(&embedding_lane_config_from_env());
-    let upstream_file_pressure = claimable_file_backlog_depth
-        .saturating_add(inflight_file_backlog_depth)
-        .saturating_add(metrics.active_claimed_current as usize)
-        .saturating_add(metrics.prepare_claimed_current as usize)
-        .saturating_add(metrics.persist_claimed_current as usize);
-    let target_ready_chunks = vector_ready_chunk_reserve_target(
-        configured_target_ready_chunks(),
-        upstream_file_pressure,
-        controller.target_files_per_cycle,
-        controller.target_embed_batch_chunks,
-        metrics.ready_queue_chunks_current as usize,
-        metrics.prepare_inflight_chunks_current as usize,
-        controller.avg_chunks_per_embed_call,
-        metrics.oldest_ready_batch_age_ms_current,
-    );
-    let front_chunk_demand =
-        target_ready_chunks.saturating_add(metrics.ready_replenishment_deficit_current as usize);
-    let front_chunk_supply = (metrics.ready_queue_chunks_current as usize)
-        .saturating_add(metrics.prepare_inflight_chunks_current as usize);
-    let claimable_floor = if upstream_file_pressure >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        controller.target_files_per_cycle.max(1).saturating_mul(4)
-    } else {
-        controller.target_files_per_cycle.max(1).saturating_mul(2)
-    };
-    front_chunk_demand
-        .saturating_sub(front_chunk_supply)
-        .div_ceil(default_chunks_per_file_estimate())
-        .max(claimable_floor)
-        .max(32)
-        .max(1)
-}
-
-
-
-fn maintain_vector_claimable_supply(graph_store: &GraphStore) -> anyhow::Result<usize> {
-    let claimable_file_backlog_depth =
-        graph_store.fetch_claimable_file_vectorization_queue_count()?;
-    // REQ-AXO-901653 Slice 3b — file_vectorization_queue table dropped post
-    // MIL-AXO-017 / REQ-AXO-289 ; canonical pipeline_v2 path bypasses the queue.
-    let (_queued, inflight): (usize, usize) = (0, 0);
-    let metrics = service_guard::vector_runtime_metrics();
-    let desired_claimable_depth =
-        desired_vector_claimable_supply_depth(metrics, claimable_file_backlog_depth, inflight);
-    let current_supply_depth = claimable_file_backlog_depth
-        .saturating_add(metrics.active_claimed_current as usize)
-        .saturating_add(metrics.prepare_claimed_current as usize)
-        .saturating_add(metrics.persist_claimed_current as usize);
-    let refill_deficit = desired_claimable_depth.saturating_sub(current_supply_depth);
-    if refill_deficit == 0 {
-        return Ok(0);
-    }
-    graph_store.backfill_file_vectorization_queue_with_limit(refill_deficit)
-}
 
 
 
@@ -5396,55 +5227,6 @@ mod tests {
 
         std::env::remove_var("AXON_VECTOR_WORKERS");
         std::env::remove_var("AXON_EMBEDDING_PROVIDER");
-    }
-
-
-
-
-
-
-
-    #[test]
-    fn test_maintain_vector_claimable_supply_promotes_missing_graph_ready_work() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        for path in ["/tmp/supply-a.rs", "/tmp/supply-b.rs", "/tmp/supply-c.rs"] {
-            store
-                .execute(&format!(
-                    "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                     VALUES ('{}', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
-                    path
-                ))
-                .unwrap();
-            store
-                .execute(&format!(
-                    "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                     VALUES ('chunk-{}', 'symbol', 'sym-{}', 'PRJ', '{}', 'function', 'body', 'hash-{}', 1, 1)",
-                    path.replace('/', "_"),
-                    path.replace('/', "_"),
-                    path,
-                    path.replace('/', "_"),
-                ))
-                .unwrap();
-        }
-        crate::service_guard::reset_for_tests();
-        crate::service_guard::record_vector_canonical_backlog_depth(64);
-        crate::service_guard::record_vector_ready_queue_depth(0);
-        crate::service_guard::record_vector_prepare_inflight_depth(0);
-        crate::service_guard::record_vector_prepare_claimed(0);
-        crate::service_guard::record_vector_ready_claimed(0);
-        crate::service_guard::record_vector_active_claimed(0);
-        crate::service_guard::record_vector_persist_claimed(0);
-
-        let added = super::maintain_vector_claimable_supply(&store).unwrap();
-
-        assert!(added > 0);
-        assert!(
-            store
-                .fetch_claimable_file_vectorization_queue_count()
-                .unwrap()
-                > 0,
-            "claimable queue should be replenished"
-        );
     }
 
 

@@ -1674,14 +1674,17 @@ impl McpServer {
         path_hints: &[String],
         limit: usize,
     ) -> Vec<EntryCandidate> {
-        let path_match = Self::path_match_sql(path_hints, "f.path");
-        let term_match = Self::term_match_sql(terms, "f.path");
+        // REQ-AXO-901653 slice-5d — public.File dropped ; project_code per
+        // file derives from public.Chunk (canonical pivot post pipeline_v2).
+        let path_match = Self::path_match_sql(path_hints, "c.file_path");
+        let term_match = Self::term_match_sql(terms, "c.file_path");
         let query = format!(
-            "SELECT f.path, COALESCE(f.project_code, 'unknown') \
-             FROM File f \
-             WHERE ({path_match} OR {term_match}){project_filter} \
+            "SELECT DISTINCT c.file_path, COALESCE(c.project_code, 'unknown') \
+             FROM public.Chunk c \
+             WHERE c.file_path IS NOT NULL \
+               AND ({path_match} OR {term_match}){project_filter} \
              LIMIT {limit}",
-            project_filter = Self::sql_project_filter_for_fields(project, &["f.project_code"]),
+            project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]),
         );
 
         let raw = self

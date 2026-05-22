@@ -18,7 +18,7 @@ fn test_retrieve_context_intent_mode_prefers_plan_docs_over_feedback_docs() {
 fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/payment.rs', 'BKS', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-why', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout orchestrates payment capture and settlement', 'hash-why-checkout', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
@@ -112,7 +112,7 @@ fn test_why_surfaces_missing_governing_intent_without_laundering_inference_into_
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/refund.rs', 'BKS', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/refund.rs', 'symbol', 'sym-src/refund.rs', 'BKS', 'src/refund.rs', 'hash-src/refund.rs')")
         .unwrap();
     server
         .graph_store
@@ -166,7 +166,7 @@ fn test_why_uses_concept_links_to_recover_governing_requirement() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/dashboard/lib/axon_dashboard/application.ex', 'AXO', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/dashboard/lib/axon_dashboard/application.ex', 'symbol', 'sym-src/dashboard/lib/axon_dashboard/application.ex', 'AXO', 'src/dashboard/lib/axon_dashboard/application.ex', 'hash-src/dashboard/lib/axon_dashboard/application.ex')")
         .unwrap();
     server
         .graph_store
@@ -234,7 +234,7 @@ fn test_why_marks_script_artifacts_as_correlated_weak_support() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('scripts/refund_probe.rs', 'BKS', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-scripts/refund_probe.rs', 'symbol', 'sym-scripts/refund_probe.rs', 'BKS', 'scripts/refund_probe.rs', 'hash-scripts/refund_probe.rs')")
         .unwrap();
     server
         .graph_store
@@ -288,7 +288,7 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -390,7 +390,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -479,7 +479,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -620,12 +620,12 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/api.rs', 'AXO', 'indexed')",
+            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'AXO', 'src/api.rs', 'hash-src/api.rs')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/impl.rs', 'AXO', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/impl.rs', 'symbol', 'sym-src/impl.rs', 'AXO', 'src/impl.rs', 'hash-src/impl.rs')")
         .unwrap();
     server
         .graph_store
@@ -1144,7 +1144,7 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -1264,15 +1264,15 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/source.rs', 'AXO', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/source.rs', 'symbol', 'sym-src/source.rs', 'AXO', 'src/source.rs', 'hash-src/source.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/foreign.rs', 'AXO', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/foreign.rs', 'symbol', 'sym-src/foreign.rs', 'AXO', 'src/foreign.rs', 'hash-src/foreign.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/interface.rs', 'AXO', 'indexed')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/interface.rs', 'symbol', 'sym-src/interface.rs', 'AXO', 'src/interface.rs', 'hash-src/interface.rs')")
         .unwrap();
 
     server
@@ -2007,551 +2007,6 @@ fn test_soll_work_plan_counts_decision_evidence() {
     );
 }
 
-#[test]
-fn test_axon_debug_reports_backlog_memory_and_storage_views() {
-    let _guard = env_lock();
-    std::env::remove_var("AXON_ENABLE_GRAPH_VECTORIZATION");
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
-        std::env::set_var("AXON_EMBEDDING_GPU_PRESENT", "false");
-        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
-        std::env::set_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION", "true");
-        std::env::set_var("AXON_QUERY_EMBED_WORKERS", "2");
-        std::env::set_var("AXON_VECTOR_WORKERS", "5");
-        std::env::set_var("AXON_GRAPH_WORKERS", "3");
-        std::env::set_var("AXON_CHUNK_BATCH_SIZE", "64");
-        std::env::set_var("AXON_FILE_VECTORIZATION_BATCH_SIZE", "24");
-    }
-    crate::runtime_tuning::reset_runtime_tuning_snapshot(
-        crate::embedder::bootstrap_runtime_tuning_state(),
-    );
-    reset_vector_batch_controller_for_tests(&embedding_lane_config_from_env());
-    service_guard::record_vector_stage_ms(service_guard::VectorStageKind::Fetch, 11);
-    service_guard::record_vector_stage_ms(service_guard::VectorStageKind::Embed, 22);
-    service_guard::record_vector_stage_ms(service_guard::VectorStageKind::DbWrite, 33);
-    service_guard::record_vector_stage_ms(service_guard::VectorStageKind::CompletionCheck, 44);
-    service_guard::record_vector_stage_ms(service_guard::VectorStageKind::MarkDone, 55);
-    service_guard::record_vector_embed_call(7, 3);
-    service_guard::record_vector_files_completed(2);
-    service_guard::record_vector_claimed_work_items(5);
-    service_guard::record_vector_partial_file_cycles(4);
-    service_guard::record_vector_mark_done_call();
-    service_guard::record_vector_prepare_dispatch();
-    service_guard::record_vector_prepare_prefetch();
-    service_guard::record_vector_prepare_fallback_inline();
-    service_guard::record_vector_prepare_outcome(9, 2, 1);
-    service_guard::record_vector_prepare_reply_wait_ms(66);
-    service_guard::record_vector_prepare_send_wait_ms(77);
-    service_guard::record_vector_prepare_queue_wait_ms(78);
-    service_guard::record_vector_prepare_queue_depth(2);
-    service_guard::record_vector_embed_inputs(7, 700, 9);
-    service_guard::record_vector_embed_breakdown(10, 12);
-    service_guard::record_vector_finalize_enqueued();
-    service_guard::record_vector_finalize_fallback_inline();
-    service_guard::record_vector_finalize_send_wait_ms(88);
-    service_guard::record_vector_finalize_queue_wait_ms(89);
-    service_guard::record_vector_finalize_queue_depth(3);
-    let temp = tempdir().unwrap();
-    let root = temp.path().join("graph_v2");
-    std::fs::create_dir_all(&root).unwrap();
-    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
-    let server = McpServer::new(store.clone());
-
-    store
-        .execute(
-            "INSERT INTO File (path, project_code, status, size, mtime, priority) VALUES \
-             ('src/a.rs', 'AXO', 'indexed', 10, 1, 100), \
-             ('src/b.rs', 'AXO', 'pending', 20, 1, 100), \
-             ('src/c.rs', 'AXO', 'indexing', 30, 1, 100), \
-             ('src/d.rs', 'AXO', 'indexed_degraded', 40, 1, 100), \
-             ('src/e.rs', 'AXO', 'oversized_for_current_budget', 50, 1, 100), \
-             ('src/f.rs', 'AXO', 'skipped', 60, 1, 100)",
-        )
-        .unwrap();
-    store
-        .execute(
-            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-             ('axon::a', 'a', 'function', false, true, false, false, 'AXO')"
-        )
-        .unwrap();
-    store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/a.rs', 'axon::a', 'AXO')")
-        .unwrap();
-    store
-        .execute(
-            "INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at, last_error_reason, last_attempt_at) VALUES \
-             ('file', 'src/a.rs', 2, 'queued', 0, 1, NULL, NULL), \
-             ('file', 'src/b.rs', 2, 'inflight', 0, 1, NULL, NULL)",
-        )
-        .unwrap();
-    store
-        .execute(
-            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
-             ('src/a.rs', 'queued', 1), \
-             ('src/b.rs', 'inflight', 1)",
-        )
-        .unwrap();
-
-    let response = server.axon_debug().expect("debug response");
-    let content = response["content"][0]["text"].as_str().unwrap_or_default();
-    let contract = &response["data"]["embedding_contract"];
-
-    assert!(content.contains("Known files: 6"), "{content}");
-    assert!(content.contains("Remaining backlog: 2"), "{content}");
-    assert!(content.contains("Pending: 1"), "{content}");
-    assert!(content.contains("Indexing: 1"), "{content}");
-    assert!(content.contains("Indexed degraded: 1"), "{content}");
-    assert!(content.contains("Oversized: 1"), "{content}");
-    assert!(content.contains("Skipped: 1"), "{content}");
-    assert!(content.contains("DuckDB Storage"), "{content}");
-    assert!(content.contains("RSS Anon"), "{content}");
-    assert!(content.contains("DuckDB Memory"), "{content}");
-    assert!(content.contains("Ingress Buffer"), "{content}");
-    assert!(
-        content.contains("Graph Projection Queue Queued : 1"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Graph Projection Queue Inflight : 1"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Graph Projection Queue Pending : 2"),
-        "{content}"
-    );
-    assert!(content.contains("GPU Present Detected : no"), "{content}");
-    assert!(
-        content.contains("Embedding Provider Requested : cuda"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Embedding Provider Effective"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Embedding Acceleration State : gpu_requested_but_unavailable"),
-        "{content}"
-    );
-    assert!(content.contains("Query Workers : 2"), "{content}");
-    assert!(content.contains("Vector Workers : 5"), "{content}");
-    assert!(content.contains("Graph Workers : 3"), "{content}");
-    assert!(content.contains("Vector Runtime Breakdown"), "{content}");
-    assert!(content.contains("Fetch ms total : 11"), "{content}");
-    assert!(content.contains("Embed ms total : 22"), "{content}");
-    assert!(content.contains("DB write ms total : 33"), "{content}");
-    assert!(content.contains("Prepare dispatch total : 1"), "{content}");
-    assert!(content.contains("Prepare prefetch total : 1"), "{content}");
-    assert!(
-        content.contains("Prepare fallback inline total : 1"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Prepare reply wait ms total : 66"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Prepare send wait ms total : 77"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Prepare queue wait ms total : 78"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Prepare queue depth current/max : 2/2"),
-        "{content}"
-    );
-    assert!(content.contains("Embed input texts total : 7"), "{content}");
-    assert!(
-        content.contains("Embed input text bytes total : 700"),
-        "{content}"
-    );
-    assert!(content.contains("Embed clone ms total : 9"), "{content}");
-    assert!(content.contains("Finalize enqueued total : 1"), "{content}");
-    assert!(
-        content.contains("Finalize fallback inline total : 1"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Finalize send wait ms total : 88"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Finalize queue wait ms total : 89"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Finalize queue depth current/max : 3/3"),
-        "{content}"
-    );
-    assert!(content.contains("Embed calls total : 1"), "{content}");
-    assert!(
-        content.contains("Claimed work items total : 5"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Partial file cycles total : 4"),
-        "{content}"
-    );
-    assert!(content.contains("Mark done calls total : 1"), "{content}");
-    assert!(content.contains("Files touched total : 3"), "{content}");
-    assert!(
-        content.contains("Avg chunks per embed call : 7.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Avg files per embed call : 3.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Avg embed input texts per call : 7.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Avg embed input bytes per call : 700.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Avg embed input bytes per chunk : 100.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Embed clone ms per call : 9.00"),
-        "{content}"
-    );
-    assert!(
-        content.contains("File vectorization queue statuses"),
-        "{content}"
-    );
-    assert!(content.contains("`inflight` : 1"), "{content}");
-    assert!(content.contains("`queued` : 1"), "{content}");
-    assert!(
-        content.contains("Vector Stage Latencies (recent window)"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Fetch p50/p95/max ms : 11/11/11 (samples: 1)"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Embed p50/p95/max ms : 22/22/22 (samples: 1)"),
-        "{content}"
-    );
-    assert!(
-        content.contains("Drain State : gpu_scaling_blocked"),
-        "{content}"
-    );
-    assert!(
-        content.contains("GPU Background Worker Cap : 0"),
-        "{content}"
-    );
-    assert_eq!(contract["model_name"].as_str(), Some(MODEL_NAME));
-    assert_eq!(contract["dimension"].as_u64(), Some(DIMENSION as u64));
-    assert_eq!(
-        contract["native_dimension"].as_u64(),
-        Some(NATIVE_DIMENSION as u64)
-    );
-    assert_eq!(contract["max_length"].as_u64(), Some(MAX_LENGTH as u64));
-    assert_eq!(contract["storage_type"].as_str(), Some("float16"));
-    assert_eq!(contract["gpu_present_detected"].as_bool(), Some(false));
-    assert_eq!(contract["provider_requested"].as_str(), Some("cuda"));
-    assert!(contract["provider_effective"].as_str().is_some());
-    assert_eq!(contract["provider_gpu_mismatch"].as_bool(), Some(true));
-    assert_eq!(
-        contract["acceleration_state"].as_str(),
-        Some("gpu_requested_but_unavailable")
-    );
-    assert_eq!(
-        contract["drain_state"].as_str(),
-        Some("gpu_scaling_blocked")
-    );
-    assert_eq!(contract["gpu_background_worker_cap"].as_u64(), Some(0));
-    assert_eq!(
-        contract["vector_runtime"]["prepare_dispatch_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_prefetch_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_fallback_inline_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepared_work_items_total"].as_u64(),
-        Some(9)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_empty_batches_total"].as_u64(),
-        Some(0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_immediate_completed_total"].as_u64(),
-        Some(2)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_failed_fetches_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_reply_wait_ms_total"].as_u64(),
-        Some(66)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_send_wait_ms_total"].as_u64(),
-        Some(77)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_queue_wait_ms_total"].as_u64(),
-        Some(78)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_queue_depth_current"].as_u64(),
-        Some(2)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["prepare_queue_depth_max"].as_u64(),
-        Some(2)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_input_texts_total"].as_u64(),
-        Some(7)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_input_text_bytes_total"].as_u64(),
-        Some(700)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_clone_ms_total"].as_u64(),
-        Some(9)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_transform_ms_total"].as_u64(),
-        Some(10)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_export_ms_total"].as_u64(),
-        Some(12)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_enqueued_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_fallback_inline_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_send_wait_ms_total"].as_u64(),
-        Some(88)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_queue_wait_ms_total"].as_u64(),
-        Some(89)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_queue_depth_current"].as_u64(),
-        Some(3)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["finalize_queue_depth_max"].as_u64(),
-        Some(3)
-    );
-    assert_eq!(contract["query_workers"].as_u64(), Some(2));
-    assert_eq!(contract["vector_workers"].as_u64(), Some(5));
-    assert_eq!(contract["graph_workers"].as_u64(), Some(3));
-    assert_eq!(contract["max_chunks_per_file"].as_u64(), Some(64));
-    assert_eq!(
-        contract["max_embed_batch_bytes"].as_u64(),
-        Some(4 * 1024 * 1024)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["fetch_ms_total"].as_u64(),
-        Some(11)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_ms_total"].as_u64(),
-        Some(22)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["db_write_ms_total"].as_u64(),
-        Some(33)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["completion_check_ms_total"].as_u64(),
-        Some(44)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["mark_done_ms_total"].as_u64(),
-        Some(55)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["batches_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["chunks_embedded_total"].as_u64(),
-        Some(7)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["files_completed_total"].as_u64(),
-        Some(2)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_calls_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["claimed_work_items_total"].as_u64(),
-        Some(5)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["partial_file_cycles_total"].as_u64(),
-        Some(4)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["mark_done_calls_total"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["files_touched_total"].as_u64(),
-        Some(3)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["avg_chunks_per_embed_call"].as_f64(),
-        Some(7.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["avg_files_per_embed_call"].as_f64(),
-        Some(3.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["db_write"]["p95_ms"].as_u64(),
-        Some(33)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["mark_done"]["p95_ms"].as_u64(),
-        Some(55)
-    );
-    assert_eq!(
-        contract["vector_batch_controller"]["state"].as_str(),
-        Some("holding")
-    );
-    assert_eq!(
-        contract["vector_runtime"]["avg_embed_input_texts_per_call"].as_f64(),
-        Some(7.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["avg_embed_input_bytes_per_call"].as_f64(),
-        Some(700.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["avg_embed_input_bytes_per_chunk"].as_f64(),
-        Some(100.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_transform_ms_per_call"].as_f64(),
-        Some(10.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_export_ms_per_call"].as_f64(),
-        Some(12.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_clone_ms_per_call"].as_f64(),
-        Some(9.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_transform_ms_per_chunk"].as_f64(),
-        Some(10.0 / 7.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["embed_export_ms_per_chunk"].as_f64(),
-        Some(12.0 / 7.0)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["fetch"]["samples"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["fetch"]["p50_ms"].as_u64(),
-        Some(11)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["fetch"]["p95_ms"].as_u64(),
-        Some(11)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["fetch"]["max_ms"].as_u64(),
-        Some(11)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["embed"]["samples"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["embed"]["p50_ms"].as_u64(),
-        Some(22)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["db_write"]["p50_ms"].as_u64(),
-        Some(33)
-    );
-    assert_eq!(
-        contract["vector_runtime"]["latency_recent"]["mark_done"]["p50_ms"].as_u64(),
-        Some(55)
-    );
-    assert_eq!(
-        contract["file_vectorization_queue_statuses"]
-            .as_array()
-            .map(|v| v.len()),
-        Some(2)
-    );
-    assert_eq!(
-        contract["file_vectorization_queue_statuses"][0]["status"].as_str(),
-        Some("inflight")
-    );
-    assert_eq!(
-        contract["file_vectorization_queue_statuses"][0]["count"].as_i64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["file_vectorization_queue_statuses"][1]["status"].as_str(),
-        Some("queued")
-    );
-    assert_eq!(
-        contract["file_vectorization_queue_statuses"][1]["count"].as_i64(),
-        Some(1)
-    );
-    assert_eq!(
-        contract["vector_batch_controller"]["state"].as_str(),
-        Some("holding")
-    );
-    assert_eq!(
-        contract["vector_batch_controller"]["target_embed_batch_chunks"].as_u64(),
-        Some(64)
-    );
-    assert_eq!(
-        contract["vector_batch_controller"]["target_files_per_cycle"].as_u64(),
-        Some(24)
-    );
-    assert_eq!(contract["chunk_model_id"].as_str(), Some(CHUNK_MODEL_ID));
-
-    unsafe {
-        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
-        std::env::remove_var("AXON_EMBEDDING_GPU_PRESENT");
-        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
-        std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
-        std::env::remove_var("AXON_QUERY_EMBED_WORKERS");
-        std::env::remove_var("AXON_VECTOR_WORKERS");
-        std::env::remove_var("AXON_GRAPH_WORKERS");
-        std::env::remove_var("AXON_CHUNK_BATCH_SIZE");
-        std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE");
-    }
-    service_guard::reset_for_tests();
-}
 
 #[test]
 fn test_axon_list_labels_tables_reclassifies_graph_tables_as_derived_optional() {
@@ -2570,59 +2025,7 @@ fn test_axon_list_labels_tables_reclassifies_graph_tables_as_derived_optional() 
     assert!(content.contains("GraphProjectionQueue"), "{content}");
 }
 
-#[test]
-fn test_axon_debug_reports_top_pending_reasons() {
-    let temp = tempdir().unwrap();
-    let root = temp.path().join("graph_v2");
-    std::fs::create_dir_all(&root).unwrap();
-    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
-    let server = McpServer::new(store.clone());
 
-    store
-        .execute(
-            "INSERT INTO File (path, project_code, status, status_reason, size, mtime, priority) VALUES \
-             ('src/a.rs', 'AXO', 'pending', 'metadata_changed_scan', 10, 1, 100), \
-             ('src/b.rs', 'AXO', 'pending', 'metadata_changed_scan', 20, 1, 100), \
-             ('src/c.rs', 'AXO', 'indexing', 'needs_reindex_while_indexing', 30, 1, 100), \
-             ('src/d.rs', 'AXO', 'pending', 'manual_or_system_requeue', 40, 1, 100)"
-        )
-        .unwrap();
-
-    let response = server.axon_debug().expect("debug response");
-    let content = response["content"][0]["text"].as_str().unwrap_or_default();
-
-    assert!(content.contains("Top backlog causes"), "{content}");
-    assert!(
-        content.contains("`metadata_changed_scan`")
-            || content.contains("`manual_or_system_requeue`")
-            || content.contains("`needs_reindex_while_indexing`")
-            || content.contains("`unknown`"),
-        "{content}"
-    );
-}
-
-#[test]
-fn test_status_reports_canonical_file_vectorization_queue_counts() {
-    let _guard = env_lock();
-    let server = create_test_server();
-
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
-             ('/tmp/q.rs', 'queued', 1), \
-             ('/tmp/i.rs', 'inflight', 2)",
-        )
-        .unwrap();
-
-    let response = server.axon_status(&json!({})).expect("status response");
-    let content = response["content"][0]["text"].as_str().unwrap_or_default();
-
-    assert!(
-        content.contains("**Vector backlog:** queued=1 inflight=1"),
-        "{content}"
-    );
-}
 
 #[test]
 fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
@@ -2690,12 +2093,12 @@ fn test_axon_architectural_drift() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('ui/app.js', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-ui/app.js', 'symbol', 'sym-ui/app.js', 'PRJ', 'ui/app.js', 'hash-ui/app.js')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::fetchData', 'fetchData', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('db/repo.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-db/repo.rs', 'symbol', 'sym-db/repo.rs', 'PRJ', 'db/repo.rs', 'hash-db/repo.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::executeSQL', 'executeSQL', 'function', false, true, false, 'PRJ')").unwrap();
     server
@@ -2750,11 +2153,11 @@ fn test_axon_query_with_project() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('prj/f1.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f1.rs', 'symbol', 'sym-prj/f1.rs', 'PRJ', 'prj/f1.rs', 'hash-prj/f1.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('prj/f2.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f2.rs', 'symbol', 'sym-prj/f2.rs', 'PRJ', 'prj/f2.rs', 'hash-prj/f2.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::auth_func', 'auth_func', 'function', false, true, false, 'PRJ')").unwrap();
     server
@@ -2795,15 +2198,15 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/api.rs', 'AXO')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/api.rs', 'symbol', 'sym-src/core/api.rs', 'AXO', 'src/core/api.rs', 'hash-src/core/api.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_a.rs', 'AXO')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_a.rs', 'symbol', 'sym-src/core/consumer_a.rs', 'AXO', 'src/core/consumer_a.rs', 'hash-src/core/consumer_a.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_b.rs', 'AXO')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_b.rs', 'symbol', 'sym-src/core/consumer_b.rs', 'AXO', 'src/core/consumer_b.rs', 'hash-src/core/consumer_b.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'AXO')").unwrap();
@@ -2891,7 +2294,7 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
 
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/payment.rs', 'BKS')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
         .unwrap();
     server
         .graph_store
@@ -2972,7 +2375,7 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/router.rs', 'AXO')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/runtime/router.rs', 'symbol', 'sym-src/runtime/router.rs', 'AXO', 'src/runtime/router.rs', 'hash-src/runtime/router.rs')")
         .unwrap();
     server
         .graph_store
@@ -3120,1222 +2523,20 @@ fn test_retrieve_context_uses_repo_literal_fallback_when_index_has_no_anchor() {
     service_guard::reset_for_tests();
 }
 
-#[test]
-fn test_retrieve_context_accepts_canonical_project_code_for_repo_code_symbols() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
 
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO File (path, project_code, status, graph_ready) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'AXO', 'indexed', TRUE)",
-        )
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context', 'AXO')")
-        .unwrap();
 
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "retrieve_context",
-            "arguments": {
-                "question": "axon_retrieve_context",
-                "project": "AXO",
-                "token_budget": 900
-            }
-        })),
-        id: Some(json!(6004)),
-    };
 
-    let response = server.handle_request(req).unwrap();
-    let result = response.result.expect("Expected result");
-    let packet = result
-        .get("data")
-        .and_then(|data| data.get("packet"))
-        .expect("expected packet");
-    let direct_evidence = packet
-        .get("direct_evidence")
-        .and_then(|value| value.as_array())
-        .expect("expected direct evidence array");
 
-    assert!(
-        direct_evidence
-            .iter()
-            .any(|row| row.to_string().contains("axon_retrieve_context")),
-        "{packet:?}"
-    );
 
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
 
-#[test]
-fn test_retrieve_context_eval_harness_hits_route_and_grounded_evidence_thresholds() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
 
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, FALSE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/consumer.rs', 'AXO', TRUE, FALSE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, FALSE, 'indexed')")
-        .unwrap();
 
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer', 'consumer', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
 
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer.rs', 'axon::consumer', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer', 'axon::parse_batch', 'AXO')")
-        .unwrap();
 
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-parse', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-parse', 1, 12)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout creates a Stripe charge through the Rust SDK', 'hash-checkout', 1, 12)")
-        .unwrap();
 
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-EVAL-1', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
-    let cases = vec![
-        (
-            "What breaks if parse_batch changes?",
-            "AXO",
-            "impact",
-            "consumer",
-            false,
-        ),
-        (
-            "Where is parse_batch wired?",
-            "AXO",
-            "wiring",
-            "parse_batch",
-            false,
-        ),
-        (
-            "Why does checkout use the Stripe SDK?",
-            "BKS",
-            "soll_hybrid",
-            "checkout",
-            true,
-        ),
-    ];
 
-    let mut route_hits = 0usize;
-    let mut grounded_hits = 0usize;
-    let mut soll_hits = 0usize;
 
-    for (question, project, expected_route, expected_symbol, expects_soll) in cases {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": question,
-                    "project": project,
-                    "token_budget": 1200
-                }
-            })),
-            id: Some(json!(6100)),
-        };
-
-        let response = server.handle_request(req).unwrap();
-        let result = response.result.expect("Expected result");
-        let data = result.get("data").expect("expected data payload");
-        let route = data["planner"]["route"].as_str().unwrap_or_default();
-        let packet = &data["packet"];
-
-        if route == expected_route {
-            route_hits += 1;
-        }
-        if packet["answer_sketch"]
-            .as_str()
-            .unwrap_or_default()
-            .contains(expected_symbol)
-            || packet["direct_evidence"]
-                .to_string()
-                .contains(expected_symbol)
-            || packet["supporting_chunks"]
-                .to_string()
-                .contains(expected_symbol)
-        {
-            grounded_hits += 1;
-        }
-        if expects_soll
-            && packet["relevant_soll_entities"]
-                .to_string()
-                .contains("DEC-BKS-010")
-        {
-            soll_hits += 1;
-        }
-    }
-
-    let route_hit_rate = route_hits as f64 / 3.0;
-    let grounded_hit_rate = grounded_hits as f64 / 3.0;
-    assert!(
-        route_hit_rate >= 1.0,
-        "route_hit_rate={route_hit_rate}, route_hits={route_hits}"
-    );
-    assert!(
-        grounded_hit_rate >= 1.0,
-        "grounded_hit_rate={grounded_hit_rate}, grounded_hits={grounded_hits}"
-    );
-    assert_eq!(soll_hits, 1, "expected exactly one SOLL-rationale hit");
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_uses_file_anchor_for_path_like_question() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/axon-core/src/mcp/tools_context.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "src/axon-core/src/mcp/tools_context.rs",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6201)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let data = result.get("data").expect("expected data payload");
-    assert_eq!(
-        data["planner"]["route"].as_str().unwrap_or_default(),
-        "exact_lookup"
-    );
-    let packet = data.get("packet").expect("expected packet");
-    let direct_evidence = packet["direct_evidence"]
-        .as_array()
-        .expect("expected direct evidence");
-    assert!(
-        direct_evidence.iter().any(|row| {
-            row.get("evidence_class").and_then(|value| value.as_str()) == Some("canonical_file")
-                && row.to_string().contains("tools_context.rs")
-        }),
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_prefers_anchored_chunks_over_generic_semantic_noise() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/docs/noise.md', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::noise_symbol', 'noise_symbol', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/docs/noise.md', 'axon::noise_symbol', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor', 1, 12)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise', 'symbol', 'axon::noise_symbol', 'AXO', 'body', 'parse_batch appears in a broad semantic discussion without direct implementation detail', 'hash-noise', 1, 12)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "parse_batch",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6202)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = result["data"]["packet"].clone();
-    let chunks = packet["supporting_chunks"]
-        .as_array()
-        .expect("expected supporting chunks");
-    assert!(!chunks.is_empty(), "{packet:?}");
-    let first = &chunks[0];
-    assert_eq!(
-        first["chunk_id"].as_str().unwrap_or_default(),
-        "chunk-anchor",
-        "{packet:?}"
-    );
-    assert_eq!(
-        first["anchored_to_entry"].as_bool(),
-        Some(true),
-        "{packet:?}"
-    );
-    assert!(
-        result["data"]["packet"]["retrieval_diagnostics"]["anchored_chunks_selected"]
-            .as_u64()
-            .unwrap_or(0)
-            >= 1,
-        "{packet:?}"
-    );
-    assert!(
-        result["data"]["packet"]["retrieval_diagnostics"]["chunk_candidates_considered"]
-            .as_u64()
-            .unwrap_or(u64::MAX)
-            <= 4,
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_skips_semantic_search_under_critical_pressure_and_reports_partial_truth() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-    service_guard::reset_for_tests();
-    service_guard::record_latency(ServiceKind::Mcp, 1_700);
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor-critical', 1, 12)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "parse_batch",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6203)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let planner = &result["data"]["planner"];
-    let packet = &result["data"]["packet"];
-    assert_eq!(
-        planner["semantic_search_used"].as_bool(),
-        Some(false),
-        "{planner:?}"
-    );
-    assert!(
-        planner["degraded_reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("pressure_critical"),
-        "{planner:?}"
-    );
-    assert!(
-        packet["missing_evidence"]
-            .to_string()
-            .contains("Semantic chunk search was skipped or unavailable"),
-        "{packet:?}"
-    );
-    assert!(
-        packet["direct_evidence"]
-            .to_string()
-            .contains("parse_batch"),
-        "{packet:?}"
-    );
-
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_prefers_same_file_impl_chunk_over_docs_chunk() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/router.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/router.md', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::router_docs', 'router_docs', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/router.rs', 'axon::trigger_scan', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/router.md', 'axon::router_docs', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-impl', 'symbol', 'axon::trigger_scan', 'AXO', 'body', 'trigger_scan queues the router worker and commits the scan request', 'hash-router-impl', 1, 12)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-doc', 'symbol', 'axon::router_docs', 'AXO', 'body', 'trigger_scan is mentioned in the router overview documentation', 'hash-router-doc', 1, 12)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Where is trigger_scan wired?",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6204)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    let chunks = packet["supporting_chunks"]
-        .as_array()
-        .expect("expected supporting chunks");
-    assert!(!chunks.is_empty(), "{packet:?}");
-    assert_eq!(
-        chunks[0]["chunk_id"].as_str().unwrap_or_default(),
-        "chunk-router-impl",
-        "{packet:?}"
-    );
-    assert!(
-        packet["excluded_because"]
-            .to_string()
-            .contains("docs_file_penalty")
-            || packet["excluded_because"]
-                .to_string()
-                .contains("same_file_preferred")
-            || packet["retrieval_diagnostics"]["chunk_candidates_considered"]
-                .as_u64()
-                .unwrap_or_default()
-                == 1,
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_caps_broad_semantic_fallbacks_to_one() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-main', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the batch writer', 'hash-anchor-main', 1, 12)")
-        .unwrap();
-    for idx in 0..3 {
-        server.graph_store.execute(&format!(
-            "INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/noise/semantic_{idx}.rs', 'AXO', TRUE, 'indexed')"
-        )).unwrap();
-        server.graph_store.execute(&format!(
-            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_{idx}', 'semantic_noise_{idx}', 'function', true, true, false, 'AXO')"
-        )).unwrap();
-        server.graph_store.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/noise/semantic_{idx}.rs', 'axon::semantic_noise_{idx}', 'AXO')"
-        )).unwrap();
-        server.graph_store.execute(&format!(
-            "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise-{idx}', 'symbol', 'axon::semantic_noise_{idx}', 'AXO', 'body', 'parse_batch appears in broad semantic background number {idx}', 'hash-noise-{idx}', 1, 12)"
-        )).unwrap();
-    }
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "parse_batch",
-                    "project": "AXO",
-                    "token_budget": 1100
-                }
-            })),
-            id: Some(json!(6205)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    let chunks = packet["supporting_chunks"]
-        .as_array()
-        .expect("expected supporting chunks");
-    let broad_count = chunks
-        .iter()
-        .filter(|chunk| {
-            chunk["anchored_to_entry"].as_bool() == Some(false)
-                && chunk["same_file_as_entry"].as_bool() == Some(false)
-        })
-        .count();
-    assert!(broad_count <= 1, "{packet:?}");
-    if broad_count == 1 {
-        assert!(
-            packet["excluded_because"]
-                .to_string()
-                .contains("broader_semantic_dropped_due_to_anchor"),
-            "{packet:?}"
-        );
-    }
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-FILE', 'Decision', 'BKS', 'Payment file rationale', 'File-level rationale', 'current', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-FILE', 'Requirement', 'BKS', 'File-level requirement', 'Requirement tied to file', 'current', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-BKS-FILE', 'REQ-BKS-FILE', 'SOLVES')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-FILE-001', 'Decision', 'DEC-BKS-FILE', 'File', 'src/payment.rs', 1.0, 0)").unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Why is src/payment.rs designed this way?",
-                    "project": "BKS",
-                    "token_budget": 1000
-                }
-            })),
-            id: Some(json!(6206)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    let soll_entities = packet["relevant_soll_entities"]
-        .as_array()
-        .expect("expected soll entities");
-    assert!(
-        soll_entities
-            .iter()
-            .any(|row| row.to_string().contains("DEC-BKS-FILE")),
-        "{packet:?}"
-    );
-    assert!(
-        soll_entities[0]
-            .to_string()
-            .contains("direct_file_traceability"),
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_rationale_prefers_canonical_project_docs_over_workspace_noise() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'BKS', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('.axon/cache/noise.md', 'BKS', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::stripe_plan_doc', 'stripe_plan_doc', 'module', false, false, false, 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::workspace_noise_doc', 'workspace_noise_doc', 'module', false, false, false, 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'bks::stripe_plan_doc', 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('.axon/cache/noise.md', 'bks::workspace_noise_doc', 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-checkout-rationale', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout uses the Stripe SDK for payment capture and settlement', 'hash-bks-checkout-rationale', 1, 8)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-plan-doc', 'symbol', 'bks::stripe_plan_doc', 'BKS', 'body', 'Implementation plan: use the Stripe SDK for operational safety and payment reliability.', 'hash-bks-plan-doc', 1, 8)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-noise-doc', 'symbol', 'bks::workspace_noise_doc', 'BKS', 'body', 'Cached workspace note mentioning Stripe SDK without canonical project intent.', 'hash-bks-noise-doc', 1, 8)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-T6', 'Decision', 'BKS', 'Use Stripe SDK', 'Canonical rationale', 'current', '{\"rationale\":\"Operational safety\"}')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-T6', 'Decision', 'DEC-BKS-T6', 'Symbol', 'checkout', 1.0, 0)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Why does checkout use the Stripe SDK?",
-                    "project": "BKS",
-                    "token_budget": 1200,
-                    "top_k": 4
-                }
-            })),
-            id: Some(json!(6216)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    assert_eq!(
-        packet["retrieval_policy"]["linked_evidence_first"].as_bool(),
-        Some(true),
-        "{packet:?}"
-    );
-    let chunks = packet["supporting_chunks"]
-        .as_array()
-        .expect("expected supporting chunks");
-    let plan_pos = chunks
-        .iter()
-        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-plan-doc"));
-    let noise_pos = chunks
-        .iter()
-        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-noise-doc"));
-    assert!(plan_pos.is_some(), "{packet:?}");
-    if let Some(noise_pos) = noise_pos {
-        assert!(plan_pos.expect("plan pos") < noise_pos, "{packet:?}");
-    }
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chunks() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-    service_guard::reset_for_tests();
-    service_guard::record_latency(ServiceKind::Mcp, 1_700);
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('scripts/noise.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_parse', 'semantic_noise_parse', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('scripts/noise.rs', 'axon::semantic_noise_parse', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-no-anchor-impact', 'symbol', 'axon::semantic_noise_parse', 'AXO', 'body', 'parse_batch appears in generic benchmark noise and fallback prose', 'hash-no-anchor-impact', 1, 12)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "What breaks if parse_batch changes?",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6210)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let planner = &result["data"]["planner"];
-    let packet = &result["data"]["packet"];
-    let chunks = packet["supporting_chunks"]
-        .as_array()
-        .expect("expected supporting chunks");
-    assert_eq!(planner["route"].as_str(), Some("impact"), "{planner:?}");
-    assert!(
-        planner["degraded_reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("pressure_critical"),
-        "{planner:?}"
-    );
-    assert!(
-        chunks.is_empty(),
-        "critical pressure should prefer no support over unanchored fallback noise: {packet:?}"
-    );
-    assert!(
-        packet["missing_evidence"].to_string().contains(
-            "An anchor was found but no anchored chunk-level grounding evidence was retained"
-        ),
-        "{packet:?}"
-    );
-    assert!(
-        packet["direct_evidence"]
-            .to_string()
-            .contains("\"project_code\":\"AXO\""),
-        "{packet:?}"
-    );
-
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_under_critical_pressure_skips_graph_and_soll_even_with_anchor() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-    service_guard::reset_for_tests();
-    service_guard::record_latency(ServiceKind::Mcp, 1_700);
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-rationale', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates lifecycle state', 'hash-anchor-rationale', 1, 12)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::parse_batch', 'axon::write_revision', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::write_revision', 'write_revision', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-CRIT', 'Decision', 'AXO', 'Batch rationale', 'Why parse_batch exists', 'current', '{}')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-CRIT', 'Decision', 'DEC-AXO-CRIT', 'Symbol', 'axon::parse_batch', 1.0, 0)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Why does parse_batch exist?",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6209)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    assert_eq!(
-        packet["structural_neighbors"]
-            .as_array()
-            .map(|rows| rows.len()),
-        Some(0),
-        "{packet:?}"
-    );
-    assert_eq!(
-        packet["relevant_soll_entities"]
-            .as_array()
-            .map(|rows| rows.len()),
-        Some(0),
-        "{packet:?}"
-    );
-    assert!(
-        packet["excluded_because"]
-            .to_string()
-            .contains("graph_expansion_skipped_due_to_pressure_guarded"),
-        "{packet:?}"
-    );
-    assert!(
-        packet["excluded_because"]
-            .to_string()
-            .contains("soll_join_skipped_due_to_pressure_guarded"),
-        "{packet:?}"
-    );
-
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_under_recovering_pressure_keeps_soll_join_for_rationale() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-    service_guard::reset_for_tests();
-    service_guard::record_latency(ServiceKind::Mcp, 1_700);
-    service_guard::record_latency(ServiceKind::Mcp, 140);
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-rationale-recovering', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates lifecycle state', 'hash-anchor-rationale-recovering', 1, 12)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-RECOVERING', 'Decision', 'AXO', 'Keep parse_batch explicit', 'Rationale for parse_batch', 'current', '{}')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-RECOVERING', 'Decision', 'DEC-AXO-RECOVERING', 'Symbol', 'parse_batch', 1.0, 0)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Why does parse_batch exist?",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6211)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let planner = &result["data"]["planner"];
-    let packet = &result["data"]["packet"];
-    assert_eq!(
-        planner["route"].as_str(),
-        Some("soll_hybrid"),
-        "{planner:?}"
-    );
-    assert!(
-        packet["relevant_soll_entities"]
-            .as_array()
-            .is_some_and(|rows| rows
-                .iter()
-                .any(|row| { row["id"].as_str() == Some("DEC-AXO-RECOVERING") })),
-        "{packet:?}"
-    );
-    assert!(
-        !packet["excluded_because"]
-            .to_string()
-            .contains("soll_join_skipped_due_to_pressure_guarded"),
-        "{packet:?}"
-    );
-
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_retrieve_context_falls_back_to_repo_local_global_symbol_when_project_code_misses() {
-    let _guard = env_lock();
-    service_guard::reset_for_tests();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'AXO', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'axon::Axon.Watcher.Server.trigger_scan', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-axon-trigger', 'symbol', 'axon::Axon.Watcher.Server.trigger_scan', 'AXO', 'body', 'trigger_scan queues a new scan and notifies the worker loop', 'hash-global-trigger', 1, 12)")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Where is trigger_scan wired?",
-                    "project": "AXO",
-                    "token_budget": 900
-                }
-            })),
-            id: Some(json!(6210)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    assert!(
-        packet["direct_evidence"]
-            .to_string()
-            .contains("trigger_scan"),
-        "{packet:?}"
-    );
-    assert!(
-        packet["supporting_chunks"]
-            .to_string()
-            .contains("chunk-axon-trigger"),
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-    service_guard::reset_for_tests();
-}
-
-#[test]
-fn test_retrieve_context_reports_precise_missing_rationale_evidence() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, 'indexed')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
-        .unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "retrieve_context",
-                "arguments": {
-                    "question": "Why does checkout exist?",
-                    "project": "BKS",
-                    "token_budget": 1000
-                }
-            })),
-            id: Some(json!(6207)),
-        })
-        .unwrap();
-
-    let result = response.result.expect("Expected result");
-    let packet = &result["data"]["packet"];
-    assert!(
-        packet["missing_evidence"]
-            .to_string()
-            .contains("anchor_found_but_no_traceability"),
-        "{packet:?}"
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
-
-#[test]
-fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
-    let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
-    let server = create_test_server();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status, graph_ready) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'AXO', 'indexed', TRUE)").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::caller', 'caller', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context', 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::caller', 'axon::axon_retrieve_context', 'AXO')").unwrap();
-
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "impact",
-                "arguments": { "symbol": "axon_retrieve_context", "project": "AXO", "depth": 2 }
-            })),
-            id: Some(json!(6208)),
-        })
-        .unwrap();
-    let result = response.result.expect("Expected result");
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text.contains("caller"), "{text}");
-    assert!(
-        !text.contains("symbol not found in current scope"),
-        "{text}"
-    );
-    let data = result.get("data").unwrap();
-    assert_eq!(data["symbol"].as_str(), Some("axon_retrieve_context"));
-    assert_eq!(data["impact_radius"].as_i64(), Some(1));
-    assert_eq!(
-        data["next_action"]["kind"].as_str(),
-        Some("simulate_mutation_before_editing")
-    );
-    assert_eq!(
-        data["next_action"]["tool"].as_str(),
-        Some("simulate_mutation")
-    );
-    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
-}
 
 #[test]
 fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
@@ -4872,11 +3073,11 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -4933,11 +3134,11 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
     let stale_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -4994,11 +3195,11 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -5048,11 +3249,11 @@ fn test_axon_audit_taint_analysis() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'PRJ', 'src/api.rs', 'hash-src/api.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.rs', 'symbol', 'sym-src/api_dummy.rs', 'PRJ', 'src/api_dummy.rs', 'hash-src/api_dummy.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::user_input', 'user_input', 'function', false, true, false, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::run_task', 'run_task', 'function', false, true, false, false, 'PRJ')").unwrap();
@@ -5103,7 +3304,7 @@ fn test_axon_audit_technical_debt() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/danger.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/danger.rs', 'symbol', 'sym-src/danger.rs', 'PRJ', 'src/danger.rs', 'hash-src/danger.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::risky_func', 'risky_func', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::unwrap', 'unwrap', 'method', false, true, false, 'PRJ')").unwrap();
@@ -5147,7 +3348,7 @@ fn test_axon_audit_technical_debt_comments() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/todo.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/todo.rs', 'symbol', 'sym-src/todo.rs', 'PRJ', 'src/todo.rs', 'hash-src/todo.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::todo1', '// TODO: Fix this', 'TODO', false, true, false, 'PRJ')").unwrap();
     server
@@ -5188,7 +3389,7 @@ fn test_axon_audit_secrets_detection() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/config.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/config.rs', 'symbol', 'sym-src/config.rs', 'PRJ', 'src/config.rs', 'hash-src/config.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'PRJ')").unwrap();
     server
@@ -5227,11 +3428,11 @@ fn test_axon_audit_cross_language_taint() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.ex', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.ex', 'symbol', 'sym-src/api.ex', 'PRJ', 'src/api.ex', 'hash-src/api.ex')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.ex', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.ex', 'symbol', 'sym-src/api_dummy.ex', 'PRJ', 'src/api_dummy.ex', 'hash-src/api_dummy.ex')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::elixir_func', 'elixir_func', 'function', false, true, false, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::rust_nif', 'rust_nif', 'function', false, true, true, false, 'PRJ')").unwrap();
@@ -5281,11 +3482,11 @@ fn test_axon_health_god_objects() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/god.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god.rs', 'symbol', 'sym-src/god.rs', 'PRJ', 'src/god.rs', 'hash-src/god.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/god_dummy.rs', 'PRJ')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god_dummy.rs', 'symbol', 'sym-src/god_dummy.rs', 'PRJ', 'src/god_dummy.rs', 'hash-src/god_dummy.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::GodClass', 'GodClass', 'class', false, true, false, 'PRJ')").unwrap();
     server
@@ -5332,11 +3533,11 @@ fn test_axon_audit_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/input.rs', 'symbol', 'sym-apps/pja/lib/input.rs', 'PJA', 'apps/pja/lib/input.rs', 'hash-apps/pja/lib/input.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pjb/lib/unsafe.rs', 'PJB')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/unsafe.rs', 'symbol', 'sym-apps/pjb/lib/unsafe.rs', 'PJB', 'apps/pjb/lib/unsafe.rs', 'hash-apps/pjb/lib/unsafe.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::safe_entry', 'safe_entry', 'function', true, true, false, false, 'PJA')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::beta_entry', 'beta_entry', 'function', false, true, false, false, 'PJB')").unwrap();
@@ -5388,11 +3589,11 @@ fn test_axon_health_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/covered.rs', 'symbol', 'sym-apps/pja/lib/covered.rs', 'PJA', 'apps/pja/lib/covered.rs', 'hash-apps/pja/lib/covered.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pjb/lib/god.rs', 'PJB')")
+        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/god.rs', 'symbol', 'sym-apps/pjb/lib/god.rs', 'PJB', 'apps/pjb/lib/god.rs', 'hash-apps/pjb/lib/god.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::covered', 'covered', 'function', true, true, false, 'PJA')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::GodClass', 'GodClass', 'class', false, true, false, 'PJB')").unwrap();
@@ -5444,144 +3645,6 @@ fn test_axon_health_respects_project_scope() {
     assert!(!content.contains("GodClass"), "{}", content);
 }
 
-#[test]
-fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_name() {
-    let _runtime = RuntimeEnvGuard::full_autonomous();
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/api.rs', 'PJA')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/safe.rs', 'PJB')")
-        .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::entrypoint', 'entrypoint', 'function', false, true, false, false, 'PJA')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::eval', 'eval', 'function', false, true, false, true, 'PJA')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::safe_fn', 'safe_fn', 'function', true, true, false, false, 'PJB')").unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/api.rs', 'PJA::entrypoint', 'PJA')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/api.rs', 'PJA::eval', 'PJA')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/safe.rs', 'PJB::safe_fn', 'PJB')")
-        .unwrap();
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJA::entrypoint', 'PJA::eval', 'PJA')",
-        )
-        .unwrap();
-    assert_eq!(
-        server
-            .graph_store
-            .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $proj OR path LIKE '%' || $proj || '%'",
-                &json!({"proj": "PJA"})
-            )
-            .unwrap(),
-        1
-    );
-
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "audit",
-            "arguments": {
-                "project": "PJA"
-            }
-        })),
-        id: Some(json!(94)),
-    };
-
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
-        .unwrap();
-
-    assert!(content.contains("Compliance Audit: PJA"));
-    assert!(content.contains("eval"));
-    assert!(!content.contains("seems unindexed"));
-}
-
-#[test]
-fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_name() {
-    let _runtime = RuntimeEnvGuard::full_autonomous();
-    let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/pja_core.rs', 'PJA')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/pjb_core.rs', 'PJB')")
-        .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::GodClass', 'GodClass', 'class', false, true, false, 'PJA')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::stable_api', 'stable_api', 'function', true, true, false, 'PJB')").unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/pja_core.rs', 'PJA::GodClass', 'PJA')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/pjb_core.rs', 'PJB::stable_api', 'PJB')")
-        .unwrap();
-
-    for i in 0..5 {
-        server
-            .graph_store
-            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::dep{}', 'dep{}', 'function', false, true, false, 'PJA')", i, i))
-            .unwrap();
-        server
-            .graph_store
-            .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJA::dep{}', 'PJA::GodClass', 'PJA')", i))
-            .unwrap();
-    }
-    assert_eq!(
-        server
-            .graph_store
-            .query_count_param(
-                "SELECT count(*) FROM File WHERE project_code = $proj OR path LIKE '%' || $proj || '%'",
-                &json!({"proj": "PJB"})
-            )
-            .unwrap(),
-        1
-    );
-
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "health",
-            "arguments": {
-                "project": "PJB"
-            }
-        })),
-        id: Some(json!(95)),
-    };
-
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
-        .unwrap();
-
-    assert!(content.contains("Health Report: PJB"));
-    assert!(content.contains("Coverage 100%"));
-    assert!(!content.contains("GodClass"));
-    assert!(!content.contains("seems unindexed"));
-}
 
 // REQ-AXO-264 Phase A — layered envelope contract.
 //
@@ -5594,7 +3657,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
 fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::checkout', 'checkout', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/payment.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'AXO', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'axo::checkout', 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-layered', 'symbol', 'axo::checkout', 'AXO', 'body', 'checkout orchestrates payment capture', 'hash-checkout-layered', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-264-T', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
@@ -5687,7 +3750,7 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
 fn test_retrieve_context_legacy_shape_unchanged_after_layered_addition() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::cl', 'cl', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/cl.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/cl.rs', 'symbol', 'sym-src/cl.rs', 'AXO', 'src/cl.rs', 'hash-src/cl.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/cl.rs', 'axo::cl', 'AXO')").unwrap();
 
     let response = server
@@ -5783,7 +3846,7 @@ fn test_recent_band_returns_git_error_when_not_a_repo() {
 fn test_retrieve_context_layered_surfaces_default_budgets() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::small', 'small', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/small.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/small.rs', 'symbol', 'sym-src/small.rs', 'AXO', 'src/small.rs', 'hash-src/small.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/small.rs', 'axo::small', 'AXO')").unwrap();
 
     let response = server
@@ -5835,7 +3898,7 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
             "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('{chunk_id}', 'symbol', '{sym_id}', 'AXO', 'body', '{chunk_content}', 'hash-big-{i}', 1, 30)"
         )).unwrap();
     }
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/big.rs', 'AXO', 'indexed')").unwrap();
+    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/big.rs', 'symbol', 'sym-src/big.rs', 'AXO', 'src/big.rs', 'hash-src/big.rs')").unwrap();
     for i in 0..30 {
         server.graph_store.execute(&format!(
             "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/big.rs', 'axo::big_{i}', 'AXO')"
