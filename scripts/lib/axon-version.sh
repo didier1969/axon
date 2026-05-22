@@ -77,7 +77,23 @@ axon_resolve_version() {
 
     package_version="$(axon_package_version "$project_root")"
 
-    if [[ -f "$build_info_file" ]]; then
+    # REQ-AXO-901661 — Source `bin/*.build-info` ONLY for the live instance.
+    #
+    # `bin/axon-core.build-info` is stamped by `axon setup --artifact-only`
+    # during a live promote. Sourcing it from a DEV start.sh leaks the live
+    # promote's `AXON_BUILD_ID` / `AXON_RELEASE_VERSION` /
+    # `AXON_INSTALL_GENERATION` into the dev brain — so MCP `status` reports
+    # the live's `runtime_version.build_id` instead of dev's actual git
+    # describe at start time. That falsifies the `feedback_dev_first_no_exception`
+    # gate (REQ-AXO-901659 / 901660) which compares dev brain build_id to
+    # the candidate HEAD short-sha : with the leak, dev appears to "already
+    # run the candidate" indefinitely and the gate is effectively bypassed.
+    #
+    # Fix : restrict the source to `AXON_INSTANCE_KIND == "live"`. Dev,
+    # test, and other instances fall through to `axon_workspace_build_id`
+    # which runs `git describe --tags --always --dirty` at start time —
+    # giving each instance a build_id that reflects its actual code state.
+    if [[ "${AXON_INSTANCE_KIND:-live}" == "live" && -f "$build_info_file" ]]; then
         # shellcheck disable=SC1090
         source "$build_info_file"
     fi
