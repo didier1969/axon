@@ -571,8 +571,20 @@ impl McpServer {
         // `soll_pg` until the snapshot exposes pagination by entity_type.
         let total_available =
             (visions.len() + reqs.len() + decisions.len() + revisions.len()) as u64;
+        // REQ-AXO-901616 — surface a structured compact summary in the
+        // text response so MCP clients that only display content[].text
+        // (no data.*) still get actionable bootstrap info. The previous
+        // text "SOLL context for {project} loaded." was a dead-end for
+        // every LLM that didn't know to inspect `data.*`.
+        let text = format_soll_query_context_summary(
+            &project_code,
+            &visions,
+            &reqs,
+            &decisions,
+            &revisions,
+        );
         let response = json!({
-            "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
+            "content": [{"type":"text","text": text}],
             "data": {
                 "project_code": project_code,
                 "visions": visions,
@@ -588,6 +600,132 @@ impl McpServer {
         Self::write_soll_context_cache(cache_key, now_ms, &response);
         Some(response)
     }
+}
+
+/// REQ-AXO-901616 — render a token-thrifty multi-line summary of the SOLL
+/// context query result, surfacing canonical IDs + status counts in the
+/// `content[].text` response so MCP clients that only display text still
+/// get an actionable bootstrap view.
+///
+/// Row formats (built by axon_soll_query_context above) :
+///   - visions  : "id|title|status|description"
+///   - reqs     : "id|title|status"
+///   - decisions: "id|title|status"
+///   - revisions: "revision_id|summary|author"
+pub(super) fn format_soll_query_context_summary(
+    project_code: &str,
+    visions: &[String],
+    reqs: &[String],
+    decisions: &[String],
+    revisions: &[String],
+) -> String {
+    fn split_row(row: &str, max_parts: usize) -> Vec<&str> {
+        row.splitn(max_parts, '|').collect()
+    }
+
+    fn status_counts<F>(rows: &[String], status_at: F) -> std::collections::BTreeMap<String, usize>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let mut counts = std::collections::BTreeMap::new();
+        for row in rows {
+            if let Some(status) = status_at(row) {
+                *counts.entry(status).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    fn status_breakdown(counts: &std::collections::BTreeMap<String, usize>) -> String {
+        if counts.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> = counts
+            .iter()
+            .map(|(k, v)| format!("{v} {k}"))
+            .collect();
+        format!(" ({})", parts.join(", "))
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("SOLL context for {} :\n", project_code));
+
+    // Visions — print id + title for each (typically very few).
+    if visions.is_empty() {
+        out.push_str("- Vision: none\n");
+    } else {
+        for row in visions.iter().take(3) {
+            let parts = split_row(row, 4);
+            let id = parts.first().copied().unwrap_or("?");
+            let title = parts.get(1).copied().unwrap_or("");
+            let status = parts.get(2).copied().unwrap_or("");
+            out.push_str(&format!("- Vision: {} ({}) — {}\n", id, status, title));
+        }
+        if visions.len() > 3 {
+            out.push_str(&format!("  ... +{} more vision(s)\n", visions.len() - 3));
+        }
+    }
+
+    // Requirements — show top-3 ids + status breakdown.
+    let req_counts = status_counts(reqs, |row| {
+        split_row(row, 3).get(2).map(|s| s.to_string())
+    });
+    let top_reqs: Vec<&str> = reqs
+        .iter()
+        .take(3)
+        .filter_map(|row| split_row(row, 3).first().copied())
+        .collect();
+    out.push_str(&format!(
+        "- REQs: {} total{}",
+        reqs.len(),
+        status_breakdown(&req_counts)
+    ));
+    if !top_reqs.is_empty() {
+        out.push_str(&format!(" | top: {}", top_reqs.join(", ")));
+    }
+    out.push('\n');
+
+    // Decisions — same shape.
+    let dec_counts = status_counts(decisions, |row| {
+        split_row(row, 3).get(2).map(|s| s.to_string())
+    });
+    let top_decs: Vec<&str> = decisions
+        .iter()
+        .take(3)
+        .filter_map(|row| split_row(row, 3).first().copied())
+        .collect();
+    out.push_str(&format!(
+        "- DECs: {} total{}",
+        decisions.len(),
+        status_breakdown(&dec_counts)
+    ));
+    if !top_decs.is_empty() {
+        out.push_str(&format!(" | top: {}", top_decs.join(", ")));
+    }
+    out.push('\n');
+
+    // Revisions — last revision id + summary.
+    if let Some(first) = revisions.first() {
+        let parts = split_row(first, 3);
+        let id = parts.first().copied().unwrap_or("?");
+        let summary = parts.get(1).copied().unwrap_or("");
+        let truncated_summary = if summary.len() > 80 {
+            format!("{}...", &summary[..80])
+        } else {
+            summary.to_string()
+        };
+        out.push_str(&format!(
+            "- Last revision: {} — {} ({} more)\n",
+            id,
+            truncated_summary,
+            revisions.len().saturating_sub(1)
+        ));
+    } else {
+        out.push_str("- Revisions: none\n");
+    }
+
+    out.push_str("Use `soll_work_plan top=8` for scored execution order ; `soll_query_context` returns full rows in `data.*`.");
+    out
 }
 
 fn summarize_ops(ops: &[Value]) -> (usize, usize) {
@@ -652,4 +790,57 @@ fn apply_plan_operation_contract(operations: &[Value]) -> Value {
         "skipped": skipped,
         "errors": errors
     })
+}
+
+#[cfg(test)]
+mod soll_query_context_summary_tests {
+    use super::format_soll_query_context_summary;
+
+    /// REQ-AXO-901616 — the text payload must surface canonical IDs + status
+    /// counts so a fresh LLM that can only see content[].text gets actionable
+    /// bootstrap info (the previous "SOLL context for AXO loaded." was a
+    /// dead-end).
+    #[test]
+    fn summary_surfaces_canonical_ids_and_status_counts() {
+        let visions = vec!["VIS-AXO-001|Axon vision|current|desc".to_string()];
+        let reqs = vec![
+            "REQ-AXO-101|first|current".to_string(),
+            "REQ-AXO-102|second|planned".to_string(),
+            "REQ-AXO-103|third|delivered".to_string(),
+        ];
+        let decisions = vec!["DEC-AXO-001|d1|current".to_string()];
+        let revisions = vec!["REV-001|migrated AGE→PG|author".to_string()];
+
+        let text =
+            format_soll_query_context_summary("AXO", &visions, &reqs, &decisions, &revisions);
+
+        // Canonical id surfaces (vision + REQ top + DEC top + revision id).
+        assert!(text.contains("VIS-AXO-001"), "missing vision id: {text}");
+        assert!(text.contains("REQ-AXO-101"), "missing top REQ id: {text}");
+        assert!(text.contains("DEC-AXO-001"), "missing DEC id: {text}");
+        assert!(text.contains("REV-001"), "missing revision id: {text}");
+        // Status breakdown counts each REQ status.
+        assert!(text.contains("1 current"), "missing 'current' count: {text}");
+        assert!(text.contains("1 planned"), "missing 'planned' count: {text}");
+        assert!(
+            text.contains("1 delivered"),
+            "missing 'delivered' count: {text}"
+        );
+        // Hint anchors the next call.
+        assert!(
+            text.contains("soll_work_plan"),
+            "missing next-call hint: {text}"
+        );
+    }
+
+    /// REQ-AXO-901616 — empty payloads produce the friendly fallback.
+    #[test]
+    fn summary_handles_empty_payload() {
+        let text = format_soll_query_context_summary("EMPTY", &[], &[], &[], &[]);
+        assert!(text.contains("SOLL context for EMPTY"));
+        assert!(text.contains("Vision: none"));
+        assert!(text.contains("REQs: 0 total"));
+        assert!(text.contains("DECs: 0 total"));
+        assert!(text.contains("Revisions: none"));
+    }
 }
