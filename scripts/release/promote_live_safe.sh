@@ -98,6 +98,50 @@ validate_dev_healthy() {
     return 1
   fi
   echo "  ✅ dev MCP responsive on ${dev_mcp_port}"
+
+  # REQ-AXO-901659 — STRONGER gate : dev brain MUST run the candidate
+  # binary (same git HEAD). Without this, "dev validation" was just a
+  # ping ; an unchanged dev passes the ping while live receives an
+  # untested new binary. Session 51 reinforcement (operator critique
+  # after 3 violations of `feedback_dev_first_no_exception`).
+  local candidate_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  local dev_build_id
+  dev_build_id=$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:${dev_mcp_port}/mcp" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"status","arguments":{"mode":"verbose"}},"id":1}' 2>&1 \
+    | grep -oE '"build_id":"[^"]+"' | head -1 | sed 's/"build_id":"//;s/"$//' || true)
+
+  if [[ -z "$dev_build_id" ]]; then
+    # Brain `status` may not surface build_id in JSON output — fall back
+    # to a soft warning rather than block (don't penalize an environment
+    # where introspection isn't wired). Operator can still override via
+    # --skip-dev-validation if they accept the risk.
+    echo "  ⚠️ could not extract dev build_id from MCP status ; binary-match check skipped"
+    return 0
+  fi
+
+  # Match : dev build_id must contain the short HEAD sha. Format ex :
+  # v0.8.0-629-gd0d7a43f → contains `d0d7a43f`.
+  local short_head="${candidate_head:0:8}"
+  if [[ "$dev_build_id" == *"$short_head"* ]]; then
+    echo "  ✅ dev brain runs candidate binary (build_id=$dev_build_id matches HEAD $short_head)"
+  else
+    echo "❌ Dev brain runs a DIFFERENT binary than the promotion candidate." >&2
+    echo "   dev build_id      : $dev_build_id" >&2
+    echo "   candidate HEAD    : $candidate_head ($short_head)" >&2
+    echo "   You are about to promote untested code to live." >&2
+    echo "" >&2
+    echo "   Recovery:" >&2
+    echo "     # 1. Rebuild dev with current HEAD" >&2
+    echo "     ./scripts/axon-dev stop --hard" >&2
+    echo "     ./scripts/axon-dev start --indexer-full" >&2
+    echo "     # 2. Functional test in dev (e.g. create file, query MCP)" >&2
+    echo "     # 3. Re-run this command" >&2
+    echo "" >&2
+    echo "   Bypass (EMERGENCY ONLY) :" >&2
+    echo "     bash scripts/release/promote_live_safe.sh --skip-dev-validation ..." >&2
+    return 1
+  fi
 }
 
 if [[ "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
