@@ -230,7 +230,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "properties": {
                         "project_code": { "type": "string", "description": "Existing canonical project code (e.g. AXO). The server then assigns `preview_id` and created canonical IDs." },
                         "author": { "type": "string", "description": "Author of the preview/revision. Recommended for audit." },
-                        "dry_run": { "type": "boolean", "description": "If true, makes no changes and only produces the action plan." },
+                        "dry_run": { "type": "boolean", "description": "If true, makes no changes and only produces the action plan. Default `false` (REQ-AXO-901625): `succeeded` means applied, mirroring `soll_manager` contract. Opt-in to preview by passing `dry_run=true` explicitly." },
                         "plan": {
                             "type": "object",
                             "description": "Optional collections by type. Each item accepts `logical_key`, `title`, `description`, `status`, `metadata`, and type-specific business fields. `logical_key` makes the operation idempotent.",
@@ -376,7 +376,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "document_intent",
-                "description": "[DX/SOLL] Records an LLM-observed intent (requirement/decision/concept/guideline) into SOLL with auto-classification. Universal entry point for 'document this' / 'documente' / 'save observation' workflows; discoverable via tools_catalog so a fresh LLM can log to SOLL without per-client prompt configuration. Server-side classifier picks `requirement` (problem/gap/friction), `decision` (choice/picks/we will), `concept` (mental model / how this works), or `guideline` (rule/method/style) when `suggest_type` is omitted. Returns canonical SOLL ID + entity_type chosen + classification reason.",
+                "description": "[DX/SOLL] Records an LLM-observed intent (requirement/decision/concept/guideline) into SOLL with auto-classification. Universal entry point for 'document this' / 'documente' / 'save observation' workflows; discoverable via tools_catalog so a fresh LLM can log to SOLL without per-client prompt configuration. Server-side classifier picks `requirement` (problem/gap/friction), `decision` (choice/picks/we will), `concept` (mental model / how this works), or `guideline` (rule/method/style) when `suggest_type` is omitted. REQ-AXO-901615 — when `attach_to`/`relation_type` are omitted, the server auto-infers the project's lowest-id current Pillar as fallback parent (BELONGS_TO). Returns canonical SOLL ID + entity_type chosen + classification reason + attach_source (`explicit_argument` | `auto_inferred_project_pillar`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -384,7 +384,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "body": { "type": "string", "description": "Full description / rationale / acceptance text." },
                         "suggest_type": { "type": "string", "enum": ["requirement", "decision", "concept", "guideline"], "description": "Optional hint; omit to let the server classify." },
                         "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag list, persisted to metadata.tags." },
-                        "project_code": { "type": "string", "description": "Optional canonical project code; resolved from cwd if omitted." }
+                        "project_code": { "type": "string", "description": "Optional canonical project code; resolved from cwd if omitted." },
+                        "attach_to": { "type": "string", "description": "Optional canonical parent id (e.g. PIL-AXO-002, CPT-AXO-018). REQ-AXO-901615 — when omitted, the server auto-infers the lowest-id `current` Pillar in the project." },
+                        "relation_type": { "type": "string", "description": "Optional canonical relation type (e.g. BELONGS_TO, EXPLAINS, REFINES). Defaults to BELONGS_TO when omitted." }
                     },
                     "required": ["intent", "body"]
                 }

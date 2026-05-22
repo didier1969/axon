@@ -62,6 +62,28 @@ const CONCEPT_KEYWORDS: &[&str] = &[
     "the loop",
 ];
 
+/// REQ-AXO-901615 — Default relation type for `entity → Pillar` fallback parent.
+/// Mirrors `relation_policy_for_pair(_, "PIL")` defaults: REQ/CPT/GUI/SKI all
+/// use BELONGS_TO; Decision/Milestone/Validation default to attaching against
+/// a Requirement, but absent any anchor we still pick the project pillar with
+/// `BELONGS_TO` because the canonical policy table accepts that as a fallback
+/// for the methodology entities used by document_intent (REQ/DEC/CPT/GUI). The
+/// classifier only ever produces these four types, so this is well-defined.
+fn default_relation_for_entity_to_pillar(entity_type: &str) -> &'static str {
+    match entity_type {
+        // CPT→PIL = BELONGS_TO (REQ-AXO-115)
+        // REQ→PIL = BELONGS_TO
+        // GUI→PIL = BELONGS_TO (REQ-AXO-274)
+        // DEC→PIL has no direct policy; we fall through to BELONGS_TO which
+        // soll_manager will accept iff the (DEC, PIL) pair is registered.
+        // When the policy rejects it the LLM gets a precise parameter_repair
+        // pointing to soll_relation_schema, which is the documented recovery
+        // path (see REQ-AXO-901615 acceptance criterion 3).
+        "requirement" | "concept" | "guideline" | "decision" => "BELONGS_TO",
+        _ => "BELONGS_TO",
+    }
+}
+
 fn classify_intent(intent: &str, body: &str) -> (&'static str, &'static str) {
     let haystack = format!("{} {}", intent, body).to_ascii_lowercase();
     if REQUIREMENT_KEYWORDS.iter().any(|kw| haystack.contains(kw)) {
@@ -154,6 +176,65 @@ impl McpServer {
             None => classify_intent(intent, body),
         };
 
+        // REQ-AXO-901615 — accept optional `attach_to` + `relation_type`.
+        // If the operator passes them, forward verbatim. If absent, auto-infer
+        // a fallback parent (the lowest-id `current` Pillar in the project) so
+        // the documented "universal entry point" contract (CPT-AXO-019)
+        // actually delivers when no anchor is in working memory. The LLM can
+        // override later via `soll_manager(action=link, ...)` once they know
+        // the canonical anchor.
+        let explicit_attach_to = args
+            .get("attach_to")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        let explicit_relation_type = args
+            .get("relation_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_uppercase());
+
+        let (attach_to, relation_type, attach_source) = match explicit_attach_to {
+            Some(target) => {
+                let rel = explicit_relation_type
+                    .unwrap_or_else(|| default_relation_for_entity_to_pillar(entity_type).to_string());
+                (target, rel, "explicit_argument")
+            }
+            None => match self.default_project_pillar(&project_code) {
+                Some(pillar_id) => (
+                    pillar_id,
+                    explicit_relation_type
+                        .unwrap_or_else(|| default_relation_for_entity_to_pillar(entity_type).to_string()),
+                    "auto_inferred_project_pillar",
+                ),
+                None => {
+                    // Acceptance criterion #3 — return a clear error message
+                    // listing the suggested anchors so the LLM can retry.
+                    let suggestions = self.suggest_attach_to_candidates(&project_code);
+                    return Some(json!({
+                        "content": [{"type":"text","text": format!(
+                            "document_intent could not infer a parent for project `{}` ; supply `attach_to=<canonical_id>` and optionally `relation_type`. Suggested candidates: {:?}",
+                            project_code, suggestions
+                        )}],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "classification": {
+                                "entity_type": entity_type,
+                                "classifier_reason": classifier_reason
+                            },
+                            "parameter_repair": {
+                                "invalid_field": "attach_to",
+                                "hint": "no current Pillar found for inference ; pass attach_to=<canonical PIL/CPT id>",
+                                "suggested_anchors": suggestions,
+                                "follow_up_tools": ["soll_query_context", "soll_relation_schema"]
+                            }
+                        }
+                    }));
+                }
+            },
+        };
+
         // REQ-AXO-141 — delegate to soll_manager.create so canonical id
         // assignment, project_code validation, and Registry counters all
         // go through the canonical mutation path. The wrapper only
@@ -166,10 +247,13 @@ impl McpServer {
                 "title": intent,
                 "description": body,
                 "status": "planned",
+                "attach_to": attach_to,
+                "relation_type": relation_type,
                 "metadata": {
                     "tags": tags,
                     "originator": "document_intent_mcp",
-                    "classifier_reason": classifier_reason
+                    "classifier_reason": classifier_reason,
+                    "attach_source": attach_source
                 }
             }
         });
@@ -217,8 +301,8 @@ impl McpServer {
 
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "document_intent: recorded {} `{}` as `{}` ({} tags={:?})",
-                entity_type, intent, canonical_id, classifier_reason, tags
+                "document_intent: recorded {} `{}` as `{}` attached to `{}` via {} ({}, tags={:?}, attach_source={})",
+                entity_type, intent, canonical_id, attach_to, relation_type, classifier_reason, tags, attach_source
             )}],
             "data": {
                 "status": "ok",
@@ -227,19 +311,57 @@ impl McpServer {
                 "classifier_reason": classifier_reason,
                 "project_code": project_code,
                 "tags": tags,
+                "attach_to": attach_to,
+                "relation_type": relation_type,
+                "attach_source": attach_source,
                 "follow_up_tools": ["soll_manager", "soll_attach_evidence"],
                 "next_action": {
                     "tool": "soll_manager",
                     "kind": "link",
-                    "when": "after_picking_a_parent_pillar_or_concept"
+                    "when": "if_a_more_specific_anchor_is_known"
                 },
                 "hint": format!(
-                    "auto-link to a parent pillar/concept via `soll_manager(action=link, source_id={}, target_id=<PIL|CPT>, relation_type=BELONGS_TO|EXPLAINS)` then attach evidence as work lands",
-                    canonical_id
+                    "node was attached to `{}` via {}. If a more specific parent (concept/requirement) is known, add a second edge via `soll_manager(action=link, source_id={}, target_id=<id>, relation_type=...)`. Use `soll_attach_evidence` once artifacts land.",
+                    attach_to, relation_type, canonical_id
                 ),
                 "upstream": inner_data
             }
         }))
+    }
+
+    /// REQ-AXO-901615 — return the lowest-id `current` Pillar in the project,
+    /// used as the inferred parent when document_intent is called without
+    /// explicit `attach_to`. Returns None if no current pillar exists.
+    fn default_project_pillar(&self, project_code: &str) -> Option<String> {
+        let escaped = escape_sql(project_code);
+        let query = format!(
+            "SELECT id FROM soll.Node \
+             WHERE project_code = '{escaped}' \
+               AND type = 'Pillar' \
+               AND status = 'current' \
+             ORDER BY id ASC \
+             LIMIT 1"
+        );
+        self.query_single_column(&query)
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// REQ-AXO-901615 — list a handful of plausible anchors so the LLM can
+    /// retry document_intent with a canonical attach_to when auto-inference
+    /// failed (no current Pillar in the project).
+    fn suggest_attach_to_candidates(&self, project_code: &str) -> Vec<String> {
+        let escaped = escape_sql(project_code);
+        let query = format!(
+            "SELECT id FROM soll.Node \
+             WHERE project_code = '{escaped}' \
+               AND type IN ('Pillar', 'Concept', 'Requirement') \
+               AND status IN ('current', 'planned') \
+             ORDER BY type DESC, id ASC \
+             LIMIT 8"
+        );
+        self.query_single_column(&query).unwrap_or_default()
     }
 }
 
@@ -276,6 +398,21 @@ mod document_intent_classifier_tests {
         );
         assert_eq!(kind, "concept");
         assert_eq!(reason, "no_keyword_match_default_concept");
+    }
+
+    /// REQ-AXO-901615 — fallback relation table must produce BELONGS_TO for
+    /// all four classifier outputs so document_intent without attach_to lands
+    /// the node on the default project Pillar.
+    #[test]
+    fn default_relation_to_pillar_is_belongs_to_for_all_classifier_outputs() {
+        use super::default_relation_for_entity_to_pillar;
+        for entity_type in ["requirement", "decision", "concept", "guideline"] {
+            assert_eq!(
+                default_relation_for_entity_to_pillar(entity_type),
+                "BELONGS_TO",
+                "entity_type={entity_type}"
+            );
+        }
     }
 
     #[test]
