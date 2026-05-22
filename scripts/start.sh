@@ -318,11 +318,46 @@ launch_dashboard_window() {
     fi
 
     tmux new-window -t "$TMUX_SESSION" -n "nexus"
+    # REQ-AXO-901655 (followup) — same tmpfile pattern as core launch.
+    # Prevents future tmux send-keys truncation if dashboard env-string
+    # grows (PHX_PORT + HYDRA_TCP_PORT + AXON_* + future additions).
+    local NEXUS_LAUNCH="$AXON_RUN_ROOT/launch-nexus.sh"
+    mkdir -p "$AXON_RUN_ROOT"
     if [[ "$SKIP_ELIXIR_PREWARM" == "1" ]]; then
-        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell --no-reload --no-tui -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT AXON_INSTANCE_KIND=$AXON_INSTANCE_KIND AXON_RUNTIME_IDENTITY=$AXON_RUNTIME_IDENTITY AXON_MUTATION_POLICY=$AXON_MUTATION_POLICY elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+        cat > "$NEXUS_LAUNCH" <<NEXUS_EOF
+#!/usr/bin/env bash
+set -e
+cd "$PROJECT_ROOT/src/dashboard"
+export PHX_PORT="$PHX_PORT"
+export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
+export AXON_SQL_URL="$AXON_SQL_URL"
+export AXON_PROJECT_CODE="$PROJECT_CODE"
+export AXON_WATCH_DIR="$WATCH_ROOT"
+export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
+export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
+export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
+exec elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server
+NEXUS_EOF
     else
-        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell --no-reload --no-tui -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT AXON_INSTANCE_KIND=$AXON_INSTANCE_KIND AXON_RUNTIME_IDENTITY=$AXON_RUNTIME_IDENTITY AXON_MUTATION_POLICY=$AXON_MUTATION_POLICY elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+        cat > "$NEXUS_LAUNCH" <<NEXUS_EOF
+#!/usr/bin/env bash
+set -e
+cd "$PROJECT_ROOT/src/dashboard"
+mix local.hex --force >/dev/null
+mix local.rebar --force >/dev/null
+export PHX_PORT="$PHX_PORT"
+export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
+export AXON_SQL_URL="$AXON_SQL_URL"
+export AXON_PROJECT_CODE="$PROJECT_CODE"
+export AXON_WATCH_DIR="$WATCH_ROOT"
+export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
+export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
+export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
+exec elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server
+NEXUS_EOF
     fi
+    chmod +x "$NEXUS_LAUNCH"
+    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell --no-reload --no-tui -- bash \"$NEXUS_LAUNCH\"" C-m
 }
 
 probe_writer_guard() {
