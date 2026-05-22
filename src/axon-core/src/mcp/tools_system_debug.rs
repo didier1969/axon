@@ -223,6 +223,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     // into Option so a transient hiccup doesn't break the diagnostic output.
     let pg_database_bytes = server.graph_store.pg_database_size_bytes();
     let pg_chunkembedding_total_bytes = server.graph_store.pg_chunkembedding_total_bytes();
+    let pg_wal_bytes = server.graph_store.pg_wal_bytes();
     let pg_buffer_hit_ratio = server.graph_store.pg_buffer_hit_ratio();
     let ingress = ingress_metrics_snapshot();
     let provider = current_embedding_provider_diagnostics();
@@ -452,6 +453,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         **PostgreSQL Health:**\n\
         *   Database size: {}\n\
         *   ChunkEmbedding total size: {}\n\
+        *   WAL volume (cumulative): {}\n\
         *   Buffer cache hit ratio: {}\n\n\
         **Graph Volume:**\n\
         *   Known files: {}\n\
@@ -581,6 +583,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
             .map(|bytes| format_bytes_human(bytes.max(0) as u64))
             .unwrap_or_else(|| "n/a".to_string()),
         pg_chunkembedding_total_bytes
+            .map(|bytes| format_bytes_human(bytes.max(0) as u64))
+            .unwrap_or_else(|| "n/a".to_string()),
+        pg_wal_bytes
             .map(|bytes| format_bytes_human(bytes.max(0) as u64))
             .unwrap_or_else(|| "n/a".to_string()),
         pg_buffer_hit_ratio

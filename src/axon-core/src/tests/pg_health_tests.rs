@@ -42,6 +42,17 @@ mod tests {
     }
 
     #[test]
+    fn pg_wal_bytes_returns_value_or_none() {
+        let store = create_test_db().expect("create test db");
+        // pg_stat_wal exists from PG 14 ; cluster has been doing some
+        // WAL activity from prior tests so a Some(>=0) is expected.
+        // None is acceptable if pg_stat_wal view is missing.
+        if let Some(bytes) = store.pg_wal_bytes() {
+            assert!(bytes >= 0, "pg_wal_bytes negative: {bytes}");
+        }
+    }
+
+    #[test]
     fn pg_buffer_hit_ratio_returns_ratio_or_none() {
         let store = create_test_db().expect("create test db");
         match store.pg_buffer_hit_ratio() {

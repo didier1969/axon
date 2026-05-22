@@ -398,6 +398,10 @@ defmodule Axon.Watcher.CockpitLive do
                 value={human_bytes(@runtime.pg_chunkembedding_total_bytes)}
               />
               <.signal_stat
+                label="WAL volume"
+                value={human_bytes(@runtime.pg_wal_bytes)}
+              />
+              <.signal_stat
                 label="Buffer cache hit"
                 value={human_ratio(@runtime.pg_buffer_hit_ratio)}
               />
@@ -1248,6 +1252,7 @@ defmodule Axon.Watcher.CockpitLive do
       rss_shmem_bytes: Map.get(stats, :rss_shmem_bytes, 0) || 0,
       pg_database_bytes: Map.get(stats, :pg_database_bytes, nil),
       pg_chunkembedding_total_bytes: Map.get(stats, :pg_chunkembedding_total_bytes, nil),
+      pg_wal_bytes: Map.get(stats, :pg_wal_bytes, nil),
       pg_buffer_hit_ratio: Map.get(stats, :pg_buffer_hit_ratio, nil),
       vector_chunks_embedded_total: Map.get(stats, :vector_chunks_embedded_total, 0) || 0,
       chunk_embeddings_per_second: Map.get(stats, :chunk_embeddings_per_second, 0.0) || 0.0,

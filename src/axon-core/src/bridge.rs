@@ -156,6 +156,7 @@ pub enum BridgeEvent {
         // catalog miss doesn't poison the payload.
         pg_database_bytes: Option<i64>,
         pg_chunkembedding_total_bytes: Option<i64>,
+        pg_wal_bytes: Option<i64>,
         pg_buffer_hit_ratio: Option<f64>,
         vector_chunks_embedded_total: u64,
         chunk_embeddings_per_second: f64,
@@ -269,6 +270,7 @@ mod tests {
             rss_shmem_bytes: 300,
             pg_database_bytes: Some(8_589_934_592),
             pg_chunkembedding_total_bytes: Some(2_147_483_648),
+            pg_wal_bytes: Some(1_073_741_824),
             pg_buffer_hit_ratio: Some(0.987),
             vector_chunks_embedded_total: 96,
             chunk_embeddings_per_second: 32.0,
@@ -380,6 +382,7 @@ mod tests {
         assert!(json.contains("\"rss_shmem_bytes\":300"));
         assert!(json.contains("\"pg_database_bytes\":8589934592"));
         assert!(json.contains("\"pg_chunkembedding_total_bytes\":2147483648"));
+        assert!(json.contains("\"pg_wal_bytes\":1073741824"));
         assert!(json.contains("\"pg_buffer_hit_ratio\":0.987"));
         assert!(json.contains("\"vector_chunks_embedded_total\":96"));
         assert!(json.contains("\"chunk_embeddings_per_second\":32.0"));

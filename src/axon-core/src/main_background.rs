@@ -213,6 +213,7 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     // catalog miss doesn't poison the telemetry payload.
     pub pg_database_bytes: Option<i64>,
     pub pg_chunkembedding_total_bytes: Option<i64>,
+    pub pg_wal_bytes: Option<i64>,
     pub pg_buffer_hit_ratio: Option<f64>,
     pub vector_chunks_embedded_total: u64,
     pub chunk_embeddings_per_second: f64,
@@ -1434,6 +1435,7 @@ pub(crate) fn runtime_telemetry_snapshot(
         // catalog hiccup never breaks the telemetry pipeline.
         pg_database_bytes: store.pg_database_size_bytes(),
         pg_chunkembedding_total_bytes: store.pg_chunkembedding_total_bytes(),
+        pg_wal_bytes: store.pg_wal_bytes(),
         pg_buffer_hit_ratio: store.pg_buffer_hit_ratio(),
         vector_chunks_embedded_total: service_guard::vector_chunks_embedded_total(),
         chunk_embeddings_per_second: service_guard::vector_chunk_embeddings_per_second(),

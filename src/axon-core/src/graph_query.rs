@@ -541,6 +541,17 @@ impl GraphStore {
         .flatten()
     }
 
+    /// REQ-AXO-284 Slice 2 — cumulative WAL volume since the cluster was
+    /// last reset (`pg_stat_wal.wal_bytes`, PG 14+). Useful as a
+    /// rate-of-change indicator when sampled per heartbeat tick on the
+    /// dashboard. Returns `None` if the view is absent (older PG) or on
+    /// catalog error.
+    pub fn pg_wal_bytes(&self) -> Option<i64> {
+        self.query_single_i64_writer("SELECT wal_bytes::BIGINT FROM pg_stat_wal")
+            .ok()
+            .flatten()
+    }
+
     /// REQ-AXO-284 Slice 2 — PG buffer cache hit ratio for the current
     /// database. Returns ratio in [0.0, 1.0] (multiply by 100 for %).
     /// `None` when `pg_stat_database` has no row yet for current DB (rare,
