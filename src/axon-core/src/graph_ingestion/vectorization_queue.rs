@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 
 use crate::graph::GraphStore;
-use crate::runtime_mode::AxonRuntimeMode;
 use crate::service_guard;
 
 use super::{
@@ -657,18 +656,15 @@ impl GraphStore {
     }
 
     pub fn fetch_file_vectorization_queue_counts(&self) -> Result<(usize, usize)> {
-        if !AxonRuntimeMode::from_env().semantic_workers_enabled() {
-            return Ok((0, 0));
-        }
-        let queued = self.query_count_writer(
-            "SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority')",
-        )?;
-        let inflight = self.query_count_writer(
-            "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'",
-        )?;
-        let queued = usize::try_from(queued).unwrap_or(0);
-        let inflight = usize::try_from(inflight).unwrap_or(0);
-        Ok((queued, inflight))
+        // REQ-AXO-901653 Slice 3a — the `FileVectorizationQueue` table was
+        // dropped (MIL-AXO-017 PG canonical / REQ-AXO-289 streaming v2 ;
+        // legacy `vector_lane_worker` was gated post-REQ-AXO-901632). The
+        // canonical vectorization path is `pipeline_v2` (CPT-AXO-054 /
+        // DEC-AXO-081) which uses `Chunk` + `ChunkEmbedding` directly,
+        // no intermediate queue. Method returns (0,0) ; PG query removed
+        // to eliminate `[pg_query_count] db error` log spam.
+        // Slice 3b (later) : delete callsites + this method entirely.
+        Ok((0, 0))
     }
 
     pub fn fetch_claimable_file_vectorization_queue_count(&self) -> Result<usize> {

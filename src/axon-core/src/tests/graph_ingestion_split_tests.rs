@@ -97,74 +97,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn graph_ingestion_graph_projection_queue_surface_stays_constructive_on_empty_store() {
-        let store = crate::tests::test_helpers::create_test_db().expect("test db");
-        assert_eq!(
-            store
-                .fetch_graph_projection_queue_counts()
-                .expect("graph projection queue counts"),
-            (0, 0)
-        );
-        assert!(store
-            .fetch_pending_graph_projection_work(8)
-            .expect("pending graph projection work")
-            .is_empty());
-    }
+    // REQ-AXO-901653 Slice 3a — `graph_ingestion_graph_projection_queue_surface_stays_constructive_on_empty_store`
+    // also removed (depended on `fetch_pending_graph_projection_work` which still
+    // CRUDs the legacy table). Slice 3b will delete the method.
 
-    // REQ-AXO-269 v1 unit-level coverage: prove that the underlying primitive
-    // `mark_graph_projection_work_done` cleanly drains a queued+inflight set
-    // back to (0, 0). This is the exact call the embedder.rs short-circuit
-    // makes when `graph_store.skip_legacy_relations()` returns true (PG mode).
-    //
-    // The bench harness can't easily exercise this path under PG-AGE-only
-    // (autoconfig sets graph_workers=0 under tight VRAM, see VAL-AXO-061;
-    // forcing AXON_GRAPH_WORKERS=1 timed out the harness, see VAL-AXO-062).
-    // This test closes the validation loop at the primitive layer where the
-    // DuckDB test fixture works fine.
-    #[test]
-    fn req_axo_269_v1_mark_graph_projection_work_done_drains_queue_to_zero() {
-        use crate::graph_ingestion::GraphProjectionWork;
-        let store = crate::tests::test_helpers::create_test_db().expect("test db");
-        // Enqueue one work item then fetch+mark in one cycle. The
-        // multi-row fetch path has a separate concern (DuckDB AND/OR
-        // precedence under UPDATE); this test focuses on REQ-AXO-269 v1's
-        // contract: given a non-empty `pending` batch + skip_legacy_relations,
-        // the primitive `mark_graph_projection_work_done` removes the
-        // inflight rows it was given.
-        store
-            .enqueue_graph_projection_refresh("file", "src/foo.rs", 2)
-            .expect("enqueue");
-        let (queued, inflight) = store
-            .fetch_graph_projection_queue_counts()
-            .expect("counts");
-        assert_eq!(queued, 1, "after enqueue queued=1");
-        assert_eq!(inflight, 0, "after enqueue inflight=0");
-
-        // fetch_pending pulls into 'inflight' — same code path the
-        // graph_worker_loop uses upstream of REQ-269 v1's short-circuit.
-        let pending = store
-            .fetch_pending_graph_projection_work(8)
-            .expect("fetch pending");
-        assert_eq!(pending.len(), 1);
-        let (queued, inflight) = store
-            .fetch_graph_projection_queue_counts()
-            .expect("counts mid-flight");
-        assert_eq!(queued, 0, "after fetch_pending queued=0");
-        assert_eq!(inflight, 1, "after fetch_pending inflight=1");
-
-        // REQ-269 v1: short-circuit calls mark_graph_projection_work_done
-        // on the entire pending batch. Prove it drains.
-        let work_owned: Vec<GraphProjectionWork> = pending;
-        store
-            .mark_graph_projection_work_done(&work_owned)
-            .expect("mark done");
-        let (queued, inflight) = store
-            .fetch_graph_projection_queue_counts()
-            .expect("counts post-drain");
-        assert_eq!(queued, 0, "queued must be 0 after mark_done");
-        assert_eq!(inflight, 0, "inflight must be 0 after mark_done");
-    }
+    // REQ-AXO-901653 Slice 3a — `req_axo_269_v1_mark_graph_projection_work_done_drains_queue_to_zero`
+    // removed. It exercised the legacy `GraphProjectionQueue` enqueue/
+    // fetch/mark_done cycle that is structurally obsolete post-MIL-AXO-017
+    // (AGE retired) + REQ-AXO-289 (streaming v2 canonical). The
+    // `fetch_graph_projection_queue_counts` method now returns (0,0)
+    // unconditionally (the table no longer exists in canonical PG schema
+    // ; CREATE in graph_bootstrap.rs is DuckDB-era residue cleaned in
+    // Slice 4). The three "*_surface_stays_constructive_on_empty_store"
+    // tests below still pass because they assert (0,0) on empty store.
 
     #[test]
     fn graph_ingestion_vector_persist_outbox_surface_stays_constructive_on_empty_store() {

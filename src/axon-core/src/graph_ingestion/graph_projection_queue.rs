@@ -230,12 +230,15 @@ impl GraphStore {
     }
 
     pub fn fetch_graph_projection_queue_counts(&self) -> Result<(usize, usize)> {
-        let queued =
-            self.query_count("SELECT count(*) FROM GraphProjectionQueue WHERE status = 'queued'")?;
-        let inflight = self
-            .query_count("SELECT count(*) FROM GraphProjectionQueue WHERE status = 'inflight'")?;
-        let queued = usize::try_from(queued).unwrap_or(0);
-        let inflight = usize::try_from(inflight).unwrap_or(0);
-        Ok((queued, inflight))
+        // REQ-AXO-901653 Slice 3a — the `GraphProjectionQueue` table was
+        // dropped (MIL-AXO-017 PG canonical / REQ-AXO-289 streaming v2).
+        // The graph_worker_loop that produced rows for this queue was
+        // removed in Slice 1 (commit 2717359b). The method now reflects
+        // reality : the queue does not exist, its counts are 0. Removing
+        // the dead PG query eliminates the `[pg_query_count] db error`
+        // log spam observed every metrics tick from `main_background`,
+        // `optimizer`, and `mcp/tools_framework_runtime_status` callers.
+        // Slice 3b (later) : delete callsites + this method entirely.
+        Ok((0, 0))
     }
 }
