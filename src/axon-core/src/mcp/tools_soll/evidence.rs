@@ -97,6 +97,13 @@ impl McpServer {
         let mut artifact_diagnostics = Vec::new();
         let mut fallback_guidance = Vec::new();
 
+        // REQ-AXO-901619 — capture the canonical project root once so per-
+        // artifact diagnostics can surface a concrete "did you mean
+        // <absolute_path>" hint for path_not_resolvable rejections.
+        let project_root_for_hint = self
+            .canonical_project_root_for_entity(entity_id)
+            .map(|p| p.to_string_lossy().into_owned());
+
         for (idx, art) in artifacts.iter().enumerate() {
             let raw_artifact_ref = art
                 .get("artifact_ref")
@@ -123,14 +130,27 @@ impl McpServer {
 
             if artifact_ref.is_empty() {
                 diagnostic_reasons.push("missing_artifact_ref".to_string());
-                artifact_diagnostics.push(json!({
+                // REQ-AXO-901619 — synthesise the "did you mean" suggested
+                // path so rejected diagnostics carry a one-step recovery.
+                let suggested_absolute = build_suggested_absolute_path(
+                    raw_artifact_ref,
+                    project_root_for_hint.as_deref(),
+                );
+                let mut diag = json!({
                     "index": idx,
                     "input": art,
                     "status": "rejected",
                     "normalized_artifact_type": normalized_artifact_type,
                     "normalized_artifact_ref": artifact_ref,
-                    "reasons": diagnostic_reasons
-                }));
+                    "reasons": diagnostic_reasons,
+                });
+                if let Some(suggestion) = suggested_absolute {
+                    diag["suggested_absolute_path"] = json!(suggestion);
+                }
+                if let Some(root) = project_root_for_hint.as_ref() {
+                    diag["project_root"] = json!(root);
+                }
+                artifact_diagnostics.push(diag);
                 continue;
             }
             if !artifact_schema_accepts(&normalized_entity_type, &normalized_artifact_type) {
@@ -237,10 +257,47 @@ impl McpServer {
                     "use one of the accepted_artifact_schema values for {}: {:?}",
                     normalized_entity_type, accepted_schema
                 )),
-                Some("path_not_resolvable") => Some(
-                    "artifact path does not resolve under the project root and is not absolute"
-                        .to_string(),
-                ),
+                // REQ-AXO-901619 — surface project root + did-you-mean hint
+                // so the LLM can correct the relative path in one round-trip
+                // without re-reading data.artifact_diagnostics.
+                Some("path_not_resolvable") => Some({
+                    let first_rejected_suggestion = artifact_diagnostics
+                        .iter()
+                        .find(|d| {
+                            d.get("status").and_then(|v| v.as_str()) == Some("rejected")
+                                && d.get("suggested_absolute_path").is_some()
+                        })
+                        .and_then(|d| {
+                            let raw = d
+                                .get("input")
+                                .and_then(|v| v.get("artifact_ref")
+                                    .or_else(|| v.get("path"))
+                                    .or_else(|| v.get("file_path"))
+                                    .or_else(|| v.get("uri")))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let suggested = d
+                                .get("suggested_absolute_path")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let root = d
+                                .get("project_root")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if suggested.is_empty() {
+                                None
+                            } else {
+                                Some(format!(
+                                    "artifact path `{}` does not exist relative to project root `{}` nor as an absolute path. Did you mean `{}`?",
+                                    raw, root, suggested
+                                ))
+                            }
+                        });
+                    first_rejected_suggestion.unwrap_or_else(|| {
+                        "artifact path does not resolve under the project root and is not absolute"
+                            .to_string()
+                    })
+                }),
                 Some("traceability_insert_failed") => Some(
                     "graph_store insert failed; check Traceability schema and DB availability"
                         .to_string(),
@@ -355,6 +412,55 @@ impl McpServer {
     }
 }
 
+/// REQ-AXO-901619 — synthesise the "did you mean" suggested absolute path
+/// for a relative `raw_ref` joined against the canonical project root.
+/// Returns None when there is no project root, the path is already absolute,
+/// or the raw_ref is empty. The path is returned even if the file does NOT
+/// exist on disk so the LLM can spot the typo / wrong-prefix mistake.
+fn build_suggested_absolute_path(raw_ref: &str, project_root: Option<&str>) -> Option<String> {
+    let trimmed = raw_ref.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        return None;
+    }
+    let root = project_root?;
+    let joined = Path::new(root).join(p);
+    Some(joined.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod build_suggested_absolute_path_tests {
+    use super::build_suggested_absolute_path;
+
+    #[test]
+    fn returns_joined_path_for_relative_ref() {
+        let result = build_suggested_absolute_path("Cargo.toml", Some("/home/dstadel/projects/axon"));
+        assert_eq!(result.as_deref(), Some("/home/dstadel/projects/axon/Cargo.toml"));
+    }
+
+    #[test]
+    fn returns_none_for_absolute_path() {
+        let result =
+            build_suggested_absolute_path("/etc/hostname", Some("/home/dstadel/projects/axon"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn returns_none_when_no_project_root() {
+        let result = build_suggested_absolute_path("Cargo.toml", None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn returns_none_for_empty_ref() {
+        let result = build_suggested_absolute_path("", Some("/home/dstadel/projects/axon"));
+        assert_eq!(result, None);
+    }
+}
+
 // REQ-AXO-139 slice — extract structured parameter_repair from the first
 // rejected artifact so an LLM can fix one input field per round-trip.
 // Returns None when no rejection diagnostic is present (caller falls back to
@@ -432,20 +538,45 @@ fn first_rejected_repair(
                     "artifact #{idx} type `{supplied}` is not accepted; use one of {accepted_schema:?}"
                 ),
             }),
-            "path_not_resolvable" => json!({
-                "invalid_field": "artifact_ref",
-                "rejected_artifact_index": idx,
-                "rejected_artifact_kind": kind,
-                "supplied_artifact_ref": raw_ref,
-                "primary_reason": primary,
-                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
-                "required_field_hint": required_field_hint_for_artifact_kind(kind),
-                "hint": format!(
-                    "artifact #{idx} path `{raw_ref}` does not resolve under the project root \
-                     and is not absolute; {}",
-                    required_field_hint_for_artifact_kind(kind)
-                ),
-            }),
+            "path_not_resolvable" => {
+                // REQ-AXO-901619 — forward suggested_absolute_path + project_root
+                // so the LLM gets a concrete "did you mean" candidate in
+                // parameter_repair (not buried in artifact_diagnostics).
+                let suggested = diag
+                    .get("suggested_absolute_path")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let root = diag
+                    .get("project_root")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let mut repair = json!({
+                    "invalid_field": "artifact_ref",
+                    "rejected_artifact_index": idx,
+                    "rejected_artifact_kind": kind,
+                    "supplied_artifact_ref": raw_ref,
+                    "primary_reason": primary,
+                    "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                    "required_field_hint": required_field_hint_for_artifact_kind(kind),
+                });
+                if let Some(s) = &suggested {
+                    repair["did_you_mean"] = json!(s);
+                }
+                if let Some(r) = &root {
+                    repair["project_root"] = json!(r);
+                }
+                repair["hint"] = match (suggested.as_deref(), root.as_deref()) {
+                    (Some(s), Some(r)) => json!(format!(
+                        "artifact #{idx} path `{raw_ref}` does not exist relative to project root `{r}` nor as an absolute path. Did you mean `{s}`?"
+                    )),
+                    _ => json!(format!(
+                        "artifact #{idx} path `{raw_ref}` does not resolve under the project root \
+                         and is not absolute; {}",
+                        required_field_hint_for_artifact_kind(kind)
+                    )),
+                };
+                repair
+            },
             "traceability_insert_failed" => json!({
                 "invalid_field": "artifact_ref",
                 "rejected_artifact_index": idx,
