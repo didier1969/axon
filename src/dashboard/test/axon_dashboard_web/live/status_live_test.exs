@@ -167,8 +167,6 @@ defmodule AxonDashboardWeb.StatusLiveTest do
              "telemetry" => %{
                "ingress_buffered_entries" => 73,
                "ingress_last_promoted_count" => 29,
-               "graph_projection_queue" => %{"total" => 144},
-               "file_vectorization_queue" => %{"total" => 81},
                "vector_chunks_embedded_total" => 640,
                "ready_queue_chunks_current" => 21,
                "ready_queue_chunks_small" => 3,

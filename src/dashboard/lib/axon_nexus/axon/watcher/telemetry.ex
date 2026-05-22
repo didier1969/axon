@@ -61,16 +61,6 @@ defmodule Axon.Watcher.Telemetry do
       rss_anon_bytes: Map.get(payload, "rss_anon_bytes", 0),
       rss_file_bytes: Map.get(payload, "rss_file_bytes", 0),
       rss_shmem_bytes: Map.get(payload, "rss_shmem_bytes", 0),
-      graph_projection_queue_queued: Map.get(payload, "graph_projection_queue_queued", 0),
-      graph_projection_queue_inflight:
-        Map.get(payload, "graph_projection_queue_inflight", 0),
-      graph_projection_queue_depth:
-        Map.get(payload, "graph_projection_queue_depth", 0),
-      file_vectorization_queue_queued: Map.get(payload, "file_vectorization_queue_queued", 0),
-      file_vectorization_queue_inflight:
-        Map.get(payload, "file_vectorization_queue_inflight", 0),
-      file_vectorization_queue_depth:
-        Map.get(payload, "file_vectorization_queue_depth", 0),
       vector_chunks_embedded_total: Map.get(payload, "vector_chunks_embedded_total", 0),
       chunk_embeddings_per_second: Map.get(payload, "chunk_embeddings_per_second", 0.0),
       chunk_embeddings_rate_window_ms: Map.get(payload, "chunk_embeddings_rate_window_ms", 0),
@@ -318,14 +308,6 @@ defmodule Axon.Watcher.Telemetry do
       rss_anon_bytes: Map.get(runtime, :rss_anon_bytes, 0),
       rss_file_bytes: Map.get(runtime, :rss_file_bytes, 0),
       rss_shmem_bytes: Map.get(runtime, :rss_shmem_bytes, 0),
-      graph_projection_queue_queued: Map.get(runtime, :graph_projection_queue_queued, 0),
-      graph_projection_queue_inflight:
-        Map.get(runtime, :graph_projection_queue_inflight, 0),
-      graph_projection_queue_depth: Map.get(runtime, :graph_projection_queue_depth, 0),
-      file_vectorization_queue_queued: Map.get(runtime, :file_vectorization_queue_queued, 0),
-      file_vectorization_queue_inflight:
-        Map.get(runtime, :file_vectorization_queue_inflight, 0),
-      file_vectorization_queue_depth: Map.get(runtime, :file_vectorization_queue_depth, 0),
       vector_chunks_embedded_total: Map.get(runtime, :vector_chunks_embedded_total, 0),
       chunk_embeddings_per_second: Map.get(runtime, :chunk_embeddings_per_second, 0.0),
       chunk_embeddings_rate_window_ms: Map.get(runtime, :chunk_embeddings_rate_window_ms, 0),
@@ -436,12 +418,6 @@ defmodule Axon.Watcher.Telemetry do
          rss_anon_bytes: 0,
          rss_file_bytes: 0,
          rss_shmem_bytes: 0,
-         graph_projection_queue_queued: 0,
-         graph_projection_queue_inflight: 0,
-         graph_projection_queue_depth: 0,
-         file_vectorization_queue_queued: 0,
-         file_vectorization_queue_inflight: 0,
-         file_vectorization_queue_depth: 0,
          vector_chunks_embedded_total: 0,
          chunk_embeddings_per_second: 0.0,
          chunk_embeddings_rate_window_ms: 0,

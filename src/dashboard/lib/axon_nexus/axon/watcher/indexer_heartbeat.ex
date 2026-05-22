@@ -28,7 +28,6 @@ defmodule Axon.Watcher.IndexerHeartbeat do
         "graph_workers_started_total" => 11,
         "ingress_buffered_entries" => 14232,
         "vector_chunks_embedded_total" => 0,
-        "file_vectorization_queue" => %{"inflight" => 0, "queued" => 0, "total" => 0},
         "ingress_subtree_hint_*" => ...
       },
       "stale" => false, "stale_after_ms" => 5000
@@ -209,16 +208,6 @@ defmodule Axon.Watcher.IndexerHeartbeat do
         ingress_subtree_hint_accepted_total: num(rt, "ingress_subtree_hint_accepted_total"),
         ingress_subtree_hint_blocked_total: num(rt, "ingress_subtree_hint_blocked_total"),
         ingress_subtree_hint_suppressed_total: num(rt, "ingress_subtree_hint_suppressed_total"),
-        file_vectorization_queue_total:
-          get_in(rt, ["file_vectorization_queue", "total"]) || 0,
-        file_vectorization_queue_inflight:
-          get_in(rt, ["file_vectorization_queue", "inflight"]) || 0,
-        file_vectorization_queue_queued:
-          get_in(rt, ["file_vectorization_queue", "queued"]) || 0,
-        graph_projection_queue_total:
-          get_in(rt, ["graph_projection_queue", "total"]) || 0,
-        graph_projection_queue_inflight:
-          get_in(rt, ["graph_projection_queue", "inflight"]) || 0,
         ready_queue_chunks_current: num(rt, "ready_queue_chunks_current"),
         ready_queue_chunks_small: num(rt, "ready_queue_chunks_small"),
         ready_queue_chunks_medium: num(rt, "ready_queue_chunks_medium"),

@@ -403,18 +403,6 @@ defmodule Axon.Watcher.CockpitLive do
               />
               <.signal_stat label="Queue Depth" value={Integer.to_string(@runtime.queue_depth)} />
               <.signal_stat
-                label="Graph Projection Queued"
-                value={Integer.to_string(@runtime.graph_projection_queue_queued)}
-              />
-              <.signal_stat
-                label="Graph Projection In-Flight"
-                value={Integer.to_string(@runtime.graph_projection_queue_inflight)}
-              />
-              <.signal_stat
-                label="Graph Projection Pending"
-                value={Integer.to_string(@runtime.graph_projection_queue_depth)}
-              />
-              <.signal_stat
                 label="Chunk Embed Rate"
                 value={
                   chunk_embedding_rate_label(
@@ -469,18 +457,6 @@ defmodule Axon.Watcher.CockpitLive do
               <.signal_stat
                 label="Graph Workers"
                 value={"#{@runtime.graph_workers_active_current} active / #{@runtime.graph_workers_started_total} started"}
-              />
-              <.signal_stat
-                label="File Vector Queued"
-                value={Integer.to_string(@runtime.file_vectorization_queue_queued)}
-              />
-              <.signal_stat
-                label="File Vector In-Flight"
-                value={Integer.to_string(@runtime.file_vectorization_queue_inflight)}
-              />
-              <.signal_stat
-                label="File Vector Pending"
-                value={Integer.to_string(@runtime.file_vectorization_queue_depth)}
               />
               <.signal_stat label="Claim Mode" value={String.upcase(@runtime.claim_mode)} />
               <.signal_stat
@@ -585,18 +561,6 @@ defmodule Axon.Watcher.CockpitLive do
                 }
               />
               <.signal_stat
-                label="Graph Pending"
-                value={
-                  Integer.to_string(
-                    get_in(@runtime.projected_indexer_runtime, [
-                      "telemetry",
-                      "graph_projection_queue",
-                      "total"
-                    ]) || 0
-                  )
-                }
-              />
-              <.signal_stat
                 label="Chunk Embed Rate"
                 value={
                   chunk_embedding_rate_label(
@@ -691,18 +655,6 @@ defmodule Axon.Watcher.CockpitLive do
                     get_in(@runtime.projected_indexer_runtime, [
                       "telemetry",
                       "graph_workers_started_total"
-                    ]) || 0
-                  )
-                }
-              />
-              <.signal_stat
-                label="File Vector Pending"
-                value={
-                  Integer.to_string(
-                    get_in(@runtime.projected_indexer_runtime, [
-                      "telemetry",
-                      "file_vectorization_queue",
-                      "total"
                     ]) || 0
                   )
                 }
@@ -1248,13 +1200,6 @@ defmodule Axon.Watcher.CockpitLive do
       rss_anon_bytes: Map.get(stats, :rss_anon_bytes, 0) || 0,
       rss_file_bytes: Map.get(stats, :rss_file_bytes, 0) || 0,
       rss_shmem_bytes: Map.get(stats, :rss_shmem_bytes, 0) || 0,
-      graph_projection_queue_queued: Map.get(stats, :graph_projection_queue_queued, 0) || 0,
-      graph_projection_queue_inflight: Map.get(stats, :graph_projection_queue_inflight, 0) || 0,
-      graph_projection_queue_depth: Map.get(stats, :graph_projection_queue_depth, 0) || 0,
-      file_vectorization_queue_queued: Map.get(stats, :file_vectorization_queue_queued, 0) || 0,
-      file_vectorization_queue_inflight:
-        Map.get(stats, :file_vectorization_queue_inflight, 0) || 0,
-      file_vectorization_queue_depth: Map.get(stats, :file_vectorization_queue_depth, 0) || 0,
       vector_chunks_embedded_total: Map.get(stats, :vector_chunks_embedded_total, 0) || 0,
       chunk_embeddings_per_second: Map.get(stats, :chunk_embeddings_per_second, 0.0) || 0.0,
       chunk_embeddings_rate_window_ms: Map.get(stats, :chunk_embeddings_rate_window_ms, 0) || 0,

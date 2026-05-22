@@ -115,7 +115,6 @@ defmodule AxonDashboard.BridgeClientTest do
              "observed_age_ms" => 42,
              "telemetry" => %{
                "ingress_buffered_entries" => 88,
-               "graph_projection_queue" => %{"total" => 13},
                "chunk_embeddings_per_second" => 40.0
              }
            }

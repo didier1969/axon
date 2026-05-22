@@ -227,18 +227,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               tone={:neutral}
             />
             <.kpi
-              label="File Vec Queue"
-              value={hb_get_in(@heartbeat, [:telemetry, :file_vectorization_queue_total], 0) |> humanize_int()}
-              sub={"#{hb_get_in(@heartbeat, [:telemetry, :file_vectorization_queue_inflight], 0)} in-flight"}
-              tone={:neutral}
-            />
-            <.kpi
-              label="Graph Proj Queue"
-              value={hb_get_in(@heartbeat, [:telemetry, :graph_projection_queue_total], 0) |> humanize_int()}
-              sub={"#{hb_get_in(@heartbeat, [:telemetry, :graph_projection_queue_inflight], 0)} in-flight"}
-              tone={:neutral}
-            />
-            <.kpi
               label="Ingress Buffered"
               value={hb_get_in(@heartbeat, [:telemetry, :ingress_buffered_entries], 0) |> humanize_int()}
               sub={"#{hb_get_in(@heartbeat, [:telemetry, :ingress_hot_entries], 0)} hot"}
@@ -533,7 +521,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       rate: hb_get_in(hb, [:telemetry, :chunk_embeddings_per_second], 0.0) || 0.0,
       coverage_pct: mcp_get(mcp, :coverage_pct, 0.0) || 0.0,
       graph_workers_active: hb_get_in(hb, [:telemetry, :graph_workers_active_current], 0) || 0,
-      file_vec_inflight: hb_get_in(hb, [:telemetry, :file_vectorization_queue_inflight], 0) || 0,
       ingress_hot: hb_get_in(hb, [:telemetry, :ingress_hot_entries], 0) || 0,
       gpu: hb_gpu_effective(hb),
       degraded: hb_get(hb, :degraded_reason, nil)
