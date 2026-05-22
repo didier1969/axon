@@ -262,6 +262,18 @@ pub fn spawn_pipeline_v2_indexer(
     // Bootstrap scan: enumerate every eligible file under the watch
     // root once at boot and feed pipeline A. Re-runs on every restart;
     // IndexedFile + UPSERT idempotence makes this safe.
+    //
+    // REQ-AXO-901649 — use try_send + brief async yield instead of
+    // blocking send().await. The 1024-slot A1 input channel saturates
+    // within ~milliseconds on bootstrap of a 130K-file workspace ;
+    // a blocking send was observed to deadlock the bootstrap task in
+    // production (session 51, live indexer hung 2.5h post-boot with
+    // ingress_buffered_entries=14253 stuck at the exact same value
+    // across consecutive heartbeats). A dropped path is NOT lost :
+    // scope_reconciliation_orchestrator re-walks every 60 s and re-
+    // submits any file whose (path, mtime, size) doesn't match
+    // IndexedFile, so transient back-pressure absorbs naturally
+    // without freezing the pipeline.
     let input_tx_bootstrap = handles_a.input_tx.clone();
     let scanner_bootstrap = scanner.clone();
     let watch_root_bootstrap = watch_root.clone();
@@ -272,33 +284,81 @@ pub fn spawn_pipeline_v2_indexer(
             "pipeline_v2 bootstrap: enumerated {} files under {}",
             count, watch_root_bootstrap
         );
+        let mut handed = 0usize;
+        let mut dropped = 0usize;
         for path in files {
-            if input_tx_bootstrap.send(path).await.is_err() {
-                return;
+            match input_tx_bootstrap.try_send(path) {
+                Ok(()) => handed += 1,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    dropped += 1;
+                    // A1 is saturated ; yield so it can drain, then
+                    // continue. The dropped path will be re-submitted
+                    // by scope_reconciliation_orchestrator on its next
+                    // sweep (DEFAULT 60 s) when IndexedFile shows no
+                    // matching (path, mtime, size) row.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed / {dropped} dropped");
+                    return;
+                }
             }
         }
-        info!("pipeline_v2 bootstrap: handed {} paths to A1", count);
+        info!(
+            "pipeline_v2 bootstrap: walk complete (total={}, handed={}, dropped_for_reconciliation={})",
+            count, handed, dropped
+        );
     });
 
     // Steady-state drain loop: pull file events from the shared
     // ingress_buffer (watcher pushes here on FS notifications) and
     // forward into pipeline A. Subtree hints are completed silently
     // — full subtree re-scans happen via separate scanner sweeps.
+    //
+    // REQ-AXO-901649 — three hardening changes vs. pre-fix:
+    // 1. Complete subtree hints BEFORE the file send loop so a slow /
+    //    saturated A1 can never starve hint clearing (the in_flight
+    //    counter was observed pinned at 256 = drain limit, with
+    //    blocked_total growing +144K/h as new hints bounced off the
+    //    saturated retry budget).
+    // 2. Replace input_tx.send().await with try_send + bounded yield
+    //    so the drain task can NEVER park indefinitely on a full A1
+    //    channel. Dropped paths are picked up by the next watcher
+    //    event or by scope_reconciliation_orchestrator's 60 s sweep
+    //    (every dropped file remains in the IndexedFile-mismatch set
+    //    until it's actually persisted, so reconciliation will re-
+    //    submit it).
+    // 3. Log a periodic heartbeat ('drain tick: buffered=… in_flight_
+    //    hints=…') at INFO every 25 ticks (~5 s) so any future stall
+    //    is visible without re-instrumenting.
     let input_tx_drain = handles_a.input_tx;
     let ingress_for_drain = ingress_buffer.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(INGRESS_DRAIN_POLL_MS));
+        let mut tick_counter: u64 = 0;
+        let mut dropped_since_log: u64 = 0;
         loop {
             tick.tick().await;
+            tick_counter = tick_counter.wrapping_add(1);
             let batch = {
                 let mut guard = ingress_for_drain
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
                 guard.drain_batch(INGRESS_DRAIN_BATCH)
             };
+            // Clear subtree hints FIRST so even a full A1 channel
+            // cannot starve them (defense-in-depth ; the try_send
+            // change below already removes the blocking path).
+            for hint in &batch.subtree_hints {
+                let mut guard = ingress_for_drain
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                guard.complete_subtree_hint(&hint.path);
+            }
             // REQ-AXO-344 — trace drain throughput so we can correlate
             // Scanner walks (`Nexus Scan Complete: N`) with A1 ingress.
-            if !batch.files.is_empty() {
+            let batch_file_count = batch.files.len();
+            if batch_file_count > 0 {
                 let sample_path = batch
                     .files
                     .first()
@@ -307,25 +367,49 @@ pub fn spawn_pipeline_v2_indexer(
                 info!(
                     target: "pipeline_v2::drain",
                     "drain: forwarded {} paths to A1 (sample: {})",
-                    batch.files.len(),
+                    batch_file_count,
                     sample_path
                 );
             }
+            let mut sent = 0usize;
+            let mut dropped = 0usize;
             for file_event in batch.files {
                 let path = PathBuf::from(file_event.path);
-                if input_tx_drain.send(path).await.is_err() {
-                    return;
+                match input_tx_drain.try_send(path) {
+                    Ok(()) => sent += 1,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => dropped += 1,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        warn!("pipeline_v2 drain: A1 input channel closed; drain task exiting");
+                        return;
+                    }
                 }
             }
-            // Subtree hints: mark them complete so the ingress buffer
-            // does not re-emit them on the next tick. Path enumeration
-            // for any sub-tree happens via the bootstrap scan + native
-            // watcher events, not from hint replay.
-            for hint in batch.subtree_hints {
-                let mut guard = ingress_for_drain
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                guard.complete_subtree_hint(&hint.path);
+            dropped_since_log = dropped_since_log.saturating_add(dropped as u64);
+            // Heartbeat every ~5 s (25 ticks * 200 ms) so a future
+            // stall is observable in `journalctl -f` without external
+            // instrumentation. Logs even when buffer is empty so the
+            // absence of the line proves the task died.
+            if tick_counter.is_multiple_of(25) {
+                let snapshot = {
+                    let guard = ingress_for_drain
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    guard.metrics_snapshot()
+                };
+                info!(
+                    target: "pipeline_v2::drain",
+                    "drain heartbeat: tick={} buffered={} hot={} scan={} subtree_in_flight={} last_batch_files={} last_batch_sent={} last_batch_dropped_full={} cumulative_dropped_full={}",
+                    tick_counter,
+                    snapshot.buffered_entries,
+                    snapshot.hot_entries,
+                    snapshot.scan_entries,
+                    snapshot.subtree_hint_in_flight,
+                    batch_file_count,
+                    sent,
+                    dropped,
+                    dropped_since_log,
+                );
+                dropped_since_log = 0;
             }
         }
     });
