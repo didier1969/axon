@@ -16,7 +16,9 @@ use axon_core::runtime_mode::AxonRuntimeMode;
 use axon_core::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 use axon_core::scanner;
 use axon_core::service_guard;
-use crossbeam_channel::Sender;
+// REQ-AXO-901653 slice-5c — `crossbeam_channel::Sender` removed (was only
+// imported for DbWriteTask sender) ; `tokio::sync::broadcast::Sender` is
+// re-imported per-signature via the `broadcast::Sender` alias below.
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
@@ -383,6 +385,11 @@ pub(crate) fn spawn_runtime_telemetry(
     });
 }
 
+// REQ-AXO-901653 slice-5c — `db_sender` parameter (Sender<worker::DbWriteTask>)
+// removed from telemetry. Worker.rs + DbWriteTask + EXECUTE_CYPHER command path
+// were the v1 writer-actor bridge ; pipeline_v2 (REQ-AXO-289) writes through
+// GraphStore directly. EXECUTE_CYPHER + PULL_PENDING command handlers deleted
+// — they had no production callers post v1 retirement.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_telemetry_connection(
     socket: UnixStream,
@@ -390,7 +397,6 @@ pub(crate) fn spawn_telemetry_connection(
     queue: Arc<QueueStore>,
     projects_root: String,
     boot_id_lock: Arc<Mutex<String>>,
-    db_sender: Sender<axon_core::worker::DbWriteTask>,
     mut results_rx: broadcast::Receiver<String>,
     results_tx: broadcast::Sender<String>,
 ) {
@@ -428,7 +434,6 @@ pub(crate) fn spawn_telemetry_connection(
                 queue.clone(),
                 projects_root.clone(),
                 boot_id_lock.clone(),
-                db_sender.clone(),
                 results_tx.clone(),
             )
             .await;
@@ -443,7 +448,6 @@ pub(crate) async fn handle_telemetry_command(
     queue: Arc<QueueStore>,
     projects_root: String,
     boot_id_lock: Arc<Mutex<String>>,
-    db_sender: Sender<axon_core::worker::DbWriteTask>,
     results_tx: broadcast::Sender<String>,
 ) {
     if command.is_empty() {
@@ -451,12 +455,6 @@ pub(crate) async fn handle_telemetry_command(
     }
 
     debug!("Telemetry: Received command [{}]", command);
-
-    if let Some(stripped) = command.strip_prefix("EXECUTE_CYPHER ") {
-        let query = stripped.trim().to_string();
-        let _ = db_sender.send(axon_core::worker::DbWriteTask::ExecuteCypher { query });
-        return;
-    }
 
     if let Some(stripped) = command.strip_prefix("RAW_QUERY ") {
         let query = stripped.trim().to_string();
@@ -525,21 +523,10 @@ pub(crate) async fn handle_telemetry_command(
         return;
     }
 
-    if let Some(stripped) = command.strip_prefix("PULL_PENDING ") {
-        let count = stripped.trim().parse::<usize>().unwrap_or(10);
-        tokio::spawn(async move {
-            if let Ok(files) = store.fetch_pending_batch(count) {
-                if !files.is_empty() {
-                    let response =
-                        serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
-                    if let Ok(msg) = serde_json::to_string(&response) {
-                        let _ = results_tx.send(msg + "\n");
-                    }
-                }
-            }
-        });
-        return;
-    }
+    // REQ-AXO-901653 slice-5c — `PULL_PENDING` command path deleted ; relied
+    // on `fetch_pending_batch` (now a no-op stub) and the legacy v1 worker
+    // pool. Pipeline_v2 (REQ-AXO-289) streams files directly from
+    // `ingress_buffer` ; no pull semantics needed.
 
     if command == "SCAN_ALL" {
         tokio::spawn(async move {

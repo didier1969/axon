@@ -15,7 +15,8 @@ use crate::runtime_profile::{
     recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
 };
 use crate::runtime_writer_guard::WriterGuard;
-use crate::worker::{DbWriteTask, WorkerPool};
+// REQ-AXO-901653 slice-5c — v1 `worker::{DbWriteTask, WorkerPool}` retired.
+// Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054) owns the ingestion path.
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::future::pending;
@@ -719,7 +720,9 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         num_workers
     );
 
-    let db_sender = if profile.start_mcp_http {
+    // REQ-AXO-901653 slice-5c — `db_sender` removed (v1 writer-actor retired).
+    // Pipeline_v2 (REQ-AXO-289) writes via GraphStore directly.
+    if profile.start_mcp_http {
         let options = match runtime_mode {
             AxonRuntimeMode::BrainOnly => main_services::RuntimeServiceOptions::brain_only(),
             AxonRuntimeMode::IndexerGraph => main_services::RuntimeServiceOptions::indexer_graph(),
@@ -734,7 +737,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             results_tx.clone(),
             num_workers,
             options,
-        )
+        );
     } else {
         start_indexer_only_services(
             graph_store.clone(),
@@ -742,8 +745,8 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             results_tx.clone(),
             num_workers,
             runtime_mode,
-        )
-    };
+        );
+    }
 
     let projects_root_str = projects_root.to_string();
     let watch_root_str = watch_root.to_string();
@@ -857,7 +860,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
                 queue_store.clone(),
                 projects_root_str.clone(),
                 current_boot_id.clone(),
-                db_sender.clone(),
                 results_tx.subscribe(),
                 results_tx.clone(),
             );
@@ -1481,45 +1483,16 @@ mod tests {
 
 }
 
+// REQ-AXO-901653 slice-5c — WorkerPool spawn removed ; pipeline_v2 owns ingestion.
 fn start_indexer_only_services(
     graph_store: Arc<GraphStore>,
     queue_store: Arc<QueueStore>,
-    results_tx: tokio::sync::broadcast::Sender<String>,
-    num_workers: usize,
+    _results_tx: tokio::sync::broadcast::Sender<String>,
+    _num_workers: usize,
     runtime_mode: AxonRuntimeMode,
-) -> crossbeam_channel::Sender<DbWriteTask> {
-    let writer_queue_capacity = std::env::var("AXON_WRITER_QUEUE_CAPACITY")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|capacity| *capacity > 0)
-        .unwrap_or_else(|| num_workers.saturating_mul(4).clamp(32, 256));
-    let (db_tx, db_rx) = crossbeam_channel::bounded(writer_queue_capacity);
-
+) {
     if runtime_mode.ingestion_enabled() {
-        info!(
-            "Runtime services: writer queue capacity set to {} tasks.",
-            writer_queue_capacity
-        );
-        WorkerPool::spawn_writer_actor(
-            graph_store.clone(),
-            queue_store.clone(),
-            db_rx,
-            results_tx.clone(),
-        );
-        let queue_for_pool = queue_store.clone();
-        let store_for_pool = graph_store.clone();
-        let results_tx_for_pool = results_tx.clone();
-        let db_tx_for_pool = db_tx.clone();
-
-        tokio::task::spawn_blocking(move || {
-            WorkerPool::new(
-                num_workers,
-                queue_for_pool,
-                store_for_pool,
-                db_tx_for_pool,
-                results_tx_for_pool,
-            );
-        });
+        info!("Runtime services: indexing handled by pipeline_v2 (REQ-AXO-289).");
     } else {
         info!("Runtime services: indexing workers disabled by runtime mode.");
     }
@@ -1541,6 +1514,4 @@ fn start_indexer_only_services(
     } else {
         info!("Runtime services: semantic workers disabled by runtime mode.");
     }
-
-    db_tx
 }

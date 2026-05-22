@@ -2787,74 +2787,9 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
     assert!(content.contains("src/runtime/requeue.rs"), "{content}");
 }
 
-#[test]
-fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
-    let _runtime = RuntimeEnvGuard::full_autonomous();
-    let server = create_test_server();
-    let path = "/tmp/axon_docstring_query.rs".to_string();
-    server
-        .graph_store
-        .bulk_insert_files(&[(path.clone(), "AXO".to_string(), 120, 1)])
-        .unwrap();
-
-    let extraction = crate::parser::ExtractionResult {
-        project_code: Some("AXO".to_string()),
-        symbols: vec![crate::parser::Symbol {
-            name: "opaque_gate".to_string(),
-            kind: "function".to_string(),
-            start_line: 1,
-            end_line: 3,
-            docstring: Some("Relays manual scan requests to the rust watcher without forcing a fake indexing overlay.".to_string()),
-            is_entry_point: false,
-            is_public: true,
-            tested: true,
-            is_nif: false,
-            is_unsafe: false,
-            properties: std::collections::HashMap::new(),
-            embedding: None,
-        }],
-        relations: vec![],
-    };
-
-    server
-        .graph_store
-        .insert_file_data_batch(&[crate::worker::DbWriteTask::FileExtraction {
-            reservation_id: "res-docstring-trace".to_string(),
-            path: path.clone(),
-            content: Some("fn opaque_gate() {\n    notify_runtime();\n}\n".to_string()),
-            extraction,
-            processing_mode: ProcessingMode::Full,
-            trace_id: "docstring-trace".to_string(),
-            observed_cost_bytes: 0,
-            t0: 0,
-            t1: 0,
-            t2: 0,
-            t3: 0,
-        }])
-        .unwrap();
-
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "query",
-            "arguments": { "query": "fake indexing overlay", "project": "AXO" }
-        })),
-        id: Some(json!(26)),
-    };
-
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
-        .unwrap();
-
-    assert!(content.contains("opaque_gate"));
-    assert!(content.contains("fake indexing overlay"));
-    assert!(content.contains("docstring"));
-}
+// REQ-AXO-901653 slice-5c — `test_vcr1_chunk_retrieval_uses_ingested_docstring_content`
+// deleted ; relied on v1 worker::DbWriteTask + insert_file_data_batch ingestion path.
+// Pipeline_v2 ingestion harness rewrite tracked by REQ-AXO-901663.
 
 #[test]
 fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {

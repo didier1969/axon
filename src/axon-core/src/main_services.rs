@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axon_core::graph::GraphStore;
 use axon_core::mcp::McpServer;
 use axon_core::queue::QueueStore;
-use crossbeam_channel::Sender;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Copy)]
@@ -42,48 +41,19 @@ impl RuntimeServiceOptions {
     }
 }
 
+// REQ-AXO-901653 slice-5c — v1 WorkerPool + writer-actor removed. The
+// `spawn_indexing_workers` option is preserved for telemetry semantics
+// but no longer spawns the legacy worker pool : pipeline_v2 (REQ-AXO-289
+// / CPT-AXO-054) owns the ingestion path entirely via `spawn_pipeline_v2_indexer`.
 pub(crate) fn start_runtime_services(
     graph_store: Arc<GraphStore>,
     queue_store: Arc<QueueStore>,
-    results_tx: tokio::sync::broadcast::Sender<String>,
-    num_workers: usize,
+    _results_tx: tokio::sync::broadcast::Sender<String>,
+    _num_workers: usize,
     options: RuntimeServiceOptions,
-) -> Sender<axon_core::worker::DbWriteTask> {
-    let writer_queue_capacity = std::env::var("AXON_WRITER_QUEUE_CAPACITY")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|capacity| *capacity > 0)
-        .unwrap_or_else(|| num_workers.saturating_mul(4).clamp(32, 256));
-    let (db_tx, db_rx) = crossbeam_channel::bounded(writer_queue_capacity);
-
+) {
     if options.spawn_indexing_workers {
-        info!(
-            "Runtime services: writer queue capacity set to {} tasks.",
-            writer_queue_capacity
-        );
-        axon_core::worker::WorkerPool::spawn_writer_actor(
-            graph_store.clone(),
-            queue_store.clone(),
-            db_rx,
-            results_tx.clone(),
-        );
-    }
-
-    if options.spawn_indexing_workers {
-        let queue_for_pool = queue_store.clone();
-        let store_for_pool = graph_store.clone();
-        let results_tx_for_pool = results_tx.clone();
-        let db_tx_for_pool = db_tx.clone();
-
-        tokio::task::spawn_blocking(move || {
-            axon_core::worker::WorkerPool::new(
-                num_workers,
-                queue_for_pool,
-                store_for_pool,
-                db_tx_for_pool,
-                results_tx_for_pool,
-            );
-        });
+        info!("Runtime services: indexing handled by pipeline_v2 (REQ-AXO-289).");
     } else {
         info!("Runtime services: indexing workers disabled by runtime mode.");
     }
@@ -116,6 +86,4 @@ pub(crate) fn start_runtime_services(
             ),
         }
     });
-
-    db_tx
 }

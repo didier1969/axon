@@ -1279,137 +1279,6 @@ pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
     });
 }
 
-pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
-    tokio::spawn(async move {
-        info!("Autonomous Ingestor: Ignition. Monitoring PostgreSQL for work...");
-        let memory_limit = memory_limit_bytes();
-        let mut last_mode: Option<ClaimMode> = None;
-        let mut idle = true;
-        loop {
-            let policy = claim_policy(
-                queue.common_len(),
-                queue.memory_budget_snapshot().exhaustion_ratio,
-                current_rss_bytes(),
-                memory_limit,
-                service_guard::current_pressure(),
-            );
-            if last_mode != Some(policy.mode) {
-                record_claim_mode_transition(policy.mode);
-                info!(
-                    "Autonomous Ingestor claim mode={} claim_count={} sleep_ms={} queue_len={} service_pressure={:?}",
-                    policy.mode.label(),
-                    policy.claim_count,
-                    policy.sleep.as_millis(),
-                    queue.common_len(),
-                    service_guard::current_pressure(),
-                );
-                last_mode = Some(policy.mode);
-            }
-            if policy.claim_count > 0 {
-                if let Ok(candidates) = store.fetch_pending_candidates(
-                    policy.claim_count.saturating_mul(4).max(policy.claim_count),
-                ) {
-                    let plan = plan_admissions(&queue, candidates, policy.claim_count);
-                    let mut made_progress = false;
-
-                    if !plan.deferred.is_empty() {
-                        let deferred_paths = plan
-                            .deferred
-                            .iter()
-                            .map(|file| file.path.clone())
-                            .collect::<Vec<_>>();
-                        if let Err(err) = store.mark_pending_files_deferred(&deferred_paths) {
-                            warn!(
-                                "Autonomous Ingestor failed to record deferred fairness debt: {}",
-                                err
-                            );
-                        } else {
-                            made_progress = true;
-                        }
-                    }
-
-                    for oversized in &plan.oversized {
-                        record_oversized_refusal();
-                        if let Err(err) =
-                            store.mark_file_oversized_for_current_budget(&oversized.path)
-                        {
-                            warn!(
-                                "Autonomous Ingestor failed to mark {} as oversized: {}",
-                                oversized.path, err
-                            );
-                        } else {
-                            made_progress = true;
-                        }
-                    }
-
-                    let selected_modes = plan
-                        .selected
-                        .iter()
-                        .map(|selection| (selection.file.path.clone(), selection.mode))
-                        .collect::<std::collections::HashMap<_, _>>();
-
-                    if let Ok(files) = store.claim_pending_paths(
-                        &plan
-                            .selected
-                            .iter()
-                            .map(|selection| selection.file.path.clone())
-                            .collect::<Vec<_>>(),
-                    ) {
-                        if !files.is_empty() {
-                            debug!(
-                                "Autonomous Ingestor: Feeding {} tasks to workers.",
-                                files.len()
-                            );
-                            enqueue_claimed_files(&store, &queue, files, &selected_modes);
-                            made_progress = true;
-                        }
-                    } else if !plan.selected.is_empty() {
-                        warn!("Autonomous Ingestor failed to claim selected pending files.");
-                    }
-
-                    if made_progress {
-                        idle = false;
-                        tokio::task::yield_now().await;
-                    } else {
-                        let signaled = wait_for_runtime_work_activity_or_timeout_async(
-                            autonomous_ingestor_idle_wait(policy.sleep, queue.common_len()),
-                        )
-                        .await;
-                        if signaled {
-                            if idle {
-                                service_guard::record_background_runtime_wakeup(
-                                    service_guard::BackgroundWakeDetail::AutonomousIngestor,
-                                    0,
-                                    0,
-                                );
-                            }
-                            idle = false;
-                        } else {
-                            idle = true;
-                        }
-                    }
-                    continue;
-                }
-            }
-            let signaled = wait_for_runtime_work_activity_or_timeout_async(
-                autonomous_ingestor_idle_wait(policy.sleep, queue.common_len()),
-            )
-            .await;
-            if signaled {
-                if idle {
-                    service_guard::record_background_runtime_wakeup(
-                        service_guard::BackgroundWakeDetail::AutonomousIngestor,
-                        0,
-                        0,
-                    );
-                }
-                idle = false;
-            } else {
-                idle = true;
-            }
-        }
-    });
-}
 
 async fn wait_for_runtime_work_activity_or_timeout_async(timeout: std::time::Duration) -> bool {
     tokio::task::spawn_blocking(move || {
@@ -2062,71 +1931,6 @@ fn fill_admission_plan(
     }
 }
 
-fn enqueue_claimed_files(
-    store: &GraphStore,
-    queue: &QueueStore,
-    files: Vec<PendingFile>,
-    selected_modes: &std::collections::HashMap<String, ProcessingMode>,
-) {
-    for file in files {
-        let mut mode = selected_modes
-            .get(&file.path)
-            .copied()
-            .unwrap_or(ProcessingMode::Full);
-
-        if !queue.can_fit_alone_in_mode(&file.path, file.size_bytes, mode) {
-            if mode == ProcessingMode::Full
-                && queue.can_fit_alone_in_mode(
-                    &file.path,
-                    file.size_bytes,
-                    ProcessingMode::StructureOnly,
-                )
-            {
-                mode = ProcessingMode::StructureOnly;
-            } else {
-                record_oversized_refusal();
-                warn!(
-                    "Autonomous Ingestor marked {} as oversized for current budget (priority={}, size={}).",
-                    file.path,
-                    file.priority,
-                    file.size_bytes
-                );
-                if let Err(err) = store.mark_file_oversized_for_current_budget(&file.path) {
-                    error!(
-                        "Autonomous Ingestor failed to mark oversized claimed file {}: {}",
-                        file.path, err
-                    );
-                }
-                continue;
-            }
-        }
-
-        let is_hot = file.priority >= HOT_PRIORITY;
-        if matches!(mode, ProcessingMode::StructureOnly) {
-            record_structure_only_admission();
-        }
-
-        if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
-            record_oversized_refusal();
-            warn!(
-                "Autonomous Ingestor failed to enqueue {} (priority={}, mode={:?}): {}. Requeueing claim.",
-                file.path,
-                file.priority,
-                mode,
-                err
-            );
-            if let Err(requeue_err) = store
-                .requeue_claimed_file_with_reason(&file.path, "requeued_after_queue_push_failure")
-            {
-                error!(
-                    "Autonomous Ingestor failed to requeue claimed file {} after queue pressure: {}",
-                    file.path,
-                    requeue_err
-                );
-            }
-        }
-    }
-}
 
 fn run_initial_scan(
     store: Arc<GraphStore>,
@@ -3229,8 +3033,8 @@ mod tests {
     use super::{
         active_project_hot_targets, admission_controller_decision, bootstrap_salvage_paths,
         path_in_excluded_build_dir, EXCLUDED_BUILD_DIR_SEGMENTS,
-        // legacy alphabetical pull-up continued below ;
-        claim_policy, enqueue_claimed_files, federation_orchestration_candidates_from_identities,
+        // REQ-AXO-901653 slice-5c — `enqueue_claimed_files` removed (v1 admission path).
+        claim_policy, federation_orchestration_candidates_from_identities,
         federation_orchestrator_enabled, filter_orchestration_candidates_by_watch_root,
         flush_ingress_buffer_once, handle_watcher_events, ingress_flush_batch_size,
         ingress_promoter_backoff_ms, ingress_promoter_sleep_ms, memory_limit_bytes,
@@ -4291,53 +4095,6 @@ mod tests {
     }
 
     #[test]
-    fn test_enqueue_claimed_files_requeues_work_when_common_lane_is_full() {
-        let temp = tempdir().unwrap();
-        let file_path = temp.path().join("bulk_overflow.ex");
-        std::fs::write(&file_path, "defmodule BulkOverflow do\nend\n").unwrap();
-
-        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
-        store
-            .bulk_insert_files(&[(
-                file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
-                10,
-                1,
-            )])
-            .unwrap();
-
-        let claimed = store.fetch_pending_batch(10).unwrap();
-        assert_eq!(claimed.len(), 1);
-
-        let queue = QueueStore::new(3);
-        for idx in 0..2 {
-            let fill_bulk = temp.path().join(format!("fill-bulk-{}.ex", idx));
-            std::fs::write(&fill_bulk, "defmodule FillBulk do\nend\n").unwrap();
-            queue
-                .push(
-                    fill_bulk.to_string_lossy().as_ref(),
-                    0,
-                    &format!("fill-bulk-{}", idx),
-                    0,
-                    0,
-                    false,
-                )
-                .unwrap();
-        }
-
-        enqueue_claimed_files(&store, &queue, claimed, &std::collections::HashMap::new());
-
-        let row = store
-            .query_json(&format!(
-                "SELECT status, worker_id FROM File WHERE path = '{}'",
-                file_path.to_string_lossy().replace('\'', "''")
-            ))
-            .unwrap();
-        assert!(row.contains("pending"));
-        assert!(row.contains("null"));
-    }
-
-    #[test]
     fn test_plan_admissions_prefers_packable_candidates_over_single_blocking_large_file() {
         let temp = tempdir().unwrap();
         let large = temp.path().join("large.txt");
@@ -4600,38 +4357,6 @@ mod tests {
     }
 
     #[test]
-    fn test_enqueue_claimed_files_marks_oversized_when_file_cannot_fit_alone() {
-        let temp = tempdir().unwrap();
-        let file_path = temp.path().join("oversized.rs");
-        std::fs::write(&file_path, vec![b'x'; 16 * 1024]).unwrap();
-
-        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
-        store
-            .bulk_insert_files(&[(
-                file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
-                16 * 1024,
-                1,
-            )])
-            .unwrap();
-
-        let claimed = store.fetch_pending_batch(10).unwrap();
-        let queue = QueueStore::with_memory_budget(10, 2 * 1024 * 1024);
-
-        enqueue_claimed_files(&store, &queue, claimed, &std::collections::HashMap::new());
-
-        let row = store
-            .query_json(&format!(
-                "SELECT status, last_error_reason, worker_id FROM File WHERE path = '{}'",
-                file_path.to_string_lossy().replace('\'', "''")
-            ))
-            .unwrap();
-
-        assert!(row.contains("oversized"));
-        assert!(row.contains("current budget"));
-        assert!(row.contains("null"));
-    }
-
     #[test]
     fn test_rescan_guard_reset_releases_guard_on_drop() {
         let guard = Arc::new(AtomicBool::new(true));

@@ -4068,9 +4068,6 @@ impl McpServer {
 mod tests {
     use super::ChunkCandidate;
     use super::McpServer;
-    use crate::parser::{ExtractionResult, Symbol};
-    use crate::queue::ProcessingMode;
-    use crate::worker::DbWriteTask;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -4139,122 +4136,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn retrieve_context_retains_adjacent_chunks_for_split_symbol() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let server = McpServer::new(store.clone());
-        let path = "/tmp/multipart_lookup_probe.rs".to_string();
-
-        unsafe {
-            std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "64");
-            std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "32");
-            std::env::set_var("AXON_GRAY_ZONE_CHAR_THRESHOLD", "64");
-        }
-
-        store
-            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
-            .unwrap();
-        store
-            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
-                reservation_id: "res-multipart-lookup".to_string(),
-                path: path.clone(),
-                content: Some(
-                    [
-                        "fn multipart_lookup_probe() {",
-                        "    let alpha = very_long_identifier_name_for_a_large_symbol_payload();",
-                        "",
-                        "    let beta = very_long_identifier_name_for_a_large_symbol_payload();",
-                        "",
-                        "    let gamma = very_long_identifier_name_for_a_large_symbol_payload();",
-                        "",
-                        "    let delta = very_long_identifier_name_for_a_large_symbol_payload();",
-                        "}",
-                    ]
-                    .join("\n"),
-                ),
-                extraction: ExtractionResult {
-                    project_code: Some("PRJ".to_string()),
-                    symbols: vec![Symbol {
-                        name: "multipart_lookup_probe".to_string(),
-                        kind: "function".to_string(),
-                        start_line: 1,
-                        end_line: 9,
-                        docstring: None,
-                        is_entry_point: false,
-                        is_public: true,
-                        tested: false,
-                        is_nif: false,
-                        is_unsafe: false,
-                        properties: Default::default(),
-                        embedding: None,
-                    }],
-                    relations: vec![],
-                },
-                processing_mode: ProcessingMode::Full,
-                trace_id: "trace-multipart-lookup".to_string(),
-                observed_cost_bytes: 1,
-                t0: 0,
-                t1: 0,
-                t2: 0,
-                t3: 0,
-            }])
-            .unwrap();
-
-        let response = server
-            .axon_retrieve_context(&json!({
-                "question": "multipart_lookup_probe",
-                "project": "PRJ",
-                "top_k": 4,
-                "token_budget": 1200,
-                "include_graph": false,
-                "include_soll": false,
-            }))
-            .expect("retrieve_context response");
-
-        let supporting_chunks = response["data"]["packet"]["supporting_chunks"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        assert_eq!(supporting_chunks.len(), 2);
-        assert!(supporting_chunks.iter().all(|chunk| {
-            chunk["source_id"]
-                .as_str()
-                .unwrap_or_default()
-                .ends_with("::multipart_lookup_probe")
-        }));
-        assert_eq!(
-            supporting_chunks[0]["chunk_path"]
-                .as_str()
-                .unwrap_or_default(),
-            "1/4"
-        );
-        assert_eq!(
-            supporting_chunks[1]["chunk_path"]
-                .as_str()
-                .unwrap_or_default(),
-            "2/4"
-        );
-
-        let diagnostics = &response["data"]["packet"]["retrieval_diagnostics"];
-        assert_eq!(
-            diagnostics["multipart_chunks_selected"]
-                .as_u64()
-                .unwrap_or_default(),
-            2
-        );
-        assert_eq!(
-            diagnostics["multipart_symbol_groups_selected"]
-                .as_u64()
-                .unwrap_or_default(),
-            1
-        );
-
-        unsafe {
-            std::env::remove_var("AXON_TARGET_CHUNK_TOKENS");
-            std::env::remove_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH");
-            std::env::remove_var("AXON_GRAY_ZONE_CHAR_THRESHOLD");
-        }
-    }
+    // REQ-AXO-901653 slice-5c — `retrieve_context_retains_adjacent_chunks_for_split_symbol`
+    // deleted ; relied on v1 worker::DbWriteTask + insert_file_data_batch path.
+    // Pipeline_v2 ingestion harness rewrite tracked by REQ-AXO-901663.
 
     #[test]
     fn rerank_prefers_head_and_adjacent_multipart_chunks() {

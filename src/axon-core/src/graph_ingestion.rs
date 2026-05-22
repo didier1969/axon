@@ -76,19 +76,13 @@ impl GraphStore {
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
     pub fn backfill_file_vectorization_queue_with_limit(&self, _limit: usize) -> Result<usize> { Ok(0) } // slice-5b-stub
     pub fn recover_stale_inflight_file_vectorization_work(&self, _now_ms: i64, _stale_threshold_ms: i64) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn fetch_pending_batch(&self, _limit: usize) -> Result<Vec<crate::graph::PendingFile>> { Ok(Vec::new()) } // slice-5b-stub
-    pub fn fetch_pending_candidates(&self, _limit: usize) -> Result<Vec<crate::graph::PendingFile>> { Ok(Vec::new()) } // slice-5b-stub
-    pub fn mark_pending_files_deferred(&self, _paths: &[String]) -> Result<()> { Ok(()) } // slice-5b-stub
-    pub fn mark_file_oversized_for_current_budget(&self, _path: &str) -> Result<()> { Ok(()) } // slice-5b-stub
-    pub fn claim_pending_paths(&self, _paths: &[String]) -> Result<Vec<crate::graph::PendingFile>> { Ok(Vec::new()) } // slice-5b-stub
-    pub fn requeue_claimed_file_with_reason(&self, _path: &str, _reason: &str) -> Result<()> { Ok(()) } // slice-5b-stub
-    pub fn requeue_claimed_paths_with_reason(&self, _paths: &[String], _reason: &str) -> Result<()> { Ok(()) } // slice-5b-stub
-    pub fn mark_claimed_file_writer_pending_commit(&self, _path: &str) -> Result<()> { Ok(()) } // slice-5b-stub
-    pub fn insert_file_data_batch<T>(&self, _batch: &[T]) -> Result<()> { Ok(()) } // slice-5b-stub
-
-    // ---- file_ingress upsert helpers (file_ingress.rs legacy, slice-5c will delete) ----
-    pub fn upsert_file_queries(_path: &str, _project: &str, _at_ms: i64, _stage: i64, _source: i64, _kind: FileUpsertSource) -> Vec<String> { Vec::new() } // slice-5b-stub
-    pub fn bulk_upsert_file_queries(_rows: &[(String, String, i64, i64, i64, FileUpsertSource)]) -> Vec<String> { Vec::new() } // slice-5b-stub
+    // REQ-AXO-901653 slice-5c — 11 stubs DELETED (zero callers post worker.rs +
+    // spawn_autonomous_ingestor + enqueue_claimed_files purge) :
+    // fetch_pending_batch, fetch_pending_candidates, mark_pending_files_deferred,
+    // mark_file_oversized_for_current_budget, claim_pending_paths,
+    // requeue_claimed_file_with_reason, requeue_claimed_paths_with_reason,
+    // mark_claimed_file_writer_pending_commit, insert_file_data_batch,
+    // upsert_file_queries, bulk_upsert_file_queries.
 
     pub fn append_file_lifecycle_events(&self, events: &[FileLifecycleEvent]) -> Result<()> {
         if events.is_empty() {
