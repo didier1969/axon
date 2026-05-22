@@ -67,12 +67,6 @@ mod provider_contract;
 mod provider_runtime;
 #[path = "embedder/vector_executor.rs"]
 mod vector_executor;
-#[path = "embedder/vector_maintenance_loop.rs"]
-mod vector_maintenance_loop;
-#[path = "embedder/vector_pipeline_3stages.rs"]
-mod vector_pipeline_3stages;
-#[path = "embedder/vector_worker_loop.rs"]
-mod vector_worker_loop;
 
 #[cfg(test)]
 pub(crate) use batch_lanes::reset_token_lane_classifier_for_tests;
@@ -181,8 +175,6 @@ static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingReques
 
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
-    _vector_workers: Vec<thread::JoinHandle<()>>,
-    _vector_maintenance_workers: Vec<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1209,40 +1201,6 @@ impl SemanticWorkerPool {
             }));
         }
 
-        // DEC-AXO-070 single-loop vector lane: claim → prepare → embed →
-        // persist → finalize, all in one thread per worker. Channels and the
-        // 5-loop pipeline are gone. Maintenance loop (stale-inflight recovery)
-        // remains as a separate thread.
-        //
-        // REQ-AXO-901632 — pipeline_v2 (CPT-AXO-054 / DEC-AXO-081 / REQ-AXO-289)
-        // is the canonical vectorization path under the live runtime. The
-        // legacy DuckDB-era `vector_lane_worker` is gated behind the explicit
-        // opt-in `AXON_LEGACY_VECTOR_WORKER_LOOP=1` so the live indexer stops
-        // emitting the session 49 log spam (`FROM FileVectorizationQueue ...`
-        // / `LEFT JOIN File ...` against tables that no longer exist or are
-        // being retired). Tests that exercise the legacy lane set the flag
-        // explicitly. Default = no spawn ; `config.vector_workers` and
-        // `embedding_lane_config_from_env()` honor env knobs unchanged for
-        // backward compatibility and tuning telemetry.
-        let mut vector_workers = Vec::new();
-        let mut vector_maintenance_workers = Vec::new();
-        let legacy_vector_loop_enabled = std::env::var("AXON_LEGACY_VECTOR_WORKER_LOOP")
-            .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        if legacy_vector_loop_enabled && config.vector_workers > 0 {
-            let maintenance_graph_store = Arc::clone(&graph_store);
-            vector_maintenance_workers.push(thread::spawn(move || {
-                vector_maintenance_loop::vector_maintenance_worker_loop(maintenance_graph_store);
-            }));
-            for worker_idx in 0..config.vector_workers {
-                let lane_graph_store = Arc::clone(&graph_store);
-                vector_workers.push(thread::spawn(move || {
-                    vector_worker_loop::vector_lane_worker(worker_idx, lane_graph_store);
-                }));
-            }
-        }
-
         // REQ-AXO-901653 Slice 1 — graph_worker_loop spawn removed.
         // The Semantic Graph Worker (graph projection embedding cache) was
         // structurally obsolete since MIL-AXO-017 (AGE retirement) +
@@ -1254,10 +1212,17 @@ impl SemanticWorkerPool {
         // Authoritative call-graph reads route through public.Edge
         // (db/ddl/04_graph_functions.sql) ; the projection cache has no
         // remaining consumer.
+        //
+        // REQ-AXO-901653 Slice 2 — vector_worker_loop +
+        // vector_maintenance_worker_loop + vector_pipeline_3stages deleted.
+        // The legacy DuckDB-era single-loop vector lane (DEC-AXO-070) and the
+        // 3-stage variant became dead code once pipeline_v2
+        // (CPT-AXO-054 / DEC-AXO-081 / REQ-AXO-289) took over canonical
+        // vectorization under the live runtime. The previous
+        // AXON_LEGACY_VECTOR_WORKER_LOOP env-gate (REQ-AXO-901632, session 49)
+        // defaulted to false ; this slice removes the gated code outright.
         Self {
             _query_workers: query_workers,
-            _vector_workers: vector_workers,
-            _vector_maintenance_workers: vector_maintenance_workers,
         }
     }
 
