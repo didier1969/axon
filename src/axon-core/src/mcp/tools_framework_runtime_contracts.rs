@@ -323,13 +323,8 @@ impl McpServer {
         };
         let structural_graph_backlog_count =
             structural_graph_queued_count.saturating_add(structural_graph_inflight_count);
-        let (graph_queue_queued_count, graph_queue_inflight_count) = if graph_runtime_enabled {
-            self.graph_store
-                .fetch_graph_projection_queue_counts()
-                .unwrap_or((0usize, 0usize))
-        } else {
-            (0usize, 0usize)
-        };
+        // REQ-AXO-901653 Slice 3b — graph_projection_queue table dropped.
+        let (graph_queue_queued_count, graph_queue_inflight_count): (usize, usize) = (0, 0);
         let graph_queue_owned_count =
             u64::try_from(graph_queue_queued_count.saturating_add(graph_queue_inflight_count))
                 .unwrap_or(0);

@@ -95,13 +95,9 @@ impl McpServer {
                 (status == "inflight").then_some(count)
             })
             .sum::<u64>();
-        let (db_queued_files, db_inflight_files) = if runtime_mode.semantic_workers_enabled() {
-            self.graph_store
-                .fetch_file_vectorization_queue_counts()
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+        // REQ-AXO-901653 Slice 3b — queue helpers removed ; canonical
+        // pipeline_v2 path tracks via Chunk + ChunkEmbedding directly.
+        let (db_queued_files, db_inflight_files): (usize, usize) = (0, 0);
         let queued_files = debug_queued_files.max(db_queued_files as u64);
         let inflight_files = debug_inflight_files.max(db_inflight_files as u64);
         let drain_state = debug_data
@@ -117,13 +113,8 @@ impl McpServer {
             .pointer("/embedding_contract/runtime_telemetry/graph_projection_queue_depth")
             .and_then(|value| value.as_u64())
             .unwrap_or(0) as usize;
-        let (db_graph_queue_queued, db_graph_queue_inflight) = if runtime_mode.ingestion_enabled() {
-            self.graph_store
-                .fetch_graph_projection_queue_counts()
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+        // REQ-AXO-901653 Slice 3b — graph_projection_queue table dropped.
+        let (db_graph_queue_queued, db_graph_queue_inflight): (usize, usize) = (0, 0);
         let graph_queue_depth =
             debug_graph_queue_depth.max(db_graph_queue_queued + db_graph_queue_inflight);
         let ingress = ingress_metrics_snapshot();

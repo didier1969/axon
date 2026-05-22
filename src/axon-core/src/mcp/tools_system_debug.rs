@@ -204,26 +204,13 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0
     };
-    let (graph_projection_queue_queued, graph_projection_queue_inflight) = if graph_runtime_enabled
-    {
-        server
-            .graph_store
-            .fetch_graph_projection_queue_counts()
-            .unwrap_or((0, 0))
-    } else {
-        (0, 0)
-    };
+    // REQ-AXO-901653 Slice 3b — queue helpers removed (tables dropped post
+    // MIL-AXO-017 / REQ-AXO-289). Canonical pipeline_v2 path bypasses the queues.
+    let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) = (0, 0);
     let graph_projection_queue_depth =
         graph_projection_queue_queued + graph_projection_queue_inflight;
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) =
-        if vector_runtime_enabled {
-            server
-                .graph_store
-                .fetch_file_vectorization_queue_counts()
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+    let (file_vectorization_queue_queued, file_vectorization_queue_inflight): (usize, usize) =
+        (0, 0);
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
     let reader_snapshot_age_ms = server.graph_store.reader_snapshot_age_ms();

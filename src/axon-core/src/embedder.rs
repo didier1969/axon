@@ -1770,7 +1770,9 @@ fn desired_vector_claimable_supply_depth(
 fn maintain_vector_claimable_supply(graph_store: &GraphStore) -> anyhow::Result<usize> {
     let claimable_file_backlog_depth =
         graph_store.fetch_claimable_file_vectorization_queue_count()?;
-    let (_queued, inflight) = graph_store.fetch_file_vectorization_queue_counts()?;
+    // REQ-AXO-901653 Slice 3b — file_vectorization_queue table dropped post
+    // MIL-AXO-017 / REQ-AXO-289 ; canonical pipeline_v2 path bypasses the queue.
+    let (_queued, inflight): (usize, usize) = (0, 0);
     let metrics = service_guard::vector_runtime_metrics();
     let desired_claimable_depth =
         desired_vector_claimable_supply_depth(metrics, claimable_file_backlog_depth, inflight);

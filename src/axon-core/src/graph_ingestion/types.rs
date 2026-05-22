@@ -1,12 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
-pub struct GraphProjectionWork {
-    pub anchor_type: String,
-    pub anchor_id: String,
-    pub radius: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileVectorizationWork {
     pub file_path: String,

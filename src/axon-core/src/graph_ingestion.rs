@@ -21,7 +21,6 @@ static FILE_VECTORIZATION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub mod async_writer;
 mod file_ingress;
-mod graph_projection_queue;
 mod sql_helpers;
 mod types;
 mod vector_runtime;
@@ -36,9 +35,9 @@ use sql_helpers::{
 };
 pub use types::{
     EmbedderLifecycleHeartbeatRecord, FileLifecycleEvent, FileVectorizationLeaseSnapshot,
-    FileVectorizationWork, GraphProjectionWork, IgnoreReconcileStats, VectorBatchRun,
-    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
-    VectorPersistOutboxWork, VectorWorkerFault,
+    FileVectorizationWork, IgnoreReconcileStats, VectorBatchRun, VectorLaneStateRecord,
+    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork,
+    VectorWorkerFault,
 };
 
 #[derive(Debug, Clone, Copy)]

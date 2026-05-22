@@ -120,18 +120,17 @@ pub(super) struct RetrievalRuntimeState {
 }
 
 impl RetrievalRuntimeState {
-    pub(super) fn new(server: &McpServer) -> Self {
+    pub(super) fn new(_server: &McpServer) -> Self {
         let pressure = service_guard::current_pressure();
-        let (graph_projection_queue_queued, graph_projection_queue_inflight) = server
-            .graph_store
-            .fetch_graph_projection_queue_counts()
-            .unwrap_or((0, 0));
+        // REQ-AXO-901653 Slice 3b — queue helpers removed (tables dropped
+        // post MIL-AXO-017 / REQ-AXO-289). Canonical pipeline_v2 path tracks
+        // via Chunk + ChunkEmbedding directly.
+        let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) =
+            (0, 0);
         let graph_projection_queue_depth =
             graph_projection_queue_queued + graph_projection_queue_inflight;
-        let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = server
-            .graph_store
-            .fetch_file_vectorization_queue_counts()
-            .unwrap_or((0, 0));
+        let (file_vectorization_queue_queued, file_vectorization_queue_inflight): (usize, usize) =
+            (0, 0);
         let file_vectorization_queue_depth =
             file_vectorization_queue_queued + file_vectorization_queue_inflight;
 

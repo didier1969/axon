@@ -1444,9 +1444,10 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or_else(|poison| poison.into_inner())
         .metrics_snapshot();
     let process_memory = process_memory_snapshot();
-    let (graph_projection_queue_queued, graph_projection_queue_inflight) = store
-        .fetch_graph_projection_queue_counts()
-        .unwrap_or((0, 0));
+    // REQ-AXO-901653 Slice 3b — queue helpers removed (graph_projection_queue
+    // + file_vectorization_queue tables dropped post MIL-AXO-017 / REQ-AXO-289).
+    // Canonical pipeline_v2 path writes Chunk + ChunkEmbedding directly.
+    let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) = (0, 0);
     let graph_projection_queue_depth =
         graph_projection_queue_queued + graph_projection_queue_inflight;
     let persisted_file_pending_depth = if graph_runtime_enabled {
@@ -1454,14 +1455,8 @@ pub(crate) fn runtime_telemetry_snapshot(
     } else {
         0
     };
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) =
-        if vector_runtime_enabled {
-            store
-                .fetch_file_vectorization_queue_counts()
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+    let (file_vectorization_queue_queued, file_vectorization_queue_inflight): (usize, usize) =
+        (0, 0);
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
     let runtime_truth_feed = service_guard::current_runtime_truth_feed();
