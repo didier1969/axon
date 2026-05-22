@@ -10,5 +10,7 @@ pub mod embedder_provider_runtime_tests;
 // replaced by pipeline_v2 (REQ-AXO-289 / CPT-AXO-054). REQ-AXO-901634 absorbed.
 pub mod queue_decoupling_tests;
 pub mod test_helpers;
-// REQ-AXO-901663 — restored coverage for LIVE vector_runtime methods.
+// REQ-AXO-901663 / 901669 — restored coverage for LIVE vector_runtime methods.
 pub mod vector_runtime_tests;
+// REQ-AXO-284 Slice 2 — PG health helpers.
+pub mod pg_health_tests;

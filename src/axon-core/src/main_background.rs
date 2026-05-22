@@ -209,6 +209,11 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub rss_anon_bytes: u64,
     pub rss_file_bytes: u64,
     pub rss_shmem_bytes: u64,
+    // REQ-AXO-284 Slice 2 — PG health metrics. `Option` so transient
+    // catalog miss doesn't poison the telemetry payload.
+    pub pg_database_bytes: Option<i64>,
+    pub pg_chunkembedding_total_bytes: Option<i64>,
+    pub pg_buffer_hit_ratio: Option<f64>,
     pub vector_chunks_embedded_total: u64,
     pub chunk_embeddings_per_second: f64,
     pub chunk_embeddings_rate_window_ms: u64,
@@ -1424,6 +1429,12 @@ pub(crate) fn runtime_telemetry_snapshot(
         rss_anon_bytes: process_memory.rss_anon_bytes,
         rss_file_bytes: process_memory.rss_file_bytes,
         rss_shmem_bytes: process_memory.rss_shmem_bytes,
+        // REQ-AXO-284 Slice 2 — PG health probe. Cheap catalog reads, run
+        // once per heartbeat tick ; absorbed errors return None so a
+        // catalog hiccup never breaks the telemetry pipeline.
+        pg_database_bytes: store.pg_database_size_bytes(),
+        pg_chunkembedding_total_bytes: store.pg_chunkembedding_total_bytes(),
+        pg_buffer_hit_ratio: store.pg_buffer_hit_ratio(),
         vector_chunks_embedded_total: service_guard::vector_chunks_embedded_total(),
         chunk_embeddings_per_second: service_guard::vector_chunk_embeddings_per_second(),
         chunk_embeddings_rate_window_ms: service_guard::vector_chunk_embeddings_rate_window_ms(),

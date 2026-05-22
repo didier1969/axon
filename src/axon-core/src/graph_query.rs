@@ -517,6 +517,50 @@ impl GraphStore {
         self.query_count_on_reader(query)
     }
 
+    /// REQ-AXO-284 Slice 2 — PG health metrics for the dashboard +
+    /// `tools_system_debug` diagnostic surface.
+    ///
+    /// Returns the canonical database size (`pg_database_size(current_database())`)
+    /// in bytes. Errors are absorbed and surfaced as `None` so a transient
+    /// catalog hiccup never breaks the telemetry pipeline.
+    pub fn pg_database_size_bytes(&self) -> Option<i64> {
+        self.query_single_i64_writer("SELECT pg_database_size(current_database())::BIGINT")
+            .ok()
+            .flatten()
+    }
+
+    /// REQ-AXO-284 Slice 2 — size of the per-tenant `ChunkEmbedding` table
+    /// (the largest IST table on a populated tenant), including indexes.
+    /// Returns `None` when the table is absent (fresh deployment) or on
+    /// catalog error.
+    pub fn pg_chunkembedding_total_bytes(&self) -> Option<i64> {
+        self.query_single_i64_writer(
+            "SELECT pg_total_relation_size('public.ChunkEmbedding')::BIGINT",
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// REQ-AXO-284 Slice 2 — PG buffer cache hit ratio for the current
+    /// database. Returns ratio in [0.0, 1.0] (multiply by 100 for %).
+    /// `None` when `pg_stat_database` has no row yet for current DB (rare,
+    /// only on bootstrap) or `blks_hit + blks_read == 0`.
+    pub fn pg_buffer_hit_ratio(&self) -> Option<f64> {
+        let raw = self.query_json_writer(
+            "SELECT blks_hit, blks_read FROM pg_stat_database WHERE datname = current_database()",
+        )
+        .ok()?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let row = rows.first()?;
+        let blks_hit = row.first().and_then(|v| v.as_i64())?;
+        let blks_read = row.get(1).and_then(|v| v.as_i64())?;
+        let total = blks_hit + blks_read;
+        if total <= 0 {
+            return None;
+        }
+        Some(blks_hit as f64 / total as f64)
+    }
+
     pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
         let res = self.query_json_param(query, params)?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res).unwrap_or_default();

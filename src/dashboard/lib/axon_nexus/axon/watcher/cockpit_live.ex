@@ -382,6 +382,31 @@ defmodule Axon.Watcher.CockpitLive do
           <section class="cockpit-band">
             <div class="band-title-row">
               <div>
+                <p class="eyebrow">Storage</p>
+                <h2>PostgreSQL health</h2>
+              </div>
+              <span class="band-kicker">PG 17</span>
+            </div>
+
+            <div class="detail-grid">
+              <.signal_stat
+                label="Database size"
+                value={human_bytes(@runtime.pg_database_bytes)}
+              />
+              <.signal_stat
+                label="ChunkEmbedding size"
+                value={human_bytes(@runtime.pg_chunkembedding_total_bytes)}
+              />
+              <.signal_stat
+                label="Buffer cache hit"
+                value={human_ratio(@runtime.pg_buffer_hit_ratio)}
+              />
+            </div>
+          </section>
+
+          <section class="cockpit-band">
+            <div class="band-title-row">
+              <div>
                 <p class="eyebrow">Runtime</p>
                 <h2>Service & scheduling</h2>
               </div>
@@ -881,6 +906,27 @@ defmodule Axon.Watcher.CockpitLive do
   attr :value, :string, required: true
   attr :tone, :atom, default: :neutral
 
+  # REQ-AXO-284 Slice 2 — humanize byte values for the PostgreSQL Health panel.
+  defp human_bytes(nil), do: "n/a"
+
+  defp human_bytes(bytes) when is_integer(bytes) and bytes >= 0 do
+    cond do
+      bytes >= 1_099_511_627_776 -> "#{Float.round(bytes / 1_099_511_627_776, 2)} TB"
+      bytes >= 1_073_741_824 -> "#{Float.round(bytes / 1_073_741_824, 2)} GB"
+      bytes >= 1_048_576 -> "#{Float.round(bytes / 1_048_576, 1)} MB"
+      bytes >= 1_024 -> "#{Float.round(bytes / 1_024, 1)} KB"
+      true -> "#{bytes} B"
+    end
+  end
+
+  defp human_bytes(_), do: "n/a"
+
+  defp human_ratio(nil), do: "n/a"
+
+  defp human_ratio(ratio) when is_float(ratio), do: "#{Float.round(ratio * 100.0, 2)} %"
+
+  defp human_ratio(_), do: "n/a"
+
   defp signal_chip(assigns) do
     ~H"""
     <div class={["signal-chip", tone_class(@tone)]}>
@@ -1200,6 +1246,9 @@ defmodule Axon.Watcher.CockpitLive do
       rss_anon_bytes: Map.get(stats, :rss_anon_bytes, 0) || 0,
       rss_file_bytes: Map.get(stats, :rss_file_bytes, 0) || 0,
       rss_shmem_bytes: Map.get(stats, :rss_shmem_bytes, 0) || 0,
+      pg_database_bytes: Map.get(stats, :pg_database_bytes, nil),
+      pg_chunkembedding_total_bytes: Map.get(stats, :pg_chunkembedding_total_bytes, nil),
+      pg_buffer_hit_ratio: Map.get(stats, :pg_buffer_hit_ratio, nil),
       vector_chunks_embedded_total: Map.get(stats, :vector_chunks_embedded_total, 0) || 0,
       chunk_embeddings_per_second: Map.get(stats, :chunk_embeddings_per_second, 0.0) || 0.0,
       chunk_embeddings_rate_window_ms: Map.get(stats, :chunk_embeddings_rate_window_ms, 0) || 0,

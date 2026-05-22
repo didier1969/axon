@@ -219,6 +219,11 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         0
     };
     let memory = process_memory_snapshot();
+    // REQ-AXO-284 Slice 2 — PG health metrics. Cheap catalog reads ; absorbed
+    // into Option so a transient hiccup doesn't break the diagnostic output.
+    let pg_database_bytes = server.graph_store.pg_database_size_bytes();
+    let pg_chunkembedding_total_bytes = server.graph_store.pg_chunkembedding_total_bytes();
+    let pg_buffer_hit_ratio = server.graph_store.pg_buffer_hit_ratio();
     let ingress = ingress_metrics_snapshot();
     let provider = current_embedding_provider_diagnostics();
     let lane_config = embedding_lane_config_from_env();
@@ -444,6 +449,10 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   RSS Anon: {}\n\
         *   RSS File: {}\n\
         *   RSS Shmem: {}\n\n\
+        **PostgreSQL Health:**\n\
+        *   Database size: {}\n\
+        *   ChunkEmbedding total size: {}\n\
+        *   Buffer cache hit ratio: {}\n\n\
         **Graph Volume:**\n\
         *   Known files: {}\n\
         *   Extracted symbols: {}\n\
@@ -568,6 +577,15 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         format_bytes_human(memory.rss_anon_bytes),
         format_bytes_human(memory.rss_file_bytes),
         format_bytes_human(memory.rss_shmem_bytes),
+        pg_database_bytes
+            .map(|bytes| format_bytes_human(bytes.max(0) as u64))
+            .unwrap_or_else(|| "n/a".to_string()),
+        pg_chunkembedding_total_bytes
+            .map(|bytes| format_bytes_human(bytes.max(0) as u64))
+            .unwrap_or_else(|| "n/a".to_string()),
+        pg_buffer_hit_ratio
+            .map(|ratio| format!("{:.2} %", ratio * 100.0))
+            .unwrap_or_else(|| "n/a".to_string()),
         file_count,
         symbol_count,
         edge_count,
