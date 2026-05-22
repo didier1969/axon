@@ -5,8 +5,9 @@ pub mod embedder_gpu_backend_tests;
 pub mod embedder_gpu_policy_tests;
 pub mod embedder_gpu_telemetry_tests;
 pub mod embedder_provider_runtime_tests;
-pub mod graph_ingestion_split_tests;
-pub mod maillon_tests;
+// REQ-AXO-901653 slice-7 — graph_ingestion_split_tests + maillon_tests deleted.
+// They exercised legacy v1 worker.rs + File state-machine, replaced by
+// pipeline_v2 (REQ-AXO-289 / CPT-AXO-054). REQ-AXO-901634 absorbed.
 pub mod pipeline_test;
 pub mod queue_decoupling_tests;
 pub mod test_helpers;
