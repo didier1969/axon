@@ -2825,7 +2825,10 @@ fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {
     service_guard::record_vector_ready_queue_depth(0);
     service_guard::record_vector_prepare_inflight_depth(0);
     service_guard::record_vector_persist_queue_depth(0);
-    service_guard::record_graph_vector_priority_context(1, 16);
+    // REQ-AXO-901674 — record_graph_vector_priority_context removed (was no-op
+    // since FVQ/GPQ tables dropped slice-5d). Scheduler diagnostics derive
+    // graph-vs-vector backlog from current_utility_first_scheduler_diagnostics
+    // inputs directly.
 
     let first =
         current_utility_first_scheduler_diagnostics(1, 16, service_guard::ServicePressure::Healthy);
@@ -2837,12 +2840,10 @@ fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {
         0
     );
 
-    service_guard::record_graph_vector_priority_context(0, 16);
     let held =
         current_utility_first_scheduler_diagnostics(0, 16, service_guard::ServicePressure::Healthy);
     assert_eq!(held.state.as_str(), "balanced_drain");
 
-    service_guard::record_graph_vector_priority_context(0, 16);
     let released =
         current_utility_first_scheduler_diagnostics(0, 16, service_guard::ServicePressure::Healthy);
     assert_eq!(released.state.as_str(), "balanced_drain");

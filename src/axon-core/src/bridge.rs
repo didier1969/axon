@@ -152,12 +152,6 @@ pub enum BridgeEvent {
         rss_anon_bytes: u64,
         rss_file_bytes: u64,
         rss_shmem_bytes: u64,
-        graph_projection_queue_queued: usize,
-        graph_projection_queue_inflight: usize,
-        graph_projection_queue_depth: usize,
-        file_vectorization_queue_queued: usize,
-        file_vectorization_queue_inflight: usize,
-        file_vectorization_queue_depth: usize,
         vector_chunks_embedded_total: u64,
         chunk_embeddings_per_second: f64,
         chunk_embeddings_rate_window_ms: u64,
@@ -268,12 +262,6 @@ mod tests {
             rss_anon_bytes: 5_120,
             rss_file_bytes: 1_920,
             rss_shmem_bytes: 300,
-            graph_projection_queue_queued: 12,
-            graph_projection_queue_inflight: 3,
-            graph_projection_queue_depth: 15,
-            file_vectorization_queue_queued: 7,
-            file_vectorization_queue_inflight: 2,
-            file_vectorization_queue_depth: 9,
             vector_chunks_embedded_total: 96,
             chunk_embeddings_per_second: 32.0,
             chunk_embeddings_rate_window_ms: 5_000,
@@ -313,10 +301,7 @@ mod tests {
                 "freshness_state": "fresh",
                 "observed_age_ms": 125,
                 "telemetry": {
-                    "ingress_buffered_entries": 33,
-                    "graph_projection_queue": {
-                        "total": 15
-                    }
+                    "ingress_buffered_entries": 33
                 }
             })),
         };
@@ -385,12 +370,6 @@ mod tests {
         assert!(json.contains("\"rss_anon_bytes\":5120"));
         assert!(json.contains("\"rss_file_bytes\":1920"));
         assert!(json.contains("\"rss_shmem_bytes\":300"));
-        assert!(json.contains("\"graph_projection_queue_queued\":12"));
-        assert!(json.contains("\"graph_projection_queue_inflight\":3"));
-        assert!(json.contains("\"graph_projection_queue_depth\":15"));
-        assert!(json.contains("\"file_vectorization_queue_queued\":7"));
-        assert!(json.contains("\"file_vectorization_queue_inflight\":2"));
-        assert!(json.contains("\"file_vectorization_queue_depth\":9"));
         assert!(json.contains("\"vector_chunks_embedded_total\":96"));
         assert!(json.contains("\"chunk_embeddings_per_second\":32.0"));
         assert!(json.contains("\"chunk_embeddings_rate_window_ms\":5000"));

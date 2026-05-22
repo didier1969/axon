@@ -1316,12 +1316,6 @@ pub fn record_vector_canonical_backlog_depth(depth: u64) {
     update_atomic_max(&VECTOR_CANONICAL_BACKLOG_DEPTH_MAX, depth);
 }
 
-pub fn record_graph_vector_priority_context(
-    _graph_backlog_depth: usize,
-    _semantic_backlog_depth: usize,
-) {
-}
-
 pub fn record_vector_oldest_ready_batch_age_ms(latency_ms: u64) {
     VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT.store(latency_ms, Ordering::Relaxed);
     update_atomic_max(&VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX, latency_ms);
@@ -2150,7 +2144,6 @@ mod tests {
         let _guard = TEST_GUARD.lock().unwrap();
         reset_for_tests();
         record_vector_ready_queue_depth(0);
-        record_graph_vector_priority_context(1, 16);
 
         assert_eq!(vector_runtime_metrics().ready_queue_depth_current, 0);
     }

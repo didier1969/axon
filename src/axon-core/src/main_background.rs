@@ -209,12 +209,6 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub rss_anon_bytes: u64,
     pub rss_file_bytes: u64,
     pub rss_shmem_bytes: u64,
-    pub graph_projection_queue_queued: usize,
-    pub graph_projection_queue_inflight: usize,
-    pub graph_projection_queue_depth: usize,
-    pub file_vectorization_queue_queued: usize,
-    pub file_vectorization_queue_inflight: usize,
-    pub file_vectorization_queue_depth: usize,
     pub vector_chunks_embedded_total: u64,
     pub chunk_embeddings_per_second: f64,
     pub chunk_embeddings_rate_window_ms: u64,
@@ -581,10 +575,12 @@ pub(crate) fn spawn_runtime_trace_logger(
 
         loop {
             let telemetry = runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            // REQ-AXO-901674 — FVQ/GPQ depths stubbed to 0 (tables dropped
+            // slice-5d) ; wake detail signals are vestigial for these axes.
             service_guard::record_background_runtime_wakeup(
                 service_guard::BackgroundWakeDetail::RuntimeTrace,
-                telemetry.graph_projection_queue_depth as u64,
-                telemetry.file_vectorization_queue_depth as u64,
+                0,
+                0,
             );
             let signals = collect_runtime_signals_window(&store);
             let gpu_memory = current_gpu_memory_snapshot();
@@ -600,8 +596,6 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "service_pressure": telemetry.service_pressure,
                     "interactive_priority_level": telemetry.interactive_priority_level,
                     "interactive_requests_in_flight": telemetry.interactive_requests_in_flight,
-                    "file_vectorization_queue_depth": telemetry.file_vectorization_queue_depth,
-                    "graph_projection_queue_depth": telemetry.graph_projection_queue_depth,
                     "orphan_vectorization_files": telemetry.orphan_vectorization_files,
                     "stale_vector_inflight_files": telemetry.stale_vector_inflight_files,
                     "oldest_graph_pending_age_ms": telemetry.oldest_graph_pending_age_ms,
@@ -654,7 +648,8 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "memory_utilization_ratio": snapshot.memory_utilization_ratio
                 })),
                 "drain_state": current_vector_drain_state(
-                    telemetry.file_vectorization_queue_depth,
+                    // REQ-AXO-901674 — FVQ depth stub (table dropped slice-5d).
+                    0,
                     service_guard::current_pressure(),
                     telemetry.interactive_priority_active,
                     &provider.provider_requested,
@@ -1313,26 +1308,14 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or_else(|poison| poison.into_inner())
         .metrics_snapshot();
     let process_memory = process_memory_snapshot();
-    // REQ-AXO-901653 Slice 3b — queue helpers removed (graph_projection_queue
-    // + file_vectorization_queue tables dropped post MIL-AXO-017 / REQ-AXO-289).
-    // Canonical pipeline_v2 path writes Chunk + ChunkEmbedding directly.
-    let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) = (0, 0);
-    let graph_projection_queue_depth =
-        graph_projection_queue_queued + graph_projection_queue_inflight;
+    // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 / REQ-AXO-289 /
+    // slice-5d. Canonical pipeline_v2 path writes Chunk + ChunkEmbedding directly.
     let persisted_file_pending_depth = if graph_runtime_enabled {
         store.count_persisted_file_pending().unwrap_or(0)
     } else {
         0
     };
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight): (usize, usize) =
-        (0, 0);
-    let file_vectorization_queue_depth =
-        file_vectorization_queue_queued + file_vectorization_queue_inflight;
     let runtime_truth_feed = service_guard::current_runtime_truth_feed();
-    service_guard::record_graph_vector_priority_context(
-        persisted_file_pending_depth,
-        file_vectorization_queue_depth,
-    );
     let now_ms = chrono::Utc::now().timestamp_millis();
     let stale_threshold_ms = std::env::var("AXON_VECTOR_LEASE_STALE_MS")
         .ok()
@@ -1365,9 +1348,12 @@ pub(crate) fn runtime_telemetry_snapshot(
     } else {
         0
     };
+    // REQ-AXO-901674 — FVQ depth stub (table dropped slice-5d) ; scheduler
+    // diagnostics consume 0 until rewired against pipeline_v2 ready-queue
+    // counters (separate REQ).
     let utility_scheduler = current_utility_first_scheduler_diagnostics(
         effective_graph_scheduler_depth,
-        file_vectorization_queue_depth,
+        0,
         service_pressure,
     );
 
@@ -1438,12 +1424,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         rss_anon_bytes: process_memory.rss_anon_bytes,
         rss_file_bytes: process_memory.rss_file_bytes,
         rss_shmem_bytes: process_memory.rss_shmem_bytes,
-        graph_projection_queue_queued,
-        graph_projection_queue_inflight,
-        graph_projection_queue_depth,
-        file_vectorization_queue_queued,
-        file_vectorization_queue_inflight,
-        file_vectorization_queue_depth,
         vector_chunks_embedded_total: service_guard::vector_chunks_embedded_total(),
         chunk_embeddings_per_second: service_guard::vector_chunk_embeddings_per_second(),
         chunk_embeddings_rate_window_ms: service_guard::vector_chunk_embeddings_rate_window_ms(),

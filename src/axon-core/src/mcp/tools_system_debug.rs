@@ -181,15 +181,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0
     };
-    // REQ-AXO-901653 Slice 3b — queue helpers removed (tables dropped post
-    // MIL-AXO-017 / REQ-AXO-289). Canonical pipeline_v2 path bypasses the queues.
-    let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) = (0, 0);
-    let graph_projection_queue_depth =
-        graph_projection_queue_queued + graph_projection_queue_inflight;
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight): (usize, usize) =
-        (0, 0);
-    let file_vectorization_queue_depth =
-        file_vectorization_queue_queued + file_vectorization_queue_inflight;
+    // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 /
+    // REQ-AXO-289 / slice-5d. Canonical pipeline_v2 writes Chunk +
+    // ChunkEmbedding directly.
     let reader_snapshot_age_ms = server.graph_store.reader_snapshot_age_ms();
     let reader_refresh_failures_total = server.graph_store.reader_refresh_failures_total();
     let reader_snapshot = server.graph_store.reader_snapshot_diagnostics();
@@ -465,12 +459,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Graph Ready: {}\n\
         *   Vector Ready: {}\n\
         *   Completion rate: {:.2} %\n\n\
-        *   Graph Projection Queue Queued : {}\n\
-        *   Graph Projection Queue Inflight : {}\n\
-        *   Graph Projection Queue Pending : {}\n\n\
-        *   File Vectorization Queue Queued : {}\n\
-        *   File Vectorization Queue Inflight : {}\n\
-        *   File Vectorization Queue Pending : {}\n\n\
         {}\
         {}\
         {}\
@@ -593,12 +581,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         graph_ready_count,
         vector_ready_count,
         completion_rate,
-        graph_projection_queue_queued,
-        graph_projection_queue_inflight,
-        graph_projection_queue_depth,
-        file_vectorization_queue_queued,
-        file_vectorization_queue_inflight,
-        file_vectorization_queue_depth,
         file_stage_section,
         backlog_reason_section,
         vector_queue_status_section,
