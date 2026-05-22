@@ -785,6 +785,42 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
     }
     main_background::spawn_reader_snapshot_refresher(graph_store.clone());
+
+    // REQ-AXO-901658 — wire the `ist_mutated` LISTEN/NOTIFY consumer that
+    // was DEFINED (REQ-AXO-91487) but never spawned. The PG triggers in
+    // `db/ddl/05_ist_notify.sql` fire `pg_notify('ist_mutated', ...)`
+    // on every `public.symbol` / `public.edge` mutation. The listener
+    // evicts the affected project from the process `IstSnapshotCache` ;
+    // the next MCP call cold-loads a fresh CSR snapshot from PG.
+    //
+    // Without this wire, brain in split-topology (`brain_only` + separate
+    // indexer process) NEVER refreshes its in-RAM IST after boot. Session
+    // 51 diagnosis : indexer wrote +1560 `IndexedFile` rows to PG over
+    // hours while brain MCP kept serving the boot-time snapshot. User-
+    // visible symptom : "Axon does not index" (false — it indexes, but
+    // brain cannot see the writes).
+    match crate::postgres::database_url_for(
+        match std::env::var("AXON_INSTANCE_KIND")
+            .unwrap_or_else(|_| "live".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "dev" => crate::postgres::AxonInstance::Dev,
+            _ => crate::postgres::AxonInstance::Live,
+        },
+    ) {
+        Ok(url) => {
+            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(url);
+            info!("ist_mutated listener spawned (REQ-AXO-901658) — IST cache eviction wired");
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "ist_mutated listener disabled: PG URL unresolved ; IST cache will stay stale across mutations"
+            );
+        }
+    }
+
     main_background::spawn_shadow_optimizer(graph_store.clone());
     main_background::spawn_runtime_trace_logger(
         graph_store.clone(),
