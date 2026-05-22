@@ -58,6 +58,21 @@ pub fn configured_gpu_ready_low_watermark_chunks() -> usize {
         DEFAULT_GPU_READY_LOW_WATERMARK_BATCHES,
         default_stock_chunk_unit(),
     );
+    // REQ-AXO-901657 slice 4 cluster D : per CPT-AXO-90026 canonical is
+    // the name without `_CHUNKS` suffix (the value is already in chunks).
+    // The legacy `_CHUNKS` reading kept its meaning (raw chunk count) to
+    // stay non-breaking ; the no-suffix variant is read as "legacy
+    // batches" and converted via target_ready_chunk_reserve. Both still
+    // honored, `_CHUNKS` flagged as deprecated via warn-once.
+    if std::env::var("AXON_GPU_READY_LOW_WATERMARK_CHUNKS")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        crate::env_alias::alias_is_set(
+            "AXON_GPU_READY_LOW_WATERMARK",
+            "AXON_GPU_READY_LOW_WATERMARK_CHUNKS",
+        );
+    }
     let low = std::env::var("AXON_GPU_READY_LOW_WATERMARK_CHUNKS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -84,6 +99,16 @@ pub fn configured_gpu_ready_high_watermark_chunks() -> usize {
         default_stock_chunk_unit(),
     );
     let low = configured_gpu_ready_low_watermark_chunks();
+    // REQ-AXO-901657 slice 4 cluster D : see low watermark above.
+    if std::env::var("AXON_GPU_READY_HIGH_WATERMARK_CHUNKS")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        crate::env_alias::alias_is_set(
+            "AXON_GPU_READY_HIGH_WATERMARK",
+            "AXON_GPU_READY_HIGH_WATERMARK_CHUNKS",
+        );
+    }
     std::env::var("AXON_GPU_READY_HIGH_WATERMARK_CHUNKS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -329,9 +354,15 @@ fn gpu_vector_lease_required() -> bool {
 }
 
 fn gpu_vector_lease_owner_identity() -> String {
-    std::env::var("AXON_RUNTIME_IDENTITY")
-        .or_else(|_| std::env::var("AXON_INSTANCE_KIND"))
-        .unwrap_or_else(|_| "unknown".to_string())
+    // REQ-AXO-901657 slice 4 cluster A : alias AXON_INSTANCE_KIND warns
+    // once; canonical = AXON_INSTANCE.
+    if let Ok(identity) = std::env::var("AXON_RUNTIME_IDENTITY") {
+        if !identity.trim().is_empty() {
+            return identity;
+        }
+    }
+    crate::env_alias::read_with_alias("AXON_INSTANCE", "AXON_INSTANCE_KIND")
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn gpu_vector_lease_path() -> PathBuf {

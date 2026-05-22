@@ -799,11 +799,16 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // hours while brain MCP kept serving the boot-time snapshot. User-
     // visible symptom : "Axon does not index" (false — it indexes, but
     // brain cannot see the writes).
+    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE
+    // (alias AXON_INSTANCE_KIND still honored with one-shot warn).
     match crate::postgres::database_url_for(
-        match std::env::var("AXON_INSTANCE_KIND")
-            .unwrap_or_else(|_| "live".to_string())
-            .to_lowercase()
-            .as_str()
+        match crate::env_alias::read_with_alias_or(
+            "AXON_INSTANCE",
+            "AXON_INSTANCE_KIND",
+            "live",
+        )
+        .to_lowercase()
+        .as_str()
         {
             "dev" => crate::postgres::AxonInstance::Dev,
             _ => crate::postgres::AxonInstance::Live,

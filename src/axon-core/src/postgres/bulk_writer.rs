@@ -83,8 +83,9 @@ fn resolve_database_url() -> Result<String> {
     // would silently connect to axon_live and dev writes leaked into
     // production. Detection symptom: axon_dev rows stay at 0 while
     // axon_live grows under a dev-mode indexer.
-    let kind = std::env::var("AXON_INSTANCE_KIND")
-        .unwrap_or_else(|_| "live".to_string())
+    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE,
+    // alias = AXON_INSTANCE_KIND (warn-once when only the alias is set).
+    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
         .to_lowercase();
     let primary = match kind.as_str() {
         "dev" => "AXON_DEV_DATABASE_URL",
@@ -98,7 +99,7 @@ fn resolve_database_url() -> Result<String> {
         }
     }
     Err(anyhow!(
-        "bulk_writer requires {primary} or DATABASE_URL (AXON_INSTANCE_KIND={kind})"
+        "bulk_writer requires {primary} or DATABASE_URL (AXON_INSTANCE={kind})"
     ))
 }
 

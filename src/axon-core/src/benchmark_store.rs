@@ -364,10 +364,9 @@ pub(crate) fn mirror_vector_batch_run(
     let provider = current_embedding_provider_diagnostics();
     let vector_runtime = service_guard::vector_runtime_metrics();
     let gpu_snapshot = current_gpu_memory_snapshot();
-    let instance_kind = std::env::var("AXON_INSTANCE_KIND")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "dev".to_string());
+    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
+    let instance_kind =
+        crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "dev");
     let runtime_mode = std::env::var("AXON_RUNTIME_MODE")
         .ok()
         .filter(|value| !value.trim().is_empty())

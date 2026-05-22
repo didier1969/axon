@@ -446,11 +446,11 @@ fn gpu_provider_explicitly_requested() -> bool {
 /// DEC-AXO-086 slice 1B helper : pick the PostgreSQL connection string
 /// for the running instance. Honors `AXON_LIVE_DATABASE_URL` /
 /// `AXON_DEV_DATABASE_URL` then `DATABASE_URL`, gated by
-/// `AXON_INSTANCE_KIND` (default: live).
+/// `AXON_INSTANCE` (default: live ; legacy alias `AXON_INSTANCE_KIND`
+/// still honored with a one-shot deprecation warning — REQ-AXO-901657).
 fn resolve_listener_database_url() -> Result<String> {
     use crate::postgres::{database_url_for, AxonInstance};
-    let kind = std::env::var("AXON_INSTANCE_KIND")
-        .unwrap_or_else(|_| "live".to_string())
+    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
         .to_lowercase();
     let instance = match kind.as_str() {
         "dev" => AxonInstance::Dev,

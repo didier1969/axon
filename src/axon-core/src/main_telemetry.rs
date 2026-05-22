@@ -56,7 +56,9 @@ fn projected_indexer_runtime_from_heartbeat() -> Option<serde_json::Value> {
         return None;
     }
 
-    let instance_kind = std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "dev".to_string());
+    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
+    let instance_kind =
+        crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "dev");
     let project_root = std::env::var("AXON_PROJECT_ROOT")
         .ok()
         .filter(|value| !value.trim().is_empty())

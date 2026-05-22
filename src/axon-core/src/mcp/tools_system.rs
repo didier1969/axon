@@ -404,10 +404,18 @@ impl McpServer {
             "AXON_B1_COLDSTART_BATCH_SIZE",
             crate::pipeline_v2::channels::B1_COLDSTART_BATCH_SIZE_DEFAULT,
         );
-        let a3_to_b1_cap = env_usize(
+        // REQ-AXO-901657 slice 4 cluster B : canonical name is
+        // `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (matches the read site in
+        // `pipeline_v2::channels::CapsCfg::from_env`). The legacy
+        // `AXON_A3_TO_B1_BUFFER` is honored with a one-shot deprecation
+        // warning so the status snapshot stays consistent with what the
+        // pipeline actually reads.
+        let a3_to_b1_cap = crate::env_alias::read_with_alias(
+            "AXON_PIPELINE_A3_TO_B1_BUFFER_CAP",
             "AXON_A3_TO_B1_BUFFER",
-            crate::pipeline_v2::channels::A3_TO_B1_BUFFER_CAP_DEFAULT,
-        );
+        )
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(crate::pipeline_v2::channels::A3_TO_B1_BUFFER_CAP_DEFAULT);
 
         // REQ-AXO-90009 Slice 2 — in-memory pending set heartbeat.
         // `runtime_pending` reflects what THIS process's
