@@ -970,7 +970,52 @@ if ! has_live_runtime_dataplane; then
         exit 1
     fi
 
-    tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_RUNTIME_SHADOW_ROLE=\"$RUNTIME_SHADOW_ROLE\"; export AXON_SPLIT_SHADOW_ONLY=\"$RUNTIME_SHADOW_ONLY\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting $RUNTIME_EXECUTABLE_NAME...\"; \"$AXONCTL_BIN\" supervise --project-root \"$PROJECT_ROOT\" --instance-kind \"$AXON_INSTANCE_KIND\" --role \"$RUNTIME_SHADOW_ROLE\" -- \"$RUNTIME_EXECUTABLE\"'" C-m
+    # REQ-AXO-901655 — write launch env+exec to a tmpfile and tmux send-keys
+    # only the short `bash $LAUNCH_SCRIPT` invocation. Avoids the
+    # `tmux send-keys` truncation observed at session 51 when the cumulative
+    # env-string (LD_LIBRARY_PATH + PROFILE/EMBEDDING/PASS_THROUGH exports)
+    # exceeded ~2KB after REQ-AXO-901642/901647 chromedriver+chromium+gcc
+    # additions. Symptom : unclosed quote at end of truncated send-keys
+    # buffer, bash secondary `>` prompt, axonctl never launches, start.sh
+    # times out 900s `Waiting for Axon Infrastructure to rise`.
+    mkdir -p "$AXON_RUN_ROOT"
+    LAUNCH_SCRIPT="$AXON_RUN_ROOT/launch-${RUNTIME_SHADOW_ROLE}.sh"
+    cat > "$LAUNCH_SCRIPT" <<LAUNCH_EOF
+#!/usr/bin/env bash
+set -e
+mkdir -p "$AXON_RUN_ROOT"
+export AXON_PROJECTS_ROOT="$PROJECTS_ROOT"
+export AXON_WATCH_DIR="$WATCH_ROOT"
+export AXON_PROJECT_ROOT="$PROJECT_ROOT"
+export AXON_RUNTIME_MODE="$RUNTIME_MODE"
+export AXON_RUNTIME_SHADOW_ROLE="$RUNTIME_SHADOW_ROLE"
+export AXON_SPLIT_SHADOW_ONLY="$RUNTIME_SHADOW_ONLY"
+export AXON_MCP_MUTATION_JOBS=1
+export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
+export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
+export AXON_DB_ROOT="$AXON_DB_ROOT"
+export AXON_RUN_ROOT="$AXON_RUN_ROOT"
+export AXON_PID_FILE="$AXON_PID_FILE"
+export AXON_TELEMETRY_SOCK="$AXON_TELEMETRY_SOCK"
+export AXON_MCP_SOCK="$AXON_MCP_SOCK"
+export PHX_PORT="$PHX_PORT"
+export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
+export HYDRA_HTTP_PORT="$HYDRA_HTTP_PORT"
+export HYDRA_ODATA_PORT="$HYDRA_ODATA_PORT"
+export HYDRA_HTTP2_PORT="$HYDRA_HTTP2_PORT"
+export HYDRA_MCP_PORT="$HYDRA_MCP_PORT"
+export AXON_SQL_URL="$AXON_SQL_URL"
+export AXON_MCP_URL="$AXON_MCP_URL"
+export AXON_DASHBOARD_URL="$AXON_DASHBOARD_URL"
+export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
+${PROFILE_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}
+export ORT_STRATEGY=system
+export ORT_DYLIB_PATH="$ORT_DYLIB_PATH"
+echo "🚀 Starting $RUNTIME_EXECUTABLE_NAME..."
+exec "$AXONCTL_BIN" supervise --project-root "$PROJECT_ROOT" --instance-kind "$AXON_INSTANCE_KIND" --role "$RUNTIME_SHADOW_ROLE" -- "$RUNTIME_EXECUTABLE"
+LAUNCH_EOF
+    chmod +x "$LAUNCH_SCRIPT"
+    tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash \"$LAUNCH_SCRIPT\"" C-m
 fi
 
 if [ "$START_DASHBOARD" = "1" ] && ! has_live_dashboard_dataplane; then
