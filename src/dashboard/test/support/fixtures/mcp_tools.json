@@ -1,0 +1,274 @@
+[
+  {
+    "name": "help",
+    "description": "Stub description for help (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "status",
+    "description": "Stub description for status (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "mcp_surface_diagnostics",
+    "description": "Stub description for mcp_surface_diagnostics (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "skill_list",
+    "description": "Stub description for skill_list (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "skill_invoke",
+    "description": "Stub description for skill_invoke (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "prompt_template_get",
+    "description": "Stub description for prompt_template_get (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "job_status",
+    "description": "Stub description for job_status (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "fs_read",
+    "description": "Stub description for fs_read (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "project_status",
+    "description": "Stub description for project_status (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "project_registry_lookup",
+    "description": "Stub description for project_registry_lookup (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "schema_overview",
+    "description": "Stub description for schema_overview (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "list_labels_tables",
+    "description": "Stub description for list_labels_tables (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "query_examples",
+    "description": "Stub description for query_examples (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "sql",
+    "description": "Stub description for sql (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "debug",
+    "description": "Stub description for debug (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "truth_check",
+    "description": "Stub description for truth_check (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "axon_init_project",
+    "description": "Stub description for axon_init_project (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "axon_apply_guidelines",
+    "description": "Stub description for axon_apply_guidelines (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "axon_apply_methodology_bundle",
+    "description": "Stub description for axon_apply_methodology_bundle (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "axon_commit_work",
+    "description": "Stub description for axon_commit_work (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "axon_pre_flight_check",
+    "description": "Stub description for axon_pre_flight_check (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_manager",
+    "description": "Stub description for soll_manager (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_apply_plan",
+    "description": "Stub description for soll_apply_plan (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_commit_revision",
+    "description": "Stub description for soll_commit_revision (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_query_context",
+    "description": "Stub description for soll_query_context (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_work_plan",
+    "description": "Stub description for soll_work_plan (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_attach_evidence",
+    "description": "Stub description for soll_attach_evidence (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_remove_evidence",
+    "description": "Stub description for soll_remove_evidence (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_verify_requirements",
+    "description": "Stub description for soll_verify_requirements (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_rollback_revision",
+    "description": "Stub description for soll_rollback_revision (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_export",
+    "description": "Stub description for soll_export (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_generate_docs",
+    "description": "Stub description for soll_generate_docs (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_validate",
+    "description": "Stub description for soll_validate (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_acyclic_audit",
+    "description": "Stub description for soll_acyclic_audit (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "soll_relation_schema",
+    "description": "Stub description for soll_relation_schema (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "snapshot_history",
+    "description": "Stub description for snapshot_history (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "snapshot_diff",
+    "description": "Stub description for snapshot_diff (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "conception_view",
+    "description": "Stub description for conception_view (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "restore_soll",
+    "description": "Stub description for restore_soll (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "infer_soll_mutation",
+    "description": "Stub description for infer_soll_mutation (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "refine_lattice",
+    "description": "Stub description for refine_lattice (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "entrench_nuance",
+    "description": "Stub description for entrench_nuance (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "document_intent",
+    "description": "Stub description for document_intent (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "re_anchor",
+    "description": "Stub description for re_anchor (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "change_safety",
+    "description": "Stub description for change_safety (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "why",
+    "description": "Stub description for why (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "path",
+    "description": "Stub description for path (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "anomalies",
+    "description": "Stub description for anomalies (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "retrieve_context",
+    "description": "Stub description for retrieve_context (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "retrieve_context_layered",
+    "description": "Stub description for retrieve_context_layered (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "query",
+    "description": "Stub description for query (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "inspect",
+    "description": "Stub description for inspect (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "diagnose_indexing",
+    "description": "Stub description for diagnose_indexing (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "embedding_status",
+    "description": "Stub description for embedding_status (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "audit",
+    "description": "Stub description for audit (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "impact",
+    "description": "Stub description for impact (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "health",
+    "description": "Stub description for health (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "diff",
+    "description": "Stub description for diff (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "batch",
+    "description": "Stub description for batch (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "semantic_clones",
+    "description": "Stub description for semantic_clones (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "architectural_drift",
+    "description": "Stub description for architectural_drift (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "bidi_trace",
+    "description": "Stub description for bidi_trace (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "api_break_check",
+    "description": "Stub description for api_break_check (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "simulate_mutation",
+    "description": "Stub description for simulate_mutation (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "ist_snapshot_warm",
+    "description": "Stub description for ist_snapshot_warm (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "ist_centrality_pagerank",
+    "description": "Stub description for ist_centrality_pagerank (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "ist_structural_sccs",
+    "description": "Stub description for ist_structural_sccs (REQ-AXO-901649 fixture)."
+  },
+  {
+    "name": "ist_shortest_path",
+    "description": "Stub description for ist_shortest_path (REQ-AXO-901649 fixture)."
+  }
+]

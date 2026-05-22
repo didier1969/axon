@@ -74,7 +74,13 @@ defmodule AxonDashboard.MixProject do
       {:rustler, "~> 0.36.0", runtime: false},
       {:file_system, "~> 1.0"},
       {:ecto_sqlite3, "~> 0.10"},
-      {:liveview_witness, path: "../liveview_witness"}
+      {:liveview_witness, path: "../liveview_witness"},
+      # REQ-AXO-901649 — Wallaby drives Chrome via WebDriver for E2E feature
+      # tests (test/axon_dashboard_web/features/). `runtime: false` keeps it
+      # out of prod / dev compile graphs ; `only: :test` keeps the dep tree
+      # lean. ChromeDriver + Chromium themselves are provisioned by
+      # devenv.nix so every machine gets ABI-matched binaries.
+      {:wallaby, "~> 0.30", runtime: false, only: :test}
     ]
   end
 

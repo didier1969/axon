@@ -251,7 +251,19 @@ defmodule AxonDashboardWeb.Live.McpLive do
           </div>
         </section>
 
-        <div :if={@loaded? and @visible == []} class="text-slate-500 text-sm font-mono px-4 py-12 text-center">
+        <%!--
+          REQ-AXO-901649 : "No tools match" only when the user has typed a
+          filter or picked a non-:all category. An empty filter + :all
+          category + 0 tools is "still loading / brain unreachable", not
+          a no-match condition — the loading / error blocks above already
+          cover that case. Without this guard the page falsely claims
+          "No tools match filter """ when the catalog hasn't streamed in
+          yet, regressing the cockpit's first-paint contract.
+        --%>
+        <div
+          :if={@loaded? and @visible == [] and (@filter != "" or @category != :all)}
+          class="text-slate-500 text-sm font-mono px-4 py-12 text-center"
+        >
           No tools match filter <code class="text-slate-300">"{@filter}"</code>.
         </div>
       </div>
@@ -289,7 +301,7 @@ defmodule AxonDashboardWeb.Live.McpLive do
     parent = self()
 
     Task.start(fn ->
-      case McpClient.list_tools() do
+      case fetch_tools() do
         {:ok, list} when is_list(list) ->
           tools =
             list
@@ -303,6 +315,30 @@ defmodule AxonDashboardWeb.Live.McpLive do
     end)
 
     socket
+  end
+
+  # REQ-AXO-901649 — feature tests stub the catalog via a JSON fixture so
+  # the suite never depends on a live brain. The fixture path is given
+  # through `AXON_MCP_FIXTURE_PATH` and must point to a file containing a
+  # JSON array of `%{"name" => ..., "description" => ...}` objects. Any
+  # other env (dev / live / prod) falls through to McpClient.
+  defp fetch_tools do
+    case System.get_env("AXON_MCP_FIXTURE_PATH") do
+      nil ->
+        McpClient.list_tools()
+
+      "" ->
+        McpClient.list_tools()
+
+      path ->
+        with {:ok, body} <- File.read(path),
+             {:ok, list} when is_list(list) <- Jason.decode(body) do
+          {:ok, list}
+        else
+          {:ok, other} -> {:error, {:bad_fixture_shape, other}}
+          err -> err
+        end
+    end
   end
 
   defp normalize_tool(%{"name" => name} = t) do

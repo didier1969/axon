@@ -109,6 +109,16 @@ in
     # is explicit and version-pinned (erlang_27 — see `beamPackages` let).
     beamPackages.erlang
 
+    # REQ-AXO-901649 — Wallaby E2E browser stack for the dashboard test
+    # suite. `chromedriver` is the WebDriver process Wallaby talks to over
+    # HTTP, `chromium` is the headless browser engine. Pinned through
+    # nixpkgs so every client / CI runner gets the same versions without
+    # downloading binaries at `mix test` time. Without these, the host's
+    # `/usr/bin/google-chrome` is unmatched (no ABI-compatible driver) and
+    # Wallaby sessions hang during `start_session/1`.
+    chromedriver
+    chromium
+
     # REQ-AXO-901630 — DO NOT add `pkgs.onnxruntime` here. The nixpkgs
     # default onnxruntime ships without TensorRT/CUDA provider libs and,
     # when present in `packages`, leaks its `lib/` into devenv shell's
