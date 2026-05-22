@@ -28,10 +28,8 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="dev-probe-${TAG}-${TS}.csv"
 HB_PATH=".axon-dev/run-indexer/runtime-heartbeat.json"
 
-echo "🚀 [$TAG] Starting dev (parquet=true tensorrt) at $TS"
+echo "🚀 [$TAG] Starting dev (tensorrt) at $TS"
 env \
-  AXON_PARQUET_EMBEDDING_STORE_ENABLED="${AXON_PARQUET_EMBEDDING_STORE_ENABLED:-true}" \
-  AXON_PARQUET_CHUNK_CONTENT_ENABLED="${AXON_PARQUET_CHUNK_CONTENT_ENABLED:-false}" \
   AXON_ASYNC_WRITER_ENABLED="${AXON_ASYNC_WRITER_ENABLED:-false}" \
   AXON_DIAG_SKIP_CHUNK_CONTENT="${AXON_DIAG_SKIP_CHUNK_CONTENT:-false}" \
   AXON_GRAPH_EMBEDDINGS_ENABLED=false \
@@ -42,7 +40,6 @@ env \
   AXON_CUDA_MEMORY_SOFT_LIMIT_MB=7500 \
   AXON_CUDA_MEMORY_LIMIT_MB=4096 \
   AXON_GPU_PRIMARY_WORKER_MAX_USED_MB=6500 \
-  AXON_DUCKDB_MEMORY_LIMIT_GB=8 \
   AXON_WATCH_DIR="$ROOT" \
   AXON_PROJECTS_ROOT="$ROOT" \
   ./scripts/axon-dev start --indexer-full --tensorrt \

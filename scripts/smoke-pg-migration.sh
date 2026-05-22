@@ -3,18 +3,14 @@
 #
 # This script boots a short-lived `axon-test/age-pgvector:pg17`
 # container, configures the brain + indexer with the opt-in flags
-# shipped in commits 3365086 (slice 3h gate opt-in) + c88a5fe
-# (AXON_AGE_READ default ON) + 5380d97 (B.4 prep flag), runs the
+# shipped in commits 3365086 (slice 3h gate opt-in), runs the
 # indexer against a small test corpus, and verifies parity vs the
-# DuckDB baseline.
+# baseline.
 #
 # Acceptance:
 # - axon-indexer boots under PG (slice 3h gate opt-in flag set)
 # - Indexer drains the test corpus without panics
-# - Symbol/Chunk/CONTAINS/CALLS counts match DuckDB baseline (within ±5%)
-# - AGE graph populated: `MATCH (s:Symbol) RETURN count(*)` > 0
-# - All 6 B.3 readers via AXON_AGE_READ=true return non-empty results
-#   on the populated graph (no fallback to SQL needed for primary path)
+# - Symbol/Chunk/CONTAINS/CALLS counts match baseline (within ±5%)
 #
 # Usage:
 #   ./scripts/smoke-pg-migration.sh             # default: smoke test only
@@ -99,12 +95,9 @@ fi
 echo "[smoke] corpus ready at $TEST_CORPUS"
 
 echo "=== Phase 3: Boot indexer under PG (slice 3h opt-in) ==="
-export AXON_DB_BACKEND=postgres
 export AXON_LIVE_DATABASE_URL="$PG_URL"
 export AXON_DEV_DATABASE_URL="$PG_URL"
 export AXON_INDEXER_PG_OPT_IN=1
-export AXON_AGE_DUAL_WRITE=true
-export AXON_AGE_READ=true
 export AXON_PROJECT_ROOT="$TEST_CORPUS"
 export AXON_WATCH_DIR="$TEST_CORPUS"
 
@@ -149,10 +142,5 @@ echo
 echo "=== Smoke test complete ==="
 echo "Manual next steps:"
 echo "  1. Review counts above. Symbols/CALLS should be > 0."
-echo "  2. AGE counts should match SQL counts (B.2 dual-write parity)."
-echo "  3. If green: open a PR removing the AXON_INDEXER_PG_OPT_IN guard"
+echo "  2. If green: open a PR removing the AXON_INDEXER_PG_OPT_IN guard"
 echo "     in src/axon-core/src/runtime_boot.rs:441."
-echo "  4. After validation: enable AXON_AGE_ONLY_RELATIONS=true and re-run"
-echo "     to verify B.4 prep (SQL relation writes skipped)."
-echo "  5. Final step: apply scripts/migrations/drop-relation-tables.sql"
-echo "     to actually drop CALLS / CALLS_NIF / CONTAINS tables (irreversible)."
