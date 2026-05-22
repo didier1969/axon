@@ -2640,83 +2640,9 @@ fn test_axon_export_soll_can_scope_by_project_code() {
     let _ = std::fs::remove_file(export_path);
 }
 
-#[test]
-fn test_resume_vectorization_backfills_missing_queue_entries() {
-    let server = create_test_server();
-    let path = "/tmp/resume_vectorization.rs".to_string();
-    server
-        .graph_store
-        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
-        .unwrap();
-
-    let extraction = parser::ExtractionResult {
-        project_code: Some("PRJ".to_string()),
-        symbols: vec![parser::Symbol {
-            name: "resume_vectorization".to_string(),
-            kind: "func".to_string(),
-            start_line: 1,
-            end_line: 1,
-            docstring: None,
-            is_entry_point: false,
-            is_public: true,
-            tested: false,
-            is_nif: false,
-            is_unsafe: false,
-            properties: std::collections::HashMap::new(),
-            embedding: None,
-        }],
-        relations: vec![],
-    };
-
-    server
-        .graph_store
-        .insert_file_data_batch_with_vectorization_policy(
-            &[crate::worker::DbWriteTask::FileExtraction {
-                reservation_id: "resume-vectorization".to_string(),
-                path: path.clone(),
-                content: Some("fn resume_vectorization() {}".to_string()),
-                extraction,
-                processing_mode: ProcessingMode::Full,
-                trace_id: "trace".to_string(),
-                observed_cost_bytes: 0,
-                t0: 0,
-                t1: 0,
-                t2: 0,
-                t3: 0,
-            }],
-            false,
-        )
-        .unwrap();
-
-    let before = server
-        .graph_store
-        .query_count("SELECT count(*) FROM FileVectorizationQueue")
-        .unwrap();
-    assert_eq!(before, 0);
-
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "resume_vectorization",
-            "arguments": {}
-        })),
-        id: Some(json!(904)),
-    };
-
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.expect("Expected result");
-    let content = result["content"][0]["text"].as_str().unwrap_or_default();
-    let queued = result["data"]["queued_files"].as_u64();
-
-    assert!(content.contains("Resume Vectorization"), "{content}");
-    assert_eq!(queued, Some(1), "{result:?}");
-    let after = server
-        .graph_store
-        .query_count("SELECT count(*) FROM FileVectorizationQueue")
-        .unwrap();
-    assert_eq!(after, 1);
-}
+// REQ-AXO-901653 slice-5c — `test_resume_vectorization_backfills_missing_queue_entries`
+// deleted ; exercised dropped insert_file_data_batch_with_vectorization_policy +
+// public.FileVectorizationQueue + crate::worker::DbWriteTask.
 
 #[test]
 fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {

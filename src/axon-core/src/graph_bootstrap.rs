@@ -2351,49 +2351,8 @@ mod graph_bootstrap_tests {
             .contains("Legacy soll.RevisionPreview schema detected"));
     }
 
-    #[test]
-    fn test_soft_invalidate_embedding_state_rebuilds_embedding_tables() {
-        let store = create_test_db().unwrap();
-        store.execute(&format!("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('{CHUNK_MODEL_ID}', 'chunk', '{MODEL_NAME}', {DIMENSION}, '{MODEL_VERSION}', 1)")).unwrap();
-        store.execute(&format!("INSERT INTO ChunkEmbedding (chunk_id, model_id, embedding, source_hash) VALUES ('chunk-1', '{CHUNK_MODEL_ID}', CAST([1.0] || repeat([0.0], {}) AS FLOAT[{DIMENSION}]), 'hash-1')", DIMENSION - 1)).unwrap();
-        store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::demo', 1, '{GRAPH_MODEL_ID}', 'sig-1', '1', CAST([1.0] || repeat([0.0], {}) AS FLOAT[{DIMENSION}]), 1)", DIMENSION - 1)).unwrap();
-        store.execute("INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/demo.rs', 'queued', 1)").unwrap();
-        store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES ('global::demo', 'demo', 'function', FALSE, TRUE, FALSE, FALSE, 'AXO', CAST([1.0] || repeat([0.0], {}) AS FLOAT[{DIMENSION}]))", DIMENSION - 1)).unwrap();
-        store.execute("INSERT INTO File (path, project_code, status, size, priority, mtime, graph_ready, vector_ready) VALUES ('/tmp/demo.rs', 'AXO', 'indexed', 1, 1, 1, TRUE, TRUE)").unwrap();
-
-        store.soft_invalidate_embedding_state().unwrap();
-
-        assert_eq!(
-            store
-                .query_count("SELECT count(*) FROM EmbeddingModel")
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count("SELECT count(*) FROM ChunkEmbedding")
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count("SELECT count(*) FROM GraphEmbedding")
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count("SELECT count(*) FROM FileVectorizationQueue")
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            store
-                .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
-                .unwrap(),
-            0
-        );
-    }
+    // REQ-AXO-901653 slice-5c — `test_soft_invalidate_embedding_state_*` deleted ;
+    // exercised legacy `soft_invalidate_embedding_state` + public.File/FileVectorizationQueue.
 
     #[test]
     fn startup_vector_backfill_limit_keeps_vector_startup_bounded_by_graph_ready_stock() {

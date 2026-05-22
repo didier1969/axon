@@ -544,42 +544,24 @@ impl Scanner {
 }
 
 fn dispatch_scanner_batch(
-    graph: &Arc<GraphStore>,
+    _graph: &Arc<GraphStore>,
     batch: &[(String, String, i64, i64)],
-    guard: Option<&SharedFileIngressGuard>,
+    _guard: Option<&SharedFileIngressGuard>,
     ingress: Option<&SharedIngressBuffer>,
 ) -> bool {
+    // REQ-AXO-901653 slice-5c — pipeline_v2 canonical : push to ingress_buffer,
+    // never call legacy GraphStore::bulk_insert_files / fetch_file_ingress_rows
+    // (those query the dropped public.File table). FileIngressGuard hydration
+    // is now driven by pipeline_v2 via ingress_buffer back-pressure.
     if let Some(shared_ingress) = ingress {
         let mut locked = shared_ingress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if locked.is_enabled() {
-            enqueue_scanner_batch(&mut locked, batch);
-            return true;
-        }
+        enqueue_scanner_batch(&mut locked, batch);
+        return true;
     }
-
-    if let Err(err) = graph.bulk_insert_files(batch) {
-        error!("Bulk insert failed: {:?}", err);
-        return false;
-    }
-
-    if let Some(shared_guard) = guard {
-        let paths = batch
-            .iter()
-            .map(|(path, _, _, _)| path.clone())
-            .collect::<Vec<_>>();
-        if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
-            let mut locked = shared_guard
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            for row in rows {
-                locked.record_committed_row(row);
-            }
-        }
-    }
-
-    true
+    error!("dispatch_scanner_batch: no ingress_buffer available — batch dropped");
+    false
 }
 
 fn enqueue_scanner_batch(buffer: &mut IngressBuffer, batch: &[(String, String, i64, i64)]) {
