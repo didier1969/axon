@@ -1,16 +1,13 @@
--- Axon canonical schema — extensions (DEC-AXO-082 / MIL-AXO-017 slice 6B Phase E).
+-- Axon canonical schema — PostgreSQL extensions.
+-- Loaded first: every downstream file relies on `vector(N)` types.
 -- Idempotent: safe to re-run on every startup.
---
--- AGE extension retired (DEC-AXO-083) — `public.Edge` is the canonical
--- structural edge storage. Loaded first because every later file relies
--- on `vector(N)` types from pgvector.
 
 CREATE EXTENSION IF NOT EXISTS vector;
+
 -- pg_trgm powers GIN trigram indexes on soll.Node.title / description
--- (used by soll_query_context fuzzy lookups). Optional — wrapped so
--- the bootstrap continues without it on minimal PG installs without
--- contrib (those just lose trigram fuzzy search; exact lookups still
--- work via the B-tree indexes).
+-- (used by soll_query_context fuzzy lookups). Optional: on minimal PG
+-- installs without contrib privileges the bootstrap continues and SOLL
+-- fuzzy search is disabled while exact B-tree lookups keep working.
 DO $$
 BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
