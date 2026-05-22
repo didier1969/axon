@@ -40,7 +40,12 @@ impl McpServer {
             mode.unwrap_or("brief"),
             runtime_mode.as_str(),
             runtime_profile.as_str(),
-            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
+            crate::env_alias::read_with_alias_or(
+                "AXON_INSTANCE",
+                "AXON_INSTANCE_KIND",
+                "unknown",
+            ),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string())
         );
         let status_cache_ttl_ms = match mode.unwrap_or("brief") {
@@ -317,8 +322,12 @@ impl McpServer {
                 .collect::<Vec<_>>()
         };
 
-        let instance_kind =
-            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
+        // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
+        let instance_kind = crate::env_alias::read_with_alias_or(
+            "AXON_INSTANCE",
+            "AXON_INSTANCE_KIND",
+            "unknown",
+        );
         let runtime_identity =
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string());
         // REQ-AXO-108 — `data_root` is the compact form (e.g. `./.axon`)
@@ -478,7 +487,12 @@ impl McpServer {
 **Drain state:** `{}`\n",
             runtime_mode.as_str(),
             runtime_profile.as_str(),
-            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
+            crate::env_alias::read_with_alias_or(
+                "AXON_INSTANCE",
+                "AXON_INSTANCE_KIND",
+                "unknown",
+            ),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
             if indexed_projection_fresh { "fresh" } else { "stale" },
             if indexed_projection_fresh {
@@ -728,6 +742,62 @@ impl McpServer {
         let local_vector_runtime_metrics = service_guard::vector_runtime_metrics();
         let vector_stage_telemetry = service_guard::vector_pipeline_stage_telemetry();
         let vector_latency_summaries = service_guard::vector_runtime_latency_summaries();
+        // REQ-AXO-91572 — surface embedder lifecycle (phase + last_used_ms
+        // + counters) in framework runtime status. Prefers the indexer
+        // heartbeat row (`axon_runtime.EmbedderLifecycleHeartbeat`) over
+        // the brain-local singleton so the JSON reflects the process that
+        // actually owns the GPU session. Same freshness gate as
+        // `embedding_status` (tools_system.rs).
+        const EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+        let embedder_lifecycle_heartbeat = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten()
+            .filter(|row| {
+                (now_ms - row.heartbeat_ms).max(0) <= EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS
+            });
+        let embedder_lifecycle_source = if embedder_lifecycle_heartbeat.is_some() {
+            "indexer_heartbeat"
+        } else {
+            "brain_local_singleton"
+        };
+        let local_embedder_lifecycle = crate::embedder::lifecycle_machine::process_lifecycle();
+        let (
+            embedder_lifecycle_phase,
+            embedder_lifecycle_last_used_ms,
+            embedder_lifecycle_wake_count,
+            embedder_lifecycle_sleep_count,
+            embedder_lifecycle_pending_count,
+        ) = match embedder_lifecycle_heartbeat.as_ref() {
+            Some(row) => (
+                row.phase.as_str().to_string(),
+                row.last_used_ms,
+                row.wake_count,
+                row.sleep_count,
+                row.pending_count,
+            ),
+            None => (
+                local_embedder_lifecycle.phase().as_str().to_string(),
+                local_embedder_lifecycle.last_used_ms(),
+                local_embedder_lifecycle.wake_count(),
+                local_embedder_lifecycle.sleep_count(),
+                crate::embedder::lifecycle::process_state().pending_count() as i64,
+            ),
+        };
+        let embedder_lifecycle_heartbeat_age_ms = embedder_lifecycle_heartbeat
+            .as_ref()
+            .map(|row| (now_ms - row.heartbeat_ms).max(0));
+        let embedder_lifecycle_snapshot = json!({
+            "lifecycle_phase": embedder_lifecycle_phase,
+            "last_used_ms": embedder_lifecycle_last_used_ms,
+            "wake_count": embedder_lifecycle_wake_count,
+            "sleep_count": embedder_lifecycle_sleep_count,
+            "pending_count": embedder_lifecycle_pending_count,
+            "source": embedder_lifecycle_source,
+            "heartbeat_age_ms": embedder_lifecycle_heartbeat_age_ms,
+            "heartbeat_freshness_window_ms": EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        });
         let embedding_provider_diagnostics = current_embedding_provider_diagnostics();
         let embedding_provider_resolution = embedding_provider_diagnostics.resolution.clone();
         let provider_effective_lower = embedding_provider_diagnostics
@@ -1016,6 +1086,14 @@ impl McpServer {
                     "proposed_control_model": "admission_first_stock_control",
                     "runtime_state": runtime_authority_state,
                     "vector_pipeline_telemetry": vector_pipeline_telemetry,
+                    // REQ-AXO-91572 — embedder lifecycle observability.
+                    // `source=indexer_heartbeat` means we read the indexer
+                    // process state via `axon_runtime.EmbedderLifecycleHeartbeat`
+                    // (cross-process, the brain reports the GPU owner's truth).
+                    // `source=brain_local_singleton` means the indexer hasn't
+                    // published a fresh heartbeat (or the table is empty) and
+                    // we fell back to the brain's own (likely idle) lifecycle.
+                    "embedder_lifecycle": embedder_lifecycle_snapshot,
                     "loop_semantics": Self::loop_semantics_snapshot(),
                     "canonical_ingestion_stage_model": canonical_ingestion_stage_model,
                     "admission_controller": admission_controller,
