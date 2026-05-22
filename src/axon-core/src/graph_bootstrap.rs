@@ -130,14 +130,8 @@ fn remove_path_if_exists(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IstCompatibilityAction {
-    Noop,
-    AdditiveRepair,
-    SoftDerivedInvalidation,
-    SoftEmbeddingInvalidation,
-    HardRebuild,
-}
+// REQ-AXO-901653 slice-5a: `IstCompatibilityAction` enum deleted ;
+// only consumed by the deleted `ensure_runtime_compatibility` helper.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SollAccessMode {
@@ -907,10 +901,13 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE, first_seen_at_ms BIGINT, indexing_started_at_ms BIGINT, graph_ready_at_ms BIGINT, vectorization_started_at_ms BIGINT, vector_ready_at_ms BIGINT, last_state_change_at_ms BIGINT, last_error_at_ms BIGINT)")?;
+        // REQ-AXO-901653 slice-5a: legacy `CREATE TABLE File` (state-machine
+        // schema with file_stage / graph_ready / vector_ready columns)
+        // deleted ; pipeline-v2 cut-over (REQ-AXO-289) made the state
+        // machine obsolete. Sub-Agent H handles the DROP TABLE migration
+        // operator-gated against live PG.
         // REQ-AXO-289 S2 — minimal watcher filter table for streaming v2.
         // path PK + content_hash + last_seen_ms only. NO status machine.
-        // Coexists with the legacy `File` table until slice S7 cut-over.
         self.execute("CREATE TABLE IF NOT EXISTS IndexedFile (path VARCHAR PRIMARY KEY, content_hash VARCHAR NOT NULL, last_seen_ms BIGINT NOT NULL)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_code VARCHAR, embedding FLOAT[{DIMENSION}])"))?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_code VARCHAR, file_path VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT, chunk_part_index BIGINT, chunk_part_count BIGINT, chunk_path VARCHAR)")?;
@@ -949,9 +946,10 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
+        // REQ-AXO-901653 slice-5a: VectorPersistOutbox CREATE/INDEX +
+        // HourlyVectorizationRollup CREATE deleted ; legacy persist
+        // outbox + per-hour rollup of files_vector_ready are tied to the
+        // FileVectorizationQueue lifecycle which pipeline-v2 obsoletes.
         self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
         Ok(())
@@ -960,7 +958,8 @@ impl GraphStore {
     fn ensure_embedding_runtime_tables(&self) -> Result<()> {
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[{DIMENSION}], source_hash VARCHAR, embedded_at_ms BIGINT, PRIMARY KEY (chunk_id, model_id))"))?;
-        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, persist_started_at_ms BIGINT DEFAULT NULL)")?;
+        // REQ-AXO-901653 slice-5a: FileVectorizationQueue CREATE deleted
+        // ; pipeline-v2 stage B3 writes ChunkEmbedding rows directly.
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[{DIMENSION}], updated_at BIGINT)"))?;
@@ -972,8 +971,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjection (anchor_type VARCHAR, anchor_id VARCHAR, target_type VARCHAR, target_id VARCHAR, edge_kind VARCHAR, distance BIGINT, radius BIGINT, projection_version VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionState (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, source_signature VARCHAR, projection_version VARCHAR, updated_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_state_anchor_idx ON GraphProjectionState(anchor_type, anchor_id, radius)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionQueue (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_queue_anchor_idx ON GraphProjectionQueue(anchor_type, anchor_id, radius)")?;
+        // REQ-AXO-901653 slice-5a: GraphProjectionQueue CREATE + UNIQUE
+        // INDEX deleted ; queue table retired with the File state-machine.
         Ok(())
     }
 
@@ -982,7 +981,9 @@ impl GraphStore {
         self.execute("DROP TABLE IF EXISTS GraphEmbedding")?;
         self.execute("DROP TABLE IF EXISTS ChunkEmbedding")?;
         self.execute("DROP TABLE IF EXISTS EmbeddingModel")?;
-        self.execute("DROP TABLE IF EXISTS FileVectorizationQueue")?;
+        // REQ-AXO-901653 slice-5a: DROP TABLE FileVectorizationQueue
+        // removed ; table no longer created. Sub-Agent H drops the
+        // pre-existing row in live PG.
         self.execute("DROP TABLE IF EXISTS VectorWorkerFault")?;
         self.execute("DROP TABLE IF EXISTS VectorLaneState")?;
         self.ensure_embedding_runtime_tables()
@@ -991,41 +992,17 @@ impl GraphStore {
     fn rebuild_graph_projection_runtime_tables(&self) -> Result<()> {
         self.execute("DROP TABLE IF EXISTS GraphProjectionState")?;
         self.execute("DROP TABLE IF EXISTS GraphProjection")?;
-        self.execute("DROP TABLE IF EXISTS GraphProjectionQueue")?;
+        // REQ-AXO-901653 slice-5a: DROP TABLE GraphProjectionQueue
+        // removed (table retired ; Sub-Agent H drops it live).
         self.ensure_graph_projection_runtime_tables()
     }
 
     fn ensure_additive_schema(&self) -> Result<()> {
-        // Drop indexes on File table to allow ALTER TABLE ... ADD COLUMN with DEFAULT values
-        let _ = self.execute("DROP INDEX IF EXISTS file_project_code_idx");
-        let _ = self.execute("DROP INDEX IF EXISTS file_status_idx");
-        let _ = self.execute("DROP INDEX IF EXISTS file_project_path_idx");
-
-        self.execute(
-            "ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE",
-        )?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_error_reason VARCHAR")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS status_reason VARCHAR")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS defer_count BIGINT DEFAULT 0")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_deferred_at_ms BIGINT")?;
-        self.execute(
-            "ALTER TABLE File ADD COLUMN IF NOT EXISTS file_stage VARCHAR DEFAULT 'promoted'",
-        )?;
-        self.execute(
-            "ALTER TABLE File ADD COLUMN IF NOT EXISTS graph_ready BOOLEAN DEFAULT FALSE",
-        )?;
-        self.execute(
-            "ALTER TABLE File ADD COLUMN IF NOT EXISTS vector_ready BOOLEAN DEFAULT FALSE",
-        )?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS first_seen_at_ms BIGINT")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS indexing_started_at_ms BIGINT")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS graph_ready_at_ms BIGINT")?;
-        self.execute(
-            "ALTER TABLE File ADD COLUMN IF NOT EXISTS vectorization_started_at_ms BIGINT",
-        )?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS vector_ready_at_ms BIGINT")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_state_change_at_ms BIGINT")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_error_at_ms BIGINT")?;
+        // REQ-AXO-901653 slice-5a: all `ALTER TABLE File ADD COLUMN ...`
+        // / state-machine backfill UPDATE blocks deleted ; legacy File
+        // + FileVectorizationQueue tables retired by REQ-AXO-289
+        // pipeline-v2 cut-over. Sub-Agent H runs the DROP TABLE
+        // migration operator-gated against live PG (Slice 4).
         self.execute("ALTER TABLE ChunkEmbedding ADD COLUMN IF NOT EXISTS embedded_at_ms BIGINT")?;
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS chunk_part_index BIGINT")?;
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS chunk_part_count BIGINT")?;
@@ -1041,76 +1018,16 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
+        // REQ-AXO-901653 slice-5a: VectorPersistOutbox /
+        // HourlyVectorizationRollup CREATE deleted ; tied to retired
+        // FileVectorizationQueue lifecycle.
         self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
-        self.execute(
-            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_heartbeat_at_ms BIGINT",
-        )?;
-        self.execute(
-            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_owner VARCHAR",
-        )?;
-        self.execute(
-            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_epoch BIGINT DEFAULT 0",
-        )?;
-        self.execute(
-            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS persist_started_at_ms BIGINT DEFAULT NULL",
-        )?;
 
-        let columns = self.list_file_table_columns()?;
-        let has_status = columns.contains("status");
-        let has_file_stage = columns.contains("file_stage");
-        let has_graph_ready = columns.contains("graph_ready");
-        let has_vector_ready = columns.contains("vector_ready");
-
-        if has_file_stage {
-            if has_status {
-                self.execute(
-                    "UPDATE File \
-                     SET file_stage = CASE \
-                            WHEN status = 'indexing' THEN 'claimed' \
-                            WHEN status IN ('indexed', 'indexed_degraded') THEN 'graph_indexed' \
-                            WHEN status = 'skipped' THEN 'skipped' \
-                            WHEN status = 'deleted' THEN 'deleted' \
-                            ELSE 'promoted' \
-                         END \
-                         WHERE file_stage IS NULL",
-                )?;
-            } else {
-                self.execute(
-                    "UPDATE File \
-                     SET file_stage = 'promoted' \
-                     WHERE file_stage IS NULL",
-                )?;
-            }
-        }
-
-        if has_graph_ready {
-            if has_status {
-                self.execute(
-                    "UPDATE File \
-                     SET graph_ready = CASE WHEN status IN ('indexed', 'indexed_degraded') THEN TRUE ELSE COALESCE(graph_ready, FALSE) END \
-                     WHERE graph_ready IS NULL OR status IN ('indexed', 'indexed_degraded')",
-                )?;
-            } else {
-                self.execute(
-                    "UPDATE File \
-                     SET graph_ready = COALESCE(graph_ready, FALSE) \
-                     WHERE graph_ready IS NULL",
-                )?;
-            }
-        }
-
-        if has_vector_ready {
-            self.execute("UPDATE File SET vector_ready = COALESCE(vector_ready, FALSE) WHERE vector_ready IS NULL")?;
-        }
-        self.execute("UPDATE File SET first_seen_at_ms = COALESCE(first_seen_at_ms, last_deferred_at_ms, mtime) WHERE first_seen_at_ms IS NULL")?;
-        self.execute("UPDATE File SET graph_ready_at_ms = COALESCE(graph_ready_at_ms, mtime) WHERE graph_ready = TRUE AND graph_ready_at_ms IS NULL")?;
-        self.execute("UPDATE File SET vector_ready_at_ms = COALESCE(vector_ready_at_ms, graph_ready_at_ms, mtime) WHERE vector_ready = TRUE AND vector_ready_at_ms IS NULL")?;
-        self.execute("UPDATE File SET last_state_change_at_ms = COALESCE(last_state_change_at_ms, vector_ready_at_ms, graph_ready_at_ms, first_seen_at_ms, mtime) WHERE last_state_change_at_ms IS NULL")?;
-        self.execute("UPDATE File SET last_error_at_ms = COALESCE(last_error_at_ms, last_deferred_at_ms) WHERE last_error_reason IS NOT NULL AND last_error_at_ms IS NULL")?;
+        // REQ-AXO-901653 slice-5a: list_file_table_columns + backfill
+        // UPDATE chain (file_stage / graph_ready / vector_ready /
+        // first_seen_at_ms / last_state_change_at_ms / last_error_at_ms)
+        // deleted ; legacy File state-machine schema.
         let embedded_now_ms = chrono::Utc::now().timestamp_millis();
         self.execute(&format!(
             "UPDATE ChunkEmbedding SET embedded_at_ms = COALESCE(embedded_at_ms, {}) WHERE embedded_at_ms IS NULL",
@@ -1152,19 +1069,18 @@ impl GraphStore {
         )?;
         self.execute("CREATE INDEX IF NOT EXISTS substantiates_project_code_idx ON SUBSTANTIATES(project_code)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_project_code_idx ON Symbol(project_code)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
+        // REQ-AXO-901653 slice-5a: `file_project_code_idx` /
+        // `file_status_idx` / `file_project_path_idx` /
+        // `file_vectorization_queue_status_eligible_idx` deleted ;
+        // tables retired.
         self.execute("CREATE INDEX IF NOT EXISTS chunk_project_code_idx ON Chunk(project_code)")?;
         self.execute("CREATE INDEX IF NOT EXISTS chunk_file_path_idx ON Chunk(file_path)")?;
         self.execute("CREATE INDEX IF NOT EXISTS chunk_project_file_path_idx ON Chunk(project_code, file_path)")?;
         self.execute("CREATE INDEX IF NOT EXISTS chunk_source_id_idx ON Chunk(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS chunk_content_hash_idx ON Chunk(content_hash)")?;
         self.execute("CREATE INDEX IF NOT EXISTS chunk_embedding_chunk_model_hash_idx ON ChunkEmbedding(chunk_id, model_id, source_hash)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS file_vectorization_queue_status_eligible_idx ON FileVectorizationQueue(status, next_eligible_at_ms)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_kind_idx ON Symbol(kind)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_is_public_idx ON Symbol(is_public)")?;
-        if has_status {
-            self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
-        }
 
         // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): composite (project_code, key)
         // indexes for multi-tenant lookups on hot IST tables.
@@ -1177,7 +1093,6 @@ impl GraphStore {
         self.execute("CREATE INDEX IF NOT EXISTS impacts_project_source_idx ON IMPACTS(project_code, source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS substantiates_project_source_idx ON SUBSTANTIATES(project_code, source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_project_id_idx ON Symbol(project_code, id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)")?;
 
         Ok(())
     }
@@ -2118,135 +2033,12 @@ impl GraphStore {
         Ok(())
     }
 
-    fn ensure_runtime_compatibility(&self) -> Result<()> {
-        let expected = [
-            ("schema_version", IST_SCHEMA_VERSION),
-            ("ingestion_version", IST_INGESTION_VERSION),
-            ("embedding_version", IST_EMBEDDING_VERSION),
-        ];
-
-        let before_graph_ready = self
-            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
-            .unwrap_or(0);
-        let before_vector_ready = self
-            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
-            .unwrap_or(0);
-        let before_vec_queue_queued = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")
-            .unwrap_or(0);
-        let before_vec_queue_inflight = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")
-            .unwrap_or(0);
-
-        let current = self.load_runtime_metadata()?;
-        let schema_matches = current
-            .get("schema_version")
-            .is_some_and(|v| v == IST_SCHEMA_VERSION);
-        let ingestion_matches = current
-            .get("ingestion_version")
-            .is_some_and(|v| v == IST_INGESTION_VERSION);
-        let embedding_matches = current
-            .get("embedding_version")
-            .is_some_and(|v| v == IST_EMBEDDING_VERSION);
-
-        info!(
-            "IST compatibility preflight: current(schema={}, ingestion={}, embedding={}) expected(schema={}, ingestion={}, embedding={}) matches(schema={}, ingestion={}, embedding={}) before(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
-            current.get("schema_version").map(String::as_str).unwrap_or("missing"),
-            current.get("ingestion_version").map(String::as_str).unwrap_or("missing"),
-            current.get("embedding_version").map(String::as_str).unwrap_or("missing"),
-            IST_SCHEMA_VERSION,
-            IST_INGESTION_VERSION,
-            IST_EMBEDDING_VERSION,
-            schema_matches,
-            ingestion_matches,
-            embedding_matches,
-            before_graph_ready,
-            before_vector_ready,
-            before_vec_queue_queued,
-            before_vec_queue_inflight
-        );
-
-        let mut applied = Vec::new();
-
-        if !schema_matches {
-            if self.is_known_additive_schema_repair(&current)? {
-                info!("IST schema drift detected but preserved via additive repair.");
-                applied.push(IstCompatibilityAction::AdditiveRepair);
-            } else {
-                warn!("IST schema drift is incompatible with current runtime. Rebuilding IST while preserving SOLL.");
-                self.reset_ist_state()?;
-                applied.push(IstCompatibilityAction::HardRebuild);
-            }
-        }
-
-        if !ingestion_matches && !applied.contains(&IstCompatibilityAction::HardRebuild) {
-            warn!("IST ingestion drift detected. Soft-invalidating derived structural layers while preserving File backlog.");
-            self.soft_invalidate_derived_state()?;
-            applied.push(IstCompatibilityAction::SoftDerivedInvalidation);
-        } else if !embedding_matches && !applied.contains(&IstCompatibilityAction::HardRebuild) {
-            warn!(
-                "IST embedding drift detected. Soft-invalidating semantic embedding layers only."
-            );
-            self.soft_invalidate_embedding_state()?;
-            applied.push(IstCompatibilityAction::SoftEmbeddingInvalidation);
-        }
-
-        if applied.is_empty() {
-            info!("IST runtime metadata is compatible with current Axon Core.");
-            applied.push(IstCompatibilityAction::Noop);
-        }
-
-        self.write_runtime_metadata(&expected)?;
-
-        let after_graph_ready = self
-            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
-            .unwrap_or(0);
-        let after_vector_ready = self
-            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
-            .unwrap_or(0);
-        let after_vec_queue_queued = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")
-            .unwrap_or(0);
-        let after_vec_queue_inflight = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")
-            .unwrap_or(0);
-
-        info!(
-            "IST compatibility actions={:?} after(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
-            applied,
-            after_graph_ready,
-            after_vector_ready,
-            after_vec_queue_queued,
-            after_vec_queue_inflight
-        );
-        Ok(())
-    }
-
-    fn recover_interrupted_indexing(&self) -> Result<()> {
-        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
-        let columns: std::collections::HashSet<String> = rows
-            .into_iter()
-            .filter_map(|row| row.into_iter().next())
-            .collect();
-
-        if !columns.contains("status") {
-            return Ok(());
-        }
-
-        let interrupted =
-            self.query_count("SELECT count(*) FROM File WHERE status = 'indexing'")?;
-        if interrupted > 0 {
-            warn!(
-                "Recovering {} interrupted indexing claim(s) back to pending during startup.",
-                interrupted
-            );
-            self.execute(
-                "UPDATE File SET status = 'pending', worker_id = NULL, status_reason = 'recovered_interrupted_indexing', file_stage = 'promoted' WHERE status = 'indexing'",
-            )?;
-        }
-        Ok(())
-    }
+    // REQ-AXO-901653 slice-5a: `ensure_runtime_compatibility` +
+    // `recover_interrupted_indexing` deleted ; both queried/updated
+    // public.File status state machine columns (graph_ready /
+    // vector_ready / file_stage / status). Pipeline-v2 (REQ-AXO-289)
+    // makes the per-file recovery cursor obsolete — A/B stages are
+    // idempotent and replay from public.IndexedFile + public.Chunk.
 
     fn load_runtime_metadata(&self) -> Result<std::collections::HashMap<String, String>> {
         let existing = self.query_json("SELECT key, value FROM RuntimeMetadata")?;
@@ -2271,44 +2063,10 @@ impl GraphStore {
         Ok(())
     }
 
-    fn is_known_additive_schema_repair(
-        &self,
-        current: &std::collections::HashMap<String, String>,
-    ) -> Result<bool> {
-        let schema_version = current.get("schema_version").map(String::as_str);
-        if schema_version != Some("1") && schema_version != Some("2") {
-            return Ok(false);
-        }
-
-        let columns = self.list_file_table_columns()?;
-
-        let required = [
-            "path",
-            "project_code",
-            "status",
-            "size",
-            "priority",
-            "mtime",
-            "worker_id",
-            "trace_id",
-            "needs_reindex",
-            "file_stage",
-            "graph_ready",
-            "vector_ready",
-        ];
-
-        Ok(required.iter().all(|column| columns.contains(*column)))
-    }
-
-    fn list_file_table_columns(&self) -> Result<std::collections::HashSet<String>> {
-        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
-        let columns: std::collections::HashSet<String> = rows
-            .into_iter()
-            .filter_map(|row| row.into_iter().next())
-            .collect();
-        Ok(columns)
-    }
+    // REQ-AXO-901653 slice-5a: `is_known_additive_schema_repair` +
+    // `list_file_table_columns` deleted ; introspected the retired
+    // public.File schema (status / file_stage / graph_ready /
+    // vector_ready columns).
 
     fn list_project_code_registry_columns(&self) -> Result<std::collections::HashSet<String>> {
         for target in ["soll.ProjectCodeRegistry", "ProjectCodeRegistry"] {
@@ -2342,118 +2100,13 @@ impl GraphStore {
         Ok(std::collections::HashSet::new())
     }
 
-    fn reset_ist_state(&self) -> Result<()> {
-        // MIL-AXO-017 slice 6B Phase C: SQL DELETE chain handles cleanup.
-
-        let mut cleanup_queries: Vec<&str> = Vec::with_capacity(8);
-        cleanup_queries.extend([
-            "DELETE FROM CALLS_NIF",
-            "DELETE FROM CALLS",
-            "DELETE FROM CONTAINS",
-            "DELETE FROM IMPACTS",
-            "DELETE FROM SUBSTANTIATES",
-        ]);
-        // IST tables (Symbol/Chunk/Project) always SQL on both backends.
-        cleanup_queries.extend([
-            "DELETE FROM Chunk",
-            "DELETE FROM Symbol",
-            "DELETE FROM Project",
-        ]);
-
-        for query in cleanup_queries {
-            self.execute(query)?;
-        }
-
-        self.rebuild_graph_projection_runtime_tables()?;
-        self.rebuild_embedding_runtime_tables()?;
-
-        self.execute("DROP TABLE IF EXISTS File;")?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE, first_seen_at_ms BIGINT, indexing_started_at_ms BIGINT, graph_ready_at_ms BIGINT, vectorization_started_at_ms BIGINT, vector_ready_at_ms BIGINT, last_state_change_at_ms BIGINT, last_error_at_ms BIGINT)",
-        )?;
-
-        // The DROP+CREATE above discards every index on File. Recreate the
-        // multi-tenant indexes (REQ-AXO-066 Phase 1, DEC-AXO-064 Option A) so
-        // post-hard-rebuild reads stay scale-correct.
-        self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)",
-        )?;
-
-        info!("IST state reset complete. SOLL sanctuary preserved.");
-        Ok(())
-    }
-
-    fn soft_invalidate_derived_state(&self) -> Result<()> {
-        // MIL-AXO-017 slice 6B Phase C: AGE retired ; SQL DELETE chain is canonical.
-        let mut cleanup_queries: Vec<&str> = Vec::with_capacity(8);
-        cleanup_queries.extend([
-            "DELETE FROM CALLS_NIF",
-            "DELETE FROM CALLS",
-            "DELETE FROM CONTAINS",
-            "DELETE FROM IMPACTS",
-            "DELETE FROM SUBSTANTIATES",
-        ]);
-        cleanup_queries.extend([
-            "DELETE FROM Chunk",
-            "DELETE FROM Symbol",
-            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated', file_stage = 'promoted', graph_ready = FALSE, vector_ready = FALSE",
-        ]);
-
-        for query in cleanup_queries {
-            self.execute(query)?;
-        }
-
-        self.rebuild_file_runtime_table()?;
-        self.rebuild_graph_projection_runtime_tables()?;
-        self.rebuild_embedding_runtime_tables()?;
-
-        info!("IST derived structural layers soft-invalidated. File backlog preserved for replay.");
-        Ok(())
-    }
-
-    fn soft_invalidate_embedding_state(&self) -> Result<()> {
-        let cleanup_queries = ["UPDATE File SET vector_ready = FALSE WHERE graph_ready = TRUE"];
-
-        for query in cleanup_queries {
-            self.execute(query)?;
-        }
-
-        self.rebuild_embedding_runtime_tables()?;
-
-        info!("IST embedding layers soft-invalidated. Structural truth preserved.");
-        Ok(())
-    }
-
-    fn rebuild_file_runtime_table(&self) -> Result<()> {
-        self.execute("DROP TABLE IF EXISTS File_rebuilt;")?;
-        self.execute(
-            "CREATE TABLE File_rebuilt (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE, first_seen_at_ms BIGINT, indexing_started_at_ms BIGINT, graph_ready_at_ms BIGINT, vectorization_started_at_ms BIGINT, vector_ready_at_ms BIGINT, last_state_change_at_ms BIGINT, last_error_at_ms BIGINT)",
-        )?;
-        self.execute(
-            "INSERT INTO File_rebuilt (path, project_code, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready, first_seen_at_ms, indexing_started_at_ms, graph_ready_at_ms, vectorization_started_at_ms, vector_ready_at_ms, last_state_change_at_ms, last_error_at_ms) \
-             SELECT path, project_code, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready, first_seen_at_ms, indexing_started_at_ms, graph_ready_at_ms, vectorization_started_at_ms, vector_ready_at_ms, last_state_change_at_ms, last_error_at_ms \
-             FROM ( \
-                 SELECT path, project_code, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready, first_seen_at_ms, indexing_started_at_ms, graph_ready_at_ms, vectorization_started_at_ms, vector_ready_at_ms, last_state_change_at_ms, last_error_at_ms, \
-                        ROW_NUMBER() OVER (PARTITION BY path ORDER BY COALESCE(mtime, 0) DESC, COALESCE(priority, 0) DESC, path ASC) AS rownum \
-                 FROM File \
-             ) ranked \
-             WHERE rownum = 1;",
-        )?;
-        self.execute("DROP TABLE File;")?;
-        self.execute("ALTER TABLE File_rebuilt RENAME TO File;")?;
-
-        // The DROP+RENAME above discards every index on File. Recreate the
-        // multi-tenant indexes (REQ-AXO-066 Phase 1, DEC-AXO-064 Option A) so
-        // post-soft-invalidation reads stay scale-correct.
-        self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS file_project_path_idx ON File(project_code, path)",
-        )?;
-        Ok(())
-    }
+    // REQ-AXO-901653 slice-5a: `reset_ist_state`,
+    // `soft_invalidate_derived_state`, `soft_invalidate_embedding_state`,
+    // `rebuild_file_runtime_table` deleted ; all rebuilt the retired
+    // public.File table + its file_project_code_idx / file_status_idx /
+    // file_project_path_idx + reset graph_ready / vector_ready /
+    // file_stage. Their only caller (`ensure_runtime_compatibility`) was
+    // already deleted above.
 }
 
 #[cfg(test)]
