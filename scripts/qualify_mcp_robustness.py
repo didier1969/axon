@@ -400,10 +400,20 @@ def run_mode(
     reset_ist: bool,
     run_dir: Path,
 ) -> dict[str, Any]:
-    stop_code, stop_output = run_script("scripts/stop.sh", check=False)
+    # REQ-AXO-901653 slice-5d (DDL DROP TABLE) + GUI-AXO-1023 — canonical
+    # 4-verb wrapper (./scripts/axon --instance live ...) loads the right
+    # AXON_INSTANCE_KIND, runtime profile, OS-level LD_LIBRARY_PATH (ORT/CUDA
+    # dlopen) before forking start.sh. Raw `scripts/start.sh` invocations
+    # crashed the brain via libonnxruntime.so dlopen failure when env was
+    # not pre-resolved.
+    stop_code, stop_output = run_script(
+        "scripts/axon", ["--instance", "live", "stop", "--hard"], check=False
+    )
     (run_dir / f"{mode}-stop.log").write_text(stop_output)
     if stop_code != 0 and detect_axon_pid() is not None:
-        raise RuntimeError(f"stop.sh returned {stop_code} and axon-core is still running for mode={mode}")
+        raise RuntimeError(
+            f"axon stop returned {stop_code} and axon-core is still running for mode={mode}"
+        )
 
     if reset_ist:
         for path in [IST_DB, IST_WAL]:
@@ -418,10 +428,14 @@ def run_mode(
         "indexer_vector": "--indexer-vector",
         "indexer_full": "--indexer-full",
     }[mode]
-    start_code, start_output = run_script("scripts/start.sh", [start_arg], check=False)
+    start_code, start_output = run_script(
+        "scripts/axon", ["--instance", "live", "start", start_arg], check=False
+    )
     (run_dir / f"{mode}-start.log").write_text(start_output)
     if start_code != 0 and detect_axon_pid() is None:
-        raise RuntimeError(f"start.sh returned {start_code} and runtime did not start for mode={mode}")
+        raise RuntimeError(
+            f"axon start returned {start_code} and runtime did not start for mode={mode}"
+        )
     pid = wait_for_mcp_ready(url, 120)
 
     if warmup > 0:
@@ -628,10 +642,12 @@ def main(argv: list[str]) -> int:
             )
 
     if not args.keep_running:
-        stop_code, stop_output = run_script("scripts/stop.sh", check=False)
+        stop_code, stop_output = run_script(
+            "scripts/axon", ["--instance", "live", "stop", "--hard"], check=False
+        )
         (run_dir / "final-stop.log").write_text(stop_output)
         if stop_code != 0 and detect_axon_pid() is not None:
-            print("[robustness] warning: final stop.sh did not fully stop runtime", file=sys.stderr)
+            print("[robustness] warning: final axon stop did not fully stop runtime", file=sys.stderr)
 
     return 0
 
