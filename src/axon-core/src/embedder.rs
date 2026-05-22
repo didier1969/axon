@@ -1,6 +1,5 @@
 use crate::embedding_contract::{
-    fastembed_model, CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME, MODEL_VERSION,
-    SYMBOL_MODEL_ID,
+    fastembed_model, CHUNK_MODEL_ID, DIMENSION, MODEL_NAME, MODEL_VERSION, SYMBOL_MODEL_ID,
 };
 use crate::embedding_profile::{
     configured_embedding_max_length as profile_configured_embedding_max_length,
@@ -11,8 +10,8 @@ use crate::embedding_profile::{
 };
 use crate::graph::GraphStore;
 use crate::graph_ingestion::{
-    FileVectorizationLeaseSnapshot, FileVectorizationWork, GraphProjectionWork, VectorBatchRun,
-    VectorLaneStateRecord, VectorWorkerFault, INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS,
+    FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun, VectorLaneStateRecord,
+    VectorWorkerFault, INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS,
     INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT,
 };
 use crate::queue::QueueStore;
@@ -29,10 +28,10 @@ use crate::service_guard::{self, ServicePressure, VectorLaneState};
 use crate::vector_control::{
     configured_gpu_ready_high_watermark_chunks, configured_gpu_ready_low_watermark_chunks,
     configured_target_ready_chunks, current_vector_batch_controller_diagnostics,
-    graph_projection_allowed, observe_vector_batch_controller,
-    reset_vector_batch_controller_for_tests, semantic_policy_with_graph, symbol_embedding_allowed,
-    vector_claim_target, vector_ready_chunk_reserve_target, vector_worker_admission_decision,
-    VectorBatchControllerObservation, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
+    observe_vector_batch_controller, reset_vector_batch_controller_for_tests,
+    symbol_embedding_allowed, vector_claim_target, vector_ready_chunk_reserve_target,
+    vector_worker_admission_decision, VectorBatchControllerObservation,
+    AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
 };
 use anyhow::{anyhow, Result as AnyhowResult};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -184,7 +183,6 @@ pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
     _vector_workers: Vec<thread::JoinHandle<()>>,
     _vector_maintenance_workers: Vec<thread::JoinHandle<()>>,
-    _graph_workers: Vec<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,20 +256,6 @@ impl Drop for VectorWorkerLivenessGuard {
     }
 }
 
-struct GraphWorkerLivenessGuard;
-
-impl GraphWorkerLivenessGuard {
-    fn new() -> Self {
-        service_guard::record_graph_worker_started();
-        Self
-    }
-}
-
-impl Drop for GraphWorkerLivenessGuard {
-    fn drop(&mut self) {
-        service_guard::record_graph_worker_stopped();
-    }
-}
 
 
 
@@ -1159,7 +1143,7 @@ fn spawn_hot_status_cache_workers(
 }
 
 impl SemanticWorkerPool {
-    pub fn new(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) -> Self {
+    pub fn new(graph_store: Arc<GraphStore>, _queue_store: Arc<QueueStore>) -> Self {
         let config = embedding_lane_config_from_env();
         info!(
             "Semantic Factory: spawning graph/vector semantic workers (query_support_workers={}, vector_workers={}, graph_workers={}, chunk_batch_size={}, file_batch_size={}, graph_batch_size={})",
@@ -1259,19 +1243,21 @@ impl SemanticWorkerPool {
             }
         }
 
-        let mut graph_workers = Vec::new();
-        for worker_idx in 0..config.graph_workers {
-            let graph_store = Arc::clone(&graph_store);
-            let queue_store = Arc::clone(&queue_store);
-            graph_workers.push(thread::spawn(move || {
-                Self::graph_worker_loop(worker_idx, graph_store, queue_store);
-            }));
-        }
+        // REQ-AXO-901653 Slice 1 — graph_worker_loop spawn removed.
+        // The Semantic Graph Worker (graph projection embedding cache) was
+        // structurally obsolete since MIL-AXO-017 (AGE retirement) +
+        // REQ-AXO-271 slice 2e (refresh_*_projection became no-op +
+        // GraphProjectionState never populated). The loop kept polling
+        // public.GraphProjectionQueue (a DROP'd table) and emitted
+        // `[pg_query_count] db error` + `graph projection fetch error`
+        // every iteration, drowning logs and consuming PG conn pool.
+        // Authoritative call-graph reads route through public.Edge
+        // (db/ddl/04_graph_functions.sql) ; the projection cache has no
+        // remaining consumer.
         Self {
             _query_workers: query_workers,
             _vector_workers: vector_workers,
             _vector_maintenance_workers: vector_maintenance_workers,
-            _graph_workers: graph_workers,
         }
     }
 
@@ -1315,126 +1301,6 @@ impl SemanticWorkerPool {
     }
 
 
-
-    fn graph_worker_loop(
-        worker_idx: usize,
-        graph_store: Arc<GraphStore>,
-        queue_store: Arc<QueueStore>,
-    ) {
-        let _liveness = GraphWorkerLivenessGuard::new();
-        let mut model: Option<TextEmbedding> = None;
-        let mut graph_model_registered = false;
-
-        loop {
-            service_guard::record_graph_worker_heartbeat();
-            let lane_config = embedding_lane_config_from_env();
-            let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
-                .fetch_graph_projection_queue_counts()
-                .unwrap_or((0, 0));
-            let graph_backlog_depth =
-                graph_projection_queue_queued + graph_projection_queue_inflight;
-            let policy = semantic_policy_with_graph(
-                queue_store.common_len(),
-                graph_backlog_depth,
-                service_guard::current_pressure(),
-            );
-            let service_pressure = service_guard::current_pressure();
-            let (vector_queue_queued, vector_queue_inflight) = graph_store
-                .fetch_file_vectorization_queue_counts()
-                .unwrap_or((0, 0));
-            let (outbox_queued, outbox_inflight) = graph_store
-                .fetch_vector_persist_outbox_counts()
-                .unwrap_or((0, 0));
-            let vector_backlog_depth =
-                vector_queue_queued + vector_queue_inflight + outbox_queued + outbox_inflight;
-            service_guard::record_runtime_wakeup(
-                service_guard::RuntimeWakeSource::Graph,
-                graph_backlog_depth as u64,
-                vector_backlog_depth as u64,
-            );
-            let gpu_available = effective_embedding_provider_is_gpu();
-            if worker_idx >= lane_config.graph_workers {
-                thread::sleep(policy.idle_sleep);
-                continue;
-            }
-            if !graph_projection_allowed(
-                queue_store.common_len(),
-                service_pressure,
-                vector_backlog_depth,
-                gpu_available,
-            ) {
-                thread::sleep(policy.sleep);
-                continue;
-            }
-
-            match graph_store.fetch_pending_graph_projection_work(lane_config.graph_batch_size) {
-                Ok(pending) if !pending.is_empty() => {
-                    if model.is_none() {
-                        info!(
-                            "Semantic Graph Worker [{}]: Initializing BGE-Large Model (1024d) on first admitted graph workload...",
-                            worker_idx
-                        );
-                        model = Self::build_text_embedding_model("graph", worker_idx);
-                        if model.is_none() {
-                            return;
-                        }
-                    }
-                    if !graph_model_registered {
-                        if let Err(e) = graph_store.ensure_embedding_model(
-                            GRAPH_MODEL_ID,
-                            "graph",
-                            MODEL_NAME,
-                            DIMENSION as i64,
-                            MODEL_VERSION,
-                        ) {
-                            error!(
-                                "Semantic Graph Worker [{}]: failed to register graph embedding model: {:?}",
-                                worker_idx, e
-                            );
-                        }
-                        graph_model_registered = true;
-                    }
-                    debug!(
-                        "Semantic Graph Worker [{}]: Embedding {} graph projection jobs...",
-                        worker_idx,
-                        pending.len()
-                    );
-
-                    // REQ-AXO-271 slice 2e + REQ-AXO-269 v1 follow-up : under PG
-                    // canonical (post-MIL-AXO-017 AGE retirement),
-                    // `refresh_*_projection` is a no-op (cf graph_query.rs slice
-                    // 2a) and `GraphProjectionState` is never populated. The
-                    // historical refresh→fetch→embed→mark_done cascade collapsed
-                    // to an infinite re-queue loop (VAL-AXO-057 saw 14146 stuck
-                    // entries). Authoritative call-graph reads now route through
-                    // public.Edge + db/ddl/04_graph_functions.sql, so the
-                    // graph-projection embedding cache is structurally obsolete.
-                    // Drain every pending work item and skip the embed pass.
-                    let drained = pending.len();
-                    if let Err(err) = graph_store.mark_graph_projection_work_done(&pending) {
-                        error!(
-                            "Semantic Graph Worker [{}]: failed to mark {} projection jobs done: {:?}",
-                            worker_idx, drained, err
-                        );
-                    } else {
-                        debug!(
-                            "Semantic Graph Worker [{}]: drained {} projection jobs (PG canonical, no projection cache)",
-                            worker_idx, drained
-                        );
-                    }
-                    continue;
-                }
-                Ok(_) => thread::sleep(policy.idle_sleep),
-                Err(err) => {
-                    error!(
-                        "Semantic Graph Worker [{}]: graph projection fetch error: {:?}",
-                        worker_idx, err
-                    );
-                    thread::sleep(policy.idle_sleep);
-                }
-            }
-        }
-    }
 
     fn build_text_embedding_model(lane: &str, worker_idx: usize) -> Option<TextEmbedding> {
         let options = InitOptions::new(fastembed_model())
