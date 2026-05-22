@@ -32,7 +32,9 @@ axon_cleanup_role_state() {
     rm -f "/tmp/axon-${instance_kind}-${role}-telemetry.sock" \
           "/tmp/axon-${instance_kind}-${role}-mcp.sock" \
           "$run_root_base/run-${role}/axon-${role}.pid" \
-          "$run_root_base/run-${role}/runtime.env"
+          "$run_root_base/run-${role}/runtime.env" \
+          "$run_root_base/run-${role}/launch-${role}.sh" \
+          "$run_root_base/run-${role}/launch-nexus.sh"
 }
 
 axon_cleanup_legacy_instance_paths() {

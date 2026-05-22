@@ -1063,6 +1063,12 @@ echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: ${STARTUP_TIMEOUT_S}
 CORE_READY=false
 DASHBOARD_READY=false
 
+# REQ-AXO-901657 — heartbeat every 30s during the wait so silent
+# hangs become observable. Session 51 lesson : start.sh waited 900s
+# with zero feedback while axonctl was stuck on a malformed command,
+# making the failure invisible until timeout expired.
+last_heartbeat=0
+
 # Wait up to STARTUP_TIMEOUT_S * 1s
 for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     if [ "$CORE_READY" = false ]; then
@@ -1091,7 +1097,23 @@ for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     if [ "$CORE_READY" = true ] && [ "$DASHBOARD_READY" = true ]; then
         break
     fi
-    
+
+    # Heartbeat every 30s : diagnostics so silent hangs are visible.
+    if (( i - last_heartbeat >= 30 )); then
+        last_heartbeat=$i
+        hb_core_pid="$(pgrep -f "$AXONCTL_BIN supervise.*--role $RUNTIME_SHADOW_ROLE" | head -1 || true)"
+        hb_dash_pid=""
+        if [ "$START_DASHBOARD" = "1" ]; then
+            hb_dash_pid="$(ss -ltnp 2>/dev/null | awk -v port=":${PHX_PORT}\$" '$4 ~ port { gsub(/.*pid=/,"",$NF); gsub(/,.*/,"",$NF); print $NF; exit }' || true)"
+        fi
+        echo "  ⏳ waiting ${i}s/${STARTUP_TIMEOUT_S}s : core_ready=$CORE_READY (pid=${hb_core_pid:-none}) dashboard_ready=$DASHBOARD_READY (pid=${hb_dash_pid:-none})"
+        # Surface a clear hint if neither role process is alive — likely
+        # a launch-script regression (cf. REQ-AXO-901655 tmux truncation).
+        if [ -z "$hb_core_pid" ] && [ "$CORE_READY" = false ]; then
+            echo "     ⚠️  no $RUNTIME_SHADOW_ROLE supervisor process detected — check tmux pane '$TMUX_SESSION:core' for a malformed command or crash"
+        fi
+    fi
+
     sleep 1
 done
 

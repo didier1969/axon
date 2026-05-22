@@ -12,12 +12,14 @@ PROJECT_CODE="AXO"
 SKIP_BUILD=0
 SKIP_QUALIFY=0
 DRY_RUN=0
+SKIP_DEV_VALIDATION=0
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--skip-build] [--skip-qualify] [--dry-run]
+Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--skip-build] [--skip-qualify] [--skip-dev-validation] [--dry-run]
 
 One-shot promotion flow:
+  0. Validate dev instance healthy (`feedback_dev_first_no_exception`)
   1. Build canonical release artifact
   2. Run release preflight
   3. Create qualified release manifest
@@ -25,6 +27,12 @@ One-shot promotion flow:
   5. Run core MCP qualification and final live status
 
 Live promotion always builds the brain MCP + indexer authority contract.
+
+Flags:
+  --skip-dev-validation  EMERGENCY ONLY. Bypasses dev pre-flight. Use
+                         only when dev environment is intentionally
+                         unavailable (e.g. fresh-clone bootstrap before
+                         dev has ever been started). Logs the bypass.
 EOF
 }
 
@@ -33,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --project) PROJECT_CODE="${2:-}"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
+    --skip-dev-validation) SKIP_DEV_VALIDATION=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -61,8 +70,41 @@ run_step() {
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would promote current HEAD via safe one-shot flow"
-  echo "DRY RUN: project=$PROJECT_CODE runtime_contract=brain_mcp_indexer_ist head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY"
+  echo "DRY RUN: project=$PROJECT_CODE runtime_contract=brain_mcp_indexer_ist head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY skip_dev_validation=$SKIP_DEV_VALIDATION"
   exit 0
+fi
+
+# REQ-AXO-901656 — Step 0 : pre-flight dev validation gate. Refuses to
+# promote live if dev MCP is not responding. Catches start.sh regressions
+# and binary startup bugs in dev BEFORE they hit live (session 51 lesson :
+# tmux send-keys 2KB truncation broke live for 1h because dev was never
+# tested first ; `feedback_dev_first_no_exception` mandates this gate).
+validate_dev_healthy() {
+  local dev_mcp_port="44139"
+  local probe_status
+  probe_status=$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:${dev_mcp_port}/mcp" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>&1 | head -c 80 || true)
+  if [[ "$probe_status" != *'"jsonrpc"'* ]]; then
+    echo "❌ Dev MCP not responding on port ${dev_mcp_port} (feedback_dev_first_no_exception)." >&2
+    echo "   New binaries must validate in dev BEFORE promote-live." >&2
+    echo "   Recovery:" >&2
+    echo "     ./scripts/axon-dev start --brain-only        # or --indexer-full" >&2
+    echo "     # Verify dev MCP responds, run for >5 min." >&2
+    echo "     # Re-run this command." >&2
+    echo "" >&2
+    echo "   Bypass (EMERGENCY ONLY, logs the violation):" >&2
+    echo "     bash scripts/release/promote_live_safe.sh --skip-dev-validation ..." >&2
+    return 1
+  fi
+  echo "  ✅ dev MCP responsive on ${dev_mcp_port}"
+}
+
+if [[ "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
+  echo "== dev validation =="
+  echo "  ⚠️ BYPASSED via --skip-dev-validation (violation of feedback_dev_first_no_exception)"
+else
+  run_step "dev validation gate (feedback_dev_first_no_exception)" validate_dev_healthy
 fi
 
 if [[ "$SKIP_BUILD" -ne 1 ]]; then
