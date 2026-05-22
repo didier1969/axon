@@ -30,10 +30,11 @@ mod sql_helpers;
 mod types;
 mod vector_runtime;
 
-use sql_helpers::{
-    hourly_bucket_start_ms, next_vector_persist_outbox_claim_token, parse_file_ingress_row,
-    parse_i64_field, parse_u64_field,
-};
+// REQ-AXO-901653 slice-5c — sql_helpers re-exports trimmed ; deleted
+// helpers (hourly_bucket_start_ms, next_vector_persist_outbox_claim_token,
+// parse_file_ingress_row, parse_i64_field, parse_u64_field) had no usage
+// inside graph_ingestion.rs root after the test mod purge. vector_runtime
+// imports parse_i64_field + parse_u64_field directly from super::sql_helpers.
 pub use types::{
     EmbedderLifecycleHeartbeatRecord, FileLifecycleEvent, FileVectorizationLeaseSnapshot,
     FileVectorizationWork, IgnoreReconcileStats, VectorBatchRun, VectorLaneStateRecord,

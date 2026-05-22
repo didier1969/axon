@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use serde_json::Value;
 
 use crate::graph::GraphStore;
 
@@ -76,34 +75,17 @@ pub struct GuardMetricsSnapshot {
 }
 
 impl FileIngressGuard {
-    pub fn hydrate_from_store(store: &GraphStore) -> Result<Self> {
+    pub fn hydrate_from_store(_store: &GraphStore) -> Result<Self> {
+        // REQ-AXO-901653 slice-5c — `public.File` table retired ; pipeline_v2
+        // (REQ-AXO-289 / CPT-AXO-054) writes IndexedFile (3 cols : path,
+        // content_hash, last_seen_ms) and does not carry per-path mtime/size
+        // snapshots. The FileIngressGuard hydration cache now boots empty :
+        // pipeline_v2 stage A1 short-circuits unchanged files via
+        // content_hash comparison directly, so the in-memory mtime/size dedup
+        // is no longer load-bearing. GuardDecision::StageNew is returned for
+        // every probe on a cold guard, which matches pipeline_v2 semantics.
         let started_at = std::time::Instant::now();
-        let raw = store.query_json(
-            "SELECT path, status, mtime, size \
-             FROM File",
-        )?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        let mut by_path = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let Some(path) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let status = row
-                .get(1)
-                .and_then(|value| value.as_str())
-                .unwrap_or("pending");
-            let mtime = row.get(2).and_then(parse_i64_value).unwrap_or_default();
-            let size = row.get(3).and_then(parse_i64_value).unwrap_or_default();
-            by_path.insert(
-                path.to_string(),
-                FileStamp {
-                    mtime,
-                    size,
-                    is_deleted: status == "deleted",
-                    is_indexing: status == "indexing",
-                },
-            );
-        }
+        let by_path: HashMap<String, FileStamp> = HashMap::new();
         GUARD_HYDRATED_ENTRIES.store(by_path.len() as u64, Ordering::Relaxed);
         GUARD_HYDRATION_DURATION_MS
             .store(started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -198,12 +180,8 @@ fn read_enabled_from_env() -> bool {
     }
 }
 
-fn parse_i64_value(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|raw| i64::try_from(raw).ok()))
-        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
-}
+// REQ-AXO-901653 slice-5c — `parse_i64_value` removed (was only used by the
+// retired File-table hydration path).
 
 pub fn guard_metrics_snapshot() -> GuardMetricsSnapshot {
     GuardMetricsSnapshot {

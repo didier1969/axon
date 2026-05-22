@@ -329,23 +329,16 @@ mod tests {
 
     #[test]
     fn global_schema_includes_multi_project_ist_tables() {
-        // Post-CPT-AXO-039 supersedure: every IST table lives in
-        // `public` with project_code as a row-level discriminator.
-        // REQ-AXO-216 / Stop A: the 5 relation tables (CONTAINS /
-        // CALLS / CALLS_NIF / IMPACTS / SUBSTANTIATES) were dropped
-        // wave 9; AGE elabels are now canonical for edges.
+        // REQ-AXO-901653 slice-5c — public.File + public.GraphProjectionQueue
+        // dropped from the canonical schema ; assertion list updated to match.
         let joined = generate_global_schema().join("\n");
         for tbl in [
-            "public.File",
+            "public.IndexedFile",
             "public.Symbol",
             "public.Chunk",
             "public.ChunkEmbedding",
-            // DEC-AXO-086: FileVectorizationQueue retired ; signal via NOTIFY.
-            "public.GraphProjectionQueue",
             "public.FileLifecycleEvent",
             "public.HourlyVectorizationRollup",
-            // REQ-AXO-242: indexer hot-path tables added to close the
-            // P9 DDL gap so axon-indexer can boot under PG.
             "public.Project",
             "public.EmbeddingModel",
             "public.GraphProjection",

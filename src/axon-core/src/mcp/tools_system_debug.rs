@@ -147,57 +147,34 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let graph_runtime_enabled = runtime_mode.ingestion_enabled();
     let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
 
+    // REQ-AXO-901653 slice-5c — public.File state-machine dropped ; the
+    // legacy per-status counters (`pending`, `indexing`, `indexed_degraded`,
+    // `oversized_for_current_budget`, `skipped`) no longer apply to
+    // pipeline_v2 (REQ-AXO-289). File presence is now `IndexedFile`,
+    // graph-readiness = Chunk row, vector-readiness = ChunkEmbedding row.
     let file_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File")
+        snapshot_count("SELECT count(*) FROM public.IndexedFile")
     } else {
         0
     };
-    let pending_count = if graph_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE status = 'pending'")
-    } else {
-        0
-    };
-    let indexing_count = if graph_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE status = 'indexing'")
-    } else {
-        0
-    };
-    let degraded_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'")
-    } else {
-        0
-    };
-    let oversized_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'")
-    } else {
-        0
-    };
-    let skipped_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE status = 'skipped'")
-    } else {
-        0
-    };
+    let pending_count: i64 = 0; // pipeline_v2 has no pending-status concept.
+    let indexing_count: i64 = 0;
+    let degraded_count: i64 = 0;
+    let oversized_count: i64 = 0;
+    let skipped_count: i64 = 0;
     let graph_ready_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
+        snapshot_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
     } else {
         0
     };
     let vector_ready_query = format!(
-        "WITH pending_vector_chunks AS ( \
-           SELECT c.file_path AS file_path \
-           FROM Chunk c \
-           LEFT JOIN ChunkEmbedding ce \
-             ON ce.chunk_id = c.id \
-            AND ce.model_id = '{CHUNK_MODEL_ID}' \
-            AND ce.source_hash = c.content_hash \
-           WHERE c.file_path IS NOT NULL \
-             AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
-           GROUP BY 1 \
-         ) \
-         SELECT COUNT(*) \
-         FROM File f \
-         LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path \
-         WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL"
+        "SELECT count(DISTINCT c.file_path) \
+         FROM public.Chunk c \
+         JOIN public.ChunkEmbedding ce \
+           ON ce.chunk_id = c.id \
+          AND ce.model_id = '{CHUNK_MODEL_ID}' \
+          AND ce.source_hash = c.content_hash \
+         WHERE c.file_path IS NOT NULL"
     );
     let vector_ready_count = if vector_runtime_enabled {
         snapshot_count(&vector_ready_query)
@@ -217,7 +194,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let reader_refresh_failures_total = server.graph_store.reader_refresh_failures_total();
     let reader_snapshot = server.graph_store.reader_snapshot_diagnostics();
     let canonical_file_count = if graph_runtime_enabled || vector_runtime_enabled {
-        canonical_count("SELECT count(*) FROM File")
+        canonical_count("SELECT count(*) FROM public.IndexedFile")
     } else {
         0
     };
@@ -392,32 +369,15 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0.0
     };
-    let stage_rows = snapshot_json(
-        "SELECT COALESCE(file_stage, 'unknown'), count(*) \
-         FROM File \
-         GROUP BY 1 \
-         ORDER BY count(*) DESC, 1 ASC \
-         LIMIT 6",
-    );
+    // REQ-AXO-901653 slice-5c — stage_rows / backlog_reason_rows / vector_queue_status_rows
+    // were aggregates over public.File + public.FileVectorizationQueue (retired).
+    // Pipeline_v2 has no per-file `file_stage` / `status_reason` enum ; the
+    // residual breakdown is published as a constant empty `[]` to keep the
+    // diagnostic shape stable for dashboards.
+    let stage_rows = "[]".to_string();
     let stage_counts = parse_reason_count_rows(&stage_rows);
-    let backlog_reason_rows = snapshot_json(
-        "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-         FROM File \
-         WHERE status IN ('pending', 'indexing') \
-         GROUP BY 1 \
-         ORDER BY count(*) DESC, 1 ASC \
-         LIMIT 5",
-    );
-    let vector_queue_status_rows = if vector_runtime_enabled {
-        snapshot_json(
-            "SELECT status, count(*) \
-             FROM FileVectorizationQueue \
-             GROUP BY 1 \
-             ORDER BY count(*) DESC, 1 ASC",
-        )
-    } else {
-        "[]".to_string()
-    };
+    let backlog_reason_rows = "[]".to_string();
+    let vector_queue_status_rows = "[]".to_string();
     let latest_optimizer_decision_row = snapshot_json(
         "SELECT decision_id, mode, action_profile_id, at_ms, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms \
          FROM OptimizerDecisionLog \

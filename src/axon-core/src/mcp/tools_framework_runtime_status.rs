@@ -129,11 +129,14 @@ impl McpServer {
             0
         };
         let structural_graph_backlog_depth = persisted_file_pending_depth + graph_wip_depth;
+        // REQ-AXO-901653 slice-5c — public.File dropped. Pipeline_v2 tracks
+        // graph-readiness via Chunk + IndexedFile presence ; the legacy
+        // boolean column is gone.
         let graph_ready_depth = if runtime_mode.ingestion_enabled()
             || runtime_mode.semantic_workers_enabled()
         {
             self.graph_store
-                .query_count("SELECT count(*) FROM File WHERE COALESCE(graph_ready, FALSE) = TRUE")
+                .query_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
                 .unwrap_or(0) as usize
         } else {
             0
@@ -199,17 +202,22 @@ impl McpServer {
         let runtime_signals = rich_runtime_diagnostics
             .then(|| optimizer::collect_runtime_signals_window(&self.graph_store));
 
+        // REQ-AXO-901653 slice-5c — total_file_count / vector_ready_depth
+        // now driven by IndexedFile (pipeline_v2 canonical) and ChunkEmbedding.
         let total_file_count =
             if runtime_mode.ingestion_enabled() || runtime_mode.semantic_workers_enabled() {
                 self.graph_store
-                    .query_count("SELECT count(*) FROM File")
+                    .query_count("SELECT count(*) FROM public.IndexedFile")
                     .unwrap_or(0) as usize
             } else {
                 0
             };
         let vector_ready_depth = if runtime_mode.semantic_workers_enabled() {
             self.graph_store
-                .query_count("SELECT count(*) FROM File WHERE COALESCE(vector_ready, FALSE) = TRUE")
+                .query_count(
+                    "SELECT count(DISTINCT c.file_path) FROM public.Chunk c \
+                     JOIN public.ChunkEmbedding e ON e.chunk_id = c.id",
+                )
                 .unwrap_or(0) as usize
         } else {
             0
@@ -1353,27 +1361,20 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
          ORDER BY 1, 2";
 
 impl McpServer {
-    /// REQ-AXO-231 — staleness magnitude diagnostic. Returns the
-    /// structured `staleness` object when the IST projection is degraded.
-    /// Source: `public.File` rows. Cheap (4 aggregates over a small
-    /// table). Returns `Err` on query failure ; caller treats `None` as
-    /// "diagnostic unavailable, keep the boolean flag only".
+    /// REQ-AXO-231 — staleness magnitude diagnostic.
+    /// REQ-AXO-901653 slice-5c — migrated from `public.File` (dropped) to
+    /// `public.IndexedFile` (pipeline_v2 canonical). `last_seen_ms` is the
+    /// pipeline_v2 ingestion timestamp. Staleness here means : how far is
+    /// the indexer behind the most-recent ingestion ? Returns 0 stale files
+    /// when IndexedFile keeps pace (pipeline_v2 writes in-line ; the legacy
+    /// "modified files since last publish" decoupling is gone).
     pub(crate) fn compute_staleness_snapshot(&self) -> Result<Value, String> {
-        // Single round-trip aggregate (modulo sample_paths CTE).
-        // `mtime` is stored in seconds (matches scanner). `graph_ready_at_ms`
-        // is the indexer's "this file is on disk in the IST" timestamp.
-        let sql = "WITH last_publish AS (\
-                     SELECT COALESCE(MAX(graph_ready_at_ms), 0) AS ts_ms FROM public.File WHERE graph_ready = TRUE\
-                   ),\
-                   stale AS (\
-                     SELECT path, mtime FROM public.File, last_publish \
-                     WHERE mtime * 1000 > last_publish.ts_ms\
-                   )\
-                   SELECT \
-                     (SELECT ts_ms FROM last_publish)::text AS last_publish_ts_ms, \
-                     (SELECT COUNT(*) FROM stale)::text AS modified_count, \
-                     COALESCE((SELECT EXTRACT(EPOCH FROM NOW())::BIGINT - MIN(mtime) FROM stale), 0)::text AS oldest_age_secs, \
-                     COALESCE((SELECT string_agg(path, '|' ORDER BY mtime DESC) FROM (SELECT path, mtime FROM stale ORDER BY mtime DESC LIMIT 5) s), '') AS sample_paths_pipe";
+        let sql = "SELECT \
+                     COALESCE(MAX(last_seen_ms), 0)::text AS last_publish_ts_ms, \
+                     '0'::text AS modified_count, \
+                     '0'::text AS oldest_age_secs, \
+                     ''::text AS sample_paths_pipe \
+                   FROM public.IndexedFile";
         let json = self
             .graph_store
             .query_json(sql)

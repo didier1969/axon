@@ -8,20 +8,19 @@ use super::McpServer;
 impl McpServer {
     pub(super) fn derive_conception_view(&self, project_code: &str) -> Value {
         let escaped_project = project_code.replace('\'', "''");
+        // REQ-AXO-901653 slice-5c — public.File retired ; group by Chunk.file_path
+        // which is the canonical per-file pivot post pipeline_v2.
         let modules_raw = self
             .graph_store
             .query_json(&format!(
-                "SELECT f.path, count(rel.target_id) AS symbol_count
-                 FROM File f
-                 LEFT JOIN CONTAINS rel
-                   ON rel.source_id = f.path
-                  AND rel.project_code = '{project}'
-                 WHERE f.project_code = '{}'
-                 GROUP BY 1
-                 ORDER BY symbol_count DESC, f.path ASC
+                "SELECT c.file_path AS path, count(DISTINCT c.source_id) AS symbol_count
+                 FROM public.Chunk c
+                 WHERE c.project_code = '{}'
+                   AND c.file_path IS NOT NULL
+                 GROUP BY c.file_path
+                 ORDER BY symbol_count DESC, c.file_path ASC
                  LIMIT 5",
-                escaped_project,
-                project = escaped_project
+                escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let module_rows: Vec<Vec<Value>> = serde_json::from_str(&modules_raw).unwrap_or_default();
@@ -35,21 +34,22 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
+        // REQ-AXO-901653 slice-5c — interface listing now derives path from
+        // Chunk.file_path (Chunk → Symbol via source_id). No File join.
         let interfaces_raw = self
             .graph_store
             .query_json(&format!(
-                "SELECT s.name, f.path
-                 FROM Symbol s
-                 LEFT JOIN CONTAINS rel
-                   ON rel.target_id = s.id
-                  AND rel.project_code = '{project}'
-                 LEFT JOIN File f ON f.path = rel.source_id
+                "SELECT s.name, c.file_path AS path
+                 FROM public.Symbol s
+                 LEFT JOIN public.Chunk c
+                   ON c.source_id = s.id
+                  AND c.project_code = s.project_code
                  WHERE s.project_code = '{}'
                    AND s.kind = 'interface'
+                 GROUP BY s.name, c.file_path
                  ORDER BY s.name ASC
                  LIMIT 5",
-                escaped_project,
-                project = escaped_project
+                escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let interface_rows: Vec<Vec<Value>> =
@@ -64,22 +64,23 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
+        // REQ-AXO-901653 slice-5c — path now derived from Chunk.file_path
+        // (Chunk.source_id = Symbol.id) ; public.File join removed.
         let contracts_raw = self
             .graph_store
             .query_json(&format!(
-                "SELECT s.name, s.kind, f.path
-                 FROM Symbol s
-                 LEFT JOIN CONTAINS rel
-                   ON rel.target_id = s.id
-                  AND rel.project_code = '{project}'
-                 LEFT JOIN File f ON f.path = rel.source_id
+                "SELECT s.name, s.kind, c.file_path AS path
+                 FROM public.Symbol s
+                 LEFT JOIN public.Chunk c
+                   ON c.source_id = s.id
+                  AND c.project_code = s.project_code
                  WHERE s.project_code = '{}'
                    AND COALESCE(s.is_public, false) = true
                    AND s.kind IN ('interface', 'module', 'class', 'struct', 'function', 'method')
+                 GROUP BY s.name, s.kind, c.file_path
                  ORDER BY s.kind ASC, s.name ASC
                  LIMIT 5",
-                escaped_project,
-                project = escaped_project
+                escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let contract_rows: Vec<Vec<Value>> =

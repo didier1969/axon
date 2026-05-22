@@ -304,64 +304,43 @@ impl McpServer {
         let graph_runtime_enabled = runtime_mode.ingestion_enabled();
         let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
         let ingress = ingress_metrics_snapshot();
+        // REQ-AXO-901653 slice-5c — public.File + FileVectorizationQueue
+        // dropped. Pipeline_v2 canonical : IndexedFile = persisted, Chunk =
+        // graph-ready, ChunkEmbedding present = vector-ready. Queue depths
+        // are always 0 (in-memory pipeline_v2 stages own back-pressure).
         let persisted_file_count = if graph_runtime_enabled || vector_runtime_enabled {
             self.graph_store
-                .query_count("SELECT count(*) FROM File")
+                .query_count("SELECT count(*) FROM public.IndexedFile")
                 .unwrap_or(0)
         } else {
             0
         };
-        let structural_graph_queued_count = if graph_runtime_enabled {
-            self.graph_store.count_persisted_file_pending().unwrap_or(0)
-        } else {
-            0
-        };
-        let structural_graph_inflight_count = if graph_runtime_enabled {
-            self.graph_store.count_graph_wip_files().unwrap_or(0)
-        } else {
-            0
-        };
-        let structural_graph_backlog_count =
-            structural_graph_queued_count.saturating_add(structural_graph_inflight_count);
-        // REQ-AXO-901653 Slice 3b — graph_projection_queue table dropped.
+        let structural_graph_queued_count: i64 = 0;
+        let structural_graph_inflight_count: i64 = 0;
+        let structural_graph_backlog_count: i64 = 0;
         let (graph_queue_queued_count, graph_queue_inflight_count): (usize, usize) = (0, 0);
         let graph_queue_owned_count =
             u64::try_from(graph_queue_queued_count.saturating_add(graph_queue_inflight_count))
                 .unwrap_or(0);
         let graph_ready_count = if graph_runtime_enabled || vector_runtime_enabled {
             self.graph_store
-                .query_count("SELECT count(*) FROM File WHERE COALESCE(graph_ready, FALSE) = TRUE")
+                .query_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
                 .unwrap_or(0)
         } else {
             0
         };
-        let vector_queue_owned_count = if vector_runtime_enabled {
-            self.graph_store
-                .query_count(
-                    "SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority', 'inflight')",
-                )
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let vector_queue_owned_count: i64 = 0;
         let vector_ready_count = if vector_runtime_enabled {
             self.graph_store
-                .query_count("SELECT count(*) FROM File WHERE COALESCE(vector_ready, FALSE) = TRUE")
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let explicitly_excluded_count = if graph_runtime_enabled || vector_runtime_enabled {
-            self.graph_store
                 .query_count(
-                    "SELECT count(*) FROM File \
-                     WHERE status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
-                        OR COALESCE(file_stage, '') IN ('deleted', 'skipped', 'oversized')",
+                    "SELECT count(DISTINCT c.file_path) FROM public.Chunk c \
+                     JOIN public.ChunkEmbedding e ON e.chunk_id = c.id",
                 )
                 .unwrap_or(0)
         } else {
             0
         };
+        let explicitly_excluded_count: i64 = 0;
 
         json!({
             "authority_state": "canonical",

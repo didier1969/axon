@@ -117,21 +117,25 @@ impl GraphStore {
             return Ok(serde_json::Map::new());
         }
         // REQ-AXO-350 : public.Edge replaces legacy CONTAINS / CALLS (MIL-AXO-017).
+        // REQ-AXO-901653 slice-5c : public.File retired ; public.IndexedFile is
+        // the canonical per-file pivot. IndexedFile has no `project_code`
+        // column ; the scoping happens via Symbol.project_code on the
+        // CONTAINS edge target.
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT f.path, s.name
-            FROM File f
+            FROM public.IndexedFile f
             JOIN public.Edge c ON c.source_id = f.path AND c.relation_type = 'CONTAINS'
-            JOIN Symbol s ON s.id = c.target_id
+            JOIN public.Symbol s ON s.id = c.target_id
             WHERE (lower(s.name) LIKE '%todo%'
                OR lower(s.name) LIKE '%fixme%'
                OR lower(s.name) LIKE '%secret%'
                OR lower(s.name) LIKE '%hardcoded credential%'
                OR EXISTS (
                     SELECT 1 FROM public.Edge call
-                    JOIN Symbol target ON target.id = call.target_id
+                    JOIN public.Symbol target ON target.id = call.target_id
                     WHERE call.relation_type = 'CALLS'
                       AND call.source_id = s.id
                       AND lower(target.name) IN ('unwrap', 'eval')
@@ -139,10 +143,7 @@ impl GraphStore {
             {}
         ",
             if scoped {
-                format!(
-                    " AND (f.project_code = '{}' OR s.project_code = '{}')",
-                    escaped, escaped
-                )
+                format!(" AND s.project_code = '{}'", escaped)
             } else {
                 String::new()
             }

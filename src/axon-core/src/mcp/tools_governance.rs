@@ -53,22 +53,22 @@ impl McpServer {
     }
 
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
-        let file_filter = Self::project_filter(project, "project_code");
+        // REQ-AXO-901653 slice-5c — public.File retired ; canonical file
+        // surface is now public.IndexedFile + public.Chunk via project_code
+        // on Chunk (IndexedFile has no project_code by design — pipeline_v2
+        // resolves project_code at Chunk write time). status/pending/indexing
+        // concepts don't exist in pipeline_v2 (writes are in-line) ; the
+        // counts collapse to 0 / known.
+        let chunk_filter = Self::project_filter(project, "project_code");
         let symbol_filter = Self::project_filter(project, "project_code");
-        let known = self.sql_scalar(&format!("SELECT count(*) FROM File WHERE {}", file_filter));
-        let global_known = self.sql_scalar("SELECT count(*) FROM File");
-        let pending = self.sql_scalar(&format!(
-            "SELECT count(*) FROM File WHERE {} AND status = 'pending'",
-            file_filter
+        let known = self.sql_scalar(&format!(
+            "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE {}",
+            chunk_filter
         ));
-        let indexing = self.sql_scalar(&format!(
-            "SELECT count(*) FROM File WHERE {} AND status = 'indexing'",
-            file_filter
-        ));
-        let completed = self.sql_scalar(&format!(
-            "SELECT count(*) FROM File WHERE {} AND status IN ('indexed','indexed_degraded','skipped','deleted')",
-            file_filter
-        ));
+        let global_known = self.sql_scalar("SELECT count(*) FROM public.IndexedFile");
+        let pending = 0i64;
+        let indexing = 0i64;
+        let completed = known;
         let symbols = self.sql_scalar(&format!(
             "SELECT count(*) FROM Symbol WHERE {}",
             symbol_filter
@@ -94,20 +94,11 @@ impl McpServer {
                 Self::project_filter(project, "s.project_code")
             ))
         };
-        let top_reasons = self.sql_rows(&format!(
-            "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-             FROM File \
-             WHERE {} AND status IN ('pending','indexing','indexed_degraded','oversized_for_current_budget') \
-             GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
-            file_filter
-        ));
-        let top_errors = self.sql_rows(&format!(
-            "SELECT COALESCE(last_error_reason, 'unknown'), count(*) \
-             FROM File \
-             WHERE {} AND last_error_reason IS NOT NULL \
-             GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
-            file_filter
-        ));
+        // REQ-AXO-901653 slice-5c — `status_reason` + `last_error_reason`
+        // were public.File columns ; pipeline_v2 doesn't carry equivalent
+        // diagnostic data (failures are logged via tracing, not row state).
+        let top_reasons: Vec<Vec<Value>> = Vec::new();
+        let top_errors: Vec<Vec<Value>> = Vec::new();
 
         // REQ-AXO-212 — sub-causes carry ADR-2026-04-18-aligned
         // vocabulary so the LLM gets a single actionable next step
@@ -162,11 +153,10 @@ impl McpServer {
                  inspect `last_error_reason` and `status_reason` columns",
             ));
         }
-        // file_too_large_for_budget surfaces the oversized_for_current_budget status.
-        let oversized = self.sql_scalar(&format!(
-            "SELECT count(*) FROM File WHERE {} AND status = 'oversized_for_current_budget'",
-            file_filter
-        ));
+        // REQ-AXO-901653 slice-5c — `oversized_for_current_budget` status was
+        // a public.File enum ; pipeline_v2 enforces budget via in-line stage
+        // back-pressure (no persisted oversized flag).
+        let oversized = 0i64;
         if oversized > 0 {
             causes.push((
                 "file_too_large_for_budget",
@@ -281,11 +271,13 @@ impl McpServer {
     }
 
     fn file_count_for_project(&self, project: &str) -> i64 {
+        // REQ-AXO-901653 slice-5c — IndexedFile is the canonical file
+        // surface ; Chunk carries project_code (IndexedFile is global).
         let query = if project == "*" {
-            "SELECT count(*) FROM File".to_string()
+            "SELECT count(*) FROM public.IndexedFile".to_string()
         } else {
             format!(
-                "SELECT count(*) FROM File WHERE project_code = '{}'",
+                "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE project_code = '{}'",
                 project.replace('\'', "''")
             )
         };
