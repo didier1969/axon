@@ -104,38 +104,59 @@ validate_dev_healthy() {
   # ping ; an unchanged dev passes the ping while live receives an
   # untested new binary. Session 51 reinforcement (operator critique
   # after 3 violations of `feedback_dev_first_no_exception`).
+  #
+  # REQ-AXO-901660 (session 51 marathon fix) — extraction targets the
+  # canonical JSON path `.result.data.runtime_version.build_id` (the
+  # brain's OWN build_id) instead of the previous naive `grep build_id`
+  # which incidentally captured `peer_runtime_version.build_id` (a
+  # cached / federated entry that lags reality by N commits). The
+  # naive parser would silently let mismatched dev brains pass when
+  # they happened to share peer metadata with the candidate.
   local candidate_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  local dev_build_id
-  dev_build_id=$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:${dev_mcp_port}/mcp" \
+  local dev_status_json
+  dev_status_json=$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:${dev_mcp_port}/mcp" \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"status","arguments":{"mode":"verbose"}},"id":1}' 2>&1 \
-    | grep -oE '"build_id":"[^"]+"' | head -1 | sed 's/"build_id":"//;s/"$//' || true)
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"status","arguments":{"mode":"verbose"}},"id":1}' 2>&1 || true)
+  local dev_build_id
+  dev_build_id=$(printf '%s' "$dev_status_json" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    bid = doc.get("result", {}).get("data", {}).get("runtime_version", {}).get("build_id")
+    if isinstance(bid, str) and bid:
+        print(bid)
+except Exception:
+    pass
+' 2>/dev/null || true)
 
   if [[ -z "$dev_build_id" ]]; then
-    # Brain `status` may not surface build_id in JSON output — fall back
-    # to a soft warning rather than block (don't penalize an environment
-    # where introspection isn't wired). Operator can still override via
-    # --skip-dev-validation if they accept the risk.
-    echo "  ⚠️ could not extract dev build_id from MCP status ; binary-match check skipped"
+    # Brain `status` may not surface `runtime_version.build_id` (older
+    # binary contracts pre-REQ-AXO-150). Fall back to soft warning to
+    # avoid blocking environments where introspection isn't wired ;
+    # operator can still override via --skip-dev-validation if they
+    # accept the risk.
+    echo "  ⚠️ could not extract .result.data.runtime_version.build_id from dev status ; binary-match check skipped"
     return 0
   fi
 
   # Match : dev build_id must contain the short HEAD sha. Format ex :
-  # v0.8.0-629-gd0d7a43f → contains `d0d7a43f`.
+  # `v0.8.0-635-g5e61cdd1` → contains `5e61cdd1`.
   local short_head="${candidate_head:0:8}"
   if [[ "$dev_build_id" == *"$short_head"* ]]; then
     echo "  ✅ dev brain runs candidate binary (build_id=$dev_build_id matches HEAD $short_head)"
   else
     echo "❌ Dev brain runs a DIFFERENT binary than the promotion candidate." >&2
-    echo "   dev build_id      : $dev_build_id" >&2
-    echo "   candidate HEAD    : $candidate_head ($short_head)" >&2
+    echo "   dev runtime_version.build_id : $dev_build_id" >&2
+    echo "   candidate HEAD               : $candidate_head ($short_head)" >&2
     echo "   You are about to promote untested code to live." >&2
     echo "" >&2
     echo "   Recovery:" >&2
-    echo "     # 1. Rebuild dev with current HEAD" >&2
+    echo "     # 1. Rebuild dev with current HEAD (force build.rs re-eval if cached)" >&2
     echo "     ./scripts/axon-dev stop --hard" >&2
-    echo "     ./scripts/axon-dev start --indexer-full" >&2
-    echo "     # 2. Functional test in dev (e.g. create file, query MCP)" >&2
+    echo "     touch src/axon-core/build.rs 2>/dev/null  # force git-info rebuild" >&2
+    echo "     devenv shell --no-reload --no-tui -- bash -lc 'cargo build --manifest-path src/axon-core/Cargo.toml --bin axon-brain --bin axon-indexer'" >&2
+    echo "     ./scripts/axon-dev start --indexer-full   # or --brain-only" >&2
+    echo "     # 2. Functional test in dev (e.g. create file, query MCP, observe effect)" >&2
     echo "     # 3. Re-run this command" >&2
     echo "" >&2
     echo "   Bypass (EMERGENCY ONLY) :" >&2
