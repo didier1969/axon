@@ -2218,8 +2218,8 @@ mod graph_bootstrap_tests {
         assert!(!indexer.soll_attached);
         indexer
             .execute(
-                "INSERT INTO File (path, project_code, status, size, priority, mtime)
-                 VALUES ('/tmp/indexer.txt', 'AXO', 'pending', 1, 1, 1)",
+                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                 VALUES ('/tmp/indexer.txt', 'hash-indexer', 1)",
             )
             .unwrap();
         indexer.refresh_reader_snapshot().unwrap();
@@ -2240,8 +2240,8 @@ mod graph_bootstrap_tests {
         let indexer = GraphStore::new(&db_root_str).unwrap();
         indexer
             .execute(
-                "INSERT INTO File (path, project_code, status, size, priority, mtime)
-                 VALUES ('/tmp/demo.txt', 'AXO', 'pending', 1, 1, 1)",
+                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                 VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
             )
             .unwrap();
         indexer.mark_writer_commit_visible();
@@ -2252,7 +2252,7 @@ mod graph_bootstrap_tests {
 
         let brain = GraphStore::new_brain_reader_soll_writer(&db_root_str).unwrap();
         let raw = brain
-            .query_json_on_reader("SELECT count(*) FROM File")
+            .query_json_on_reader("SELECT count(*) FROM public.IndexedFile")
             .unwrap();
         assert!(raw.contains("1"), "{raw}");
         assert!(matches!(
@@ -2271,8 +2271,8 @@ mod graph_bootstrap_tests {
         let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
         indexer
             .execute(
-                "INSERT INTO File (path, project_code, status, size, priority, mtime)
-                 VALUES ('/tmp/demo.txt', 'AXO', 'pending', 1, 1, 1)",
+                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                 VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
             )
             .unwrap();
         let conflicting_temp_dir = db_root.join("ist-reader.db.tmp");

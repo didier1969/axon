@@ -858,16 +858,20 @@ mod tests {
         assert!(rendered[0].starts_with("INSERT INTO Symbol"));
         assert!(rendered[1].starts_with("INSERT INTO Chunk"));
 
+        // REQ-AXO-901653 slice-5c — replaced legacy FileVectorizationQueue /
+        // File raw SQL with live ChunkEmbedding samples (representative of
+        // pipeline_v2 raw-query payloads).
         acc.absorb(WriteDiff::RawQueries(vec![
-            "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
-            "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+            "DELETE FROM public.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
+            "UPDATE public.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'"
+                .to_string(),
         ]));
         let rendered = acc.render_bulk_queries();
         assert_eq!(rendered.len(), 4);
         assert!(rendered[0].starts_with("INSERT INTO Symbol"));
         assert!(rendered[1].starts_with("INSERT INTO Chunk"));
-        assert!(rendered[2].starts_with("DELETE FROM FileVectorizationQueue"));
-        assert!(rendered[3].starts_with("UPDATE File"));
+        assert!(rendered[2].starts_with("DELETE FROM public.ChunkEmbedding"));
+        assert!(rendered[3].starts_with("UPDATE public.IndexedFile"));
     }
 
     #[test]
@@ -1121,8 +1125,10 @@ mod tests {
         acc.absorb(WriteDiff::Contains(vec![sample_relation("a", "b")]));
         acc.absorb(WriteDiff::Calls(vec![sample_relation("c", "d")]));
         acc.absorb(WriteDiff::CallsNif(vec![sample_relation("e", "f")]));
+        // REQ-AXO-901653 slice-5c — sample raw query migrated to live table.
         acc.absorb(WriteDiff::RawQueries(vec![
-            "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+            "UPDATE public.IndexedFile SET last_seen_ms = 99 WHERE path = '/tmp/a.rs'"
+                .to_string(),
         ]));
         let rendered = acc.render_bulk_queries();
         // 1 Symbol INSERT + 1 Chunk INSERT + 1 CONTAINS INSERT + 2 CALLS
@@ -1135,7 +1141,7 @@ mod tests {
         assert!(rendered[4].starts_with("INSERT INTO CALLS"));
         assert!(rendered[5].starts_with("DELETE FROM CALLS_NIF"));
         assert!(rendered[6].starts_with("INSERT INTO CALLS_NIF"));
-        assert!(rendered[7].starts_with("UPDATE File"));
+        assert!(rendered[7].starts_with("UPDATE public.IndexedFile"));
     }
 
     #[test]
@@ -1448,13 +1454,15 @@ mod tests {
 
     #[test]
     fn raw_queries_reach_sink_through_dispatcher() {
+        // REQ-AXO-901653 slice-5c — sample queries migrated to live tables.
         let sink = Arc::new(RecordingSink::default());
         let (dispatcher, handle) = spawn(Arc::clone(&sink));
 
         dispatcher
             .dispatch(WriteDiff::RawQueries(vec![
-                "DELETE FROM FileVectorizationQueue WHERE file_path = '/tmp/a.rs'".to_string(),
-                "UPDATE File SET vector_ready = TRUE WHERE path = '/tmp/a.rs'".to_string(),
+                "DELETE FROM public.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
+                "UPDATE public.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'"
+                    .to_string(),
             ]))
             .expect("dispatch ok");
 
@@ -1469,8 +1477,8 @@ mod tests {
         let batches = sink.batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 2);
-        assert!(batches[0][0].starts_with("DELETE FROM FileVectorizationQueue"));
-        assert!(batches[0][1].starts_with("UPDATE File"));
+        assert!(batches[0][0].starts_with("DELETE FROM public.ChunkEmbedding"));
+        assert!(batches[0][1].starts_with("UPDATE public.IndexedFile"));
         drop(dispatcher);
         handle.join().expect("writer thread joined");
     }

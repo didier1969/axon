@@ -885,6 +885,8 @@ mod tests {
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
+        // REQ-AXO-901653 slice-5c — File table dropped ; test migrated to
+        // public.IndexedFile (3 cols : path, content_hash, last_seen_ms).
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let read = store.execute_raw_sql_gateway("SELECT 1").unwrap();
@@ -892,13 +894,16 @@ mod tests {
 
         let write = store
             .execute_raw_sql_gateway(
-                "INSERT INTO File (path, project_code) VALUES ('/tmp/sql_gateway.ex', 'PRJ')",
+                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms) \
+                 VALUES ('/tmp/sql_gateway.ex', 'hash-1', 1)",
             )
             .unwrap();
         assert!(write.contains("\"ok\":true"), "{write}");
 
         let count = store
-            .query_count("SELECT count(*) FROM File WHERE path = '/tmp/sql_gateway.ex'")
+            .query_count(
+                "SELECT count(*) FROM public.IndexedFile WHERE path = '/tmp/sql_gateway.ex'",
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
