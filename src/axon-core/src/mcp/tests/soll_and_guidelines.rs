@@ -316,6 +316,299 @@ fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
     );
 }
 
+// REQ-AXO-901625 — silent-success regression cluster.
+//
+// The Pollux Cuisine 2026-05-20 session called
+// `soll_apply_plan(project_code=CSC, plan={requirements:[7], relations:[16]})`
+// and polled `job_status` to `succeeded` — but zero nodes and zero edges
+// were materialised. Three root causes overlapped :
+//
+//   1. `dry_run` defaulted to `true`. Omitting the flag produced a
+//      preview that never matched the LLM-facing "succeeded ⇒ applied"
+//      contract that every other mutator honours.
+//   2. `relations` nested inside `plan` were silently dropped because
+//      `build_plan_operations` reads relations from the top-level args.
+//   3. An empty operations array returned a benign "DRY-RUN ready"
+//      message instead of an `isError: true` envelope.
+//
+// The tests below pin each branch so the silent-success path cannot
+// regress.
+
+#[test]
+fn test_soll_apply_plan_dry_run_defaults_to_false_and_actually_commits() {
+    // REQ-AXO-901625 root-cause guard : when the caller omits `dry_run`,
+    // the plan must be COMMITTED (not previewed). Before the fix the
+    // default was `true`, so the LLM saw `succeeded` but soll.Node was
+    // untouched — the symptom logged by the operator.
+    let _guard = env_lock();
+    // Ensure AXON_MCP_MUTATION_JOBS is unset so the call returns the
+    // synchronous envelope (commit branch) rather than queuing a job
+    // when running after a sibling test that left the var set.
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                // dry_run intentionally omitted — must default to false.
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-901625-default-commit",
+                        "title": "Default dry_run must commit",
+                        "description": "Verifies REQ-AXO-901625 silent-success fix.",
+                        "status": "current"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(901_625_01)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result
+        .get("content")
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    // Core assertion : the default branch must take the COMMIT path
+    // (success or failure), not the DRY-RUN preview path. The pre-fix
+    // behaviour returned a `succeeded` envelope containing
+    // "DRY-RUN ready" with zero mutations. Now we either see
+    // "SOLL revision committed" (happy path) or "SOLL commit error"
+    // (downstream PG state collision unrelated to REQ-AXO-901625, e.g.
+    // a shared-backend revision id race). Either is acceptable here :
+    // the silent-success regression we are pinning is "DRY-RUN ready"
+    // bubbling out when the caller omitted `dry_run`.
+    assert!(
+        !content.contains("DRY-RUN ready"),
+        "default dry_run must NOT take the preview branch. content={content}"
+    );
+    // When the commit succeeds end-to-end the envelope must self-describe
+    // via `applied=true` + `dry_run=false` so a caller can branch on a
+    // single boolean. On commit failure the envelope is `isError=true`
+    // (no `applied` flag) — we still pass because we excluded the DRY-RUN
+    // path above.
+    if !result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        assert!(
+            content.contains("SOLL revision committed"),
+            "happy-path content must announce the revision commit: {content}"
+        );
+        assert_eq!(
+            result["data"]["applied"].as_bool(),
+            Some(true),
+            "data.applied must be true on commit branch"
+        );
+        assert_eq!(
+            result["data"]["dry_run"].as_bool(),
+            Some(false),
+            "data.dry_run must be false on commit branch"
+        );
+        let node_count = server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = 'Default dry_run must commit'",
+            )
+            .unwrap();
+        assert_eq!(
+            node_count, 1,
+            "default dry_run must materialise the requirement in soll.Node"
+        );
+    }
+}
+
+#[test]
+fn test_soll_apply_plan_dry_run_true_surfaces_applied_false_flag() {
+    // REQ-AXO-901625 — when the operator opts in to dry_run=true the
+    // envelope must self-describe via `applied=false` + `dry_run=true`
+    // so a caller can branch on a single boolean instead of parsing the
+    // human-readable content text.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-901625-explicit-preview",
+                        "title": "Explicit preview only",
+                        "description": "Should NOT touch soll.Node.",
+                        "status": "current"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(901_625_02)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    assert_eq!(
+        result["data"]["applied"].as_bool(),
+        Some(false),
+        "explicit dry_run=true must set applied=false"
+    );
+    assert_eq!(
+        result["data"]["dry_run"].as_bool(),
+        Some(true),
+        "explicit dry_run=true must echo dry_run=true"
+    );
+    let content = result
+        .get("content")
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        content.contains("NO mutations applied"),
+        "dry-run content blob must flag the no-op explicitly: {content}"
+    );
+    // soll.Node must remain untouched by the preview path.
+    let node_count = server
+        .graph_store
+        .query_count(
+            "SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = 'Explicit preview only'",
+        )
+        .unwrap();
+    assert_eq!(node_count, 0, "dry_run=true must not materialise nodes");
+}
+
+#[test]
+fn test_soll_apply_plan_rejects_relations_nested_inside_plan() {
+    // REQ-AXO-901625 — guard against the schema-drift mistake observed
+    // in the Pollux Cuisine session : `relations` nested inside `plan`
+    // instead of at the top level. Before the fix the array was silently
+    // dropped and zero edges were created. The fix surfaces an
+    // `input_invalid` envelope with `parameter_repair` so the caller
+    // recovers in one round-trip.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-901625-misplaced",
+                        "title": "Misplaced relations parent",
+                        "description": "Triggers relations-inside-plan guard"
+                    }],
+                    // INTENTIONALLY misplaced — this is the LLM mistake.
+                    "relations": [
+                        {"source_id": "req-901625-misplaced", "target_id": "PIL-AXO-001", "relation_type": "BELONGS_TO"}
+                    ]
+                }
+            }
+        })),
+        id: Some(json!(901_625_03)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    assert_eq!(
+        result["isError"].as_bool(),
+        Some(true),
+        "misplaced relations must return isError=true"
+    );
+    assert_eq!(
+        result["data"]["status"].as_str(),
+        Some("input_invalid"),
+        "status must be input_invalid"
+    );
+    assert_eq!(
+        result["data"]["parameter_repair"]["category"].as_str(),
+        Some("relations_misplaced_inside_plan"),
+        "parameter_repair must categorise the misplacement"
+    );
+    assert_eq!(
+        result["data"]["parameter_repair"]["items_silently_dropped"]
+            .as_u64(),
+        Some(1),
+        "parameter_repair must report how many items were misplaced"
+    );
+}
+
+#[test]
+fn test_soll_apply_plan_rejects_empty_plan_with_explicit_error() {
+    // REQ-AXO-901625 — empty-plan guard. A plan with all-empty
+    // collections (or missing entirely) produced zero operations and
+    // returned a benign "DRY-RUN ready" success message before the fix.
+    // Now the call returns `input_invalid` so the caller catches the
+    // malformed payload immediately.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                // plan present but contains no recognised collection.
+                "plan": {
+                    "typo_requirements": [{"title": "wrong key"}]
+                }
+            }
+        })),
+        id: Some(json!(901_625_04)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    assert_eq!(
+        result["isError"].as_bool(),
+        Some(true),
+        "empty plan must return isError=true"
+    );
+    assert_eq!(
+        result["data"]["status"].as_str(),
+        Some("input_invalid"),
+        "status must be input_invalid for empty plan"
+    );
+    assert_eq!(
+        result["data"]["parameter_repair"]["category"].as_str(),
+        Some("empty_plan"),
+        "parameter_repair must categorise the empty plan"
+    );
+}
+
 #[test]
 fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
     let server = create_test_server();

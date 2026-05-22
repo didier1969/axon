@@ -18,11 +18,61 @@ impl McpServer {
             .get("author")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+        // REQ-AXO-901625 — default switched from `true` to `false`. The
+        // LLM-facing contract is "succeeded means applied" (CPT-AXO-025
+        // Branch 2). With the previous default, a caller that omitted
+        // `dry_run` got a successful preview that left soll.Node /
+        // soll.Edge untouched — perfect silent-success failure mode.
+        // Callers that want a preview must now opt in explicitly.
         let dry_run = args
             .get("dry_run")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let _plan = args.get("plan")?;
+
+        // REQ-AXO-901625 — detect a frequent LLM mistake : nesting
+        // `relations` inside `plan` instead of at the top level. The
+        // documented schema places `relations` next to `plan`, but the
+        // collection name reads naturally as part of the plan object so
+        // callers slip the array inside. Before this guard the misplaced
+        // array was silently dropped (parsed neither by build_plan_operations
+        // nor by the top-level relations loop), producing a "succeeded"
+        // job that materialised zero edges. Surface the misplacement
+        // explicitly so the operator can correct the call in one round-trip.
+        if let Some(plan_obj) = args.get("plan").and_then(|v| v.as_object()) {
+            if let Some(misplaced) = plan_obj.get("relations") {
+                let len = misplaced.as_array().map(|a| a.len()).unwrap_or(0);
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "soll_apply_plan rejected: `relations` ({} item(s)) is nested inside `plan` but the schema places it at the top level next to `plan`. Move the array out of `plan` and retry.",
+                            len
+                        )
+                    }],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "operator_guidance": {
+                            "problem_class": "relations_misplaced_inside_plan",
+                            "likely_cause": "schema_drift_relations_under_plan",
+                            "follow_up_tools": ["help", "soll_apply_plan"],
+                            "confidence": "high",
+                        },
+                        "parameter_repair": {
+                            "tool": "soll_apply_plan",
+                            "category": "relations_misplaced_inside_plan",
+                            "invalid_field": "plan.relations",
+                            "expected_field": "relations",
+                            "items_silently_dropped": len,
+                            "hint": "move `relations: [...]` out of `plan` so the call looks like `{project_code, plan:{requirements:[...]}, relations:[...]}`",
+                            "follow_up_tools": ["help", "soll_apply_plan"],
+                        },
+                        "canonical_source": "REQ-AXO-901625",
+                    },
+                }));
+            }
+        }
 
         let (canonical_project_code, _) = match self
             .resolve_canonical_project_identity_for_mutation(&project_code)
@@ -96,6 +146,44 @@ impl McpServer {
         }
 
         let operations = self.build_plan_operations(&canonical_project_code, args);
+
+        // REQ-AXO-901625 — empty-plan guard. If neither plan.* collections
+        // nor top-level relations[] produced any operation, the call is a
+        // no-op : the previous silent-success path is the original symptom
+        // logged by the operator. Surface this as an explicit input error
+        // so the caller diagnoses the malformed payload in one round-trip.
+        if operations.is_empty() {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "soll_apply_plan rejected: plan produced zero operations. Provide at least one entry under `plan.{pillars|requirements|decisions|milestones|concepts|guidelines|stakeholders|validations}` or top-level `relations`."
+                }],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "operator_guidance": {
+                        "problem_class": "empty_plan",
+                        "likely_cause": "malformed_plan_payload_or_missing_collections",
+                        "follow_up_tools": ["help", "soll_apply_plan"],
+                        "confidence": "high",
+                    },
+                    "parameter_repair": {
+                        "tool": "soll_apply_plan",
+                        "category": "empty_plan",
+                        "invalid_field": "plan",
+                        "accepted_collections": [
+                            "pillars", "requirements", "decisions", "milestones",
+                            "concepts", "guidelines", "stakeholders", "validations"
+                        ],
+                        "top_level_field": "relations",
+                        "hint": "ensure each plan entry includes `logical_key` (or `title`) and is nested under one of the accepted collection names",
+                        "follow_up_tools": ["help"],
+                    },
+                    "canonical_source": "REQ-AXO-901625",
+                },
+            }));
+        }
+
         let preview_id = if let Some(reserved_preview_id) = args
             .get("reserved_preview_id")
             .and_then(|value| value.as_str())
@@ -136,13 +224,26 @@ impl McpServer {
         let counts = summarize_ops(&operations);
         let result_contract = apply_plan_operation_contract(&operations);
         if dry_run {
+            // REQ-AXO-901625 — explicit `applied=false` + `dry_run=true`
+            // flags so a caller polling `job_status` can distinguish a
+            // preview from a real commit without re-reading the
+            // human-readable content blob. Includes the next-step tool
+            // call to flip the preview into a revision.
             return Some(json!({
-                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
+                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}). To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, preview_id)}],
                 "data": {
                     "preview_id": preview_id,
+                    "applied": false,
+                    "dry_run": true,
                     "counts": {"create": counts.0, "update": counts.1},
                     "operations": operations,
-                    "result_contract": result_contract
+                    "result_contract": result_contract,
+                    "next_action": {
+                        "tool": "soll_commit_revision",
+                        "arguments": {"preview_id": preview_id},
+                        "hint": "preview persisted in soll.RevisionPreview ; commit_revision materialises nodes + edges. Alternatively re-call soll_apply_plan with dry_run=false to commit in one shot."
+                    },
+                    "canonical_source": "REQ-AXO-901625"
                 }
             }));
         }
@@ -411,10 +512,16 @@ impl McpServer {
             arr.extend(link_errors);
         }
 
+        // REQ-AXO-901625 — explicit `applied=true` + `dry_run=false`
+        // flags on the commit branch mirror the dry-run envelope so a
+        // caller can branch on a single boolean instead of parsing the
+        // human-readable content blob.
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
             "data": {
                 "revision_id": revision_id,
+                "applied": true,
+                "dry_run": false,
                 "operations": operations.len(),
                 "identity_mapping": identity_mapping,
                 "created": result_contract.get("created").cloned().unwrap_or_else(|| Value::Array(vec![])),
