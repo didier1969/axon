@@ -13,8 +13,206 @@ use crate::vector_control::current_vector_batch_controller_diagnostics;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Mutex, OnceLock},
 };
+
+// ─── Optimizer weights : TOML-backed config (REQ-AXO-901657 slice 5) ──────
+//
+// Replaces ~50 `AXON_OPT_REWARD_*` / `AXON_OPT_SCORE_*` env vars with a
+// single `AXON_OPT_WEIGHTS_FILE` pointing to `config/optimizer-weights.example.toml`.
+// `#[serde(default)]` on every field means a missing key (or a missing
+// section / missing file) falls back to the historical default baked here.
+// Audit reference : `docs/audits/2026-05-22-env-vars-inventory.md` (cluster F).
+// Operator directive : "rien garder de legacy" — no env-var aliases retained.
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RewardWeights {
+    pub cpu_penalty_scale: f64,
+    pub ram_penalty_scale: f64,
+    pub vram_penalty_divisor_mb: f64,
+    pub mcp_penalty_divisor_ms: f64,
+    pub io_penalty_scale: f64,
+    pub liveness_penalty: f64,
+    pub gpu_headroom_bonus: f64,
+    pub chunks_throughput_weight: f64,
+    pub files_throughput_weight: f64,
+    pub ready_queue_nonempty_bonus: f64,
+    pub underfed_backlog_penalty: f64,
+    pub stability_penalty_scale: f64,
+}
+
+impl Default for RewardWeights {
+    fn default() -> Self {
+        Self {
+            cpu_penalty_scale: 100.0,
+            ram_penalty_scale: 100.0,
+            vram_penalty_divisor_mb: 32.0,
+            mcp_penalty_divisor_ms: 10.0,
+            io_penalty_scale: 100.0,
+            liveness_penalty: 25.0,
+            gpu_headroom_bonus: 5.0,
+            chunks_throughput_weight: 1.5,
+            files_throughput_weight: 0.05,
+            ready_queue_nonempty_bonus: 10.0,
+            underfed_backlog_penalty: 15.0,
+            stability_penalty_scale: 20.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScoreWeights {
+    pub embed_throughput_weight: f64,
+    pub batch_gt_backlog_penalty: f64,
+    pub cpu_parallelism_risk_penalty: f64,
+    pub cpu_guard_penalty: f64,
+    pub cpu_headroom_bonus: f64,
+    pub ram_guard_penalty: f64,
+    pub vram_guard_penalty: f64,
+    pub gpu_batch_depth_divisor: f64,
+    pub gpu_underutilized_open_batch_bonus: f64,
+    pub gpu_underutilized_small_batch_penalty: f64,
+    pub gpu_underutilized_open_workers_bonus: f64,
+    pub warmup_prefers_depth_bonus: f64,
+    pub warmup_avoids_worker_fanout_penalty: f64,
+    pub io_wait_guard_penalty: f64,
+    pub mcp_guard_penalty: f64,
+    pub interactive_pressure_penalty: f64,
+    pub embed_inflight_penalty: f64,
+    pub overly_small_batch_penalty: f64,
+    pub ready_depth_starvation_bonus: f64,
+    pub persist_relief_bonus: f64,
+    pub overdeep_queue_penalty: f64,
+    pub bottleneck_backlog_open_batch_bonus: f64,
+    pub bottleneck_backlog_open_file_batch_bonus: f64,
+    pub bottleneck_backlog_open_items_bonus: f64,
+    pub bottleneck_backlog_open_tokens_bonus: f64,
+    pub bottleneck_gpu_busy_bonus: f64,
+    pub cpu_prepare_underfeed_file_batch_bonus: f64,
+    pub cpu_prepare_underfeed_ready_depth_bonus: f64,
+    pub cpu_prepare_underfeed_micro_items_bonus: f64,
+    pub cpu_prepare_underfeed_micro_tokens_bonus: f64,
+    pub cpu_prepare_underfeed_buffer_fill_bonus: f64,
+    pub cpu_prepare_underfeed_persist_guard_penalty: f64,
+    pub cpu_prepare_underfeed_persist_stall_penalty: f64,
+    pub cpu_prepare_underfeed_chunk_growth_penalty: f64,
+    pub controller_low_density_file_batch_bonus: f64,
+    pub controller_low_density_ready_depth_bonus: f64,
+    pub controller_low_density_micro_items_bonus: f64,
+    pub controller_low_density_micro_tokens_bonus: f64,
+    pub controller_low_density_chunk_growth_penalty: f64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            embed_throughput_weight: 1.0,
+            batch_gt_backlog_penalty: 1.0,
+            cpu_parallelism_risk_penalty: 5.0,
+            cpu_guard_penalty: 10.0,
+            cpu_headroom_bonus: 0.5,
+            ram_guard_penalty: 10.0,
+            vram_guard_penalty: 12.0,
+            gpu_batch_depth_divisor: 64.0,
+            gpu_underutilized_open_batch_bonus: 4.0,
+            gpu_underutilized_small_batch_penalty: 2.0,
+            gpu_underutilized_open_workers_bonus: 1.0,
+            warmup_prefers_depth_bonus: 2.0,
+            warmup_avoids_worker_fanout_penalty: 1.0,
+            io_wait_guard_penalty: 4.0,
+            mcp_guard_penalty: 8.0,
+            interactive_pressure_penalty: 2.0,
+            embed_inflight_penalty: 1.5,
+            overly_small_batch_penalty: 1.0,
+            ready_depth_starvation_bonus: 3.0,
+            persist_relief_bonus: 1.5,
+            overdeep_queue_penalty: 1.0,
+            bottleneck_backlog_open_batch_bonus: 3.0,
+            bottleneck_backlog_open_file_batch_bonus: 1.5,
+            bottleneck_backlog_open_items_bonus: 1.5,
+            bottleneck_backlog_open_tokens_bonus: 1.5,
+            bottleneck_gpu_busy_bonus: 2.0,
+            cpu_prepare_underfeed_file_batch_bonus: 3.0,
+            cpu_prepare_underfeed_ready_depth_bonus: 3.0,
+            cpu_prepare_underfeed_micro_items_bonus: 1.5,
+            cpu_prepare_underfeed_micro_tokens_bonus: 1.5,
+            cpu_prepare_underfeed_buffer_fill_bonus: 2.5,
+            cpu_prepare_underfeed_persist_guard_penalty: 4.0,
+            cpu_prepare_underfeed_persist_stall_penalty: 20.0,
+            cpu_prepare_underfeed_chunk_growth_penalty: 2.5,
+            controller_low_density_file_batch_bonus: 6.0,
+            controller_low_density_ready_depth_bonus: 6.0,
+            controller_low_density_micro_items_bonus: 3.0,
+            controller_low_density_micro_tokens_bonus: 3.0,
+            controller_low_density_chunk_growth_penalty: 8.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OptimizerWeights {
+    pub reward: RewardWeights,
+    pub score: ScoreWeights,
+}
+
+static OPTIMIZER_WEIGHTS: OnceLock<OptimizerWeights> = OnceLock::new();
+
+/// Resolve + parse the optimizer weights TOML. Honors `AXON_OPT_WEIGHTS_FILE`.
+/// Missing file, unset env var, or parse failure : log a single WARN and fall
+/// back to baked defaults (matches `RewardWeights::default()` / `ScoreWeights::default()`).
+/// Memoized via `OnceLock` so repeated calls are zero-cost on hot paths.
+pub fn optimizer_weights() -> &'static OptimizerWeights {
+    OPTIMIZER_WEIGHTS.get_or_init(load_optimizer_weights_from_env)
+}
+
+fn load_optimizer_weights_from_env() -> OptimizerWeights {
+    let raw_path = match std::env::var("AXON_OPT_WEIGHTS_FILE") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            // Unset is a normal production posture — defaults are sane.
+            return OptimizerWeights::default();
+        }
+    };
+    let path = PathBuf::from(raw_path.trim());
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match toml::from_str::<OptimizerWeights>(&content) {
+            Ok(weights) => {
+                tracing::info!(
+                    weights_file = %path.display(),
+                    "loaded optimizer weights from AXON_OPT_WEIGHTS_FILE"
+                );
+                weights
+            }
+            Err(err) => {
+                tracing::warn!(
+                    weights_file = %path.display(),
+                    error = %err,
+                    "AXON_OPT_WEIGHTS_FILE could not be parsed ; falling back to defaults"
+                );
+                OptimizerWeights::default()
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                weights_file = %path.display(),
+                error = %err,
+                "AXON_OPT_WEIGHTS_FILE could not be read ; falling back to defaults"
+            );
+            OptimizerWeights::default()
+        }
+    }
+}
+
+/// Test helper : force a re-load of the optimizer weights cache. The
+/// `OnceLock` cannot be cleared, so tests instead read the env var directly.
+#[cfg(test)]
+pub fn load_optimizer_weights_for_test() -> OptimizerWeights {
+    load_optimizer_weights_from_env()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostSnapshot {
@@ -278,114 +476,79 @@ impl PolicyEngine for HeuristicPolicyEngine {
         let controller = current_vector_batch_controller_diagnostics(&lane_config);
         let controller_reason = controller.reason.as_str();
 
+        let weights = optimizer_weights();
+        let sw = &weights.score;
+        // REQ-AXO-901657 slice 5 : ~50 `AXON_OPT_SCORE_*` env vars consolidated
+        // into `AXON_OPT_WEIGHTS_FILE` (see `optimizer_weights()`). Clamps that
+        // existed on the original env reads (`.max(0.1)`, `.max(1.0)`) are
+        // preserved here so out-of-range TOML values stay safe.
+        let score_embed_throughput_weight = sw.embed_throughput_weight.max(0.1);
+        let score_batch_gt_backlog_penalty = sw.batch_gt_backlog_penalty;
+        let score_cpu_parallelism_risk_penalty = sw.cpu_parallelism_risk_penalty;
+        let score_cpu_guard_penalty = sw.cpu_guard_penalty;
+        let score_cpu_headroom_bonus = sw.cpu_headroom_bonus;
+        let score_ram_guard_penalty = sw.ram_guard_penalty;
+        let score_vram_guard_penalty = sw.vram_guard_penalty;
+        let score_gpu_batch_depth_divisor = sw.gpu_batch_depth_divisor.max(1.0);
+        let score_gpu_underutilized_open_batch_bonus = sw.gpu_underutilized_open_batch_bonus;
+        let score_gpu_underutilized_small_batch_penalty = sw.gpu_underutilized_small_batch_penalty;
+        let score_gpu_underutilized_open_workers_bonus = sw.gpu_underutilized_open_workers_bonus;
+        let score_warmup_prefers_depth_bonus = sw.warmup_prefers_depth_bonus;
+        let score_warmup_avoids_worker_fanout_penalty = sw.warmup_avoids_worker_fanout_penalty;
+        let score_io_wait_guard_penalty = sw.io_wait_guard_penalty;
+        let score_mcp_guard_penalty = sw.mcp_guard_penalty;
+        let score_interactive_pressure_penalty = sw.interactive_pressure_penalty;
+        let score_embed_inflight_penalty = sw.embed_inflight_penalty;
+        let score_overly_small_batch_penalty = sw.overly_small_batch_penalty;
+        let score_ready_depth_starvation_bonus = sw.ready_depth_starvation_bonus;
+        let score_persist_relief_bonus = sw.persist_relief_bonus;
+        let score_overdeep_queue_penalty = sw.overdeep_queue_penalty;
+        let score_bottleneck_backlog_open_batch_bonus = sw.bottleneck_backlog_open_batch_bonus;
+        let score_bottleneck_backlog_open_file_batch_bonus =
+            sw.bottleneck_backlog_open_file_batch_bonus;
+        let score_bottleneck_backlog_open_items_bonus = sw.bottleneck_backlog_open_items_bonus;
+        let score_bottleneck_backlog_open_tokens_bonus = sw.bottleneck_backlog_open_tokens_bonus;
+        let score_bottleneck_gpu_busy_bonus = sw.bottleneck_gpu_busy_bonus;
+        let score_cpu_prepare_underfeed_file_batch_bonus =
+            sw.cpu_prepare_underfeed_file_batch_bonus;
+        let score_cpu_prepare_underfeed_ready_depth_bonus =
+            sw.cpu_prepare_underfeed_ready_depth_bonus;
+        let score_cpu_prepare_underfeed_micro_items_bonus =
+            sw.cpu_prepare_underfeed_micro_items_bonus;
+        let score_cpu_prepare_underfeed_micro_tokens_bonus =
+            sw.cpu_prepare_underfeed_micro_tokens_bonus;
+        let score_cpu_prepare_underfeed_buffer_fill_bonus =
+            sw.cpu_prepare_underfeed_buffer_fill_bonus;
+        let score_cpu_prepare_underfeed_persist_guard_penalty =
+            sw.cpu_prepare_underfeed_persist_guard_penalty;
+        let score_cpu_prepare_underfeed_persist_stall_penalty =
+            sw.cpu_prepare_underfeed_persist_stall_penalty;
+        let score_cpu_prepare_underfeed_chunk_growth_penalty =
+            sw.cpu_prepare_underfeed_chunk_growth_penalty;
+        let score_controller_low_density_file_batch_bonus =
+            sw.controller_low_density_file_batch_bonus;
+        let score_controller_low_density_ready_depth_bonus =
+            sw.controller_low_density_ready_depth_bonus;
+        let score_controller_low_density_micro_items_bonus =
+            sw.controller_low_density_micro_items_bonus;
+        let score_controller_low_density_micro_tokens_bonus =
+            sw.controller_low_density_micro_tokens_bonus;
+        let score_controller_low_density_chunk_growth_penalty =
+            sw.controller_low_density_chunk_growth_penalty;
+        // `AXON_OPT_GPU_UNDERUTILIZED_RATIO`, `AXON_OPT_GPU_HEADROOM_MARGIN_MB`
+        // and `AXON_OPT_WARMUP_BACKLOG_THRESHOLD` are NOT score weights ; they
+        // are runtime knobs outside this slice's scope and keep their env vars.
+        let gpu_underutilized_ratio =
+            env_f64("AXON_OPT_GPU_UNDERUTILIZED_RATIO", 0.35).clamp(0.0, 1.0);
+        let gpu_headroom_margin_mb = env_u64("AXON_OPT_GPU_HEADROOM_MARGIN_MB", 512);
+        let warmup_backlog_threshold = env_u64("AXON_OPT_WARMUP_BACKLOG_THRESHOLD", 32) as usize;
+
         for profile in action_profiles {
-            let score_embed_throughput_weight =
-                env_f64("AXON_OPT_SCORE_EMBED_THROUGHPUT_WEIGHT", 1.0).max(0.1);
             let mut score = analytics.chunks_embedded_current_hour as f64
                 * policy.backlog_priority_weight.max(0.1)
                 * score_embed_throughput_weight;
             let mut reasons = Vec::new();
             let backlog_depth = signals.file_vectorization_queue_depth.max(1);
-            let gpu_underutilized_ratio =
-                env_f64("AXON_OPT_GPU_UNDERUTILIZED_RATIO", 0.35).clamp(0.0, 1.0);
-            let gpu_headroom_margin_mb = env_u64("AXON_OPT_GPU_HEADROOM_MARGIN_MB", 512);
-            let warmup_backlog_threshold =
-                env_u64("AXON_OPT_WARMUP_BACKLOG_THRESHOLD", 32) as usize;
-            let score_batch_gt_backlog_penalty =
-                env_f64("AXON_OPT_SCORE_BATCH_GT_BACKLOG_PENALTY", 1.0);
-            let score_cpu_parallelism_risk_penalty =
-                env_f64("AXON_OPT_SCORE_CPU_PARALLELISM_RISK_PENALTY", 5.0);
-            let score_cpu_guard_penalty = env_f64("AXON_OPT_SCORE_CPU_GUARD_PENALTY", 10.0);
-            let score_cpu_headroom_bonus = env_f64("AXON_OPT_SCORE_CPU_HEADROOM_BONUS", 0.5);
-            let score_ram_guard_penalty = env_f64("AXON_OPT_SCORE_RAM_GUARD_PENALTY", 10.0);
-            let score_vram_guard_penalty = env_f64("AXON_OPT_SCORE_VRAM_GUARD_PENALTY", 12.0);
-            let score_gpu_batch_depth_divisor =
-                env_f64("AXON_OPT_SCORE_GPU_BATCH_DEPTH_DIVISOR", 64.0).max(1.0);
-            let score_gpu_underutilized_open_batch_bonus =
-                env_f64("AXON_OPT_SCORE_GPU_UNDERUTILIZED_OPEN_BATCH_BONUS", 4.0);
-            let score_gpu_underutilized_small_batch_penalty =
-                env_f64("AXON_OPT_SCORE_GPU_UNDERUTILIZED_SMALL_BATCH_PENALTY", 2.0);
-            let score_gpu_underutilized_open_workers_bonus =
-                env_f64("AXON_OPT_SCORE_GPU_UNDERUTILIZED_OPEN_WORKERS_BONUS", 1.0);
-            let score_warmup_prefers_depth_bonus =
-                env_f64("AXON_OPT_SCORE_WARMUP_PREFERS_DEPTH_BONUS", 2.0);
-            let score_warmup_avoids_worker_fanout_penalty =
-                env_f64("AXON_OPT_SCORE_WARMUP_AVOIDS_WORKER_FANOUT_PENALTY", 1.0);
-            let score_io_wait_guard_penalty = env_f64("AXON_OPT_SCORE_IO_WAIT_GUARD_PENALTY", 4.0);
-            let score_mcp_guard_penalty = env_f64("AXON_OPT_SCORE_MCP_GUARD_PENALTY", 8.0);
-            let score_interactive_pressure_penalty =
-                env_f64("AXON_OPT_SCORE_INTERACTIVE_PRESSURE_PENALTY", 2.0);
-            let score_embed_inflight_penalty =
-                env_f64("AXON_OPT_SCORE_EMBED_INFLIGHT_PENALTY", 1.5);
-            let score_overly_small_batch_penalty =
-                env_f64("AXON_OPT_SCORE_OVERLY_SMALL_BATCH_PENALTY", 1.0);
-            let score_ready_depth_starvation_bonus =
-                env_f64("AXON_OPT_SCORE_READY_DEPTH_STARVATION_BONUS", 3.0);
-            let score_persist_relief_bonus = env_f64("AXON_OPT_SCORE_PERSIST_RELIEF_BONUS", 1.5);
-            let score_overdeep_queue_penalty =
-                env_f64("AXON_OPT_SCORE_OVERDEEP_QUEUE_PENALTY", 1.0);
-            let score_bottleneck_backlog_open_batch_bonus =
-                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_BATCH_BONUS", 3.0);
-            let score_bottleneck_backlog_open_file_batch_bonus = env_f64(
-                "AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_FILE_BATCH_BONUS",
-                1.5,
-            );
-            let score_bottleneck_backlog_open_items_bonus =
-                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_ITEMS_BONUS", 1.5);
-            let score_bottleneck_backlog_open_tokens_bonus =
-                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_TOKENS_BONUS", 1.5);
-            let score_bottleneck_gpu_busy_bonus =
-                env_f64("AXON_OPT_SCORE_BOTTLENECK_GPU_BUSY_BONUS", 2.0);
-            let score_cpu_prepare_underfeed_file_batch_bonus =
-                env_f64("AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_FILE_BATCH_BONUS", 3.0);
-            let score_cpu_prepare_underfeed_ready_depth_bonus = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_READY_DEPTH_BONUS",
-                3.0,
-            );
-            let score_cpu_prepare_underfeed_micro_items_bonus = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_MICRO_ITEMS_BONUS",
-                1.5,
-            );
-            let score_cpu_prepare_underfeed_micro_tokens_bonus = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_MICRO_TOKENS_BONUS",
-                1.5,
-            );
-            let score_cpu_prepare_underfeed_buffer_fill_bonus = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_BUFFER_FILL_BONUS",
-                2.5,
-            );
-            let score_cpu_prepare_underfeed_persist_guard_penalty = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_PERSIST_GUARD_PENALTY",
-                4.0,
-            );
-            let score_cpu_prepare_underfeed_persist_stall_penalty = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_PERSIST_STALL_PENALTY",
-                20.0,
-            );
-            let score_cpu_prepare_underfeed_chunk_growth_penalty = env_f64(
-                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_CHUNK_GROWTH_PENALTY",
-                2.5,
-            );
-            let score_controller_low_density_file_batch_bonus = env_f64(
-                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_FILE_BATCH_BONUS",
-                6.0,
-            );
-            let score_controller_low_density_ready_depth_bonus = env_f64(
-                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_READY_DEPTH_BONUS",
-                6.0,
-            );
-            let score_controller_low_density_micro_items_bonus = env_f64(
-                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_MICRO_ITEMS_BONUS",
-                3.0,
-            );
-            let score_controller_low_density_micro_tokens_bonus = env_f64(
-                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_MICRO_TOKENS_BONUS",
-                3.0,
-            );
-            let score_controller_low_density_chunk_growth_penalty = env_f64(
-                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_CHUNK_GROWTH_PENALTY",
-                8.0,
-            );
             let gpu_underutilized = host.gpu_present
                 && backlog_depth >= profile.target_chunk_batch_size.max(16)
                 && signals.gpu_utilization_ratio < gpu_underutilized_ratio
@@ -1306,24 +1469,22 @@ pub fn observe_reward(
         previous.canonical_chunks_embedded_last_minute as f64 * 60.0;
     let warmup_gpu_underutilized_ratio =
         env_f64("AXON_OPT_GPU_UNDERUTILIZED_RATIO", 0.35).clamp(0.0, 1.0);
-    let reward_cpu_penalty_scale = env_f64("AXON_OPT_REWARD_CPU_PENALTY_SCALE", 100.0);
-    let reward_ram_penalty_scale = env_f64("AXON_OPT_REWARD_RAM_PENALTY_SCALE", 100.0);
-    let reward_vram_penalty_divisor =
-        env_f64("AXON_OPT_REWARD_VRAM_PENALTY_DIVISOR_MB", 32.0).max(1.0);
-    let reward_mcp_penalty_divisor =
-        env_f64("AXON_OPT_REWARD_MCP_PENALTY_DIVISOR_MS", 10.0).max(1.0);
-    let reward_io_penalty_scale = env_f64("AXON_OPT_REWARD_IO_PENALTY_SCALE", 100.0);
-    let reward_liveness_penalty = env_f64("AXON_OPT_REWARD_LIVENESS_PENALTY", 25.0);
-    let reward_gpu_headroom_bonus = env_f64("AXON_OPT_REWARD_GPU_HEADROOM_BONUS", 5.0);
-    let reward_chunks_throughput_weight =
-        env_f64("AXON_OPT_REWARD_CHUNKS_THROUGHPUT_WEIGHT", 1.5).max(0.1);
-    let reward_files_throughput_weight =
-        env_f64("AXON_OPT_REWARD_FILES_THROUGHPUT_WEIGHT", 0.05).max(0.0);
-    let reward_ready_queue_nonempty_bonus =
-        env_f64("AXON_OPT_REWARD_READY_QUEUE_NONEMPTY_BONUS", 10.0);
-    let reward_underfed_backlog_penalty = env_f64("AXON_OPT_REWARD_UNDERFED_BACKLOG_PENALTY", 15.0);
-    let reward_stability_penalty_scale =
-        env_f64("AXON_OPT_REWARD_STABILITY_PENALTY_SCALE", 20.0).max(0.0);
+    // REQ-AXO-901657 slice 5 : 12 `AXON_OPT_REWARD_*` env vars consolidated
+    // into `AXON_OPT_WEIGHTS_FILE`. Clamps from the original env reads are
+    // preserved so out-of-range TOML values stay safe.
+    let rw = &optimizer_weights().reward;
+    let reward_cpu_penalty_scale = rw.cpu_penalty_scale;
+    let reward_ram_penalty_scale = rw.ram_penalty_scale;
+    let reward_vram_penalty_divisor = rw.vram_penalty_divisor_mb.max(1.0);
+    let reward_mcp_penalty_divisor = rw.mcp_penalty_divisor_ms.max(1.0);
+    let reward_io_penalty_scale = rw.io_penalty_scale;
+    let reward_liveness_penalty = rw.liveness_penalty;
+    let reward_gpu_headroom_bonus = rw.gpu_headroom_bonus;
+    let reward_chunks_throughput_weight = rw.chunks_throughput_weight.max(0.1);
+    let reward_files_throughput_weight = rw.files_throughput_weight.max(0.0);
+    let reward_ready_queue_nonempty_bonus = rw.ready_queue_nonempty_bonus;
+    let reward_underfed_backlog_penalty = rw.underfed_backlog_penalty;
+    let reward_stability_penalty_scale = rw.stability_penalty_scale.max(0.0);
     let warmup_active = current.file_vectorization_queue_depth > 0
         && current.canonical_chunks_embedded_last_minute == 0
         && current.gpu_utilization_ratio < warmup_gpu_underutilized_ratio;

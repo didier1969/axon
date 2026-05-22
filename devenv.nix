@@ -176,6 +176,10 @@ in
     
     PYTHONPATH = config.env.DEVENV_ROOT + "/src";
     FILESYSTEM_FSINOTIFY_EXECUTABLE_FILE = "${pkgs.inotify-tools}/bin/inotifywait";
+
+    # REQ-AXO-901657 slice 5 : single TOML replaces ~50 AXON_OPT_REWARD_* /
+    # AXON_OPT_SCORE_* env vars. Missing file = safe (baked defaults).
+    AXON_OPT_WEIGHTS_FILE = config.env.DEVENV_ROOT + "/config/optimizer-weights.example.toml";
   };
 
   # Managed Processes
