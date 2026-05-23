@@ -255,6 +255,31 @@ impl McpServer {
             "no drops — drain healthy"
         };
 
+        // REQ-AXO-901677 — periodic_sweep block. Inotify-drop
+        // reconciliation safety net. Surfaces the configured cadence +
+        // CPU gate alongside the live tick counters so the operator can
+        // detect (a) worker disabled (`hours=0`), (b) chronic CPU skip,
+        // or (c) stale last-run timestamp (worker died / never ran).
+        let sweep = crate::ingress_buffer::periodic_sweep_metrics_snapshot();
+        let sweep_hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_HOURS_DEFAULT);
+        let sweep_cpu_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .map(|v| v.min(100))
+            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
+        let sweep_status = if sweep_hours == 0 {
+            "disabled (AXON_PERIODIC_SWEEP_HOURS=0) — inotify drops not reconciled"
+        } else if sweep.last_run_at_ms == 0 && sweep.runs_total == 0 {
+            "configured but not yet observed in this process (first tick pending)"
+        } else if sweep.skipped_high_cpu_total > 0 && sweep.runs_total == 0 {
+            "every tick so far skipped under CPU pressure — raise AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT or schedule work to a quieter window"
+        } else {
+            "running — see counters for last tick outcome"
+        };
+
         format!(
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
@@ -276,12 +301,24 @@ impl McpServer {
              * dropped_full_total: {}\n\
              * cold-start poll cadence: every {} s (env AXON_B1_COLDSTART_POLL_INTERVAL_SECS)\n\
              * status: {}\n\n\
+             ### Periodic sweep (REQ-AXO-901677)\n\
+             * cadence: every {} h (env AXON_PERIODIC_SWEEP_HOURS, 0=off)\n\
+             * cpu_skip_threshold_pct: {} (env AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT)\n\
+             * last_run_at_ms: {}\n\
+             * last_duration_ms: {}\n\
+             * last_files_compared: {}\n\
+             * last_deltas_found: {}\n\
+             * runs_total: {}\n\
+             * deltas_total: {}\n\
+             * skipped_high_cpu_total: {}\n\
+             * status: {}\n\n\
              **Remediation hints**\n\
              * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
-             * if `dropped_full_total` keeps rising, raise `AXON_INGRESS_DRAIN_BATCH` (default 512) or widen `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (default 10 000)",
+             * if `dropped_full_total` keeps rising, raise `AXON_INGRESS_DRAIN_BATCH` (default 512) or widen `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (default 10 000)\n\
+             * if `skipped_high_cpu_total` keeps rising while `runs_total` stays low, raise `AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT` or schedule the work to a quieter window",
             project,
             known,
             completed,
@@ -301,6 +338,16 @@ impl McpServer {
             drain.drain_dropped_full_total,
             coldstart_poll_secs,
             drain_status,
+            sweep_hours,
+            sweep_cpu_pct,
+            sweep.last_run_at_ms,
+            sweep.last_duration_ms,
+            sweep.last_files_compared,
+            sweep.last_deltas_found,
+            sweep.runs_total,
+            sweep.deltas_total,
+            sweep.skipped_high_cpu_total,
+            sweep_status,
         )
     }
 

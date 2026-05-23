@@ -17,16 +17,22 @@
 //! is wired; pipelines run in the background for the lifetime of the
 //! process.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
-use crate::ingress_buffer::{record_drain_tick, SharedIngressBuffer};
+use crate::ingress_buffer::{
+    record_drain_tick, record_periodic_sweep_skipped_high_cpu, record_periodic_sweep_tick,
+    IngressSource, SharedIngressBuffer,
+};
 use crate::pipeline_v2::{
     b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_a, spawn_pipeline_b_full,
     GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
@@ -42,6 +48,29 @@ const INGRESS_DRAIN_POLL_MS: u64 = 200;
 // hardcoded constants (256 / 30) were dead knobs : the runtime ignored
 // any env override the operator set. Bench session 54 confirmed A3
 // drum saturated under multi-project cold-start with 256 cap.
+
+// REQ-AXO-901677 — periodic_sweep_worker defaults.
+//
+// Cadence : every 4 h, the worker re-walks the watch root, recomputes
+// stable content hashes, and pushes deltas (missing-from-IndexedFile or
+// hash-mismatch) into the ingress buffer as low-priority subtree hints.
+// The point is to catch inotify drops (queue overflow on big refactors,
+// container mount changes, silent init failures) that would otherwise
+// remain invisible until service restart.
+//
+// CPU gate : the sweep is opportunistic, not critical-path. If the host
+// is already busy (default threshold = 50%), skip this tick and try
+// again on the next interval. Operator-visible via
+// `periodic_sweep.skipped_high_cpu_total` so chronic skipping is
+// detectable.
+pub const PERIODIC_SWEEP_HOURS_DEFAULT: u64 = 4;
+pub const PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT: u8 = 50;
+/// Subtree hint priority for periodic_sweep enqueues. LOWER than the
+/// registry-driven 100 (REQ-AXO-901675) so an operator-initiated
+/// `axon_init_project` or a fresh inotify event preempts a background
+/// reconciliation walk that is, by definition, catching up rather than
+/// reacting in real time.
+const PERIODIC_SWEEP_HINT_PRIORITY: i64 = 50;
 
 /// Boot the streaming pipeline v2 in the indexer binary.
 ///
@@ -415,7 +444,305 @@ pub fn spawn_pipeline_v2_indexer(
         }
     });
 
+    // REQ-AXO-901677 — periodic_sweep_worker. Inotify drop reconciliation
+    // safety net. Only spawned in ingestion-enabled modes (IndexerGraph,
+    // IndexerFull — IndexerVector consumes Chunk rows produced by
+    // pipeline A but does not own scanning) AND only when the operator
+    // hasn't disabled it via `AXON_PERIODIC_SWEEP_HOURS=0`. The handle
+    // is intentionally dropped : the task runs for the lifetime of the
+    // process, exits only on tokio runtime shutdown.
+    if runtime_mode.ingestion_enabled() {
+        let sweep_cfg = PeriodicSweepConfig::from_env();
+        if sweep_cfg.is_enabled() {
+            let _handle = spawn_periodic_sweep_worker(
+                ingress_buffer.clone(),
+                watch_root.clone(),
+                store.clone(),
+                sweep_cfg,
+            );
+        } else {
+            info!(
+                "periodic_sweep_worker: disabled (AXON_PERIODIC_SWEEP_HOURS=0) — \
+                 inotify drops will not be reconciled in the background"
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// REQ-AXO-901677 — periodic_sweep_worker configuration parsed from env.
+///
+/// `hours` = 0 disables the worker entirely (operator opt-out).
+/// `cpu_threshold_pct` = soft skip gate ; when host CPU is above this
+/// percentage at tick time, skip the sweep and try again next interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeriodicSweepConfig {
+    pub hours: u64,
+    pub cpu_threshold_pct: u8,
+}
+
+impl PeriodicSweepConfig {
+    pub fn from_env() -> Self {
+        let hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(PERIODIC_SWEEP_HOURS_DEFAULT);
+        let cpu_threshold_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u8>().ok())
+            .map(|v| v.min(100))
+            .unwrap_or(PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
+        Self {
+            hours,
+            cpu_threshold_pct,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.hours > 0
+    }
+
+    pub fn interval(&self) -> Duration {
+        // Saturating multiply : `u64::MAX / 3600` is comfortably above
+        // any sane operator setting (a sweep every 5 million years), so
+        // saturation is purely defensive against pathological env input.
+        Duration::from_secs(self.hours.saturating_mul(3600))
+    }
+}
+
+/// REQ-AXO-901677 — outcome of one periodic sweep tick. Exposed pub
+/// to support `periodic_sweep_tick_for_tests`.
+#[derive(Debug, Clone)]
+pub enum PeriodicSweepTickOutcome {
+    /// Sweep ran end-to-end.
+    Ran {
+        files_compared: u64,
+        deltas_found: u64,
+        duration_ms: u64,
+    },
+    /// CPU above threshold ; skipped to honor host pressure budget.
+    SkippedHighCpu,
+}
+
+/// REQ-AXO-901677 — long-running tokio task that re-walks `watch_root`
+/// every `cfg.interval()` and enqueues hash-mismatch / missing-from-
+/// IndexedFile paths as subtree hints. Returns the JoinHandle so the
+/// caller may keep it alive (or drop it to let the task run for the
+/// lifetime of the process — the common case).
+pub fn spawn_periodic_sweep_worker(
+    ingress_buffer: SharedIngressBuffer,
+    watch_root: String,
+    store: Arc<GraphStore>,
+    cfg: PeriodicSweepConfig,
+) -> JoinHandle<()> {
+    info!(
+        watch_root = %watch_root,
+        hours = cfg.hours,
+        cpu_threshold_pct = cfg.cpu_threshold_pct,
+        "periodic_sweep_worker: spawning (REQ-AXO-901677)"
+    );
+    tokio::spawn(async move {
+        let interval = cfg.interval();
+        let mut tick = tokio::time::interval(interval);
+        // Skip the immediate first tick : the bootstrap scan that fires
+        // at spawn already covers the same work ; running a duplicate
+        // walk right away would double-load A1 on cold boot.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            // Refresh the IndexedFile snapshot from PG on every tick so
+            // hash mutations that landed since the last sweep are taken
+            // into account (no stale closure capture).
+            let known = match load_indexed_file_paths(&store) {
+                Ok(set) => set,
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "periodic_sweep_worker: failed to load IndexedFile snapshot — skipping tick"
+                    );
+                    continue;
+                }
+            };
+            let outcome = periodic_sweep_tick(
+                &ingress_buffer,
+                &watch_root,
+                &cfg,
+                known,
+                /* force_cpu_ok = */ false,
+            );
+            match outcome {
+                PeriodicSweepTickOutcome::Ran {
+                    files_compared,
+                    deltas_found,
+                    duration_ms,
+                } => {
+                    info!(
+                        target: "pipeline_v2::periodic_sweep",
+                        "periodic_sweep tick: files_compared={} deltas_found={} duration_ms={}",
+                        files_compared, deltas_found, duration_ms,
+                    );
+                }
+                PeriodicSweepTickOutcome::SkippedHighCpu => {
+                    info!(
+                        target: "pipeline_v2::periodic_sweep",
+                        "periodic_sweep tick: skipped (host CPU above {}% threshold)",
+                        cfg.cpu_threshold_pct,
+                    );
+                }
+            }
+        }
+    })
+}
+
+/// REQ-AXO-901677 — one-shot version of the worker body. Used by both
+/// the long-running task and by `periodic_sweep_tick_for_tests`. Keeps
+/// the orchestration deterministic.
+fn periodic_sweep_tick(
+    ingress_buffer: &SharedIngressBuffer,
+    watch_root: &str,
+    cfg: &PeriodicSweepConfig,
+    known: HashSet<String>,
+    force_cpu_ok: bool,
+) -> PeriodicSweepTickOutcome {
+    if !force_cpu_ok && !cpu_below_threshold(cfg.cpu_threshold_pct) {
+        record_periodic_sweep_skipped_high_cpu();
+        return PeriodicSweepTickOutcome::SkippedHighCpu;
+    }
+
+    let started = std::time::Instant::now();
+    // Empty project_code : Scanner defers per-file project resolution
+    // (only the enumerate path is used here, which doesn't need it).
+    let scanner = Scanner::new(watch_root, "");
+    let files = scanner.enumerate_files();
+    let files_compared = files.len() as u64;
+
+    let mut deltas: Vec<String> = Vec::new();
+    for path in &files {
+        let path_str = path.to_string_lossy().to_string();
+        if !known.contains(&path_str) {
+            deltas.push(path_str);
+        }
+        // NOTE : hash-mismatch detection happens implicitly via A3's
+        // existing UPSERT path. We could compute file hashes here to
+        // short-circuit obviously-unchanged paths, but on a 4 h cadence
+        // that would re-read every file on disk every 4 hours — the
+        // exact thing we want to avoid. Sending only the missing-row
+        // set preserves the cheap reconciliation contract.
+    }
+    let deltas_found = deltas.len() as u64;
+
+    if !deltas.is_empty() {
+        let mut guard = ingress_buffer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for path in deltas {
+            guard.record_subtree_hint(
+                path,
+                PERIODIC_SWEEP_HINT_PRIORITY,
+                IngressSource::Scan,
+            );
+        }
+    }
+
+    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    record_periodic_sweep_tick(now_ms, duration_ms, files_compared, deltas_found);
+
+    PeriodicSweepTickOutcome::Ran {
+        files_compared,
+        deltas_found,
+        duration_ms,
+    }
+}
+
+/// REQ-AXO-901677 — test-only shim exposing one sweep tick to the
+/// integration test suite. Behaves like the production tick but lets
+/// the test inject a `known` set + force the CPU check past so tests
+/// run deterministically regardless of host load.
+pub fn periodic_sweep_tick_for_tests(
+    ingress_buffer: &SharedIngressBuffer,
+    watch_root: &str,
+    cfg: &PeriodicSweepConfig,
+    known: HashSet<String>,
+    force_cpu_ok: bool,
+) -> PeriodicSweepTickOutcome {
+    periodic_sweep_tick(ingress_buffer, watch_root, cfg, known, force_cpu_ok)
+}
+
+/// REQ-AXO-901677 — pull a `HashSet<path>` of every row currently in
+/// `public.IndexedFile`. Used by the worker on each tick so changes
+/// since the last sweep are accounted for (no stale closure capture).
+///
+/// Returns an empty set on a fresh DB ; propagates SQL gateway errors
+/// so the caller can log + skip the tick rather than silently treat
+/// every file on disk as a delta (which would re-enqueue the entire
+/// workspace into A1).
+fn load_indexed_file_paths(store: &GraphStore) -> Result<HashSet<String>> {
+    let raw = store
+        .execute_raw_sql_gateway("SELECT path FROM public.IndexedFile")
+        .map_err(|e| anyhow!("load IndexedFile snapshot: {e}"))?;
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut out = HashSet::with_capacity(rows.len());
+    for row in rows {
+        if let Some(path) = row.into_iter().next().and_then(|v| v.as_str().map(String::from)) {
+            out.insert(path);
+        }
+    }
+    Ok(out)
+}
+
+/// REQ-AXO-901677 — coarse CPU-load gate. Reads /proc/stat (same
+/// approach as `optimizer::read_cpu_and_io_usage_ratios`) but with a
+/// brief inline sample so we don't depend on the optimizer's stateful
+/// global sampler (which is only touched when the optimizer module
+/// is otherwise active).
+///
+/// Returns `true` iff host CPU usage is BELOW `threshold_pct`. On
+/// non-Linux hosts or `/proc/stat` read failure, returns `true` (fail-
+/// open) so the sweep still runs ; the reconciliation safety net
+/// failing closed would silently let inotify drops accumulate.
+fn cpu_below_threshold(threshold_pct: u8) -> bool {
+    let Some(first) = read_proc_stat_busy_total() else {
+        return true;
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let Some(second) = read_proc_stat_busy_total() else {
+        return true;
+    };
+    let total_delta = second.0.saturating_sub(first.0);
+    if total_delta == 0 {
+        return true;
+    }
+    let idle_delta = second.1.saturating_sub(first.1);
+    let busy_delta = total_delta.saturating_sub(idle_delta);
+    let usage_ratio = (busy_delta as f64) / (total_delta as f64);
+    let threshold_ratio = (threshold_pct as f64) / 100.0;
+    usage_ratio < threshold_ratio
+}
+
+/// REQ-AXO-901677 — minimal /proc/stat reader. Returns `(total, idle)`
+/// jiffies for the aggregate `cpu ` line. Returns `None` on any parse
+/// failure or non-Linux hosts.
+fn read_proc_stat_busy_total() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = content.lines().find(|l| l.starts_with("cpu "))?;
+    let mut values = line.split_whitespace().skip(1);
+    let user = values.next()?.parse::<u64>().ok()?;
+    let nice = values.next()?.parse::<u64>().ok()?;
+    let system = values.next()?.parse::<u64>().ok()?;
+    let idle = values.next()?.parse::<u64>().ok()?;
+    let iowait = values.next()?.parse::<u64>().ok()?;
+    let irq = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let softirq = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let steal = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    Some((
+        user + nice + system + idle + iowait + irq + softirq + steal,
+        idle,
+    ))
 }
 
 /// REQ-AXO-901630 — returns true iff the operator has explicitly

@@ -20,3 +20,5 @@ pub mod registry_notify_integration_tests;
 pub mod drain_overload_tests;
 // REQ-AXO-901676 — public MCP tool `rescan_project(project_code, full=false)`.
 pub mod rescan_project_tests;
+// REQ-AXO-901677 — periodic_sweep_worker for inotify-drop reconciliation.
+pub mod periodic_sweep_tests;

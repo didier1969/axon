@@ -421,6 +421,22 @@ impl McpServer {
             crate::pipeline_v2::channels::B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
         );
         let drain_snapshot = crate::ingress_buffer::ingress_metrics_snapshot();
+        // REQ-AXO-901677 — periodic_sweep_worker telemetry. Surface the
+        // configured cadence + CPU gate alongside the live counters so
+        // the operator can spot a worker that's never running (chronic
+        // CPU skip), never enabled (`hours=0`), or whose last sweep is
+        // ancient (`last_run_at_ms` very old). All defaults mirror the
+        // worker constants so a fresh process reads canonical values.
+        let periodic_sweep_hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_HOURS_DEFAULT);
+        let periodic_sweep_cpu_threshold_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u8>().ok())
+            .map(|v| v.min(100))
+            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
+        let periodic_sweep_snapshot = crate::ingress_buffer::periodic_sweep_metrics_snapshot();
         // REQ-AXO-901657 slice 4 cluster B : canonical name is
         // `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (matches the read site in
         // `pipeline_v2::channels::CapsCfg::from_env`). The legacy
@@ -520,11 +536,28 @@ impl McpServer {
              - Last batch sent:      {drain_last_batch_sent}\n\
              - Last batch dropped (A1 full): {drain_last_batch_dropped_full}\n\
              - Cumulative dropped (A1 full): {drain_dropped_full_total}\n\n\
+             ### Periodic sweep (REQ-AXO-901677)\n\
+             - Interval:             {periodic_sweep_hours} h (env AXON_PERIODIC_SWEEP_HOURS, 0=off)\n\
+             - CPU skip threshold:   {periodic_sweep_cpu_threshold_pct}% (env AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT)\n\
+             - Last run at (ms):     {periodic_sweep_last_run_at_ms}\n\
+             - Last duration (ms):   {periodic_sweep_last_duration_ms}\n\
+             - Last files compared:  {periodic_sweep_last_files_compared}\n\
+             - Last deltas found:    {periodic_sweep_last_deltas_found}\n\
+             - Total runs:           {periodic_sweep_runs_total}\n\
+             - Total deltas enqueued: {periodic_sweep_deltas_total}\n\
+             - Skipped (high CPU):   {periodic_sweep_skipped_high_cpu_total}\n\n\
              Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer).",
             drain_heartbeat_tick = drain_snapshot.drain_heartbeat_tick,
             drain_last_batch_sent = drain_snapshot.drain_last_batch_sent,
             drain_last_batch_dropped_full = drain_snapshot.drain_last_batch_dropped_full,
             drain_dropped_full_total = drain_snapshot.drain_dropped_full_total,
+            periodic_sweep_last_run_at_ms = periodic_sweep_snapshot.last_run_at_ms,
+            periodic_sweep_last_duration_ms = periodic_sweep_snapshot.last_duration_ms,
+            periodic_sweep_last_files_compared = periodic_sweep_snapshot.last_files_compared,
+            periodic_sweep_last_deltas_found = periodic_sweep_snapshot.last_deltas_found,
+            periodic_sweep_runs_total = periodic_sweep_snapshot.runs_total,
+            periodic_sweep_deltas_total = periodic_sweep_snapshot.deltas_total,
+            periodic_sweep_skipped_high_cpu_total = periodic_sweep_snapshot.skipped_high_cpu_total,
         );
 
         Some(json!({
@@ -563,6 +596,22 @@ impl McpServer {
                     "last_batch_dropped_full": drain_snapshot.drain_last_batch_dropped_full,
                     "dropped_full_total": drain_snapshot.drain_dropped_full_total,
                     "configured_batch_cap": ingress_drain_batch,
+                },
+                // REQ-AXO-901677 — periodic_sweep_worker telemetry.
+                // Inotify-drop reconciliation safety net. All counters
+                // are 0 in `brain_only` mode (worker is only spawned in
+                // ingestion-enabled runtimes) or before the first
+                // scheduled tick has fired (default cadence = 4 h).
+                "periodic_sweep": {
+                    "configured_interval_hours": periodic_sweep_hours,
+                    "cpu_threshold_pct": periodic_sweep_cpu_threshold_pct,
+                    "last_run_at_ms": periodic_sweep_snapshot.last_run_at_ms,
+                    "last_duration_ms": periodic_sweep_snapshot.last_duration_ms,
+                    "last_files_compared": periodic_sweep_snapshot.last_files_compared,
+                    "last_deltas_found": periodic_sweep_snapshot.last_deltas_found,
+                    "runs_total": periodic_sweep_snapshot.runs_total,
+                    "deltas_total": periodic_sweep_snapshot.deltas_total,
+                    "skipped_high_cpu_total": periodic_sweep_snapshot.skipped_high_cpu_total,
                 },
             }
         }))

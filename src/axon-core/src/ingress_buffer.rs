@@ -40,6 +40,21 @@ static INGRESS_DRAIN_HEARTBEAT_TICK: AtomicU64 = AtomicU64::new(0);
 static INGRESS_DRAIN_LAST_BATCH_SENT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_DRAIN_DROPPED_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
+// REQ-AXO-901677 — periodic_sweep_worker telemetry. The worker re-walks
+// the watch root on a coarse interval (default 4 h, env-tunable) to
+// reconcile against missed inotify events (queue overflow, mount
+// changes, silent init failures). Published from
+// `pipeline_v2_runtime::spawn_periodic_sweep_worker` once per tick.
+//
+// Surface : `axon_embedding_status.periodic_sweep` JSON block +
+// `axon_diagnose_indexing` markdown section.
+static PERIODIC_SWEEP_LAST_RUN_AT_MS: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_LAST_DURATION_MS: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_LAST_FILES_COMPARED: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_LAST_DELTAS_FOUND: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_RUNS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_DELTAS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PERIODIC_SWEEP_SKIPPED_HIGH_CPU_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_ACTIVITY_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -672,6 +687,75 @@ pub fn record_drain_tick(batch_size: usize, sent: u64, dropped_full: u64, tick: 
     if dropped_full > 0 {
         INGRESS_DRAIN_DROPPED_FULL_TOTAL.fetch_add(dropped_full, Ordering::Relaxed);
     }
+}
+
+/// REQ-AXO-901677 — snapshot of the periodic sweep telemetry exposed
+/// by `axon_embedding_status` (JSON block `periodic_sweep`) and the
+/// `Periodic sweep` section of `axon_diagnose_indexing` markdown.
+///
+/// All fields default to 0 before the first sweep runs. `last_run_at_ms`
+/// is a Unix epoch ms timestamp ; the reader interprets `0` as "no
+/// sweep has executed in this process yet".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeriodicSweepMetricsSnapshot {
+    pub last_run_at_ms: u64,
+    pub last_duration_ms: u64,
+    pub last_files_compared: u64,
+    pub last_deltas_found: u64,
+    pub runs_total: u64,
+    pub deltas_total: u64,
+    pub skipped_high_cpu_total: u64,
+}
+
+pub fn periodic_sweep_metrics_snapshot() -> PeriodicSweepMetricsSnapshot {
+    PeriodicSweepMetricsSnapshot {
+        last_run_at_ms: PERIODIC_SWEEP_LAST_RUN_AT_MS.load(Ordering::Relaxed),
+        last_duration_ms: PERIODIC_SWEEP_LAST_DURATION_MS.load(Ordering::Relaxed),
+        last_files_compared: PERIODIC_SWEEP_LAST_FILES_COMPARED.load(Ordering::Relaxed),
+        last_deltas_found: PERIODIC_SWEEP_LAST_DELTAS_FOUND.load(Ordering::Relaxed),
+        runs_total: PERIODIC_SWEEP_RUNS_TOTAL.load(Ordering::Relaxed),
+        deltas_total: PERIODIC_SWEEP_DELTAS_TOTAL.load(Ordering::Relaxed),
+        skipped_high_cpu_total: PERIODIC_SWEEP_SKIPPED_HIGH_CPU_TOTAL.load(Ordering::Relaxed),
+    }
+}
+
+/// REQ-AXO-901677 — published by `pipeline_v2_runtime::spawn_periodic_sweep_worker`
+/// after each successful sweep tick. `now_ms` is the wall-clock
+/// timestamp at the END of the sweep ; `duration_ms` is how long the
+/// enumerate + compare loop took. `deltas_found` is the count of paths
+/// turned into subtree hints this tick. `files_compared` is the total
+/// number of paths the scanner enumerated (regardless of delta outcome).
+pub fn record_periodic_sweep_tick(
+    now_ms: u64,
+    duration_ms: u64,
+    files_compared: u64,
+    deltas_found: u64,
+) {
+    PERIODIC_SWEEP_LAST_RUN_AT_MS.store(now_ms, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_DURATION_MS.store(duration_ms, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_FILES_COMPARED.store(files_compared, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_DELTAS_FOUND.store(deltas_found, Ordering::Relaxed);
+    PERIODIC_SWEEP_RUNS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if deltas_found > 0 {
+        PERIODIC_SWEEP_DELTAS_TOTAL.fetch_add(deltas_found, Ordering::Relaxed);
+    }
+}
+
+/// REQ-AXO-901677 — bumped when the CPU-load gate blocks a scheduled
+/// sweep. Surfaced separately from `runs_total` so the operator can
+/// detect a worker that's never running due to chronic load pressure.
+pub fn record_periodic_sweep_skipped_high_cpu() {
+    PERIODIC_SWEEP_SKIPPED_HIGH_CPU_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn reset_periodic_sweep_metrics_for_tests() {
+    PERIODIC_SWEEP_LAST_RUN_AT_MS.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_DURATION_MS.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_FILES_COMPARED.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_LAST_DELTAS_FOUND.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_RUNS_TOTAL.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_DELTAS_TOTAL.store(0, Ordering::Relaxed);
+    PERIODIC_SWEEP_SKIPPED_HIGH_CPU_TOTAL.store(0, Ordering::Relaxed);
 }
 
 pub fn reset_ingress_metrics_for_tests() {
