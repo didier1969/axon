@@ -827,14 +827,27 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             // turns the notification into an `IngressSource::Scan` subtree
             // hint, so the scanner discovers and indexes the newly registered
             // project without requiring an indexer restart.
-            crate::registry_notify_listener::spawn_registry_change_listener(
-                url,
-                ingress_buffer.clone(),
-            );
-            info!(
-                "axon_registry_changed listener spawned (REQ-AXO-901675) — \
-                 registry mutations now trigger automatic subtree scan"
-            );
+            //
+            // Gate : only spawned in ingestion-enabled modes (indexer-graph /
+            // indexer-vector / indexer-full / brain+indexer). In `brain_only`
+            // mode the ingress_buffer exists but is never drained — pushing
+            // subtree hints there would waste CPU + leak memory.
+            if runtime_mode.ingestion_enabled() {
+                crate::registry_notify_listener::spawn_registry_change_listener(
+                    url,
+                    ingress_buffer.clone(),
+                );
+                info!(
+                    "axon_registry_changed listener spawned (REQ-AXO-901675) — \
+                     registry mutations now trigger automatic subtree scan"
+                );
+            } else {
+                info!(
+                    "axon_registry_changed listener NOT spawned: ingestion disabled \
+                     in current runtime mode ; the indexer process (separate boot) \
+                     owns this responsibility"
+                );
+            }
         }
         Err(err) => {
             warn!(
