@@ -12,10 +12,13 @@ defmodule AxonDashboardWeb.Features.ProjectsTest do
   alias Wallaby.Query
 
   feature "page loads with Projects header", %{session: session} do
+    # REQ-AXO-901683 — "Indexing per project" is rendered inside a
+    # `<div class="uppercase ...">` (see lib/axon_dashboard_web/live/projects_live.ex).
+    # WebDriver getText returns the rendered (upper-cased) text.
     session
     |> visit("/projects")
     |> assert_has(Query.css("header", text: "Axon Cockpit"))
-    |> assert_has(Query.css("body", text: "Indexing per project"))
+    |> assert_has(Query.css("body", text: "INDEXING PER PROJECT"))
   end
 
   feature "table headers are visible", %{session: session} do
@@ -30,7 +33,10 @@ defmodule AxonDashboardWeb.Features.ProjectsTest do
   feature "totals strip renders five tot cards", %{session: session} do
     session = visit(session, "/projects")
 
-    for label <- ["Projects", "Σ Chunks", "Σ Embedded", "Σ Symbols", "Σ Edges"] do
+    # REQ-AXO-901683 — tot card labels render through `<div class="uppercase">`
+    # (see `tot/1` in projects_live.ex). Match against the upper-cased
+    # text that WebDriver getText returns.
+    for label <- ["PROJECTS", "Σ CHUNKS", "Σ EMBEDDED", "Σ SYMBOLS", "Σ EDGES"] do
       assert_has(session, Query.css("section", text: label))
     end
   end

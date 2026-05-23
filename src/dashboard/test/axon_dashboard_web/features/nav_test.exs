@@ -27,23 +27,43 @@ defmodule AxonDashboardWeb.Features.NavTest do
   end
 
   feature "top-nav links route to /, /projects, /mcp", %{session: session} do
-    session = visit(session, "/")
+    session = session |> visit("/") |> wait_for_live()
 
-    # Pipeline → Projects
-    session
-    |> click(Query.link("Projects"))
-    |> assert_has(Query.css("[href=\"/projects\"][aria-current=page], a[href=\"/projects\"]"))
-
-    # we expect URL to be /projects now
+    # Pipeline → Projects. REQ-AXO-901683 — Phoenix `.link navigate={…}`
+    # renders an `<a data-phx-link>` that the LV JS hooks into for
+    # `live_redirect`. The navigation runs through the WebSocket, so we
+    # need both `wait_for_live` BEFORE clicking and an assertion that
+    # the destination DOM rendered AFTER clicking — `current_path/1`
+    # alone races with the network round-trip.
+    session = click(session, Query.link("Projects"))
+    # Wait until the LV pushState lands the new URL (live_redirect is
+    # async over the WebSocket).
+    wait_until_path(session, "/projects")
     assert current_path(session) == "/projects"
 
     # Projects → MCP
-    session = click(session, Query.link("MCP"))
+    session = session |> wait_for_live() |> click(Query.link("MCP"))
+    wait_until_path(session, "/mcp")
     assert current_path(session) == "/mcp"
 
     # MCP → Pipeline (root)
-    session = click(session, Query.link("Pipeline"))
+    session = session |> wait_for_live() |> click(Query.link("Pipeline"))
+    wait_until_path(session, "/")
     assert current_path(session) == "/"
+  end
+
+  defp wait_until_path(session, expected, attempts \\ 50) do
+    cond do
+      current_path(session) == expected ->
+        :ok
+
+      attempts <= 0 ->
+        :timeout
+
+      true ->
+        Process.sleep(100)
+        wait_until_path(session, expected, attempts - 1)
+    end
   end
 
   feature "active nav link is highlighted on each route", %{session: session} do
@@ -62,27 +82,32 @@ defmodule AxonDashboardWeb.Features.NavTest do
   end
 
   feature "logo and shell footer visible on every route", %{session: session} do
+    # REQ-AXO-901683 — "Structural Intelligence", "install" and
+    # "heartbeat age" are wrapped in `text-transform: uppercase` Tailwind
+    # classes ; WebDriver's `getText` returns the visual text — see
+    # CSS in lib/axon_dashboard_web/live/nav.ex (chip label + footer).
     for {path, _current, _label} <- @routes do
       session
       |> visit(path)
-      |> assert_has(Query.css("header", text: "Axon Cockpit"))
-      |> assert_has(Query.css("header", text: "Structural Intelligence"))
-      |> assert_has(Query.css("footer", text: "install"))
-      |> assert_has(Query.css("footer", text: "heartbeat age"))
+      |> assert_has(Query.css("header", text: "Axon Cockpit", count: :any))
+      |> assert_has(Query.css("header", text: "STRUCTURAL INTELLIGENCE", count: :any))
+      |> assert_has(Query.css("footer", text: "INSTALL", count: :any))
+      |> assert_has(Query.css("footer", text: "HEARTBEAT AGE", count: :any))
     end
   end
 
   feature "mode / instance / build chips render on every route", %{session: session} do
-    # The chips use lowercase labels ("mode" / "instance" / "build")
-    # rendered with uppercase via Tailwind CSS — assertion is text-based
-    # so it survives CSS changes.
+    # REQ-AXO-901683 — chip labels are wrapped in `<span class="uppercase">`
+    # (see `chip/1` in lib/axon_dashboard_web/live/nav.ex). WebDriver's
+    # `getText` returns the rendered upper-cased text, so assert against
+    # "MODE" / "INSTANCE" / "BUILD" — not their DOM source casing.
     for {path, _current, _label} <- @routes do
       session = visit(session, path)
 
       session
-      |> assert_has(Query.css("header", text: "mode"))
-      |> assert_has(Query.css("header", text: "instance"))
-      |> assert_has(Query.css("header", text: "build"))
+      |> assert_has(Query.css("header", text: "MODE", count: :any))
+      |> assert_has(Query.css("header", text: "INSTANCE", count: :any))
+      |> assert_has(Query.css("header", text: "BUILD", count: :any))
     end
   end
 end

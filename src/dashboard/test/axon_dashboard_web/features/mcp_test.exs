@@ -26,8 +26,11 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session = visit(session, "/mcp")
 
     # The :all tab is labelled "All (68)"; the others have category-specific
-    # counts (DX/SOLL/Graph/System/Other).
-    for label <- ["All", "DX", "SOLL", "Graph", "System", "Other"] do
+    # counts (DX/SOLL/Graph/System/Other). The tab buttons carry
+    # `text-transform: uppercase`, so WebDriver's `getText` (which Wallaby
+    # forwards into `text:` match) returns "ALL (68)" / "DX (20)" / etc —
+    # not the camel-cased DOM source text (REQ-AXO-901683).
+    for label <- ["ALL", "DX", "SOLL", "GRAPH", "SYSTEM", "OTHER"] do
       assert_has(session, Query.css("button[phx-click=\"category\"]", text: label))
     end
   end
@@ -36,9 +39,12 @@ defmodule AxonDashboardWeb.Features.McpTest do
           %{session: session} do
     session
     |> visit("/mcp")
-    |> click(Query.css("button[phx-value-value=\"dx\"]"))
+    |> wait_for_live()
+    |> click(Query.css("button[phx-value-cat=\"dx\"]"))
 
     # Should show DX category header (cat_label/1 = "DX · structural intelligence")
+    # Header is text-transform:uppercase via CSS, so WebDriver getText returns
+    # "DX · STRUCTURAL INTELLIGENCE" (REQ-AXO-901683).
     assert_has(session, Query.css("section h2", text: "DX"))
 
     # And NOT show SOLL-only tools like soll_manager
@@ -49,11 +55,14 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session =
       session
       |> visit("/mcp")
-      |> click(Query.css("button[phx-value-value=\"dx\"]"))
-      |> click(Query.css("button[phx-value-value=\"all\"]"))
+      |> wait_for_live()
+      |> click(Query.css("button[phx-value-cat=\"dx\"]"))
+      |> click(Query.css("button[phx-value-cat=\"all\"]"))
 
     # Both a DX-tool and a SOLL-tool should be present.
-    assert_has(session, Query.css("code", text: "query"))
+    # REQ-AXO-901683 — `<code>query</code>` is one of multiple matches
+    # (also `query_examples`, `soll_query_context`), so use count: :any.
+    assert_has(session, Query.css("code", text: "query", count: :any))
     assert_has(session, Query.css("code", text: "soll_manager"))
   end
 
@@ -61,6 +70,7 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session =
       session
       |> visit("/mcp")
+      |> wait_for_live()
       |> fill_in(Query.css("input[phx-keyup=\"filter\"]"), with: "soll")
 
     # soll_manager must remain visible.
@@ -75,6 +85,7 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session =
       session
       |> visit("/mcp")
+      |> wait_for_live()
       |> fill_in(Query.css("input[phx-keyup=\"filter\"]"), with: "xyzdoesnotexist")
 
     assert_has(session, Query.css("body", text: "No tools match filter"))
@@ -86,13 +97,15 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session =
       session
       |> visit("/mcp")
+      |> wait_for_live()
       |> fill_in(Query.css("input[phx-keyup=\"filter\"]"), with: "xyzdoesnotexist")
       # Now clear it
       |> clear(Query.css("input[phx-keyup=\"filter\"]"))
 
     refute_has(session, Query.css("body", text: "No tools match filter"))
     assert_has(session, Query.css("code", text: "soll_manager"))
-    assert_has(session, Query.css("code", text: "query"))
+    # REQ-AXO-901683 — `<code>query</code>` is one of multiple matches.
+    assert_has(session, Query.css("code", text: "query", count: :any))
   end
 
   feature "fast typing then full backspace ends in clean state (REQ-AXO-901649 race-free)",
@@ -102,6 +115,7 @@ defmodule AxonDashboardWeb.Features.McpTest do
     session =
       session
       |> visit("/mcp")
+      |> wait_for_live()
       |> fill_in(field, with: "abcdefghij")
       |> clear(field)
 

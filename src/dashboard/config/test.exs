@@ -7,7 +7,15 @@ import Config
 config :axon_dashboard, AxonDashboardWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 44126],
   secret_key_base: "Gr1hatC1TQcyEW5avHIisHGjCj47ubL8Ps3Oq94YnqQ2UnFW/NN9v3G9VKsuq23j",
-  server: true
+  server: true,
+  # REQ-AXO-901683 — Wallaby drives Chromium against http://127.0.0.1:44126
+  # but Phoenix.Socket's default `check_origin` rejects mismatched hosts,
+  # blocking the LiveView WebSocket. With the socket closed, the cockpit
+  # JS displays the `.phx-error` banner (errors_test.exs:20 fails) and
+  # every subsequent feature test starves waiting for LiveView-rendered
+  # content. `check_origin: false` is safe here because the endpoint only
+  # binds to 127.0.0.1 in the test env (see :http :ip above).
+  check_origin: false
 
 # Print only warnings and errors during test
 config :logger, level: :warning

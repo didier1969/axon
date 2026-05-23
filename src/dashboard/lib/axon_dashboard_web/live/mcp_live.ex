@@ -98,18 +98,48 @@ defmodule AxonDashboardWeb.Live.McpLive do
       send(self(), :load)
     end
 
+    # REQ-AXO-901683 — when a fixture is configured (test env), load it
+    # synchronously on the FIRST mount (HTTP render) so Wallaby sees the
+    # 68 tools immediately without depending on the LiveView WebSocket
+    # round-trip. Production (no fixture env) keeps the async Task path
+    # so a slow brain never blocks page paint.
+    {tools, loaded?, error} = initial_tools()
+
     socket =
       socket
       |> assign(:page_title, "Axon · MCP Catalog")
-      |> assign(:tools, [])
+      |> assign(:tools, tools)
       |> assign(:descriptions, %{})
       |> assign(:filter, "")
       |> assign(:category, :all)
       |> assign(:heartbeat, IndexerHeartbeat.latest())
-      |> assign(:loaded?, false)
-      |> assign(:error, nil)
+      |> assign(:loaded?, loaded?)
+      |> assign(:error, error)
 
     {:ok, socket}
+  end
+
+  # If AXON_MCP_FIXTURE_PATH is set (Wallaby feature tests, hermetic
+  # smoke runs), preload the catalog synchronously so the first HTTP
+  # render already exposes every tool. Otherwise return the legacy
+  # "loading…" state and let `:load` populate via async Task.
+  defp initial_tools do
+    case System.get_env("AXON_MCP_FIXTURE_PATH") do
+      nil ->
+        {[], false, nil}
+
+      "" ->
+        {[], false, nil}
+
+      _path ->
+        case fetch_tools() do
+          {:ok, list} when is_list(list) ->
+            {Enum.map(list, &normalize_tool/1), true, nil}
+
+          {:error, reason} ->
+            {[], true, inspect(reason)}
+        end
+    end
   end
 
   @impl true
@@ -154,7 +184,13 @@ defmodule AxonDashboardWeb.Live.McpLive do
   end
 
   @impl true
-  def handle_event("category", %{"value" => v}, socket) do
+  def handle_event("category", params, socket) do
+    # REQ-AXO-901683 — accept BOTH `cat` (canonical phx-value-cat) AND
+    # legacy `value` (older phx-value-value rendering). Wallaby + LV
+    # under WebDriver showed inconsistent serialization for the
+    # `value` key when an `<input name="value">` lives in the same
+    # LV scope ; the safer key is `cat` (no collision).
+    v = Map.get(params, "cat") || Map.get(params, "value", "")
     {:noreply, assign(socket, :category, String.to_atom(v))}
   end
 
@@ -199,15 +235,28 @@ defmodule AxonDashboardWeb.Live.McpLive do
               <.cat_tab current={@category} value={:other} label={"Other (#{count_cat(@tools, :other)})"} />
             </div>
 
-            <input
-              type="text"
-              phx-keyup="filter"
-              phx-debounce="120"
-              name="value"
-              value={@filter}
-              placeholder="filter by name or description…"
-              class="bg-slate-900/60 border border-slate-800 rounded-md px-3 py-1.5 text-sm font-mono w-72 text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20"
-            />
+            <%!--
+              REQ-AXO-901683 — wrap the filter input in a form with
+              `phx-change="filter"` so that:
+                * normal typing keeps using `phx-keyup` (with debounce),
+                * programmatic `WebDriver.Element.clear/1` (Wallaby's
+                  `clear/2`) — which fires `input`+`change` events but
+                  NOT `keyup` — still pushes the empty value back to
+                  the LiveView. Without the form wrapper, Wallaby
+                  could clear the field client-side but the server's
+                  `@filter` would stay frozen on the previous value.
+            --%>
+            <form phx-change="filter" autocomplete="off" class="contents">
+              <input
+                type="text"
+                phx-keyup="filter"
+                phx-debounce="120"
+                name="value"
+                value={@filter}
+                placeholder="filter by name or description…"
+                class="bg-slate-900/60 border border-slate-800 rounded-md px-3 py-1.5 text-sm font-mono w-72 text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20"
+              />
+            </form>
           </div>
         </section>
 
@@ -281,7 +330,7 @@ defmodule AxonDashboardWeb.Live.McpLive do
     ~H"""
     <button
       phx-click="category"
-      phx-value-value={Atom.to_string(@value)}
+      phx-value-cat={Atom.to_string(@value)}
       class={[
         "px-2.5 py-1 rounded text-[10px] font-mono uppercase tracking-wider transition-colors cursor-pointer",
         if(@current == @value,

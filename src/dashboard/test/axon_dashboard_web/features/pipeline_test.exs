@@ -25,8 +25,13 @@ defmodule AxonDashboardWeb.Features.PipelineTest do
           %{session: session} do
     session = visit(session, "/")
 
-    for label <- ["Indexed Files", "Symbols", "Edges", "Total Chunks", "Embedded", "Pending"] do
-      assert_has(session, Query.css("section", text: label))
+    # REQ-AXO-901683 — KPI labels render through `text-[10px] uppercase`
+    # in `kpi/1` (pipeline_live.ex). WebDriver getText returns the
+    # rendered upper-cased text.
+    for label <- ["INDEXED FILES", "SYMBOLS", "EDGES", "TOTAL CHUNKS", "EMBEDDED", "PENDING"] do
+      # count: :any — labels like "EMBEDDED" / "PENDING" may appear in
+      # multiple sections (KPI card + worker activity panel).
+      assert_has(session, Query.css("section", text: label, count: :any))
     end
   end
 
@@ -45,9 +50,12 @@ defmodule AxonDashboardWeb.Features.PipelineTest do
   end
 
   feature "A3→B1 buffer cap row visible", %{session: session} do
+    # REQ-AXO-901683 — the buffer cap line lives inside a parent div with
+    # `uppercase tracking-wider` (pipeline_live.ex), so WebDriver getText
+    # returns "A3→B1 BUFFER CAP".
     session
     |> visit("/")
-    |> assert_has(Query.css("body", text: "A3→B1 buffer cap"))
+    |> assert_has(Query.css("body", text: "A3→B1 BUFFER CAP"))
   end
 
   feature "worker config table has six rows", %{session: session} do
@@ -64,11 +72,15 @@ defmodule AxonDashboardWeb.Features.PipelineTest do
   end
 
   feature "B2 embedder rate panel + GPU panel visible", %{session: session} do
+    # REQ-AXO-901683 — "B2 Embedder" lives inside a `text-[10px] uppercase
+    # tracking-[0.18em]` parent (pipeline_live.ex), so WebDriver getText
+    # returns "B2 EMBEDDER". The h2 right after ("B2 embedder rate ...")
+    # is NOT uppercase-styled, so it stays as authored.
     session
     |> visit("/")
     |> assert_has(Query.css("body", text: "B2 embedder rate"))
-    |> assert_has(Query.css("body", text: "B2 Embedder"))
-    |> assert_has(Query.css("body", text: "Effective provider"))
+    |> assert_has(Query.css("body", text: "B2 EMBEDDER"))
+    |> assert_has(Query.css("body", text: "EFFECTIVE PROVIDER"))
   end
 
   feature "page renders with no JavaScript console errors", %{session: session} do
