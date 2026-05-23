@@ -20,8 +20,14 @@ if System.get_env("PHX_SERVER") do
   config :axon_dashboard, AxonDashboardWeb.Endpoint, server: true
 end
 
-config :axon_dashboard, AxonDashboardWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PHX_PORT") || System.get_env("PORT") || "44127")]
+# REQ-AXO-901654 — only override the endpoint port for non-test environments.
+# config/test.exs binds the Wallaby endpoint to 44126; an unconditional override
+# here re-binds it to 44127 (dev/cockpit port) and collides with a running
+# dashboard, breaking the E2E suite.
+if config_env() != :test do
+  config :axon_dashboard, AxonDashboardWeb.Endpoint,
+    http: [port: String.to_integer(System.get_env("PHX_PORT") || System.get_env("PORT") || "44127")]
+end
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
