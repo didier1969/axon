@@ -830,9 +830,16 @@ fn subtree_hint_retry_budget() -> u64 {
 }
 
 fn watcher_subtree_hint_budget() -> usize {
-    // AXON_WATCHER_SUBTREE_HINT_BUDGET retired (REQ-AXO-290 S3) ;
-    // streaming-pipeline v2 watcher uses the constant default.
-    512
+    // REQ-AXO-901686 — re-honour AXON_WATCHER_SUBTREE_HINT_BUDGET when set
+    // so operators can clamp watcher memory footprint, and so unit tests
+    // exercising the saturation behaviour (`test_watcher_subtree_hint_is_
+    // dropped_when_budget_is_exhausted`) can run with a small budget.
+    // Falls back to the post-REQ-AXO-290-S3 default of 512.
+    const DEFAULT_BUDGET: usize = 512;
+    match std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET") {
+        Ok(raw) => raw.trim().parse::<usize>().ok().filter(|v| *v > 0).unwrap_or(DEFAULT_BUDGET),
+        Err(_) => DEFAULT_BUDGET,
+    }
 }
 
 impl Default for IngressBuffer {

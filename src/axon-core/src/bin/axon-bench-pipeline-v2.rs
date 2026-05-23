@@ -538,8 +538,11 @@ mod tests {
         std::fs::write(dir.path().join(".git").join("hooked.rs"), "ignored").unwrap();
         std::fs::create_dir_all(dir.path().join("target")).unwrap();
         std::fs::write(dir.path().join("target").join("compiled.rs"), "ignored").unwrap();
-        // Unsupported extension must be skipped.
-        std::fs::write(dir.path().join("doc.md"), "ignored").unwrap();
+        // Unsupported extension must be skipped. REQ-AXO-901687 :
+        // `.md` is in the canonical supported_extensions list (config.rs
+        // default), so we use a truly unsupported binary extension here
+        // to keep the test's stated intent intact.
+        std::fs::write(dir.path().join("doc.bin"), "ignored").unwrap();
 
         let files = walk_source(dir.path(), 100).unwrap();
         assert_eq!(files.len(), 5, "exactly 5 .rs files under nested/");
