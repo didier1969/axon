@@ -1,4 +1,43 @@
 use super::*;
+use crate::tests::test_helpers::unique_test_project_code;
+
+/// REQ-AXO-91560 — allocate a unique canonical project_code for this
+/// test and register it in `soll.ProjectCodeRegistry` on the supplied
+/// server so subsequent `soll_manager` / `soll_apply_plan` calls accept
+/// it. Returns the 3-char code. Idempotent via `ON CONFLICT` in
+/// `sync_project_registry_entry`.
+///
+/// Also wipes any pre-existing rows in `soll.Node`, `soll.Edge`,
+/// `soll.Revision`, `soll.RevisionChange`, `soll.RevisionPreview`, and
+/// `soll.Registry` for the allocated code. The 1296-code base-36 space
+/// recycles across `cargo test` invocations; without an explicit purge
+/// a residual node like `PIL-T0E-001` from a prior run will collide on
+/// PK with the freshly-seeded fixture even though the code is "unique"
+/// inside the current process.
+fn scoped_test_project_code(server: &McpServer) -> String {
+    let code = unique_test_project_code();
+    let store = &server.graph_store;
+    // Delete edges first (FK to Node), then nodes, then registry rows.
+    // Cover edges where either endpoint references the recycled code.
+    // Combine all DELETEs into one batch so a single failure doesn't
+    // poison the transaction for the subsequent INSERTs that the caller
+    // is about to issue.
+    let wipe = format!(
+        "DELETE FROM soll.RevisionChange WHERE revision_id IN (SELECT revision_id FROM soll.Revision WHERE project_code = '{code}');\n\
+         DELETE FROM soll.Revision WHERE project_code = '{code}';\n\
+         DELETE FROM soll.RevisionPreview WHERE project_code = '{code}';\n\
+         DELETE FROM soll.Edge WHERE source_id LIKE '%-{code}-%' OR target_id LIKE '%-{code}-%' OR project_code = '{code}';\n\
+         DELETE FROM soll.Node WHERE project_code = '{code}' OR id LIKE '%-{code}-%';\n\
+         DELETE FROM soll.Registry WHERE project_code = '{code}';"
+    );
+    let _ = store.execute(&wipe);
+    let _ = store.sync_project_registry_entry(
+        &code,
+        Some(&format!("Test {code}")),
+        Some(&format!("/tmp/{code}")),
+    );
+    code
+}
 
 #[test]
 fn test_axon_query_global_default() {
@@ -27,10 +66,23 @@ fn test_axon_query_global_default() {
 
 #[test]
 fn test_axon_soll_manager_auto_id() {
+    // REQ-AXO-91560 — PG isolation via unique project_code + attach_to a
+    // seeded Pillar so the MIL-AXO-020 create+attach invariant holds.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let expected_id = format!("CPT-{code}-011");
+    let pillar_id = format!("PIL-{code}-001");
     server
         .graph_store
-        .execute("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 10, 0)")
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 1, 0, 10, 0) ON CONFLICT (project_code) DO UPDATE SET last_pil = 1, last_cpt = 10"
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -42,10 +94,12 @@ fn test_axon_soll_manager_auto_id() {
                 "action": "create",
                 "entity": "concept",
                 "data": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "name": "Test Concept",
                     "explanation": "To test auto id",
-                    "rationale": "Because testing is good"
+                    "rationale": "Because testing is good",
+                    "attach_to": pillar_id,
+                    "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -60,21 +114,39 @@ fn test_axon_soll_manager_auto_id() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("CPT-AXO-011"));
+    assert!(
+        content.contains(&expected_id),
+        "expected {expected_id} in response, got: {content}"
+    );
 
     let count = server
         .graph_store
-        .query_count("SELECT count(*) FROM soll.Node WHERE type='Concept' AND id = 'CPT-AXO-011'")
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Node WHERE type='Concept' AND id = '{expected_id}'"
+        ))
         .unwrap();
     assert_eq!(count, 1);
 }
 
 #[test]
 fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // attach_to seeding (Pillar).
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
+    let expected_id = format!("CPT-{code}-012");
     server
         .graph_store
-        .execute("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 11, 0)")
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 1, 0, 11, 0) ON CONFLICT (project_code) DO UPDATE SET last_pil = 1, last_cpt = 11"
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -86,10 +158,12 @@ fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
                 "action": "create",
                 "entity": "concept",
                 "data": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "name": "Prefixed concept",
                     "explanation": "Should work through legacy prefixed tool names",
-                    "rationale": "Client compatibility"
+                    "rationale": "Client compatibility",
+                    "attach_to": pillar_id,
+                    "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -104,7 +178,7 @@ fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("CPT-AXO-012"), "{content}");
+    assert!(content.contains(&expected_id), "{content}");
 }
 
 #[test]
@@ -151,7 +225,10 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
 
 #[test]
 fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let title = format!("Preview Commit Requirement {code}");
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -159,13 +236,13 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
         params: Some(json!({
             "name": "soll_apply_plan",
             "arguments": {
-                "project_code": "AXO",
+                "project_code": code,
                 "dry_run": false,
                 "author": "test",
                 "plan": {
                     "requirements": [{
                         "logical_key": "req-preview-commit",
-                        "title": "Preview Commit Requirement",
+                        "title": title,
                         "description": "Commit should read back the persisted preview",
                         "priority": "P1",
                         "status": "current"
@@ -188,15 +265,16 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = 'Preview Commit Requirement'")
+            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = '{title}'"))
             .unwrap(),
         1
     );
     let revision_rows = server
         .graph_store
-        .query_json("SELECT revision_id FROM soll.Revision ORDER BY created_at DESC LIMIT 1")
+        .query_json(&format!("SELECT revision_id FROM soll.Revision WHERE project_code = '{code}' ORDER BY created_at DESC LIMIT 1"))
         .unwrap();
-    assert!(revision_rows.contains("REV-AXO-001"), "{revision_rows}");
+    let expected_rev = format!("REV-{code}-001");
+    assert!(revision_rows.contains(&expected_rev), "{revision_rows}");
     assert!(result["data"]["created"].is_array());
     assert!(result["data"]["updated"].is_array());
     assert!(result["data"]["linked"].is_array());
@@ -206,7 +284,9 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
 
 #[test]
 fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -214,7 +294,7 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
         params: Some(json!({
             "name": "soll_apply_plan",
             "arguments": {
-                "project_code": "AXO",
+                "project_code": code,
                 "dry_run": true,
                 "author": "test",
                 "plan": {
@@ -234,7 +314,7 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
     let preview_id = result["data"]["preview_id"].as_str().unwrap();
-    assert_eq!(preview_id, "PRV-AXO-001");
+    assert_eq!(preview_id, format!("PRV-{code}-001"));
     assert!(result["data"]["result_contract"]["created"].is_array());
     assert!(result["data"]["result_contract"]["updated"].is_array());
     assert!(result["data"]["result_contract"]["linked"].is_array());
@@ -250,6 +330,7 @@ fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
     // already supports all three. Adding them to the iteration list closes
     // the gap and makes soll_apply_plan symmetric with soll_manager.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -257,7 +338,7 @@ fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
         params: Some(json!({
             "name": "soll_apply_plan",
             "arguments": {
-                "project_code": "AXO",
+                "project_code": code,
                 "dry_run": true,
                 "author": "test",
                 "plan": {
@@ -611,10 +692,17 @@ fn test_soll_apply_plan_rejects_empty_plan_with_explicit_error() {
 
 #[test]
 fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
+    // REQ-AXO-91560 — per-test project_code isolation. Two distinct
+    // codes exercise the "same logical_key, different project" branch.
     let server = create_test_server();
+    let target = scoped_test_project_code(&server);
+    let other = scoped_test_project_code(&server);
+    let other_req = format!("REQ-{other}-001");
+    let shared_title = format!("Shared title {target}");
+    let shared_key = format!("shared-key-{target}");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'Shared title', 'Other project duplicate', 'planned', '{\"logical_key\":\"shared-key\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{other_req}', 'Requirement', '{other}', '{shared_title}', 'Other project duplicate', 'planned', '{{\"logical_key\":\"{shared_key}\"}}')"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -623,14 +711,14 @@ fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
         params: Some(json!({
             "name": "soll_apply_plan",
             "arguments": {
-                "project_code": "AXO",
+                "project_code": target,
                 "dry_run": true,
                 "author": "test",
                 "plan": {
                     "requirements": [{
-                        "logical_key": "shared-key",
-                        "title": "Shared title",
-                        "description": "Should still create in AXO scope"
+                        "logical_key": shared_key,
+                        "title": shared_title,
+                        "description": format!("Should still create in {target} scope")
                     }]
                 }
             }
@@ -702,13 +790,13 @@ fn test_axon_soll_manager_create_without_project_code_auto_resolves_or_errors() 
 
 #[test]
 fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Perishability ordering', 'Short-life ingredients must be consumed earlier in the week.', 'current', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let req_a = format!("REQ-{code}-001");
+    let req_b = format!("REQ-{code}-002");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_b}', 'Requirement', '{code}', 'Perishability ordering', 'Short-life ingredients must be consumed earlier in the week.', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -717,7 +805,7 @@ fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
             params: Some(json!({
                 "name": "infer_soll_mutation",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "statement": "Weekly shopping should allow grouped purchases."
                 }
             })),
@@ -735,18 +823,17 @@ fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
     );
     assert_eq!(
         result["data"]["target_ids"][0].as_str(),
-        Some("REQ-AXO-001")
+        Some(req_a.as_str())
     );
 }
 
 #[test]
 fn test_entrench_nuance_requires_confirmation_before_write() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let req_id = format!("REQ-{code}-001");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -755,7 +842,7 @@ fn test_entrench_nuance_requires_confirmation_before_write() {
             params: Some(json!({
                 "name": "entrench_nuance",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "statement": "Weekly shopping should allow grouped purchases."
                 }
             })),
@@ -767,19 +854,18 @@ fn test_entrench_nuance_requires_confirmation_before_write() {
 
     let rows = server
         .graph_store
-        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .query_json(&format!("SELECT metadata FROM soll.Node WHERE id = '{req_id}'"))
         .unwrap();
     assert!(!rows.contains("nuances"));
 }
 
 #[test]
 fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let req_id = format!("REQ-{code}-001");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -788,10 +874,10 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
             params: Some(json!({
                 "name": "entrench_nuance",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "statement": "Weekly shopping should allow grouped purchases.",
                     "confirm": true,
-                    "target_ids": ["REQ-AXO-001"]
+                    "target_ids": [req_id]
                 }
             })),
             id: Some(json!(3)),
@@ -801,12 +887,12 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
     assert_eq!(result["data"]["confirm_required"].as_bool(), None);
     assert_eq!(
         result["data"]["mutation_feedback"]["changed_entities"][0]["id"].as_str(),
-        Some("REQ-AXO-001")
+        Some(req_id.as_str())
     );
 
     let rows = server
         .graph_store
-        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .query_json(&format!("SELECT metadata FROM soll.Node WHERE id = '{req_id}'"))
         .unwrap();
     assert!(rows.contains("Weekly shopping should allow grouped purchases."));
     assert!(rows.contains("nuances"));
@@ -957,12 +1043,11 @@ fn test_soll_manager_create_invalid_status_returns_parameter_repair() {
 #[test]
 fn test_soll_manager_update_invalid_status_returns_parameter_repair() {
     // REQ-AXO-325 — same vocabulary enforcement on update path.
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-91476', 'Requirement', 'AXO', 'REQ-AXO-325 update test', 'fixture for status validation on update path', 'current', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let req_id = format!("REQ-{code}-91476");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'REQ-AXO-325 update test', 'fixture for status validation on update path', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -974,7 +1059,7 @@ fn test_soll_manager_update_invalid_status_returns_parameter_repair() {
                     "action": "update",
                     "entity": "requirement",
                     "data": {
-                        "id": "REQ-AXO-91476",
+                        "id": req_id,
                         "status": "accepted"
                     }
                 }
@@ -996,20 +1081,13 @@ fn test_soll_manager_update_invalid_status_returns_parameter_repair() {
 #[test]
 fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     // REQ-AXO-147 slice 2 — cross-project target_ids rejection now
-    // surfaces structured `data.parameter_repair` (status,
-    // expected_project_code, supplied_target_ids, invalid_target_ids,
-    // follow_up_tools, hint) so the LLM can filter the bad ids in one
-    // round-trip.
+    // surfaces structured `data.parameter_repair`.
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server
-        .graph_store
-        .sync_project_registry_entry("NTO", Some("Nutri"), Some("/tmp/nutri"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-NTO-901', 'Requirement', 'NTO', 'Cross-project Req', 'Cross-project entrench rejection contract', 'current', '{}')").unwrap();
+    let target = scoped_test_project_code(&server);
+    let cross = scoped_test_project_code(&server);
+    let cross_req = format!("REQ-{cross}-901");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cross_req}', 'Requirement', '{cross}', 'Cross-project Req', 'Cross-project entrench rejection contract', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1018,10 +1096,10 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
             params: Some(json!({
                 "name": "entrench_nuance",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": target,
                     "statement": "Cross-project rejection contract",
                     "confirm": true,
-                    "target_ids": ["REQ-NTO-901"]
+                    "target_ids": [cross_req]
                 }
             })),
             id: Some(json!(91471)),
@@ -1035,12 +1113,12 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     let repair = data["parameter_repair"].clone();
     assert_eq!(repair["invalid_field"].as_str(), Some("target_ids"));
     assert_eq!(repair["stage"].as_str(), Some("cross_project_check"));
-    assert_eq!(repair["expected_project_code"].as_str(), Some("AXO"));
+    assert_eq!(repair["expected_project_code"].as_str(), Some(target.as_str()));
     let invalid = repair["invalid_target_ids"]
         .as_array()
         .expect("invalid_target_ids array");
     let invalid_names: Vec<&str> = invalid.iter().filter_map(|v| v.as_str()).collect();
-    assert!(invalid_names.contains(&"REQ-NTO-901"));
+    assert!(invalid_names.contains(&cross_req.as_str()));
     let follow_up = repair["follow_up_tools"]
         .as_array()
         .expect("follow_up_tools array");
@@ -1053,16 +1131,12 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
 
 #[test]
 fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server
-        .graph_store
-        .sync_project_registry_entry("NTO", Some("Nutri"), Some("/tmp/nutri"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-NTO-001', 'Requirement', 'NTO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    let target = scoped_test_project_code(&server);
+    let cross = scoped_test_project_code(&server);
+    let cross_req = format!("REQ-{cross}-001");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cross_req}', 'Requirement', '{cross}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1071,10 +1145,10 @@ fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
             params: Some(json!({
                 "name": "entrench_nuance",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": target,
                     "statement": "Weekly shopping should allow grouped purchases.",
                     "confirm": true,
-                    "target_ids": ["REQ-NTO-001"]
+                    "target_ids": [cross_req]
                 }
             })),
             id: Some(json!(31)),
@@ -1084,19 +1158,19 @@ fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
     assert_eq!(result["isError"].as_bool(), Some(true));
     assert_eq!(
         result["data"]["invalid_target_ids"][0].as_str(),
-        Some("REQ-NTO-001")
+        Some(cross_req.as_str())
     );
 }
 
 #[test]
 fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambiguous() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
-        .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Grouped shopping purchases v2', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let req_a = format!("REQ-{code}-001");
+    let req_b = format!("REQ-{code}-002");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_b}', 'Requirement', '{code}', 'Grouped shopping purchases v2', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1105,7 +1179,7 @@ fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambi
             params: Some(json!({
                 "name": "entrench_nuance",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "statement": "Weekly shopping should allow grouped purchases.",
                     "confirm": true
                 }
@@ -1120,10 +1194,16 @@ fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambi
 
 #[test]
 fn test_soll_manager_create_returns_mutation_feedback() {
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // attach_to/Pillar seeding.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
     server
         .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
         .unwrap();
 
     let response = server
@@ -1135,11 +1215,13 @@ fn test_soll_manager_create_returns_mutation_feedback() {
                 "arguments": {
                     "action": "create",
                     "entity": "requirement",
-                    "project_code": "AXO",
+                    "project_code": code,
                     "data": {
-                        "project_code": "AXO",
+                        "project_code": code,
                         "title": "Roadmap feedback requirement",
-                        "description": "A new canonical requirement from roadmap feedback."
+                        "description": "A new canonical requirement from roadmap feedback.",
+                        "attach_to": pillar_id,
+                        "relation_type": "BELONGS_TO"
                     }
                 }
             })),
@@ -1580,10 +1662,16 @@ fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
     // REQ-AXO-092 — schema enum advertises `guideline` but the create branch
     // previously rejected it as "Unknown entity", forcing LLMs toward cypher
     // INSERT workarounds. Storage layer already supports the GUI prefix.
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // attach_to a seeded Pillar.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
     server
         .graph_store
-        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
         .unwrap();
 
     let response = server
@@ -1595,11 +1683,13 @@ fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
                 "arguments": {
                     "action": "create",
                     "entity": "guideline",
-                    "project_code": "AXO",
+                    "project_code": code,
                     "data": {
-                        "project_code": "AXO",
+                        "project_code": code,
                         "title": "TDD with real I/O",
-                        "description": "Tests must hit real DBs, not mocks."
+                        "description": "Tests must hit real DBs, not mocks.",
+                        "attach_to": pillar_id,
+                        "relation_type": "BELONGS_TO"
                     }
                 }
             })),
@@ -1612,9 +1702,10 @@ fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
     // Response should expose canonical id (GUI-{project}-NNN) and entity_type
     let data = &result["data"];
     let created_id = data["created_id"].as_str().expect("created_id present");
+    let expected_prefix = format!("GUI-{code}-");
     assert!(
-        created_id.starts_with("GUI-AXO-"),
-        "id must use GUI-AXO- prefix: {created_id}"
+        created_id.starts_with(&expected_prefix),
+        "id must use {expected_prefix} prefix: {created_id}"
     );
     assert_eq!(data["entity_type"].as_str(), Some("Guideline"));
 }
@@ -1791,10 +1882,23 @@ fn test_axon_apply_guidelines_rejects_non_canonical_project_code() {
 
 #[test]
 fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // Vision seeded so the new pillar can EPITOMIZES it.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let vis_id = format!("VIS-{code}-001");
+    let expected_pillar = format!("PIL-{code}-004");
     server
         .graph_store
-        .execute("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 3, 12, 0, 0)")
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 3, 12, 0, 0) ON CONFLICT (project_code) DO UPDATE SET last_pil = 3, last_req = 12"
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', 'Test Vision', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1806,9 +1910,11 @@ fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
                 "action": "create",
                 "entity": "pillar",
                 "data": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "title": "Dedicated Pillar Counter",
-                    "description": "Pillars must not consume requirement ids"
+                    "description": "Pillars must not consume requirement ids",
+                    "attach_to": vis_id,
+                    "relation_type": "EPITOMIZES"
                 }
             }
         })),
@@ -1823,19 +1929,33 @@ fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("PIL-AXO-004"), "{content}");
+    assert!(content.contains(&expected_pillar), "{content}");
 }
 
 #[test]
 fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // attach_to a seeded Pillar.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
+    let req_existing = format!("REQ-{code}-007");
+    let expected_req = format!("REQ-{code}-008");
     server
         .graph_store
-        .execute("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0)")
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 1, 0, 0, 0) ON CONFLICT (project_code) DO UPDATE SET last_pil = 1, last_req = 0"
+        ))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-007', 'Requirement', 'AXO', 'Existing', 'Already there', '', '{\"priority\":\"P1\"}')")
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_existing}', 'Requirement', '{code}', 'Existing', 'Already there', '', '{{\"priority\":\"P1\"}}')"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1847,10 +1967,12 @@ fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
                 "action": "create",
                 "entity": "requirement",
                 "data": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "title": "Recovered Counter",
                     "description": "Should continue after observed max",
-                    "priority": "P1"
+                    "priority": "P1",
+                    "attach_to": pillar_id,
+                    "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -1865,7 +1987,7 @@ fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("REQ-AXO-008"), "{content}");
+    assert!(content.contains(&expected_req), "{content}");
 }
 
 #[test]
@@ -1947,11 +2069,21 @@ fn test_axon_soll_manager_can_create_and_update_vision() {
 
 #[test]
 fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
+    // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
+    // attach_to a seeded Pillar.
     let temp = tempdir().unwrap();
     let root = temp.path().join("graph_v2");
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
     let server = McpServer::new(store.clone());
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
+    let expected_stk = format!("STK-{code}-001");
+    store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Test Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -1962,9 +2094,11 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
                 "action": "create",
                 "entity": "stakeholder",
                 "data": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "name": "Runtime Rust",
-                    "role": "Owns ingestion and canonical persistence"
+                    "role": "Owns ingestion and canonical persistence",
+                    "attach_to": pillar_id,
+                    "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -1978,12 +2112,12 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("STK-AXO-001"), "{content}");
+    assert!(content.contains(&expected_stk), "{content}");
 
     std::thread::sleep(std::time::Duration::from_millis(75));
 
     let count = store
-        .query_count("SELECT count(*) FROM soll.Node WHERE type='Stakeholder' AND id = 'STK-AXO-001' AND title = 'Runtime Rust'")
+        .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Stakeholder' AND id = '{expected_stk}' AND title = 'Runtime Rust'"))
         .unwrap();
     assert_eq!(count, 1);
 }
@@ -1996,11 +2130,10 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
     // puts kind + category + recovery in `content.text` and keeps the
     // truncated raw error under `data.diagnostic_excerpt` for opt-in
     // inspection.
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server
-        .graph_store
-        .sync_project_registry_entry("AXO", Some("axon"), Some("/tmp/fake"))
-        .unwrap();
+    let code = scoped_test_project_code(&server);
+    let missing_id = format!("REQ-{code}-9999");
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
@@ -2010,7 +2143,7 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
                 "action": "update",
                 "entity": "requirement",
                 "data": {
-                    "id": "REQ-AXO-9999",
+                    "id": missing_id,
                     "status": "completed"
                 }
             }
@@ -2062,9 +2195,14 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
 
 #[test]
 fn test_axon_export_soll() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Test Vision', 'Desc', '', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'My Concept', 'Expl', '', '{}')").unwrap();
+    let code = scoped_test_project_code(&server);
+    let vis_id = format!("VIS-{code}-001");
+    let cpt_id = format!("CPT-{code}-001");
+    let test_vision_title = format!("Test Vision {code}");
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', '{test_vision_title}', 'Desc', '', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_id}', 'Concept', '{code}', 'My Concept', 'Expl', '', '{{}}')")).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2097,8 +2235,8 @@ fn test_axon_export_soll() {
 
     let export_content = std::fs::read_to_string(&export_path).unwrap();
     assert!(export_content.contains("# SOLL Extraction"));
-    assert!(export_content.contains("Test Vision"));
-    assert!(export_content.contains("CPT-AXO-001"));
+    assert!(export_content.contains(&test_vision_title));
+    assert!(export_content.contains(&cpt_id));
 
     let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
     assert!(export_body.contains("## Entities: Vision") || export_body.contains("## Entities: Vision"));
@@ -2276,27 +2414,34 @@ fn test_axon_restore_soll() {
 
 #[test]
 fn test_axon_validate_soll_reports_orphan_invariants() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let other = scoped_test_project_code(&server);
+    let req_id = format!("REQ-{code}-001");
+    let val_id = format!("VAL-{code}-001");
+    let dec_id = format!("DEC-{code}-001");
+    let cpt_other = format!("CPT-{other}-001");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Orphan requirement', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Orphan requirement', 'No structural links', 'planned', '{{\"priority\":\"P1\"}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', '', '', 'pending', '{\"method\":\"manual\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{val_id}', 'Validation', '{code}', '', '', 'pending', '{{\"method\":\"manual\"}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_id}', 'Decision', '{code}', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'current', '{{}}')"))
         .unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-BKS-001', 'Concept', 'BKS', 'BKS Concept', 'Expl', '', '{}')").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_other}', 'Concept', '{other}', 'Other Concept', 'Expl', '', '{{}}')")).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_validate",
-            "arguments": {}
+            "arguments": { "project_code": code }
         })),
         id: Some(json!(31)),
     };
@@ -2310,29 +2455,35 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         .unwrap();
 
     assert!(content.contains("violation"));
-    assert!(content.contains("REQ-AXO-001"));
-    assert!(content.contains("VAL-AXO-001"));
-    assert!(content.contains("DEC-AXO-001"));
+    assert!(content.contains(&req_id));
+    assert!(content.contains(&val_id));
+    assert!(content.contains(&dec_id));
 }
 
 #[test]
 fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements() {
+    // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let req_a = format!("REQ-{code}-010");
+    let req_b = format!("REQ-{code}-011");
+    let dec_a = format!("DEC-{code}-010");
+    let dec_b = format!("DEC-{code}-011");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Duplicate req', 'No criteria', 'planned', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code}', 'Duplicate req', 'No criteria', 'planned', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-011', 'Requirement', 'AXO', 'Duplicate req', 'Still no criteria', 'planned', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_b}', 'Requirement', '{code}', 'Duplicate req', 'Still no criteria', 'planned', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-010', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_a}', 'Decision', '{code}', 'Duplicate dec', 'No links', 'current', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-011', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_b}', 'Decision', '{code}', 'Duplicate dec', 'No links', 'current', '{{}}')"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2340,7 +2491,7 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_validate",
-            "arguments": { "project_code": "AXO" }
+            "arguments": { "project_code": code }
         })),
         id: Some(json!(3204)),
     };
@@ -2360,42 +2511,48 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
         content.contains("Requirements without criteria/evidence"),
         "{content}"
     );
-    assert!(content.contains("REQ-AXO-010"), "{content}");
-    assert!(content.contains("REQ-AXO-011"), "{content}");
+    assert!(content.contains(&req_a), "{content}");
+    assert!(content.contains(&req_b), "{content}");
 }
 
 #[test]
 fn test_axon_validate_soll_reports_clean_minimal_graph() {
+    // REQ-AXO-91560 — per-test project_code isolation (PG shared instance).
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pillar_id = format!("PIL-{code}-001");
+    let req_id = format!("REQ-{code}-001");
+    let val_id = format!("VAL-{code}-001");
+    let dec_id = format!("DEC-{code}-001");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Core', 'Protect SOLL', '', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Platform Core', 'Protect SOLL', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'planned', '{\"priority\":\"P1\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Linked requirement', 'Has links', 'planned', '{{\"priority\":\"P1\"}}') ON CONFLICT (id) DO NOTHING"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', '', '', 'passed', '{\"method\":\"manual\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{val_id}', 'Validation', '{code}', '', '', 'passed', '{{\"method\":\"manual\"}}') ON CONFLICT (id) DO NOTHING"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Linked decision', '', 'current', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_id}', 'Decision', '{code}', 'Linked decision', '', 'current', '{{\"context\":\"Context\",\"rationale\":\"Because\"}}') ON CONFLICT (id) DO NOTHING"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('{req_id}', '{pillar_id}', 'BELONGS_TO')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('VAL-AXO-001', 'REQ-AXO-001', 'VERIFIES')")
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('{val_id}', '{req_id}', 'VERIFIES')"))
         .unwrap();
     server
         .graph_store
-        .execute(
-            "INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')",
-        )
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('{dec_id}', '{req_id}', 'SOLVES')"
+        ))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2403,7 +2560,7 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_validate",
-            "arguments": {}
+            "arguments": { "project_code": code }
         })),
         id: Some(json!(32)),
     };
@@ -2428,14 +2585,18 @@ fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
     // appear in the "Requirements without criteria/evidence" list, otherwise
     // operators are forced to backfill criteria on already-closed work and the
     // violation count cannot reach zero by curation alone.
+    // REQ-AXO-91560 — per-test project_code isolation (PG shared instance).
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let active_id = format!("REQ-{code}-900");
+    let archived_id = format!("REQ-{code}-901");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-900', 'Requirement', 'AXO', 'Active uncovered', 'No criteria', 'planned', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{active_id}', 'Requirement', '{code}', 'Active uncovered', 'No criteria', 'planned', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-901', 'Requirement', 'AXO', 'Closed and archived', 'No criteria, but archived', 'archived', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{archived_id}', 'Requirement', '{code}', 'Closed and archived', 'No criteria, but archived', 'archived', '{{}}')"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2443,7 +2604,7 @@ fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_validate",
-            "arguments": { "project_code": "AXO" }
+            "arguments": { "project_code": code }
         })),
         id: Some(json!(3245)),
     };
@@ -2460,30 +2621,36 @@ fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
         content.contains("Requirements without criteria/evidence"),
         "{content}"
     );
-    assert!(content.contains("REQ-AXO-900"), "{content}");
+    assert!(content.contains(&active_id), "{content}");
     assert!(
-        !content.contains("REQ-AXO-901"),
+        !content.contains(&archived_id),
         "archived requirement leaked into uncovered list: {content}"
     );
 }
 
 #[test]
 fn test_axon_validate_soll_can_scope_by_project_code() {
+    // REQ-AXO-91560 — two unique project_codes per test run avoid
+    // collisions on shared PG (`AXO`/`BKS` poisoned by prior live runs).
     let server = create_test_server();
+    let code_a = scoped_test_project_code(&server);
+    let code_b = scoped_test_project_code(&server);
+    let req_a = format!("REQ-{code_a}-001");
+    let req_b = format!("REQ-{code_b}-001");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO orphan', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code_a}', 'A orphan', 'No structural links', 'planned', '{{\"priority\":\"P1\"}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'BKS orphan', 'No structural links', 'planned', '{\"priority\":\"P1\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_b}', 'Requirement', '{code_b}', 'B orphan', 'No structural links', 'planned', '{{\"priority\":\"P1\"}}')"))
         .unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_validate",
-            "arguments": { "project_code": "AXO" }
+            "arguments": { "project_code": code_a }
         })),
         id: Some(json!(3201)),
     };
@@ -2496,9 +2663,9 @@ fn test_axon_validate_soll_can_scope_by_project_code() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("project:AXO"), "{content}");
-    assert!(content.contains("REQ-AXO-001"), "{content}");
-    assert!(!content.contains("REQ-BKS-001"), "{content}");
+    assert!(content.contains(&format!("project:{code_a}")), "{content}");
+    assert!(content.contains(&req_a), "{content}");
+    assert!(!content.contains(&req_b), "{content}");
 }
 
 #[test]

@@ -36,6 +36,34 @@ pub fn unique_test_scope(label: &str) -> String {
     format!("{label}-{count}-{pid}-{now}")
 }
 
+/// REQ-AXO-91560 — per-invocation unique canonical project_code for tests
+/// that mutate `soll.Registry` / `soll.Node` (shared PG instance under
+/// MIL-AXO-017). `soll.Registry.project_code` is PRIMARY KEY and the
+/// canonical shape is `^[A-Z][A-Z0-9]{2}$` (3 chars, see
+/// `db/ddl/01_soll_schema.sql`). Hardcoded `"AXO"` literals collide
+/// across the ~158 parallel tests in `mcp::tests::soll_and_guidelines`
+/// — each test must therefore allocate its own code and pass it to
+/// `soll_manager` / `Registry` inserts, then build asserted IDs via
+/// `format!("CPT-{code}-NNN", code = code)` rather than `"CPT-AXO-NNN"`.
+///
+/// Encoding : `T` prefix + 2 base-36 digits derived from a monotonic
+/// counter. 1296 codes per process, recycled-on-overflow (acceptable :
+/// PG state is wiped between full test runs and any single `cargo test`
+/// invocation produces far fewer than 1296 distinct test-side projects).
+/// The prefix `T` (= "test") avoids collision with the canonical
+/// production codes (`AXO`, `BKS`, `PRJ`, …) seeded by `create_test_db`.
+pub fn unique_test_project_code() -> String {
+    let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let slot = count % (36 * 36);
+    let first = slot / 36;
+    let second = slot % 36;
+    fn base36(d: usize) -> char {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        alphabet[d % 36] as char
+    }
+    format!("T{}{}", base36(first), base36(second))
+}
+
 pub fn create_test_db() -> Result<GraphStore> {
     let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
