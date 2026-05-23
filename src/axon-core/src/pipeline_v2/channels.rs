@@ -70,6 +70,23 @@ pub const A3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
 /// downstream throttle. Operator override: `AXON_B3_BATCH_SIZE`.
 pub const B3_BATCH_SIZE_DEFAULT: usize = 256;
 
+/// REQ-AXO-901678 — default batch size for the pipeline_v2 runtime drain
+/// loop in `pipeline_v2_runtime::spawn_pipeline_v2_indexer`. Replaces the
+/// legacy hardcoded 256 cap that saturated under multi-project cold
+/// starts (session-54 bench : 338-file scan triggered repeated
+/// `last_batch_dropped_full=256` heartbeats, cumulative ~2.7k drops in
+/// 60s while A3 ran at work_ratio=0.99). Bumping to 512 doubles the
+/// drain bandwidth without inflating per-tick lock-hold time
+/// observably ; operator override : `AXON_INGRESS_DRAIN_BATCH`.
+pub const INGRESS_DRAIN_BATCH_DEFAULT: usize = 512;
+
+/// REQ-AXO-901678 — default tick cadence for the B1 cold-start poll. Was
+/// hardcoded `const B1_COLDSTART_POLL_INTERVAL_SECS: u64 = 30` in
+/// `pipeline_v2_runtime.rs` ; promoted to an env knob so the operator
+/// can compress the catch-up window under heavy backlog. Operator
+/// override : `AXON_B1_COLDSTART_POLL_INTERVAL_SECS`.
+pub const B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT: u64 = 30;
+
 /// B3 partial-batch flush timeout. **Critical: 200 ms, not 10 ms.**
 /// Prior 10 ms default was copy-pasted from A3 (whose 10 ms floor
 /// was operator-requested 2026-05-12 for FTS visibility latency).
@@ -96,6 +113,8 @@ pub struct PipelineChannelCaps {
     pub b2_batch_timeout_ms: u64,
     pub b3_batch_size: usize,
     pub b3_batch_timeout_ms: u64,
+    pub ingress_drain_batch: usize,
+    pub b1_coldstart_poll_interval_secs: u64,
 }
 
 impl Default for PipelineChannelCaps {
@@ -110,6 +129,8 @@ impl Default for PipelineChannelCaps {
             b2_batch_timeout_ms: B2_BATCH_TIMEOUT_MS_DEFAULT,
             b3_batch_size: B3_BATCH_SIZE_DEFAULT,
             b3_batch_timeout_ms: B3_BATCH_TIMEOUT_MS_DEFAULT,
+            ingress_drain_batch: INGRESS_DRAIN_BATCH_DEFAULT,
+            b1_coldstart_poll_interval_secs: B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
         }
     }
 }
@@ -182,6 +203,20 @@ impl PipelineChannelCaps {
                 }
             }
         }
+        if let Ok(raw) = std::env::var("AXON_INGRESS_DRAIN_BATCH") {
+            if let Ok(parsed) = raw.trim().parse::<usize>() {
+                if parsed > 0 {
+                    caps.ingress_drain_batch = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS") {
+            if let Ok(parsed) = raw.trim().parse::<u64>() {
+                if parsed > 0 {
+                    caps.b1_coldstart_poll_interval_secs = parsed;
+                }
+            }
+        }
         caps
     }
 }
@@ -211,5 +246,13 @@ mod tests {
         assert_eq!(caps.a3_batch_timeout_ms, 10);
         assert_eq!(caps.b3_batch_size, 256);
         assert_eq!(caps.b3_batch_timeout_ms, 200);
+    }
+
+    /// REQ-AXO-901678 — drain-loop and cold-start-poll cadence knobs.
+    #[test]
+    fn defaults_match_req_axo_901678_drain_knobs() {
+        let caps = PipelineChannelCaps::default();
+        assert_eq!(caps.ingress_drain_batch, 512);
+        assert_eq!(caps.b1_coldstart_poll_interval_secs, 30);
     }
 }

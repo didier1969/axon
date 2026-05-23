@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
-use crate::ingress_buffer::SharedIngressBuffer;
+use crate::ingress_buffer::{record_drain_tick, SharedIngressBuffer};
 use crate::pipeline_v2::{
     b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_a, spawn_pipeline_b_full,
     GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
@@ -34,19 +34,14 @@ use crate::pipeline_v2::{
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
-const INGRESS_DRAIN_BATCH: usize = 256;
 const INGRESS_DRAIN_POLL_MS: u64 = 200;
-/// Cadence of the periodic `b1_cold_start_poll` that rattrapes chunks
-/// A3's `try_send` dropped under A1→B1 buffer pressure. Conservative
-/// default — 30 s — keeps the poll cost negligible (a single
-/// `SELECT … LEFT JOIN … LIMIT batch_size` per tick when steady-state)
-/// while ensuring the embedding backlog drains promptly when A
-/// outpaces B (the common case at boot + large workspaces).
-const B1_COLDSTART_POLL_INTERVAL_SECS: u64 = 30;
-// REQ-AXO-314 follow-up — read cold-start batch from `caps.b1_coldstart_batch_size`
-// at boot (default 4096, env knob `AXON_B1_COLDSTART_BATCH_SIZE`). The
-// hardcoded 256-row constant was a dead-knob bug: caps was plumbed but
-// never read here, so the env never took effect.
+// REQ-AXO-901678 — `INGRESS_DRAIN_BATCH` and `B1_COLDSTART_POLL_INTERVAL_SECS`
+// are now read from `PipelineChannelCaps::from_env` (knobs
+// `AXON_INGRESS_DRAIN_BATCH`, default 512 ; and
+// `AXON_B1_COLDSTART_POLL_INTERVAL_SECS`, default 30). The legacy
+// hardcoded constants (256 / 30) were dead knobs : the runtime ignored
+// any env override the operator set. Bench session 54 confirmed A3
+// drum saturated under multi-project cold-start with 256 cap.
 
 /// Boot the streaming pipeline v2 in the indexer binary.
 ///
@@ -210,9 +205,10 @@ pub fn spawn_pipeline_v2_indexer(
 
         let store_for_poll = store.clone();
         let coldstart_batch_size = caps.b1_coldstart_batch_size;
+        let coldstart_poll_interval_secs = caps.b1_coldstart_poll_interval_secs;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(
-                B1_COLDSTART_POLL_INTERVAL_SECS,
+                coldstart_poll_interval_secs,
             ));
             tick.tick().await; // skip the immediate first tick
             loop {
@@ -333,6 +329,7 @@ pub fn spawn_pipeline_v2_indexer(
     //    is visible without re-instrumenting.
     let input_tx_drain = handles_a.input_tx;
     let ingress_for_drain = ingress_buffer.clone();
+    let drain_batch_cap = caps.ingress_drain_batch;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(INGRESS_DRAIN_POLL_MS));
         let mut tick_counter: u64 = 0;
@@ -344,7 +341,7 @@ pub fn spawn_pipeline_v2_indexer(
                 let mut guard = ingress_for_drain
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                guard.drain_batch(INGRESS_DRAIN_BATCH)
+                guard.drain_batch(drain_batch_cap)
             };
             // Clear subtree hints FIRST so even a full A1 channel
             // cannot starve them (defense-in-depth ; the try_send
@@ -385,6 +382,10 @@ pub fn spawn_pipeline_v2_indexer(
                 }
             }
             dropped_since_log = dropped_since_log.saturating_add(dropped as u64);
+            // REQ-AXO-901678 — publish drain telemetry every tick so
+            // `axon_embedding_status` + `axon_diagnose_indexing` can
+            // surface saturation without parsing logs.
+            record_drain_tick(drain_batch_cap, sent as u64, dropped as u64, tick_counter);
             // Heartbeat every ~5 s (25 ticks * 200 ms) so a future
             // stall is observable in `journalctl -f` without external
             // instrumentation. Logs even when buffer is empty so the

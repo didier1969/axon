@@ -28,6 +28,18 @@ static INGRESS_LAST_DURABLY_PERSISTED_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_DURABLY_PERSISTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_EXCLUDED_FROM_PENDING_TOTAL: AtomicU64 = AtomicU64::new(0);
+// REQ-AXO-901678 — drain saturation telemetry. Populated by
+// `record_drain_tick` after the runtime's drain loop forwards a batch
+// into pipeline A's `input_tx`. `dropped_full_total` is monotonically
+// cumulative; `last_batch_*` reflects the most recent tick; `batch_size`
+// reflects the effective `AXON_INGRESS_DRAIN_BATCH` cap the loop ran
+// with. `heartbeat_tick` is the rolling drain-loop counter (capacity-
+// independent liveness probe).
+static INGRESS_DRAIN_BATCH_SIZE: AtomicUsize = AtomicUsize::new(0);
+static INGRESS_DRAIN_HEARTBEAT_TICK: AtomicU64 = AtomicU64::new(0);
+static INGRESS_DRAIN_LAST_BATCH_SENT: AtomicU64 = AtomicU64::new(0);
+static INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_DRAIN_DROPPED_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_ACTIVITY_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -147,6 +159,14 @@ pub struct IngressMetricsSnapshot {
     pub durably_persisted_total: u64,
     pub last_excluded_from_pending_count: u64,
     pub excluded_from_pending_total: u64,
+    // REQ-AXO-901678 — drain saturation telemetry. Surfaces the
+    // pipeline_v2 runtime drain loop's per-tick throughput so the
+    // operator can detect A1 back-pressure without trawling logs.
+    pub drain_batch_size: usize,
+    pub drain_heartbeat_tick: u64,
+    pub drain_last_batch_sent: u64,
+    pub drain_last_batch_dropped_full: u64,
+    pub drain_dropped_full_total: u64,
 }
 
 #[derive(Debug)]
@@ -366,6 +386,12 @@ impl IngressBuffer {
                 .load(Ordering::Relaxed),
             excluded_from_pending_total: INGRESS_EXCLUDED_FROM_PENDING_TOTAL
                 .load(Ordering::Relaxed),
+            drain_batch_size: INGRESS_DRAIN_BATCH_SIZE.load(Ordering::Relaxed),
+            drain_heartbeat_tick: INGRESS_DRAIN_HEARTBEAT_TICK.load(Ordering::Relaxed),
+            drain_last_batch_sent: INGRESS_DRAIN_LAST_BATCH_SENT.load(Ordering::Relaxed),
+            drain_last_batch_dropped_full: INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL
+                .load(Ordering::Relaxed),
+            drain_dropped_full_total: INGRESS_DRAIN_DROPPED_FULL_TOTAL.load(Ordering::Relaxed),
         }
     }
 
@@ -624,6 +650,27 @@ pub fn ingress_metrics_snapshot() -> IngressMetricsSnapshot {
         last_excluded_from_pending_count: INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT
             .load(Ordering::Relaxed),
         excluded_from_pending_total: INGRESS_EXCLUDED_FROM_PENDING_TOTAL.load(Ordering::Relaxed),
+        drain_batch_size: INGRESS_DRAIN_BATCH_SIZE.load(Ordering::Relaxed),
+        drain_heartbeat_tick: INGRESS_DRAIN_HEARTBEAT_TICK.load(Ordering::Relaxed),
+        drain_last_batch_sent: INGRESS_DRAIN_LAST_BATCH_SENT.load(Ordering::Relaxed),
+        drain_last_batch_dropped_full: INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL
+            .load(Ordering::Relaxed),
+        drain_dropped_full_total: INGRESS_DRAIN_DROPPED_FULL_TOTAL.load(Ordering::Relaxed),
+    }
+}
+
+/// REQ-AXO-901678 — published by `pipeline_v2_runtime::spawn_pipeline_v2_indexer`
+/// at the tail of each drain tick. Aggregates the per-tick `try_send`
+/// outcome into the global ingress metrics so `axon_embedding_status`
+/// and `axon_diagnose_indexing` can surface drain saturation without
+/// tailing `journalctl`.
+pub fn record_drain_tick(batch_size: usize, sent: u64, dropped_full: u64, tick: u64) {
+    INGRESS_DRAIN_BATCH_SIZE.store(batch_size, Ordering::Relaxed);
+    INGRESS_DRAIN_HEARTBEAT_TICK.store(tick, Ordering::Relaxed);
+    INGRESS_DRAIN_LAST_BATCH_SENT.store(sent, Ordering::Relaxed);
+    INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL.store(dropped_full, Ordering::Relaxed);
+    if dropped_full > 0 {
+        INGRESS_DRAIN_DROPPED_FULL_TOTAL.fetch_add(dropped_full, Ordering::Relaxed);
     }
 }
 
@@ -648,6 +695,11 @@ pub fn reset_ingress_metrics_for_tests() {
     INGRESS_DURABLY_PERSISTED_TOTAL.store(0, Ordering::Relaxed);
     INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT.store(0, Ordering::Relaxed);
     INGRESS_EXCLUDED_FROM_PENDING_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_DRAIN_BATCH_SIZE.store(0, Ordering::Relaxed);
+    INGRESS_DRAIN_HEARTBEAT_TICK.store(0, Ordering::Relaxed);
+    INGRESS_DRAIN_LAST_BATCH_SENT.store(0, Ordering::Relaxed);
+    INGRESS_DRAIN_LAST_BATCH_DROPPED_FULL.store(0, Ordering::Relaxed);
+    INGRESS_DRAIN_DROPPED_FULL_TOTAL.store(0, Ordering::Relaxed);
 }
 
 pub fn record_ingress_flush(

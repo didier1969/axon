@@ -16,3 +16,5 @@ pub mod vector_runtime_tests;
 pub mod pg_health_tests;
 // REQ-AXO-901675 — registry NOTIFY end-to-end integration.
 pub mod registry_notify_integration_tests;
+// REQ-AXO-901678 — drain saturation telemetry + tuning end-to-end.
+pub mod drain_overload_tests;

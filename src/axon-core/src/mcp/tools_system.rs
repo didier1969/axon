@@ -408,6 +408,19 @@ impl McpServer {
             "AXON_B1_COLDSTART_BATCH_SIZE",
             crate::pipeline_v2::channels::B1_COLDSTART_BATCH_SIZE_DEFAULT,
         );
+        // REQ-AXO-901678 — surface drain saturation knobs + counters so
+        // the operator can spot A1 back-pressure without trawling
+        // journalctl. Defaults mirror `PipelineChannelCaps` so an
+        // unconfigured env still reports the canonical 512 / 30 s.
+        let ingress_drain_batch = env_usize(
+            "AXON_INGRESS_DRAIN_BATCH",
+            crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT,
+        );
+        let coldstart_poll_interval_secs = env_u64(
+            "AXON_B1_COLDSTART_POLL_INTERVAL_SECS",
+            crate::pipeline_v2::channels::B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
+        );
+        let drain_snapshot = crate::ingress_buffer::ingress_metrics_snapshot();
         // REQ-AXO-901657 slice 4 cluster B : canonical name is
         // `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (matches the read site in
         // `pipeline_v2::channels::CapsCfg::from_env`). The legacy
@@ -498,10 +511,20 @@ impl McpServer {
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
              - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par cold-start poll)\n\
              - NOTIFY channel:    chunk_pending_embed\n\
-             - Cold-start poll:   every 30 s, batch {coldstart_batch}\n\
+             - Cold-start poll:   every {coldstart_poll_interval_secs} s, batch {coldstart_batch}\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\n\
-             Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer)."
+             ### Pipeline drain (ingress → A1)\n\
+             - Drain batch cap:      {ingress_drain_batch} (env AXON_INGRESS_DRAIN_BATCH)\n\
+             - Heartbeat tick:       {drain_heartbeat_tick}\n\
+             - Last batch sent:      {drain_last_batch_sent}\n\
+             - Last batch dropped (A1 full): {drain_last_batch_dropped_full}\n\
+             - Cumulative dropped (A1 full): {drain_dropped_full_total}\n\n\
+             Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer).",
+            drain_heartbeat_tick = drain_snapshot.drain_heartbeat_tick,
+            drain_last_batch_sent = drain_snapshot.drain_last_batch_sent,
+            drain_last_batch_dropped_full = drain_snapshot.drain_last_batch_dropped_full,
+            drain_dropped_full_total = drain_snapshot.drain_dropped_full_total,
         );
 
         Some(json!({
@@ -519,7 +542,7 @@ impl McpServer {
                 "pipeline_a": { "a1": a1, "a2": a2, "a3": a3, "a3_batch_size": a3_batch, "a3_batch_timeout_ms": a3_timeout },
                 "pipeline_b": { "b1": b1, "b2": b2, "b3": b3, "b2_batch_size": b2_batch, "b2_batch_timeout_ms": b2_timeout, "b3_batch_size": b3_batch, "b3_batch_timeout_ms": b3_timeout, "a3_to_b1_buffer_cap": a3_to_b1_cap, "coldstart_batch_size": coldstart_batch },
                 "notify_channel": "chunk_pending_embed",
-                "coldstart_poll_interval_secs": 30,
+                "coldstart_poll_interval_secs": coldstart_poll_interval_secs,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
                 "lifecycle_phase": lifecycle_phase,
@@ -528,6 +551,19 @@ impl McpServer {
                 "lifecycle_sleep_count": lifecycle_sleep_count,
                 "lifecycle_source": lifecycle_source,
                 "lifecycle_heartbeat_age_ms": lifecycle_heartbeat_age_ms,
+                // REQ-AXO-901678 — drain saturation telemetry surface.
+                // `batch_size` and `heartbeat_tick` reflect what the
+                // runtime drain loop ran with on its last tick (0 if the
+                // pipeline-v2 runtime has not started yet — e.g. brain
+                // process answering on its own).
+                "pipeline_drain": {
+                    "batch_size": drain_snapshot.drain_batch_size,
+                    "heartbeat_tick": drain_snapshot.drain_heartbeat_tick,
+                    "last_batch_sent": drain_snapshot.drain_last_batch_sent,
+                    "last_batch_dropped_full": drain_snapshot.drain_last_batch_dropped_full,
+                    "dropped_full_total": drain_snapshot.drain_dropped_full_total,
+                    "configured_batch_cap": ingress_drain_batch,
+                },
             }
         }))
     }

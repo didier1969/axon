@@ -232,6 +232,29 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // REQ-AXO-901678 — drain saturation block. Sourced from the
+        // global ingress metrics ; populated by the pipeline_v2 runtime
+        // drain loop. Surfaces A1 back-pressure (`last_batch_dropped_full`
+        // > 0) so the operator can correlate with the cold-start poll
+        // catch-up and tune `AXON_INGRESS_DRAIN_BATCH`. The default cap
+        // shown is the `PipelineChannelCaps` default (512).
+        let drain = crate::ingress_buffer::ingress_metrics_snapshot();
+        let configured_batch_cap = std::env::var("AXON_INGRESS_DRAIN_BATCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT);
+        let coldstart_poll_secs = std::env::var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(crate::pipeline_v2::channels::B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT);
+        let drain_status = if drain.drain_heartbeat_tick == 0 {
+            "drain loop not running (pipeline_v2 runtime not spawned in this process)"
+        } else if drain.drain_dropped_full_total > 0 || drain.drain_last_batch_dropped_full > 0 {
+            "drops observed — A1 input channel saturated ; raise AXON_INGRESS_DRAIN_BATCH or AXON_PIPELINE_A3_TO_B1_BUFFER_CAP"
+        } else {
+            "no drops — drain healthy"
+        };
+
         format!(
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
@@ -245,11 +268,20 @@ impl McpServer {
              **Likely root causes**\n{}\n\n\
              **Top status reasons**\n{}\n\n\
              **Top parser/runtime errors**\n{}\n\n\
+             ### Drain analysis (REQ-AXO-901678)\n\
+             * batch_size: {} (env AXON_INGRESS_DRAIN_BATCH ; configured cap = {})\n\
+             * heartbeat_tick: {}\n\
+             * last_batch_sent: {}\n\
+             * last_batch_dropped_full: {}\n\
+             * dropped_full_total: {}\n\
+             * cold-start poll cadence: every {} s (env AXON_B1_COLDSTART_POLL_INTERVAL_SECS)\n\
+             * status: {}\n\n\
              **Remediation hints**\n\
              * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
-             * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries",
+             * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
+             * if `dropped_full_total` keeps rising, raise `AXON_INGRESS_DRAIN_BATCH` (default 512) or widen `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (default 10 000)",
             project,
             known,
             completed,
@@ -260,7 +292,15 @@ impl McpServer {
             calls_nif,
             cause_lines,
             reason_lines,
-            error_lines
+            error_lines,
+            drain.drain_batch_size,
+            configured_batch_cap,
+            drain.drain_heartbeat_tick,
+            drain.drain_last_batch_sent,
+            drain.drain_last_batch_dropped_full,
+            drain.drain_dropped_full_total,
+            coldstart_poll_secs,
+            drain_status,
         )
     }
 
