@@ -818,13 +818,30 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         },
     ) {
         Ok(url) => {
-            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(url);
+            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(url.clone());
             info!("ist_mutated listener spawned (REQ-AXO-901658) — IST cache eviction wired");
+            // REQ-AXO-901675 (PIL-AXO-008) — registry mutation NOTIFY consumer.
+            // axon_init_project (and any other write to soll.ProjectCodeRegistry)
+            // emits pg_notify('axon_registry_changed', ...) via the trigger
+            // installed by `db/ddl/07_registry_notify.sql`. This listener
+            // turns the notification into an `IngressSource::Scan` subtree
+            // hint, so the scanner discovers and indexes the newly registered
+            // project without requiring an indexer restart.
+            crate::registry_notify_listener::spawn_registry_change_listener(
+                url,
+                ingress_buffer.clone(),
+            );
+            info!(
+                "axon_registry_changed listener spawned (REQ-AXO-901675) — \
+                 registry mutations now trigger automatic subtree scan"
+            );
         }
         Err(err) => {
             warn!(
                 error = %err,
-                "ist_mutated listener disabled: PG URL unresolved ; IST cache will stay stale across mutations"
+                "ist_mutated + axon_registry_changed listeners disabled: PG URL unresolved ; \
+                 IST cache will stay stale across mutations AND new projects from \
+                 axon_init_project will not be indexed without a manual restart"
             );
         }
     }

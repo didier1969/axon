@@ -35,6 +35,7 @@ pub mod pipeline_v2_runtime;
 pub mod postgres;
 pub mod project_meta;
 pub mod queue;
+pub mod registry_notify_listener;
 pub mod runtime_boot;
 pub mod runtime_command_proxy;
 pub mod runtime_mode;

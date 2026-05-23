@@ -14,3 +14,5 @@ pub mod test_helpers;
 pub mod vector_runtime_tests;
 // REQ-AXO-284 Slice 2 — PG health helpers.
 pub mod pg_health_tests;
+// REQ-AXO-901675 — registry NOTIFY end-to-end integration.
+pub mod registry_notify_integration_tests;
