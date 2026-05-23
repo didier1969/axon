@@ -985,6 +985,25 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "properties": {},
                     "required": []
                 }
+            }),
+            // REQ-AXO-901676 — proportionate recovery surface for cases
+            // where the indexer's incremental state is suspected stale
+            // (git pull massif, backup restore, inotify drop, watcher
+            // crash). Returns synchronously with `files_scheduled` +
+            // `projection_eta_ms` ; the actual scan runs asynchronously
+            // via the existing `axon_registry_changed` NOTIFY listener
+            // (REQ-AXO-901675) so no indexer restart is required.
+            json!({
+                "name": "rescan_project",
+                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; triggers the indexer's existing subtree-scan plumbing (NOTIFY axon_registry_changed → record_subtree_hint). `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Must be present in soll.ProjectCodeRegistry." },
+                        "full": { "type": "boolean", "description": "When true, wipes IndexedFile rows under the project_path so the next scanner pass re-parses + re-embeds every file regardless of cached content_hash. Default false (delta scan only re-touches files whose hash changed)." }
+                    },
+                    "required": ["project_code"]
+                }
             })
         ]
     });

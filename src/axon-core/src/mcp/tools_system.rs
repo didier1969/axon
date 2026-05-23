@@ -644,5 +644,239 @@ impl McpServer {
             json!({ "content": [{ "type": "text", "text": serde_json::to_string(&all_results).unwrap_or_default() }] }),
         )
     }
+
+    /// REQ-AXO-901676 — `rescan_project(project_code, full=false)`.
+    ///
+    /// Proportionate recovery surface for cases where the indexer's
+    /// incremental state machine is suspected stale (git pull massif,
+    /// backup restore, inotify drop, watcher crash). Returns
+    /// synchronously with `files_scheduled` + `projection_eta_ms` ;
+    /// the actual scan runs asynchronously via the existing
+    /// `axon_registry_changed` NOTIFY listener wired up in
+    /// `runtime_boot.rs` (REQ-AXO-901675). No new DDL / listener
+    /// thread is introduced — we reuse the symmetric push pattern.
+    ///
+    /// Modes :
+    ///  - `full=false` (default) : delta scan only ; IndexedFile
+    ///    cache is preserved so the indexer skips files whose
+    ///    `content_hash` already matches the disk hash.
+    ///  - `full=true` : wipes `public.IndexedFile` rows whose `path`
+    ///    is under the project_path prefix BEFORE triggering the
+    ///    NOTIFY, so every file is forced through A1/A2/A3 + B1/B2/B3
+    ///    on the next scanner pass.
+    ///
+    /// Error envelope follows the standard MCP shape :
+    /// `{"content":[{...}], "structuredContent":{"status":"error",...},
+    /// "isError": true}` so callers can distinguish a registry miss
+    /// from a transport failure.
+    pub(crate) fn axon_rescan_project(&self, args: &Value) -> Option<Value> {
+        let project_code = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let project_code = match project_code {
+            Some(code) => code.to_string(),
+            None => return Some(rescan_error_envelope(
+                "",
+                "missing_project_code",
+                "argument `project_code` is required",
+            )),
+        };
+        let full = args
+            .get("full")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mode_label = if full { "full" } else { "delta" };
+
+        // Step 1 — resolve project_path via soll.ProjectCodeRegistry.
+        // Inline (instead of touching workflow_project.rs) so the file
+        // allocation contract for sub-B2 is respected.
+        let project_path = match self.lookup_project_path_for_rescan(&project_code) {
+            Some(path) => path,
+            None => return Some(rescan_error_envelope(
+                &project_code,
+                "unknown_project_code",
+                &format!(
+                    "project_code `{}` is not present in soll.ProjectCodeRegistry — register it via axon_init_project first",
+                    project_code
+                ),
+            )),
+        };
+
+        // Step 2 — when full=true, wipe IndexedFile rows under the
+        // project_path so the scanner cannot skip files via cached
+        // content_hash. Best-effort : a failure here is logged in the
+        // returned envelope's `cache_invalidation` field but does not
+        // abort the rescan trigger (degraded path still beats nothing).
+        let cache_invalidation = if full {
+            self.rescan_wipe_indexed_files(&project_path)
+        } else {
+            "skipped (delta mode)".to_string()
+        };
+
+        // Step 3 — enumerate files on disk to compute
+        // `files_scheduled` for the caller. The scanner applies the
+        // same .gitignore / .axonignore / supported-extension filters
+        // the indexer would, so the count matches what will actually
+        // be queued by A1.
+        let files_scheduled = self.rescan_enumerate_file_count(&project_path, &project_code);
+
+        // Step 4 — emit NOTIFY on the existing registry channel. The
+        // listener (when ingestion is enabled — see runtime_boot.rs)
+        // converts the payload into an `IngressSource::Scan` subtree
+        // hint with priority 100 via record_subtree_hint, identical to
+        // what axon_init_project triggers. If the indexer is not
+        // running, the NOTIFY is silently dropped (PG semantics) ; the
+        // caller still gets a structured envelope so the operator
+        // sees the work was requested.
+        let notify_outcome = self.rescan_emit_subtree_notify(&project_code, &project_path, full);
+
+        // Step 5 — projection ETA. Heuristic : ~30 ms/file end-to-end
+        // through A1+A2+A3 (CPU graph + chunks) ; B1/B2/B3 (GPU embed)
+        // overlaps with A so we don't double-count. This is a coarse
+        // lower bound for operator UX — actual throughput depends on
+        // file size, parser, GPU saturation.
+        const ETA_MS_PER_FILE: usize = 30;
+        let projection_eta_ms = files_scheduled.saturating_mul(ETA_MS_PER_FILE);
+
+        let report = format!(
+            "### Rescan Project\n\n\
+             **project_code:** `{project_code}`\n\
+             **project_path:** `{project_path_display}`\n\
+             **mode:** {mode_label} (full={full})\n\
+             **files_scheduled:** {files_scheduled}\n\
+             **projection_eta_ms:** {projection_eta_ms}\n\
+             **cache_invalidation:** {cache_invalidation}\n\
+             **notify_outcome:** {notify_outcome}\n\n\
+             Re-scan triggered via `axon_registry_changed` NOTIFY ; \
+             the indexer's `record_subtree_hint` consumer (REQ-AXO-901675) \
+             will pick the work up asynchronously. If the indexer is not \
+             running, start it via `./scripts/axon-{{live,dev}} start \
+             --indexer-graph` and the next boot will replay IndexedFile from \
+             PG before scanning.",
+            project_path_display = project_path,
+        );
+        let structured = json!({
+            "status": "ok",
+            "project_code": project_code,
+            "project_path": project_path,
+            "mode": mode_label,
+            "full": full,
+            "files_scheduled": files_scheduled,
+            "projection_eta_ms": projection_eta_ms,
+            "cache_invalidation": cache_invalidation,
+            "notify_outcome": notify_outcome,
+        });
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "structuredContent": structured,
+        }))
+    }
+
+    /// Internal helper — registry lookup duplicated from
+    /// `workflow_project::lookup_project_path_by_code` so sub-B2 file
+    /// allocation stays tight (see PR contract). Returns the absolute
+    /// project_path string on hit, `None` otherwise.
+    fn lookup_project_path_for_rescan(&self, project_code: &str) -> Option<String> {
+        let escaped = project_code.replace('\'', "''");
+        let raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT project_path FROM {} WHERE project_code = '{}'",
+                self.graph_store.soll_table("ProjectCodeRegistry"),
+                escaped
+            ))
+            .ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
+        let path = rows.into_iter().next()?.into_iter().next()?;
+        if path.trim().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    }
+
+    /// Internal helper — wipe IndexedFile rows under `project_path`
+    /// so the scanner is forced to re-parse every file regardless of
+    /// the cached `content_hash`. Returns a human-readable status
+    /// string for the envelope. Failure is non-fatal : the NOTIFY
+    /// still fires and the indexer will at minimum re-touch
+    /// `last_seen_ms` on next pass.
+    fn rescan_wipe_indexed_files(&self, project_path: &str) -> String {
+        let escaped = project_path.replace('\'', "''");
+        let sql = format!(
+            "DELETE FROM public.IndexedFile WHERE path LIKE '{}/%'",
+            escaped
+        );
+        match self.graph_store.execute_raw_sql_gateway(&sql) {
+            Ok(_) => "wiped (full mode)".to_string(),
+            Err(err) => format!("wipe_failed: {err}"),
+        }
+    }
+
+    /// Internal helper — enumerate files on disk for the project,
+    /// honoring the same .gitignore / .axonignore / supported-extension
+    /// rules as the indexer's scan pass.
+    fn rescan_enumerate_file_count(&self, project_path: &str, project_code: &str) -> usize {
+        let scanner = crate::scanner::Scanner::new(project_path, project_code);
+        scanner.enumerate_files().len()
+    }
+
+    /// Internal helper — emit `pg_notify('axon_registry_changed', ...)`
+    /// with the same payload shape as `db/ddl/07_registry_notify.sql`
+    /// so the existing listener (`registry_notify_listener.rs`)
+    /// converts it into an `IngressSource::Scan` subtree hint.
+    /// `op` is set to `"rescan"` so operators can distinguish an
+    /// operator-driven rescan from a registry insert/update in
+    /// downstream telemetry. (The listener treats any non-empty
+    /// `project_path` as a scan trigger so the new op string is
+    /// forward-compatible.)
+    fn rescan_emit_subtree_notify(
+        &self,
+        project_code: &str,
+        project_path: &str,
+        full: bool,
+    ) -> String {
+        let payload = json!({
+            "op": "rescan",
+            "project_code": project_code,
+            "project_path": project_path,
+            "full": full,
+        });
+        let payload_str = payload.to_string().replace('\'', "''");
+        let sql = format!(
+            "SELECT pg_notify('axon_registry_changed', '{}')",
+            payload_str
+        );
+        match self.graph_store.execute_raw_sql_gateway(&sql) {
+            Ok(_) => "notified".to_string(),
+            Err(err) => format!("notify_failed: {err}"),
+        }
+    }
+}
+
+/// Build a standard MCP error envelope for rescan_project failures.
+/// Mirrors the shape used by other tools (`{content, structuredContent,
+/// isError}`) so callers parsing the envelope schema get a uniform
+/// signal regardless of which tool failed.
+fn rescan_error_envelope(project_code: &str, code: &str, message: &str) -> Value {
+    let text = format!(
+        "### Rescan Project — error\n\n\
+         **status:** error\n\
+         **code:** {code}\n\
+         **project_code:** `{project_code}`\n\
+         **message:** {message}"
+    );
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": {
+            "status": "error",
+            "code": code,
+            "project_code": project_code,
+            "message": message,
+        },
+        "isError": true,
+    })
 }
 

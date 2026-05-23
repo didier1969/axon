@@ -1233,6 +1233,9 @@ impl McpServer {
             "query_examples" => self.axon_query_examples(arguments),
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
+            // REQ-AXO-901676 — proportionate recovery: force delta / full rescan
+            // of a project subtree without restarting the indexer.
+            "rescan_project" => self.axon_rescan_project(arguments),
             "job_status" => self.axon_job_status(arguments),
             // REQ-AXO-91580/91581 — SKI + PRT MCP surface.
             "skill_list" => self.axon_skill_list(arguments),
