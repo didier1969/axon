@@ -488,8 +488,18 @@ Options:
   --skip-mcp-tests Skip automatic MCP quality gate validation after startup
   --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
   --fast          MCP-only dev iteration shorthand (=--no-dashboard --skip-mcp-tests --skip-elixir-prewarm)
+  --use-process-compose  REQ-AXO-901735 Phase 2d : exec ./scripts/axon-pc up à la place du flow legacy.
+                          Convient pour brain-only V1 (live) + brain+indexer (dev). Comportement
+                          réversible : sans ce flag, le flow tmux+axonctl-supervise actuel s applique.
 EOF
             exit 0
+            ;;
+        --use-process-compose)
+            # REQ-AXO-901735 Phase 2d MVP — bypass start.sh legacy flow et délègue
+            # à scripts/axon-pc (qui exec process-compose up avec preflight gate).
+            # Réversible : tant que ce flag n est pas la default, start.sh ancien
+            # path cohabite et l opérateur peut revenir en arrière.
+            USE_PROCESS_COMPOSE=1
             ;;
         *)
             echo "❌ Unknown option: $1"
@@ -499,6 +509,16 @@ EOF
     esac
     shift
 done
+
+# REQ-AXO-901735 Phase 2d : redirection vers process-compose si demandé.
+# Exécuté AVANT toute autre logique start.sh (ensure_runtime, devenv shell,
+# tmux, etc.) — `scripts/axon-pc` gère tout via process-compose.yaml +
+# axonctl preflight.
+if [[ "${USE_PROCESS_COMPOSE:-0}" == "1" ]]; then
+    PC_INSTANCE="${AXON_INSTANCE_KIND:-live}"
+    echo "🔀 REQ-AXO-901735 Phase 2d : delegating to scripts/axon-pc (instance=$PC_INSTANCE)..."
+    exec "$PROJECT_ROOT/scripts/axon-pc" up --instance "$PC_INSTANCE"
+fi
 
 if [[ "$REQUEST_TENSORRT" == "1" ]]; then
     if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
