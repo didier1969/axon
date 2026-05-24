@@ -1413,6 +1413,144 @@ fn check_binary_present(path: &Path) -> PreflightCheck {
     }
 }
 
+/// REQ-AXO-901739 — refuser les env vars retirées par migrations SOLL.
+/// Instance du pattern CPT-AXO-90034 (technology migration residue tracking).
+/// La liste est statique et trackée avec la SOLL ref qui l a retirée.
+fn check_env_no_stale_vars() -> PreflightCheck {
+    // (env_var_name, soll_ref_explaining_retirement)
+    let retired: &[(&str, &str)] = &[
+        ("AXON_AGE_ONLY_RELATIONS", "MIL-AXO-017 retire Apache AGE"),
+        ("AXON_INDEXER_PG_OPT_IN", "MIL-AXO-017 Gate 7 merged 2026-05-13"),
+        ("AXON_DUCKDB_WAL_DIR", "REQ-AXO-271 slice 2-6 retire DuckDB"),
+        ("AXON_DUCKDB_OPT_IN", "REQ-AXO-271 retire DuckDB"),
+        ("AXON_HOT_STATUS_CACHE", "REQ-AXO-901653 slice-5d retire FVQ flush path"),
+        (
+            "AXON_FILE_VECTORIZATION_QUEUE_DEPTH",
+            "REQ-AXO-901632 retire FVQ",
+        ),
+        (
+            "AXON_FILE_VECTORIZATION_QUEUE_TIMEOUT_MS",
+            "REQ-AXO-901632 retire FVQ",
+        ),
+        (
+            "AXON_FVQ_TELEMETRY_ENABLED",
+            "REQ-AXO-901674 purge FVQ/GPQ telemetry",
+        ),
+        (
+            "AXON_GPQ_TELEMETRY_ENABLED",
+            "REQ-AXO-901674 purge FVQ/GPQ telemetry",
+        ),
+        (
+            "AXON_QUEUE_MEMORY_BUDGET_BYTES",
+            "REQ-AXO-290 S3 retire env-gated queue cap",
+        ),
+        (
+            "AXON_GPU_EMBED_SERVICE_TENSORRT",
+            "REQ-AXO-901737 retire indirection ; AXON_EMBEDDING_PROVIDER=tensorrt suffit",
+        ),
+        (
+            "AXON_REQUEST_TENSORRT",
+            "REQ-AXO-901737 retire indirection ; AXON_EMBEDDING_PROVIDER=tensorrt suffit",
+        ),
+        (
+            "AXON_EMBEDDING_GPU_PRESENT",
+            "REQ-AXO-901737 retire env-fanout ; in-process struct EmbeddingProviderDiagnostics",
+        ),
+        (
+            "AXON_EMBEDDING_PROVIDER_EFFECTIVE",
+            "REQ-AXO-901737 retire env-fanout",
+        ),
+        (
+            "AXON_EMBEDDING_PROVIDER_INIT_ERROR",
+            "REQ-AXO-901737 retire env-fanout",
+        ),
+    ];
+
+    let leaks: Vec<String> = retired
+        .iter()
+        .filter(|(var, _)| std::env::var(var).is_ok())
+        .map(|(var, soll)| format!("  {} → retiré par {}", var, soll))
+        .collect();
+
+    if leaks.is_empty() {
+        PreflightCheck {
+            name: "env-stale-vars".to_string(),
+            passed: true,
+            detail: format!(
+                "Aucune des {} env vars retirées présente",
+                retired.len()
+            ),
+        }
+    } else {
+        PreflightCheck {
+            name: "env-stale-vars".to_string(),
+            passed: false,
+            detail: format!(
+                "{} env var(s) retirée(s) détectée(s) — résidu de session précédente, peut causer comportement indéfini :\n{}",
+                leaks.len(),
+                leaks.join("\n")
+            ),
+        }
+    }
+}
+
+/// REQ-AXO-901739 — `ORT_DYLIB_PATH` doit pointer vers l artifact TensorRT
+/// canonical, pas vers l onnxruntime nixpkgs default (la trap REQ-AXO-901630).
+/// V1 : reject si le chemin contient `onnxruntime` MAIS PAS `tensorrt` ;
+/// reject si le chemin n existe pas sur disque. V2 raffinera contre le
+/// manifest .axon/ort-artifacts/onnxruntime-tensorrt-cudaPackages/current.json.
+fn check_ort_dylib_path_canonical() -> PreflightCheck {
+    match std::env::var("ORT_DYLIB_PATH") {
+        Err(_) => PreflightCheck {
+            name: "ort-dylib-path".to_string(),
+            passed: true,
+            detail: "ORT_DYLIB_PATH unset — runtime résoudra via artifact manifest (REQ-AXO-901630)".to_string(),
+        },
+        Ok(path) => {
+            let trimmed = path.trim().to_string();
+            if trimmed.is_empty() {
+                return PreflightCheck {
+                    name: "ort-dylib-path".to_string(),
+                    passed: true,
+                    detail: "ORT_DYLIB_PATH empty — runtime résoudra via artifact manifest".to_string(),
+                };
+            }
+            let p = Path::new(&trimmed);
+            if !p.exists() {
+                return PreflightCheck {
+                    name: "ort-dylib-path".to_string(),
+                    passed: false,
+                    detail: format!("ORT_DYLIB_PATH={trimmed} n existe pas sur disque"),
+                };
+            }
+            // Heuristic V1 : la trap REQ-AXO-901630 = onnxruntime nixpkgs
+            // default (pas de TensorRT EP). Le path TensorRT canonical
+            // contient toujours "tensorrt" ou pointe vers .axon/ort-artifacts/.
+            let lower = trimmed.to_ascii_lowercase();
+            let is_nixpkgs_default = lower.contains("/nix/store/")
+                && lower.contains("onnxruntime")
+                && !lower.contains("tensorrt");
+            if is_nixpkgs_default {
+                PreflightCheck {
+                    name: "ort-dylib-path".to_string(),
+                    passed: false,
+                    detail: format!(
+                        "ORT_DYLIB_PATH={trimmed} pointe vers onnxruntime nixpkgs default \
+                         (sans TensorRT EP). La trap REQ-AXO-901630. Unset et laisser le runtime \
+                         résoudre via .axon/ort-artifacts/onnxruntime-tensorrt-cudaPackages/current.json"
+                    ),
+                }
+            } else {
+                PreflightCheck {
+                    name: "ort-dylib-path".to_string(),
+                    passed: true,
+                    detail: format!("ORT_DYLIB_PATH={trimmed} (TensorRT-tagged)"),
+                }
+            }
+        }
+    }
+}
+
 fn cmd_preflight(config: InstanceConfig, json: bool) -> Result<()> {
     let pg_port: u16 = std::env::var("PGPORT")
         .ok()
@@ -1426,6 +1564,10 @@ fn cmd_preflight(config: InstanceConfig, json: bool) -> Result<()> {
     let bin_indexer = config.project_root.join("bin").join("axon-indexer");
     checks.push(check_binary_present(&bin_brain));
     checks.push(check_binary_present(&bin_indexer));
+
+    // REQ-AXO-901739 — env hygiene gates (Phase 2c V2).
+    checks.push(check_env_no_stale_vars());
+    checks.push(check_ort_dylib_path_canonical());
 
     let all_passed = checks.iter().all(|c| c.passed);
     let status = if all_passed { "ready" } else { "blocked" };
