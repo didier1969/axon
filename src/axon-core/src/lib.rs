@@ -20,6 +20,7 @@ pub mod graph_ingestion;
 pub mod graph_query;
 // REQ-AXO-901653 slice-5d — `hot_status_cache` deleted (env-gated FileVectorizationQueue
 // flush path ; pipeline_v2 owns chunk-state directly).
+pub mod indexer_health_http;
 pub mod indexing_policy;
 pub mod ingress_buffer;
 pub mod ist_snapshot;

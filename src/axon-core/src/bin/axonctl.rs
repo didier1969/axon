@@ -194,6 +194,7 @@ Usage:
 Commands:
   stop          Orchestrated instance stop (kill processes, clean locks, verify)
   supervise     Spawn and supervise a runtime binary (signal forwarding, PID file)
+  preflight     REQ-AXO-901735: pre-launch checks (PG accessible, binaries present)
   status        Health check for an instance
   auto-restart  REQ-AXO-097: poll role health, respawn on failure detection
 
@@ -343,6 +344,7 @@ fn main() -> Result<()> {
             result
         }
         "supervise" => cmd_supervise(require_config(&args)?, args.passthrough),
+        "preflight" => cmd_preflight(require_config(&args)?, args.json),
         "auto-restart" => cmd_auto_restart(
             require_config(&args)?,
             args.passthrough,
@@ -1340,6 +1342,118 @@ fn get_listening_ports() -> BTreeSet<u16> {
     ports
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 5 (REQ-AXO-901735) : axonctl preflight — pre-launch checks
+// ---------------------------------------------------------------------------
+//
+// V1 MVP : 2 checks suffisent à éliminer le cas root du bug 2026-05-24
+// (PG mort post-reboot Windows, 94 s d'opacité avant échec générique).
+// V2 raffinera (role axon existe, target DB seedée, DDL appliqué).
+//
+// L'output JSON est consommable par process-compose `depends_on` exec
+// probe (l'exit code 0 = green light, 1 = bloquer le boot des
+// consumers). Comme remplacement de scripts/lib/ensure-runtime.sh.
+
+#[derive(Debug, Serialize)]
+struct PreflightCheck {
+    name: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PreflightReport {
+    instance_kind: String,
+    role: String,
+    pg_port: u16,
+    checks: Vec<PreflightCheck>,
+    status: String,
+}
+
+fn run_pg_isready(port: u16) -> PreflightCheck {
+    // pg_isready returns 0 if accepting, 1 if rejecting, 2 if no response,
+    // 3 on invocation error. We treat 0 as passed and capture stderr.
+    match Command::new("pg_isready")
+        .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-q"])
+        .output()
+    {
+        Ok(out) if out.status.success() => PreflightCheck {
+            name: "pg_isready".to_string(),
+            passed: true,
+            detail: format!("PG responding on :{port}"),
+        },
+        Ok(out) => PreflightCheck {
+            name: "pg_isready".to_string(),
+            passed: false,
+            detail: format!(
+                "PG not ready on :{port} (rc={}): {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        },
+        Err(e) => PreflightCheck {
+            name: "pg_isready".to_string(),
+            passed: false,
+            detail: format!("pg_isready binary unavailable: {e}"),
+        },
+    }
+}
+
+fn check_binary_present(path: &Path) -> PreflightCheck {
+    let exists = path.exists();
+    PreflightCheck {
+        name: format!("binary:{}", path.display()),
+        passed: exists,
+        detail: if exists {
+            format!("{} present", path.display())
+        } else {
+            format!("{} missing — promote_live_safe.sh required", path.display())
+        },
+    }
+}
+
+fn cmd_preflight(config: InstanceConfig, json: bool) -> Result<()> {
+    let pg_port: u16 = std::env::var("PGPORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or(44144);
+
+    let mut checks = Vec::new();
+    checks.push(run_pg_isready(pg_port));
+
+    let bin_brain = config.project_root.join("bin").join("axon-brain");
+    let bin_indexer = config.project_root.join("bin").join("axon-indexer");
+    checks.push(check_binary_present(&bin_brain));
+    checks.push(check_binary_present(&bin_indexer));
+
+    let all_passed = checks.iter().all(|c| c.passed);
+    let status = if all_passed { "ready" } else { "blocked" };
+
+    let report = PreflightReport {
+        instance_kind: config.instance_kind.label().to_string(),
+        role: config.role.label().to_string(),
+        pg_port,
+        checks,
+        status: status.to_string(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("axonctl preflight — instance={} role={}", report.instance_kind, report.role);
+        for c in &report.checks {
+            let marker = if c.passed { "✅" } else { "❌" };
+            println!("  {marker} {} — {}", c.name, c.detail);
+        }
+        println!("status: {}", report.status);
+    }
+
+    if !all_passed {
+        return Err(anyhow!("preflight checks failed"));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Shared process utilities

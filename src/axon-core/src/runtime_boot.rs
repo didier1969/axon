@@ -1616,4 +1616,20 @@ fn start_indexer_only_services(
     } else {
         info!("Runtime services: semantic workers disabled by runtime mode.");
     }
+
+    // REQ-AXO-901735 / DEC-AXO-901615 — health probes HTTP indexer pour
+    // que process-compose puisse observer liveness / readiness / startup
+    // sans inspection ad-hoc (PID file, pgrep). Port dédié séparé de
+    // celui du brain pour cohabitation live brain :44129 + indexer :44139.
+    // Best-effort : si bind échoue, l'indexer tourne sans HTTP (process-
+    // compose perdra ses probes mais ne crash pas).
+    let health_state = crate::indexer_health_http::IndexerHealthState::new();
+    let health_port = crate::indexer_health_http::resolve_health_port();
+    let health_state_for_spawn = health_state.clone();
+    tokio::spawn(async move {
+        crate::indexer_health_http::serve_health_probes(health_port, health_state_for_spawn).await;
+    });
+    // Init terminé (workers spawnés ci-dessus) → /startupz peut retourner
+    // 200. Avant ce point, /startupz retourne 503 + {state:starting}.
+    health_state.mark_startup_done();
 }
