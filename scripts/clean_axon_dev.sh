@@ -39,9 +39,18 @@ for arg in "$@"; do
 done
 
 # --- Safety check : refuse any DB name containing "live" or "prod". ---
-db_name=$(psql "$DB_URL" -tAc 'SELECT current_database();' 2>/dev/null || true)
+# REQ-AXO-901740 — capture psql stderr to a temp file so the real cause
+# (auth refused, host unreachable, role missing) surfaces instead of a
+# generic "could not query current_database()".
+_psql_err="$(mktemp /tmp/clean_axon_dev.psql.err.XXXXXX)"
+trap 'rm -f "$_psql_err"' EXIT
+db_name=$(psql "$DB_URL" -tAc 'SELECT current_database();' 2>"$_psql_err" || true)
 if [[ -z "$db_name" ]]; then
   echo "[clean_axon_dev] ERROR: could not query current_database() from $DB_URL" >&2
+  if [[ -s "$_psql_err" ]]; then
+    echo "[clean_axon_dev] psql stderr:" >&2
+    sed 's/^/  /' "$_psql_err" >&2
+  fi
   exit 2
 fi
 case "$db_name" in

@@ -434,18 +434,75 @@ fn run(profile: RuntimeBootProfile) -> anyhow::Result<()> {
         .block_on(async move { boot(profile, runtime_profile).await })
 }
 
-/// REQ-AXO-332: stdout-only tracing. Persistent forensics are the supervisor's
-/// responsibility (axonctl captures stdout/stderr per role with size-bounded
-/// rotation); live state is queryable via the `watcher_probe::recent()` ring
-/// buffer and MCP tools (`debug`, `health`, `mcp_surface_diagnostics`). Operators
-/// enable per-module DEBUG ad-hoc via `RUST_LOG=axon_core::<module>=debug`.
+/// REQ-AXO-901728: rolling on-disk tracing with strict retention.
+/// WARN+ERROR sink is always-on (last ~24h, HOURLY × 24) so post-mortem
+/// is possible without re-running. INFO sink is opt-in via
+/// `AXON_INFO_LOG_FILE=1` (last ~20 min, MINUTELY × 20) — disk-quiet by
+/// default ; operators flip the toggle only when actively debugging.
+/// stdout is preserved for tmux/console visibility regardless. Files
+/// land in `$AXON_RUN_ROOT` (set by the launch script per role). If
+/// `AXON_RUN_ROOT` is unset (tests, ad-hoc runs), file sinks are
+/// skipped and only stdout remains. Operators enable per-module DEBUG
+/// ad-hoc via `RUST_LOG=axon_core::<module>=debug`.
 fn init_runtime_tracing() {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+    use tracing_subscriber::{
+        filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+    };
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let info_log_enabled = std::env::var("AXON_INFO_LOG_FILE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    let (info_appender, error_appender) = match std::env::var("AXON_RUN_ROOT") {
+        Ok(run_root) => {
+            let run_root = std::path::PathBuf::from(run_root);
+            if std::fs::create_dir_all(&run_root).is_ok() {
+                let info = if info_log_enabled {
+                    tracing_appender::rolling::Builder::new()
+                        .rotation(tracing_appender::rolling::Rotation::MINUTELY)
+                        .filename_prefix("info")
+                        .filename_suffix("log")
+                        .max_log_files(20)
+                        .build(&run_root)
+                        .ok()
+                } else {
+                    None
+                };
+                let errors = tracing_appender::rolling::Builder::new()
+                    .rotation(tracing_appender::rolling::Rotation::HOURLY)
+                    .filename_prefix("errors")
+                    .filename_suffix("log")
+                    .max_log_files(24)
+                    .build(&run_root)
+                    .ok();
+                (info, errors)
+            } else {
+                (None, None)
+            }
+        }
+        Err(_) => (None, None),
+    };
+
+    let info_layer = info_appender.map(|appender| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(appender)
+            .with_ansi(false)
+            .with_filter(LevelFilter::INFO)
+    });
+    let error_layer = error_appender.map(|appender| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(appender)
+            .with_ansi(false)
+            .with_filter(LevelFilter::WARN)
+    });
+
     let _ = tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(info_layer)
+        .with(error_layer)
         .try_init();
 }
 
@@ -514,17 +571,13 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         canonical_embedding_provider_request(runtime_mode, runtime_profile.gpu_present);
     let gpu_execution_requested =
         runtime_profile.gpu_present && provider_requested.eq_ignore_ascii_case("cuda");
+    // REQ-AXO-901737 : AXON_EMBEDDING_PROVIDER remains the only env var
+    // (operator-facing request). gpu_present moves to the in-process
+    // diagnostics struct instead of AXON_EMBEDDING_GPU_PRESENT.
     unsafe {
         std::env::set_var("AXON_EMBEDDING_PROVIDER", provider_requested.clone());
-        std::env::set_var(
-            "AXON_EMBEDDING_GPU_PRESENT",
-            if runtime_profile.gpu_present {
-                "true"
-            } else {
-                "false"
-            },
-        );
     }
+    crate::embedder::set_gpu_present(runtime_profile.gpu_present);
     apply_canonical_ort_runtime_env(gpu_execution_requested);
     apply_canonical_ort_thread_defaults_from_openmp();
     if provider_requested.eq_ignore_ascii_case("cuda") && !runtime_profile.gpu_present {
@@ -927,7 +980,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_embedding_provider_request_defaults_to_cuda_when_gpu_present() {
+    fn canonical_embedding_provider_request_defaults_to_tensorrt_when_gpu_present() {
+        // REQ-AXO-901737 / operator directive 2026-05-24 : two-value world
+        // (cpu | tensorrt). Default for a detected GPU is tensorrt.
         let _guard = env_lock();
         unsafe {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER");
@@ -935,8 +990,25 @@ mod tests {
 
         assert_eq!(
             canonical_embedding_provider_request(AxonRuntimeMode::IndexerFull, true),
-            "cuda"
+            "tensorrt"
         );
+    }
+
+    #[test]
+    fn canonical_embedding_provider_request_normalises_cuda_to_tensorrt() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        }
+
+        assert_eq!(
+            canonical_embedding_provider_request(AxonRuntimeMode::IndexerFull, true),
+            "tensorrt"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        }
     }
 
     #[test]

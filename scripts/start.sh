@@ -506,10 +506,11 @@ if [[ "$REQUEST_TENSORRT" == "1" ]]; then
         echo "   The current mode is $RUNTIME_MODE, which does not run the vector lane."
         exit 1
     fi
-    export AXON_EMBEDDING_PROVIDER="cuda"
-    export AXON_GPU_EMBED_SERVICE_ENABLED="${AXON_GPU_EMBED_SERVICE_ENABLED:-1}"
-    export AXON_GPU_EMBED_SERVICE_TENSORRT=1
-    export AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH="${AXON_GPU_EMBED_SERVICE_RECYCLE_EVERY_BATCH:-0}"
+    # REQ-AXO-901737 : --tensorrt is now a thin alias setting the canonical
+    # AXON_EMBEDDING_PROVIDER knob. ort-runtime.sh derives the manifest path
+    # from the provider value. NVML / VRAM / telemetry vars below remain
+    # legit runtime parameters (not provider state).
+    export AXON_EMBEDDING_PROVIDER="tensorrt"
     export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
     # REQ-AXO-901641 — resolve NVML lib across WSL/native Linux. If nothing
     # found, leave the var unset and let the runtime fall back per its own
@@ -586,12 +587,20 @@ axon_apply_runtime_role_layout "$PROJECT_ROOT" "$RUNTIME_SHADOW_ROLE" "$RUNTIME_
 
 export AXON_SKIP_ELIXIR_PREWARM="$SKIP_ELIXIR_PREWARM"
 
+# REQ-AXO-901737 / operator directive 2026-05-24 : only two provider
+# values exist — `cpu` and `tensorrt`. A legacy `cuda` setting is
+# silently normalised to `tensorrt` so existing scripts/configs keep
+# working without operator action.
 if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
     EMBEDDING_PROVIDER_REQUEST="cpu"
 elif [[ -n "${AXON_EMBEDDING_PROVIDER:-}" ]]; then
-    EMBEDDING_PROVIDER_REQUEST="$AXON_EMBEDDING_PROVIDER"
+    if [[ "$AXON_EMBEDDING_PROVIDER" == "cuda" ]]; then
+        EMBEDDING_PROVIDER_REQUEST="tensorrt"
+    else
+        EMBEDDING_PROVIDER_REQUEST="$AXON_EMBEDDING_PROVIDER"
+    fi
 elif detect_accessible_gpu; then
-    EMBEDDING_PROVIDER_REQUEST="cuda"
+    EMBEDDING_PROVIDER_REQUEST="tensorrt"
 else
     EMBEDDING_PROVIDER_REQUEST="cpu"
 fi
@@ -645,7 +654,15 @@ run_devenv_shell() {
             return 1
         fi
         axon_log_warn "devenv shell failed; running 'devenv gc' once before retrying..."
-        devenv gc >/dev/null 2>&1 || true
+        # REQ-AXO-901740 — capture devenv gc output ; previously >/dev/null
+        # 2>&1 masked GC failures (disk full, permission denied) and we
+        # only saw the second devenv shell attempt fail with the same
+        # underlying cause.
+        local gc_log="${AXON_RUN_ROOT:-${PROJECT_ROOT:-${PWD}}/.axon/run}/devenv-gc.log"
+        mkdir -p "$(dirname "$gc_log")" 2>/dev/null || true
+        if ! devenv gc >>"$gc_log" 2>&1; then
+            axon_log_warn "devenv gc returned non-zero (see $gc_log)"
+        fi
         attempt=$((attempt + 1))
         sleep 1
     done
@@ -1051,6 +1068,18 @@ exec "$AXONCTL_BIN" supervise --project-root "$PROJECT_ROOT" --instance-kind "$A
 LAUNCH_EOF
     chmod +x "$LAUNCH_SCRIPT"
     tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash \"$LAUNCH_SCRIPT\"" C-m
+    # REQ-AXO-901740 — verify tmux actually received the command (REQ-AXO-901655
+    # already fixed a 2 KB truncation, but the contract was never enforced).
+    # capture-pane the immediately-following frame and ensure the start marker
+    # is present. Silent failure here = 900 s wait loop with zero feedback.
+    sleep 0.3
+    _tmux_pane_snapshot="$(tmux capture-pane -t "$TMUX_SESSION:core" -p 2>/dev/null | tail -5 || true)"
+    if [[ -z "$_tmux_pane_snapshot" ]] \
+        || ! echo "$_tmux_pane_snapshot" | grep -qE "bash .*launch-.*\.sh|🚀 Starting"; then
+        axon_log_warn "tmux send-keys may not have landed cleanly in $TMUX_SESSION:core. Last 5 lines:"
+        echo "$_tmux_pane_snapshot" | sed 's/^/   | /' >&2
+    fi
+    unset _tmux_pane_snapshot
 fi
 
 if [ "$START_DASHBOARD" = "1" ] && ! has_live_dashboard_dataplane; then
@@ -1101,7 +1130,10 @@ for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     # Heartbeat every 30s : diagnostics so silent hangs are visible.
     if (( i - last_heartbeat >= 30 )); then
         last_heartbeat=$i
-        hb_core_pid="$(pgrep -f "$AXONCTL_BIN supervise.*--role $RUNTIME_SHADOW_ROLE" | head -1 || true)"
+        # REQ-AXO-901738 : filter by --instance-kind too, otherwise a
+        # concurrent live/dev pair both matching --role makes the wait
+        # loop watch the wrong PID and time out spuriously.
+        hb_core_pid="$(pgrep -f "$AXONCTL_BIN supervise.*--instance-kind $AXON_INSTANCE_KIND --role $RUNTIME_SHADOW_ROLE" | head -1 || true)"
         hb_dash_pid=""
         if [ "$START_DASHBOARD" = "1" ]; then
             hb_dash_pid="$(ss -ltnp 2>/dev/null | awk -v port=":${PHX_PORT}\$" '$4 ~ port { gsub(/.*pid=/,"",$NF); gsub(/,.*/,"",$NF); print $NF; exit }' || true)"

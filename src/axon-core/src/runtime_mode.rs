@@ -82,17 +82,25 @@ pub fn canonical_embedding_provider_request_for_mode(
         return "cpu".to_string();
     }
 
-    std::env::var("AXON_EMBEDDING_PROVIDER")
+    // REQ-AXO-901737 / operator directive 2026-05-24 : only two provider
+    // values exist — `cpu` and `tensorrt`. Legacy `cuda` is silently
+    // normalised to `tensorrt`.
+    let raw = std::env::var("AXON_EMBEDDING_PROVIDER")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            if gpu_present {
-                "cuda".to_string()
-            } else {
-                "cpu".to_string()
-            }
-        })
+        .filter(|value| !value.is_empty());
+    let resolved = raw.unwrap_or_else(|| {
+        if gpu_present {
+            "tensorrt".to_string()
+        } else {
+            "cpu".to_string()
+        }
+    });
+    if resolved.eq_ignore_ascii_case("cuda") {
+        "tensorrt".to_string()
+    } else {
+        resolved
+    }
 }
 
 #[cfg(test)]

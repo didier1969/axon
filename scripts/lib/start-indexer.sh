@@ -13,15 +13,13 @@ export AXON_RUNTIME_MODE="${AXON_RUNTIME_MODE:-indexer_full}"
 
 runtime_flag="--${AXON_RUNTIME_MODE//_/-}"
 
-# Implicit --tensorrt when running a vector lane on live (operator directive
-# 2026-05-14: "dorénavant c'est l'indexeur full avec tensor rt par défaut").
-# Honors explicit --tensorrt / --no-tensorrt passthrough and AXON_REQUEST_TENSORRT
-# env override.
-tensorrt_flag=""
+# REQ-AXO-901737 : tensorrt is the default for live vector modes when the
+# operator hasn't explicitly set AXON_EMBEDDING_PROVIDER. No more
+# AXON_REQUEST_TENSORRT indirection ; the canonical knob is the single
+# source of truth. Operator opts out via AXON_EMBEDDING_PROVIDER={cpu,cuda}.
 if [[ "$AXON_RUNTIME_MODE" == "indexer_full" || "$AXON_RUNTIME_MODE" == "indexer_vector" ]]; then
-    if [[ "${AXON_REQUEST_TENSORRT:-1}" == "1" ]] && ! printf '%s\n' "$@" | grep -qE '^--(no-)?tensorrt$'; then
-        tensorrt_flag="--tensorrt"
-    fi
+    : "${AXON_EMBEDDING_PROVIDER:=tensorrt}"
+    export AXON_EMBEDDING_PROVIDER
 fi
 
-exec bash "$SCRIPT_DIR/../start.sh" "$@" "$runtime_flag" $tensorrt_flag --no-dashboard --skip-mcp-tests
+exec bash "$SCRIPT_DIR/../start.sh" "$@" "$runtime_flag" --no-dashboard --skip-mcp-tests

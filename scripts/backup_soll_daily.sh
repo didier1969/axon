@@ -72,7 +72,33 @@ out="${BACKUP_DIR}/axon_live-${ts}.sql.gz"
 tmp="${out}.partial"
 
 echo "[backup_soll] dumping ${DB_URL} -> ${out}"
-"${pg_dump_bin}" --no-owner --no-privileges --format=plain "${DB_URL}" | gzip -9 > "${tmp}"
+# REQ-AXO-901740 — capture per-stage exit codes so a pg_dump failure
+# masked by gzip success becomes visible. Previous form ran the pipeline
+# without pipefail : a truncated dump was indistinguishable from a clean
+# one, and the only safety net was the schema-presence grep below.
+set -o pipefail
+"${pg_dump_bin}" --no-owner --no-privileges --format=plain "${DB_URL}" 2>"${tmp}.pgdump.err" | gzip -9 > "${tmp}"
+pipe_rc=("${PIPESTATUS[@]}")
+set +o pipefail
+if [[ "${pipe_rc[0]}" -ne 0 || "${pipe_rc[1]}" -ne 0 ]]; then
+  echo "[backup_soll] dump pipeline failed (pg_dump rc=${pipe_rc[0]}, gzip rc=${pipe_rc[1]})" >&2
+  if [[ -s "${tmp}.pgdump.err" ]]; then
+    echo "[backup_soll] pg_dump stderr:" >&2
+    sed 's/^/  /' "${tmp}.pgdump.err" >&2
+  fi
+  rm -f "${tmp}" "${tmp}.pgdump.err"
+  exit 4
+fi
+rm -f "${tmp}.pgdump.err"
+
+# Size sanity : a SOLL dump is never < 10 KB even on a fresh DB. A
+# smaller file means the pipeline silently produced a near-empty gzip.
+dump_size_bytes="$(stat -c '%s' "${tmp}" 2>/dev/null || echo 0)"
+if [[ "${dump_size_bytes}" -lt 10240 ]]; then
+  echo "[backup_soll] dump size suspiciously small (${dump_size_bytes} bytes < 10240); aborting" >&2
+  rm -f "${tmp}"
+  exit 5
+fi
 
 # Sanity check: refuse to keep a dump that does not mention the SOLL schema.
 # Subshell disables pipefail so SIGPIPE from `grep -q` does not poison the rc.

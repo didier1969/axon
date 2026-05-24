@@ -21,7 +21,11 @@ axon_resolve_ort_runtime() {
     TENSORRT_LIB_DIR=""
     GPU_SERVICE_TENSORRT_REQUESTED=0
 
-    if [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    # REQ-AXO-901737 : tensorrt request derived directly from the canonical
+    # `AXON_EMBEDDING_PROVIDER` knob. Legacy `AXON_GPU_EMBED_SERVICE_TENSORRT`
+    # honored as a deprecated alias for older bench scripts.
+    if [[ "$embedding_provider_request" == "tensorrt" ]] || \
+       [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-0}" =~ ^(1|true|yes|on)$ ]]; then
         gpu_service_tensorrt_requested=1
         GPU_SERVICE_TENSORRT_REQUESTED=1
     fi
@@ -34,7 +38,7 @@ axon_resolve_ort_runtime() {
         ORT_ARTIFACT_MANIFEST="$project_root/.axon/ort-artifacts/onnxruntime-cuda/current.json"
     fi
 
-    if [[ "$embedding_provider_request" == "cuda" ]]; then
+    if [[ "$embedding_provider_request" == "cuda" || "$embedding_provider_request" == "tensorrt" ]]; then
         if [[ -f "$ORT_ARTIFACT_MANIFEST" ]]; then
             ORT_DYLIB_PATH="$(axon_manifest_value "$ORT_ARTIFACT_MANIFEST" "core_lib")"
             CUDA_PROVIDER_PATH="$(axon_manifest_value "$ORT_ARTIFACT_MANIFEST" "cuda_provider_lib")"
@@ -133,7 +137,7 @@ axon_resolve_ort_runtime() {
         fi
         if [[ -z "${ORT_OUT_PATH:-}" || ! -f "$ORT_OUT_PATH/lib/libonnxruntime.so" ]]; then
             echo "❌ Unable to materialize a valid ONNX Runtime output path."
-            if [[ "$embedding_provider_request" == "cuda" ]]; then
+            if [[ "$embedding_provider_request" == "cuda" || "$embedding_provider_request" == "tensorrt" ]]; then
                 echo "   Tried to build nixpkgs onnxruntime with cudaSupport=true."
                 if rg -q "unexpected eof while reading|cannot download .*cudnn|developer\\.download\\.nvidia\\.com" "$ORT_BUILD_LOG" 2>/dev/null; then
                     echo "   The failure came from downloading NVIDIA CUDA/cuDNN artifacts, not from Axon itself."
@@ -146,7 +150,7 @@ axon_resolve_ort_runtime() {
         ORT_DYLIB_PATH="$ORT_OUT_PATH/lib/libonnxruntime.so"
     fi
 
-    if [[ "$embedding_provider_request" == "cuda" ]]; then
+    if [[ "$embedding_provider_request" == "cuda" || "$embedding_provider_request" == "tensorrt" ]]; then
         local ort_lib_dir
         local cuda_ld_prefix
         local -a cuda_ld_path_segments=()

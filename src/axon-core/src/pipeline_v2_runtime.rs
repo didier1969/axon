@@ -753,21 +753,15 @@ fn read_proc_stat_busy_total() -> Option<(u64, u64)> {
 /// indexed with junk `(1, 0, …, 0)` vectors that broke semantic
 /// retrieval downstream while the indexer reported healthy.
 fn gpu_provider_explicitly_requested() -> bool {
-    if matches!(
+    // REQ-AXO-901737 : single canonical knob. `AXON_GPU_EMBED_SERVICE_TENSORRT`
+    // legacy check removed ; bash now sets `AXON_EMBEDDING_PROVIDER=tensorrt`
+    // for the TRT path.
+    matches!(
         std::env::var("AXON_EMBEDDING_PROVIDER")
             .ok()
             .map(|v| v.to_lowercase())
             .as_deref(),
         Some("tensorrt") | Some("cuda")
-    ) {
-        return true;
-    }
-    matches!(
-        std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT")
-            .ok()
-            .map(|v| v.to_lowercase())
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
     )
 }
 

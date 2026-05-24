@@ -114,8 +114,8 @@ use provider_runtime::{
     set_embedding_provider_runtime_state,
 };
 pub use provider_runtime::{
-    current_embedding_provider_diagnostics, embedder_provider_fallback_reason,
-    embedding_provider_diagnostics, EmbeddingProviderDiagnostics,
+    current_embedding_provider_diagnostics, current_gpu_present, embedder_provider_fallback_reason,
+    embedding_provider_diagnostics, set_gpu_present, EmbeddingProviderDiagnostics,
 };
 use vector_executor::VectorEmbeddingBackend;
 
@@ -1164,10 +1164,9 @@ impl SemanticWorkerPool {
             .with_max_length(configured_embedding_max_length());
         let provider_requested = effective_provider_request_for_lane(lane);
         let cuda_requested = provider_requested.eq_ignore_ascii_case("cuda");
-        let cuda_available = std::env::var("AXON_EMBEDDING_GPU_PRESENT")
-            .ok()
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // REQ-AXO-901737 : gpu_present read from in-process diagnostics
+        // struct instead of AXON_EMBEDDING_GPU_PRESENT env var.
+        let cuda_available = provider_runtime::current_gpu_present();
         let cuda_provider_library_available = ort_cuda_provider_library_available();
         if cuda_requested && cuda_available && !cuda_provider_library_available {
             let provider_path = ort_cuda_provider_library_path()
@@ -1943,13 +1942,11 @@ fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
 }
 
 fn effective_embedding_provider_is_gpu() -> bool {
-    std::env::var("AXON_EMBEDDING_PROVIDER_EFFECTIVE")
-        .ok()
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            value.starts_with("cuda") || value.starts_with("tensorrt")
-        })
-        .unwrap_or(false)
+    // REQ-AXO-901737 : effective provider read from in-process struct,
+    // no longer from AXON_EMBEDDING_PROVIDER_EFFECTIVE env var.
+    let value = provider_runtime::current_embedding_provider_effective();
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("cuda") || value.starts_with("tensorrt")
 }
 
 
@@ -3100,27 +3097,19 @@ mod tests {
 
     #[test]
     fn test_effective_embedding_provider_is_gpu_detects_cuda_variants() {
+        // REQ-AXO-901737 : effective state lives in the in-process struct,
+        // not in env vars. Tests drive it through set_effective_for_test.
         let _guard = lock_env_guard();
-        unsafe {
-            std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "cuda");
-        }
+        use crate::embedder::provider_runtime::set_effective_for_test;
+        set_effective_for_test(Some("cuda"));
         assert!(effective_embedding_provider_is_gpu());
-        unsafe {
-            std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "cuda_service");
-        }
+        set_effective_for_test(Some("cuda_service"));
         assert!(effective_embedding_provider_is_gpu());
-        unsafe {
-            std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "tensorrt_service");
-        }
+        set_effective_for_test(Some("tensorrt_service"));
         assert!(effective_embedding_provider_is_gpu());
-
-        unsafe {
-            std::env::set_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE", "cpu");
-        }
+        set_effective_for_test(Some("cpu"));
         assert!(!effective_embedding_provider_is_gpu());
-        unsafe {
-            std::env::remove_var("AXON_EMBEDDING_PROVIDER_EFFECTIVE");
-        }
+        set_effective_for_test(None);
         assert!(!effective_embedding_provider_is_gpu());
     }
 

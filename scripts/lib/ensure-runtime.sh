@@ -20,6 +20,12 @@
 
 set -u
 
+# REQ-AXO-901740 — observability helpers (axon_log_*, axon_run_logged).
+# Sourced once; subsequent sources are no-op via internal guard.
+_AXON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/axon-log.sh
+source "$_AXON_LIB_DIR/axon-log.sh"
+
 axon_canonical_pg_port="${PGPORT:-44144}"
 axon_backup_dir="${AXON_SOLL_BACKUP_DIR:-${HOME}/backups/soll}"
 # Minimum SOLL nodes required to consider a DB "seeded". 50 is comfortably
@@ -146,32 +152,54 @@ EOF
 }
 
 ensure_devenv_pg_running() {
-    if axon_pg_port_listener_pid >/dev/null; then
-        return 0
+    # REQ-AXO-901740 — every branch emits exactly one outcome marker
+    # (success OR failure) so the operator never sees opaque silence.
+    # Cause root of the 2026-05-24 PG-after-reboot incident : ce
+    # bloc retournait 0 sans rien echo quand un port-listener PID
+    # était détecté (zombie process / stale TCP socket), masquant que
+    # PG ne répondait pas vraiment.
+    local existing_pid
+    existing_pid="$(axon_pg_port_listener_pid || true)"
+    if [[ -n "$existing_pid" ]]; then
+        # Confirm the listener actually serves queries — sinon, on
+        # purge le port et on reboot devenv plutôt que de prétendre
+        # que tout va bien.
+        if "$PG_ISREADY_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -q 2>/dev/null; then
+            axon_log_ok "PG already up on :${axon_canonical_pg_port} (pid=${existing_pid})"
+            return 0
+        fi
+        axon_log_warn "PG port :${axon_canonical_pg_port} held by pid=${existing_pid} but pg_isready failed — proceeding to devenv up to recover."
     fi
-    echo "🐘 Postgres not running on :${axon_canonical_pg_port} — booting devenv-Nix service..."
+
     local proj
     proj="${PROJECT_ROOT:-${PWD}}"
     if [[ -z "$DEVENV_BIN" ]]; then
-        echo "❌ devenv binary not found in PATH (required to boot postgres)." >&2
+        axon_log_fail "devenv binary not found in PATH (required to boot postgres)."
         return 1
     fi
-    (cd "$proj" && "$DEVENV_BIN" up postgres -d >/dev/null 2>&1)
-    local rc=$?
-    if [[ $rc -ne 0 ]]; then
-        echo "❌ devenv up postgres -d failed (rc=$rc)." >&2
+
+    local run_root="${AXON_RUN_ROOT:-$proj/.axon/run}"
+    local log_path="$run_root/devenv-up-postgres.log"
+    local start_s=$SECONDS
+
+    axon_log_step "Booting PG via devenv (log : $log_path)"
+    if ! ( cd "$proj" && axon_run_logged "$log_path" "$DEVENV_BIN" up postgres -d ); then
+        axon_log_fail_with_tail "devenv up postgres -d failed" "$log_path" 50
         return 1
     fi
+
     local deadline=$(( SECONDS + 60 ))
     while (( SECONDS < deadline )); do
         if axon_pg_port_listener_pid >/dev/null \
            && "$PG_ISREADY_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -q 2>/dev/null; then
-            echo "✅ Postgres ready on :${axon_canonical_pg_port}"
+            local pid
+            pid="$(axon_pg_port_listener_pid || true)"
+            axon_log_ok "PG ready on :${axon_canonical_pg_port} after $((SECONDS - start_s))s (pid=${pid:-?})"
             return 0
         fi
         sleep 1
     done
-    echo "❌ Postgres did not become ready within 60s." >&2
+    axon_log_fail_with_tail "PG did not become ready within 60s after devenv up" "$log_path" 50
     return 1
 }
 
@@ -246,13 +274,23 @@ ensure_database_seeded() {
         echo "🗄️ ${dbname} is empty (soll.node=${node_count}). Restoring from $(basename "$backup")..."
     fi
 
-    if ! zcat "$backup" | "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
-            -d "$dbname" -v ON_ERROR_STOP=1 >/dev/null 2>&1; then
-        echo "❌ Restore of ${dbname} from $(basename "$backup") failed." >&2
+    # REQ-AXO-901740 — capture psql stderr to disk so a corrupted backup
+    # or a missing extension stops emitting the raw error instead of a
+    # generic "Restore failed". Previous form swallowed both pipeline
+    # stages via `>/dev/null 2>&1` — invisible if zcat OR psql failed.
+    local restore_log="${AXON_RUN_ROOT:-${PROJECT_ROOT:-${PWD}}/.axon/run}/restore-${dbname}.log"
+    mkdir -p "$(dirname "$restore_log")" 2>/dev/null || true
+    set -o pipefail
+    if ! zcat "$backup" 2>>"$restore_log" \
+        | "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
+            -d "$dbname" -v ON_ERROR_STOP=1 >>"$restore_log" 2>&1; then
+        set +o pipefail
+        axon_log_fail_with_tail "Restore of ${dbname} from $(basename "$backup") failed" "$restore_log" 40
         return 1
     fi
+    set +o pipefail
     node_count="$(axon_db_soll_node_count "$dbname")"
-    echo "✅ ${dbname} restored (soll.node=${node_count})"
+    axon_log_ok "${dbname} restored (soll.node=${node_count})"
 }
 
 apply_canonical_ddl() {

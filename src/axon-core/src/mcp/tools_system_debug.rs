@@ -258,10 +258,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let gpu_memory_soft_limit = gpu_memory_soft_limit_mb();
     let interactive_active = service_guard::interactive_priority_active()
         || service_guard::interactive_requests_in_flight() > 0;
-    let gpu_present = std::env::var("AXON_EMBEDDING_GPU_PRESENT")
-        .ok()
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // REQ-AXO-901737 : gpu_present read from in-process diagnostics struct
+    // instead of AXON_EMBEDDING_GPU_PRESENT env var.
+    let gpu_present = crate::embedder::current_gpu_present();
     let provider_effective_is_gpu = provider
         .provider_effective
         .trim()
