@@ -366,9 +366,7 @@ Options:
   --skip-mcp-tests Skip automatic MCP quality gate validation after startup
   --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
   --fast          MCP-only dev iteration shorthand (=--no-dashboard --skip-mcp-tests --skip-elixir-prewarm)
-  --use-process-compose  REQ-AXO-901735 Phase 2d : exec ./scripts/axon-pc up à la place du flow legacy.
-                          Convient pour brain-only V1 (live) + brain+indexer (dev). Comportement
-                          réversible : sans ce flag, le flow tmux+axonctl-supervise actuel s applique.
+  --use-process-compose  (Ignored — process-compose is now the default, REQ-AXO-901735)
 EOF
             exit 0
             ;;

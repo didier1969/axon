@@ -154,13 +154,17 @@ def status_script() -> dict[str, Any]:
 
 
 def tmux_tail(lines: int = 80) -> str:
-    try:
-        return shell(
-            ["tmux", "capture-pane", "-pt", "axon:0.0", "-S", f"-{lines}"],
-            check=False,
-        ).stdout
-    except Exception:
-        return ""
+    for port in (8081, 8080):
+        try:
+            r = subprocess.run(
+                ["curl", "-sf", f"http://localhost:{port}/process/logs/axon-brain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout:
+                return "\n".join(r.stdout.splitlines()[-lines:])
+        except Exception:
+            pass
+    return ""
 
 
 def collect_sample(mcp_url: str, elapsed_seconds: int) -> dict[str, Any]:

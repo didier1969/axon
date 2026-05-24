@@ -215,16 +215,7 @@ struct GlobalArgs {
     json: bool,
     hard: bool,
     timeout_ms: u64,
-    /// REQ-AXO-097 — auto-restart polling cadence in ms.
-    interval_ms: u64,
-    /// REQ-AXO-097 — auto-restart attempt cap. None = unbounded.
-    max_restarts: Option<u32>,
-    /// REQ-AXO-097 — grace window after spawning the restart command
-    /// before resuming polling, so a slow start does not trigger a
-    /// second restart attempt.
-    grace_ms: u64,
     remaining: Vec<String>,
-    passthrough: Vec<String>,
 }
 
 fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
@@ -240,21 +231,12 @@ fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
         json: false,
         hard: false,
         timeout_ms: 15_000,
-        interval_ms: 5_000,
-        max_restarts: None,
-        grace_ms: 30_000,
         remaining: Vec::new(),
-        passthrough: Vec::new(),
     };
 
-    let mut saw_separator = false;
     while let Some(arg) = iter.next() {
-        if saw_separator {
-            args.passthrough.push(arg);
-            continue;
-        }
         match arg.as_str() {
-            "--" => saw_separator = true,
+            "--" => break,
             "--project-root" => args.project_root = iter.next().map(PathBuf::from),
             "--instance-kind" => args.instance_kind = iter.next(),
             "--role" => args.role = iter.next(),
@@ -268,38 +250,13 @@ fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
                     .parse::<u64>()
                     .context("--timeout-ms must be a positive integer")?;
             }
-            "--interval-ms" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| anyhow!("--interval-ms requires a value"))?;
-                args.interval_ms = value
-                    .parse::<u64>()
-                    .context("--interval-ms must be a positive integer")?;
-            }
-            "--max-restarts" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| anyhow!("--max-restarts requires a value"))?;
-                args.max_restarts = Some(
-                    value
-                        .parse::<u32>()
-                        .context("--max-restarts must be a non-negative integer")?,
-                );
-            }
-            "--grace-ms" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| anyhow!("--grace-ms requires a value"))?;
-                args.grace_ms = value
-                    .parse::<u64>()
-                    .context("--grace-ms must be a positive integer")?;
+            "--interval-ms" | "--max-restarts" | "--grace-ms" => {
+                let _ = iter.next();
             }
             "--help" | "-h" => return Err(anyhow!("{}", usage())),
             _ => args.remaining.push(arg),
         }
     }
-    // Collect passthrough remainder
-    args.passthrough.extend(iter);
 
     Ok((command, args))
 }

@@ -1350,13 +1350,17 @@ def sql_graph_projection_queue() -> dict[str, int]:
 
 
 def capture_tmux_tail(lines: int = 400) -> str:
-    try:
-        return shell(
-            ["tmux", "capture-pane", "-pt", "axon:core", "-S", f"-{lines}"],
-            capture=True,
-        ).stdout
-    except subprocess.CalledProcessError:
-        return ""
+    for port in (8081, 8080):
+        try:
+            r = subprocess.run(
+                ["curl", "-sf", f"http://localhost:{port}/process/logs/axon-brain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout:
+                return "\n".join(r.stdout.splitlines()[-lines:])
+        except Exception:
+            pass
+    return ""
 
 
 def wait_for_runtime(timeout_s: int = 180) -> int:
