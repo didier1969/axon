@@ -33,7 +33,7 @@ def mode_contract(mode: str) -> dict[str, Any]:
             "shadow_role": "brain",
             "shadow_only": False,
             "runtime_mode": "brain_only",
-            "start_script": "scripts/lib/start-brain.sh",
+            "start_script": "scripts/axon --instance dev start --brain-only --no-dashboard --skip-mcp-tests",
             "authority_contract": runtime_authority_contract("brain"),
         }
     if normalized in {"indexer_graph", "indexer_vector", "indexer_full", "indexer"}:
@@ -44,13 +44,13 @@ def mode_contract(mode: str) -> dict[str, Any]:
             "shadow_role": "indexer",
             "shadow_only": False,
             "runtime_mode": runtime_mode,
-            "start_script": "scripts/lib/start-indexer.sh",
+            "start_script": "scripts/axon --instance dev start --indexer-full --no-dashboard --skip-mcp-tests",
             "authority_contract": runtime_authority_contract("indexer"),
         }
     return {
         "shadow_role": "indexer",
         "shadow_only": False,
         "runtime_mode": "indexer_graph",
-        "start_script": "scripts/lib/start-indexer.sh",
+        "start_script": "scripts/axon --instance dev start --indexer-full --no-dashboard --skip-mcp-tests",
         "authority_contract": runtime_authority_contract("indexer"),
     }

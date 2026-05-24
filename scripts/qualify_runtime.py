@@ -285,7 +285,7 @@ def perform_cold_reset(args: argparse.Namespace) -> None:
             "dev_baseline_require_dev_instance; "
             "dev_baseline_stop_split; "
             "dev_baseline_clean_state; "
-            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-indexer.sh; "
+            "dev_baseline_start_split; "
             "dev_baseline_wait_for_indexer_measurement_window 240"
         )
     else:
@@ -295,8 +295,7 @@ def perform_cold_reset(args: argparse.Namespace) -> None:
             "dev_baseline_require_dev_instance; "
             "dev_baseline_stop_split; "
             "dev_baseline_clean_state; "
-            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-brain.sh; "
-            "AXON_INSTANCE_KIND=dev bash scripts/lib/start-indexer.sh; "
+            "dev_baseline_start_split; "
             "dev_baseline_wait_for_stable_measurement_window 240"
         )
 

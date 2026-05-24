@@ -193,9 +193,7 @@ PY
   elif ! assert_live_stopped; then
     restart_failed=1
   else
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-indexer.sh"; then
-      restart_failed=1
-    elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/lib/start-brain.sh"; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start --brain-only --no-dashboard --skip-mcp-tests; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces 12*5s=60s legacy fixed-sleep loop.
@@ -206,8 +204,7 @@ PY
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
           --install-generation "$install_generation" >/dev/null 2>&1 \
-        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-indexer.sh" >/dev/null 2>&1 \
-        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/lib/status-brain.sh" >/dev/null 2>&1
+        && bash "$ROOT_DIR/scripts/axon" --instance live status >/dev/null 2>&1
       }
       export -f _rollback_postcheck_predicate 2>/dev/null || true
       if poll_until "live MCP runtime post-check" "$POSTCHECK_TIMEOUT_S" "$POSTCHECK_INTERVAL_S" \

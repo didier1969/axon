@@ -1,61 +1,44 @@
-# REQ-AXO-901735 + DEC-AXO-901615 — process-compose DAG canonical (live)
+# REQ-AXO-901735 — process-compose DAG canonical (live instance)
 #
-# Reason of existence : remplace la couche orchestration impérative
-# (scripts/start.sh ~1305 lignes + axonctl supervise ~800 lignes) par une
-# déclaration YAML observable. Probes liveness/readiness/startup uniformes
-# (Sridharan + k8s). DAG dépendances : postgres → axon-brain → axon-indexer.
+# Supervision déclarative : probes k8s-style, restart on_failure, shutdown ordonné.
+# Tous les env vars sont hérités du parent (start.sh exporte tout avant exec).
+# Ce YAML ne déclare que les overrides per-process et les probes.
 #
-# PG est géré hors process-compose par devenv (devenv up postgres -d) ; on
-# le déclare uniquement en tant que readiness_probe pour gate les autres
-# processus. Cette stratégie évite de réécrire un wrapper devenv en YAML.
-#
-# Pivot progressif : V1 brain-only standalone (smoke test). V2 ajoute
-# axon-indexer en mode indexer_graph. V3 ajoute indexer_full + dashboard.
-#
-# Pré-requis avant `process-compose up -f .axon/process-compose.live.yaml` :
-# - PG up sur :44144 (devenv up postgres -d ou ensure_devenv_pg_running)
-# - bin/axon-brain présent (promote_live.sh)
-# - env AXON_INSTANCE_KIND=live, AXON_RUN_ROOT, etc. exporté
-#
-# Tests :
-# - `process-compose up -f process-compose.live.yaml --detached`
-# - `curl 127.0.0.1:44129/livez`  → 200
-# - `curl 127.0.0.1:44129/readyz` → 200 si PG ping OK
-# - `process-compose down`
+# Usage : process-compose up -f process-compose.live.yaml [process-names...]
+#   brain seul   : process-compose up -f ... axon-brain
+#   brain+indexer: process-compose up -f ... axon-brain axon-indexer
+#   tout         : process-compose up -f ... (démarre tout y compris dashboard)
+# Les dépendances (postgres-check) sont résolues automatiquement.
 
 version: "0.5"
 log_level: info
-log_length: 200
+log_length: 500
+is_strict: true
 shell:
   shell_command: "bash"
   shell_argument: "-c"
 
 processes:
-  # PG checker — pas un process géré par process-compose, juste un health probe
-  # qui bloque le démarrage des consumers tant que devenv PG n'est pas up.
   postgres-check:
     command: |
-      # REQ-AXO-901740 — capture pg_isready output au lieu de >/dev/null muet ;
-      # process-compose log_length=200 garde les 200 dernières lignes.
-      until pg_isready -h 127.0.0.1 -p "${PGPORT:-44144}" -q ; do
-        echo "[postgres-check] waiting for PG on :${PGPORT:-44144}..."
+      for i in $(seq 1 30); do
+        ${AXON_PGREADY_BIN:-pg_isready} -h 127.0.0.1 -p "${PGPORT:-44144}" -q 2>/dev/null && echo "[postgres-check] PG ready" && exit 0
+        echo "[postgres-check] waiting for PG on :${PGPORT:-44144}... ($i/30)"
         sleep 2
       done
-      echo "[postgres-check] PG ready on :${PGPORT:-44144}"
+      echo "[postgres-check] TIMEOUT"
+      exit 1
     availability:
       restart: "no"
-      exit_on_skipped: true
     is_daemon: false
-    # readiness = ce script exit 0 (= PG up)
 
   axon-brain:
-    command: "bin/axon-brain"
+    command: "${AXON_BRAIN_BIN:-bin/axon-brain}"
     working_dir: "."
     environment:
-      - 'AXON_RUNTIME_MODE=brain_only'
-      - 'AXON_INSTANCE_KIND=live'
-      - 'AXON_RUNTIME_SHADOW_ROLE=brain'
-      - 'HYDRA_HTTP_PORT=44129'
+      - "AXON_RUNTIME_MODE=${AXON_BRAIN_MODE:-brain_only}"
+      - "AXON_RUNTIME_SHADOW_ROLE=brain"
+      - "AXON_INSTANCE_KIND=live"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
@@ -69,7 +52,7 @@ processes:
       period_seconds: 3
       timeout_seconds: 3
       success_threshold: 1
-      failure_threshold: 10
+      failure_threshold: 20
     liveness_probe:
       http_get:
         host: "127.0.0.1"
@@ -77,7 +60,7 @@ processes:
         path: "/livez"
         port: 44129
       initial_delay_seconds: 30
-      period_seconds: 30
+      period_seconds: 15
       timeout_seconds: 5
       success_threshold: 1
       failure_threshold: 3
@@ -85,3 +68,79 @@ processes:
       restart: "on_failure"
       max_restarts: 3
       backoff_seconds: 5
+    shutdown:
+      signal: 15
+      timeout_seconds: 30
+
+  axon-indexer:
+    command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"
+    working_dir: "."
+    environment:
+      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_full}"
+      - "AXON_RUNTIME_SHADOW_ROLE=indexer"
+      - "AXON_INSTANCE_KIND=live"
+    depends_on:
+      postgres-check:
+        condition: "process_completed_successfully"
+    readiness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/readyz"
+        port: 44139
+      initial_delay_seconds: 5
+      period_seconds: 5
+      timeout_seconds: 3
+      success_threshold: 1
+      failure_threshold: 60
+    liveness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/livez"
+        port: 44139
+      initial_delay_seconds: 120
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    availability:
+      restart: "on_failure"
+      max_restarts: 3
+      backoff_seconds: 10
+    shutdown:
+      signal: 15
+      timeout_seconds: 60
+
+  dashboard:
+    command: |
+      cd src/dashboard
+      exec elixir \
+        --name "${ELIXIR_NODE_NAME:-axon_live}@127.0.0.1" \
+        --cookie "${AXON_ERLANG_COOKIE}" \
+        -S mix phx.server
+    working_dir: "."
+    environment:
+      - "AXON_INSTANCE_KIND=live"
+    depends_on:
+      axon-brain:
+        condition: "process_healthy"
+    readiness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/"
+        port: 44127
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 12
+    availability:
+      restart: "on_failure"
+      max_restarts: 3
+      backoff_seconds: 5
+    shutdown:
+      signal: 15
+      timeout_seconds: 15
+    disabled: ${AXON_DASHBOARD_DISABLED:-false}

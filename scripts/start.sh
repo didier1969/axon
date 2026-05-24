@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Axon v2 - Daily Start Script
-# Canonical daily workflow entrypoint for running Axon in TMUX.
+# Canonical daily workflow entrypoint. Launches via process-compose (REQ-AXO-901735).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -11,7 +11,14 @@ DEFAULT_PROJECTS_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 # REQ-AXO-109 — clear AXON_*/HYDRA_* leaked from a previous run in
 # this shell before any lib re-derives instance state.
+# Preserve AXON_INSTANCE_KIND across the clear — it's set by the
+# scripts/axon dispatcher and must survive env sanitization.
+_SAVED_INSTANCE_KIND="${AXON_INSTANCE_KIND:-}"
 axon_clear_inherited_env
+if [[ -n "$_SAVED_INSTANCE_KIND" ]]; then
+    export AXON_INSTANCE_KIND="$_SAVED_INSTANCE_KIND"
+fi
+unset _SAVED_INSTANCE_KIND
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/axon-resource-policy.sh
@@ -217,147 +224,18 @@ resolve_nvml_library_path() {
     return 1
 }
 
-instance_runtime_pids() {
-    local pids=""
-    local pid=""
-    local port_pid=""
-
-    if [[ -f "$AXON_PID_FILE" ]]; then
-        pid="$(cat "$AXON_PID_FILE" 2>/dev/null || true)"
-        if [[ -n "$pid" ]]; then
-            pids="$pids $pid"
-        fi
-    fi
-
-    if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-        port_pid="$(ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
-            $1 == "LISTEN" {
-                split($4, addr_parts, ":")
-                if (addr_parts[length(addr_parts)] != p) {
-                    next
-                }
-                match($0, /pid=([0-9]+)/, m)
-                if (m[1] != "") {
-                    print m[1]
-                    exit
-                }
-            }' || true)"
-        if [[ -n "$port_pid" ]]; then
-            pids="$pids $port_pid"
-        fi
-    fi
-
-    echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
-}
-
-cleanup_stale_runtime_state() {
-    rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE"
-}
-
-# socket_responds backwards-compatible alias — real liveness probe lives
-# in scripts/lib/socket-lifecycle.sh as axon_socket_responds (REQ-AXO-093).
-socket_responds() {
-    axon_socket_responds "$@"
-}
-
-probe_sql_gateway() {
-    curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" \
-        -H 'content-type: application/json' \
-        -d '{"query":"SELECT 1"}' >/dev/null 2>&1
-}
-
-verify_mcp_http() {
-    local response
-    response="$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/mcp" \
-        -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}' 2>/dev/null || true)"
-
-    [[ "$response" == *"axon_query"* || "$response" == *'"query"'* ]]
-}
-
-has_live_runtime_dataplane() {
-    local pid
-    for pid in $(instance_runtime_pids); do
-        if [[ -n "$pid" && -e "/proc/$pid" ]]; then
-            return 0
-        fi
-    done
-
-    if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-        # REQ-AXO-093 — file-existence is not enough; orphan sockets must fail
-        if socket_responds "$AXON_TELEMETRY_SOCK"; then
-            return 0
-        fi
-        return 1
-    fi
-
+has_live_runtime() {
     if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null; then
         return 0
     fi
-
+    if [[ -f "$AXON_PID_FILE" ]]; then
+        local pid
+        pid="$(cat "$AXON_PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$pid" && -e "/proc/$pid" ]]; then
+            return 0
+        fi
+    fi
     return 1
-}
-
-has_live_dashboard_dataplane() {
-    if [[ "$START_DASHBOARD" != "1" ]]; then
-        return 0
-    fi
-
-    if nc -z localhost "$PHX_PORT" 2>/dev/null; then
-        return 0
-    fi
-
-    return 1
-}
-
-launch_dashboard_window() {
-    [[ "$START_DASHBOARD" == "1" ]] || return 0
-
-    if tmux list-windows -t "$TMUX_SESSION" 2>/dev/null | grep -qE '^[0-9]+: nexus'; then
-        tmux kill-window -t "$TMUX_SESSION:nexus" 2>/dev/null || true
-    fi
-
-    tmux new-window -t "$TMUX_SESSION" -n "nexus"
-    # REQ-AXO-901655 (followup) — same tmpfile pattern as core launch.
-    # Prevents future tmux send-keys truncation if dashboard env-string
-    # grows (PHX_PORT + HYDRA_TCP_PORT + AXON_* + future additions).
-    local NEXUS_LAUNCH="$AXON_RUN_ROOT/launch-nexus.sh"
-    mkdir -p "$AXON_RUN_ROOT"
-    if [[ "$SKIP_ELIXIR_PREWARM" == "1" ]]; then
-        cat > "$NEXUS_LAUNCH" <<NEXUS_EOF
-#!/usr/bin/env bash
-set -e
-cd "$PROJECT_ROOT/src/dashboard"
-export PHX_PORT="$PHX_PORT"
-export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
-export AXON_SQL_URL="$AXON_SQL_URL"
-export AXON_PROJECT_CODE="$PROJECT_CODE"
-export AXON_WATCH_DIR="$WATCH_ROOT"
-export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
-export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
-export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
-exec elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server
-NEXUS_EOF
-    else
-        cat > "$NEXUS_LAUNCH" <<NEXUS_EOF
-#!/usr/bin/env bash
-set -e
-cd "$PROJECT_ROOT/src/dashboard"
-mix local.hex --force >/dev/null
-mix local.rebar --force >/dev/null
-export PHX_PORT="$PHX_PORT"
-export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
-export AXON_SQL_URL="$AXON_SQL_URL"
-export AXON_PROJECT_CODE="$PROJECT_CODE"
-export AXON_WATCH_DIR="$WATCH_ROOT"
-export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
-export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
-export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
-exec elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server
-NEXUS_EOF
-    fi
-    chmod +x "$NEXUS_LAUNCH"
-    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell --no-reload --no-tui -- bash \"$NEXUS_LAUNCH\"" C-m
 }
 
 probe_writer_guard() {
@@ -495,11 +373,7 @@ EOF
             exit 0
             ;;
         --use-process-compose)
-            # REQ-AXO-901735 Phase 2d MVP — bypass start.sh legacy flow et délègue
-            # à scripts/axon-pc (qui exec process-compose up avec preflight gate).
-            # Réversible : tant que ce flag n est pas la default, start.sh ancien
-            # path cohabite et l opérateur peut revenir en arrière.
-            USE_PROCESS_COMPOSE=1
+            # Ignored — process-compose is now the only path (REQ-AXO-901735).
             ;;
         *)
             echo "❌ Unknown option: $1"
@@ -510,15 +384,6 @@ EOF
     shift
 done
 
-# REQ-AXO-901735 Phase 2d : redirection vers process-compose si demandé.
-# Exécuté AVANT toute autre logique start.sh (ensure_runtime, devenv shell,
-# tmux, etc.) — `scripts/axon-pc` gère tout via process-compose.yaml +
-# axonctl preflight.
-if [[ "${USE_PROCESS_COMPOSE:-0}" == "1" ]]; then
-    PC_INSTANCE="${AXON_INSTANCE_KIND:-live}"
-    echo "🔀 REQ-AXO-901735 Phase 2d : delegating to scripts/axon-pc (instance=$PC_INSTANCE)..."
-    exec "$PROJECT_ROOT/scripts/axon-pc" up --instance "$PC_INSTANCE"
-fi
 
 if [[ "$REQUEST_TENSORRT" == "1" ]]; then
     if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
@@ -553,13 +418,7 @@ if [[ "$REQUEST_TENSORRT" == "1" ]]; then
     export AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT="${AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT:-1}"
 fi
 
-# REQ-AXO-102 — apply the brain-only resource defaults from start-brain.sh
-# directly when `--brain-only` is selected via the unified entrypoint, so
-# `./scripts/axon start --brain-only` is contractually equivalent to
-# `bash scripts/lib/start-brain.sh`. Without this block, the unified path
-# runs a brain with default GPU tunings that diverge from the wrapper's
-# intent (no GPU avoidance). All defaults use `:-` so any explicit override
-# (env var or wrapper) wins.
+# Brain-only defaults: avoid GPU unless explicitly overridden.
 if [[ "$RUNTIME_MODE" == "brain_only" ]]; then
     export AXON_GPU_ACCESS_POLICY="${AXON_GPU_ACCESS_POLICY:-avoid}"
 fi
@@ -658,10 +517,6 @@ if [[ -z "$STARTUP_TIMEOUT_S" ]]; then
     fi
 fi
 
-if ! command -v tmux >/dev/null 2>&1; then
-    echo "❌ tmux is required to start Axon via scripts/start.sh"
-    exit 1
-fi
 
 run_devenv_shell() {
     local cmd="$1"
@@ -757,147 +612,15 @@ if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/s
     fi
 fi
 
-if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    DELETED_EXE_PIDS=$(for pid in $(instance_runtime_pids); do
-        exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
-        if [[ "$exe" == *"(deleted)"* ]]; then
-            echo "$pid"
-        fi
-    done)
-
-    if [ -n "${DELETED_EXE_PIDS:-}" ]; then
-        axon_log_warn "Found Axon processes still running on deleted executables: $DELETED_EXE_PIDS"
-        echo "   Resetting stale $RUNTIME_SHADOW_ROLE runtime state before restart..."
-        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-        cleanup_stale_runtime_state
-    fi
-
-    if has_live_runtime_dataplane && { axon_role_is_indexer "$RUNTIME_SHADOW_ROLE" || verify_mcp_http; }; then
-        if [[ "$START_DASHBOARD" == "1" ]] && ! has_live_dashboard_dataplane; then
-            axon_log_warn "Axon core is healthy in TMUX session '$TMUX_SESSION' but dashboard is absent."
-            echo "   Relaunching nexus window..."
-            launch_dashboard_window
-        else
-            echo "ℹ️ Axon is already running in TMUX session '$TMUX_SESSION'."
-            echo "   Attach with: tmux attach -t $TMUX_SESSION"
-            exit 0
-        fi
-    else
-        axon_log_warn "Found stale TMUX session '$TMUX_SESSION' without a healthy data plane. Resetting local runtime state..."
-        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-        cleanup_stale_runtime_state
-    fi
-elif [[ -S "$AXON_TELEMETRY_SOCK" || -S "$AXON_MCP_SOCK" || -f "$AXON_PID_FILE" ]]; then
-    axon_log_warn "Found stale local runtime state without a TMUX session. Cleaning sockets/pid and continuing..."
-    cleanup_stale_runtime_state
+if has_live_runtime; then
+    echo "ℹ️ Axon is already running on port $HYDRA_HTTP_PORT."
+    echo "   Stop first: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
+    exit 0
 fi
 
-# nix-daemon was verified earlier (REQ-AXO-149) before the first devenv
-# shell invocation. No re-check needed here.
-
-# Synchronize binaries (handle 'Text file busy' via install)
-LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
-DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
 DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
 
-rebuild_core_release() {
-    echo "🔧 Rebuilding axon-core release inside Devenv..."
-    if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-core' && cargo build --release"; then
-        echo "❌ Automatic Devenv rebuild failed."
-        return 1
-    fi
-    return 0
-}
 
-rebuild_tunnel_release() {
-    echo "🔧 Rebuilding axon-mcp-tunnel release inside Devenv..."
-    if ! run_devenv_shell "cd '$PROJECT_ROOT/src/axon-mcp-tunnel' && cargo build --release"; then
-        echo "❌ Automatic Devenv rebuild for axon-mcp-tunnel failed."
-        return 1
-    fi
-    return 0
-}
-
-verify_sql_gateway() {
-    local response
-    local probe_query="SELECT table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema','soll','axon_runtime','ag_catalog')"
-    response="$(curl -sS -X POST http://127.0.0.1:$HYDRA_HTTP_PORT/sql \
-        -H 'content-type: application/json' \
-        -d "{\"query\":\"$probe_query\"}" 2>/dev/null || true)"
-
-    if [[ -z "$response" ]]; then
-        echo "❌ SQL Gateway did not answer the schema probe."
-        return 1
-    fi
-
-    # REQ-AXO-901633 — canonical names are lowercase post-MIL-AXO-017
-    # (Apache AGE retired, IST tables renamed). PostgreSQL identifiers
-    # are case-folded unless quoted, so the legacy `File`/`Symbol`/
-    # `RuntimeMetadata` here produced a 100 %-false-negative warning on
-    # every boot. `file` capital is also being retired alongside
-    # FileVectorizationQueue (REQ-AXO-901632) — `indexedfile` is the
-    # canonical post-REQ-AXO-289 name and already present in every live
-    # DB. Aligned here so the check survives the legacy `file` drop.
-    for table in indexedfile symbol runtimemetadata; do
-        if [[ "$response" != *"\"$table\""* ]]; then
-            echo "❌ SQL Gateway is up but missing required table '$table'."
-            echo "   Response: $response"
-            return 1
-        fi
-    done
-
-    return 0
-}
-
-verify_role_ready() {
-    if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-        [[ -S "$AXON_TELEMETRY_SOCK" ]] || return 1
-        instance_runtime_pids | awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }'
-    else
-        probe_sql_gateway && verify_mcp_http
-    fi
-}
-
-if [ -f "$LEGACY_RELEASE_BIN" ] && [ ! -f "$DEVENV_RELEASE_BIN" ]; then
-    axon_log_warn "Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
-    echo "   Axon starts from $DEVENV_RELEASE_BIN. Attempting automatic rebuild..."
-    rebuild_core_release || exit 1
-fi
-
-if [ -f "$LEGACY_RELEASE_BIN" ] && [ "$LEGACY_RELEASE_BIN" -nt "$DEVENV_RELEASE_BIN" ]; then
-    axon_log_warn "Detected a newer release binary outside Devenv:"
-    echo "   $LEGACY_RELEASE_BIN"
-    echo "   Attempting to refresh the authoritative Devenv build..."
-    rebuild_core_release || exit 1
-fi
-
-if [ ! -f "$DEVENV_RELEASE_BIN" ]; then
-    axon_log_warn "Missing Devenv release binary at $DEVENV_RELEASE_BIN"
-    rebuild_core_release || exit 1
-fi
-
-if [ ! -f "$DEVENV_TUNNEL_BIN" ]; then
-    axon_log_warn "Missing Devenv tunnel binary at $DEVENV_TUNNEL_BIN"
-    rebuild_tunnel_release || exit 1
-fi
-
-if [ -f "$DEVENV_RELEASE_BIN" ] && find "$PROJECT_ROOT/src/axon-core/src" \
-    "$PROJECT_ROOT/src/axon-core/Cargo.toml" \
-    "$PROJECT_ROOT/src/axon-core/Cargo.lock" \
-    -newer "$DEVENV_RELEASE_BIN" -print -quit | grep -q .; then
-    axon_log_warn "Detected newer axon-core sources than $DEVENV_RELEASE_BIN"
-    echo "   Rebuilding authoritative Devenv release..."
-    rebuild_core_release || exit 1
-fi
-
-if [ -f "$DEVENV_TUNNEL_BIN" ] && find "$PROJECT_ROOT/src/axon-mcp-tunnel/src" \
-    "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.toml" \
-    "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.lock" \
-    -newer "$DEVENV_TUNNEL_BIN" -print -quit | grep -q .; then
-    axon_log_warn "Detected newer axon-mcp-tunnel sources than $DEVENV_TUNNEL_BIN"
-    echo "   Rebuilding authoritative Devenv tunnel release..."
-    rebuild_tunnel_release || exit 1
-fi
 
 if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
     if [[ "$LIVE_RELEASE_ACTIVE" -eq 1 ]]; then
@@ -928,418 +651,159 @@ fi
 if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]] \
     && ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE" \
     && [ -f "$DEVENV_TUNNEL_BIN" ]; then
-    echo "🔄 Updating bin/axon-mcp-tunnel safely..."
     mkdir -p bin && install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
 
-echo "🚀 Starting Axon in TMUX session '$TMUX_SESSION'..."
-echo "📂 Watch root: $WATCH_ROOT"
-echo "🗂️ Projects root: $PROJECTS_ROOT"
-echo "🧭 Runtime mode: $RUNTIME_MODE"
-echo "🎭 Shadow role: $RUNTIME_SHADOW_ROLE"
-echo "⚙️ Runtime binary: $RUNTIME_EXECUTABLE_NAME ($RUNTIME_EXECUTABLE)"
-if [[ "$RUNTIME_SHADOW_ONLY" == "1" ]]; then
-    echo "🧪 Split path: shadow-only / non-promotable until gates are green"
-fi
-echo "🧩 Instance kind: $AXON_INSTANCE_KIND"
-echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGROUND_BUDGET_CLASS gpu=$AXON_GPU_ACCESS_POLICY watcher=$AXON_WATCHER_POLICY"
-echo "🛠️ Per-stage workers: A=${AXON_A_WORKERS:-auto}/B=${AXON_B_WORKERS:-auto}"
-echo "🏷️ Release version: $AXON_RELEASE_VERSION"
-echo "🧱 Build id: $AXON_BUILD_ID"
-if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
-    echo "🌐 Advertised host: $AXON_PUBLIC_HOST ($AXON_PUBLIC_HOST_SOURCE)"
-else
-    echo "🌐 Advertised host: unresolved"
-fi
-export SQL_URL="$AXON_SQL_URL"
+# ---------------------------------------------------------------------------
+# Phase: env export + writer guard + process-compose launch
+# ---------------------------------------------------------------------------
 
 mkdir -p "$AXON_DB_ROOT" "$AXON_RUN_ROOT"
-# Clean only the sockets used by the selected runtime
-rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK"
-rm -f "$AXON_PID_FILE"
+rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE"
 
 while read -r guard_label guard_path; do
     [[ -n "${guard_label:-}" ]] || continue
     probe_writer_guard "$guard_label" "$guard_path"
 done < <(selected_writer_guards)
 
-axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
-  AXON_RUNTIME_MODE "$RUNTIME_MODE" \
-  AXON_RUNTIME_SHADOW_ROLE "$RUNTIME_SHADOW_ROLE" \
-  AXON_SPLIT_SHADOW_ONLY "$RUNTIME_SHADOW_ONLY" \
-  AXON_RUNTIME_REACTIVATION_PATH "$RUNTIME_REACTIVATION_PATH" \
-  AXON_DASHBOARD_ENABLED "$START_DASHBOARD" \
-  AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
-  AXON_RUNTIME_IDENTITY "$AXON_RUNTIME_IDENTITY" \
-  AXON_RESOURCE_PRIORITY "$AXON_RESOURCE_PRIORITY" \
-  AXON_BACKGROUND_BUDGET_CLASS "$AXON_BACKGROUND_BUDGET_CLASS" \
-  AXON_GPU_ACCESS_POLICY "$AXON_GPU_ACCESS_POLICY" \
-  AXON_WATCHER_POLICY "$AXON_WATCHER_POLICY" \
-  AXON_A_WORKERS "${AXON_A_WORKERS:-}" \
-  AXON_B_WORKERS "${AXON_B_WORKERS:-}" \
-  AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}" \
-  AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
-  AXON_BUILD_ID "$AXON_BUILD_ID" \
-  AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
-  AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION" \
-  AXON_PUBLIC_HOST "${AXON_PUBLIC_HOST:-}" \
-  AXON_PUBLIC_HOST_SOURCE "${AXON_PUBLIC_HOST_SOURCE:-unresolved}" \
-  AXON_PUBLIC_ENDPOINTS_AVAILABLE "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" \
-  AXON_MCP_PUBLIC_URL "${AXON_MCP_PUBLIC_URL:-}" \
-  AXON_SQL_PUBLIC_URL "${AXON_SQL_PUBLIC_URL:-}" \
-  AXON_DASHBOARD_PUBLIC_URL "${AXON_DASHBOARD_PUBLIC_URL:-}"
-
-# Create TMUX session
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    tmux new-session -d -s "$TMUX_SESSION" -n "core"
-fi
-
-# Start Data Plane
-# We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
-# NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-EMBEDDING_PROVIDER_EXPORT=""
-if [[ -n "${EMBEDDING_PROVIDER_REQUEST:-}" ]]; then
-    EMBEDDING_PROVIDER_EXPORT="export AXON_EMBEDDING_PROVIDER=\"$EMBEDDING_PROVIDER_REQUEST\"; "
-fi
-PASS_THROUGH_EXPORTS=""
-# REQ-AXO-241 — single source of truth for env var lifecycle. Iterate
-# the parent shell env, propagating any var that matches the prefix
-# allowlist (AXON_*/HYDRA_* + a narrow set of OMP_* knobs) AND is NOT a
-# derived per-instance var (denylist in scripts/lib/axon-env-vars.sh).
-# Vars set inline by start.sh on the supervisor command line (AXON_DB_ROOT,
-# AXON_PID_FILE, etc.) are on the denylist so they are not re-exported
-# here on top of their canonical inline values.
-#
-# Adding a new tunable knob now requires zero changes here: if the
-# operator exports `AXON_FOO=bar`, the prefix match propagates it to the
-# supervised process. Only NEW per-instance derived vars need the
-# denylist updated.
-while IFS='=' read -r _pass_through_var _; do
-    if axon_env_var_in_prefix_allowlist "$_pass_through_var" \
-        && ! axon_env_var_is_derived "$_pass_through_var"; then
-        _pass_through_value="${!_pass_through_var-}"
-        if [[ -n "${_pass_through_value:-}" ]]; then
-            printf -v _pass_through_escaped '%q' "$_pass_through_value"
-            PASS_THROUGH_EXPORTS+="export ${_pass_through_var}=${_pass_through_escaped}; "
-        fi
-    fi
-done < <(env)
-unset _pass_through_var _pass_through_value _pass_through_escaped
-PROFILE_EXPORT=""
-if [[ "$RUNTIME_MODE" == "indexer_full" ]]; then
-    PROFILE_EXPORT="export AXON_ENABLE_AUTONOMOUS_INGESTOR=true; export AXON_RUNTIME_PROFILE=full_autonomous; "
-fi
-PRELAUNCH_LD_LIBRARY_PATH_EXPORT=""
 axon_resolve_ort_runtime "$PROJECT_ROOT" "$EMBEDDING_PROVIDER_REQUEST" || exit 1
-if ! has_live_runtime_dataplane; then
-    # Resolve axonctl binary for process supervision
-    AXONCTL_BIN="$PROJECT_ROOT/bin/axonctl"
-    if [[ ! -x "$AXONCTL_BIN" ]]; then
-        AXONCTL_BIN="$PROJECT_ROOT/src/axon-core/target/release/axonctl"
-    fi
-    if [[ ! -x "$AXONCTL_BIN" ]]; then
-        echo "❌ axonctl binary not found. Build it: cargo build --manifest-path src/axon-core/Cargo.toml --release --bin axonctl"
-        exit 1
-    fi
 
-    # REQ-AXO-901655 — write launch env+exec to a tmpfile and tmux send-keys
-    # only the short `bash $LAUNCH_SCRIPT` invocation. Avoids the
-    # `tmux send-keys` truncation observed at session 51 when the cumulative
-    # env-string (LD_LIBRARY_PATH + PROFILE/EMBEDDING/PASS_THROUGH exports)
-    # exceeded ~2KB after REQ-AXO-901642/901647 chromedriver+chromium+gcc
-    # additions. Symptom : unclosed quote at end of truncated send-keys
-    # buffer, bash secondary `>` prompt, axonctl never launches, start.sh
-    # times out 900s `Waiting for Axon Infrastructure to rise`.
-    mkdir -p "$AXON_RUN_ROOT"
-    LAUNCH_SCRIPT="$AXON_RUN_ROOT/launch-${RUNTIME_SHADOW_ROLE}.sh"
-    cat > "$LAUNCH_SCRIPT" <<LAUNCH_EOF
-#!/usr/bin/env bash
-set -e
-mkdir -p "$AXON_RUN_ROOT"
+if [[ "$RUNTIME_MODE" == "indexer_full" ]]; then
+    export AXON_ENABLE_AUTONOMOUS_INGESTOR=true
+    export AXON_RUNTIME_PROFILE=full_autonomous
+fi
+
+export ORT_STRATEGY=system
 export AXON_PROJECTS_ROOT="$PROJECTS_ROOT"
 export AXON_WATCH_DIR="$WATCH_ROOT"
 export AXON_PROJECT_ROOT="$PROJECT_ROOT"
-export AXON_RUNTIME_MODE="$RUNTIME_MODE"
-export AXON_RUNTIME_SHADOW_ROLE="$RUNTIME_SHADOW_ROLE"
-export AXON_SPLIT_SHADOW_ONLY="$RUNTIME_SHADOW_ONLY"
 export AXON_MCP_MUTATION_JOBS=1
-export AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND"
-export AXON_RUNTIME_IDENTITY="$AXON_RUNTIME_IDENTITY"
-export AXON_DB_ROOT="$AXON_DB_ROOT"
-export AXON_RUN_ROOT="$AXON_RUN_ROOT"
-export AXON_PID_FILE="$AXON_PID_FILE"
-export AXON_TELEMETRY_SOCK="$AXON_TELEMETRY_SOCK"
-export AXON_MCP_SOCK="$AXON_MCP_SOCK"
-export PHX_PORT="$PHX_PORT"
-export HYDRA_TCP_PORT="$HYDRA_TCP_PORT"
-export HYDRA_HTTP_PORT="$HYDRA_HTTP_PORT"
-export HYDRA_ODATA_PORT="$HYDRA_ODATA_PORT"
-export HYDRA_HTTP2_PORT="$HYDRA_HTTP2_PORT"
-export HYDRA_MCP_PORT="$HYDRA_MCP_PORT"
-export AXON_SQL_URL="$AXON_SQL_URL"
-export AXON_MCP_URL="$AXON_MCP_URL"
-export AXON_DASHBOARD_URL="$AXON_DASHBOARD_URL"
-export AXON_MUTATION_POLICY="$AXON_MUTATION_POLICY"
-${PROFILE_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}
-export ORT_STRATEGY=system
-export ORT_DYLIB_PATH="$ORT_DYLIB_PATH"
-echo "🚀 Starting $RUNTIME_EXECUTABLE_NAME..."
-exec "$AXONCTL_BIN" supervise --project-root "$PROJECT_ROOT" --instance-kind "$AXON_INSTANCE_KIND" --role "$RUNTIME_SHADOW_ROLE" -- "$RUNTIME_EXECUTABLE"
-LAUNCH_EOF
-    chmod +x "$LAUNCH_SCRIPT"
-    tmux send-keys -t "$TMUX_SESSION:core" "devenv shell --no-reload --no-tui -- bash \"$LAUNCH_SCRIPT\"" C-m
-    # REQ-AXO-901740 — verify tmux actually received the command (REQ-AXO-901655
-    # already fixed a 2 KB truncation, but the contract was never enforced).
-    # capture-pane the immediately-following frame and ensure the start marker
-    # is present. Silent failure here = 900 s wait loop with zero feedback.
-    sleep 0.3
-    _tmux_pane_snapshot="$(tmux capture-pane -t "$TMUX_SESSION:core" -p 2>/dev/null | tail -5 || true)"
-    if [[ -z "$_tmux_pane_snapshot" ]] \
-        || ! echo "$_tmux_pane_snapshot" | grep -qE "bash .*launch-.*\.sh|🚀 Starting"; then
-        axon_log_warn "tmux send-keys may not have landed cleanly in $TMUX_SESSION:core. Last 5 lines:"
-        echo "$_tmux_pane_snapshot" | sed 's/^/   | /' >&2
-    fi
-    unset _tmux_pane_snapshot
+export SQL_URL="$AXON_SQL_URL"
+export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
+
+# Per-process binary paths for process-compose YAML ${VAR} references.
+if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
+    export AXON_BRAIN_BIN="$PROJECT_ROOT/bin/axon-brain"
+    export AXON_INDEXER_BIN="$PROJECT_ROOT/bin/axon-indexer"
+else
+    export AXON_BRAIN_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
+    export AXON_INDEXER_BIN="$PROJECT_ROOT/${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-indexer"
 fi
 
-if [ "$START_DASHBOARD" = "1" ] && ! has_live_dashboard_dataplane; then
-    launch_dashboard_window
+# Per-process runtime mode overrides.
+export AXON_BRAIN_MODE="brain_only"
+case "$RUNTIME_MODE" in
+    indexer_graph)  export AXON_INDEXER_MODE="indexer_graph" ;;
+    indexer_vector) export AXON_INDEXER_MODE="indexer_vector" ;;
+    indexer_full)   export AXON_INDEXER_MODE="indexer_full" ;;
+    *)              export AXON_INDEXER_MODE="indexer_full" ;;
+esac
+
+# Dashboard control.
+if [[ "$START_DASHBOARD" == "1" ]]; then
+    export AXON_DASHBOARD_DISABLED=false
+else
+    export AXON_DASHBOARD_DISABLED=true
 fi
 
-echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: ${STARTUP_TIMEOUT_S}s)..."
+# Erlang cookie — generated per-instance, never hardcoded.
+export AXON_ERLANG_COOKIE="${AXON_ERLANG_COOKIE:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)}"
 
-# Parallel wait loop for both services
-CORE_READY=false
-DASHBOARD_READY=false
+# Persist runtime state for next start default.
+axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
+  AXON_RUNTIME_MODE "$RUNTIME_MODE" \
+  AXON_RUNTIME_SHADOW_ROLE "$RUNTIME_SHADOW_ROLE" \
+  AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
+  AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}"
 
-# REQ-AXO-901657 — heartbeat every 30s during the wait so silent
-# hangs become observable. Session 51 lesson : start.sh waited 900s
-# with zero feedback while axonctl was stuck on a malformed command,
-# making the failure invisible until timeout expired.
-last_heartbeat=0
-
-# Wait up to STARTUP_TIMEOUT_S * 1s
-for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
-    if [ "$CORE_READY" = false ]; then
-        if verify_role_ready; then
-            if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-                echo "✅ Axon Indexer runtime is Ready."
-            else
-                echo "✅ Axon Data Plane and MCP Gateway are Ready."
-            fi
-            CORE_READY=true
-        fi
-    fi
-
-    if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then
-        # Dashboard is ready if the Phoenix port is responding
-        if nc -z localhost $PHX_PORT 2>/dev/null; then
-            echo "✅ Axon Dashboard is Ready."
-            DASHBOARD_READY=true
-        fi
-    fi
-
-    if [ "$START_DASHBOARD" = "0" ]; then
-        DASHBOARD_READY=true
-    fi
-
-    if [ "$CORE_READY" = true ] && [ "$DASHBOARD_READY" = true ]; then
-        break
-    fi
-
-    # Heartbeat every 30s : diagnostics so silent hangs are visible.
-    if (( i - last_heartbeat >= 30 )); then
-        last_heartbeat=$i
-        # REQ-AXO-901738 : filter by --instance-kind too, otherwise a
-        # concurrent live/dev pair both matching --role makes the wait
-        # loop watch the wrong PID and time out spuriously.
-        hb_core_pid="$(pgrep -f "$AXONCTL_BIN supervise.*--instance-kind $AXON_INSTANCE_KIND --role $RUNTIME_SHADOW_ROLE" | head -1 || true)"
-        hb_dash_pid=""
-        if [ "$START_DASHBOARD" = "1" ]; then
-            hb_dash_pid="$(ss -ltnp 2>/dev/null | awk -v port=":${PHX_PORT}\$" '$4 ~ port { gsub(/.*pid=/,"",$NF); gsub(/,.*/,"",$NF); print $NF; exit }' || true)"
-        fi
-        echo "  ⏳ waiting ${i}s/${STARTUP_TIMEOUT_S}s : core_ready=$CORE_READY (pid=${hb_core_pid:-none}) dashboard_ready=$DASHBOARD_READY (pid=${hb_dash_pid:-none})"
-        # Surface a clear hint if neither role process is alive — likely
-        # a launch-script regression (cf. REQ-AXO-901655 tmux truncation).
-        if [ -z "$hb_core_pid" ] && [ "$CORE_READY" = false ]; then
-            echo "     ⚠️  no $RUNTIME_SHADOW_ROLE supervisor process detected — check tmux pane '$TMUX_SESSION:core' for a malformed command or crash"
-        fi
-    fi
-
-    sleep 1
-done
-
-if [ "$CORE_READY" = false ]; then axon_log_warn "Timeout waiting for Axon Core."; fi
-if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then axon_log_warn "Timeout waiting for Axon Dashboard."; fi
-
-if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
-    echo "❌ Axon did not reach a fully ready state within the startup budget."
-    echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
-    exit 1
-fi
-
-if [ "$CORE_READY" = true ] && ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    echo ""
-    echo "🧪 Verifying live SQL schema..."
-    if ! verify_sql_gateway; then
-        if axon_role_is_brain "$RUNTIME_SHADOW_ROLE" \
-            && [[ "${AXON_SPLIT_BRAIN_IST_READER_ONLY:-0}" =~ ^(1|true|yes|on)$ ]]; then
-            axon_log_warn "Brain started before a materialized IST reader replica was available."
-            echo "   Continuing in degraded read mode until indexer publishes ist-reader.db."
-        else
-            echo "❌ Axon Core exposed its port but failed the live schema check."
-            echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
-            exit 1
-        fi
-    fi
-    if verify_sql_gateway >/dev/null 2>&1; then
-        echo "✅ Live SQL schema check succeeded."
-    fi
-fi
-
-if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    echo ""
-    echo "⚙️ Running MCP End-to-End Verification..."
-    # REQ-AXO-095 — verification was a partial elif chain that emitted
-    # "MCP tunnel verification failed" but never exited, so the start
-    # script continued to the final "Axon is rising" line on a runtime
-    # that was actually broken. The contract is now: try the tunnel
-    # first, fall back to the HTTP probe when the tunnel binary is
-    # missing OR the tunnel verify fails, and exit only when BOTH
-    # paths reject the runtime — that way the "rising" message can
-    # only print on a runtime the verification actually accepted.
-    _axon_mcp_verified=0
-    if [ -x "bin/axon-mcp-tunnel" ]; then
-        if echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' \
-            | bin/axon-mcp-tunnel | grep -q "axon_query"; then
-            echo "✅ MCP tunnel verification succeeded."
-            _axon_mcp_verified=1
-        else
-            axon_log_warn "MCP tunnel verification failed; falling back to HTTP probe."
-        fi
-    fi
-    if [ "$_axon_mcp_verified" = "0" ]; then
-        if verify_mcp_http; then
-            echo "✅ MCP HTTP verification succeeded."
-            _axon_mcp_verified=1
-        else
-            echo "❌ MCP verification failed (tunnel and HTTP both unreachable)."
-            echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
-            exit 1
-        fi
-    fi
-fi
-
-if [ "$RUN_MCP_TESTS" = "1" ] && ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    # Ingestion stabilization is only meaningful when an indexer is
-    # actually running and writing the IST. Brain-only restarts have no
-    # active writer, so the loop just burns 60s waiting for a quantity
-    # that will not change. Restrict to non-brain-only modes (full-stack
-    # scenarios where this start invocation also spawned an indexer).
-    if [[ "$RUNTIME_MODE" != "brain_only" ]]; then
-        echo ""
-        echo "⏳ Waiting for initial ingestion to stabilize..."
-        for i in {1..30}; do
-            pending=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''pending'\'', '\''indexing'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
-            indexed=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''indexed'\'', '\''indexed_degraded'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
-            if [ "$pending" = "0" ]; then
-                echo "✅ Ingestion stabilized ($indexed files indexed)."
-                break
-            fi
-            sleep 2
-        done
-    fi
-
-    echo "🧪 Running MCP Quality Gate Validation..."
-    # The dispatcher's verb is `qualify-mcp` (`quality-mcp` does not
-    # exist — every restart under the previous wording exited 1 with
-    # "Unknown command" and reported "❌ MCP Quality Gate failed"
-    # regardless of actual MCP health). Call the canonical wrapper
-    # directly so renames in `scripts/axon` cannot break us again.
-    if run_devenv_shell "bash '$PROJECT_ROOT/scripts/mcp_quality_gate.sh'"; then
-        echo "✅ MCP Quality Gate passed."
-    else
-        echo "❌ MCP Quality Gate failed."
-        exit 1
-    fi
-fi
-
-# 6. Final Report
-echo ""
-
-# REQ-AXO-098 / DEC-AXO-062 — read the subsystem-tagged tristate
-# readiness from the brain and gate the rising-message wording on the
-# rolled-up overall. Brain-only paths read it directly; indexer paths
-# skip (the indexer does not bind a public MCP and has no readiness
-# surface to query). Best-effort: a failure to read readiness is
-# logged via axon_log_warn and falls back to the legacy "rising"
-# message so a transient probe failure does not block the script.
-readiness_kind="unknown"
-if ! axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    readiness_payload=$(
-        AXON_MCP_URL="$AXON_MCP_URL" python3 \
-            "$PROJECT_ROOT/scripts/mcp_call.py" call status \
-            --args '{"mode":"brief"}' --format data --timeout 5 2>/dev/null || true
-    )
-    if [[ -n "$readiness_payload" ]]; then
-        readiness_kind=$(
-            python3 - "$readiness_payload" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    payload = json.loads(sys.argv[1])
-    print((payload.get("readiness") or {}).get("kind", "unknown"))
-except Exception:
-    print("unknown")
-PY
-        )
-    fi
-fi
-case "$readiness_kind" in
-    ready)
-        echo "🛡️ Axon is Ready in TMUX session '$TMUX_SESSION'."
+# Determine which processes to start.
+PC_PROCESSES=()
+case "$RUNTIME_MODE" in
+    brain_only)
+        PC_PROCESSES+=(axon-brain)
         ;;
-    degraded)
-        axon_log_warn "Axon started DEGRADED; check 'mcp__axon__status data.readiness.reasons' for the failing subsystem(s) (TMUX session '$TMUX_SESSION')."
-        ;;
-    failed)
-        axon_log_warn "Axon FAILED to reach a ready state; check 'mcp__axon__status data.readiness.reasons' for the failing subsystem(s) (TMUX session '$TMUX_SESSION')."
+    indexer_graph|indexer_vector|indexer_full)
+        PC_PROCESSES+=(axon-indexer)
         ;;
     *)
-        echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
+        PC_PROCESSES+=(axon-brain)
         ;;
 esac
 
-# REQ-AXO-150 — persist the runtime mode so the next plain `start` resumes
-# the same role. Only persist when the runtime reached at least `degraded`
-# (i.e. the process is alive); a `failed` start should not poison future
-# defaults. Survives WSL reboots, brain crashes, and stale-pid recoveries.
-if [[ "$readiness_kind" == "ready" || "$readiness_kind" == "degraded" ]]; then
-    mkdir -p "$(dirname "$AXON_INSTANCE_STATE_FILE")"
-    python3 - "$AXON_INSTANCE_STATE_FILE" "$RUNTIME_MODE" "$RUNTIME_SHADOW_ROLE" <<'PY' 2>/dev/null || true
-import json, sys, time
-state_path, mode, role = sys.argv[1], sys.argv[2], sys.argv[3]
-state = {"last_mode": mode, "last_role": role, "last_started_at_ms": int(time.time()*1000)}
-open(state_path, "w").write(json.dumps(state, indent=2))
-PY
+if [[ "$START_DASHBOARD" == "1" ]]; then
+    PC_PROCESSES+=(dashboard)
 fi
-echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
-if axon_role_is_indexer "$RUNTIME_SHADOW_ROLE"; then
-    echo "Telemetry socket: $AXON_TELEMETRY_SOCK"
-    echo "IST writer: $AXON_DB_ROOT/ist.db"
-    echo "IST reader replica: $AXON_DB_ROOT/ist-reader.db"
-elif [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
-    if [ "$START_DASHBOARD" = "1" ]; then
-        echo "Dashboard: ${AXON_DASHBOARD_PUBLIC_URL}cockpit"
-    fi
-    echo "SQL Gateway: $AXON_SQL_PUBLIC_URL"
-    echo "MCP Server: $AXON_MCP_PUBLIC_URL"
-else
-    if [ "$START_DASHBOARD" = "1" ]; then
-        echo "Dashboard (host-local): ${AXON_DASHBOARD_URL}cockpit"
-    fi
-    echo "SQL Gateway (host-local): $AXON_SQL_URL"
-    echo "MCP Server (host-local): $AXON_MCP_URL"
-    echo "Advertised endpoints unresolved. Set AXON_PUBLIC_HOST for isolated clients."
+
+PC_YAML="$PROJECT_ROOT/process-compose.${AXON_INSTANCE_KIND}.yaml"
+if [[ ! -f "$PC_YAML" ]]; then
+    echo "❌ Missing process-compose YAML: $PC_YAML"
+    exit 1
 fi
-echo "Stop services with: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
+
+# Process-compose port — distinct per instance to allow cohabitation.
+case "$AXON_INSTANCE_KIND" in
+    live) PC_PORT=8080 ;;
+    dev)  PC_PORT=8081 ;;
+    *)    PC_PORT=8080 ;;
+esac
+
+echo "🚀 Starting Axon via process-compose (instance=$AXON_INSTANCE_KIND)"
+echo "   Mode: $RUNTIME_MODE | Processes: ${PC_PROCESSES[*]}"
+echo "   Brain: $AXON_BRAIN_BIN | Indexer: $AXON_INDEXER_BIN"
+echo "   MCP: http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
+echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu} | ORT: ${ORT_DYLIB_PATH:-none}"
 echo ""
+
+# Resolve devenv-only binaries needed by process-compose children.
+_devenv_bin_resolve="$(run_devenv_shell 'echo "PC=$(which process-compose)" && echo "PGREADY=$(which pg_isready)"' 2>/dev/null | grep -E '^PC=|^PGREADY=')"
+PC_BIN="$(echo "$_devenv_bin_resolve" | grep '^PC=' | cut -d= -f2-)"
+PGREADY_BIN="$(echo "$_devenv_bin_resolve" | grep '^PGREADY=' | cut -d= -f2-)"
+unset _devenv_bin_resolve
+
+if [[ ! -x "${PC_BIN:-}" ]]; then
+    echo "❌ process-compose not found in devenv shell."
+    exit 1
+fi
+export AXON_PGREADY_BIN="${PGREADY_BIN:-pg_isready}"
+
+# Launch process-compose in detached mode.
+# All env vars are already exported in this shell — process-compose
+# and its children inherit them directly. No env file needed.
+"$PC_BIN" up \
+    -f "$PC_YAML" \
+    -p "$PC_PORT" \
+    -t=false \
+    -D \
+    --ordered-shutdown \
+    --disable-dotenv \
+    "${PC_PROCESSES[@]}"
+
+# Wait for brain readiness via HTTP /readyz probe.
+READYZ_PORT="$HYDRA_HTTP_PORT"
+if [[ "$RUNTIME_MODE" == indexer_* ]]; then
+    READYZ_PORT="$AXON_INDEXER_HEALTH_PORT"
+fi
+
+echo "⏳ Waiting for readiness on :${READYZ_PORT}/readyz (timeout ${STARTUP_TIMEOUT_S}s)..."
+READY=false
+for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
+    if curl -sf "http://127.0.0.1:${READYZ_PORT}/readyz" >/dev/null 2>&1; then
+        READY=true
+        break
+    fi
+    if (( i % 15 == 0 )); then
+        echo "  ⏳ ${i}s/${STARTUP_TIMEOUT_S}s..."
+    fi
+    sleep 1
+done
+
+if [[ "$READY" == "true" ]]; then
+    echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
+    echo "   MCP: http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
+    echo "   process-compose: http://localhost:$PC_PORT"
+    echo "   Stop: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
+else
+    echo "❌ Timeout waiting for readiness on :${READYZ_PORT}/readyz"
+    echo "   Check logs: process-compose -p $PC_PORT process logs axon-brain"
+    exit 1
+fi

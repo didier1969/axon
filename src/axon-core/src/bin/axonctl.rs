@@ -193,10 +193,8 @@ Usage:
 
 Commands:
   stop          Orchestrated instance stop (kill processes, clean locks, verify)
-  supervise     Spawn and supervise a runtime binary (signal forwarding, PID file)
-  preflight     REQ-AXO-901735: pre-launch checks (PG accessible, binaries present)
+  preflight     Pre-launch checks (PG accessible, binaries present, env hygiene)
   status        Health check for an instance
-  auto-restart  REQ-AXO-097: poll role health, respawn on failure detection
 
 Options:
   --project-root PATH     Axon project root directory
@@ -205,10 +203,8 @@ Options:
   --json                  Machine-readable JSON output
   --hard                  (stop only) Aggressive cleanup with port-based kill
   --timeout-ms N          (stop) SIGTERM grace period in ms (default 15000)
-  --interval-ms N         (auto-restart) Poll cadence in ms (default 5000)
-  --max-restarts N        (auto-restart) Cap on restart attempts (default unbounded)
-  --grace-ms N            (auto-restart) Grace period after restart before next probe (default 30000)
-  -- EXECUTABLE [ARGS]    (supervise/auto-restart) Binary to spawn (and re-spawn)
+
+Note: supervise and auto-restart are retired (REQ-AXO-901735). Use process-compose.
 "
 }
 
@@ -343,16 +339,15 @@ fn main() -> Result<()> {
             }
             result
         }
-        "supervise" => cmd_supervise(require_config(&args)?, args.passthrough),
+        "supervise" => {
+            eprintln!("axonctl supervise is retired — use process-compose (REQ-AXO-901735)");
+            std::process::exit(1);
+        }
         "preflight" => cmd_preflight(require_config(&args)?, args.json),
-        "auto-restart" => cmd_auto_restart(
-            require_config(&args)?,
-            args.passthrough,
-            args.interval_ms,
-            args.max_restarts,
-            args.grace_ms,
-            args.json,
-        ),
+        "auto-restart" => {
+            eprintln!("axonctl auto-restart is retired — use process-compose (REQ-AXO-901735)");
+            std::process::exit(1);
+        }
         "status" => {
             let base = require_config(&args)?;
             let roles = base.role.concrete_roles();
@@ -800,105 +795,9 @@ fn cleanup_files(paths: &[&Path]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2: axonctl supervise — spawn + signal forward + waitpid
-// ---------------------------------------------------------------------------
-
-fn cmd_supervise(config: InstanceConfig, passthrough: Vec<String>) -> Result<()> {
-    if passthrough.is_empty() {
-        return Err(anyhow!(
-            "supervise requires an executable after --\n\
-             Usage: axonctl supervise ... -- EXECUTABLE [ARGS]"
-        ));
-    }
-
-    let executable = &passthrough[0];
-    let extra_args = &passthrough[1..];
-
-    // Ensure run root exists
-    fs::create_dir_all(&config.run_root)
-        .with_context(|| format!("failed to create run root {}", config.run_root.display()))?;
-
-    // Spawn child process
-    let child = std::process::Command::new(executable)
-        .args(extra_args)
-        .spawn()
-        .with_context(|| format!("failed to spawn {executable}"))?;
-
-    let child_pid = child.id() as i32;
-
-    // Write PID file atomically (write tmp then rename)
-    let pid_tmp = config.pid_file.with_extension("pid.tmp");
-    fs::write(&pid_tmp, format!("{child_pid}\n"))
-        .with_context(|| format!("failed to write PID file {}", pid_tmp.display()))?;
-    fs::rename(&pid_tmp, &config.pid_file)
-        .with_context(|| format!("failed to rename PID file to {}", config.pid_file.display()))?;
-
-    eprintln!(
-        "axonctl supervise: spawned {} (pid={child_pid}), pid file: {}",
-        executable,
-        config.pid_file.display()
-    );
-
-    // Install signal handlers to forward SIGTERM/SIGINT to child
-    install_signal_forwarding(child_pid);
-
-    // Wait for child using waitpid (proper reaping, no polling)
-    let exit_code = wait_for_child(child_pid);
-
-    // Cleanup PID file
-    let _ = fs::remove_file(&config.pid_file);
-
-    eprintln!("axonctl supervise: child exited with code {exit_code}");
-    std::process::exit(exit_code);
-}
-
-fn install_signal_forwarding(child_pid: i32) {
-    // Store child PID in a global atomic for the signal handler
-    SUPERVISED_CHILD_PID.store(child_pid, std::sync::atomic::Ordering::SeqCst);
-
-    unsafe {
-        libc::signal(libc::SIGTERM, signal_forward_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, signal_forward_handler as *const () as libc::sighandler_t);
-    }
-}
-
-static SUPERVISED_CHILD_PID: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(-1);
-
-extern "C" fn signal_forward_handler(sig: libc::c_int) {
-    let pid = SUPERVISED_CHILD_PID.load(std::sync::atomic::Ordering::SeqCst);
-    if pid > 0 {
-        unsafe {
-            libc::kill(pid, sig);
-        }
-    }
-}
-
-fn wait_for_child(child_pid: i32) -> i32 {
-    let mut status: libc::c_int = 0;
-    loop {
-        let result = unsafe { libc::waitpid(child_pid, &mut status, 0) };
-        if result == child_pid {
-            if libc::WIFEXITED(status) {
-                return libc::WEXITSTATUS(status);
-            }
-            if libc::WIFSIGNALED(status) {
-                return 128 + libc::WTERMSIG(status);
-            }
-            return 1;
-        }
-        if result == -1 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                // EINTR from signal handler — retry waitpid
-                continue;
-            }
-            // ECHILD or other error — child already reaped
-            return 1;
-        }
-    }
-}
+// cmd_supervise and cmd_auto_restart retired by REQ-AXO-901735.
+// Process supervision is now handled by process-compose.
+// The dispatch table above prints a retirement message and exits.
 
 // ---------------------------------------------------------------------------
 // Phase 3: axonctl status — health check
@@ -1144,180 +1043,6 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
 // detected and respawned without operator intervention.
 // ---------------------------------------------------------------------------
 //
-// Health probe is the same liveness logic used by `cmd_status`: pid
-// file present, kill -0 succeeds, cmdline matches the instance.
-// Anything weaker (e.g. pid file alone) would re-spawn against a
-// reused PID and double-up.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RoleHealth {
-    /// Process alive AND cmdline matches the instance signature.
-    Healthy,
-    /// PID file points at a live process whose cmdline does NOT
-    /// match the instance signature (PID reuse): the role is gone,
-    /// some other process now owns that PID.
-    PidReused,
-    /// PID file present but the process is gone (stale pidfile).
-    Dead,
-    /// No PID file on disk: never started, or stop ran cleanly.
-    Absent,
-}
-
-impl RoleHealth {
-    /// Whether the role is OK and no action is required. Any other
-    /// state (Dead, PidReused, Absent) is treated by `auto-restart`
-    /// as "needs restart": the operator's intent in invoking the
-    /// command is "keep this role running" regardless of which
-    /// way it went down.
-    pub(crate) fn is_healthy(self) -> bool {
-        matches!(self, RoleHealth::Healthy)
-    }
-}
-
-pub(crate) fn role_health(config: &InstanceConfig) -> RoleHealth {
-    let pid_file_exists = config.pid_file.exists();
-    let pid = if pid_file_exists {
-        read_pid_file(&config.pid_file).ok().flatten()
-    } else {
-        None
-    };
-    let alive = pid.map(process_exists).unwrap_or(false);
-    if !pid_file_exists {
-        return RoleHealth::Absent;
-    }
-    if !alive {
-        return RoleHealth::Dead;
-    }
-    let pid = pid.expect("alive implies pid present");
-    if process_cmdline_matches_instance(pid, config) {
-        RoleHealth::Healthy
-    } else {
-        RoleHealth::PidReused
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct AutoRestartTickEvent<'a> {
-    event: &'a str,
-    instance_kind: &'a str,
-    role: &'a str,
-    health: RoleHealth,
-    restart_count: u32,
-    max_restarts: Option<u32>,
-}
-
-fn emit_tick_event<'a>(json: bool, event: &'a str, config: &InstanceConfig, health: RoleHealth, restart_count: u32, max_restarts: Option<u32>) {
-    if json {
-        let payload = AutoRestartTickEvent {
-            event,
-            instance_kind: config.instance_kind.label(),
-            role: config.role.label(),
-            health,
-            restart_count,
-            max_restarts,
-        };
-        if let Ok(line) = serde_json::to_string(&payload) {
-            eprintln!("{line}");
-        }
-    } else {
-        eprintln!(
-            "axonctl auto-restart: {event} {} {} health={:?} restarts={}/{}",
-            config.instance_kind.label(),
-            config.role.label(),
-            health,
-            restart_count,
-            match max_restarts {
-                Some(n) => n.to_string(),
-                None => "∞".into(),
-            }
-        );
-    }
-}
-
-fn cmd_auto_restart(
-    config: InstanceConfig,
-    restart_command: Vec<String>,
-    interval_ms: u64,
-    max_restarts: Option<u32>,
-    grace_ms: u64,
-    json: bool,
-) -> Result<()> {
-    if restart_command.is_empty() {
-        return Err(anyhow!(
-            "auto-restart requires a restart command after --\n\
-             Usage: axonctl auto-restart ... -- EXECUTABLE [ARGS]"
-        ));
-    }
-    if interval_ms < 100 {
-        return Err(anyhow!(
-            "--interval-ms must be ≥ 100; got {interval_ms} (faster polling burns CPU without observing real signal)"
-        ));
-    }
-
-    let interval = Duration::from_millis(interval_ms);
-    let grace = Duration::from_millis(grace_ms);
-    let mut restart_count: u32 = 0;
-    emit_tick_event(json, "auto_restart_started", &config, role_health(&config), restart_count, max_restarts);
-
-    loop {
-        let health = role_health(&config);
-        if health.is_healthy() {
-            thread::sleep(interval);
-            continue;
-        }
-        if matches!(health, RoleHealth::Absent) {
-            // Never started, or stopped cleanly. Still try to start
-            // (operator semantics: auto-restart implies "keep this
-            // role running"), but cap by max_restarts.
-        }
-        if let Some(max) = max_restarts {
-            if restart_count >= max {
-                emit_tick_event(json, "auto_restart_cap_reached", &config, health, restart_count, max_restarts);
-                return Err(anyhow!(
-                    "auto-restart cap reached ({max} attempts); giving up"
-                ));
-            }
-        }
-        restart_count = restart_count.saturating_add(1);
-        emit_tick_event(json, "auto_restart_spawn", &config, health, restart_count, max_restarts);
-
-        // Spawn restart command without waiting — it is expected to
-        // be a `start` script that detaches its own runtime. We do
-        // wait for the immediate fork to return so we observe spawn
-        // failures (bad path, etc.).
-        let executable = &restart_command[0];
-        let extra_args = &restart_command[1..];
-        let spawn_result = Command::new(executable).args(extra_args).spawn();
-        match spawn_result {
-            Ok(mut child) => {
-                // Poll the spawned process briefly; for a script that
-                // forks-and-exits, the wait returns quickly. For a
-                // long-running supervisor, we stop waiting after the
-                // grace window and re-enter the polling loop.
-                let waited_at = Instant::now();
-                while waited_at.elapsed() < grace {
-                    match child.try_wait() {
-                        Ok(Some(_status)) => break,
-                        Ok(None) => thread::sleep(Duration::from_millis(200)),
-                        Err(_) => break,
-                    }
-                }
-            }
-            Err(err) => {
-                emit_tick_event(json, "auto_restart_spawn_failed", &config, health, restart_count, max_restarts);
-                return Err(anyhow!(
-                    "auto-restart failed to spawn `{executable}`: {err}"
-                ));
-            }
-        }
-
-        // Grace window: wait for the runtime to come back up
-        // before we observe it as "still dead" and double-restart.
-        thread::sleep(grace);
-    }
-}
-
 fn get_listening_ports() -> BTreeSet<u16> {
     let output = Command::new("ss")
         .args(["-ltn"])

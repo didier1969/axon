@@ -259,7 +259,7 @@ run_step() {
                 dev_baseline_require_dev_instance
                 dev_baseline_stop_split
                 dev_baseline_clean_state
-                AXON_INSTANCE_KIND=dev bash "$SCRIPT_DIR/lib/start-indexer.sh"
+                dev_baseline_start_split
                 dev_baseline_wait_for_indexer_measurement_window 240
             )
             wait_for_warm_vector_window "$warmup_timeout" "$warmup_poll_interval" "$warmup_settle_seconds"

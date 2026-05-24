@@ -89,7 +89,7 @@ case "$ACTION" in
       exit 1
     fi
     axon_log_step "Launching process-compose up : $YAML"
-    exec process-compose up -f "$YAML" "${EXTRA_ARGS[@]}"
+    exec process-compose up -f "$YAML" --disable-dotenv "${EXTRA_ARGS[@]}"
     ;;
 
   down)

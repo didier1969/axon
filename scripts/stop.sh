@@ -9,9 +9,13 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
-# REQ-AXO-109 — clear AXON_*/HYDRA_* leaked from a previous run in
-# this shell before any lib re-derives instance state.
+# Preserve AXON_INSTANCE_KIND across env sanitization (same fix as start.sh).
+_SAVED_INSTANCE_KIND="${AXON_INSTANCE_KIND:-}"
 axon_clear_inherited_env
+if [[ -n "$_SAVED_INSTANCE_KIND" ]]; then
+    export AXON_INSTANCE_KIND="$_SAVED_INSTANCE_KIND"
+fi
+unset _SAVED_INSTANCE_KIND
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/socket-lifecycle.sh
@@ -417,6 +421,27 @@ verify_only_exit_if_needed() {
 
 echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
 
+# REQ-AXO-901735 — stop process-compose daemon if running for this instance.
+# Process-compose manages restart policies; killing children without stopping
+# the supervisor causes immediate respawn.
+case "${AXON_INSTANCE_KIND:-live}" in
+    live) _PC_PORT=8080 ;;
+    dev)  _PC_PORT=8081 ;;
+    *)    _PC_PORT=8080 ;;
+esac
+if curl -sf "http://localhost:${_PC_PORT}/live" >/dev/null 2>&1; then
+    _PC_BIN="$(command -v process-compose 2>/dev/null || true)"
+    if [[ -z "$_PC_BIN" ]]; then
+        _PC_BIN="$(devenv shell --no-reload --no-tui -- bash -c 'which process-compose' 2>/dev/null | tail -1 || true)"
+    fi
+    if [[ -x "${_PC_BIN:-}" ]]; then
+        echo "   Stopping process-compose on :${_PC_PORT}..."
+        "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
+        sleep 1
+    fi
+fi
+unset _PC_PORT _PC_BIN
+
 if [ "$VERIFY_ONLY" = "1" ]; then
     PATTERNS=(
         "$ELIXIR_NODE_NAME"
@@ -433,7 +458,9 @@ fi
 # refuses to release the node name.
 if command -v elixir >/dev/null 2>&1; then
     echo "Sending shutdown signal to Axon Nexus node..."
-    elixir --name stop_script@127.0.0.1 --cookie axon_secret --rpc "${ELIXIR_NODE_NAME}@127.0.0.1" :init :stop >/dev/null 2>&1 || true
+    _erlang_cookie="${AXON_ERLANG_COOKIE:-axon_secret}"
+    elixir --name stop_script@127.0.0.1 --cookie "$_erlang_cookie" --rpc "${ELIXIR_NODE_NAME}@127.0.0.1" :init :stop >/dev/null 2>&1 || true
+    unset _erlang_cookie
     if command -v epmd >/dev/null 2>&1; then
         _elixir_node_short="${ELIXIR_NODE_NAME%%@*}"
         _stop_end_ms=$(( $(date +%s%N) / 1000000 + 2000 ))
