@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# REQ-AXO-901735 / DEC-AXO-901615 — process-compose wrapper canonical.
+#
+# Phase 2d MVP : exec process-compose up avec axonctl preflight gate.
+# Complémentaire au start.sh actuel (pas de breaking change). Une fois
+# validé end-to-end, start.sh sera réduit à un thin wrapper qui appelle
+# ce script.
+#
+# Usage :
+#   ./scripts/axon-pc up   [--instance live|dev]   # foreground (logs visibles)
+#   ./scripts/axon-pc up   --detached              # background
+#   ./scripts/axon-pc down                         # SIGTERM ordered shutdown
+#   ./scripts/axon-pc status                       # process-compose status REST API
+#
+# Pré-requis (verified by preflight) :
+#   - PG up sur :44144 (sinon : `devenv up postgres -d`)
+#   - bin/axon-brain + bin/axon-indexer présents (promote_live_safe.sh)
+#   - process-compose dans PATH (ajouté à devenv.nix REQ-AXO-901735)
+#
+# Convention : process-compose.{live,dev}.yaml à la racine du repo.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+# shellcheck source=scripts/lib/axon-log.sh
+source "$SCRIPT_DIR/lib/axon-log.sh"
+
+# Defaults
+INSTANCE_KIND="${AXON_INSTANCE_KIND:-live}"
+ACTION="${1:-up}"
+shift || true
+
+# Parse --instance
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --instance)
+      if [[ $# -lt 2 ]]; then
+        axon_log_fail "Missing value for --instance"
+        exit 2
+      fi
+      INSTANCE_KIND="$2"
+      shift 2
+      ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$INSTANCE_KIND" in
+  live|dev) ;;
+  *)
+    axon_log_fail "Invalid --instance '$INSTANCE_KIND' (must be live or dev)"
+    exit 2
+    ;;
+esac
+
+YAML="$PROJECT_ROOT/process-compose.${INSTANCE_KIND}.yaml"
+if [[ ! -f "$YAML" ]]; then
+  axon_log_fail "process-compose YAML not found : $YAML"
+  exit 2
+fi
+
+# axonctl preflight gate (Phase 2c) — refuses to start if PG down or
+# binaries missing. Message explicite remplace les 94 s d opacité du
+# 2026-05-24.
+AXONCTL_BIN="$PROJECT_ROOT/bin/axonctl"
+if [[ ! -x "$AXONCTL_BIN" ]]; then
+  AXONCTL_BIN="$PROJECT_ROOT/.axon/cargo-target/release/axonctl"
+fi
+if [[ ! -x "$AXONCTL_BIN" ]]; then
+  axon_log_fail "axonctl binary not found (looked in bin/ and .axon/cargo-target/release/)"
+  exit 2
+fi
+
+case "$ACTION" in
+  up)
+    axon_log_step "Running axonctl preflight for instance=$INSTANCE_KIND..."
+    if ! "$AXONCTL_BIN" preflight \
+        --project-root "$PROJECT_ROOT" \
+        --instance-kind "$INSTANCE_KIND" \
+        --role brain ; then
+      axon_log_fail "Preflight failed — refusing to start process-compose"
+      exit 1
+    fi
+    axon_log_step "Launching process-compose up : $YAML"
+    exec process-compose up -f "$YAML" "${EXTRA_ARGS[@]}"
+    ;;
+
+  down)
+    axon_log_step "Stopping process-compose : $YAML"
+    exec process-compose down -f "$YAML" "${EXTRA_ARGS[@]}"
+    ;;
+
+  status)
+    exec process-compose list -f "$YAML" "${EXTRA_ARGS[@]}"
+    ;;
+
+  *)
+    cat <<USAGE >&2
+Usage: $0 {up|down|status} [--instance live|dev] [extra process-compose args...]
+
+  up        Preflight + process-compose up (foreground unless --detached).
+  down      process-compose down (ordered SIGTERM shutdown).
+  status    process-compose list (REST API state).
+
+Example :
+  $0 up --instance live --detached
+  $0 status --instance live
+  $0 down --instance live
+USAGE
+    exit 2
+    ;;
+esac
