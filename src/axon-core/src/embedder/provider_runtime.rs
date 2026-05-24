@@ -29,8 +29,33 @@ static EMBEDDING_PROVIDER_DIAGNOSTICS: OnceLock<Mutex<EmbeddingProviderDiagnosti
     OnceLock::new();
 
 fn embedding_provider_slot() -> &'static Mutex<EmbeddingProviderDiagnostics> {
-    EMBEDDING_PROVIDER_DIAGNOSTICS
-        .get_or_init(|| Mutex::new(embedding_provider_diagnostics("unspecified".to_string())))
+    // REQ-AXO-901737 fix : la closure init ne doit JAMAIS re-call
+    // `embedding_provider_slot()` (réentrance OnceLock = deadlock).
+    // Init plat avec defaults : tout consumer downstream qui veut un
+    // vrai diagnostic appelle `embedding_provider_diagnostics(...)`
+    // APRÈS init, qui peut alors re-lire le slot sans réentrance.
+    EMBEDDING_PROVIDER_DIAGNOSTICS.get_or_init(|| {
+        let initial_provider_effective = "unspecified".to_string();
+        let resolution = provider_resolution_for_label(
+            "unspecified",
+            &initial_provider_effective,
+            false,
+            false,
+            None,
+            None,
+        );
+        Mutex::new(EmbeddingProviderDiagnostics {
+            provider_requested: "unspecified".to_string(),
+            provider_effective: initial_provider_effective,
+            ort_strategy: "unspecified".to_string(),
+            ort_dylib_path: None,
+            gpu_service_enabled: false,
+            gpu_service_tensorrt_requested: false,
+            provider_init_error: None,
+            gpu_present: false,
+            resolution,
+        })
+    })
 }
 
 pub(crate) fn current_embedding_provider_effective() -> String {
