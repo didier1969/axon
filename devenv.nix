@@ -119,6 +119,15 @@ in
     chromedriver
     chromium
 
+    # REQ-AXO-901735 / DEC-AXO-901615 — process-compose orchestrator
+    # canonical pour Axon (pivot procédural → déclaratif, cf. CPT-AXO-90035).
+    # Single static Go binary, intégration first-class devenv, probes
+    # liveness/readiness/startup HTTP/exec, 5 conditions depends_on,
+    # restart policies. Remplace progressivement la couche orchestration
+    # bash de scripts/start.sh + le supervisor maison axonctl. Voir
+    # process-compose.{live,dev}.yaml (racine) pour le DAG runtime.
+    process-compose
+
     # REQ-AXO-901630 — DO NOT add `pkgs.onnxruntime` here. The nixpkgs
     # default onnxruntime ships without TensorRT/CUDA provider libs and,
     # when present in `packages`, leaks its `lib/` into devenv shell's

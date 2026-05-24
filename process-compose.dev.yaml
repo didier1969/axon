@@ -1,0 +1,66 @@
+# REQ-AXO-901735 + DEC-AXO-901615 — process-compose DAG canonical (dev)
+#
+# Variant dev : binaires debug (.axon/cargo-target/debug/) + ports dev
+# (HYDRA_HTTP_PORT=44137 vs live 44129). Brain + indexer cohabitent
+# parallèlement (depends_on postgres uniquement, pas l'un de l'autre).
+#
+# Voir process-compose.live.yaml pour la doctrine (Sridharan/k8s probes,
+# pivot progressif V1→V3, etc.).
+
+version: "0.5"
+log_level: info
+log_length: 200
+shell:
+  shell_command: "bash"
+  shell_argument: "-c"
+
+processes:
+  postgres-check:
+    command: |
+      until pg_isready -h 127.0.0.1 -p "${PGPORT:-44144}" -q ; do
+        echo "[postgres-check] waiting for PG on :${PGPORT:-44144}..."
+        sleep 2
+      done
+      echo "[postgres-check] PG ready on :${PGPORT:-44144}"
+    availability:
+      restart: "no"
+      exit_on_skipped: true
+    is_daemon: false
+
+  axon-brain:
+    command: ".axon/cargo-target/debug/axon-brain"
+    working_dir: "."
+    environment:
+      - 'AXON_RUNTIME_MODE=brain_only'
+      - 'AXON_INSTANCE_KIND=dev'
+      - 'AXON_RUNTIME_SHADOW_ROLE=brain'
+      - 'HYDRA_HTTP_PORT=44137'
+    depends_on:
+      postgres-check:
+        condition: "process_completed_successfully"
+    readiness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/readyz"
+        port: 44137
+      initial_delay_seconds: 2
+      period_seconds: 3
+      timeout_seconds: 3
+      success_threshold: 1
+      failure_threshold: 10
+    liveness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/livez"
+        port: 44137
+      initial_delay_seconds: 30
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    availability:
+      restart: "on_failure"
+      max_restarts: 3
+      backoff_seconds: 5

@@ -23,11 +23,68 @@ use tokio_stream::StreamExt;
 use tracing::Instrument;
 
 pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
+    // REQ-AXO-901735 — health probes uniformes (Sridharan + k8s style).
+    // process-compose et tout client externe lit l'état via ces 3 endpoints
+    // standards plutôt que par inspection ad-hoc des sockets/PID files.
     Router::new()
         .route("/mcp", post(handle_mcp_post))
         .route("/mcp/sse", get(handle_mcp_sse))
         .route("/sql", post(handle_sql_post))
+        .route("/livez", get(handle_livez))
+        .route("/readyz", get(handle_readyz))
+        .route("/startupz", get(handle_startupz))
         .layer(Extension(mcp_server))
+}
+
+// /livez — process vivant. Le simple fait que axum réponde prouve le
+// liveness ; on retourne 200 tant qu'aucun deadlock interne ne bloque la
+// tâche tokio. Réservé aux liveness probes (jamais 503 sauf hard freeze).
+async fn handle_livez() -> Response {
+    (StatusCode::OK, "ok").into_response()
+}
+
+// /readyz — deps OK + accepting traffic. Pour le brain : la DB doit
+// répondre à un `SELECT 1`. On peut renvoyer 200+JSON {state:degraded,
+// reasons:[...]} pour graceful degradation, mais V1 = strict 200/503.
+async fn handle_readyz(Extension(server): Extension<Arc<McpServer>>) -> Response {
+    let probe = tokio::task::spawn_blocking(move || server.execute_raw_sql("SELECT 1")).await;
+    match probe {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"state": "ready"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "state": "degraded",
+                "reasons": ["db_probe_failed"],
+                "error": format!("{:?}", e),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "state": "degraded",
+                "reasons": ["db_probe_task_panic"],
+                "error": format!("{:?}", e),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// /startupz — one-shot init terminé. Pour le brain : si on répond à HTTP,
+// l'init du runtime est forcément terminé (start_runtime_services est appelé
+// avant axum::serve). V1 retourne toujours 200 ; raffinable plus tard pour
+// distinguer "IST chargé / embedder warmed" via un AtomicBool partagé.
+async fn handle_startupz() -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"state": "started"})),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
