@@ -154,9 +154,16 @@ pub fn resolve_health_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Sérialise les tests qui mutent l env pour éviter les race entre
+    // tests parallèles (cargo test par défaut threads multiples).
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn resolve_health_port_uses_indexer_override_first() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("HYDRA_HTTP_PORT");
         std::env::set_var("AXON_INDEXER_HEALTH_PORT", "33333");
         assert_eq!(resolve_health_port(), 33333);
         std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
@@ -164,6 +171,7 @@ mod tests {
 
     #[test]
     fn resolve_health_port_falls_back_to_hydra_plus_10() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
         std::env::set_var("HYDRA_HTTP_PORT", "44129");
         assert_eq!(resolve_health_port(), 44139);
