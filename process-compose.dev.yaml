@@ -33,6 +33,7 @@ processes:
     environment:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=dev"
+      - "AXON_DEV_DATABASE_URL=${AXON_DEV_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_dev}"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
