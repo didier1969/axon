@@ -309,9 +309,13 @@ require_writer_guard_probe() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --brain-only|--brainonly)
+        brain|--brain-only|--brainonly)
             RUNTIME_MODE="brain_only"
             RUNTIME_SHADOW_ROLE="brain"
+            ;;
+        indexer|--indexer-full|--indexerfull|--full|full)
+            RUNTIME_MODE="indexer_full"
+            RUNTIME_SHADOW_ROLE="indexer"
             ;;
         --indexer-graph|--indexergraph)
             RUNTIME_MODE="indexer_graph"
@@ -319,14 +323,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --indexer-vector|--indexervector)
             RUNTIME_MODE="indexer_vector"
-            RUNTIME_SHADOW_ROLE="indexer"
-            ;;
-        --indexer-full|--indexerfull|--full)
-            # REQ-AXO-100 — accept --full as an alias for --indexer-full so
-            # docs/getting-started.md (which uses --full as the daily
-            # shorthand) executes verbatim. Without the alias the canonical
-            # doc command would fail with "Unknown option: --full".
-            RUNTIME_MODE="indexer_full"
             RUNTIME_SHADOW_ROLE="indexer"
             ;;
         --no-dashboard)
@@ -352,21 +348,23 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start.sh [--brain-only|--indexer-graph|--indexer-vector|--indexer-full] [--tensorrt] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
+Usage: ./scripts/axon-dev start <mode> [options]
+       ./scripts/axon-live start <mode> [options]
 
 Modes:
-  --brain-only      MCP + dashboard authority only, without graph or vector workers
-  --indexer-graph   Indexer with graph ingestion only, without semantic/vector workers
-  --indexer-vector  Indexer with semantic/vector workers only, without graph ingestion
-  --indexer-full    Indexer with graph + semantic/vector workloads (alias: --full)
+  brain             MCP server only (no indexation, no GPU)
+  indexer | full     Brain + indexer + GPU embedder + dashboard (default: TensorRT when GPU detected)
 
 Options:
-  --tensorrt      Enable the TensorRT GPU embedding service for indexer vector/full modes
-  --no-dashboard   Disable Elixir LiveView dashboard
-  --skip-mcp-tests Skip automatic MCP quality gate validation after startup
-  --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
-  --fast          MCP-only dev iteration shorthand (=--no-dashboard --skip-mcp-tests --skip-elixir-prewarm)
-  --use-process-compose  (Ignored — process-compose is now the default, REQ-AXO-901735)
+  --no-dashboard     Disable Elixir LiveView dashboard
+  --skip-mcp-tests   Skip automatic MCP quality gate validation after startup
+  --fast             Dev shorthand (=--no-dashboard --skip-mcp-tests --skip-elixir-prewarm)
+  --tensorrt         Force TensorRT (redundant — auto-detected when GPU present)
+
+Examples:
+  ./scripts/axon-dev start brain        # MCP only
+  ./scripts/axon-dev start full         # brain + indexer + GPU
+  ./scripts/axon-dev stop
 EOF
             exit 0
             ;;
@@ -383,18 +381,20 @@ EOF
 done
 
 
-if [[ "$REQUEST_TENSORRT" == "1" ]]; then
-    if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
-        echo "❌ --tensorrt requires --indexer-vector or --indexer-full."
-        echo "   The current mode is $RUNTIME_MODE, which does not run the vector lane."
-        exit 1
+# TensorRT is the default when GPU is detected and mode uses vectors.
+# --tensorrt flag is now redundant but still accepted for backward compat.
+if [[ "$RUNTIME_MODE" == "indexer_full" || "$RUNTIME_MODE" == "indexer_vector" ]]; then
+    if [[ "$REQUEST_TENSORRT" == "1" ]] || detect_accessible_gpu; then
+        export AXON_EMBEDDING_PROVIDER="tensorrt"
+        export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
     fi
-    # REQ-AXO-901737 : --tensorrt is now a thin alias setting the canonical
-    # AXON_EMBEDDING_PROVIDER knob. ort-runtime.sh derives the manifest path
-    # from the provider value. NVML / VRAM / telemetry vars below remain
-    # legit runtime parameters (not provider state).
-    export AXON_EMBEDDING_PROVIDER="tensorrt"
-    export AXON_GPU_TELEMETRY_BACKEND="${AXON_GPU_TELEMETRY_BACKEND:-nvml}"
+elif [[ "$REQUEST_TENSORRT" == "1" ]]; then
+    echo "❌ --tensorrt requires indexer or full mode."
+    echo "   The current mode is $RUNTIME_MODE, which does not run the vector lane."
+    exit 1
+fi
+
+if [[ "${AXON_EMBEDDING_PROVIDER:-}" == "tensorrt" ]]; then
     # REQ-AXO-901641 — resolve NVML lib across WSL/native Linux. If nothing
     # found, leave the var unset and let the runtime fall back per its own
     # discipline (TensorRT path requires NVML — operator gets a clear error

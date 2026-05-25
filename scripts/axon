@@ -39,9 +39,9 @@ Commands:
 
 Examples:
   ./scripts/axon-live status
-  ./scripts/axon-dev start --indexer-full
+  ./scripts/axon-dev start full
+  ./scripts/axon-dev start brain
   ./scripts/axon --instance live status
-  ./scripts/axon --instance dev start --indexer-full
   ./scripts/axon setup
   ./scripts/axon setup-tensorrt --precheck-only
   ./scripts/axon setup-tensorrt --qualify --max-vram-used-mb 2048 --tensorrt-workspace-mb 1024
