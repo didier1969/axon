@@ -197,31 +197,31 @@ axon_resolve_resource_policy() {
 
     if axon_normalize_resource_priority "${AXON_RESOURCE_PRIORITY:-}" >/dev/null 2>&1; then
         export AXON_RESOURCE_PRIORITY
-        export AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="explicit"
+        AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="explicit"
     else
         export AXON_RESOURCE_PRIORITY="$(axon_default_resource_priority "$instance_kind")"
-        export AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="policy_default"
+        AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="policy_default"
     fi
     if axon_normalize_background_budget_class "${AXON_BACKGROUND_BUDGET_CLASS:-}" >/dev/null 2>&1; then
         export AXON_BACKGROUND_BUDGET_CLASS
-        export AXON_POLICY_SOURCE_AXON_BACKGROUND_BUDGET_CLASS="explicit"
+        AXON_POLICY_SOURCE_AXON_BACKGROUND_BUDGET_CLASS="explicit"
     else
         export AXON_BACKGROUND_BUDGET_CLASS="$(axon_default_background_budget_class "$instance_kind")"
-        export AXON_POLICY_SOURCE_AXON_BACKGROUND_BUDGET_CLASS="policy_default"
+        AXON_POLICY_SOURCE_AXON_BACKGROUND_BUDGET_CLASS="policy_default"
     fi
     if axon_normalize_gpu_access_policy "${AXON_GPU_ACCESS_POLICY:-}" >/dev/null 2>&1; then
         export AXON_GPU_ACCESS_POLICY
-        export AXON_POLICY_SOURCE_AXON_GPU_ACCESS_POLICY="explicit"
+        AXON_POLICY_SOURCE_AXON_GPU_ACCESS_POLICY="explicit"
     else
         export AXON_GPU_ACCESS_POLICY="$(axon_default_gpu_access_policy "$instance_kind")"
-        export AXON_POLICY_SOURCE_AXON_GPU_ACCESS_POLICY="policy_default"
+        AXON_POLICY_SOURCE_AXON_GPU_ACCESS_POLICY="policy_default"
     fi
     if axon_normalize_watcher_policy "${AXON_WATCHER_POLICY:-}" >/dev/null 2>&1; then
         export AXON_WATCHER_POLICY
-        export AXON_POLICY_SOURCE_AXON_WATCHER_POLICY="explicit"
+        AXON_POLICY_SOURCE_AXON_WATCHER_POLICY="explicit"
     else
         export AXON_WATCHER_POLICY="$(axon_default_watcher_policy "$instance_kind")"
-        export AXON_POLICY_SOURCE_AXON_WATCHER_POLICY="policy_default"
+        AXON_POLICY_SOURCE_AXON_WATCHER_POLICY="policy_default"
     fi
 
     export AXON_RESOURCE_POLICY_CPU_CORES="$cpu_cores"
@@ -238,15 +238,15 @@ axon_resolve_resource_policy() {
 
     if [[ -z "${MAX_AXON_WORKERS:-}" ]]; then
         export MAX_AXON_WORKERS="$AXON_EFFECTIVE_MAX_AXON_WORKERS"
-        export AXON_POLICY_SOURCE_MAX_AXON_WORKERS="policy_default"
+        AXON_POLICY_SOURCE_MAX_AXON_WORKERS="policy_default"
     fi
     if [[ -z "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" ]]; then
         export AXON_QUEUE_MEMORY_BUDGET_BYTES="$AXON_EFFECTIVE_QUEUE_MEMORY_BUDGET_BYTES"
-        export AXON_POLICY_SOURCE_AXON_QUEUE_MEMORY_BUDGET_BYTES="policy_default"
+        AXON_POLICY_SOURCE_AXON_QUEUE_MEMORY_BUDGET_BYTES="policy_default"
     fi
     if [[ -z "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" ]]; then
         export AXON_WATCHER_SUBTREE_HINT_BUDGET="$AXON_EFFECTIVE_WATCHER_SUBTREE_HINT_BUDGET"
-        export AXON_POLICY_SOURCE_AXON_WATCHER_SUBTREE_HINT_BUDGET="policy_default"
+        AXON_POLICY_SOURCE_AXON_WATCHER_SUBTREE_HINT_BUDGET="policy_default"
     fi
 
     # REQ-AXO-184 #1: avoid → cpu auto-coercion deleted. AXON_EMBEDDING_PROVIDER

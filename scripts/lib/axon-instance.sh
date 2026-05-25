@@ -22,7 +22,7 @@ axon_load_worktree_env() {
     if [[ -f "$env_file" && "${AXON_WORKTREE_ENV_LOADED:-0}" != "1" ]]; then
         # shellcheck disable=SC1090
         source "$env_file"
-        export AXON_WORKTREE_ENV_LOADED=1
+        AXON_WORKTREE_ENV_LOADED=1
     fi
 }
 
@@ -33,7 +33,7 @@ axon_load_worktree_env() {
 #
 # Without this, a `dev` start followed by a `live` start in the same
 # shell would leak dev's per-instance values (AXON_DB_ROOT, AXON_PID_FILE,
-# AXON_RUN_ROOT, HYDRA_TCP_PORT, etc.) into the live runtime, breaking
+# AXON_RUN_ROOT, HYDRA_HTTP_PORT, etc.) into the live runtime, breaking
 # the Dual-Instance Operational Discipline Pillar (PIL-AXO-004). Operator
 # tunables (AXON_VECTOR_WORKERS, AXON_DB_BACKEND, AXON_FOO_NEW, …) are
 # preserved unchanged across runs.
@@ -50,7 +50,7 @@ axon_clear_inherited_env() {
     if [[ -f "$_axon_env_vars_lib" && "${AXON_ENV_VARS_LOADED:-0}" != "1" ]]; then
         # shellcheck disable=SC1090
         source "$_axon_env_vars_lib"
-        export AXON_ENV_VARS_LOADED=1
+        AXON_ENV_VARS_LOADED=1
     fi
     local name
     while IFS='=' read -r name _; do
@@ -185,11 +185,7 @@ axon_resolve_instance() {
         export TMUX_SESSION="axon-dev"
         export ELIXIR_NODE_NAME="axon_dev_nexus"
         export PHX_PORT="44137"
-        export HYDRA_TCP_PORT="44138"
         export HYDRA_HTTP_PORT="44139"
-        export HYDRA_ODATA_PORT="44140"
-        export HYDRA_HTTP2_PORT="44141"
-        export HYDRA_MCP_PORT="44142"
         export AXON_DB_ROOT="$project_root/.axon-dev/graph_v2"
         export AXON_RUN_ROOT="$project_root/.axon-dev/run"
         export AXON_TELEMETRY_SOCK="/tmp/axon-dev-telemetry.sock"
@@ -200,11 +196,7 @@ axon_resolve_instance() {
         export TMUX_SESSION="axon"
         export ELIXIR_NODE_NAME="axon_nexus"
         export PHX_PORT="44127"
-        export HYDRA_TCP_PORT="44128"
         export HYDRA_HTTP_PORT="44129"
-        export HYDRA_ODATA_PORT="44130"
-        export HYDRA_HTTP2_PORT="44131"
-        export HYDRA_MCP_PORT="44132"
         export AXON_DB_ROOT="$project_root/.axon/graph_v2"
         export AXON_RUN_ROOT="$project_root/.axon/live-run"
         export AXON_TELEMETRY_SOCK="/tmp/axon-live-telemetry.sock"

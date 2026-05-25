@@ -58,22 +58,21 @@ export AXON_RELEASE_VERSION="stale-version"
 export AXON_PACKAGE_VERSION="0.0.0-stale"
 export AXON_BUILD_ID="stale-build"
 export AXON_INSTALL_GENERATION="stale-gen"
-export HYDRA_TCP_PORT="44138"
 export HYDRA_HTTP_PORT="44139"
-export HYDRA_ODATA_PORT="44140"
-export HYDRA_HTTP2_PORT="44141"
-export HYDRA_MCP_PORT="44142"
-export AXON_WORKTREE_ENV_LOADED="1"
 
 # Vars from start.sh that are derived (must be unset).
 export AXON_GPU_EMBED_SERVICE_TENSORRT="1"
 
-# Vars from the user-input allowlist (must be preserved).
+# Vars from axon_resolve_instance that are ALSO in the derived list.
+# These get unset by axon_clear_inherited_env; production scripts
+# (start.sh, stop.sh) save/restore them around the clear call.
 export AXON_INSTANCE_KIND="live"
-export AXON_PROJECT_CODE="AXO"
 export AXON_PROJECT_ROOT="/home/user/projects/axon"
 export AXON_RUNTIME_SHADOW_ROLE="brain"
 export AXON_RUNTIME_MODE="brain_only"
+
+# Vars from the user-input allowlist (must be preserved).
+export AXON_PROJECT_CODE="AXO"
 export AXON_GPU_BACKEND="tensorrt"
 export AXON_VECTOR_WORKERS="4"
 export AXON_PUBLIC_HOST="public.example.com"
@@ -111,21 +110,16 @@ assert_unset AXON_RELEASE_VERSION
 assert_unset AXON_PACKAGE_VERSION
 assert_unset AXON_BUILD_ID
 assert_unset AXON_INSTALL_GENERATION
-assert_unset HYDRA_TCP_PORT
 assert_unset HYDRA_HTTP_PORT
-assert_unset HYDRA_ODATA_PORT
-assert_unset HYDRA_HTTP2_PORT
-assert_unset HYDRA_MCP_PORT
-assert_unset AXON_WORKTREE_ENV_LOADED
 assert_unset AXON_GPU_EMBED_SERVICE_TENSORRT
+assert_unset AXON_INSTANCE_KIND
+assert_unset AXON_PROJECT_ROOT
+assert_unset AXON_RUNTIME_SHADOW_ROLE
+assert_unset AXON_RUNTIME_MODE
 
 # --- Assert user-input allowlist is preserved ------------------------------
 
-assert_eq AXON_INSTANCE_KIND "live"
 assert_eq AXON_PROJECT_CODE "AXO"
-assert_eq AXON_PROJECT_ROOT "/home/user/projects/axon"
-assert_eq AXON_RUNTIME_SHADOW_ROLE "brain"
-assert_eq AXON_RUNTIME_MODE "brain_only"
 assert_eq AXON_GPU_BACKEND "tensorrt"
 assert_eq AXON_VECTOR_WORKERS "4"
 assert_eq AXON_PUBLIC_HOST "public.example.com"
@@ -141,7 +135,7 @@ assert_eq USERS_OWN_VAR "hello"
 # --- Cycle 2: idempotent on already-clean env ------------------------------
 
 axon_clear_inherited_env
-assert_eq AXON_INSTANCE_KIND "live"
+assert_eq AXON_PROJECT_CODE "AXO"
 assert_unset AXON_DB_ROOT
 
 # --- Cycle 3: re-export, re-clear pattern works repeatedly -----------------
@@ -151,6 +145,6 @@ export AXON_TELEMETRY_SOCK="/tmp/axon-dev-telemetry.sock"
 axon_clear_inherited_env
 assert_unset AXON_DB_ROOT
 assert_unset AXON_TELEMETRY_SOCK
-assert_eq AXON_INSTANCE_KIND "live"
+assert_eq AXON_PROJECT_CODE "AXO"
 
 echo "PASS: axon env cleanup (REQ-AXO-109)"

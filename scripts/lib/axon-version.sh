@@ -73,8 +73,6 @@ axon_resolve_version() {
     local release_version=""
     local install_generation=""
 
-    export AXON_BUILD_INFO_FILE="$build_info_file"
-
     package_version="$(axon_package_version "$project_root")"
 
     # REQ-AXO-901661 — Source `bin/*.build-info` ONLY for the live instance.

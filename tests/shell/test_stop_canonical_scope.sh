@@ -8,7 +8,7 @@
 #   - `scripts/stop.sh --verify` must exit 0 (canonical scope only).
 #
 # Test A : dashboard listener on PHX_PORT, no canonical process -> verify OK.
-# Test B : third-party listener on HYDRA_MCP_PORT, no canonical process -> verify OK.
+# Test B : third-party listener on a non-canonical port, no canonical process -> verify OK.
 # Test C : (skip if any canonical process alive ; would interfere with state).
 # Test D : --hard mode does NOT kill processes whose cmdline contains 'axon' but
 #          is not in ${PROJECT_ROOT}/bin/.
@@ -77,7 +77,10 @@ source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 export AXON_INSTANCE_KIND="$INSTANCE_KIND"
 axon_resolve_instance "$PROJECT_ROOT" "$(basename "$PROJECT_ROOT")"
 
-echo "instance=$AXON_INSTANCE_KIND PHX_PORT=$PHX_PORT HYDRA_MCP_PORT=$HYDRA_MCP_PORT"
+# HYDRA_MCP_PORT retired (legacy, no longer exported). Use a fixed
+# non-canonical port for the third-party listener test.
+NON_CANONICAL_PORT=44142
+echo "instance=$AXON_INSTANCE_KIND PHX_PORT=$PHX_PORT NON_CANONICAL_PORT=$NON_CANONICAL_PORT"
 
 # Sanity: skip the suite if any canonical process is alive — we cannot
 # distinguish their listeners from injected ones, and we never kill
@@ -107,11 +110,11 @@ fi
 cleanup_pid "$PID_DASH"
 PID_DASH=""
 
-# --- Test B: third-party listener on HYDRA_MCP_PORT -> verify must pass ---
-PID_3PTY="$(spawn_listener "$HYDRA_MCP_PORT" "third-party-mcp-squat")"
+# --- Test B: third-party listener on a non-canonical port -> verify must pass ---
+PID_3PTY="$(spawn_listener "$NON_CANONICAL_PORT" "third-party-mcp-squat")"
 if AXON_INSTANCE_KIND="$INSTANCE_KIND" bash "$PROJECT_ROOT/scripts/stop.sh" --verify \
         > /tmp/${TEST_NAME}_B.log 2>&1; then
-    pass B "third-party listener on HYDRA_MCP_PORT does not block --verify (binary-anchored identity)"
+    pass B "third-party listener on non-canonical port does not block --verify (binary-anchored identity)"
 else
     rc=$?
     echo "--- /tmp/${TEST_NAME}_B.log ---" >&2

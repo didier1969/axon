@@ -195,9 +195,6 @@ axon_resolve_ort_runtime() {
     fi
 
     export PRELAUNCH_LD_LIBRARY_PATH_EXPORT
-    export ORT_ARTIFACT_MANIFEST
-    export ORT_BUILD_LOG
-    export ORT_OUT_PATH
     export ORT_DYLIB_PATH
     export TENSORRT_LIB_DIR
     export GPU_SERVICE_TENSORRT_REQUESTED

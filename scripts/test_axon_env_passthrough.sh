@@ -50,7 +50,7 @@ assert_eq "${HYDRA_GRPC_PORT:-<unset>}" "50051" \
 # ─── Phase 2: derived per-instance vars are cleared ──────────────────────
 export AXON_PID_FILE="/tmp/leftover-from-previous-run.pid"
 export AXON_RUNTIME_IDENTITY="leftover-id"
-export HYDRA_TCP_PORT="33999"
+export HYDRA_HTTP_PORT="33999"
 export AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="policy_default"
 export AXON_RESOURCE_POLICY_COMPUTED_INSTANCE="dev"
 
@@ -60,8 +60,8 @@ assert_eq "${AXON_PID_FILE:-<unset>}" "<unset>" \
     "AXON_PID_FILE (derived per-instance) must be unset"
 assert_eq "${AXON_RUNTIME_IDENTITY:-<unset>}" "<unset>" \
     "AXON_RUNTIME_IDENTITY (derived per-run) must be unset"
-assert_eq "${HYDRA_TCP_PORT:-<unset>}" "<unset>" \
-    "HYDRA_TCP_PORT (derived per-instance) must be unset"
+assert_eq "${HYDRA_HTTP_PORT:-<unset>}" "<unset>" \
+    "HYDRA_HTTP_PORT (derived per-instance) must be unset"
 assert_eq "${AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY:-<unset>}" "<unset>" \
     "AXON_POLICY_SOURCE_* (resource policy marker) must be unset by wildcard match"
 assert_eq "${AXON_RESOURCE_POLICY_COMPUTED_INSTANCE:-<unset>}" "<unset>" \

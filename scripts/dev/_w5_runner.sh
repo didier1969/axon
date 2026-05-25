@@ -35,12 +35,10 @@ export AXON_PARQUET_EMBEDDING_STORE_ENABLED=true
 export AXON_INDEXER_PG_OPT_IN=1
 
 echo "==[ Wave 5 env ]=="
-echo "  AXON_DB_BACKEND                 = ${AXON_DB_BACKEND:-<unset>}"
 echo "  AXON_INDEXER_PG_OPT_IN          = ${AXON_INDEXER_PG_OPT_IN}"
 echo "  AXON_ASYNC_WRITER_ENABLED       = ${AXON_ASYNC_WRITER_ENABLED}"
 echo "  AXON_BULK_WRITER_ENABLED        = ${AXON_BULK_WRITER_ENABLED}"
 echo "  AXON_PARQUET_EMBEDDING_STORE_ENABLED = ${AXON_PARQUET_EMBEDDING_STORE_ENABLED}"
-echo "  AXON_AGE_ONLY_RELATIONS         = ${AXON_AGE_ONLY_RELATIONS:-<unset>}"
 echo "  AXON_DEV_DATABASE_URL           = (set)"
 echo "  scope=$SCOPE duration=${DURATION}s label=$LABEL"
 echo "===================="

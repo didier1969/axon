@@ -184,7 +184,6 @@ export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
 export AXON_BRAIN_BIN="$BRAIN_BIN"
 export AXON_INDEXER_BIN="$INDEXER_BIN"
 export AXON_RUNTIME_SHADOW_ROLE="$( [[ "$RUNTIME_MODE" == "brain_only" ]] && echo brain || echo indexer )"
-export SQL_URL="${AXON_SQL_URL:-}"
 export AXON_ERLANG_COOKIE="${AXON_ERLANG_COOKIE:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)}"
 
 [[ "$START_DASHBOARD" == "1" ]] && export AXON_DASHBOARD_DISABLED=false || export AXON_DASHBOARD_DISABLED=true
