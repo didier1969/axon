@@ -897,6 +897,25 @@ impl GraphStore {
     /// CPU, vector as optional enrichment.
     ///
     /// Idempotent — every INSERT uses `ON CONFLICT DO UPDATE` (Symbol,
+    /// Load all `(path, content_hash, last_seen_ms)` from `IndexedFile`
+    /// for hydrating the dedup cache at boot.
+    pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64)>> {
+        let raw = self.query_json_writer(
+            "SELECT path, content_hash, last_seen_ms FROM IndexedFile"
+        )?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
+            .unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let path = row.first()?.as_str()?.to_string();
+                let hash = row.get(1)?.as_str()?.to_string();
+                let ts = row.get(2)?.as_i64().unwrap_or(0);
+                Some((path, hash, ts))
+            })
+            .collect())
+    }
+
     /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).
     ///
     /// Returns the chunk_ids persisted. The A3 stage worker `try_send`s

@@ -71,8 +71,9 @@ pub use channels::{
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
 pub use orchestrator::{
-    spawn_pipeline_a, spawn_pipeline_b_b1_only, spawn_pipeline_b_full, PipelineAHandles,
-    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBHandles, PipelineBWorkerCounts,
+    spawn_pipeline_a, spawn_pipeline_a_with_cache, spawn_pipeline_b_b1_only,
+    spawn_pipeline_b_full, PipelineAHandles, PipelineAWorkerCounts, PipelineBFullHandles,
+    PipelineBHandles, PipelineBWorkerCounts,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;

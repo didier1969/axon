@@ -34,9 +34,11 @@ use crate::ingress_buffer::{
     IngressSource, SharedIngressBuffer,
 };
 use crate::pipeline_v2::{
-    b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_a, spawn_pipeline_b_full,
-    GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
+    b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_b_full,
+    GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
+    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
+use crate::pipeline_v2::orchestrator::spawn_pipeline_a_with_cache;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
@@ -103,6 +105,24 @@ pub fn spawn_pipeline_v2_indexer(
         }
     });
 
+    // REQ-AXO-901746 — hydrate the content-hash dedup cache from PG at boot.
+    // Files whose (path, content_hash) match are skipped between A1 and A2,
+    // avoiding the expensive tree-sitter parse on unchanged files.
+    let dedup_cache = match store.load_all_indexed_files() {
+        Ok(rows) => {
+            let count = rows.len();
+            let cache = IndexedFileCache::from_iter(rows.into_iter().map(|(path, hash, ts)| {
+                (path, IndexedFileEntry { content_hash: hash, last_seen_ms: ts })
+            }));
+            info!("pipeline_v2: dedup cache hydrated with {count} entries from IndexedFile");
+            Some(cache)
+        }
+        Err(err) => {
+            warn!(error = %err, "pipeline_v2: failed to hydrate dedup cache; all files will be re-parsed");
+            None
+        }
+    };
+
     info!(
         "pipeline_v2: spawning pipeline A (a1={} a2={} a3={}) under runtime_mode={}",
         counts_a.a1,
@@ -110,7 +130,7 @@ pub fn spawn_pipeline_v2_indexer(
         counts_a.a3,
         runtime_mode.as_str()
     );
-    let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), resolver);
+    let mut handles_a = spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
 
     let b1_inbox_rx = std::mem::replace(
         &mut handles_a.b1_inbox_rx,
@@ -277,11 +297,20 @@ pub fn spawn_pipeline_v2_indexer(
         });
     }
 
-    // A's receipts are observability-only; drop the rx side. A3 still
-    // commits to PG regardless of receipt consumption.
+    // A3 receipts update the dedup cache so subsequent re-indexing
+    // of unchanged files skips the A2 tree-sitter parse.
     let mut output_rx_a = handles_a.output_rx;
+    let dedup_cache_for_receipts = dedup_cache;
     tokio::spawn(async move {
-        while output_rx_a.recv().await.is_some() {}
+        while let Some(receipt) = output_rx_a.recv().await {
+            if let Some(ref cache) = dedup_cache_for_receipts {
+                cache.mark_indexed(
+                    receipt.path,
+                    receipt.content_hash,
+                    receipt.last_seen_ms,
+                );
+            }
+        }
     });
 
     // Bootstrap scan: enumerate every eligible file under the watch

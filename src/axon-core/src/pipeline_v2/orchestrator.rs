@@ -181,6 +181,21 @@ pub fn spawn_pipeline_a(
     store: Arc<GraphStore>,
     resolver: super::project_resolver::ProjectCodeResolver,
 ) -> PipelineAHandles {
+    spawn_pipeline_a_with_cache(counts, caps, store, resolver, None)
+}
+
+/// Like [`spawn_pipeline_a`] but with an optional content-hash dedup
+/// cache. When provided, files whose `(path, content_hash)` match the
+/// cache are silently dropped between A1 and A2 — the expensive
+/// tree-sitter parse is skipped entirely. The cache is updated by A3
+/// after a successful UPSERT.
+pub fn spawn_pipeline_a_with_cache(
+    counts: PipelineAWorkerCounts,
+    caps: PipelineChannelCaps,
+    store: Arc<GraphStore>,
+    resolver: super::project_resolver::ProjectCodeResolver,
+    dedup_cache: Option<Arc<super::IndexedFileCache>>,
+) -> PipelineAHandles {
     let (input_tx, input_rx) = mpsc::channel::<PathBuf>(caps.internal);
     let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
@@ -212,9 +227,47 @@ pub fn spawn_pipeline_a(
         metrics_a1.clone(),
     );
 
+    // REQ-AXO-901746 — content-hash dedup filter between A1 and A2.
+    // When a cache is provided, skip the expensive A2 tree-sitter parse
+    // for files whose content is unchanged since last indexing.
+    let a2_input_rx = if let Some(cache) = dedup_cache {
+        let (filtered_tx, filtered_rx) = mpsc::channel(caps.internal);
+        tokio::spawn(async move {
+            let mut a1_rx = a1_to_a2_rx;
+            let mut skipped: u64 = 0;
+            let mut forwarded: u64 = 0;
+            while let Some(prep) = a1_rx.recv().await {
+                let path_str = prep.path.to_string_lossy().to_string();
+                if cache.should_index(&path_str, &prep.content_hash) {
+                    if filtered_tx.send(prep).await.is_err() {
+                        break;
+                    }
+                    forwarded += 1;
+                } else {
+                    skipped += 1;
+                }
+                if (forwarded + skipped) % 500 == 0 && (forwarded + skipped) > 0 {
+                    tracing::info!(
+                        forwarded, skipped,
+                        "dedup filter: {:.0}% skipped",
+                        skipped as f64 / (forwarded + skipped) as f64 * 100.0
+                    );
+                }
+            }
+            tracing::info!(
+                forwarded, skipped,
+                "dedup filter done: {:.0}% skipped",
+                if forwarded + skipped > 0 { skipped as f64 / (forwarded + skipped) as f64 * 100.0 } else { 0.0 }
+            );
+        });
+        filtered_rx
+    } else {
+        a1_to_a2_rx
+    };
+
     spawn_stage_workers(
         counts.a2,
-        a1_to_a2_rx,
+        a2_input_rx,
         a2_to_a3_tx,
         |prep| async move { a2_transform(prep).await },
         metrics_a2.clone(),
