@@ -19,12 +19,13 @@ usage() {
 Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--skip-build] [--skip-qualify] [--skip-dev-validation] [--dry-run]
 
 One-shot promotion flow:
-  0. Validate dev instance healthy (`feedback_dev_first_no_exception`)
-  1. Build canonical release artifact
-  2. Run release preflight
-  3. Create qualified release manifest
-  4. Promote live with restart and MCP runtime post-check
-  5. Run core MCP qualification and final live status
+  1. Validate dev instance healthy (`feedback_dev_first_no_exception`)
+  2. Build canonical release artifact
+  3. Run release preflight
+  4. Create qualified release manifest
+  5. Promote live (copy + restart)
+  6. Run core MCP qualification
+  7. Finalize (SOLL export + status)
 
 Live promotion always builds the brain MCP + indexer authority contract.
 
@@ -50,22 +51,84 @@ done
 
 [[ -n "$PROJECT_CODE" ]] || { echo "--project is required" >&2; exit 1; }
 
+# --- REQ-AXO-901758: logging + step tracking + error trap ---
+PROMOTE_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+LOG_DIR="$ROOT_DIR/.axon/live-release"
+mkdir -p "$LOG_DIR"
+PROMOTE_LOG="$LOG_DIR/promote-${PROMOTE_TIMESTAMP}.log"
+
+CURRENT_STEP=0
+CURRENT_STEP_NAME="init"
+STEP_NAMES=(
+  "0:init"
+  "1:dev_gate"
+  "2:build"
+  "3:preflight"
+  "4:manifest"
+  "5:promote_copy_restart"
+  "6:qualify_mcp"
+  "7:finalize"
+)
+
+promote_log() {
+  local ts
+  ts="$(date -u +%H:%M:%S)"
+  echo "[$ts] $*" >> "$PROMOTE_LOG"
+  echo "$*"
+}
+
+on_promote_failure() {
+  local exit_code=$?
+  promote_log ""
+  promote_log "❌ PROMOTE FAILED at step ${CURRENT_STEP}: ${CURRENT_STEP_NAME}"
+  promote_log "   Exit code: ${exit_code}"
+  promote_log "   Log: ${PROMOTE_LOG}"
+  promote_log "   Recovery: fix the issue and re-run the command."
+  echo "" >&2
+  echo "❌ PROMOTE FAILED at step ${CURRENT_STEP}: ${CURRENT_STEP_NAME} — see ${PROMOTE_LOG}" >&2
+}
+trap on_promote_failure ERR
+
+run_step() {
+  local step_num="$1"
+  local step_name="$2"
+  shift 2
+  CURRENT_STEP="$step_num"
+  CURRENT_STEP_NAME="$step_name"
+  promote_log ""
+  promote_log "== step ${step_num}: ${step_name} =="
+  local step_tmp
+  step_tmp="$(mktemp)"
+  set +e
+  "$@" > "$step_tmp" 2>&1
+  local rc=$?
+  set -e
+  cat "$step_tmp" | tee -a "$PROMOTE_LOG"
+  rm -f "$step_tmp"
+  if [[ "$rc" -ne 0 ]]; then
+    promote_log "   step ${step_num} (${step_name}) returned exit code ${rc}"
+    promote_log ""
+    promote_log "❌ PROMOTE FAILED at step ${step_num}: ${step_name}"
+    promote_log "   Exit code: ${rc}"
+    promote_log "   Log: ${PROMOTE_LOG}"
+    echo "" >&2
+    echo "❌ PROMOTE FAILED at step ${step_num}: ${step_name} — see ${PROMOTE_LOG}" >&2
+    exit "$rc"
+  fi
+  promote_log "   ✅ step ${step_num} (${step_name}) done"
+}
+
 start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+promote_log "promote_live_safe.sh started at ${PROMOTE_TIMESTAMP}"
+promote_log "project=${PROJECT_CODE} head=${start_head} skip_build=${SKIP_BUILD} skip_qualify=${SKIP_QUALIFY} skip_dev=${SKIP_DEV_VALIDATION}"
 
 ensure_head_stable() {
   local current_head
   current_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
   if [[ "$current_head" != "$start_head" ]]; then
-    echo "HEAD changed during promotion flow: start=$start_head current=$current_head" >&2
+    promote_log "HEAD changed during promotion: start=$start_head current=$current_head"
     return 1
   fi
-}
-
-run_step() {
-  local label="$1"
-  shift
-  echo "== $label =="
-  "$@"
 }
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -165,46 +228,85 @@ except Exception:
   fi
 }
 
+# --- Step 1: dev gate ---
 if [[ "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
-  echo "== dev validation =="
-  echo "  ⚠️ BYPASSED via --skip-dev-validation (violation of feedback_dev_first_no_exception)"
+  promote_log "== step 1: dev_gate =="
+  promote_log "  ⚠️ BYPASSED via --skip-dev-validation (violation of feedback_dev_first_no_exception)"
 else
-  run_step "dev validation gate (feedback_dev_first_no_exception)" validate_dev_healthy
+  run_step 1 dev_gate validate_dev_healthy
 fi
 
+# --- Step 2: build ---
 if [[ "$SKIP_BUILD" -ne 1 ]]; then
-  run_step "build canonical release artifact" "$ROOT_DIR/scripts/axon" setup --artifact-only
+  run_step 2 build "$ROOT_DIR/scripts/axon" setup --artifact-only
 fi
 
+# --- Step 3: preflight ---
 ensure_head_stable
-run_step "release preflight" "$ROOT_DIR/scripts/axon" release-preflight
+run_step 3 preflight "$ROOT_DIR/scripts/axon" release-preflight
 ensure_head_stable
 
-manifest_path="$(run_step "create qualified release manifest" "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified | tail -n 1)"
-[[ -n "$manifest_path" ]] || { echo "Failed to capture manifest path" >&2; exit 1; }
+# --- Step 4: manifest ---
+CURRENT_STEP=4; CURRENT_STEP_NAME="manifest"
+promote_log ""
+promote_log "== step 4: manifest =="
+manifest_output="$("$ROOT_DIR/scripts/axon" create-release-manifest --state qualified 2>&1 | tee -a "$PROMOTE_LOG")"
+manifest_path="$(echo "$manifest_output" | tail -n 1)"
+if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+  promote_log "Failed to capture manifest path from create-release-manifest output"
+  exit 1
+fi
 manifest_path="$(realpath "$manifest_path")"
+promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 
+# --- Step 5: promote (copy + restart) ---
 ensure_head_stable
-run_step "promote live and verify runtime truth" "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live
+old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
+run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live
+new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
+promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
+if [[ "$old_md5" == "$new_md5" ]]; then
+  promote_log "   ⚠️ WARNING: binary md5 unchanged after promote — copy may have failed"
+fi
 
+# --- Step 6: qualify ---
 if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
   ensure_head_stable
-  run_step "qualify live MCP core surface" "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
+  run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
 fi
 
-# REQ-AXO-126 — snapshot the SOLL graph at the moment of promotion so
-# the artifact is part of the qualified-release lineage (PIL-AXO-005).
-# Best-effort: if the export call fails, log a warning but do not roll
-# back the promotion — the manifest is the authoritative artifact.
-ensure_head_stable
-echo "== snapshot SOLL for release lineage =="
+# --- Step 7: finalize (SOLL export + status) ---
+CURRENT_STEP=7; CURRENT_STEP_NAME="finalize"
+promote_log ""
+promote_log "== step 7: finalize =="
+
+# REQ-AXO-126 — SOLL snapshot for release lineage (best-effort)
 soll_export_args=$(printf '{"project_code":"%s"}' "$PROJECT_CODE")
-if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "$soll_export_args" --format text; then
-  echo "WARN: soll_export call failed; promotion is still complete (manifest is authoritative)" >&2
+if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "$soll_export_args" --format text >> "$PROMOTE_LOG" 2>&1; then
+  promote_log "   ⚠️ soll_export failed (non-blocking — manifest is authoritative)"
 fi
 
 ensure_head_stable
-run_step "final live status" bash "$ROOT_DIR/scripts/axon-live" status
+bash "$ROOT_DIR/scripts/axon-live" status 2>&1 | tee -a "$PROMOTE_LOG"
+promote_log "   ✅ step 7 (finalize) done"
 
-echo "SAFE PROMOTION COMPLETE"
-echo "manifest=$manifest_path"
+# --- Final summary ---
+final_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "unknown")"
+final_build_id="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$ROOT_DIR/.axon/live-release/current.json'))
+    print(d.get('source',{}).get('build_id','') or d.get('runtime_version',{}).get('build_id','unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown")"
+
+promote_log ""
+promote_log "✅ PROMOTE COMPLETE"
+promote_log "   build_id=${final_build_id}"
+promote_log "   sha=${start_head:0:12}"
+promote_log "   bin/axon-brain md5=${final_md5}"
+promote_log "   manifest=${manifest_path}"
+promote_log "   log=${PROMOTE_LOG}"
+
+# Disable the ERR trap — we succeeded
+trap - ERR
