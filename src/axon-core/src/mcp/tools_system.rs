@@ -1,4 +1,6 @@
 use serde_json::{json, Value};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use super::format::{format_standard_contract, format_table_from_json};
 use super::tools_system_debug;
@@ -6,6 +8,70 @@ use super::McpServer;
 use crate::graph_query::ReadFreshness;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
+
+// ── Filesystem counter cache (disk_files + eligible_files) ──────────
+// Scanning the watch root is ~1s; cache for 60s to keep
+// `embedding_status` cheap on repeated calls.
+const FS_COUNTER_CACHE_TTL_SECS: u64 = 60;
+
+struct FsCounterSnapshot {
+    disk_files: i64,
+    eligible_files: i64,
+    computed_at: Instant,
+}
+
+static FS_COUNTER_CACHE: Mutex<Option<FsCounterSnapshot>> = Mutex::new(None);
+
+/// Count total files on disk (no filter) and eligible files (scanner
+/// filters applied) under `watch_root`. Both are computed in a single
+/// walk — the walker enumerates all regular files, and `should_process_path`
+/// decides eligibility.
+fn compute_fs_counters(watch_root: &str) -> (i64, i64) {
+    let scanner = crate::scanner::Scanner::new(watch_root, "");
+    let walker = ignore::WalkBuilder::new(watch_root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build();
+    let mut disk: i64 = 0;
+    let mut eligible: i64 = 0;
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        disk += 1;
+        if scanner.should_process_path(entry.path()) {
+            eligible += 1;
+        }
+    }
+    (disk, eligible)
+}
+
+fn cached_fs_counters() -> (i64, i64) {
+    let watch_root = match std::env::var("AXON_WATCH_DIR") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return (-1, -1), // no watch dir configured
+    };
+    {
+        let guard = FS_COUNTER_CACHE.lock().unwrap();
+        if let Some(ref snap) = *guard {
+            if snap.computed_at.elapsed().as_secs() < FS_COUNTER_CACHE_TTL_SECS {
+                return (snap.disk_files, snap.eligible_files);
+            }
+        }
+    }
+    let (disk, eligible) = compute_fs_counters(&watch_root);
+    {
+        let mut guard = FS_COUNTER_CACHE.lock().unwrap();
+        *guard = Some(FsCounterSnapshot {
+            disk_files: disk,
+            eligible_files: eligible,
+            computed_at: Instant::now(),
+        });
+    }
+    (disk, eligible)
+}
 
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
@@ -266,6 +332,57 @@ impl McpServer {
             0.0
         };
 
+        // ── Filesystem counters (cached 60s) ──────────────────────
+        let (disk_files, eligible_files) = cached_fs_counters();
+
+        // ── Per-project breakdown ─────────────────────────────────
+        // Only computed for global view (project == "*"); individual
+        // project queries already scope the main counts above.
+        let per_project_breakdown: Value = if project == "*" {
+            let breakdown_sql = "\
+                SELECT c.project_code, \
+                       count(*) AS chunks, \
+                       (SELECT count(*) FROM public.ChunkEmbedding ce WHERE ce.chunk_id IN (SELECT id FROM public.Chunk c2 WHERE c2.project_code = c.project_code)) AS embeddings, \
+                       (SELECT count(*) FROM public.IndexedFile f WHERE f.project_code = c.project_code) AS indexed_files \
+                FROM public.Chunk c \
+                GROUP BY c.project_code \
+                ORDER BY chunks DESC";
+            match self.graph_store.execute_raw_sql_gateway(breakdown_sql) {
+                Ok(raw) => {
+                    // Result is [[project_code, chunks, embeddings, indexed_files], ...]
+                    if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(&raw) {
+                        let arr: Vec<Value> = rows
+                            .iter()
+                            .filter_map(|row| {
+                                let code = row.first()?.as_str()?;
+                                let ch = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                                let emb = row.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+                                let idx = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
+                                let cov = if ch > 0 {
+                                    (emb as f64 / ch as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+                                Some(json!({
+                                    "project_code": code,
+                                    "indexed_files": idx,
+                                    "chunks": ch,
+                                    "embeddings": emb,
+                                    "coverage_pct": (cov * 100.0).round() / 100.0,
+                                }))
+                            })
+                            .collect();
+                        json!(arr)
+                    } else {
+                        json!([])
+                    }
+                }
+                Err(_) => json!([]),
+            }
+        } else {
+            json!([])
+        };
+
         // Pipeline params — read env (best-effort, reflects responder).
         let env_usize = |key: &str, default: usize| -> usize {
             std::env::var(key)
@@ -404,8 +521,52 @@ impl McpServer {
         let heartbeat_age_suffix = lifecycle_heartbeat_age_ms
             .map(|age| format!(", heartbeat_age_ms={age}"))
             .unwrap_or_default();
+        // ── Per-project breakdown text ──────────────────────────
+        let breakdown_text = if project == "*" {
+            if let Some(arr) = per_project_breakdown.as_array() {
+                if arr.is_empty() {
+                    String::new()
+                } else {
+                    let mut lines = String::from(
+                        "\n### Per-project breakdown\n\
+                         | Project      | IndexedFiles | Chunks       | Embeddings   | Coverage   |\n\
+                         |--------------|--------------|--------------|--------------|------------|\n",
+                    );
+                    for entry in arr {
+                        let code = entry.get("project_code").and_then(|v| v.as_str()).unwrap_or("?");
+                        let idx = entry.get("indexed_files").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let ch = entry.get("chunks").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let emb = entry.get("embeddings").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let cov = entry.get("coverage_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        lines.push_str(&format!(
+                            "| {code:<12} | {idx:>12} | {ch:>12} | {emb:>12} | {cov:>9.2}% |\n"
+                        ));
+                    }
+                    lines
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let disk_files_str = if disk_files >= 0 {
+            format!("{disk_files}")
+        } else {
+            "n/a (no AXON_WATCH_DIR)".to_string()
+        };
+        let eligible_files_str = if eligible_files >= 0 {
+            format!("{eligible_files}")
+        } else {
+            "n/a".to_string()
+        };
+
         let report = format!(
             "## Axon Status (project={project})\n\n\
+             ### Filesystem (cached {FS_COUNTER_CACHE_TTL_SECS}s)\n\
+             - Disk files (total):    {disk_files_str}\n\
+             - Eligible files:        {eligible_files_str}\n\n\
              ### Storage\n\
              | Entity         | Count        |\n\
              |----------------|--------------|\n\
@@ -416,7 +577,8 @@ impl McpServer {
              | IndexedFile    | {indexed_files:>12} |\n\
              | Project        | {projects:>12} |\n\n\
              **Embedding coverage** : {embedded_chunks} / {total_chunks} = {coverage_pct:.2}%  (pending = {pending_chunks})\n\
-             **Runtime pending set** : {runtime_pending} (in-memory ; syncé via NOTIFY + reconcile)\n\n\
+             **Runtime pending set** : {runtime_pending} (in-memory ; syncé via NOTIFY + reconcile)\n\
+             {breakdown_text}\n\
              ### Pipeline A — CPU (graph + chunks + FTS)\n\
              - Workers:           a1={a1}  a2={a2}  a3={a3}\n\
              - A3 batch:          {a3_batch} chunks, timeout {a3_timeout} ms\n\n\
@@ -463,6 +625,8 @@ impl McpServer {
             "content": [{ "type": "text", "text": report }],
             "structuredContent": {
                 "project": project,
+                "disk_files": disk_files,
+                "eligible_files": eligible_files,
                 "symbols": symbols,
                 "total_chunks": total_chunks,
                 "embedded_chunks": embedded_chunks,
@@ -471,6 +635,7 @@ impl McpServer {
                 "edges": edges,
                 "indexed_files": indexed_files,
                 "projects": projects,
+                "per_project": per_project_breakdown,
                 "pipeline_a": { "a1": a1, "a2": a2, "a3": a3, "a3_batch_size": a3_batch, "a3_batch_timeout_ms": a3_timeout },
                 "pipeline_b": { "b1": b1, "b2": b2, "b3": b3, "b2_batch_size": b2_batch, "b2_batch_timeout_ms": b2_timeout, "b3_batch_size": b3_batch, "b3_batch_timeout_ms": b3_timeout, "a3_to_b1_buffer_cap": a3_to_b1_cap, "coldstart_batch_size": coldstart_batch },
                 "notify_channel": "chunk_pending_embed",
