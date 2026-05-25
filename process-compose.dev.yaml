@@ -26,12 +26,15 @@ processes:
       restart: "no"
     is_daemon: false
 
+  # Single-process mode: one binary runs brain MCP + indexer pipeline.
+  # AXON_RUNTIME_MODE controls what it does (brain_only vs indexer_full).
+  # No IST writer lock conflict — one process, one lock.
   axon-brain:
     command: "${AXON_BRAIN_BIN:-.axon/cargo-target/debug/axon-brain}"
     working_dir: "."
     environment:
-      - "AXON_RUNTIME_MODE=${AXON_BRAIN_MODE:-brain_only}"
-      - "AXON_RUNTIME_SHADOW_ROLE=brain"
+      - "AXON_RUNTIME_MODE=${AXON_RUNTIME_MODE:-brain_only}"
+      - "AXON_RUNTIME_SHADOW_ROLE=${AXON_RUNTIME_SHADOW_ROLE:-brain}"
       - "AXON_INSTANCE_KIND=dev"
     depends_on:
       postgres-check:
@@ -42,46 +45,6 @@ processes:
         scheme: "http"
         path: "/readyz"
         port: 44139
-      initial_delay_seconds: 5
-      period_seconds: 5
-      timeout_seconds: 5
-      success_threshold: 1
-      failure_threshold: 60
-    liveness_probe:
-      http_get:
-        host: "127.0.0.1"
-        scheme: "http"
-        path: "/livez"
-        port: 44139
-      initial_delay_seconds: 120
-      period_seconds: 30
-      timeout_seconds: 5
-      success_threshold: 1
-      failure_threshold: 3
-    availability:
-      restart: "on_failure"
-      max_restarts: 3
-      backoff_seconds: 5
-    shutdown:
-      signal: 15
-      timeout_seconds: 30
-
-  axon-indexer:
-    command: "${AXON_INDEXER_BIN:-.axon/cargo-target/debug/axon-indexer}"
-    working_dir: "."
-    environment:
-      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_full}"
-      - "AXON_RUNTIME_SHADOW_ROLE=indexer"
-      - "AXON_INSTANCE_KIND=dev"
-    depends_on:
-      postgres-check:
-        condition: "process_completed_successfully"
-    readiness_probe:
-      http_get:
-        host: "127.0.0.1"
-        scheme: "http"
-        path: "/readyz"
-        port: 44149
       initial_delay_seconds: 10
       period_seconds: 5
       timeout_seconds: 5
@@ -92,7 +55,7 @@ processes:
         host: "127.0.0.1"
         scheme: "http"
         path: "/livez"
-        port: 44149
+        port: 44139
       initial_delay_seconds: 180
       period_seconds: 30
       timeout_seconds: 5
@@ -101,7 +64,7 @@ processes:
     availability:
       restart: "on_failure"
       max_restarts: 3
-      backoff_seconds: 10
+      backoff_seconds: 5
     shutdown:
       signal: 15
       timeout_seconds: 60

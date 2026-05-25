@@ -311,19 +311,15 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         brain|--brain-only|--brainonly)
             RUNTIME_MODE="brain_only"
-            RUNTIME_SHADOW_ROLE="brain"
             ;;
         indexer|--indexer-full|--indexerfull|--full|full)
             RUNTIME_MODE="indexer_full"
-            RUNTIME_SHADOW_ROLE="indexer"
             ;;
         --indexer-graph|--indexergraph)
             RUNTIME_MODE="indexer_graph"
-            RUNTIME_SHADOW_ROLE="indexer"
             ;;
         --indexer-vector|--indexervector)
             RUNTIME_MODE="indexer_vector"
-            RUNTIME_SHADOW_ROLE="indexer"
             ;;
         --no-dashboard)
             START_DASHBOARD=0
@@ -433,55 +429,26 @@ fi
 # not the case here, ORT + Rust runtime allocate large chunks rarely).
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
-RUNTIME_REACTIVATION_PATH="default"
-RUNTIME_EXECUTABLE_NAME="$(axon_runtime_binary_name "$RUNTIME_SHADOW_ROLE")"
-
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 DEVENV_DEBUG_BIN_ROOT="$CARGO_TARGET_ROOT/debug"
 
-case "$RUNTIME_EXECUTABLE_NAME" in
-    axon-brain)
-        if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-brain" ]]; then
-            RUNTIME_EXECUTABLE="bin/axon-brain"
-        else
-            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-brain"
-        fi
-        SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
-        SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-brain"
-        ;;
-    axon-indexer)
-        if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-indexer" ]]; then
-            RUNTIME_EXECUTABLE="bin/axon-indexer"
-        else
-            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-indexer"
-        fi
-        SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
-        SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-indexer"
-        ;;
-esac
+# Single-process: always axon-brain. AXON_RUNTIME_MODE tells it what to do.
+RUNTIME_EXECUTABLE_NAME="axon-brain"
+if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-brain" ]]; then
+    RUNTIME_EXECUTABLE="bin/axon-brain"
+else
+    RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-brain"
+fi
+SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
+SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-brain"
 
+RUNTIME_SHADOW_ROLE="brain"
 axon_apply_runtime_role_layout "$PROJECT_ROOT" "$RUNTIME_SHADOW_ROLE" "$RUNTIME_EXECUTABLE_NAME"
 
 export AXON_SKIP_ELIXIR_PREWARM="$SKIP_ELIXIR_PREWARM"
 
-# REQ-AXO-901737 / operator directive 2026-05-24 : only two provider
-# values exist — `cpu` and `tensorrt`. A legacy `cuda` setting is
-# silently normalised to `tensorrt` so existing scripts/configs keep
-# working without operator action.
-if [[ "$RUNTIME_MODE" != "indexer_full" && "$RUNTIME_MODE" != "indexer_vector" ]]; then
-    EMBEDDING_PROVIDER_REQUEST="cpu"
-elif [[ -n "${AXON_EMBEDDING_PROVIDER:-}" ]]; then
-    if [[ "$AXON_EMBEDDING_PROVIDER" == "cuda" ]]; then
-        EMBEDDING_PROVIDER_REQUEST="tensorrt"
-    else
-        EMBEDDING_PROVIDER_REQUEST="$AXON_EMBEDDING_PROVIDER"
-    fi
-elif detect_accessible_gpu; then
-    EMBEDDING_PROVIDER_REQUEST="tensorrt"
-else
-    EMBEDDING_PROVIDER_REQUEST="cpu"
-fi
-export AXON_EMBEDDING_PROVIDER="$EMBEDDING_PROVIDER_REQUEST"
+# Provider already resolved at lines 384-395 (TensorRT auto-detect).
+EMBEDDING_PROVIDER_REQUEST="${AXON_EMBEDDING_PROVIDER:-cpu}"
 
 if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cpu" ]]; then
     if [[ -z "${AXON_VECTOR_WORKERS:-}" ]]; then
@@ -679,23 +646,8 @@ export AXON_MCP_MUTATION_JOBS=1
 export SQL_URL="$AXON_SQL_URL"
 export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
 
-# Per-process binary paths for process-compose YAML ${VAR} references.
-if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
-    export AXON_BRAIN_BIN="$PROJECT_ROOT/bin/axon-brain"
-    export AXON_INDEXER_BIN="$PROJECT_ROOT/bin/axon-indexer"
-else
-    export AXON_BRAIN_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
-    export AXON_INDEXER_BIN="$PROJECT_ROOT/${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-indexer"
-fi
-
-# Per-process runtime mode overrides.
-export AXON_BRAIN_MODE="brain_only"
-case "$RUNTIME_MODE" in
-    indexer_graph)  export AXON_INDEXER_MODE="indexer_graph" ;;
-    indexer_vector) export AXON_INDEXER_MODE="indexer_vector" ;;
-    indexer_full)   export AXON_INDEXER_MODE="indexer_full" ;;
-    *)              export AXON_INDEXER_MODE="indexer_full" ;;
-esac
+# Single-process: YAML references ${AXON_BRAIN_BIN} only.
+export AXON_BRAIN_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
 
 # Dashboard control.
 if [[ "$START_DASHBOARD" == "1" ]]; then
@@ -710,23 +662,12 @@ export AXON_ERLANG_COOKIE="${AXON_ERLANG_COOKIE:-$(head -c 32 /dev/urandom | bas
 # Persist runtime state for next start default.
 axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_RUNTIME_MODE "$RUNTIME_MODE" \
-  AXON_RUNTIME_SHADOW_ROLE "$RUNTIME_SHADOW_ROLE" \
   AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
   AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}"
 
-# Determine which processes to start.
-PC_PROCESSES=()
-case "$RUNTIME_MODE" in
-    brain_only)
-        PC_PROCESSES+=(axon-brain)
-        ;;
-    indexer_graph|indexer_vector|indexer_full)
-        PC_PROCESSES+=(axon-indexer)
-        ;;
-    *)
-        PC_PROCESSES+=(axon-brain)
-        ;;
-esac
+# Single-process architecture: axon-brain handles all modes.
+# AXON_RUNTIME_MODE (exported above) tells it what to run.
+PC_PROCESSES=(axon-brain)
 
 if [[ "$START_DASHBOARD" == "1" ]]; then
     PC_PROCESSES+=(dashboard)
@@ -745,11 +686,10 @@ case "$AXON_INSTANCE_KIND" in
     *)    PC_PORT=8080 ;;
 esac
 
-echo "🚀 Starting Axon via process-compose (instance=$AXON_INSTANCE_KIND)"
-echo "   Mode: $RUNTIME_MODE | Processes: ${PC_PROCESSES[*]}"
-echo "   Brain: $AXON_BRAIN_BIN | Indexer: $AXON_INDEXER_BIN"
+echo "🚀 Starting Axon (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
+echo "   Binary: $AXON_BRAIN_BIN"
 echo "   MCP: http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
-echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu} | ORT: ${ORT_DYLIB_PATH:-none}"
+echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 echo ""
 
 # Resolve devenv-only binaries needed by process-compose children.
@@ -777,10 +717,8 @@ export AXON_PGREADY_BIN="${PGREADY_BIN:-pg_isready}"
     "${PC_PROCESSES[@]}"
 
 # Wait for brain readiness via HTTP /readyz probe.
+# Single-process mode: brain serves MCP + indexer on HYDRA_HTTP_PORT.
 READYZ_PORT="$HYDRA_HTTP_PORT"
-if [[ "$RUNTIME_MODE" == indexer_* ]]; then
-    READYZ_PORT="$AXON_INDEXER_HEALTH_PORT"
-fi
 
 echo "⏳ Waiting for readiness on :${READYZ_PORT}/readyz (timeout ${STARTUP_TIMEOUT_S}s)..."
 READY=false
