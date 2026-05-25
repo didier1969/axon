@@ -171,8 +171,8 @@ pub fn spawn_pipeline_v2_indexer(
                 let arc_embedder: Arc<GpuB2Embedder> = Arc::new(e);
                 GpuB2Embedder::spawn_lifecycle_watchdog(
                     &arc_embedder,
-                    std::time::Duration::from_secs(15),
-                    std::time::Duration::from_secs(300),
+                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(20),
                     std::time::Duration::from_secs(2),
                 );
                 // REQ-AXO-91572 option B — publish the indexer's
