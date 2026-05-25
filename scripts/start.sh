@@ -43,10 +43,13 @@ RUNTIME_MODE="brain_only"
 START_DASHBOARD=1
 RUN_MCP_TESTS=1
 
+FORCE_RELEASE=0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         brain)           RUNTIME_MODE="brain_only" ;;
         full|indexer)    RUNTIME_MODE="indexer_full" ;;
+        --release)       FORCE_RELEASE=1 ;;
         --no-dashboard)  START_DASHBOARD=0 ;;
         --fast)          START_DASHBOARD=0; RUN_MCP_TESTS=0 ;;
         --help|-h)
@@ -58,6 +61,7 @@ Modes:
   full        Brain + indexer + GPU embedder + dashboard
 
 Options:
+  --release        Use release binaries (10× less RAM, 10× faster)
   --no-dashboard   Disable dashboard
   --fast           No dashboard, no MCP tests
 EOF
@@ -156,15 +160,25 @@ if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
         fi
     fi
 else
-    BRAIN_BIN="$CARGO_TARGET/debug/axon-brain"
-    INDEXER_BIN="$CARGO_TARGET/debug/axon-indexer"
+    if [[ "$FORCE_RELEASE" == "1" ]] || [[ -x "$CARGO_TARGET/release/axon-brain" && -x "$CARGO_TARGET/release/axon-indexer" ]]; then
+        BRAIN_BIN="$CARGO_TARGET/release/axon-brain"
+        INDEXER_BIN="$CARGO_TARGET/release/axon-indexer"
+        BUILD_PROFILE="--release"
+    else
+        BRAIN_BIN="$CARGO_TARGET/debug/axon-brain"
+        INDEXER_BIN="$CARGO_TARGET/debug/axon-indexer"
+        BUILD_PROFILE=""
+    fi
 fi
 
 # 6. Auto-rebuild (dev only)
-if [[ "$AXON_INSTANCE_KIND" != "live" && -f "$BRAIN_BIN" ]]; then
-    if find "$PROJECT_ROOT/src/axon-core/src" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$BRAIN_BIN" -print -quit | grep -q .; then
-        echo "🔨 Sources newer than binary, rebuilding..."
-        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml --bin axon-brain --bin axon-indexer"
+if [[ "$AXON_INSTANCE_KIND" != "live" ]]; then
+    if [[ ! -x "$BRAIN_BIN" || ! -x "$INDEXER_BIN" ]]; then
+        echo "🔨 Binary missing, building ${BUILD_PROFILE:-debug}..."
+        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-} --bin axon-brain --bin axon-indexer"
+    elif find "$PROJECT_ROOT/src/axon-core/src" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$BRAIN_BIN" -print -quit | grep -q .; then
+        echo "🔨 Sources newer than binary, rebuilding ${BUILD_PROFILE:-debug}..."
+        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-} --bin axon-brain --bin axon-indexer"
     fi
 fi
 
