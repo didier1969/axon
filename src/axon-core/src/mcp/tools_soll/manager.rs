@@ -953,7 +953,9 @@ impl McpServer {
                     Ok(_) => {
                         let mut payload = json!({
                             "content": [{ "type": "text", "text": format!("Update succeeded for `{}`", id) }],
-                            "data": {}
+                            "data": {
+                                "project_code": project_code.as_deref().unwrap_or(""),
+                            }
                         });
                         if let (Some(code), Some(before), Ok(after)) = (
                             project_code.as_deref(),
@@ -1187,7 +1189,9 @@ impl McpServer {
                                     } else {
                                         format!("Link already present: `{}` -> `{}` (via {})", src, tgt, rel_table)
                                     }}],
-                                    "data": {}
+                                    "data": {
+                                        "project_code": project_code.as_deref().unwrap_or(""),
+                                    }
                                 });
                                 if inserted {
                                     if let (Some(before), Some(code), Ok(after)) = (
@@ -1473,6 +1477,7 @@ impl McpServer {
                         }],
                         "data": {
                             "status": "ok",
+                            "project_code": project_code,
                             "edges_removed": match_count,
                             "revision_id": revision_id,
                             "source_id": src,

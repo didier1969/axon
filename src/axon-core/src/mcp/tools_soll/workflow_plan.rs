@@ -329,8 +329,8 @@ impl McpServer {
         // restores real txn semantics is tracked by REQ-AXO-254 AC#1.
 
         if let Err(e) = self.graph_store.execute_param(
-            "INSERT INTO soll.Revision (revision_id, author, source, summary, status, created_at, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            &json!([revision_id, author, "mcp", "SOLL plan commit", "committed", now, now]),
+            "INSERT INTO soll.Revision (revision_id, project_code, author, source, summary, status, created_at, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!([revision_id, project_code, author, "mcp", "SOLL plan commit", "committed", now, now]),
         ) {
             return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (revision row): {}", e)}],"isError": true}));
         }

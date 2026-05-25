@@ -149,12 +149,13 @@ impl McpServer {
             .snapshot_entity(entity, &entity_id)
             .unwrap_or(serde_json::json!({}));
         self.graph_store.execute_param(
-            "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, project_code, action, before_json, after_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             &serde_json::json!([
                 revision_id,
                 entity,
                 entity_id,
+                project_code,
                 kind,
                 before.to_string(),
                 after.to_string(),
