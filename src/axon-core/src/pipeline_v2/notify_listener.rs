@@ -175,7 +175,7 @@ where
 /// reconnects on any error using exponential backoff. `b1_inbox_tx` is
 /// the same channel A3 try-sends to and `b1_cold_start_poll` forwards
 /// to — three independent producers, single consumer pool (pipeline B).
-pub fn spawn_chunk_pending_listener(database_url: String, b1_inbox_tx: Sender<String>) {
+pub fn spawn_chunk_pending_listener(database_url: String, b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>) {
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
@@ -202,7 +202,7 @@ pub fn spawn_chunk_pending_listener(database_url: String, b1_inbox_tx: Sender<St
     });
 }
 
-async fn listen_once(database_url: &str, b1_inbox_tx: &Sender<String>) -> Result<()> {
+async fn listen_once(database_url: &str, b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
         .await
         .context("LISTEN connect failed")?;
@@ -246,7 +246,7 @@ async fn listen_once(database_url: &str, b1_inbox_tx: &Sender<String>) -> Result
         // process even when A3 (the original `mark_pending` caller) ran
         // in a different process (brain ↔ indexer split).
         embedder_state().mark_pending(chunk_id);
-        if b1_inbox_tx.send(chunk_id.to_string()).await.is_err() {
+        if b1_inbox_tx.send(super::stage_b1::B1InboxItem::FetchById(chunk_id.to_string())).await.is_err() {
             driver.abort();
             return Err(anyhow!("b1_inbox closed; stopping listener"));
         }

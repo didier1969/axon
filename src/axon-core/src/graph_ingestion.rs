@@ -1062,11 +1062,13 @@ impl GraphStore {
     /// `i` is the chunk_ids persisted for `files[i]`. The order matches
     /// the order of insertion into the accumulator (stable across runs
     /// given identical inputs).
+    /// REQ-AXO-901746 — each inner Vec carries (chunk_id, content, content_hash)
+    /// so A3 can forward chunks inline to B1 without a PG round-trip.
     pub fn upsert_graph_v2_batch(
         &self,
         files: &[crate::pipeline_v2::types::ParsedFile],
         project_code: &str,
-    ) -> Result<Vec<Vec<String>>> {
+    ) -> Result<Vec<Vec<(String, String, String)>>> {
         use crate::graph_ingestion::async_writer::{
             ChunkRow, RelationRow, SymbolRow, WriteAccumulator,
         };
@@ -1082,7 +1084,7 @@ impl GraphStore {
         // the sole structural edge storage.
 
         // Per-file chunk_ids preserved for the return value.
-        let mut chunk_ids_per_file: Vec<Vec<String>> = Vec::with_capacity(files.len());
+        let mut chunk_ids_per_file: Vec<Vec<(String, String, String)>> = Vec::with_capacity(files.len());
 
         // Cross-file deduplication: a Symbol id is uniquely keyed by
         // (project_code, path, name); a Chunk id by symbol+part_index.
@@ -1107,7 +1109,7 @@ impl GraphStore {
 
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
-            let mut chunk_ids_emitted: Vec<String> = Vec::new();
+            let mut chunk_ids_emitted: Vec<(String, String, String)> = Vec::new();
             for sym in &parsed.symbols {
                 let symbol_id = Self::symbol_id(project_code, &path_str, &sym.name);
                 if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -1136,6 +1138,7 @@ impl GraphStore {
                         derived_chunk.part_count,
                     );
                     let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
+                    let chunk_content = derived_chunk.content.clone();
                     chunk_rows.push(ChunkRow {
                         chunk_id: chunk_id.clone(),
                         source_type: "symbol".to_string(),
@@ -1144,7 +1147,7 @@ impl GraphStore {
                         file_path: path_str.clone(),
                         kind: sym.kind.clone(),
                         content: derived_chunk.content.clone(),
-                        content_hash: chunk_hash,
+                        content_hash: chunk_hash.clone(),
                         start_line: derived_chunk.start_line as i64,
                         end_line: derived_chunk.end_line as i64,
                         part_index: derived_chunk.part_index as i64,
@@ -1152,7 +1155,7 @@ impl GraphStore {
                         chunk_path: derived_chunk.chunk_path.clone(),
                         token_count: Some(derived_chunk.estimated_tokens as i64),
                     });
-                    chunk_ids_emitted.push(chunk_id);
+                    chunk_ids_emitted.push((chunk_id, chunk_content, chunk_hash));
                 }
             }
             for relation in &parsed.relations {

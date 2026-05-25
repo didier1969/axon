@@ -81,7 +81,7 @@ pub use notify_listener::{
     spawn_chunk_pending_listener, spawn_chunk_pending_state_listener,
     spawn_pending_reconcile_loop,
 };
-pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, ChunkForEmbedding};
+pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, B1InboxItem, ChunkForEmbedding};
 pub use embedder_gpu::GpuB2Embedder;
 pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
 pub use stage_b2::{b2_embed, spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};

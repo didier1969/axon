@@ -32,6 +32,19 @@ pub struct ChunkForEmbedding {
     pub content_hash: String,
 }
 
+/// REQ-AXO-901746 — Item on the A3→B1 inbox channel.
+///
+/// `Inline` carries the full payload (content already in A3's memory
+/// after upsert — avoids a PG round-trip for ~95% of steady-state).
+/// `FetchById` carries just the chunk_id; B1 SELECTs the content from
+/// PG (used by cold-start poll and NOTIFY listener which don't have
+/// the content in memory).
+#[derive(Debug, Clone)]
+pub enum B1InboxItem {
+    Inline(ChunkForEmbedding),
+    FetchById(String),
+}
+
 /// SELECT the chunk content for a given `chunk_id`.
 ///
 /// Wraps the DB call inside [`tokio::task::spawn_blocking`] to keep the
@@ -59,7 +72,7 @@ pub struct ChunkForEmbedding {
 /// is safe; if the inbox is closed mid-poll, we propagate the error.
 pub async fn b1_cold_start_poll(
     store: Arc<GraphStore>,
-    b1_inbox_tx: Sender<String>,
+    b1_inbox_tx: Sender<B1InboxItem>,
     batch_size: usize,
 ) -> Result<usize> {
     if batch_size == 0 {
@@ -79,7 +92,7 @@ pub async fn b1_cold_start_poll(
         }
         for cid in batch {
             b1_inbox_tx
-                .send(cid)
+                .send(B1InboxItem::FetchById(cid))
                 .await
                 .map_err(|e| anyhow::anyhow!("B1 cold-start: inbox closed mid-send ({e})"))?;
             total += 1;
@@ -127,7 +140,7 @@ pub async fn b1_fetch_for_embedding(
 /// * Batched B1 issues one SELECT per 64 chunk_ids → matches B2's
 ///   batch granularity → GPU runs at peak.
 pub fn spawn_b1_batched_worker(
-    mut rx: tokio::sync::mpsc::Receiver<String>,
+    mut rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
     tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
     store: Arc<crate::graph::GraphStore>,
     metrics: Arc<super::metrics::StageMetrics>,
@@ -137,7 +150,6 @@ pub fn spawn_b1_batched_worker(
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
         loop {
-            // REQ-AXO-901608 — t_recv timing (starvation indicator).
             let recv_started = std::time::Instant::now();
             let first = match rx.recv().await {
                 Some(item) => {
@@ -148,7 +160,7 @@ pub fn spawn_b1_batched_worker(
                 }
                 None => break,
             };
-            let mut batch: Vec<String> = Vec::with_capacity(batch_size);
+            let mut batch: Vec<B1InboxItem> = Vec::with_capacity(batch_size);
             batch.push(first);
 
             let deadline = tokio::time::Instant::now() + batch_timeout;
@@ -157,7 +169,6 @@ pub fn spawn_b1_batched_worker(
                 if remaining.is_zero() {
                     break;
                 }
-                // REQ-AXO-901608 — accumulate intra-batch recv wait too.
                 let recv_started = std::time::Instant::now();
                 match tokio::time::timeout(remaining, rx.recv()).await {
                     Ok(Some(item)) => {
@@ -170,8 +181,6 @@ pub fn spawn_b1_batched_worker(
                     }
                     Ok(None) => break,
                     Err(_) => {
-                        // Timeout means upstream is starved relative to
-                        // batch_timeout — count this too.
                         let recv_us = recv_started
                             .elapsed()
                             .as_micros()
@@ -182,65 +191,93 @@ pub fn spawn_b1_batched_worker(
                 }
             }
 
+            // REQ-AXO-901746 — partition into inline (already have content)
+            // vs fetch-by-id (need PG SELECT). Inline items skip the DB
+            // round-trip entirely.
+            let mut inline_payloads: Vec<ChunkForEmbedding> = Vec::new();
+            let mut fetch_ids: Vec<String> = Vec::new();
+            for item in &batch {
+                match item {
+                    B1InboxItem::Inline(payload) => inline_payloads.push(payload.clone()),
+                    B1InboxItem::FetchById(id) => fetch_ids.push(id.clone()),
+                }
+            }
+
             for _ in &batch {
                 metrics.record_started();
             }
             let started = std::time::Instant::now();
-            let store_clone = store.clone();
-            let batch_for_block = batch.clone();
-            let join_result = tokio::task::spawn_blocking(move || {
-                store_clone.fetch_chunks_for_embedding_batch(&batch_for_block)
-            })
-            .await;
 
-            match join_result {
-                Ok(Ok(fetched)) => {
-                    let elapsed_us =
-                        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    let per_item_us = elapsed_us / (batch.len() as u64).max(1);
-                    // Missing chunk_ids (race with re-parse) count as
-                    // errors so the metric stays comparable with the
-                    // per-item path; B2 won't see them.
-                    let fetched_len = fetched.len();
-                    for (chunk_id, content, content_hash) in fetched {
-                        metrics.record_finished(per_item_us);
-                        let payload = ChunkForEmbedding {
-                            chunk_id,
-                            content,
-                            content_hash,
-                        };
-                        // REQ-AXO-901608 — t_send timing (backpressure indicator).
-                        let send_started = std::time::Instant::now();
-                        let send_result = tx.send(payload).await;
-                        let send_us =
-                            send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                        metrics.record_send_wait(send_us);
-                        if send_result.is_err() {
-                            return; // downstream closed
+            // Forward inline items directly — zero PG cost.
+            for payload in inline_payloads {
+                let elapsed_us =
+                    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                metrics.record_finished(per_item_us);
+                let send_started = std::time::Instant::now();
+                let send_result = tx.send(payload).await;
+                let send_us =
+                    send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                metrics.record_send_wait(send_us);
+                if send_result.is_err() {
+                    return;
+                }
+            }
+
+            // Fetch-by-id items need a PG SELECT (cold-start / NOTIFY path).
+            if !fetch_ids.is_empty() {
+                let store_clone = store.clone();
+                let ids_for_block = fetch_ids.clone();
+                let join_result = tokio::task::spawn_blocking(move || {
+                    store_clone.fetch_chunks_for_embedding_batch(&ids_for_block)
+                })
+                .await;
+
+                match join_result {
+                    Ok(Ok(fetched)) => {
+                        let elapsed_us =
+                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                        let fetched_len = fetched.len();
+                        for (chunk_id, content, content_hash) in fetched {
+                            metrics.record_finished(per_item_us);
+                            let payload = ChunkForEmbedding {
+                                chunk_id,
+                                content,
+                                content_hash,
+                            };
+                            let send_started = std::time::Instant::now();
+                            let send_result = tx.send(payload).await;
+                            let send_us =
+                                send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                            metrics.record_send_wait(send_us);
+                            if send_result.is_err() {
+                                return;
+                            }
+                        }
+                        for _ in 0..(fetch_ids.len() - fetched_len) {
+                            metrics.record_error();
                         }
                     }
-                    for _ in 0..(batch.len() - fetched_len) {
-                        metrics.record_error();
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            stage = "B1",
+                            error = ?err,
+                            "fetch_chunks_for_embedding_batch failed"
+                        );
+                        for _ in 0..fetch_ids.len() {
+                            metrics.record_error();
+                        }
                     }
-                }
-                Ok(Err(err)) => {
-                    tracing::warn!(
-                        stage = "B1",
-                        error = ?err,
-                        "fetch_chunks_for_embedding_batch failed"
-                    );
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
-                    }
-                }
-                Err(join_err) => {
-                    tracing::warn!(
-                        stage = "B1",
-                        error = ?join_err,
-                        "B1 batched fetch spawn_blocking joined with error"
-                    );
-                    for _ in 0..batch.len() {
-                        metrics.record_error();
+                    Err(join_err) => {
+                        tracing::warn!(
+                            stage = "B1",
+                            error = ?join_err,
+                            "B1 batched fetch spawn_blocking joined with error"
+                        );
+                        for _ in 0..fetch_ids.len() {
+                            metrics.record_error();
+                        }
                     }
                 }
             }

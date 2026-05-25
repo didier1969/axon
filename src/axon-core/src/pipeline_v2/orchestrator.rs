@@ -149,13 +149,13 @@ impl PipelineAWorkerCounts {
 pub struct PipelineAHandles {
     pub input_tx: Sender<PathBuf>,
     pub output_rx: Receiver<EnrolledFile>,
-    pub b1_inbox_rx: Receiver<String>,
+    pub b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
     /// Additional clone of the same `b1_inbox_tx` A3 workers push into.
     /// Used by external pollers (e.g. `pipeline_v2_runtime::spawn_pipeline_v2_indexer`'s
     /// periodic `b1_cold_start_poll` task) to rattrape chunks A3
     /// `try_send` dropped under buffer pressure (CPT-AXO-054 cold-start
     /// poll DB contract).
-    pub b1_inbox_tx: Sender<String>,
+    pub b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     pub metrics_a1: Arc<StageMetrics>,
     pub metrics_a2: Arc<StageMetrics>,
     pub metrics_a3: Arc<StageMetrics>,
@@ -185,7 +185,7 @@ pub fn spawn_pipeline_a(
     let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
     let (output_tx, output_rx) = mpsc::channel::<EnrolledFile>(caps.internal);
-    let (b1_inbox_tx, b1_inbox_rx) = mpsc::channel::<String>(caps.a3_to_b1);
+    let (b1_inbox_tx, b1_inbox_rx) = mpsc::channel::<super::stage_b1::B1InboxItem>(caps.a3_to_b1);
 
     let metrics_a1 = StageMetrics::new("A1");
     let metrics_a2 = StageMetrics::new("A2");
@@ -310,7 +310,7 @@ pub fn spawn_pipeline_b_b1_only(
     counts: PipelineBWorkerCounts,
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
-    b1_inbox_rx: Receiver<String>,
+    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
 ) -> PipelineBHandles {
     let (output_tx, output_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
     let metrics_b1 = StageMetrics::new("B1");
@@ -320,16 +320,17 @@ pub fn spawn_pipeline_b_b1_only(
         counts.b1,
         b1_inbox_rx,
         output_tx,
-        move |chunk_id: String| {
+        move |item: super::stage_b1::B1InboxItem| {
             let store = store_for_b1.clone();
             async move {
-                // None = chunk_id no longer addressable (race with
-                // re-parse). Surface a "soft skip" via Err so the
-                // worker pool records it as a no-op step without
-                // forwarding to the downstream channel.
-                match b1_fetch_for_embedding(chunk_id, store).await? {
-                    Some(payload) => Ok(payload),
-                    None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
+                match item {
+                    super::stage_b1::B1InboxItem::Inline(payload) => Ok(payload),
+                    super::stage_b1::B1InboxItem::FetchById(chunk_id) => {
+                        match b1_fetch_for_embedding(chunk_id, store).await? {
+                            Some(payload) => Ok(payload),
+                            None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
+                        }
+                    }
                 }
             }
         },
@@ -368,7 +369,7 @@ pub fn spawn_pipeline_b_full(
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
     embedder: Arc<dyn B2Embedder>,
-    b1_inbox_rx: Receiver<String>,
+    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
 ) -> PipelineBFullHandles {
     // DEC-AXO-081 — B3 self-extracts project_code from each chunk_id
     // prefix; no orchestrator-level project_code needed here.

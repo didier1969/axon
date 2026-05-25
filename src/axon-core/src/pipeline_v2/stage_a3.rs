@@ -121,7 +121,7 @@ pub async fn a3_enroll(
 pub fn spawn_a3_batched_worker(
     mut rx: Receiver<ParsedFile>,
     tx: Sender<EnrolledFile>,
-    b1_inbox_tx: Sender<String>,
+    b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     store: Arc<GraphStore>,
     resolver: ProjectCodeResolver,
     metrics: Arc<StageMetrics>,
@@ -221,12 +221,9 @@ pub fn spawn_a3_batched_worker(
 
                 let group_len = group_batch.len();
                 match join_result {
-                    Ok(Ok(chunk_ids_per_file)) if chunk_ids_per_file.len() == group_len => {
-                        // REQ-AXO-344 — trace successful upserts per project so we
-                        // can confirm rows are committed for previously-unseen
-                        // project_codes.
+                    Ok(Ok(chunk_metas_per_file)) if chunk_metas_per_file.len() == group_len => {
                         let chunks_total: usize =
-                            chunk_ids_per_file.iter().map(|v| v.len()).sum();
+                            chunk_metas_per_file.iter().map(|v| v.len()).sum();
                         info!(
                             target: "pipeline_v2::a3",
                             "A3 upsert ok: project={} files={} chunks_emitted={}",
@@ -238,21 +235,26 @@ pub fn spawn_a3_batched_worker(
                             as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
-                        for (parsed, chunk_ids) in
-                            group_batch.into_iter().zip(chunk_ids_per_file.into_iter())
+                        for (parsed, chunk_metas) in
+                            group_batch.into_iter().zip(chunk_metas_per_file.into_iter())
                         {
-                            // REQ-AXO-90009 Slice 1 (DEC-AXO-086) — mark each
-                            // chunk as pending in the process-global embedder
-                            // state BEFORE we try_send to B1. `retrieve_context`
-                            // freshness gate consults this set in O(1) without
-                            // hitting PG. The B1 try_send remains best-effort ;
-                            // a dropped try_send is still recoverable via the
-                            // reconcile loop (Slice 2) because the chunk_id
-                            // stays in pending until B3 marks it embedded.
+                            // REQ-AXO-90009 Slice 1 (DEC-AXO-086) — mark pending
+                            // BEFORE try_send to B1.
+                            // REQ-AXO-901746 — send Inline with content so B1
+                            // skips the PG SELECT for the steady-state path.
                             let state = embedder_state();
-                            for cid in &chunk_ids {
+                            let mut chunk_ids = Vec::with_capacity(chunk_metas.len());
+                            for (cid, content, content_hash) in chunk_metas {
                                 state.mark_pending(cid.clone());
-                                let _ = b1_inbox_tx.try_send(cid.clone());
+                                let payload = super::stage_b1::ChunkForEmbedding {
+                                    chunk_id: cid.clone(),
+                                    content,
+                                    content_hash,
+                                };
+                                let _ = b1_inbox_tx.try_send(
+                                    super::stage_b1::B1InboxItem::Inline(payload),
+                                );
+                                chunk_ids.push(cid);
                             }
                             let receipt = EnrolledFile {
                                 path: parsed.path.to_string_lossy().into_owned(),

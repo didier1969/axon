@@ -114,7 +114,7 @@ pub fn spawn_pipeline_v2_indexer(
 
     let b1_inbox_rx = std::mem::replace(
         &mut handles_a.b1_inbox_rx,
-        mpsc::channel::<String>(1).1,
+        mpsc::channel::<crate::pipeline_v2::B1InboxItem>(1).1,
     );
     // Keep an extra clone of the same channel for the cold-start poll
     // task — A3 also pushes here via try_send during steady state, but
