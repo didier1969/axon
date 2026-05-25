@@ -104,6 +104,8 @@ defmodule Axon.Watcher.McpPoller do
     %{
       received_at_ms: System.monotonic_time(:millisecond),
       project: Map.get(structured, "project", "*"),
+      disk_files: num(structured, "disk_files"),
+      eligible_files: num(structured, "eligible_files"),
       total_chunks: num(structured, "total_chunks"),
       embedded_chunks: num(structured, "embedded_chunks"),
       pending_chunks: num(structured, "pending_chunks"),
@@ -112,6 +114,7 @@ defmodule Axon.Watcher.McpPoller do
       symbols: num(structured, "symbols"),
       edges: num(structured, "edges"),
       projects: num(structured, "projects"),
+      per_project: normalize_per_project(Map.get(structured, "per_project", [])),
       runtime_idle: Map.get(structured, "runtime_idle", false),
       runtime_pending_count: num(structured, "runtime_pending_count"),
       lifecycle_phase: Map.get(structured, "lifecycle_phase"),
@@ -141,6 +144,20 @@ defmodule Axon.Watcher.McpPoller do
       }
     }
   end
+
+  defp normalize_per_project(entries) when is_list(entries) do
+    Enum.map(entries, fn entry ->
+      %{
+        project_code: Map.get(entry, "project_code", "?"),
+        indexed_files: num(entry, "indexed_files"),
+        chunks: num(entry, "chunks"),
+        embeddings: num(entry, "embeddings"),
+        coverage_pct: num(entry, "coverage_pct")
+      }
+    end)
+  end
+
+  defp normalize_per_project(_), do: []
 
   defp num(map, key) do
     case Map.get(map, key) do

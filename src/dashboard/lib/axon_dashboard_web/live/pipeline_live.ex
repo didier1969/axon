@@ -101,6 +101,42 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       observed_age_ms={hb_get(@heartbeat, :observed_age_ms, nil)}
     >
       <div class="grid grid-cols-12 gap-4">
+        <%!-- INDEXATION FUNNEL --%>
+        <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
+          <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Indexation Funnel</div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-sm text-slate-200">
+            <span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Disk</span>
+              <strong class="tabular-nums">{funnel_val(@mcp, :disk_files)}</strong>
+            </span>
+            <span class="text-slate-600">&rarr;</span>
+            <span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Eligible</span>
+              <strong class="tabular-nums">{funnel_val(@mcp, :eligible_files)}</strong>
+            </span>
+            <span class="text-slate-600">&rarr;</span>
+            <span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Indexed</span>
+              <strong class="tabular-nums">{mcp_get(@mcp, :indexed_files, 0) |> humanize_int()}</strong>
+            </span>
+            <span class="text-slate-600">&rarr;</span>
+            <span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Chunks</span>
+              <strong class="tabular-nums">{mcp_get(@mcp, :total_chunks, 0) |> humanize_int()}</strong>
+            </span>
+            <span class="text-slate-600">&rarr;</span>
+            <span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Embeddings</span>
+              <strong class={["tabular-nums", coverage_text_class(mcp_get(@mcp, :coverage_pct, 0.0))]}>
+                {mcp_get(@mcp, :embedded_chunks, 0) |> humanize_int()}
+              </strong>
+              <span class="text-slate-500 text-[10px] ml-1">
+                ({:erlang.float_to_binary(mcp_get(@mcp, :coverage_pct, 0.0) * 1.0, decimals: 1)}%)
+              </span>
+            </span>
+          </div>
+        </section>
+
         <%!-- COVERAGE SUMMARY --%>
         <section class="col-span-12 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
           <.kpi label="Indexed Files" value={mcp_get(@mcp, :indexed_files, 0) |> humanize_int()} tone={:neutral} />
@@ -279,6 +315,46 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             </div>
           </div>
         </section>
+
+        <%!-- PER-PROJECT BREAKDOWN --%>
+        <section :if={has_per_project?(@mcp)} class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm">
+          <header class="px-5 py-3 border-b border-slate-800">
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Per-Project Breakdown</div>
+            <h2 class="text-base font-semibold text-slate-100 mt-0.5">Indexed files, chunks, embeddings by project</h2>
+          </header>
+          <div class="overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-950/40 text-[10px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th class="px-4 py-2 text-left">Project</th>
+                  <th class="px-4 py-2 text-right">Indexed Files</th>
+                  <th class="px-4 py-2 text-right">Chunks</th>
+                  <th class="px-4 py-2 text-right">Embeddings</th>
+                  <th class="px-4 py-2 text-right">Coverage</th>
+                </tr>
+              </thead>
+              <tbody class="font-mono text-xs divide-y divide-slate-800/60">
+                <%= for entry <- mcp_get(@mcp, :per_project, []) do %>
+                  <tr class="hover:bg-slate-800/30 transition-colors">
+                    <td class="px-4 py-2">
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border border-cyan-500/30 bg-cyan-500/5 text-cyan-200">
+                        {Map.get(entry, :project_code, "?")}
+                      </span>
+                    </td>
+                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :indexed_files, 0) |> humanize_int()}</td>
+                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :chunks, 0) |> humanize_int()}</td>
+                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :embeddings, 0) |> humanize_int()}</td>
+                    <td class="px-4 py-2 text-right tabular-nums">
+                      <span class={coverage_text_class(Map.get(entry, :coverage_pct, 0.0))}>
+                        {:erlang.float_to_binary(Map.get(entry, :coverage_pct, 0.0) * 1.0, decimals: 2)}%
+                      </span>
+                    </td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </Nav.shell>
     """
@@ -440,6 +516,24 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp embedder_class("tensorrt"), do: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
   defp embedder_class("cpu"), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
   defp embedder_class(_), do: "border-slate-700 bg-slate-800/40 text-slate-300"
+
+  defp funnel_val(mcp, key) do
+    case mcp_get(mcp, key, 0) do
+      n when is_number(n) and n >= 0 -> humanize_int(n)
+      _ -> "n/a"
+    end
+  end
+
+  defp has_per_project?(mcp) do
+    case mcp_get(mcp, :per_project, []) do
+      list when is_list(list) and length(list) > 0 -> true
+      _ -> false
+    end
+  end
+
+  defp coverage_text_class(pct) when is_number(pct) and pct >= 95.0, do: "text-emerald-300"
+  defp coverage_text_class(pct) when is_number(pct) and pct >= 75.0, do: "text-slate-100"
+  defp coverage_text_class(_), do: "text-amber-300"
 
   ## Rate sparkline
 

@@ -1,6 +1,4 @@
 use serde_json::{json, Value};
-use std::sync::Mutex;
-use std::time::Instant;
 
 use super::format::{format_standard_contract, format_table_from_json};
 use super::tools_system_debug;
@@ -9,26 +7,41 @@ use crate::graph_query::ReadFreshness;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
-// ── Filesystem counter cache (disk_files + eligible_files) ──────────
-// Scanning the watch root is ~1s; cache for 60s to keep
-// `embedding_status` cheap on repeated calls.
+// ── Filesystem counters (cached 60 s) ──────────────────────────
+// Scanning the watch root takes ~1 s; cache the result for 60 s to
+// keep `embedding_status` cheap on repeated calls.
 const FS_COUNTER_CACHE_TTL_SECS: u64 = 60;
 
 struct FsCounterSnapshot {
     disk_files: i64,
     eligible_files: i64,
-    computed_at: Instant,
+    computed_at: std::time::Instant,
 }
 
-static FS_COUNTER_CACHE: Mutex<Option<FsCounterSnapshot>> = Mutex::new(None);
+static FS_COUNTER_CACHE: std::sync::Mutex<Option<FsCounterSnapshot>> =
+    std::sync::Mutex::new(None);
 
-/// Count total files on disk (no filter) and eligible files (scanner
-/// filters applied) under `watch_root`. Both are computed in a single
-/// walk — the walker enumerates all regular files, and `should_process_path`
-/// decides eligibility.
-fn compute_fs_counters(watch_root: &str) -> (i64, i64) {
-    let scanner = crate::scanner::Scanner::new(watch_root, "");
-    let walker = ignore::WalkBuilder::new(watch_root)
+/// Returns `(disk_files, eligible_files)`.
+/// `disk_files`  = total regular files under `AXON_WATCH_DIR`.
+/// `eligible_files` = subset that passes the Scanner filter stack
+///   (.gitignore, .axonignore, supported extensions, etc.).
+/// Returns `(-1, -1)` when `AXON_WATCH_DIR` is not set.
+fn cached_fs_counters() -> (i64, i64) {
+    let watch_root = match std::env::var("AXON_WATCH_DIR") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return (-1, -1),
+    };
+    {
+        if let Ok(guard) = FS_COUNTER_CACHE.lock() {
+            if let Some(ref snap) = *guard {
+                if snap.computed_at.elapsed().as_secs() < FS_COUNTER_CACHE_TTL_SECS {
+                    return (snap.disk_files, snap.eligible_files);
+                }
+            }
+        }
+    }
+    let scanner = crate::scanner::Scanner::new(&watch_root, "");
+    let walker = ignore::WalkBuilder::new(&watch_root)
         .hidden(false)
         .git_ignore(false)
         .git_global(false)
@@ -45,29 +58,11 @@ fn compute_fs_counters(watch_root: &str) -> (i64, i64) {
             eligible += 1;
         }
     }
-    (disk, eligible)
-}
-
-fn cached_fs_counters() -> (i64, i64) {
-    let watch_root = match std::env::var("AXON_WATCH_DIR") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return (-1, -1), // no watch dir configured
-    };
-    {
-        let guard = FS_COUNTER_CACHE.lock().unwrap();
-        if let Some(ref snap) = *guard {
-            if snap.computed_at.elapsed().as_secs() < FS_COUNTER_CACHE_TTL_SECS {
-                return (snap.disk_files, snap.eligible_files);
-            }
-        }
-    }
-    let (disk, eligible) = compute_fs_counters(&watch_root);
-    {
-        let mut guard = FS_COUNTER_CACHE.lock().unwrap();
+    if let Ok(mut guard) = FS_COUNTER_CACHE.lock() {
         *guard = Some(FsCounterSnapshot {
             disk_files: disk,
             eligible_files: eligible,
-            computed_at: Instant::now(),
+            computed_at: std::time::Instant::now(),
         });
     }
     (disk, eligible)
