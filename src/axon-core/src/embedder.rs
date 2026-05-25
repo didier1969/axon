@@ -561,7 +561,7 @@ fn token_count_from_encoding(encoding: &Encoding) -> usize {
         .max(1)
 }
 
-fn load_runtime_embedding_tokenizer() -> AnyhowResult<Tokenizer> {
+fn load_runtime_embedding_tokenizer() -> AnyhowResult<std::sync::Arc<Tokenizer>> {
     profile_load_runtime_embedding_tokenizer()
 }
 
@@ -2006,6 +2006,10 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
             pressure
         ));
     }
+    // BGE-Large-v1.5 query prefix for optimal retrieval quality.
+    let texts: Vec<String> = texts.into_iter().map(|t| {
+        format!("Represent this sentence for searching relevant passages: {t}")
+    }).collect();
 
     // REQ-AXO-128 — under brain_only / indexer_graph the registered
     // sender belongs to the in-process CPU worker spawned at boot

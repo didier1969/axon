@@ -2,7 +2,7 @@ use crate::embedding_contract::MAX_LENGTH;
 use anyhow::{anyhow, Result as AnyhowResult};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,12 +211,14 @@ fn load_runtime_embedding_tokenizer_uncached() -> AnyhowResult<Tokenizer> {
     Ok(tokenizer)
 }
 
-pub fn load_runtime_embedding_tokenizer() -> AnyhowResult<Tokenizer> {
-    static TOKENIZER: OnceLock<Result<Tokenizer, String>> = OnceLock::new();
-    match TOKENIZER
-        .get_or_init(|| load_runtime_embedding_tokenizer_uncached().map_err(|err| err.to_string()))
-    {
-        Ok(tokenizer) => Ok(tokenizer.clone()),
+pub fn load_runtime_embedding_tokenizer() -> AnyhowResult<Arc<Tokenizer>> {
+    static TOKENIZER: OnceLock<Result<Arc<Tokenizer>, String>> = OnceLock::new();
+    match TOKENIZER.get_or_init(|| {
+        load_runtime_embedding_tokenizer_uncached()
+            .map(Arc::new)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(tokenizer) => Ok(Arc::clone(tokenizer)),
         Err(err) => Err(anyhow!(err.clone())),
     }
 }

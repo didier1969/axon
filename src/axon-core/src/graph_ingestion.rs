@@ -1211,6 +1211,44 @@ impl GraphStore {
                 });
                 chunk_ids_emitted.push((chunk_id, chunk_content, chunk_hash));
             }
+
+            // Phase 4: file-level chunk for files with no symbols (config,
+            // README, imports-only) or to capture top-of-file context that
+            // falls outside any symbol range. Only emitted when no symbol
+            // chunks were produced for this file.
+            if chunk_ids_emitted.is_empty() && !parsed.content.is_empty() {
+                let file_chunk_id = format!("{}::{}::file_context::chunk", project_code, path_str);
+                let truncated = if parsed.content.len() > 2000 {
+                    &parsed.content[..2000]
+                } else {
+                    &parsed.content
+                };
+                let file_content = format!(
+                    "file: {}\nkind: file_context\n\n{}",
+                    path_str, truncated
+                );
+                let token_count = crate::code_chunker::measured_symbol_token_count(&file_content)
+                    .unwrap_or(file_content.len() / 3);
+                let chunk_hash = Self::stable_content_hash(&file_content);
+                chunk_rows.push(ChunkRow {
+                    chunk_id: file_chunk_id.clone(),
+                    source_type: "file".to_string(),
+                    source_id: path_str.clone(),
+                    project_code: project_code.to_string(),
+                    file_path: path_str.clone(),
+                    kind: "file_context".to_string(),
+                    content: file_content.clone(),
+                    content_hash: chunk_hash.clone(),
+                    start_line: 1,
+                    end_line: truncated.lines().count() as i64,
+                    part_index: 1,
+                    part_count: 1,
+                    chunk_path: "1/1".to_string(),
+                    token_count: Some(token_count as i64),
+                });
+                chunk_ids_emitted.push((file_chunk_id, file_content, chunk_hash));
+            }
+
             for relation in &parsed.relations {
                 let Some(table) = Self::relation_table(&relation.rel_type) else {
                     continue;

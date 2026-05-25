@@ -23,7 +23,7 @@ use super::{
 };
 
 pub(crate) struct OrtGpuFirstTextEmbedding {
-    pub(super) tokenizer: Tokenizer,
+    pub(super) tokenizer: Arc<Tokenizer>,
     pub(super) session: Session,
     pub(super) io_binding: IoBinding,
     pub(super) run_options: RunOptions,
