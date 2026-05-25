@@ -841,9 +841,11 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
             return explicit;
         }
 
-        if canonical_provider.eq_ignore_ascii_case("cuda") {
-            return "cpu".to_string();
-        }
+        // GPU is available for query embedding — no reason to force CPU.
+        // The two ORT sessions (indexer B2 + brain query) cohabit on the
+        // same GPU via CUDA time-sharing. Query embeddings are punctual
+        // (~50ms per request) so contention with the pipeline is negligible.
+        return canonical_provider;
     }
 
     if normalized_lane == "graph" {
