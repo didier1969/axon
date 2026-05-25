@@ -174,18 +174,29 @@ for bin in "$BRAIN_BIN" "$INDEXER_BIN"; do
 done
 
 # --- Env exports ---
+# Limit glibc per-thread mmap arenas. Without this, 170+ threads create
+# up to 64 arenas × 64 MB each (~10 GB virtual). REQ-AXO-91563.
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+# ORT loads libonnxruntime from ORT_DYLIB_PATH instead of bundling it.
 export ORT_STRATEGY=system
+# Root directory containing all projects to watch/index.
 export AXON_PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$DEFAULT_PROJECTS_ROOT}"
+# Filesystem scope for the inotify watcher. Defaults to all projects.
 export AXON_WATCH_DIR="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
+# Use COPY BINARY for PG writes instead of INSERT VALUES SQL text.
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
+# Absolute path to this Axon repo root.
 export AXON_PROJECT_ROOT="$PROJECT_ROOT"
+# HTTP health port for the indexer process (brain port + 10).
 export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
+# Absolute paths to the brain and indexer binaries for process-compose.
 export AXON_BRAIN_BIN="$BRAIN_BIN"
 export AXON_INDEXER_BIN="$INDEXER_BIN"
+# Writer lock role: brain=SOLL writer, indexer=IST writer.
 export AXON_RUNTIME_SHADOW_ROLE="$( [[ "$RUNTIME_MODE" == "brain_only" ]] && echo brain || echo indexer )"
+# Random cookie for Erlang node authentication (dashboard).
 export AXON_ERLANG_COOKIE="${AXON_ERLANG_COOKIE:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 20)}"
-
+# Dashboard toggle for process-compose YAML.
 [[ "$START_DASHBOARD" == "1" ]] && export AXON_DASHBOARD_DISABLED=false || export AXON_DASHBOARD_DISABLED=true
 
 # Resolve ORT runtime (sets ORT_DYLIB_PATH, LD_LIBRARY_PATH)

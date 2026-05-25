@@ -2952,7 +2952,7 @@ fn scope_reconciliation_enabled() -> bool {
                 "false" | "0" | "off" | "no"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn scope_reconciliation_interval_secs() -> u64 {
