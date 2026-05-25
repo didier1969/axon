@@ -337,6 +337,98 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         .collect()
 }
 
+/// REQ-AXO-901746 — Minimum token count below which a single-part
+/// chunk is a candidate for fusion with its neighbors.
+const MIN_FUSE_TOKENS: usize = 100;
+
+/// A chunk tagged with its originating symbol_id, ready for fusion.
+#[derive(Debug, Clone)]
+pub struct TaggedChunk {
+    pub symbol_id: String,
+    pub symbol_name: String,
+    pub chunk: DerivedCodeChunk,
+}
+
+/// Fuse small adjacent single-part chunks into larger context groups.
+///
+/// Chunks with < `MIN_FUSE_TOKENS` tokens (and `part_count == 1`) are
+/// merged with their neighbors until the group reaches
+/// `target_tokens`. Large or multi-part chunks pass through unchanged.
+/// Within each fused group, contents are joined with `\n\n` and the
+/// chunk_id is derived from the first symbol in the group.
+///
+/// Returns `(chunk_id_suffix, content, estimated_tokens, start_line, end_line, source_symbol_id)`.
+pub fn fuse_small_chunks(
+    mut tagged: Vec<TaggedChunk>,
+    target_tokens: usize,
+) -> Vec<TaggedChunk> {
+    if tagged.is_empty() {
+        return tagged;
+    }
+    tagged.sort_by_key(|t| t.chunk.start_line);
+
+    let mut result: Vec<TaggedChunk> = Vec::with_capacity(tagged.len());
+    let mut group: Vec<TaggedChunk> = Vec::new();
+    let mut group_tokens: usize = 0;
+
+    let flush = |group: &mut Vec<TaggedChunk>,
+                 group_tokens: &mut usize,
+                 result: &mut Vec<TaggedChunk>| {
+        if group.is_empty() {
+            return;
+        }
+        if group.len() == 1 {
+            result.push(group.pop().unwrap());
+            *group_tokens = 0;
+            return;
+        }
+        let combined_content = group
+            .iter()
+            .map(|t| t.chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let start_line = group.first().unwrap().chunk.start_line;
+        let end_line = group.last().unwrap().chunk.end_line;
+        let first = &group[0];
+        let fused = TaggedChunk {
+            symbol_id: first.symbol_id.clone(),
+            symbol_name: first.symbol_name.clone(),
+            chunk: DerivedCodeChunk {
+                estimated_tokens: estimated_token_count(&combined_content),
+                content: combined_content,
+                part_index: 1,
+                part_count: 1,
+                chunk_path: "1/1".to_string(),
+                start_line,
+                end_line,
+            },
+        };
+        result.push(fused);
+        group.clear();
+        *group_tokens = 0;
+    };
+
+    for item in tagged {
+        let is_fusable =
+            item.chunk.part_count == 1 && item.chunk.estimated_tokens < MIN_FUSE_TOKENS;
+
+        if !is_fusable {
+            flush(&mut group, &mut group_tokens, &mut result);
+            result.push(item);
+            continue;
+        }
+
+        if group_tokens + item.chunk.estimated_tokens > target_tokens && !group.is_empty() {
+            flush(&mut group, &mut group_tokens, &mut result);
+        }
+        group_tokens += item.chunk.estimated_tokens;
+        group.push(item);
+    }
+    flush(&mut group, &mut group_tokens, &mut result);
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

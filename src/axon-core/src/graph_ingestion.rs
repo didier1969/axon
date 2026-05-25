@@ -953,6 +953,7 @@ impl GraphStore {
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
         let mut chunk_ids_emitted: Vec<String> = Vec::new();
 
+        let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
         for sym in symbols {
             let symbol_id = Self::symbol_id(project_code, path, &sym.name);
             if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -975,30 +976,44 @@ impl GraphStore {
                 project_code: project_code.to_string(),
             });
             for derived_chunk in Self::build_chunk_content(sym, content) {
-                let chunk_id = Self::chunk_part_id(
-                    &symbol_id,
-                    derived_chunk.part_index,
-                    derived_chunk.part_count,
-                );
-                let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
-                chunk_rows.push(ChunkRow {
-                    chunk_id: chunk_id.clone(),
-                    source_type: "symbol".to_string(),
-                    source_id: symbol_id.clone(),
-                    project_code: project_code.to_string(),
-                    file_path: path.to_string(),
-                    kind: sym.kind.clone(),
-                    content: derived_chunk.content.clone(),
-                    content_hash: chunk_hash,
-                    start_line: derived_chunk.start_line as i64,
-                    end_line: derived_chunk.end_line as i64,
-                    part_index: derived_chunk.part_index as i64,
-                    part_count: derived_chunk.part_count as i64,
-                    chunk_path: derived_chunk.chunk_path.clone(),
-                    token_count: Some(derived_chunk.estimated_tokens as i64),
+                tagged_chunks.push(crate::code_chunker::TaggedChunk {
+                    symbol_id: symbol_id.clone(),
+                    symbol_name: sym.name.clone(),
+                    chunk: derived_chunk,
                 });
-                chunk_ids_emitted.push(chunk_id);
             }
+        }
+
+        let profile = crate::code_chunker::active_chunk_profile();
+        let fused = crate::code_chunker::fuse_small_chunks(
+            tagged_chunks,
+            profile.target_chunk_tokens,
+        );
+
+        for tagged in fused {
+            let chunk_id = Self::chunk_part_id(
+                &tagged.symbol_id,
+                tagged.chunk.part_index,
+                tagged.chunk.part_count,
+            );
+            let chunk_hash = Self::stable_content_hash(&tagged.chunk.content);
+            chunk_rows.push(ChunkRow {
+                chunk_id: chunk_id.clone(),
+                source_type: "symbol".to_string(),
+                source_id: tagged.symbol_id,
+                project_code: project_code.to_string(),
+                file_path: path.to_string(),
+                kind: tagged.symbol_name,
+                content: tagged.chunk.content.clone(),
+                content_hash: chunk_hash,
+                start_line: tagged.chunk.start_line as i64,
+                end_line: tagged.chunk.end_line as i64,
+                part_index: tagged.chunk.part_index as i64,
+                part_count: tagged.chunk.part_count as i64,
+                chunk_path: tagged.chunk.chunk_path,
+                token_count: Some(tagged.chunk.estimated_tokens as i64),
+            });
+            chunk_ids_emitted.push(chunk_id);
         }
         contains_rows.sort_unstable();
         contains_rows.dedup();
@@ -1129,6 +1144,9 @@ impl GraphStore {
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
             let mut chunk_ids_emitted: Vec<(String, String, String)> = Vec::new();
+
+            // Phase 1: collect symbols + per-symbol chunks as tagged items.
+            let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
             for sym in &parsed.symbols {
                 let symbol_id = Self::symbol_id(project_code, &path_str, &sym.name);
                 if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -1151,31 +1169,47 @@ impl GraphStore {
                     project_code: project_code.to_string(),
                 });
                 for derived_chunk in Self::build_chunk_content(sym, &parsed.content) {
-                    let chunk_id = Self::chunk_part_id(
-                        &symbol_id,
-                        derived_chunk.part_index,
-                        derived_chunk.part_count,
-                    );
-                    let chunk_hash = Self::stable_content_hash(&derived_chunk.content);
-                    let chunk_content = derived_chunk.content.clone();
-                    chunk_rows.push(ChunkRow {
-                        chunk_id: chunk_id.clone(),
-                        source_type: "symbol".to_string(),
-                        source_id: symbol_id.clone(),
-                        project_code: project_code.to_string(),
-                        file_path: path_str.clone(),
-                        kind: sym.kind.clone(),
-                        content: derived_chunk.content.clone(),
-                        content_hash: chunk_hash.clone(),
-                        start_line: derived_chunk.start_line as i64,
-                        end_line: derived_chunk.end_line as i64,
-                        part_index: derived_chunk.part_index as i64,
-                        part_count: derived_chunk.part_count as i64,
-                        chunk_path: derived_chunk.chunk_path.clone(),
-                        token_count: Some(derived_chunk.estimated_tokens as i64),
+                    tagged_chunks.push(crate::code_chunker::TaggedChunk {
+                        symbol_id: symbol_id.clone(),
+                        symbol_name: sym.name.clone(),
+                        chunk: derived_chunk,
                     });
-                    chunk_ids_emitted.push((chunk_id, chunk_content, chunk_hash));
                 }
+            }
+
+            // Phase 2: fuse small adjacent chunks into context groups.
+            let profile = crate::code_chunker::active_chunk_profile();
+            let fused = crate::code_chunker::fuse_small_chunks(
+                tagged_chunks,
+                profile.target_chunk_tokens,
+            );
+
+            // Phase 3: generate chunk rows from the fused result.
+            for tagged in fused {
+                let chunk_id = Self::chunk_part_id(
+                    &tagged.symbol_id,
+                    tagged.chunk.part_index,
+                    tagged.chunk.part_count,
+                );
+                let chunk_hash = Self::stable_content_hash(&tagged.chunk.content);
+                let chunk_content = tagged.chunk.content.clone();
+                chunk_rows.push(ChunkRow {
+                    chunk_id: chunk_id.clone(),
+                    source_type: "symbol".to_string(),
+                    source_id: tagged.symbol_id,
+                    project_code: project_code.to_string(),
+                    file_path: path_str.clone(),
+                    kind: tagged.symbol_name,
+                    content: tagged.chunk.content,
+                    content_hash: chunk_hash.clone(),
+                    start_line: tagged.chunk.start_line as i64,
+                    end_line: tagged.chunk.end_line as i64,
+                    part_index: tagged.chunk.part_index as i64,
+                    part_count: tagged.chunk.part_count as i64,
+                    chunk_path: tagged.chunk.chunk_path,
+                    token_count: Some(tagged.chunk.estimated_tokens as i64),
+                });
+                chunk_ids_emitted.push((chunk_id, chunk_content, chunk_hash));
             }
             for relation in &parsed.relations {
                 let Some(table) = Self::relation_table(&relation.rel_type) else {
