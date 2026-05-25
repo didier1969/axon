@@ -1283,6 +1283,23 @@ impl GraphStore {
         contains_rows.sort_unstable();
         contains_rows.dedup();
 
+        // REQ-AXO-901747 — COPY BINARY path bypasses SQL text rendering
+        // entirely. The bulk_writer sends binary data directly to PG via
+        // the COPY protocol, eliminating the 2-3 MB SQL string parsing
+        // bottleneck that made A3 the drum at 99.6% work_ratio.
+        if crate::postgres::bulk_writer::bulk_writer_enabled() {
+            let batch = crate::postgres::bulk_writer::PgBulkBatch {
+                symbols: symbol_rows,
+                chunks: chunk_rows,
+                contains: contains_rows,
+                calls: calls_rows,
+                calls_nif: calls_nif_rows,
+                indexed_files: indexed_file_rows,
+            };
+            crate::postgres::bulk_writer::flush_batch(&batch)?;
+            return Ok(chunk_ids_per_file);
+        }
+
         let mut acc = WriteAccumulator::new();
         acc.symbols = symbol_rows;
         acc.chunks = chunk_rows;
@@ -1293,13 +1310,9 @@ impl GraphStore {
         let mut queries: Vec<String> = Vec::new();
         queries.extend(acc.render_symbols_pg());
         queries.extend(acc.render_chunks_pg());
-        // `public.Edge` is the sole structural edge storage post-MIL-AXO-017.
         let now_ms = chrono::Utc::now().timestamp_millis();
         queries.extend(acc.render_unified_edge_pg(now_ms));
 
-        // REQ-AXO-295 Phase 2 — IndexedFile multi-row INSERT instead
-        // of one statement per file. Same shape as the multi-row
-        // Symbol / Chunk inserts: ON CONFLICT (path) DO UPDATE.
         if !indexed_file_rows.is_empty() {
             let mut values_buf =
                 String::with_capacity(indexed_file_rows.len() * 80);
@@ -1322,10 +1335,6 @@ impl GraphStore {
                      last_seen_ms = EXCLUDED.last_seen_ms;"
             ));
         }
-
-        // REQ-AXO-901653 slice-5a: legacy `public.file` UPSERT block
-        // (REQ-AXO-345 hydrate_from_store) deleted ; state-machine
-        // table retired.
 
         self.execute_batch(&queries)?;
         Ok(chunk_ids_per_file)

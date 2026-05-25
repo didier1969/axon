@@ -472,6 +472,7 @@ pub struct PgBulkBatch {
     pub contains: Vec<RelationRow>,
     pub calls: Vec<RelationRow>,
     pub calls_nif: Vec<RelationRow>,
+    pub indexed_files: Vec<(String, String, i64)>,
 }
 
 impl PgBulkBatch {
@@ -481,6 +482,7 @@ impl PgBulkBatch {
             && self.contains.is_empty()
             && self.calls.is_empty()
             && self.calls_nif.is_empty()
+            && self.indexed_files.is_empty()
     }
 
     pub fn row_count(&self) -> usize {
@@ -489,6 +491,7 @@ impl PgBulkBatch {
             + self.contains.len()
             + self.calls.len()
             + self.calls_nif.len()
+            + self.indexed_files.len()
     }
 }
 
@@ -544,14 +547,25 @@ async fn flush_batch_async(
     if !batch.chunks.is_empty() {
         copy_chunks_in_tx(&tx, &batch.chunks).await?;
     }
-    if !batch.contains.is_empty() {
-        copy_relations_in_tx(&tx, RelationTable::Contains, &batch.contains).await?;
+    // REQ-AXO-901747 — unified Edge table (post-MIL-AXO-017).
+    let has_edges = !batch.contains.is_empty()
+        || !batch.calls.is_empty()
+        || !batch.calls_nif.is_empty();
+    if has_edges {
+        let mut edge_rows: Vec<(&str, &RelationRow)> = Vec::new();
+        for r in &batch.contains {
+            edge_rows.push(("CONTAINS", r));
+        }
+        for r in &batch.calls {
+            edge_rows.push(("CALLS", r));
+        }
+        for r in &batch.calls_nif {
+            edge_rows.push(("CALLS_NIF", r));
+        }
+        copy_edges_in_tx(&tx, &edge_rows).await?;
     }
-    if !batch.calls.is_empty() {
-        copy_relations_in_tx(&tx, RelationTable::Calls, &batch.calls).await?;
-    }
-    if !batch.calls_nif.is_empty() {
-        copy_relations_in_tx(&tx, RelationTable::CallsNif, &batch.calls_nif).await?;
+    if !batch.indexed_files.is_empty() {
+        copy_indexed_files_in_tx(&tx, &batch.indexed_files).await?;
     }
 
     tx.commit().await.context("bulk_writer batch commit")?;
@@ -817,6 +831,101 @@ async fn copy_relations_in_tx(
     tx.batch_execute(&merge_sql)
         .await
         .with_context(|| format!("bulk_writer {target} stage merge"))?;
+    Ok(())
+}
+
+/// REQ-AXO-901747 — COPY BINARY into unified `public.Edge`.
+async fn copy_edges_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    rows: &[(&str, &RelationRow)],
+) -> Result<()> {
+    let stage_ddl = "CREATE TEMP TABLE _bulk_edge_stage (\
+            source_id TEXT NOT NULL,\
+            target_id TEXT NOT NULL,\
+            relation_type TEXT NOT NULL,\
+            project_code TEXT NOT NULL,\
+            created_at_ms BIGINT NOT NULL\
+         ) ON COMMIT DROP";
+    tx.batch_execute(stage_ddl)
+        .await
+        .context("bulk_writer edge stage create")?;
+
+    let copy_stmt = "COPY _bulk_edge_stage (source_id, target_id, relation_type, project_code, created_at_ms) FROM STDIN BINARY";
+    let copy_sink = tx
+        .copy_in(copy_stmt)
+        .await
+        .context("bulk_writer edge copy_in begin")?;
+    let column_types = [Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::INT8];
+    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
+    pin_mut!(writer);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for (rel_type, row) in rows {
+        writer
+            .as_mut()
+            .write(&[
+                &row.source_id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &row.target_id,
+                &rel_type.to_string(),
+                &row.project_code,
+                &now_ms,
+            ])
+            .await
+            .context("bulk_writer edge copy row write")?;
+    }
+    writer.finish().await.context("bulk_writer edge copy_in finish")?;
+
+    let merge_sql = "INSERT INTO public.edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+         SELECT source_id, target_id, relation_type, project_code, created_at_ms FROM _bulk_edge_stage \
+         ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING";
+    tx.batch_execute(merge_sql)
+        .await
+        .context("bulk_writer edge stage merge")?;
+    Ok(())
+}
+
+/// REQ-AXO-901747 — COPY BINARY for IndexedFile rows.
+async fn copy_indexed_files_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    rows: &[(String, String, i64)],
+) -> Result<()> {
+    let stage_ddl = "CREATE TEMP TABLE _bulk_indexedfile_stage (\
+            path TEXT NOT NULL,\
+            content_hash TEXT NOT NULL,\
+            last_seen_ms BIGINT NOT NULL\
+         ) ON COMMIT DROP";
+    tx.batch_execute(stage_ddl)
+        .await
+        .context("bulk_writer indexedfile stage create")?;
+
+    let copy_stmt = "COPY _bulk_indexedfile_stage (path, content_hash, last_seen_ms) FROM STDIN BINARY";
+    let copy_sink = tx
+        .copy_in(copy_stmt)
+        .await
+        .context("bulk_writer indexedfile copy_in begin")?;
+    let column_types = [Type::TEXT, Type::TEXT, Type::INT8];
+    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
+    pin_mut!(writer);
+    for (path, hash, ts) in rows {
+        writer
+            .as_mut()
+            .write(&[
+                path as &(dyn tokio_postgres::types::ToSql + Sync),
+                hash,
+                ts,
+            ])
+            .await
+            .context("bulk_writer indexedfile copy row write")?;
+    }
+    writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
+
+    let merge_sql = "INSERT INTO indexedfile (path, content_hash, last_seen_ms) \
+         SELECT path, content_hash, last_seen_ms FROM _bulk_indexedfile_stage \
+         ON CONFLICT (path) DO UPDATE SET \
+             content_hash = EXCLUDED.content_hash, \
+             last_seen_ms = EXCLUDED.last_seen_ms";
+    tx.batch_execute(merge_sql)
+        .await
+        .context("bulk_writer indexedfile stage merge")?;
     Ok(())
 }
 
