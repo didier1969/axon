@@ -190,12 +190,17 @@ fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> ExitCode {
-    // REQ-AXO-901608 follow-up — opt-in tokio-console for live async runtime
-    // observability. Active only when the binary is built with
-    // `--features tokio-console` AND `RUSTFLAGS="--cfg tokio_unstable"`.
-    // No-op otherwise (zero overhead on the canonical release path).
     #[cfg(feature = "tokio-console")]
     console_subscriber::init();
+
+    #[cfg(not(feature = "tokio-console"))]
+    {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -253,6 +258,12 @@ async fn run() -> Result<()> {
         embedder,
         b1_inbox_rx,
     );
+    // REQ-AXO-901744 — the bench does not run a cold-start poll, so
+    // drop the extra b1_inbox_tx sender that PipelineAHandles keeps
+    // for the production cold-start poller. Without this, the
+    // b1_inbox channel stays open after A3 exits, B1 never sees
+    // recv()→None, and the B shutdown cascade never fires.
+    drop(handles_a.b1_inbox_tx);
 
     let total_files = files.len();
     let start = Instant::now();
