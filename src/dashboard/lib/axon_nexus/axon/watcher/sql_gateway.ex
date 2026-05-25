@@ -60,7 +60,6 @@ defmodule Axon.Watcher.SqlGateway do
     [
       Application.get_env(:axon_dashboard, __MODULE__, []) |> Keyword.get(:url),
       System.get_env("AXON_SQL_URL"),
-      System.get_env("SQL_URL"),
       @default_sql_url
     ]
     |> Enum.map(&sanitize_url_candidate/1)

@@ -113,7 +113,6 @@ fn run(args: Args) -> anyhow::Result<()> {
                 "set AXON_LIVE_DATABASE_URL, AXON_DEV_DATABASE_URL or DATABASE_URL"
             )
         })?;
-    std::env::set_var("AXON_DB_BACKEND", "postgres");
     let graph_store = GraphStore::new(&db_url)?;
     let store = GraphStoreSqlAdapter {
         inner: &graph_store,

@@ -6,8 +6,7 @@
 //! Backends:
 //!   - `noop`     : pure CPU rate (measures synthesis + closure overhead)
 //!   - `pgvector` : real `bulk_writer::flush_chunk_embeddings` (REQ-AXO-238)
-//!                  Requires AXON_DB_BACKEND=postgres + bulk-writer pool
-//!                  configured (AXON_DATABASE_URL etc.)
+//!                  Requires bulk-writer pool configured (AXON_DATABASE_URL etc.)
 //!
 //! Usage:
 //!   axon-bench-writer [--backend noop|pgvector] [--total N]
@@ -168,10 +167,6 @@ fn run() -> anyhow::Result<()> {
         args.backend, args.total, args.batch, args.dim, args.label
     );
     if args.backend == "pgvector" {
-        eprintln!(
-            "   AXON_DB_BACKEND={}",
-            std::env::var("AXON_DB_BACKEND").unwrap_or_else(|_| "<unset>".into())
-        );
         eprintln!(
             "   AXON_BULK_WRITER_ENABLED={}",
             std::env::var("AXON_BULK_WRITER_ENABLED").unwrap_or_else(|_| "<unset>".into())

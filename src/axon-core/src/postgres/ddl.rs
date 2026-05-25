@@ -376,8 +376,7 @@ mod tests {
 
     #[test]
     fn global_schema_includes_axon_runtime_tables() {
-        // MIL-AXO-015 P4 4e seed: indexer hot-path tables must exist in
-        // PG so the writer can boot under `AXON_DB_BACKEND=postgres`.
+        // MIL-AXO-015 P4 4e seed: indexer hot-path tables must exist in PG.
         let joined = generate_global_schema().join("\n");
         assert!(joined.contains("CREATE SCHEMA IF NOT EXISTS axon_runtime"));
         for tbl in [

@@ -181,7 +181,6 @@ fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
     // privileges AXON_LIVE_DATABASE_URL when AXON_INSTANCE_KIND is unset
     // — silently routing bench writes to axon_live in any devenv shell
     // that exports both URLs (the canonical dev config).
-    std::env::set_var("AXON_DB_BACKEND", "postgres");
     let url = std::env::var("AXON_DEV_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .context("set AXON_DEV_DATABASE_URL or DATABASE_URL — PG is the canonical store")?;
