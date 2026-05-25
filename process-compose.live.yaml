@@ -36,8 +36,7 @@ processes:
     command: "${AXON_BRAIN_BIN:-bin/axon-brain}"
     working_dir: "."
     environment:
-      - "AXON_RUNTIME_MODE=${AXON_BRAIN_MODE:-brain_only}"
-      - "AXON_RUNTIME_SHADOW_ROLE=brain"
+      - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=live"
     depends_on:
       postgres-check:

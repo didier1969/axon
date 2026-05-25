@@ -26,11 +26,12 @@ processes:
       restart: "no"
     is_daemon: false
 
-  # Brain = MCP server (reader IST, writer SOLL). No IST writer lock.
+  # Brain = MCP server (reader IST, writer SOLL). No watcher, no pipeline.
   axon-brain:
     command: "${AXON_BRAIN_BIN:-.axon/cargo-target/debug/axon-brain}"
     working_dir: "."
     environment:
+      - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=dev"
     depends_on:
       postgres-check:
