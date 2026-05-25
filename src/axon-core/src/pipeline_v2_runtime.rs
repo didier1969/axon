@@ -288,16 +288,15 @@ pub fn spawn_pipeline_v2_indexer(
             }
         }
 
+        // Adaptive cold-start poll: 5s when backlog exists, 30s when idle.
+        // Ensures GPU catches up quickly after a burst of indexation.
         let store_for_poll = store.clone();
         let coldstart_batch_size = caps.b1_coldstart_batch_size;
-        let coldstart_poll_interval_secs = caps.b1_coldstart_poll_interval_secs;
+        let idle_interval = Duration::from_secs(caps.b1_coldstart_poll_interval_secs);
+        let busy_interval = Duration::from_secs(5);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(
-                coldstart_poll_interval_secs,
-            ));
-            tick.tick().await; // skip the immediate first tick
+            tokio::time::sleep(busy_interval).await;
             loop {
-                tick.tick().await;
                 match b1_cold_start_poll(
                     store_for_poll.clone(),
                     b1_inbox_tx_for_poll.clone(),
@@ -307,12 +306,16 @@ pub fn spawn_pipeline_v2_indexer(
                 {
                     Ok(n) if n > 0 => {
                         info!(
-                            "pipeline_v2 cold-start poll: forwarded {n} chunk_id(s) to B1"
+                            "pipeline_v2 cold-start poll: forwarded {n} chunk_id(s) to B1 (next poll in 5s)"
                         );
+                        tokio::time::sleep(busy_interval).await;
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        tokio::time::sleep(idle_interval).await;
+                    }
                     Err(err) => {
                         warn!(error = %err, "pipeline_v2 cold-start poll failed");
+                        tokio::time::sleep(idle_interval).await;
                     }
                 }
             }
