@@ -90,12 +90,24 @@ pub async fn b3_persist_embedding(
 /// per-row pgvector HNSW contention paid by `spawn_stage_workers` +
 /// `b3_persist_embedding`.
 pub fn spawn_b3_batched_worker(
+    rx: Receiver<EmbeddedChunk>,
+    tx: Sender<PersistedEmbedding>,
+    store: Arc<GraphStore>,
+    metrics: Arc<StageMetrics>,
+    batch_size: usize,
+    batch_timeout: Duration,
+) {
+    spawn_b3_batched_worker_with_cache(rx, tx, store, metrics, batch_size, batch_timeout, None)
+}
+
+pub fn spawn_b3_batched_worker_with_cache(
     mut rx: Receiver<EmbeddedChunk>,
     tx: Sender<PersistedEmbedding>,
     store: Arc<GraphStore>,
     metrics: Arc<StageMetrics>,
     batch_size: usize,
     batch_timeout: Duration,
+    embedding_cache: super::stage_b1::EmbeddingDedupCache,
 ) {
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
@@ -197,6 +209,14 @@ pub fn spawn_b3_batched_worker(
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         for embedded in group_batch {
                             state.mark_embedded(&embedded.chunk_id);
+                            // F-05 fix: update dedup cache so subsequent
+                            // re-indexes skip this chunk in B1.
+                            if let Some(ref cache) = embedding_cache {
+                                cache.insert(
+                                    embedded.chunk_id.clone(),
+                                    embedded.source_hash.clone(),
+                                );
+                            }
                             metrics.record_finished(per_item_us);
                             let receipt = PersistedEmbedding {
                                 chunk_id: embedded.chunk_id,

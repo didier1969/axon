@@ -1218,10 +1218,9 @@ impl GraphStore {
             // chunks were produced for this file.
             if chunk_ids_emitted.is_empty() && !parsed.content.is_empty() {
                 let file_chunk_id = format!("{}::{}::file_context::chunk", project_code, path_str);
-                let truncated = if parsed.content.len() > 2000 {
-                    &parsed.content[..2000]
-                } else {
-                    &parsed.content
+                let truncated = match parsed.content.char_indices().nth(2000) {
+                    Some((idx, _)) => &parsed.content[..idx],
+                    None => &parsed.content,
                 };
                 let file_content = format!(
                     "file: {}\nkind: file_context\n\n{}",

@@ -479,6 +479,7 @@ pub fn spawn_pipeline_b_full_multi(
     // memory + latency without further benefit.
     let _ = counts.b1;
     let b1_pool_size = caps.b2_batch_size.saturating_mul(4).max(caps.b2_batch_size);
+    let embedding_cache_for_b3 = embedding_cache.clone();
     super::stage_b1::spawn_b1_batched_worker_with_dedup(
         b1_inbox_rx,
         b1_to_b2_tx,
@@ -544,13 +545,14 @@ pub fn spawn_pipeline_b_full_multi(
         let bto = std::time::Duration::from_millis(caps.b3_batch_timeout_ms);
         let n_workers = counts.b3.max(1);
         if n_workers == 1 {
-            super::stage_b3::spawn_b3_batched_worker(
+            super::stage_b3::spawn_b3_batched_worker_with_cache(
                 b2_to_b3_rx,
                 output_tx,
                 store.clone(),
                 metrics_b3.clone(),
                 bs,
                 bto,
+                embedding_cache_for_b3.clone(),
             );
         } else {
             let mut worker_txs: Vec<mpsc::Sender<EmbeddedChunk>> =
@@ -558,13 +560,14 @@ pub fn spawn_pipeline_b_full_multi(
             for _ in 0..n_workers {
                 let (wtx, wrx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
                 worker_txs.push(wtx);
-                super::stage_b3::spawn_b3_batched_worker(
+                super::stage_b3::spawn_b3_batched_worker_with_cache(
                     wrx,
                     output_tx.clone(),
                     store.clone(),
                     metrics_b3.clone(),
                     bs,
                     bto,
+                    embedding_cache_for_b3.clone(),
                 );
             }
             drop(output_tx);

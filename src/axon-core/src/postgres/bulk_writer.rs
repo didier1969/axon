@@ -694,7 +694,8 @@ async fn copy_chunks_in_tx(
             end_line BIGINT,\
             chunk_part_index BIGINT,\
             chunk_part_count BIGINT,\
-            chunk_path TEXT\
+            chunk_path TEXT,\
+            token_count INTEGER\
          ) ON COMMIT DROP",
     )
     .await
@@ -703,45 +704,28 @@ async fn copy_chunks_in_tx(
     let copy_sink = tx
         .copy_in(
             "COPY _bulk_chunk_stage \
-                  (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) \
+                  (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) \
                   FROM STDIN BINARY",
         )
         .await
         .context("bulk_writer Chunk copy_in begin (batch)")?;
     let column_types = [
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::TEXT,
+        Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT,
+        Type::TEXT, Type::TEXT, Type::TEXT, Type::INT8, Type::INT8,
+        Type::INT8, Type::INT8, Type::TEXT, Type::INT4,
     ];
     let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
     pin_mut!(writer);
     for row in rows {
+        let tc: Option<i32> = row.token_count.map(|v| v as i32);
         writer
             .as_mut()
             .write(&[
-                &row.chunk_id,
-                &row.source_type,
-                &row.source_id,
-                &row.project_code,
-                &row.file_path,
-                &row.kind,
-                &row.content,
-                &row.content_hash,
-                &row.start_line,
-                &row.end_line,
-                &row.part_index,
-                &row.part_count,
-                &row.chunk_path,
+                &row.chunk_id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &row.source_type, &row.source_id, &row.project_code,
+                &row.file_path, &row.kind, &row.content, &row.content_hash,
+                &row.start_line, &row.end_line, &row.part_index,
+                &row.part_count, &row.chunk_path, &tc,
             ])
             .await
             .context("bulk_writer Chunk copy row write (batch)")?;
@@ -753,8 +737,8 @@ async fn copy_chunks_in_tx(
 
     tx.batch_execute(
         "INSERT INTO public.Chunk \
-            (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) \
-         SELECT id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path \
+            (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) \
+         SELECT id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count \
          FROM _bulk_chunk_stage \
          ON CONFLICT (id) DO UPDATE SET \
             source_type = EXCLUDED.source_type, \
@@ -768,7 +752,8 @@ async fn copy_chunks_in_tx(
             end_line = EXCLUDED.end_line, \
             chunk_part_index = EXCLUDED.chunk_part_index, \
             chunk_part_count = EXCLUDED.chunk_part_count, \
-            chunk_path = EXCLUDED.chunk_path",
+            chunk_path = EXCLUDED.chunk_path, \
+            token_count = EXCLUDED.token_count",
     )
     .await
     .context("bulk_writer Chunk stage merge (batch)")?;

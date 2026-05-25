@@ -235,14 +235,10 @@ pub fn spawn_b1_batched_worker_with_dedup(
             for item in &batch {
                 match item {
                     B1InboxItem::Inline(payload) => {
-                        // REQ-AXO-901748 — skip chunks that already have a
-                        // valid embedding with the same content_hash.
                         if let Some(ref cache) = embedding_cache {
                             if let Some(existing) = cache.get(&payload.chunk_id) {
                                 if existing.value() == &payload.content_hash {
                                     dedup_skipped += 1;
-                                    metrics.record_started();
-                                    metrics.record_finished(0);
                                     continue;
                                 }
                             }
@@ -253,7 +249,8 @@ pub fn spawn_b1_batched_worker_with_dedup(
                 }
             }
 
-            for _ in &batch {
+            let active_count = inline_payloads.len() + fetch_ids.len();
+            for _ in 0..active_count {
                 metrics.record_started();
             }
             let started = std::time::Instant::now();
