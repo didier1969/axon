@@ -76,6 +76,7 @@ impl B2Embedder for NoOpEmbedder {
 /// so the GPU dispatch does not stall the tokio runtime (mandatory under
 /// `live` mode where B1's PG fetch and B2's GPU embed share the same
 /// runtime).
+#[cfg(test)]
 pub async fn b2_embed(
     payload: ChunkForEmbedding,
     embedder: Arc<dyn B2Embedder>,

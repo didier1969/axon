@@ -43,6 +43,7 @@ pub struct PersistedEmbedding {
 /// fallback so their hand-built chunk_ids stay accepted. The write
 /// is wrapped in [`tokio::task::spawn_blocking`] so the synchronous
 /// SQL dispatch does not stall the tokio runtime.
+#[cfg(test)]
 pub async fn b3_persist_embedding(
     embedded: EmbeddedChunk,
     store: Arc<GraphStore>,

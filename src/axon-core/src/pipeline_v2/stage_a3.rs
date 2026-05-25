@@ -1,24 +1,19 @@
-//! Stage A3 — Enregistrement graphe + chunks + FTS (CPT-AXO-054, session 19 topology).
+//! Stage A3 — Enregistrement graphe + chunks + FTS (CPT-AXO-054).
 //!
 //! A3 is the **single-transaction persistence stage** for pipeline A. It
-//! consumes a [`ParsedFile`] from A2 and writes — atomically via
-//! [`GraphStore::upsert_graph_v2`]:
+//! consumes a [`ParsedFile`] from A2 and writes atomically:
 //!
 //!   * `public.Symbol` (UPSERT, idempotent)
-//!   * AGE `Symbol` + `File` vertex enrichment (under PG)
-//!   * `CONTAINS` / `CALLS` / `CALLS_NIF` edges (SQL + AGE dual-write)
-//!   * `public.Chunk` rows with full `content` text — REQ-AXO-292 PG FTS
-//!     attaches automatically through the `content_tsv` GENERATED column,
-//!     so the lexical retrieval lane is ready **without any GPU**
-//!     dependency. SOTA hybrid retrieval: lexical + structural on CPU,
-//!     vector enrichment optional.
-//!   * `public.IndexedFile(path, content_hash, last_seen_ms)` watcher
-//!     filter row
+//!   * `public.Edge` (CONTAINS / CALLS / CALLS_NIF, ON CONFLICT DO NOTHING)
+//!   * `public.Chunk` rows with full `content` text — FTS via async TSV
+//!     worker (REQ-AXO-901624 P4), lexical retrieval without GPU.
+//!   * `public.IndexedFile(path, content_hash, last_seen_ms)` watcher filter
 //!
-//! The chunk_ids persisted are returned to the orchestrator so the A3
-//! worker can `try_send` them to the B1 inbox (best-effort, non-blocking)
-//! for the GPU embedder lane. If the channel is full, B1's cold-start
-//! poll DB pathway (slice S4c) catches the drop.
+//! Under `AXON_BULK_WRITER_ENABLED=1`, uses COPY BINARY (REQ-AXO-901747)
+//! instead of INSERT VALUES for ~12× file throughput.
+//!
+//! Chunk content+hash are forwarded inline to B1 via `B1InboxItem::Inline`
+//! (REQ-AXO-901746), eliminating the PG round-trip for steady-state embedding.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,6 +45,7 @@ pub struct EnrolledFile {
     pub chunk_ids: Vec<String>,
 }
 
+#[cfg(test)]
 /// Persist `parsed`'s graph + chunks atomically and return the receipt
 /// with chunk_ids ready to fan out to B1.
 ///

@@ -22,7 +22,7 @@ use super::metrics::StageMetrics;
 use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::EnrolledFile;
-use super::stage_b1::{b1_fetch_for_embedding, ChunkForEmbedding};
+use super::stage_b1::ChunkForEmbedding;
 use super::stage_b2::{B2Embedder, EmbeddedChunk};
 use super::stage_b3::PersistedEmbedding;
 use super::types::ParsedFile;
@@ -359,6 +359,7 @@ pub struct PipelineBHandles {
 /// `b1_inbox_rx` is the receiver returned by [`spawn_pipeline_a`] —
 /// pass it here to connect the A → B hand-off. B2 (GPU embedder) and
 /// B3 (ChunkEmbedding UPSERT) land in slice S4b.
+#[cfg(test)]
 pub fn spawn_pipeline_b_b1_only(
     counts: PipelineBWorkerCounts,
     caps: PipelineChannelCaps,
@@ -379,7 +380,7 @@ pub fn spawn_pipeline_b_b1_only(
                 match item {
                     super::stage_b1::B1InboxItem::Inline(payload) => Ok(payload),
                     super::stage_b1::B1InboxItem::FetchById(chunk_id) => {
-                        match b1_fetch_for_embedding(chunk_id, store).await? {
+                        match super::stage_b1::b1_fetch_for_embedding(chunk_id, store).await? {
                             Some(payload) => Ok(payload),
                             None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
                         }

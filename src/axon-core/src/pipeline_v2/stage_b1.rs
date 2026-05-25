@@ -1,16 +1,12 @@
-//! Stage B1 — Fetch chunk content for the GPU embedder (CPT-AXO-054, session 19 topology).
+//! Stage B1 — Triage + fetch for the GPU embedder (CPT-AXO-054).
 //!
-//! B1 is the **entry stage of pipeline B** (vectorisation lane only —
-//! lexical/FTS is handled CPU-side by A3's Chunk INSERT). It receives a
-//! `chunk_id: String` from A3's `try_send` fan-out (or from the cold-start
-//! poll DB pathway, slice S4c), SELECTs the chunk's text content from
-//! `public.Chunk`, and forwards `(chunk_id, content, content_hash)` to
-//! the B2 embedder.
+//! B1 receives `B1InboxItem` from A3 (Inline with content) or from
+//! cold-start poll / NOTIFY listener (FetchById, requires PG SELECT).
+//! Inline items are forwarded directly — zero PG cost (REQ-AXO-901746).
+//! FetchById items are batched and SELECTed from `public.Chunk`.
 //!
-//! **No tree-sitter, no chunking here.** A3 already derived the chunks
-//! and UPSERTed them with `content_tsv` GENERATED for FTS. B1 is a pure
-//! DB-read + bucketing stage, GPU-driven by B2's pace through the
-//! downstream channel.
+//! Embedding dedup (REQ-AXO-901748): chunks whose `content_hash`
+//! matches the existing `ChunkEmbedding` are skipped entirely.
 
 use std::sync::Arc;
 
@@ -125,6 +121,7 @@ pub async fn b1_cold_start_poll(
     Ok(total)
 }
 
+#[cfg(test)]
 pub async fn b1_fetch_for_embedding(
     chunk_id: String,
     store: Arc<GraphStore>,
