@@ -442,7 +442,12 @@ fi
 SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
 SELECTED_RELEASE_RUNTIME_BIN="$CARGO_TARGET_ROOT/release/axon-brain"
 
-RUNTIME_SHADOW_ROLE="brain"
+# Shadow role determines which writer locks and DB paths the binary uses.
+case "$RUNTIME_MODE" in
+    brain_only) RUNTIME_SHADOW_ROLE="brain" ;;
+    *)          RUNTIME_SHADOW_ROLE="indexer" ;;
+esac
+export AXON_RUNTIME_SHADOW_ROLE="$RUNTIME_SHADOW_ROLE"
 axon_apply_runtime_role_layout "$PROJECT_ROOT" "$RUNTIME_SHADOW_ROLE" "$RUNTIME_EXECUTABLE_NAME"
 
 export AXON_SKIP_ELIXIR_PREWARM="$SKIP_ELIXIR_PREWARM"
@@ -646,8 +651,14 @@ export AXON_MCP_MUTATION_JOBS=1
 export SQL_URL="$AXON_SQL_URL"
 export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
 
-# Single-process: YAML references ${AXON_BRAIN_BIN} only.
-export AXON_BRAIN_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
+# Binary paths for process-compose YAML.
+if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
+    export AXON_BRAIN_BIN="$PROJECT_ROOT/bin/axon-brain"
+    export AXON_INDEXER_BIN="$PROJECT_ROOT/bin/axon-indexer"
+else
+    export AXON_BRAIN_BIN="$PROJECT_ROOT/${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-brain"
+    export AXON_INDEXER_BIN="$PROJECT_ROOT/${DEVENV_DEBUG_BIN_ROOT#"$PROJECT_ROOT"/}/axon-indexer"
+fi
 
 # Dashboard control.
 if [[ "$START_DASHBOARD" == "1" ]]; then
@@ -665,9 +676,19 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
   AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}"
 
-# Single-process architecture: axon-brain handles all modes.
-# AXON_RUNTIME_MODE (exported above) tells it what to run.
-PC_PROCESSES=(axon-brain)
+# Select which processes to start based on mode.
+PC_PROCESSES=()
+case "$RUNTIME_MODE" in
+    brain_only)
+        PC_PROCESSES+=(axon-brain)
+        ;;
+    indexer_graph|indexer_vector|indexer_full)
+        PC_PROCESSES+=(axon-brain axon-indexer)
+        ;;
+    *)
+        PC_PROCESSES+=(axon-brain)
+        ;;
+esac
 
 if [[ "$START_DASHBOARD" == "1" ]]; then
     PC_PROCESSES+=(dashboard)
@@ -716,9 +737,12 @@ export AXON_PGREADY_BIN="${PGREADY_BIN:-pg_isready}"
     --disable-dotenv \
     "${PC_PROCESSES[@]}"
 
-# Wait for brain readiness via HTTP /readyz probe.
-# Single-process mode: brain serves MCP + indexer on HYDRA_HTTP_PORT.
-READYZ_PORT="$HYDRA_HTTP_PORT"
+# Wait for readiness. For full mode, wait on the indexer (last to be ready).
+if [[ "$RUNTIME_MODE" == indexer_* ]]; then
+    READYZ_PORT="$AXON_INDEXER_HEALTH_PORT"
+else
+    READYZ_PORT="$HYDRA_HTTP_PORT"
+fi
 
 echo "⏳ Waiting for readiness on :${READYZ_PORT}/readyz (timeout ${STARTUP_TIMEOUT_S}s)..."
 READY=false
