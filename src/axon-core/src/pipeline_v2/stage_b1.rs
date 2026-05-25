@@ -19,6 +19,27 @@ use tokio::sync::mpsc::Sender;
 
 use crate::graph::GraphStore;
 
+/// Load all existing (chunk_id, source_hash) pairs from ChunkEmbedding
+/// for hydrating the embedding dedup cache at boot.
+pub fn load_embedding_dedup_cache(store: &GraphStore) -> Result<Arc<dashmap::DashMap<String, String>>> {
+    let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
+    let safe = model_id.replace('\'', "''");
+    let raw = store.query_json_writer(&format!(
+        "SELECT chunk_id, source_hash FROM chunkembedding WHERE model_id = '{safe}'"
+    ))?;
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let map = dashmap::DashMap::with_capacity(rows.len());
+    for row in rows {
+        if let (Some(cid), Some(hash)) = (
+            row.first().and_then(|v| v.as_str()),
+            row.get(1).and_then(|v| v.as_str()),
+        ) {
+            map.insert(cid.to_string(), hash.to_string());
+        }
+    }
+    Ok(Arc::new(map))
+}
+
 /// Output of stage B1 — the payload B2 (GPU embedder) consumes.
 ///
 /// `chunk_id` is the PK in `public.Chunk`. `content` is the raw text to
@@ -139,6 +160,11 @@ pub async fn b1_fetch_for_embedding(
 ///   under-utilized).
 /// * Batched B1 issues one SELECT per 64 chunk_ids → matches B2's
 ///   batch granularity → GPU runs at peak.
+/// REQ-AXO-901748 — set of `(chunk_id, content_hash)` pairs that
+/// already have a valid embedding in ChunkEmbedding. B1 skips Inline
+/// items that match, avoiding redundant GPU work on re-indexation.
+pub type EmbeddingDedupCache = Option<Arc<dashmap::DashMap<String, String>>>;
+
 pub fn spawn_b1_batched_worker(
     mut rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
     tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
@@ -147,8 +173,21 @@ pub fn spawn_b1_batched_worker(
     batch_size: usize,
     batch_timeout: std::time::Duration,
 ) {
+    spawn_b1_batched_worker_with_dedup(rx, tx, store, metrics, batch_size, batch_timeout, None)
+}
+
+pub fn spawn_b1_batched_worker_with_dedup(
+    mut rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
+    tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
+    store: Arc<crate::graph::GraphStore>,
+    metrics: Arc<super::metrics::StageMetrics>,
+    batch_size: usize,
+    batch_timeout: std::time::Duration,
+    embedding_cache: EmbeddingDedupCache,
+) {
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
+        let mut dedup_skipped: u64 = 0;
         loop {
             let recv_started = std::time::Instant::now();
             let first = match rx.recv().await {
@@ -191,14 +230,25 @@ pub fn spawn_b1_batched_worker(
                 }
             }
 
-            // REQ-AXO-901746 — partition into inline (already have content)
-            // vs fetch-by-id (need PG SELECT). Inline items skip the DB
-            // round-trip entirely.
             let mut inline_payloads: Vec<ChunkForEmbedding> = Vec::new();
             let mut fetch_ids: Vec<String> = Vec::new();
             for item in &batch {
                 match item {
-                    B1InboxItem::Inline(payload) => inline_payloads.push(payload.clone()),
+                    B1InboxItem::Inline(payload) => {
+                        // REQ-AXO-901748 — skip chunks that already have a
+                        // valid embedding with the same content_hash.
+                        if let Some(ref cache) = embedding_cache {
+                            if let Some(existing) = cache.get(&payload.chunk_id) {
+                                if existing.value() == &payload.content_hash {
+                                    dedup_skipped += 1;
+                                    metrics.record_started();
+                                    metrics.record_finished(0);
+                                    continue;
+                                }
+                            }
+                        }
+                        inline_payloads.push(payload.clone());
+                    }
                     B1InboxItem::FetchById(id) => fetch_ids.push(id.clone()),
                 }
             }

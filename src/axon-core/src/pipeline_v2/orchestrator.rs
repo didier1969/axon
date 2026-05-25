@@ -424,6 +424,32 @@ pub fn spawn_pipeline_b_full(
     embedder: Arc<dyn B2Embedder>,
     b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
 ) -> PipelineBFullHandles {
+    spawn_pipeline_b_full_with_dedup(counts, caps, store, embedder, b1_inbox_rx, None)
+}
+
+pub fn spawn_pipeline_b_full_with_dedup(
+    counts: PipelineBWorkerCounts,
+    caps: PipelineChannelCaps,
+    store: Arc<GraphStore>,
+    embedder: Arc<dyn B2Embedder>,
+    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
+    embedding_cache: super::stage_b1::EmbeddingDedupCache,
+) -> PipelineBFullHandles {
+    spawn_pipeline_b_full_multi(counts, caps, store, vec![embedder], b1_inbox_rx, embedding_cache)
+}
+
+/// REQ-AXO-901748 — multi-embedder variant. Each embedder in the vec
+/// gets its own B2 batched worker with its own ORT session. CUDA
+/// interleaves memory transfers and compute across sessions
+/// (double-buffering). `counts.b2` is overridden by `embedders.len()`.
+pub fn spawn_pipeline_b_full_multi(
+    counts: PipelineBWorkerCounts,
+    caps: PipelineChannelCaps,
+    store: Arc<GraphStore>,
+    embedders: Vec<Arc<dyn B2Embedder>>,
+    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
+    embedding_cache: super::stage_b1::EmbeddingDedupCache,
+) -> PipelineBFullHandles {
     // DEC-AXO-081 — B3 self-extracts project_code from each chunk_id
     // prefix; no orchestrator-level project_code needed here.
     let (b1_to_b2_tx, b1_to_b2_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
@@ -453,32 +479,60 @@ pub fn spawn_pipeline_b_full(
     // memory + latency without further benefit.
     let _ = counts.b1;
     let b1_pool_size = caps.b2_batch_size.saturating_mul(4).max(caps.b2_batch_size);
-    super::stage_b1::spawn_b1_batched_worker(
+    super::stage_b1::spawn_b1_batched_worker_with_dedup(
         b1_inbox_rx,
         b1_to_b2_tx,
         store.clone(),
         metrics_b1.clone(),
         b1_pool_size,
         std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
+        embedding_cache,
     );
 
-    // REQ-AXO-289 S4b' — B2 runs a dedicated batched worker, not the
-    // generic spawn_stage_workers competing-consumers loop. ORT /
-    // TensorRT BGE-Large hits peak throughput around batch=64-128; at
-    // batch=1 the GPU is idle ~99% of the time. The batched worker
-    // accumulates up to `caps.b2_batch_size` payloads or waits
-    // `caps.b2_batch_timeout_ms` ms before flushing, then issues one
-    // `embed_batch` call to the embedder.
-    super::stage_b2::spawn_b2_batched_worker(
-        b1_to_b2_rx,
-        b2_to_b3_tx,
-        embedder.clone(),
-        metrics_b2.clone(),
-        caps.b2_batch_size,
-        std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
-    );
-    let _ = counts.b2; // CPT-AXO-054 sizes B2 at 1 worker per GPU; the
-                      // batched-worker spawn above is implicitly singular.
+    // REQ-AXO-901748 — B2 with per-worker embedder sessions. Each
+    // embedder in the vec gets its own batched worker + ORT session.
+    // CUDA interleaves transfers and compute across sessions.
+    {
+        let n_b2 = embedders.len().max(1);
+        let b2_batch = caps.b2_batch_size / n_b2.max(1);
+        let b2_timeout = std::time::Duration::from_millis(caps.b2_batch_timeout_ms);
+        if n_b2 == 1 {
+            super::stage_b2::spawn_b2_batched_worker(
+                b1_to_b2_rx,
+                b2_to_b3_tx,
+                embedders.into_iter().next().unwrap(),
+                metrics_b2.clone(),
+                caps.b2_batch_size,
+                b2_timeout,
+            );
+        } else {
+            let mut worker_txs: Vec<mpsc::Sender<ChunkForEmbedding>> = Vec::with_capacity(n_b2);
+            for emb in embedders {
+                let (wtx, wrx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
+                worker_txs.push(wtx);
+                super::stage_b2::spawn_b2_batched_worker(
+                    wrx,
+                    b2_to_b3_tx.clone(),
+                    emb,
+                    metrics_b2.clone(),
+                    b2_batch.max(1),
+                    b2_timeout,
+                );
+            }
+            drop(b2_to_b3_tx);
+            let mut b1_to_b2_rx_for_dispatch = b1_to_b2_rx;
+            tokio::spawn(async move {
+                let mut next = 0usize;
+                while let Some(item) = b1_to_b2_rx_for_dispatch.recv().await {
+                    let target = next % worker_txs.len();
+                    next = next.wrapping_add(1);
+                    if worker_txs[target].send(item).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    }
 
     // REQ-AXO-295 — B3 mirrors A3: multi-row UPSERT amortizes
     // pgvector HNSW contention. AXON_B3_BATCH_SIZE /

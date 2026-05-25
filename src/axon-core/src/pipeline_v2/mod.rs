@@ -72,8 +72,8 @@ pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
 pub use orchestrator::{
     spawn_pipeline_a, spawn_pipeline_a_with_cache, spawn_pipeline_b_b1_only,
-    spawn_pipeline_b_full, PipelineAHandles, PipelineAWorkerCounts, PipelineBFullHandles,
-    PipelineBHandles, PipelineBWorkerCounts,
+    spawn_pipeline_b_full, spawn_pipeline_b_full_multi, PipelineAHandles,
+    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBHandles, PipelineBWorkerCounts,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
@@ -82,7 +82,10 @@ pub use notify_listener::{
     spawn_chunk_pending_listener, spawn_chunk_pending_state_listener,
     spawn_pending_reconcile_loop,
 };
-pub use stage_b1::{b1_cold_start_poll, b1_fetch_for_embedding, B1InboxItem, ChunkForEmbedding};
+pub use stage_b1::{
+    b1_cold_start_poll, b1_fetch_for_embedding, load_embedding_dedup_cache,
+    B1InboxItem, ChunkForEmbedding, EmbeddingDedupCache,
+};
 pub use embedder_gpu::GpuB2Embedder;
 pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
 pub use stage_b2::{b2_embed, spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};

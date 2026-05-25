@@ -217,7 +217,43 @@ pub fn spawn_pipeline_v2_indexer(
                 Arc::new(NoOpEmbedder)
             }
         };
-        let mut handles_b = spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
+        // REQ-AXO-901748 — hydrate embedding dedup cache so B1 skips
+        // chunks that already have a valid embedding with the same hash.
+        let embedding_dedup = match crate::pipeline_v2::stage_b1::load_embedding_dedup_cache(&store) {
+            Ok(cache) => {
+                info!("pipeline_v2: embedding dedup cache hydrated with {} entries", cache.len());
+                Some(cache)
+            }
+            Err(err) => {
+                warn!(error = %err, "pipeline_v2: failed to hydrate embedding dedup cache");
+                None
+            }
+        };
+        // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT
+        // session per worker for true CUDA double-buffering (no Mutex
+        // contention). Each session has its own TensorRT engine cache.
+        let embedders: Vec<Arc<dyn crate::pipeline_v2::B2Embedder>> = if counts_b.b2 > 1 {
+            let mut v = vec![embedder];
+            for i in 1..counts_b.b2 {
+                match GpuB2Embedder::try_new_cuda(
+                    &format!("indexer-pipeline-v2-b2w{i}"),
+                    i,
+                ) {
+                    Ok(e) => v.push(Arc::new(e) as Arc<dyn crate::pipeline_v2::B2Embedder>),
+                    Err(err) => {
+                        warn!(worker = i, error = %err, "pipeline_v2: extra B2 worker init failed, continuing with fewer");
+                        break;
+                    }
+                }
+            }
+            info!("pipeline_v2: {} B2 GPU workers initialized", v.len());
+            v
+        } else {
+            vec![embedder]
+        };
+        let mut handles_b = crate::pipeline_v2::orchestrator::spawn_pipeline_b_full_multi(
+            counts_b, caps, store.clone(), embedders, b1_inbox_rx, embedding_dedup,
+        );
         // REQ-AXO-314 — keep the receipt rx alive by draining it in a
         // background task. Dropping `handles_b.output_rx` immediately
         // would close the receipt channel; B3 then short-circuits on
