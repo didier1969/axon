@@ -304,37 +304,9 @@ async fn flush_chunk_embeddings_async(
     Ok(())
 }
 
-/// Allowed targets for [`flush_relations`]. Constraining to a fixed
-/// list keeps the merge SQL injection-free without quoting tricks and
-/// makes call sites self-documenting (the producer's three relation
-/// hot paths line up 1:1 with the variants).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelationTable {
-    Contains,
-    Calls,
-    CallsNif,
-}
-
-impl RelationTable {
-    pub fn sql_name(self) -> &'static str {
-        match self {
-            RelationTable::Contains => "public.CONTAINS",
-            RelationTable::Calls => "public.CALLS",
-            RelationTable::CallsNif => "public.CALLS_NIF",
-        }
-    }
-
-    /// Stage-table suffix. Kept short — temp names are scoped to the
-    /// transaction so collisions are impossible, but a readable name
-    /// makes EXPLAIN output legible.
-    pub fn stage_name(self) -> &'static str {
-        match self {
-            RelationTable::Contains => "_bulk_contains_stage",
-            RelationTable::Calls => "_bulk_calls_stage",
-            RelationTable::CallsNif => "_bulk_calls_nif_stage",
-        }
-    }
-}
+// RelationTable enum removed — legacy per-type CONTAINS/CALLS/CALLS_NIF
+// tables retired. All edges go through unified public.Edge via
+// copy_edges_in_tx (REQ-AXO-901747).
 
 /// Sync entrypoint for the producer hot path: flush a Symbol batch
 /// via COPY BINARY into a temp staging table + ON CONFLICT merge.
@@ -423,37 +395,8 @@ async fn flush_chunks_async(
 ///     non-PK column, the DO UPDATE is a no-op when the value matches
 ///     and an actual update otherwise; both outcomes are equivalent to
 ///     the legacy DELETE+INSERT for a single producer batch.
-pub fn flush_relations(table: RelationTable, rows: &[RelationRow]) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let rt = runtime()?;
-    let pool = pool()?;
-    rt.block_on(async {
-        let mut client = pool
-            .get()
-            .await
-            .context("bulk_writer pool acquire failed")?;
-        flush_relations_async(&mut client, table, rows).await
-    })
-}
-
-async fn flush_relations_async(
-    client: &mut deadpool_postgres::Client,
-    table: RelationTable,
-    rows: &[RelationRow],
-) -> Result<()> {
-    let target = table.sql_name();
-    let tx = client
-        .transaction()
-        .await
-        .with_context(|| format!("bulk_writer {target} begin tx"))?;
-    copy_relations_in_tx(&tx, table, rows).await?;
-    tx.commit()
-        .await
-        .with_context(|| format!("bulk_writer {target} commit"))?;
-    Ok(())
-}
+// flush_relations removed — legacy per-type relation tables retired.
+// Use flush_batch with PgBulkBatch.
 
 /// Cross-table atomic flush. One transaction covers Symbol, Chunk, and
 /// the three relation tables. A crash mid-flush rolls back every table
@@ -760,65 +703,6 @@ async fn copy_chunks_in_tx(
     Ok(())
 }
 
-async fn copy_relations_in_tx(
-    tx: &deadpool_postgres::Transaction<'_>,
-    table: RelationTable,
-    rows: &[RelationRow],
-) -> Result<()> {
-    let stage = table.stage_name();
-    let target = table.sql_name();
-    let merge_clause = match table {
-        RelationTable::Contains => {
-            "ON CONFLICT (source_id, target_id) DO NOTHING".to_string()
-        }
-        RelationTable::Calls | RelationTable::CallsNif => {
-            "ON CONFLICT (source_id, target_id) DO UPDATE SET project_code = EXCLUDED.project_code"
-                .to_string()
-        }
-    };
-    let stage_ddl = format!(
-        "CREATE TEMP TABLE {stage} (\
-            source_id TEXT NOT NULL,\
-            target_id TEXT NOT NULL,\
-            project_code TEXT NOT NULL\
-         ) ON COMMIT DROP"
-    );
-    tx.batch_execute(&stage_ddl)
-        .await
-        .with_context(|| format!("bulk_writer {target} stage create"))?;
-
-    let copy_stmt =
-        format!("COPY {stage} (source_id, target_id, project_code) FROM STDIN BINARY");
-    let copy_sink = tx
-        .copy_in(copy_stmt.as_str())
-        .await
-        .with_context(|| format!("bulk_writer {target} copy_in begin"))?;
-    let column_types = [Type::TEXT, Type::TEXT, Type::TEXT];
-    let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
-    pin_mut!(writer);
-    for row in rows {
-        writer
-            .as_mut()
-            .write(&[&row.source_id, &row.target_id, &row.project_code])
-            .await
-            .with_context(|| format!("bulk_writer {target} copy row write"))?;
-    }
-    let _written = writer
-        .finish()
-        .await
-        .with_context(|| format!("bulk_writer {target} copy_in finish"))?;
-
-    let merge_sql = format!(
-        "INSERT INTO {target} (source_id, target_id, project_code) \
-         SELECT source_id, target_id, project_code FROM {stage} \
-         {merge_clause}"
-    );
-    tx.batch_execute(&merge_sql)
-        .await
-        .with_context(|| format!("bulk_writer {target} stage merge"))?;
-    Ok(())
-}
-
 /// REQ-AXO-901747 — COPY BINARY into unified `public.Edge`.
 async fn copy_edges_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
@@ -960,48 +844,6 @@ mod tests {
     }
 
     #[test]
-    fn flush_relations_on_empty_input_is_noop() {
-        for t in [
-            RelationTable::Contains,
-            RelationTable::Calls,
-            RelationTable::CallsNif,
-        ] {
-            let res = flush_relations(t, &[]);
-            assert!(
-                res.is_ok(),
-                "empty {:?} flush must not touch the DB",
-                t
-            );
-        }
-    }
-
-    #[test]
-    fn relation_table_sql_names_match_ddl_targets() {
-        // Sanity gate: the SQL names line up with the canonical DDL in
-        // `db/ddl/03_ist_schema.sql` (loaded via
-        // `crate::postgres::ddl::load_canonical_ddl_files`) so a future
-        // rename of either side fails the test instead of silently
-        // routing COPY BINARY into a phantom table.
-        assert_eq!(RelationTable::Contains.sql_name(), "public.CONTAINS");
-        assert_eq!(RelationTable::Calls.sql_name(), "public.CALLS");
-        assert_eq!(RelationTable::CallsNif.sql_name(), "public.CALLS_NIF");
-    }
-
-    #[test]
-    fn relation_table_stage_names_are_unique() {
-        // Cross-call collision shouldn't happen because the stage tables
-        // are TEMP + ON COMMIT DROP, but when all three are flushed in
-        // one tx via flush_batch the distinct stage names matter.
-        let names = [
-            RelationTable::Contains.stage_name(),
-            RelationTable::Calls.stage_name(),
-            RelationTable::CallsNif.stage_name(),
-        ];
-        let unique: std::collections::HashSet<&&str> = names.iter().collect();
-        assert_eq!(unique.len(), names.len());
-    }
-
-    #[test]
     fn pg_bulk_batch_default_is_empty() {
         let b = PgBulkBatch::default();
         assert!(b.is_empty());
@@ -1049,6 +891,7 @@ mod tests {
                 target_id: "nif_x".to_string(),
                 project_code: "AXO".to_string(),
             }],
+            indexed_files: vec![],
         };
         assert!(!b.is_empty());
         assert_eq!(b.row_count(), 4);
