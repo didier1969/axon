@@ -389,10 +389,17 @@ pub fn fuse_small_chunks(
             .join("\n\n");
         let start_line = group.first().unwrap().chunk.start_line;
         let end_line = group.last().unwrap().chunk.end_line;
+        // F-08 fix: use a line-range-based ID instead of first symbol's
+        // name. This is stable across minor symbol additions/renames —
+        // the chunk_id only changes if the actual line range shifts.
         let first = &group[0];
+        let file_prefix = first.symbol_id
+            .rsplit_once("::")
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(&first.symbol_id);
         let fused = TaggedChunk {
-            symbol_id: first.symbol_id.clone(),
-            symbol_name: first.symbol_name.clone(),
+            symbol_id: format!("{file_prefix}::fused_L{start_line}_{end_line}"),
+            symbol_name: "fused_group".to_string(),
             chunk: DerivedCodeChunk {
                 estimated_tokens: estimated_token_count(&combined_content),
                 content: combined_content,

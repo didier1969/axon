@@ -493,9 +493,13 @@ pub fn spawn_pipeline_b_full_multi(
     // REQ-AXO-901748 — B2 with per-worker embedder sessions. Each
     // embedder in the vec gets its own batched worker + ORT session.
     // CUDA interleaves transfers and compute across sessions.
+    // F-06 fix: each B2 worker keeps the full batch_size. Dividing it
+    // would force TensorRT to compile a new engine for the smaller size
+    // and reduce GPU compute density (more padding per batch). The
+    // double-buffering gain comes from overlapping memory transfers
+    // across sessions, not from smaller batches.
     {
         let n_b2 = embedders.len().max(1);
-        let b2_batch = caps.b2_batch_size / n_b2.max(1);
         let b2_timeout = std::time::Duration::from_millis(caps.b2_batch_timeout_ms);
         if n_b2 == 1 {
             super::stage_b2::spawn_b2_batched_worker(
@@ -516,7 +520,7 @@ pub fn spawn_pipeline_b_full_multi(
                     b2_to_b3_tx.clone(),
                     emb,
                     metrics_b2.clone(),
-                    b2_batch.max(1),
+                    caps.b2_batch_size,
                     b2_timeout,
                 );
             }
