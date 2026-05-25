@@ -34,7 +34,7 @@ use crate::ingress_buffer::{
     IngressSource, SharedIngressBuffer,
 };
 use crate::pipeline_v2::{
-    b1_cold_start_poll, spawn_chunk_pending_listener, spawn_pipeline_b_full,
+    b1_cold_start_poll, spawn_pipeline_b_full,
     GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
@@ -141,12 +141,6 @@ pub fn spawn_pipeline_v2_indexer(
     // any drop on full buffer must be rattrapé by SELECT … LEFT JOIN …
     // ChunkEmbedding IS NULL (CPT-AXO-054 contract).
     let b1_inbox_tx_for_poll = handles_a.b1_inbox_tx.clone();
-    // DEC-AXO-086 slice 1B — third producer of the same B1 inbox :
-    // a PG LISTEN task consumes 'chunk_pending_embed' notifications
-    // (fired by the trigger on Chunk INSERT/UPDATE OF content_hash) and
-    // forwards chunk_ids to B1. Three independent producers (A3 try_send
-    // / cold-start poll / NOTIFY listener) converge on the same consumer.
-    let b1_inbox_tx_for_listener = handles_a.b1_inbox_tx.clone();
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
@@ -278,16 +272,6 @@ pub fn spawn_pipeline_v2_indexer(
         //     so ~30k chunk_ids overflow per cycle without this poll)
         //   * chunks from previous indexer instances (pre-v2 cut-over)
         //   * any race where B1 fetch raced with A3 commit
-        // DEC-AXO-086 slice 1B : spawn the PG NOTIFY listener.
-        match resolve_listener_database_url() {
-            Ok(url) => {
-                spawn_chunk_pending_listener(url, b1_inbox_tx_for_listener);
-            }
-            Err(err) => {
-                warn!(error = %err, "pipeline_v2: PG NOTIFY listener disabled (DATABASE_URL unresolved); cold-start poll remains the safety net");
-            }
-        }
-
         // Adaptive cold-start poll: 5s when backlog exists, 30s when idle.
         // Ensures GPU catches up quickly after a burst of indexation.
         let store_for_poll = store.clone();
@@ -325,7 +309,6 @@ pub fn spawn_pipeline_v2_indexer(
         // a closed-channel error, then drain silently.
         let mut rx = b1_inbox_rx;
         let _ = b1_inbox_tx_for_poll;
-        let _ = b1_inbox_tx_for_listener;
         tokio::spawn(async move {
             while rx.recv().await.is_some() {
                 // Silently drop chunk_ids — there's no B to embed them
@@ -838,17 +821,6 @@ fn gpu_provider_explicitly_requested() -> bool {
 /// `AXON_DEV_DATABASE_URL` then `DATABASE_URL`, gated by
 /// `AXON_INSTANCE` (default: live ; legacy alias `AXON_INSTANCE_KIND`
 /// still honored with a one-shot deprecation warning — REQ-AXO-901657).
-fn resolve_listener_database_url() -> Result<String> {
-    use crate::postgres::{database_url_for, AxonInstance};
-    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
-        .to_lowercase();
-    let instance = match kind.as_str() {
-        "dev" => AxonInstance::Dev,
-        _ => AxonInstance::Live,
-    };
-    database_url_for(instance)
-}
-
 #[cfg(test)]
 mod tests {
     use super::gpu_provider_explicitly_requested;
