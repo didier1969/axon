@@ -66,15 +66,6 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "refine_lattice",
-                "description": "[SYSTEM] Advanced post-ingestion graph refinement to link cross-language boundaries (e.g. Elixir NIF -> native Rust) and deepen structural analysis.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
                 "name": "fs_read",
                 "description": "[DX] Read file content by path. Use after query/inspect identifies the target URI.",
                 "inputSchema": {
@@ -929,15 +920,6 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "list_labels_tables",
-                "description": "[LLM/ADVANCED] Compact inventory of tables/labels and key columns. Use before raw `cypher`/SQL to avoid fabricated queries.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
                 "name": "query_examples",
                 "description": "[LLM/ADVANCED] Ready-to-use query examples for structured exploration, backlog, errors, and cross-language bridges. Acts as a guardrail before raw queries.",
                 "inputSchema": {
@@ -948,7 +930,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "sql",
-                "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview`, `list_labels_tables`, or `query_examples`, when the product surface does not answer precisely enough.",
+                "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

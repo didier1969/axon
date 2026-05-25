@@ -97,35 +97,25 @@ impl McpServer {
             .collect::<Vec<_>>();
 
         // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-        // tables are empty/dropped — degrade conception-view flows to empty
-        // gracefully (the LLM still gets module + contract context). An
-        // AGE-native equivalent is tracked for the fuller migration.
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        let flows_raw = if skip_legacy_relations {
-            "[]".to_string()
-        } else {
-            self.graph_store
-                .query_json(&format!(
-                    "SELECT src.name, src_rel.source_id, dst.name, dst_rel.source_id
-                 FROM CALLS c
-                 JOIN Symbol src ON src.id = c.source_id
-                 JOIN Symbol dst ON dst.id = c.target_id
-                 JOIN CONTAINS src_rel
-                   ON src_rel.target_id = src.id
-                  AND src_rel.project_code = '{project}'
-                 JOIN CONTAINS dst_rel
-                   ON dst_rel.target_id = dst.id
-                  AND dst_rel.project_code = '{project}'
-                 WHERE src.project_code = '{project}'
+        // Post-MIL-AXO-017: flows via canonical public.Edge + Chunk.file_path.
+        let flows_raw = self.graph_store
+            .query_json(&format!(
+                "SELECT src.name, COALESCE(src_ch.file_path, ''), dst.name, COALESCE(dst_ch.file_path, '')
+                 FROM public.Edge e
+                 JOIN Symbol src ON src.id = e.source_id
+                 JOIN Symbol dst ON dst.id = e.target_id
+                 LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'
+                 LEFT JOIN Chunk dst_ch ON dst_ch.source_id = dst.id AND dst_ch.source_type = 'symbol'
+                 WHERE e.relation_type = 'CALLS'
+                   AND src.project_code = '{project}'
                    AND dst.project_code = '{project}'
-                   AND c.project_code = '{project}'
-                   AND src_rel.source_id != dst_rel.source_id
+                   AND e.project_code = '{project}'
+                   AND COALESCE(src_ch.file_path, '') != COALESCE(dst_ch.file_path, '')
                  ORDER BY src.name ASC, dst.name ASC
                  LIMIT 5",
-                    project = escaped_project
-                ))
-                .unwrap_or_else(|_| "[]".to_string())
-        };
+                project = escaped_project
+            ))
+            .unwrap_or_else(|_| "[]".to_string());
         let flow_rows: Vec<Vec<Value>> = serde_json::from_str(&flows_raw).unwrap_or_default();
         let flows = flow_rows
             .iter()
@@ -156,29 +146,22 @@ impl McpServer {
                 escaped_project
             ))
             .unwrap_or(0);
-        let flow_count = if skip_legacy_relations {
-            0
-        } else {
-            self.graph_store
-                .query_count(&format!(
-                    "SELECT count(*)
-                 FROM CALLS c
-                 JOIN CONTAINS src_rel
-                   ON src_rel.target_id = c.source_id
-                  AND src_rel.project_code = '{project}'
-                 JOIN CONTAINS dst_rel
-                   ON dst_rel.target_id = c.target_id
-                  AND dst_rel.project_code = '{project}'
-                 JOIN Symbol src ON src.id = c.source_id
-                 JOIN Symbol dst ON dst.id = c.target_id
-                 WHERE src.project_code = '{project}'
+        let flow_count = self.graph_store
+            .query_count(&format!(
+                "SELECT count(*)
+                 FROM public.Edge e
+                 JOIN Symbol src ON src.id = e.source_id
+                 JOIN Symbol dst ON dst.id = e.target_id
+                 LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'
+                 LEFT JOIN Chunk dst_ch ON dst_ch.source_id = dst.id AND dst_ch.source_type = 'symbol'
+                 WHERE e.relation_type = 'CALLS'
+                   AND src.project_code = '{project}'
                    AND dst.project_code = '{project}'
-                   AND c.project_code = '{project}'
-                   AND src_rel.source_id != dst_rel.source_id",
-                    project = escaped_project
-                ))
-                .unwrap_or(0)
-        };
+                   AND e.project_code = '{project}'
+                   AND COALESCE(src_ch.file_path, '') != COALESCE(dst_ch.file_path, '')",
+                project = escaped_project
+            ))
+            .unwrap_or(0);
 
         json!({
             "module_count": modules.len(),

@@ -626,7 +626,7 @@ impl McpServer {
         let mut all_results = Vec::new();
         for file in files {
             let query = format!(
-                "SELECT s.name, s.kind FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id WHERE f.path LIKE '%{}%' LIMIT {}",
+                "SELECT s.name, s.kind FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' WHERE ch.file_path LIKE '%{}%' LIMIT {}",
                 file.replace("'", "''"),
                 limit
             );

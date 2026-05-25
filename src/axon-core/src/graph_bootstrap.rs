@@ -950,8 +950,8 @@ impl GraphStore {
         // HourlyVectorizationRollup CREATE deleted ; legacy persist
         // outbox + per-hour rollup of files_vector_ready are tied to the
         // FileVectorizationQueue lifecycle which pipeline-v2 obsoletes.
-        self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS axon_runtime.OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS axon_runtime.RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
         Ok(())
     }
 
@@ -1021,8 +1021,8 @@ impl GraphStore {
         // REQ-AXO-901653 slice-5a: VectorPersistOutbox /
         // HourlyVectorizationRollup CREATE deleted ; tied to retired
         // FileVectorizationQueue lifecycle.
-        self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS axon_runtime.OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS axon_runtime.RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
 
         // REQ-AXO-901653 slice-5a: list_file_table_columns + backfill
         // UPDATE chain (file_stage / graph_ready / vector_ready /

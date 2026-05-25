@@ -761,57 +761,11 @@ impl McpServer {
     }
 
     fn count_degraded_links_for_node(&self, node_id: &str) -> usize {
-        // REQ-AXO-251: under PG age-only-relations, the SQL SUBSTANTIATES /
-        // IMPACTS / CONTAINS relation tables are empty/dropped — return 0
-        // gracefully (no degraded-link signal). The authoritative
-        // SUBSTANTIATES/IMPACTS edges live on soll.main.Edge.relation_type;
-        // an AGE/SOLL-Edge-native equivalent for this query is a follow-up
-        // (tracked on REQ-AXO-251 closure notes).
-        if self.graph_store.skip_legacy_relations() {
-            return 0;
-        }
-        let degraded_file_query = format!(
-            "SELECT count(*) FROM (
-                SELECT DISTINCT f.path
-                FROM SUBSTANTIATES rel
-                JOIN File f ON (
-                    (rel.source_id = '{id}' AND rel.target_id = f.path)
-                    OR (rel.target_id = '{id}' AND rel.source_id = f.path)
-                )
-                WHERE f.status = 'indexed_degraded'
-                UNION
-                SELECT DISTINCT f.path
-                FROM IMPACTS rel
-                JOIN File f ON (
-                    (rel.source_id = '{id}' AND rel.target_id = f.path)
-                    OR (rel.target_id = '{id}' AND rel.source_id = f.path)
-                )
-                WHERE f.status = 'indexed_degraded'
-                UNION
-                SELECT DISTINCT f.path
-                FROM SUBSTANTIATES rel
-                JOIN CONTAINS c ON (
-                    (rel.source_id = '{id}' AND rel.target_id = c.target_id)
-                    OR (rel.target_id = '{id}' AND rel.source_id = c.target_id)
-                )
-                JOIN File f ON f.path = c.source_id
-                WHERE f.status = 'indexed_degraded'
-                UNION
-                SELECT DISTINCT f.path
-                FROM IMPACTS rel
-                JOIN CONTAINS c ON (
-                    (rel.source_id = '{id}' AND rel.target_id = c.target_id)
-                    OR (rel.target_id = '{id}' AND rel.source_id = c.target_id)
-                )
-                JOIN File f ON f.path = c.source_id
-                WHERE f.status = 'indexed_degraded'
-            ) t",
-            id = escape_sql(node_id)
-        );
-        self.graph_store
-            .query_count(&degraded_file_query)
-            .unwrap_or(0)
-            .max(0) as usize
+        // Post-MIL-AXO-017: legacy SUBSTANTIATES/IMPACTS/CONTAINS tables
+        // are retired. Degraded file detection not yet migrated to
+        // public.Edge; return 0 conservatively.
+        let _ = node_id;
+        0
     }
 }
 

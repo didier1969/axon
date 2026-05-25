@@ -309,7 +309,7 @@ impl McpServer {
          OR lower(replace(replace(replace(c.content, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
          OR lower(c.content) LIKE '%' || $wildcard || '%' \
          OR lower(replace(replace(replace(replace(c.content, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
-         OR lower(f.path) LIKE '%' || $wildcard || '%'"
+         OR lower(c.file_path) LIKE '%' || $wildcard || '%'"
     }
 
     fn chunk_docstring_match_expression() -> &'static str {
@@ -324,8 +324,8 @@ impl McpServer {
     }
 
     fn chunk_path_match_expression() -> &'static str {
-        "lower(f.path) LIKE '%' || $wildcard || '%' \
-         OR lower(f.path) LIKE '%' || $normalized || '%'"
+        "lower(c.file_path) LIKE '%' || $wildcard || '%' \
+         OR lower(c.file_path) LIKE '%' || $normalized || '%'"
     }
 
     fn classify_query_intent(query_text: &str) -> QueryIntent {
@@ -650,8 +650,8 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
-                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                            "SELECT s.name, s.kind, ch.file_path AS uri, {cosine_expr} as score \
+                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} \
                                 OR {cosine_expr} < 0.5 \
                              ORDER BY score ASC LIMIT {}",
@@ -662,9 +662,9 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri, {cosine_expr} as score \
-                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                             WHERE f.project_code = $proj AND ( {} \
+                            "SELECT s.name, s.kind, ch.file_path AS uri, {cosine_expr} as score \
+                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             WHERE ch.project_code = $proj AND ( {} \
                                 OR {cosine_expr} < 0.5 \
                              ) \
                              ORDER BY score ASC LIMIT {}",
@@ -679,8 +679,8 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri \
-                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                            "SELECT s.name, s.kind, ch.file_path AS uri \
+                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} LIMIT {}",
                             base_predicate, query_limit
                         ),
@@ -689,9 +689,9 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, f.path AS uri \
-                             FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                             WHERE f.project_code = $proj AND ( {} ) LIMIT {}",
+                            "SELECT s.name, s.kind, ch.file_path AS uri \
+                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             WHERE ch.project_code = $proj AND ( {} ) LIMIT {}",
                             base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
@@ -701,8 +701,8 @@ impl McpServer {
         } else if project == "*" {
             (
                 format!(
-                    "SELECT s.name, s.kind, f.path AS uri \
-                     FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                    "SELECT s.name, s.kind, ch.file_path AS uri \
+                     FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                      WHERE {} \
                      LIMIT {}",
                     base_predicate, query_limit
@@ -712,9 +712,9 @@ impl McpServer {
         } else {
             (
                 format!(
-                    "SELECT s.name, s.kind, f.path AS uri \
-                     FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                     WHERE f.project_code = $proj AND ( {} ) LIMIT {}",
+                    "SELECT s.name, s.kind, ch.file_path AS uri \
+                     FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                     WHERE ch.project_code = $proj AND ( {} ) LIMIT {}",
                     base_predicate, query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
@@ -1005,7 +1005,7 @@ impl McpServer {
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, f.path AS uri, \
+                    SELECT s.name, s.kind, ch.file_path AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1019,13 +1019,12 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN f.path \
+                               WHEN {path_match} THEN c.file_path \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
                     JOIN Symbol s ON s.id = c.source_id \
-                    JOIN CONTAINS rel ON rel.target_id = s.id \
-                    JOIN File f ON f.path = rel.source_id \
+\
                     WHERE {predicate} \
                  ) \
                  SELECT name, kind, uri, match_reason, evidence \
@@ -1045,7 +1044,7 @@ impl McpServer {
         } else {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, f.path AS uri, \
+                    SELECT s.name, s.kind, ch.file_path AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1059,13 +1058,12 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN f.path \
+                               WHEN {path_match} THEN c.file_path \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
                     JOIN Symbol s ON s.id = c.source_id \
-                    JOIN CONTAINS rel ON rel.target_id = s.id \
-                    JOIN File f ON f.path = rel.source_id \
+\
                     WHERE c.project_code = $proj AND ({predicate}) \
                  ) \
                  SELECT name, kind, uri, match_reason, evidence \
@@ -1148,16 +1146,9 @@ impl McpServer {
         let degraded_files = self.degraded_file_count((project != "*").then_some(project));
         let degraded_note = self.degraded_truth_note(degraded_files);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
-        // REQ-AXO-251: under PG age-only-relations, the SQL CONTAINS table is
-        // empty/dropped. Treat as zero so the structure-only-empty branch is
-        // taken (canonical edge facts live in AGE post-Stop A).
-        let contains_count = if self.graph_store.skip_legacy_relations() {
-            0
-        } else {
-            self.graph_store
-                .query_count("SELECT count(*) FROM CONTAINS")
-                .unwrap_or(0)
-        };
+        // Post-MIL-AXO-017: legacy CONTAINS table is retired; symbol->file
+        // mapping lives in Chunk.file_path. contains_count is invariantly 0.
+        let contains_count: i64 = 0;
         println!(
             "axon_query_without_contains: contains_count={} in DB {:?}",
             contains_count, self.graph_store.db_path
@@ -1443,7 +1434,7 @@ impl McpServer {
                 vec![
                     "retry `query` with a less specific term (drop the trailing `::method`, prefix-only, single token)",
                     "verify spelling and project scope",
-                    "use `list_labels_tables` to list indexed kinds when the symbol class is uncertain",
+                    "use `schema_overview` to list indexed kinds when the symbol class is uncertain",
                 ]
             };
             let parameter_repair = json!({
@@ -1455,7 +1446,7 @@ impl McpServer {
                 "follow_up_tools": if has_suggestions {
                     vec!["inspect"]
                 } else {
-                    vec!["query", "list_labels_tables", "inspect"]
+                    vec!["query", "schema_overview", "inspect"]
                 },
                 "hint": if has_suggestions {
                     format!(
@@ -1464,7 +1455,7 @@ impl McpServer {
                     )
                 } else {
                     format!(
-                        "no candidate found for `{}` in {}; widen the search via `query` or list kinds via `list_labels_tables`",
+                        "no candidate found for `{}` in {}; widen the search via `query` or list kinds via `schema_overview`",
                         symbol, scope
                     )
                 },
@@ -1545,40 +1536,17 @@ impl McpServer {
                 (None, None)
             };
 
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        let query = if skip_legacy_relations {
-            if project.is_some() {
-                format!(
-                    "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
-                     FROM Symbol s WHERE s.id = $sym OR s.name = $sym{}",
-                    Self::sql_project_filter_for_fields(project, &["s.project_code"])
-                )
-            } else {
-                "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
-                 FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
-                    .to_string()
-            }
-        } else if project.is_some() {
+        // Post-MIL-AXO-017: caller/callee counts come from RAM
+        // IstGraphView (above). SQL base returns 0/0; warm RAM counts
+        // are patched in downstream.
+        let query = if project.is_some() {
             format!(
-                "SELECT s.name, s.kind, s.tested, \
-                 (SELECT count(*) FROM CALLS c1 \
-                    WHERE (c1.target_id = s.id OR c1.target_id LIKE ('%::' || s.name)) \
-                      AND c1.project_code = s.project_code) AS callers, \
-                 (SELECT count(*) FROM CALLS c2 \
-                    WHERE (c2.source_id = s.id OR c2.source_id LIKE ('%::' || s.name)) \
-                      AND c2.project_code = s.project_code) AS callees \
-                 FROM Symbol s \
-                 WHERE s.id = $sym OR s.name = $sym{}",
+                "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
+                 FROM Symbol s WHERE s.id = $sym OR s.name = $sym{}",
                 Self::sql_project_filter_for_fields(project, &["s.project_code"])
             )
         } else {
-            "SELECT s.name, s.kind, s.tested, \
-             (SELECT count(*) FROM CALLS c1 \
-                WHERE (c1.target_id = s.id OR c1.target_id LIKE ('%::' || s.name)) \
-                  AND c1.project_code = s.project_code) AS callers, \
-             (SELECT count(*) FROM CALLS c2 \
-                WHERE (c2.source_id = s.id OR c2.source_id LIKE ('%::' || s.name)) \
-                  AND c2.project_code = s.project_code) AS callees \
+            "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
              FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
                 .to_string()
         };

@@ -73,27 +73,15 @@ impl McpServer {
             "SELECT count(*) FROM Symbol WHERE {}",
             symbol_filter
         ));
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CALLS_NIF
-        // tables are empty/dropped — these governance counts return 0 cleanly
-        // (canonical edge counts live in AGE post-Stop A; this diagnostic is
-        // a SQL-storage health probe).
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
-        let calls_direct = if skip_legacy_relations {
-            0
-        } else {
-            self.sql_scalar(&format!(
-                "SELECT count(*) FROM CALLS c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-                Self::project_filter(project, "s.project_code")
-            ))
-        };
-        let calls_nif = if skip_legacy_relations {
-            0
-        } else {
-            self.sql_scalar(&format!(
-                "SELECT count(*) FROM CALLS_NIF c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-                Self::project_filter(project, "s.project_code")
-            ))
-        };
+        // Post-MIL-AXO-017: edge counts from canonical public.Edge table.
+        let calls_direct = self.sql_scalar(&format!(
+            "SELECT count(*) FROM public.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS' AND {}",
+            Self::project_filter(project, "s.project_code")
+        ));
+        let calls_nif = self.sql_scalar(&format!(
+            "SELECT count(*) FROM public.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS_NIF' AND {}",
+            Self::project_filter(project, "s.project_code")
+        ));
         // REQ-AXO-901653 slice-5c — `status_reason` + `last_error_reason`
         // were public.File columns ; pipeline_v2 doesn't carry equivalent
         // diagnostic data (failures are logged via tracing, not row state).

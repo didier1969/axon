@@ -204,17 +204,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0
     };
-    // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
-    // (CONTAINS / CALLS / CALLS_NIF) are empty/dropped. Edge counts in this
-    // diagnostic surface are SQL-only — return 0 gracefully (the canonical
-    // edge-count surface lives on AGE post-Stop A; this diagnostic block is
-    // a SQL-storage health probe, not an authoritative edge-graph reading).
-    let edge_count = if (graph_runtime_enabled || vector_runtime_enabled)
-        && !server.graph_store.skip_legacy_relations()
-    {
-        snapshot_count(
-            "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
-        )
+    // Post-MIL-AXO-017: canonical edge count from public.Edge.
+    let edge_count = if graph_runtime_enabled || vector_runtime_enabled {
+        snapshot_count("SELECT count(*) FROM public.Edge")
     } else {
         0
     };
@@ -379,13 +371,13 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let vector_queue_status_rows = "[]".to_string();
     let latest_optimizer_decision_row = snapshot_json(
         "SELECT decision_id, mode, action_profile_id, at_ms, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms \
-         FROM OptimizerDecisionLog \
+         FROM axon_runtime.OptimizerDecisionLog \
          ORDER BY at_ms DESC \
          LIMIT 1",
     );
     let latest_optimizer_reward_row = snapshot_json(
         "SELECT decision_id, observed_at_ms, throughput_chunks_per_hour, throughput_files_per_hour \
-         FROM RewardObservationLog \
+         FROM axon_runtime.RewardObservationLog \
          ORDER BY observed_at_ms DESC \
          LIMIT 1",
     );

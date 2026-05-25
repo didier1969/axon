@@ -933,7 +933,7 @@ impl GraphStore {
         relations: &[crate::parser::Relation],
     ) -> Result<Vec<String>> {
         use crate::graph_ingestion::async_writer::{
-            ChunkRow, RelationRow, SymbolRow, WriteAccumulator,
+            ChunkRow, RelationRow, SymbolRow,
         };
         use std::collections::HashSet;
 
@@ -1043,39 +1043,16 @@ impl GraphStore {
             }
         }
 
-        let mut acc = WriteAccumulator::new();
-        acc.symbols = symbol_rows;
-        acc.chunks = chunk_rows;
-        acc.contains = contains_rows;
-        acc.calls = calls_rows;
-        acc.calls_nif = calls_nif_rows;
-
-        // PG-canonical: `_pg` renderers emit pgvector literals for the
-        // Symbol embedding column when set, and `NULL` when unset (the
-        // streaming-v2 path leaves embeddings to B3, so symbols arrive
-        // here with `embedding: None`). Chunk INSERT triggers the
-        // REQ-AXO-292 `content_tsv` GENERATED column automatically.
-        let mut queries: Vec<String> = Vec::new();
-        queries.extend(acc.render_symbols_pg());
-        queries.extend(acc.render_chunks_pg());
-        // `public.Edge` (REQ-AXO-295 / REQ-AXO-297 UPSERTs) is the sole
-        // structural edge storage post-MIL-AXO-017.
-        queries.extend(acc.render_unified_edge_pg(last_seen_ms));
-
-        let safe_path = Self::escape_sql(path);
-        let safe_hash = Self::escape_sql(content_hash);
-        queries.push(format!(
-            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
-             VALUES ('{path}', '{hash}', {ts}) \
-             ON CONFLICT (path) DO UPDATE SET \
-                 content_hash = EXCLUDED.content_hash, \
-                 last_seen_ms = EXCLUDED.last_seen_ms;",
-            path = safe_path,
-            hash = safe_hash,
-            ts = last_seen_ms,
-        ));
-
-        self.execute_batch(&queries)?;
+        // PG-canonical: COPY BINARY path via bulk_writer.
+        let batch = crate::postgres::bulk_writer::PgBulkBatch {
+            symbols: symbol_rows,
+            chunks: chunk_rows,
+            contains: contains_rows,
+            calls: calls_rows,
+            calls_nif: calls_nif_rows,
+            indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms)],
+        };
+        crate::postgres::bulk_writer::flush_batch(&batch)?;
         Ok(chunk_ids_emitted)
     }
 
@@ -1104,7 +1081,7 @@ impl GraphStore {
         project_code: &str,
     ) -> Result<Vec<Vec<(String, String, String)>>> {
         use crate::graph_ingestion::async_writer::{
-            ChunkRow, RelationRow, SymbolRow, WriteAccumulator,
+            ChunkRow, RelationRow, SymbolRow,
         };
         use std::collections::HashSet;
 
@@ -1282,60 +1259,16 @@ impl GraphStore {
         contains_rows.sort_unstable();
         contains_rows.dedup();
 
-        // REQ-AXO-901747 — COPY BINARY path bypasses SQL text rendering
-        // entirely. The bulk_writer sends binary data directly to PG via
-        // the COPY protocol, eliminating the 2-3 MB SQL string parsing
-        // bottleneck that made A3 the drum at 99.6% work_ratio.
-        if crate::postgres::bulk_writer::bulk_writer_enabled() {
-            let batch = crate::postgres::bulk_writer::PgBulkBatch {
-                symbols: symbol_rows,
-                chunks: chunk_rows,
-                contains: contains_rows,
-                calls: calls_rows,
-                calls_nif: calls_nif_rows,
-                indexed_files: indexed_file_rows,
-            };
-            crate::postgres::bulk_writer::flush_batch(&batch)?;
-            return Ok(chunk_ids_per_file);
-        }
-
-        let mut acc = WriteAccumulator::new();
-        acc.symbols = symbol_rows;
-        acc.chunks = chunk_rows;
-        acc.contains = contains_rows;
-        acc.calls = calls_rows;
-        acc.calls_nif = calls_nif_rows;
-
-        let mut queries: Vec<String> = Vec::new();
-        queries.extend(acc.render_symbols_pg());
-        queries.extend(acc.render_chunks_pg());
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        queries.extend(acc.render_unified_edge_pg(now_ms));
-
-        if !indexed_file_rows.is_empty() {
-            let mut values_buf =
-                String::with_capacity(indexed_file_rows.len() * 80);
-            for (i, (path, hash, ts)) in indexed_file_rows.iter().enumerate() {
-                if i > 0 {
-                    values_buf.push(',');
-                }
-                values_buf.push_str(&format!(
-                    "('{}', '{}', {})",
-                    Self::escape_sql(path),
-                    Self::escape_sql(hash),
-                    ts
-                ));
-            }
-            queries.push(format!(
-                "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
-                 VALUES {values_buf} \
-                 ON CONFLICT (path) DO UPDATE SET \
-                     content_hash = EXCLUDED.content_hash, \
-                     last_seen_ms = EXCLUDED.last_seen_ms;"
-            ));
-        }
-
-        self.execute_batch(&queries)?;
+        // REQ-AXO-901747 — COPY BINARY path via bulk_writer.
+        let batch = crate::postgres::bulk_writer::PgBulkBatch {
+            symbols: symbol_rows,
+            chunks: chunk_rows,
+            contains: contains_rows,
+            calls: calls_rows,
+            calls_nif: calls_nif_rows,
+            indexed_files: indexed_file_rows,
+        };
+        crate::postgres::bulk_writer::flush_batch(&batch)?;
         Ok(chunk_ids_per_file)
     }
 

@@ -1563,16 +1563,15 @@ impl McpServer {
     ) -> Vec<EntryCandidate> {
         let mut candidates = self.find_exact_symbol_candidates(project, terms, limit);
         let name_match = Self::term_match_sql(terms, "s.name");
-        let path_match = Self::path_match_sql(path_hints, "f.path");
-        let uri_term_match = Self::term_match_sql(terms, "f.path");
+        let path_match = Self::path_match_sql(path_hints, "ch.file_path");
+        let uri_term_match = Self::term_match_sql(terms, "ch.file_path");
         let query = format!(
-            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(f.path, '') \
+            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
              FROM Symbol s \
-             LEFT JOIN CONTAINS c ON c.target_id = s.id \
-             LEFT JOIN File f ON f.path = c.source_id \
+             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
              WHERE ({name_match} OR {uri_term_match} OR {path_match}){project_filter} \
              LIMIT {limit}",
-            project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "f.project_code"]),
+            project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "ch.project_code"]),
         );
 
         let raw = self
@@ -1631,13 +1630,12 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join(", ");
         let query = format!(
-            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(f.path, '') \
+            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
              FROM Symbol s \
-             LEFT JOIN CONTAINS c ON c.target_id = s.id \
-             LEFT JOIN File f ON f.path = c.source_id \
+             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
              WHERE lower(s.name) IN ({exact_values}){project_filter} \
              LIMIT {limit}",
-            project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "f.project_code"]),
+            project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "ch.project_code"]),
         );
 
         let raw = self
@@ -1899,13 +1897,13 @@ impl McpServer {
         } else {
             entry_uris
                 .iter()
-                .map(|uri| format!("f.path = '{}'", Self::escape_sql(uri)))
+                .map(|uri| format!("c.file_path = '{}'", Self::escape_sql(uri)))
                 .collect::<Vec<_>>()
                 .join(" OR ")
         };
         let lexical_predicate = Self::term_match_sql(terms, "c.content");
-        let path_match = Self::path_match_sql(path_hints, "f.path");
-        let lexical_uri_match = Self::term_match_sql(terms, "f.path");
+        let path_match = Self::path_match_sql(path_hints, "c.file_path");
+        let lexical_uri_match = Self::term_match_sql(terms, "c.file_path");
 
         let semantic = if semantic_allowed {
             match crate::embedder::batch_embed(vec![question.to_string()]) {
@@ -2037,7 +2035,7 @@ impl McpServer {
         }
 
         let project_filter =
-            Self::sql_project_filter_for_fields(project, &["c.project_code", "f.project_code"]);
+            Self::sql_project_filter_for_fields(project, &["c.project_code"]);
 
         let cosine_expr = if let Some(embedding) = semantic.as_ref() {
             match crate::postgres::vector::vector_literal(embedding) {
@@ -2056,7 +2054,7 @@ impl McpServer {
 
         let query = if let Some(cosine_expr) = cosine_expr.as_ref() {
             format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
@@ -2068,8 +2066,6 @@ impl McpServer {
                         {cosine_expr} \
                  FROM Chunk c \
                  JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash \
-                 LEFT JOIN CONTAINS rel ON rel.target_id = c.source_id \
-                 LEFT JOIN File f ON f.path = rel.source_id \
                  WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match}) OR {cosine_expr} < 0.55){project_filter} \
                  ORDER BY {cosine_expr} ASC \
                  LIMIT {limit}",
@@ -2077,7 +2073,7 @@ impl McpServer {
             )
         } else {
             format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(f.path, ''), c.content, \
+                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
@@ -2087,8 +2083,6 @@ impl McpServer {
                         END, \
                         NULL \
                  FROM Chunk c \
-                 LEFT JOIN CONTAINS rel ON rel.target_id = c.source_id \
-                 LEFT JOIN File f ON f.path = rel.source_id \
                  WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match})){project_filter} \
                  LIMIT {limit}",
             )
@@ -2106,7 +2100,7 @@ impl McpServer {
                 let fallback_query = query.replacen(
                     &Self::sql_project_filter_for_fields(
                         project,
-                        &["c.project_code", "f.project_code"],
+                        &["c.project_code"],
                     ),
                     "",
                     1,

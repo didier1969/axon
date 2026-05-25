@@ -431,16 +431,16 @@ impl McpServer {
             { "step": 3, "kind": "file", "target": "<persistent_memory>/MEMORY.md", "purpose": "accumulated session memory and active handoff pointer" },
             { "step": 4, "kind": "mcp", "target": "mcp__axon__help", "purpose": "confirm MCP reachable, return Axon identity and tool routing" },
             { "step": 5, "kind": "mcp", "target": "mcp__axon__status mode=brief", "purpose": "runtime instance, profile, freshness, vector backlog" },
-            { "step": 6, "kind": "sql", "target": "SELECT id, title, description FROM soll.main.Node WHERE project_code = '<CODE>' AND type = 'Vision'", "purpose": "project Vision in full" },
-            { "step": 7, "kind": "sql", "target": "SELECT id, title, description FROM soll.main.Node WHERE project_code = '<CODE>' AND type = 'Pillar' ORDER BY id", "purpose": "every Pillar description in full" },
-            { "step": 8, "kind": "sql", "target": "SELECT id, title FROM soll.main.Node WHERE project_code = '<CODE>' AND type IN ('Decision','Milestone') AND status IN ('accepted','delivered','completed') ORDER BY id DESC LIMIT 30", "purpose": "already-completed work" },
+            { "step": 6, "kind": "sql", "target": "SELECT id, title, description FROM soll.Node WHERE project_code = '<CODE>' AND type = 'Vision'", "purpose": "project Vision in full" },
+            { "step": 7, "kind": "sql", "target": "SELECT id, title, description FROM soll.Node WHERE project_code = '<CODE>' AND type = 'Pillar' ORDER BY id", "purpose": "every Pillar description in full" },
+            { "step": 8, "kind": "sql", "target": "SELECT id, title FROM soll.Node WHERE project_code = '<CODE>' AND type IN ('Decision','Milestone') AND status IN ('accepted','delivered','completed') ORDER BY id DESC LIMIT 30", "purpose": "already-completed work" },
             { "step": 9, "kind": "mcp", "target": "mcp__axon__soll_validate project_code=<CODE>", "purpose": "current SOLL invariant violations (target zero)" },
             { "step": 10, "kind": "mcp", "target": "mcp__axon__soll_work_plan project_code=<CODE> format=brief top=5 limit=15", "purpose": "scored topological order of unblockers; wave 1 score is authoritative" }
         ])
     }
 
     fn default_methodology_summary() -> &'static str {
-        "Observe -> Log to SOLL -> Link to Pillar/Concept -> Re-plan via soll_work_plan -> Execute the highest-score wave-1 unblocker. Repeat. Interrupt the user only for destructive irreversible actions, architectural decisions needing human authority, hard blockers, or external-impact milestones (deploy/release/fix unblocking another human). Canonical reference: CPT-AXO-019 in soll.main.Node."
+        "Observe -> Log to SOLL -> Link to Pillar/Concept -> Re-plan via soll_work_plan -> Execute the highest-score wave-1 unblocker. Repeat. Interrupt the user only for destructive irreversible actions, architectural decisions needing human authority, hard blockers, or external-impact milestones (deploy/release/fix unblocking another human). Canonical reference: CPT-AXO-019 in soll.Node."
     }
 
     fn default_kickoff_prompt() -> &'static str {

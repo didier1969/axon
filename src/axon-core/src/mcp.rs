@@ -154,11 +154,9 @@ impl McpServer {
             "simulate_mutation" => &["impact", "change_safety", "path"],
             "batch" => &["status", "mcp_surface_diagnostics"],
             "sql" => &["schema_overview", "query_examples"],
-            "schema_overview" => &["query_examples", "list_labels_tables"],
-            "list_labels_tables" => &["schema_overview", "query_examples"],
+            "schema_overview" => &["query_examples", "query"],
             "query_examples" => &["query", "schema_overview"],
             "truth_check" => &["status", "project_status"],
-            "refine_lattice" => &["health", "query"],
             "fs_read" => &["inspect", "query"],
             "debug" => &["status", "mcp_surface_diagnostics"],
             _ => &["status", "mcp_surface_diagnostics"],
@@ -1167,7 +1165,6 @@ impl McpServer {
     ) -> Option<Value> {
         match normalized_name {
             "help" => self.axon_help(arguments),
-            "refine_lattice" => self.axon_refine_lattice(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
@@ -1229,7 +1226,6 @@ impl McpServer {
             "simulate_mutation" => self.axon_simulate_mutation(arguments),
             "debug" => self.axon_debug_with_args(arguments),
             "schema_overview" => self.axon_schema_overview(arguments),
-            "list_labels_tables" => self.axon_list_labels_tables(arguments),
             "query_examples" => self.axon_query_examples(arguments),
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),

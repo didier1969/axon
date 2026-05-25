@@ -53,12 +53,12 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"impact"));
     assert!(tool_names.contains(&"health"));
     assert!(!tool_names.contains(&"soll_apply_plan_v2"));
-    assert!(tool_names.contains(&"refine_lattice"));
+    assert!(!tool_names.contains(&"refine_lattice"));
     assert!(tool_names.contains(&"batch"));
     assert!(tool_names.contains(&"sql"));
     assert!(tool_names.contains(&"debug"));
     assert!(tool_names.contains(&"schema_overview"));
-    assert!(tool_names.contains(&"list_labels_tables"));
+    assert!(!tool_names.contains(&"list_labels_tables"));
     assert!(tool_names.contains(&"query_examples"));
     assert!(tool_names.contains(&"truth_check"));
     assert!(tool_names.contains(&"diagnose_indexing"));
@@ -1682,11 +1682,11 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"api_break_check"));
     assert!(public_tool_names.contains(&"simulate_mutation"));
     assert!(!public_tool_names.contains(&"resume_vectorization"));
-    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(!public_tool_names.contains(&"refine_lattice"));
     assert!(public_tool_names.contains(&"sql"));
     assert!(public_tool_names.contains(&"debug"));
     assert!(public_tool_names.contains(&"schema_overview"));
-    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(!public_tool_names.contains(&"list_labels_tables"));
     assert!(public_tool_names.contains(&"query_examples"));
     assert!(data
         .get("runtime_mode")
@@ -2898,11 +2898,11 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
     assert!(public_tool_names.contains(&"api_break_check"));
     assert!(public_tool_names.contains(&"simulate_mutation"));
     assert!(!public_tool_names.contains(&"resume_vectorization"));
-    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(!public_tool_names.contains(&"refine_lattice"));
     assert!(public_tool_names.contains(&"sql"));
     assert!(public_tool_names.contains(&"debug"));
     assert!(public_tool_names.contains(&"schema_overview"));
-    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(!public_tool_names.contains(&"list_labels_tables"));
     assert!(public_tool_names.contains(&"query_examples"));
 
     unsafe {

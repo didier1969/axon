@@ -461,7 +461,7 @@ impl McpServer {
                    AND {req_status_sql} \
                  GROUP BY r.id, r.status, r.metadata \
                  HAVING COUNT(t.id) = 0 \
-                    AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]') \
+                    AND COALESCE((r.metadata->>'acceptance_criteria'), '') IN ('', '[]') \
                  ORDER BY 1, 2"
             );
             let fused_raw = self.graph_store.query_json(&fused_sql)?;

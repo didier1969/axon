@@ -72,36 +72,6 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
-        let store = &self.graph_store;
-        let refine_query = "
-            MATCH (elixir:Symbol {is_nif: true})<-[:CONTAINS]-(e_file:File)
-            MATCH (rust:Symbol {is_nif: true})<-[:CONTAINS]-(r_file:File)
-            WHERE elixir.name = rust.name 
-            MERGE (elixir)-[:CALLS_NIF]->(rust)
-            RETURN elixir.name, e_file.path, r_file.path
-        ";
-        match store.query_json(refine_query) {
-            Ok(res) => {
-                let parsed: Vec<Value> = serde_json::from_str(&res).unwrap_or_default();
-                let count = parsed.len();
-                let report = if count > 0 {
-                    format!(
-                        "**Lattice Refiner executed successfully.**\n\nDiscovered and linked **{} FFI bridges (Rustler NIFs)** between Elixir and Rust.\n\n{}",
-                        count,
-                        format_table_from_json(&res, &["NIF Name", "Elixir File", "Rust File"])
-                    )
-                } else {
-                    "**Lattice Refiner executed.**\nNo new unlinked FFI bridge (Rustler NIF) detected in the graph.".to_string()
-                };
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
-            }
-            Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Refiner Error: {}", e) }], "isError": true }),
-            ),
-        }
-    }
-
     #[allow(dead_code)]
     pub(crate) fn axon_debug(&self) -> Option<Value> {
         self.axon_debug_with_args(&json!({}))
@@ -144,68 +114,6 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
-    pub(crate) fn axon_list_labels_tables(&self, _args: &Value) -> Option<Value> {
-        let rels = self
-            .graph_store
-            .query_json_on_reader_with_freshness(
-                "SELECT table_name \
-                 FROM information_schema.tables \
-                 WHERE table_schema = 'main' \
-                   AND table_name IN ('File','Symbol','Chunk','CONTAINS','CALLS','CALLS_NIF','IMPACTS','SUBSTANTIATES','GraphEmbedding','GraphProjection','GraphProjectionQueue','FileVectorizationQueue') \
-                 ORDER BY table_name",
-                ReadFreshness::StaleOk,
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-        let table_rows: Vec<Vec<Value>> = serde_json::from_str(&rels).unwrap_or_default();
-        let mut core_tables = Vec::new();
-        let mut derived_optional_tables = Vec::new();
-        for row in table_rows {
-            let Some(table_name) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let rendered = vec![Value::String(table_name.to_string())];
-            if matches!(
-                table_name,
-                "GraphEmbedding"
-                    | "GraphProjection"
-                    | "GraphProjectionQueue"
-                    | "FileVectorizationQueue"
-            ) {
-                derived_optional_tables.push(rendered);
-            } else {
-                core_tables.push(rendered);
-            }
-        }
-        let cols = self
-            .graph_store
-            .query_json_on_reader_with_freshness(
-                "SELECT table_name, column_name, data_type \
-                 FROM information_schema.columns \
-                 WHERE table_schema = 'main' \
-                   AND table_name IN ('File','Symbol','CALLS','CALLS_NIF','CONTAINS','GraphEmbedding') \
-                 ORDER BY table_name, ordinal_position",
-                ReadFreshness::StaleOk,
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-        let report = format!(
-            "## 🗂️ Labels / Tables Discovery\n\n\
-             **Core tables:**\n{}\n\n\
-             **Derived optional tables:**\n{}\n\n\
-             **Key columns:**\n{}\n",
-            format_table_from_json(
-                &serde_json::to_string(&core_tables).unwrap_or_else(|_| "[]".to_string()),
-                &["Table"]
-            ),
-            format_table_from_json(
-                &serde_json::to_string(&derived_optional_tables)
-                    .unwrap_or_else(|_| "[]".to_string()),
-                &["Table"]
-            ),
-            format_table_from_json(&cols, &["Table", "Column", "Type"])
-        );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
-    }
-
     pub(crate) fn axon_query_examples(&self, _args: &Value) -> Option<Value> {
         // REQ-AXO-901653 slice-5d — examples migrated from public.File to
         // pipeline_v2 canonical (IndexedFile + Chunk + ChunkEmbedding).
@@ -233,10 +141,6 @@ impl McpServer {
     }
 
     pub(crate) fn axon_truth_check(&self, _args: &Value) -> Option<Value> {
-        // REQ-AXO-251: under PG age-only-relations, the SQL relation tables
-        // (CALLS / CALLS_NIF / CONTAINS) are empty/dropped — skip those
-        // checks so drift is reported only on canonical surfaces.
-        let skip_legacy_relations = self.graph_store.skip_legacy_relations();
         let canonical_count = |query: &str| -> i64 {
             self.graph_store
                 .execute_raw_sql_gateway(query)
@@ -248,19 +152,14 @@ impl McpServer {
         let reader_count =
             |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
 
-        // REQ-AXO-901653 slice-5d — `File` invariant replaced by `IndexedFile`
-        // (canonical pipeline_v2 per-file pivot).
-        let mut checks: Vec<(&str, &str)> = vec![
+        // Canonical IST tables (post-MIL-AXO-017 migration).
+        let checks: Vec<(&str, &str)> = vec![
             ("IndexedFile", "SELECT count(*) FROM public.IndexedFile"),
             ("Symbol", "SELECT count(*) FROM public.Symbol"),
+            ("Edge", "SELECT count(*) FROM public.Edge"),
+            ("Chunk", "SELECT count(*) FROM public.Chunk"),
+            ("ChunkEmbedding", "SELECT count(*) FROM public.ChunkEmbedding"),
         ];
-        if !skip_legacy_relations {
-            checks.extend([
-                ("CALLS", "SELECT count(*) FROM CALLS"),
-                ("CALLS_NIF", "SELECT count(*) FROM CALLS_NIF"),
-                ("CONTAINS", "SELECT count(*) FROM CONTAINS"),
-            ]);
-        }
 
         let mut rows = Vec::new();
         let mut drift_count = 0_i64;

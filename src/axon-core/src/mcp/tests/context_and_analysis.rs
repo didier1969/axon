@@ -2008,22 +2008,7 @@ fn test_soll_work_plan_counts_decision_evidence() {
 }
 
 
-#[test]
-fn test_axon_list_labels_tables_reclassifies_graph_tables_as_derived_optional() {
-    let _guard = env_lock();
-    std::env::remove_var("AXON_ENABLE_GRAPH_VECTORIZATION");
-    let server = create_test_server();
-
-    let response = server
-        .axon_list_labels_tables(&json!({}))
-        .expect("labels/tables response");
-    let content = response["content"][0]["text"].as_str().unwrap_or_default();
-
-    assert!(content.contains("Core tables"), "{content}");
-    assert!(content.contains("Derived optional tables"), "{content}");
-    assert!(content.contains("GraphEmbedding"), "{content}");
-    assert!(content.contains("GraphProjectionQueue"), "{content}");
-}
+// list_labels_tables tool removed (post-MIL-AXO-017 legacy cleanup).
 
 
 
@@ -2994,7 +2979,7 @@ fn test_axon_inspect_unknown_symbol_returns_parameter_repair_with_widening_actio
     // REQ-AXO-139 slice — universal parameter_repair contract for inspect
     // symbol-not-found. Mirrors cypher-binder + soll_attach_evidence slices.
     // When no suggestions exist the LLM should be steered toward widening
-    // tools (`query`, `list_labels_tables`) instead of guessing.
+    // tools (`query`, `schema_overview`) instead of guessing.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
 
@@ -3049,8 +3034,8 @@ fn test_axon_inspect_unknown_symbol_returns_parameter_repair_with_widening_actio
         "no-suggestions follow_up_tools must include `query`: {follow_up_names:?}"
     );
     assert!(
-        follow_up_names.contains(&"list_labels_tables"),
-        "no-suggestions follow_up_tools must include `list_labels_tables`: {follow_up_names:?}"
+        follow_up_names.contains(&"schema_overview"),
+        "no-suggestions follow_up_tools must include `schema_overview`: {follow_up_names:?}"
     );
 
     let hint = repair["hint"].as_str().expect("hint string");
