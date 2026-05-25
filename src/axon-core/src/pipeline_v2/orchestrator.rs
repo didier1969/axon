@@ -477,7 +477,12 @@ pub fn spawn_pipeline_b_full_multi(
     // seq_bucket → padding ≈ 0 per GPU batch. Smaller pool means B2
     // batches cross bucket boundaries (current bug); larger pool wastes
     // memory + latency without further benefit.
-    let _ = counts.b1;
+    if counts.b1 != PipelineBWorkerCounts::default().b1 {
+        tracing::warn!(
+            "AXON_B1_WORKERS={} is set but B1 uses a single batched worker; the value is ignored",
+            counts.b1
+        );
+    }
     let b1_pool_size = caps.b2_batch_size.saturating_mul(4).max(caps.b2_batch_size);
     let embedding_cache_for_b3 = embedding_cache.clone();
     super::stage_b1::spawn_b1_batched_worker_with_dedup(

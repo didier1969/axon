@@ -139,6 +139,7 @@ pub fn spawn_a3_batched_worker(
         // item, so a single straggler waits AT MOST `batch_timeout`
         // ms from when it enters the buffer.
         let mut tick = tokio::time::interval(batch_timeout);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Skip the immediate first tick that `interval` fires; with
         // an empty buffer it would be a no-op anyway.
         tick.tick().await;
@@ -211,15 +212,26 @@ pub fn spawn_a3_batched_worker(
                 groups.keys().collect::<Vec<_>>()
             );
             for (pc_str, group_batch) in groups {
+                // DEEP-008 fix: extract receipt metadata before passing
+                // ownership to spawn_blocking, avoiding a full clone of
+                // the batch content (~1.6 MB per flush).
+                let receipt_meta: Vec<(String, String, usize, usize)> = group_batch
+                    .iter()
+                    .map(|p| (
+                        p.path.to_string_lossy().into_owned(),
+                        p.content_hash.clone(),
+                        p.symbols.len(),
+                        p.relations.len(),
+                    ))
+                    .collect();
+                let group_len = group_batch.len();
                 let store_clone = store.clone();
-                let group_for_block = group_batch.clone();
                 let pc_for_block = pc_str.clone();
                 let join_result = tokio::task::spawn_blocking(move || {
-                    store_clone.upsert_graph_v2_batch(&group_for_block, &pc_for_block)
+                    store_clone.upsert_graph_v2_batch(&group_batch, &pc_for_block)
                 })
                 .await;
 
-                let group_len = group_batch.len();
                 match join_result {
                     Ok(Ok(chunk_metas_per_file)) if chunk_metas_per_file.len() == group_len => {
                         let chunks_total: usize =
@@ -235,21 +247,17 @@ pub fn spawn_a3_batched_worker(
                             as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
-                        for (parsed, chunk_metas) in
-                            group_batch.into_iter().zip(chunk_metas_per_file.into_iter())
+                        for ((path, content_hash, sym_count, rel_count), chunk_metas) in
+                            receipt_meta.into_iter().zip(chunk_metas_per_file.into_iter())
                         {
-                            // REQ-AXO-90009 Slice 1 (DEC-AXO-086) — mark pending
-                            // BEFORE try_send to B1.
-                            // REQ-AXO-901746 — send Inline with content so B1
-                            // skips the PG SELECT for the steady-state path.
                             let state = embedder_state();
                             let mut chunk_ids = Vec::with_capacity(chunk_metas.len());
-                            for (cid, content, content_hash) in chunk_metas {
+                            for (cid, content, chash) in chunk_metas {
                                 state.mark_pending(cid.clone());
                                 let payload = super::stage_b1::ChunkForEmbedding {
                                     chunk_id: cid.clone(),
                                     content,
-                                    content_hash,
+                                    content_hash: chash,
                                 };
                                 let _ = b1_inbox_tx.try_send(
                                     super::stage_b1::B1InboxItem::Inline(payload),
@@ -257,15 +265,14 @@ pub fn spawn_a3_batched_worker(
                                 chunk_ids.push(cid);
                             }
                             let receipt = EnrolledFile {
-                                path: parsed.path.to_string_lossy().into_owned(),
-                                content_hash: parsed.content_hash,
-                                symbols_count: parsed.symbols.len(),
-                                relations_count: parsed.relations.len(),
+                                path,
+                                content_hash,
+                                symbols_count: sym_count,
+                                relations_count: rel_count,
                                 last_seen_ms: now_ms,
                                 chunk_ids,
                             };
                             metrics.record_finished(per_item_us);
-                            // REQ-AXO-901608 — t_send timing (backpressure indicator).
                             let send_started = Instant::now();
                             let send_result = tx.send(receipt).await;
                             let send_elapsed_us =

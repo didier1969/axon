@@ -114,6 +114,7 @@ pub fn spawn_b3_batched_worker_with_cache(
         // REQ-AXO-295 — tick-based batching (see
         // stage_a3::spawn_a3_batched_worker for the canonical comment).
         let mut tick = tokio::time::interval(batch_timeout);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
         let mut buffer: Vec<EmbeddedChunk> = Vec::with_capacity(batch_size);
 

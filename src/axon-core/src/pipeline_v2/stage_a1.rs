@@ -65,12 +65,13 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
 /// Public-in-module so subsequent stages (A2 chunk hashes, B1 chunk lookup
 /// keys) can reuse the same digest function without re-implementing it.
 pub(crate) fn sha256_hex(content: &str) -> String {
+    use std::fmt::Write;
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let digest = hasher.finalize();
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
-        out.push_str(&format!("{:02x}", byte));
+        let _ = write!(out, "{:02x}", byte);
     }
     out
 }

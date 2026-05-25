@@ -181,9 +181,7 @@ pub fn spawn_b2_batched_worker(
             for _ in &batch {
                 metrics.record_started();
             }
-            let texts: Vec<String> = batch.iter().map(|p| {
-                format!("Represent this sentence: {}", p.content)
-            }).collect();
+            let texts: Vec<String> = batch.iter().map(|p| p.content.clone()).collect();
             let embedder_clone = embedder.clone();
             let started = Instant::now();
             let join_result = tokio::task::spawn_blocking(move || {
