@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -12,25 +12,21 @@ use axon_core::embedder::{
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, embedding_lane_config_from_env,
 };
 use axon_core::file_ingress_guard::{
-    guard_metrics_snapshot, FileIngressRow, SharedFileIngressGuard,
+    guard_metrics_snapshot, SharedFileIngressGuard,
 };
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
-use axon_core::graph::PendingFile;
 use axon_core::ingress_buffer::{
-    record_ingress_flush, wait_for_ingress_activity_or_timeout, IngressMetricsSnapshot,
-    IngressSubtreeHint, SharedIngressBuffer,
+    IngressMetricsSnapshot,
+    SharedIngressBuffer,
 };
 use axon_core::optimizer::{
     build_admissible_action_profiles, collect_host_snapshot, collect_operator_policy_snapshot,
     collect_recent_analytics_window, collect_runtime_signals_window, observe_reward,
     HeuristicPolicyEngine, PolicyEngine,
 };
-use axon_core::queue::{ProcessingMode, QueueStore};
+use axon_core::queue::QueueStore;
 use axon_core::runtime_observability::process_memory_snapshot;
-use axon_core::runtime_profile::{
-    current_admission_controller_state, recommend_admission_controller_profile, RuntimeProfile,
-};
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
 use axon_core::service_guard::{InteractivePriority, RuntimeQuiescentState, ServicePressure};
@@ -96,32 +92,43 @@ struct WatchTarget {
     recursive: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 struct AdmissionPlan {
     selected: Vec<AdmissionSelection>,
-    deferred: Vec<PendingFile>,
-    oversized: Vec<PendingFile>,
+    deferred: Vec<axon_core::graph::PendingFile>,
+    oversized: Vec<axon_core::graph::PendingFile>,
     degraded: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct AdmissionSelection {
-    file: PendingFile,
-    mode: ProcessingMode,
+    file: axon_core::graph::PendingFile,
+    mode: axon_core::queue::ProcessingMode,
 }
 
-const CLAIM_MODE_SENTINEL: u8 = u8::MAX;
+#[cfg(test)]
 const FAIRNESS_PROMOTION_DEFER_THRESHOLD: u32 = 3;
+#[cfg(test)]
 const OVERSIZED_PROBATION_DEFER_THRESHOLD: u32 = 3;
-const AUTONOMOUS_INGESTOR_IDLE_WAIT_MS: u64 = 2_000;
+#[cfg(test)]
 const INGRESS_PROMOTER_POLL_INTERVAL_MS: u64 = 50;
+#[cfg(test)]
 const INGRESS_PROMOTER_IDLE_WAIT_MS: u64 = 2_000;
+#[cfg(test)]
 const INGRESS_HOT_FLUSH_WINDOW_MS: u64 = 100;
+#[cfg(test)]
 const INGRESS_BULK_FLUSH_WINDOW_MS: u64 = 75;
+#[cfg(test)]
 const INGRESS_HINT_FLUSH_WINDOW_MS: u64 = 150;
+#[cfg(test)]
 const INGRESS_MAX_BATCH_SIZE: usize = 2_048;
+#[cfg(test)]
 const INGRESS_FORCE_BATCH_SIZE: usize = 4_096;
+#[cfg(test)]
 const INGRESS_HOT_PRIORITY_BATCH_CAP: usize = 256;
+#[cfg(test)]
 const INGRESS_MIXED_BULK_BATCH_SIZE: usize = 1_024;
 const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
 const QUIESCENT_INTERVAL_SCALE_PCT_DEFAULT: usize = 400;
@@ -130,8 +137,8 @@ static OVERSIZED_REFUSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MEMORY_TRIM_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static MEMORY_TRIM_SUCCESSES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct AdmissionControllerDecision {
     target_band: usize,
@@ -143,6 +150,7 @@ struct AdmissionControllerDecision {
     bulk_fill_preferred: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct IngressFlushOutcome {
     admitted_count: usize,
@@ -1182,25 +1190,12 @@ fn quiescent_scaled_interval_ms(base_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
     )
 }
 
+#[cfg(test)]
 fn ingress_promoter_poll_interval_ms() -> u64 {
     quiescent_scaled_interval_ms(INGRESS_PROMOTER_POLL_INTERVAL_MS, 50, 2_000)
 }
 
-fn autonomous_ingestor_idle_wait(
-    timeout: std::time::Duration,
-    queue_len: usize,
-) -> std::time::Duration {
-    std::time::Duration::from_millis(
-        quiescent_scaled_interval_ms(AUTONOMOUS_INGESTOR_IDLE_WAIT_MS, 250, 30_000)
-            .max(timeout.as_millis().min(u128::from(u64::MAX)) as u64)
-            .max(
-                quiescent_scaled_claim_sleep(1_000, queue_len)
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64,
-            ),
-    )
-}
-
+#[cfg(test)]
 fn ingress_promoter_idle_wait_ms() -> u64 {
     quiescent_scaled_interval_ms(INGRESS_PROMOTER_IDLE_WAIT_MS, 250, 30_000)
 }
@@ -1280,14 +1275,6 @@ pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
     });
 }
 
-
-async fn wait_for_runtime_work_activity_or_timeout_async(timeout: std::time::Duration) -> bool {
-    tokio::task::spawn_blocking(move || {
-        service_guard::wait_for_runtime_work_activity_or_timeout(timeout)
-    })
-    .await
-    .unwrap_or(false)
-}
 
 pub(crate) fn runtime_telemetry_snapshot(
     store: &GraphStore,
@@ -1482,26 +1469,7 @@ pub(crate) fn runtime_telemetry_snapshot(
     }
 }
 
-fn should_flush_ingress_buffer(metrics: &IngressMetricsSnapshot, elapsed: Duration) -> bool {
-    if metrics.buffered_entries == 0 && metrics.subtree_hints == 0 {
-        return false;
-    }
-
-    if metrics.buffered_entries >= INGRESS_FORCE_BATCH_SIZE {
-        return true;
-    }
-
-    if metrics.hot_entries > 0 && elapsed >= Duration::from_millis(INGRESS_HOT_FLUSH_WINDOW_MS) {
-        return true;
-    }
-
-    if metrics.subtree_hints > 0 && elapsed >= Duration::from_millis(INGRESS_HINT_FLUSH_WINDOW_MS) {
-        return true;
-    }
-
-    metrics.scan_entries > 0 && elapsed >= Duration::from_millis(INGRESS_BULK_FLUSH_WINDOW_MS)
-}
-
+#[cfg(test)]
 fn ingress_promoter_sleep_ms(metrics: &IngressMetricsSnapshot, elapsed: Duration) -> u64 {
     if !metrics.enabled || (metrics.buffered_entries == 0 && metrics.subtree_hints == 0) {
         return ingress_promoter_idle_wait_ms();
@@ -1532,6 +1500,7 @@ fn ingress_promoter_sleep_ms(metrics: &IngressMetricsSnapshot, elapsed: Duration
     remaining.clamp(floor, ceiling)
 }
 
+#[cfg(test)]
 fn ingress_promoter_backoff_ms(
     metrics: &IngressMetricsSnapshot,
     elapsed: Duration,
@@ -1550,14 +1519,15 @@ fn ingress_promoter_backoff_ms(
     scaled.clamp(base, ceiling)
 }
 
+#[cfg(test)]
 fn admission_controller_decision(
     metrics: &IngressMetricsSnapshot,
     persisted_file_pending_current: usize,
     graph_wip_current: usize,
 ) -> AdmissionControllerDecision {
-    let runtime_profile = RuntimeProfile::detect();
-    let profile = recommend_admission_controller_profile(&runtime_profile);
-    let state = current_admission_controller_state(
+    let runtime_profile = axon_core::runtime_profile::RuntimeProfile::detect();
+    let profile = axon_core::runtime_profile::recommend_admission_controller_profile(&runtime_profile);
+    let state = axon_core::runtime_profile::current_admission_controller_state(
         profile,
         metrics.buffered_entries,
         metrics.hot_entries,
@@ -1579,6 +1549,7 @@ fn admission_controller_decision(
     }
 }
 
+#[cfg(test)]
 fn ingress_flush_batch_size(
     metrics: &IngressMetricsSnapshot,
     persisted_file_pending_current: usize,
@@ -1611,6 +1582,7 @@ fn ingress_flush_batch_size(
     INGRESS_HOT_PRIORITY_BATCH_CAP.min(INGRESS_MAX_BATCH_SIZE)
 }
 
+#[cfg(test)]
 fn flush_ingress_buffer_once(
     store: Arc<GraphStore>,
     projects_root: &str,
@@ -1670,7 +1642,7 @@ fn flush_ingress_buffer_once(
                 locked.record_committed_row(row);
             }
             let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            record_ingress_flush(
+            axon_core::ingress_buffer::record_ingress_flush(
                 elapsed_ms,
                 admitted_delta,
                 durably_persisted_count,
@@ -1726,7 +1698,7 @@ fn flush_ingress_buffer_once(
     }
 
     let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    record_ingress_flush(
+    axon_core::ingress_buffer::record_ingress_flush(
         elapsed_ms,
         0,
         durably_persisted_count,
@@ -1761,18 +1733,20 @@ fn flush_ingress_buffer_once(
     })
 }
 
-fn count_pending_graph_eligible_rows(rows: &[FileIngressRow]) -> usize {
+#[cfg(test)]
+fn count_pending_graph_eligible_rows(rows: &[axon_core::file_ingress_guard::FileIngressRow]) -> usize {
     rows.iter()
         .filter(|row| row.is_pending_graph_eligible())
         .count()
 }
 
+#[cfg(test)]
 fn spawn_subtree_hint_scans(
     projects_root: String,
     store: Arc<GraphStore>,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
-    subtree_hints: Vec<IngressSubtreeHint>,
+    subtree_hints: Vec<axon_core::ingress_buffer::IngressSubtreeHint>,
 ) {
     for hint in subtree_hints {
         let projects_root = projects_root.clone();
@@ -1803,9 +1777,10 @@ fn spawn_subtree_hint_scans(
     }
 }
 
+#[cfg(test)]
 fn plan_admissions(
     queue: &QueueStore,
-    candidates: Vec<PendingFile>,
+    candidates: Vec<axon_core::graph::PendingFile>,
     max_count: usize,
 ) -> AdmissionPlan {
     if max_count == 0 || candidates.is_empty() {
@@ -1847,12 +1822,13 @@ fn plan_admissions(
     plan
 }
 
+#[cfg(test)]
 fn fill_admission_plan(
     queue: &QueueStore,
     remaining_budget: &mut u64,
     max_count: usize,
     plan: &mut AdmissionPlan,
-    mut candidates: Vec<PendingFile>,
+    mut candidates: Vec<axon_core::graph::PendingFile>,
 ) {
     candidates.sort_by(|left, right| {
         right
@@ -1878,20 +1854,20 @@ fn fill_admission_plan(
         let estimated_cost = queue.estimate_cost_for_path_in_mode(
             &candidate.path,
             candidate.size_bytes,
-            ProcessingMode::Full,
+            axon_core::queue::ProcessingMode::Full,
         );
         let degraded_cost = queue.estimate_cost_for_path_in_mode(
             &candidate.path,
             candidate.size_bytes,
-            ProcessingMode::StructureOnly,
+            axon_core::queue::ProcessingMode::StructureOnly,
         );
 
-        if !queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::Full)
+        if !queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, axon_core::queue::ProcessingMode::Full)
         {
             if queue.can_fit_alone_in_mode(
                 &candidate.path,
                 candidate.size_bytes,
-                ProcessingMode::StructureOnly,
+                axon_core::queue::ProcessingMode::StructureOnly,
             ) && candidate.defer_count >= OVERSIZED_PROBATION_DEFER_THRESHOLD
                 && degraded_cost <= *remaining_budget
             {
@@ -1899,13 +1875,13 @@ fn fill_admission_plan(
                 plan.degraded.push(candidate.path.clone());
                 plan.selected.push(AdmissionSelection {
                     file: candidate,
-                    mode: ProcessingMode::StructureOnly,
+                    mode: axon_core::queue::ProcessingMode::StructureOnly,
                 });
             } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD
                 || queue.can_fit_alone_in_mode(
                     &candidate.path,
                     candidate.size_bytes,
-                    ProcessingMode::StructureOnly,
+                    axon_core::queue::ProcessingMode::StructureOnly,
                 )
             {
                 plan.deferred.push(candidate);
@@ -1916,7 +1892,7 @@ fn fill_admission_plan(
             *remaining_budget = remaining_budget.saturating_sub(estimated_cost);
             plan.selected.push(AdmissionSelection {
                 file: candidate,
-                mode: ProcessingMode::Full,
+                mode: axon_core::queue::ProcessingMode::Full,
             });
         } else {
             plan.deferred.push(candidate);
@@ -2112,101 +2088,6 @@ pub(crate) fn spawn_hot_delta_watcher(
     });
 }
 
-pub(crate) fn spawn_ingress_promoter(
-    store: Arc<GraphStore>,
-    projects_root: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    std::thread::spawn(move || {
-        let mut last_flush = Instant::now();
-        let mut zero_admission_streak = 0u32;
-
-        loop {
-            let metrics = ingress_buffer
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .metrics_snapshot();
-
-            if !metrics.enabled {
-                let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                    ingress_promoter_backoff_ms(
-                        &metrics,
-                        last_flush.elapsed(),
-                        zero_admission_streak,
-                    ),
-                ));
-                if signaled {
-                    service_guard::record_background_runtime_wakeup(
-                        service_guard::BackgroundWakeDetail::IngressPromoter,
-                        0,
-                        0,
-                    );
-                }
-                continue;
-            }
-
-            if !should_flush_ingress_buffer(&metrics, last_flush.elapsed()) {
-                let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                    ingress_promoter_backoff_ms(
-                        &metrics,
-                        last_flush.elapsed(),
-                        zero_admission_streak,
-                    ),
-                ));
-                if signaled {
-                    service_guard::record_background_runtime_wakeup(
-                        service_guard::BackgroundWakeDetail::IngressPromoter,
-                        0,
-                        0,
-                    );
-                }
-                continue;
-            }
-
-            service_guard::record_background_runtime_wakeup(
-                service_guard::BackgroundWakeDetail::IngressPromoter,
-                0,
-                0,
-            );
-
-            match flush_ingress_buffer_once(
-                store.clone(),
-                &projects_root,
-                &file_ingress_guard,
-                &ingress_buffer,
-            ) {
-                Ok(outcome) if outcome.admitted_count > 0 => {
-                    zero_admission_streak = 0;
-                    last_flush = Instant::now();
-                }
-                Ok(_outcome) => {
-                    zero_admission_streak = zero_admission_streak.saturating_add(1);
-                    let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                        ingress_promoter_backoff_ms(
-                            &metrics,
-                            last_flush.elapsed(),
-                            zero_admission_streak,
-                        ),
-                    ));
-                    if signaled {
-                        service_guard::record_background_runtime_wakeup(
-                            service_guard::BackgroundWakeDetail::IngressPromoter,
-                            0,
-                            0,
-                        );
-                    }
-                }
-                Err(err) => {
-                    zero_admission_streak = zero_admission_streak.saturating_add(1);
-                    warn!("Ingress promoter flush failed: {}", err);
-                    std::thread::sleep(Duration::from_millis(INGRESS_BULK_FLUSH_WINDOW_MS));
-                }
-            }
-        }
-    });
-}
-
 /// REQ-AXO-91561 — directory name segments that MUST never be subscribed to
 /// recursively by the FS watcher. Cargo `target/`, Mix `_build/`, NPM
 /// `node_modules/`, etc. emit millions of inotify events during normal
@@ -2311,6 +2192,7 @@ fn project_hot_target_rank(path: &Path) -> (u8, String) {
 struct ClaimPolicy {
     mode: ClaimMode,
     claim_count: usize,
+    #[cfg(test)]
     sleep: std::time::Duration,
 }
 
@@ -2346,6 +2228,7 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Paused,
                 claim_count: 0,
+                #[cfg(test)]
                 sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
             };
         }
@@ -2354,6 +2237,7 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Guarded,
                 claim_count: 50,
+                #[cfg(test)]
                 sleep: quiescent_scaled_claim_sleep(750, queue_len),
             };
         }
@@ -2383,6 +2267,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Paused,
             claim_count: 0,
+            #[cfg(test)]
             sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
         };
     }
@@ -2394,6 +2279,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Guarded),
+            #[cfg(test)]
             sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Guarded, queue_len),
         };
     }
@@ -2402,6 +2288,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
+            #[cfg(test)]
             sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
@@ -2410,6 +2297,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
+            #[cfg(test)]
             sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
@@ -2417,6 +2305,7 @@ fn claim_policy(
     ClaimPolicy {
         mode: ClaimMode::Fast,
         claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Fast),
+        #[cfg(test)]
         sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Fast, queue_len),
     }
 }
@@ -2466,33 +2355,8 @@ fn host_state_label(
     }
 }
 
-fn record_oversized_refusal() {
-    OVERSIZED_REFUSALS_TOTAL.fetch_add(1, Ordering::Relaxed);
-}
-
-fn record_structure_only_admission() {
-    DEGRADED_MODE_ENTRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
-}
-
-fn record_claim_mode_transition(mode: ClaimMode) {
-    let code = claim_mode_code(mode);
-    let previous = LAST_REPORTED_CLAIM_MODE.swap(code, Ordering::Relaxed);
-
-    if previous != code && matches!(mode, ClaimMode::Guarded | ClaimMode::Paused) {
-        DEGRADED_MODE_ENTRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-fn claim_mode_code(mode: ClaimMode) -> u8 {
-    match mode {
-        ClaimMode::Fast => 0,
-        ClaimMode::Slow => 1,
-        ClaimMode::Guarded => 2,
-        ClaimMode::Paused => 3,
-    }
-}
-
-fn fairness_bucket(candidate: &PendingFile) -> u8 {
+#[cfg(test)]
+fn fairness_bucket(candidate: &axon_core::graph::PendingFile) -> u8 {
     if candidate.defer_count >= FAIRNESS_PROMOTION_DEFER_THRESHOLD {
         1
     } else {
@@ -2500,6 +2364,7 @@ fn fairness_bucket(candidate: &PendingFile) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn dynamic_claim_sleep(
     pressure: f64,
     mode: ClaimMode,
@@ -2515,6 +2380,7 @@ fn dynamic_claim_sleep(
     quiescent_scaled_claim_sleep(base_sleep_ms, graph_backlog_depth)
 }
 
+#[cfg(test)]
 fn quiescent_scaled_claim_sleep(
     base_sleep_ms: u64,
     graph_backlog_depth: usize,
@@ -3930,7 +3796,7 @@ mod tests {
         assert_eq!(plan.selected[0].file.trace_id, "candidate");
         assert_eq!(
             plan.selected[0].mode,
-            axon_core::queue::ProcessingMode::StructureOnly
+            axon_core::queue::axon_core::queue::ProcessingMode::StructureOnly
         );
     }
 
