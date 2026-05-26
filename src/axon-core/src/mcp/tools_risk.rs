@@ -337,9 +337,17 @@ impl McpServer {
                     "tool": "simulate_mutation",
                     "when": "now"
                 });
+                // REQ-AXO-901753 — SRS slice 3: legacy proximity from
+                // target + impacted symbols.
+                let legacy_proximity_value = self.detect_impact_legacy_proximity(
+                    project,
+                    &target_id,
+                    &impacted_symbol_ids,
+                );
+
                 // REQ-AXO-91512 — tri-modal envelope (GUI-AXO-1003).
                 let total_available = impact_radius as u64;
-                let response = json!({
+                let mut response = json!({
                     "content": [{ "type": "text", "text": report }],
                     "data": {
                         "surfaces_used": surfaces_used,
@@ -371,6 +379,9 @@ impl McpServer {
                         "next_action": next_action
                     }
                 });
+                if let Some(lp) = legacy_proximity_value {
+                    response["data"]["legacy_proximity"] = lp;
+                }
                 Self::write_impact_cache(cache_key, now_ms, &response);
                 Some(response)
             }
@@ -388,6 +399,62 @@ impl McpServer {
                 }
             })),
         }
+    }
+
+    /// REQ-AXO-901753 — SRS slice 3: detect legacy proximity for
+    /// the target symbol and its impacted dependents.
+    fn detect_impact_legacy_proximity(
+        &self,
+        project: Option<&str>,
+        target_id: &str,
+        impacted_ids: &BTreeSet<String>,
+    ) -> Option<Value> {
+        use std::collections::HashSet;
+        let project_code = project?;
+        let snapshot = self.soll_cache().snapshot(project_code).ok()?;
+
+        let mut all_nodes: Vec<super::tools_srs::LegacyNode> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let mut check = |artifact: &str| {
+            if let Some(prox) = super::tools_srs::detect_legacy_proximity(artifact, &snapshot) {
+                for node in prox.nodes {
+                    if seen.insert(node.id.clone()) {
+                        all_nodes.push(node);
+                    }
+                }
+            }
+        };
+
+        check(target_id);
+        for id in impacted_ids {
+            check(id);
+        }
+
+        if all_nodes.is_empty() {
+            return None;
+        }
+
+        let direction = all_nodes
+            .first()
+            .map(|n| n.strategy.direction_hint())
+            .unwrap_or("review legacy linkage")
+            .to_string();
+        let confidence = if all_nodes.iter().all(|n| n.successor.is_some()) {
+            "high"
+        } else {
+            "medium"
+        };
+        Some(json!({
+            "nodes": all_nodes.iter().map(|n| json!({
+                "id": n.id,
+                "strategy": n.strategy,
+                "successor": n.successor,
+                "superseded_at": n.superseded_at,
+            })).collect::<Vec<_>>(),
+            "direction": direction,
+            "confidence": confidence,
+        }))
     }
 
     fn axon_impact_without_calls(

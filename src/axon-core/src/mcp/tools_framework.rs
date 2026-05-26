@@ -591,7 +591,26 @@ impl McpServer {
         // verdict (`change_safety`+`reasoning`) ; adding a parallel
         // results[] would inflate bench precision denominators without
         // helping LLM consumers (same logic as inspect REQ-AXO-91509).
-        Some(json!({
+        // REQ-AXO-901753 — SRS slice 3: legacy proximity for change_safety target.
+        let legacy_proximity_value = {
+            let snapshot = self.soll_cache().snapshot(project_code).ok();
+            snapshot.and_then(|snap| {
+                super::tools_srs::detect_legacy_proximity(target, &snap).map(|prox| {
+                    json!({
+                        "nodes": prox.nodes.iter().map(|n| json!({
+                            "id": n.id,
+                            "strategy": n.strategy,
+                            "successor": n.successor,
+                            "superseded_at": n.superseded_at,
+                        })).collect::<Vec<_>>(),
+                        "direction": prox.direction,
+                        "confidence": prox.confidence,
+                    })
+                })
+            })
+        };
+
+        let mut response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
                 "surfaces_used": ["symbol_index", "soll_traceability"],
@@ -619,6 +638,10 @@ impl McpServer {
                 "safe_to_act": safe_to_act,
                 "needs_human_confirmation": needs_human_confirmation
             }
-        }))
+        });
+        if let Some(lp) = legacy_proximity_value {
+            response["data"]["legacy_proximity"] = lp;
+        }
+        Some(response)
     }
 }
