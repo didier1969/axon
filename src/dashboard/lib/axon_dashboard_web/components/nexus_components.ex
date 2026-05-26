@@ -6,7 +6,6 @@ defmodule AxonDashboardWeb.NexusComponents do
     - `Axon.Watcher.PipelineLive`  (/)
     - `Axon.Watcher.ProjectsLive`  (/projects)
     - `Axon.Watcher.McpLive`       (/mcp)
-    - `Axon.Watcher.CockpitLive`   (/legacy) — left untouched for fallback
 
   Aesthetic DNA (industrial dark, glassmorphism, amber tactical accent) per
   the phoenix-liveview-architect skill.
@@ -41,7 +40,6 @@ defmodule AxonDashboardWeb.NexusComponents do
             <.nav_item href="/" current={@current_path} label="Pipeline" icon="flow" />
             <.nav_item href="/projects" current={@current_path} label="Projects" icon="grid" />
             <.nav_item href="/mcp" current={@current_path} label="MCP catalog" icon="terminal" />
-            <.nav_item href="/legacy" current={@current_path} label="Legacy cockpit" icon="archive" />
           </nav>
 
           <div class="mt-auto space-y-2">
