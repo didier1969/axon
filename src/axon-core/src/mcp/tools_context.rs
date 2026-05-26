@@ -506,7 +506,15 @@ impl McpServer {
             }
         });
 
-        let data = json!({
+        // REQ-AXO-901752 — SRS slice 2: detect legacy proximity from
+        // artifacts returned in the evidence packet.
+        let legacy_proximity_value = self.detect_packet_legacy_proximity(
+            project,
+            &direct_evidence,
+            &supporting_chunks,
+        );
+
+        let mut data = json!({
             "planner": {
                 "route": route.as_str(),
                 "project_scope": project.unwrap_or("*"),
@@ -522,6 +530,9 @@ impl McpServer {
             },
             "packet": packet
         });
+        if let Some(lp) = &legacy_proximity_value {
+            data["legacy_proximity"] = lp.clone();
+        }
 
         let evidence = self.render_evidence_packet(&data["packet"], route);
         let evidence = evidence_by_mode(&evidence, mode);
@@ -3225,6 +3236,82 @@ impl McpServer {
             lines.push("Current rationale is supported by local evidence only and should not be treated as canonical intent.".to_string());
         }
         lines.join(" ")
+    }
+
+    /// REQ-AXO-901752 — scan artifacts in the evidence packet for legacy
+    /// SOLL proximity. Returns a serialized `LegacyProximity` if any
+    /// artifact is linked to a superseded SOLL node.
+    fn detect_packet_legacy_proximity(
+        &self,
+        project: Option<&str>,
+        direct_evidence: &[Value],
+        supporting_chunks: &[Value],
+    ) -> Option<Value> {
+        let project_code = project?;
+        let snapshot = self.soll_cache().snapshot(project_code).ok()?;
+
+        let mut artifact_refs: Vec<String> = Vec::new();
+        for ev in direct_evidence {
+            if let Some(uri) = ev.get("uri").and_then(|v| v.as_str()) {
+                if !artifact_refs.iter().any(|r| r == uri) {
+                    artifact_refs.push(uri.to_string());
+                }
+            }
+            if let Some(sym) = ev.get("symbol_id").and_then(|v| v.as_str()) {
+                if !artifact_refs.iter().any(|r| r == sym) {
+                    artifact_refs.push(sym.to_string());
+                }
+            }
+        }
+        for chunk in supporting_chunks {
+            if let Some(uri) = chunk.get("uri").and_then(|v| v.as_str()) {
+                if !artifact_refs.iter().any(|r| r == uri) {
+                    artifact_refs.push(uri.to_string());
+                }
+            }
+            if let Some(cp) = chunk.get("chunk_path").and_then(|v| v.as_str()) {
+                if !artifact_refs.iter().any(|r| r == cp) {
+                    artifact_refs.push(cp.to_string());
+                }
+            }
+        }
+
+        let mut all_nodes: Vec<super::tools_srs::LegacyNode> = Vec::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        for artifact in &artifact_refs {
+            if let Some(prox) = super::tools_srs::detect_legacy_proximity(artifact, &snapshot) {
+                for node in prox.nodes {
+                    if seen_ids.insert(node.id.clone()) {
+                        all_nodes.push(node);
+                    }
+                }
+            }
+        }
+
+        if all_nodes.is_empty() {
+            return None;
+        }
+
+        let direction = all_nodes
+            .first()
+            .map(|n| n.strategy.direction_hint())
+            .unwrap_or("review legacy linkage")
+            .to_string();
+        let confidence = if all_nodes.iter().all(|n| n.successor.is_some()) {
+            "high"
+        } else {
+            "medium"
+        };
+        Some(json!({
+            "nodes": all_nodes.iter().map(|n| json!({
+                "id": n.id,
+                "strategy": n.strategy,
+                "successor": n.successor,
+                "superseded_at": n.superseded_at,
+            })).collect::<Vec<_>>(),
+            "direction": direction,
+            "confidence": confidence,
+        }))
     }
 
     fn build_direct_evidence(&self, entry_candidates: &[EntryCandidate]) -> Vec<Value> {
