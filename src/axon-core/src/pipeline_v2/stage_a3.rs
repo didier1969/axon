@@ -15,6 +15,7 @@
 //! Chunk content+hash are forwarded inline to B1 via `B1InboxItem::Inline`
 //! (REQ-AXO-901746), eliminating the PG round-trip for steady-state embedding.
 
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

@@ -3796,7 +3796,7 @@ mod tests {
         assert_eq!(plan.selected[0].file.trace_id, "candidate");
         assert_eq!(
             plan.selected[0].mode,
-            axon_core::queue::axon_core::queue::ProcessingMode::StructureOnly
+            crate::queue::ProcessingMode::StructureOnly
         );
     }
 

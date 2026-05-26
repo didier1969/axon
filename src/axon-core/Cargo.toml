@@ -166,6 +166,5 @@ rand = "0.8"
 tempfile = "3.8"
 tower = { version = "0.5.3", features = ["util"] }
 # MIL-AXO-015 P1: ephemeral PG instances for unit/integration tests.
-# Bypasses the need for a long-lived devenv-managed PG during cargo test.
 testcontainers = { version = "0.23", features = ["blocking"] }
 testcontainers-modules = { version = "0.11", features = ["postgres"] }

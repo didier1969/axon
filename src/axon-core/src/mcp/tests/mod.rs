@@ -99,25 +99,74 @@ impl Drop for SollSiteRootGuard {
     }
 }
 
-fn create_test_server() -> McpServer {
-    let temp = tempdir().unwrap();
-    let db_root = temp.path().to_str().unwrap().to_string();
-    test_db_roots()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(temp);
-    let store = Arc::new(GraphStore::new(&db_root).unwrap());
-    McpServer::new(store)
+/// REQ-AXO-91562 Slice 2 — per-test database isolation via PG template.
+///
+/// Each test gets a fresh database cloned from `axon_test_template`.
+/// The database is dropped when the `TestDb` guard goes out of scope.
+/// This prevents test pollution of live/dev SOLL data.
+struct TestDb {
+    db_name: String,
+    pg_port: String,
 }
 
-/// REQ-AXO-91562 short-term workaround — tests run against the shared
-/// live PG (`AXON_LIVE_DATABASE_URL` default) because `GraphStore::new`
-/// ignores `db_root` under the PG backend. The proper fix is per-test
-/// schema isolation (REQ-AXO-91562 slice 2+) ; until then, callers that
-/// INSERT hardcoded fixture ids MUST first wipe them, or PK collisions
-/// from prior runs poison the test. Pass the symbol ids you are about
-/// to insert — order matches the `IN (...)` clause exactly so chunks /
-/// edges referencing those ids are removed too.
+impl TestDb {
+    fn create() -> Self {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tid = std::thread::current().id();
+        let db_name = format!("axon_test_{:x}_{:?}", id, tid)
+            .replace("ThreadId(", "t")
+            .replace(')', "");
+        let pg_port = std::env::var("PGPORT").unwrap_or_else(|_| "44144".to_string());
+        let template = std::env::var("AXON_TEST_TEMPLATE")
+            .unwrap_or_else(|_| "axon_test_template".to_string());
+
+        let output = std::process::Command::new("createdb")
+            .args([
+                "-h", "127.0.0.1",
+                "-p", &pg_port,
+                "-U", "axon",
+                "-T", &template,
+                &db_name,
+            ])
+            .output()
+            .expect("createdb command failed to execute");
+
+        if !output.status.success() {
+            panic!(
+                "TestDb create failed for {}: {}",
+                db_name,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        TestDb { db_name, pg_port }
+    }
+
+    fn url(&self) -> String {
+        format!(
+            "postgres://axon@127.0.0.1:{}/{}",
+            self.pg_port, self.db_name
+        )
+    }
+}
+
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("dropdb")
+            .args([
+                "-h", "127.0.0.1",
+                "-p", &self.pg_port,
+                "-U", "axon",
+                "--if-exists",
+                &self.db_name,
+            ])
+            .output();
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
     if ids.is_empty() {
@@ -128,8 +177,6 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         .map(|id| format!("'{}'", id.replace('\'', "''")))
         .collect();
     let list = quoted.join(", ");
-    // Order matters : ChunkEmbedding → Chunk → Edge → Symbol
-    // (foreign-key cascades aren't declared on every table).
     let _ = server.graph_store.execute(&format!(
         "DELETE FROM public.ChunkEmbedding WHERE chunk_id IN \
          (SELECT id FROM public.Chunk WHERE source_id IN ({list}))"
@@ -144,6 +191,27 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         "DELETE FROM public.Symbol WHERE id IN ({list})"
     ));
 }
+
+fn create_test_server() -> McpServer {
+    let temp = tempdir().unwrap();
+    let db_root = temp.path().to_str().unwrap().to_string();
+    test_db_roots()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(temp);
+
+    let test_db = TestDb::create();
+    let db_url = test_db.url();
+    TEST_DBS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(test_db);
+
+    let store = Arc::new(GraphStore::new_with_database(&db_root, &db_url).unwrap());
+    McpServer::new(store)
+}
+
+static TEST_DBS: Mutex<Vec<TestDb>> = Mutex::new(Vec::new());
 
 fn create_test_server_with_distinct_reader(db_root: &Path) -> McpServer {
     let store = Arc::new(GraphStore::new(db_root.to_str().unwrap()).unwrap());

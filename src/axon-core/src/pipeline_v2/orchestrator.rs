@@ -22,7 +22,7 @@ use super::metrics::StageMetrics;
 use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::EnrolledFile;
-use super::stage_b1::ChunkForEmbedding;
+use super::stage_b1::{B1InboxItem, ChunkForEmbedding};
 use super::stage_b2::{B2Embedder, EmbeddedChunk};
 use super::stage_b3::PersistedEmbedding;
 use super::types::ParsedFile;
