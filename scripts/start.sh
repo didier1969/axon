@@ -149,15 +149,25 @@ if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
     BRAIN_BIN="$PROJECT_ROOT/bin/axon-brain"
     INDEXER_BIN="$PROJECT_ROOT/bin/axon-indexer"
 
-    # Live release manifest: install promoted binaries
-    MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
+    # Live release manifest: install promoted binaries + propagate identity
+    MANIFEST="${AXON_LIVE_RELEASE_MANIFEST:-$PROJECT_ROOT/.axon/live-release/current.json}"
     if [[ -f "$MANIFEST" ]]; then
-        BRAIN_ARTIFACT="$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('artifacts',{}).get('axon-brain',{}).get('path',''))")"
-        INDEXER_ARTIFACT="$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('artifacts',{}).get('axon-indexer',{}).get('path',''))")"
-        if [[ -n "$BRAIN_ARTIFACT" && -f "$BRAIN_ARTIFACT" ]]; then
+        eval "$(python3 -c "
+import json, os
+m = json.load(open('$MANIFEST'))
+arts = m.get('artifacts', {})
+rv = m.get('runtime_version', {})
+bp = arts.get('axon-brain', {}).get('path', '')
+ip = arts.get('axon-indexer', {}).get('path', '')
+ig = rv.get('install_generation', '')
+if bp: print(f'BRAIN_ARTIFACT={bp}')
+if ip: print(f'INDEXER_ARTIFACT={ip}')
+if ig: print(f'export AXON_INSTALL_GENERATION={ig}')
+")"
+        if [[ -n "${BRAIN_ARTIFACT:-}" && -f "$BRAIN_ARTIFACT" ]]; then
             mkdir -p bin
             install -m 755 "$BRAIN_ARTIFACT" "$BRAIN_BIN"
-            install -m 755 "$INDEXER_ARTIFACT" "$INDEXER_BIN"
+            install -m 755 "${INDEXER_ARTIFACT:-}" "$INDEXER_BIN" 2>/dev/null || true
         fi
     fi
 else
