@@ -1,6 +1,5 @@
 pub mod bench_embedding_runtime;
 pub mod bench_extraction;
-pub mod embedder_batch_lanes_tests;
 pub mod embedder_gpu_backend_tests;
 pub mod embedder_gpu_policy_tests;
 pub mod embedder_gpu_telemetry_tests;

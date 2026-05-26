@@ -18,17 +18,16 @@ use std::time::Duration;
 use anyhow::{anyhow, Result as AnyhowResult};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
 
-// `INLINE_EMBED_TIMEOUT`, `inline_pipeline_enabled`, and
-// `embed_via_vector_lane` are the public surface H.2 (graph_ingestion
-// inline path) will call. H.1 lands the foundation only; with zero
-// senders by default the symbols are unused at compile time. The
-// `dead_code` allows are scoped to those H.2 entry points.
-
+// H.1 foundation — channel plumbing only. H.2 will add graph_ingestion
+// call sites. With zero senders by default, all symbols are unused at
+// compile time. Module-level allow covers the staged infrastructure.
+#[allow(dead_code)]
 const INLINE_INBOX_CAPACITY: usize = 64;
 
 #[allow(dead_code)]
 const INLINE_EMBED_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[allow(dead_code)]
 pub(crate) struct InlineEmbedRequest {
     pub(crate) texts: Vec<String>,
     pub(crate) respond_to: Sender<AnyhowResult<Vec<Vec<f32>>>>,
@@ -36,10 +35,12 @@ pub(crate) struct InlineEmbedRequest {
 
 static INLINE_TX: OnceLock<Sender<InlineEmbedRequest>> = OnceLock::new();
 
+#[allow(dead_code)]
 pub(crate) fn create_vector_lane_inbox() -> (Sender<InlineEmbedRequest>, Receiver<InlineEmbedRequest>) {
     bounded(INLINE_INBOX_CAPACITY)
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_vector_lane_inbox(tx: Sender<InlineEmbedRequest>) -> bool {
     INLINE_TX.set(tx).is_ok()
 }

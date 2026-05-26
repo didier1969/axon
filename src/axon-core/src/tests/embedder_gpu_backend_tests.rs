@@ -2,7 +2,7 @@
 mod tests {
     #[test]
     fn embedder_gpu_backend_public_surface_keeps_cuda_dispatch_strict() {
-        let dispatch = crate::embedder::embedder_cuda_execution_provider_dispatch();
+        let dispatch = crate::embedder::cuda_execution_provider_dispatch();
         let rendered = format!("{dispatch:?}");
         assert!(
             rendered.contains("error_on_failure: true"),
@@ -25,7 +25,7 @@ mod tests {
                 ort_dir.join("libonnxruntime.so").display().to_string(),
             );
         }
-        let available = crate::embedder::embedder_ort_cuda_provider_library_available();
+        let available = crate::embedder::ort_cuda_provider_library_available();
         unsafe {
             std::env::remove_var("ORT_DYLIB_PATH");
         }

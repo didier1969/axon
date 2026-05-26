@@ -7,7 +7,6 @@ use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::{builder::GraphOptimizationLevel, run_options::RunOptions, Session};
 use ort::value::TensorRef;
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,8 +14,8 @@ use tokenizers::{Encoding, Tokenizer};
 use tracing::{info, warn};
 
 use super::{
-    current_gpu_memory_snapshot, embedding_model_cache_dir, gpu_memory_soft_limit_mb,
-    gpu_recycle_immediate_required, load_runtime_embedding_tokenizer, normalize_embedding,
+    embedding_model_cache_dir, gpu_memory_soft_limit_mb,
+    load_runtime_embedding_tokenizer, normalize_embedding,
     ort_pooling_cls, ort_pooling_mean, runtime_embedding_snapshot_dir, FASTEMBED_OUTPUT_PRECEDENCE,
 };
 
@@ -53,6 +52,7 @@ pub(crate) struct OrtGpuFirstTextEmbedding {
 /// REQ-AXO-262 — batch-level stats emitted alongside timings so the
 /// pipeline trace can correlate slow iters with shape variance.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub(super) struct EmbeddingBatchStats {
     /// Max raw sequence length across encodings in the micro-batch
     /// (= BatchLongest pad length BEFORE bucket-up).
@@ -63,15 +63,6 @@ pub(super) struct EmbeddingBatchStats {
     pub tokens_total: usize,
     /// Total batch size = sum of micro-batch sizes.
     pub batch_size_total: usize,
-}
-
-impl EmbeddingBatchStats {
-    pub(super) fn merge(&mut self, other: EmbeddingBatchStats) {
-        self.seq_len_raw_max = self.seq_len_raw_max.max(other.seq_len_raw_max);
-        self.seq_len_padded_max = self.seq_len_padded_max.max(other.seq_len_padded_max);
-        self.tokens_total = self.tokens_total.saturating_add(other.tokens_total);
-        self.batch_size_total = self.batch_size_total.saturating_add(other.batch_size_total);
-    }
 }
 
 
@@ -505,19 +496,6 @@ pub(crate) fn bucket_up(raw: usize, buckets: &[usize]) -> usize {
 #[cfg(test)]
 #[path = "gpu_backend_tests.rs"]
 mod gpu_backend_tests;
-
-pub(super) fn abort_gpu_embed_if_vram_summit_reached() -> AnyhowResult<()> {
-    if gpu_recycle_immediate_required(current_gpu_memory_snapshot(), 0) {
-        let vram_used_mb = current_gpu_memory_snapshot()
-            .map(|snapshot| snapshot.used_mb)
-            .unwrap_or(0);
-        return Err(anyhow!(
-            "gpu_recycle_immediate_after_vram_summit vram={}",
-            vram_used_mb
-        ));
-    }
-    Ok(())
-}
 
 pub(crate) fn cuda_execution_provider_dispatch() -> ExecutionProviderDispatch {
     let mut cuda = ep::CUDA::default()

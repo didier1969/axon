@@ -62,6 +62,7 @@ impl EmbedderRuntimeState {
     /// orchestrator has fetched the chunks-without-fresh-embedding set
     /// from PG. Subsequent A3/B3 mark calls converge the set on the
     /// canonical state from there.
+    #[allow(dead_code)]
     pub fn hydrate_from_db_rows<I>(&self, rows: I)
     where
         I: IntoIterator<Item = String>,
@@ -101,6 +102,7 @@ impl EmbedderRuntimeState {
     /// it would return, gets back the subset still waiting on an
     /// embedding update. Result preserves the caller's input order so
     /// callers can render alongside their original ranking.
+    #[allow(dead_code)]
     pub fn pending_subset(&self, candidates: &[String]) -> Vec<String> {
         let pending = self.pending.read();
         candidates

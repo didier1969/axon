@@ -81,13 +81,6 @@ pub(crate) fn set_embedding_provider_runtime_state(
         .map(str::to_string);
 }
 
-pub(crate) fn publish_embedding_provider_state(provider_effective: &str, init_error: Option<&str>) {
-    set_embedding_provider_runtime_state(provider_effective, init_error);
-    register_embedding_provider_diagnostics(embedding_provider_diagnostics(
-        provider_effective.to_string(),
-    ));
-}
-
 /// REQ-AXO-901737 : recorded at boot, then read by downstream consumers
 /// instead of AXON_EMBEDDING_GPU_PRESENT env var.
 pub fn set_gpu_present(gpu_present: bool) {
@@ -106,7 +99,7 @@ pub fn current_gpu_present() -> bool {
 
 /// REQ-AXO-901737 : test-only helper to override the effective provider
 /// label without going through env vars. Production code MUST use
-/// `set_embedding_provider_runtime_state` / `publish_embedding_provider_state`.
+/// `set_embedding_provider_runtime_state`.
 #[cfg(test)]
 pub(crate) fn set_effective_for_test(provider_effective: Option<&str>) {
     let mut slot = embedding_provider_slot()

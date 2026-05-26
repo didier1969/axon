@@ -1,6 +1,4 @@
-use crate::embedding_contract::{
-    fastembed_model, CHUNK_MODEL_ID,
-};
+use crate::embedding_contract::fastembed_model;
 use crate::embedding_profile::{
     configured_embedding_max_length as profile_configured_embedding_max_length,
     configured_embedding_token_bucket_size as profile_configured_embedding_token_bucket_size,
@@ -9,7 +7,6 @@ use crate::embedding_profile::{
     runtime_embedding_snapshot_dir as profile_runtime_embedding_snapshot_dir,
 };
 use crate::graph::GraphStore;
-use crate::graph_ingestion::FileVectorizationWork;
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
@@ -25,7 +22,7 @@ use crate::vector_control::reset_vector_batch_controller_for_tests;
 use anyhow::{anyhow, Result as AnyhowResult};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{InitOptions, OutputKey, TextEmbedding};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -33,8 +30,6 @@ use std::time::{Duration, Instant};
 use tokenizers::{Encoding, Tokenizer};
 use tracing::{error, info, warn};
 
-#[path = "embedder/batch_lanes.rs"]
-mod batch_lanes;
 #[path = "embedder/cpu_query_service.rs"]
 mod cpu_query_service;
 #[path = "embedder/gpu_backend.rs"]
@@ -54,16 +49,8 @@ mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]
 mod provider_runtime;
 
-#[cfg(test)]
-pub(crate) use batch_lanes::reset_token_lane_classifier_for_tests;
-#[cfg(test)]
-pub(crate) use batch_lanes::TokenLaneThresholdSource;
-pub(crate) use batch_lanes::{
-    current_token_lane_thresholds, observe_token_lane_thresholds, TokenLaneThresholds,
-    VectorBatchLane,
-};
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
-use gpu_backend::{
+pub(crate) use gpu_backend::{
     cuda_execution_provider_dispatch, ort_cuda_provider_library_available,
     ort_cuda_provider_library_path,
 };
@@ -71,9 +58,7 @@ pub(crate) use gpu_backend::OrtGpuFirstTextEmbedding;
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
-use gpu_policy::{
-    embedding_provider_requested_is_gpu, gpu_recycle_immediate_required,
-};
+use gpu_policy::embedding_provider_requested_is_gpu;
 #[cfg(test)]
 use gpu_policy::gpu_memory_pressure_active;
 pub use gpu_telemetry::{
@@ -102,19 +87,7 @@ pub use provider_runtime::{
     embedding_provider_diagnostics, set_gpu_present, EmbeddingProviderDiagnostics,
 };
 
-#[allow(dead_code)]
-pub(crate) fn embedder_cuda_execution_provider_dispatch(
-) -> ort::execution_providers::ExecutionProviderDispatch {
-    gpu_backend::cuda_execution_provider_dispatch()
-}
-
-#[allow(dead_code)]
-pub(crate) fn embedder_ort_cuda_provider_library_available() -> bool {
-    gpu_backend::ort_cuda_provider_library_available()
-}
-
 const CHUNK_BATCH_SIZE: usize = 16;
-const SYMBOL_BATCH_SIZE: usize = 32;
 const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
@@ -123,7 +96,6 @@ const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS: u64 = 120_000;
 const DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS: u64 = 10_000;
-const DEFAULT_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddingLaneConfig {
@@ -159,79 +131,6 @@ static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingReques
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
 }
-
-#[derive(Debug, Clone)]
-struct VectorChunkWorkItem {
-    file_path: String,
-    chunk_id: String,
-    content_hash: String,
-    text: String,
-}
-
-#[derive(Debug, Default)]
-struct VectorBatchPlan {
-    work_items: Vec<VectorChunkWorkItem>,
-    touched_works: Vec<FileVectorizationWork>,
-    finalize_after_success: Vec<FileVectorizationWork>,
-    immediate_completed: Vec<FileVectorizationWork>,
-    oversized_works: Vec<FileVectorizationWork>,
-    continuation_works: Vec<FileVectorizationWork>,
-    untouched_works: Vec<FileVectorizationWork>,
-    files_touched: usize,
-    partial_file_cycles: usize,
-    fetch_ms_total: u64,
-    failed_fetches: Vec<(FileVectorizationWork, String)>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedVectorEmbedBatch {
-    batch_id: String,
-    prepare_started_at_ms: i64,
-    prepare_finished_at_ms: i64,
-    prepared_at_ms: i64,
-    batch_lane: VectorBatchLane,
-    mixed_fallback: bool,
-    lane_thresholds: TokenLaneThresholds,
-    work_items: Vec<VectorChunkWorkItem>,
-    texts: Vec<String>,
-    token_counts: Vec<usize>,
-    encoded_micro_batches: Vec<PreparedEncodedMicroBatch>,
-    touched_works: Vec<FileVectorizationWork>,
-    finalize_after_success: Vec<FileVectorizationWork>,
-    immediate_completed: Vec<FileVectorizationWork>,
-    oversized_works: Vec<FileVectorizationWork>,
-    next_active_after_success: Vec<FileVectorizationWork>,
-    next_active_after_failure: Vec<FileVectorizationWork>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    files_touched: usize,
-    partial_file_cycles: usize,
-    fetch_ms_total: u64,
-    failed_fetches: Vec<(FileVectorizationWork, String)>,
-}
-
-
-#[derive(Debug, Clone)]
-struct PreparedEncodedMicroBatch {
-    item_indices: Vec<usize>,
-    encodings: Vec<Encoding>,
-}
-
-struct VectorWorkerLivenessGuard;
-
-impl VectorWorkerLivenessGuard {
-    fn new() -> Self {
-        service_guard::record_vector_worker_started();
-        Self
-    }
-}
-
-impl Drop for VectorWorkerLivenessGuard {
-    fn drop(&mut self) {
-        service_guard::record_vector_worker_stopped();
-    }
-}
-
-
 
 
 
@@ -523,18 +422,6 @@ fn ort_pooling_mean(
     Ok(pooled)
 }
 
-fn default_chunks_per_file_estimate() -> usize {
-    std::env::var("AXON_VECTOR_DEFAULT_CHUNKS_PER_FILE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(4)
-}
-
-fn wait_for_vector_backlog_or_timeout(timeout: Duration) -> bool {
-    service_guard::wait_for_vector_backlog_signal(timeout)
-}
-
 fn token_count_from_encoding(encoding: &Encoding) -> usize {
     encoding
         .get_attention_mask()
@@ -598,138 +485,7 @@ fn build_token_aware_micro_batches(
     micro_batches
 }
 
-fn attach_preencoded_micro_batches(
-    tokenizer: &Tokenizer,
-    prepared: &mut PreparedVectorEmbedBatch,
-) -> AnyhowResult<()> {
-    if prepared.texts.is_empty() {
-        prepared.token_counts = Vec::new();
-        prepared.encoded_micro_batches = Vec::new();
-        return Ok(());
-    }
 
-    let inputs = prepared
-        .texts
-        .iter()
-        .map(|text| text.as_str())
-        .collect::<Vec<_>>();
-    let encodings = tokenizer
-        .encode_batch(inputs, true)
-        .map_err(|err| anyhow!("Failed to encode prepared batch: {}", err))?;
-    prepared.token_counts = encodings.iter().map(token_count_from_encoding).collect();
-    prepared.lane_thresholds = observe_token_lane_thresholds(&prepared.token_counts);
-    let observed_lanes = prepared
-        .token_counts
-        .iter()
-        .map(|token_count| prepared.lane_thresholds.classify(*token_count))
-        .collect::<HashSet<_>>();
-    prepared.batch_lane = if observed_lanes.len() == 1 {
-        observed_lanes
-            .iter()
-            .copied()
-            .next()
-            .unwrap_or(VectorBatchLane::Mixed)
-    } else {
-        VectorBatchLane::Mixed
-    };
-    prepared.encoded_micro_batches = build_token_aware_micro_batches(
-        &prepared.token_counts,
-        configured_embedding_token_bucket_size(),
-        configured_embedding_micro_batch_max_items(prepared.texts.len()),
-        configured_embedding_micro_batch_max_total_tokens(prepared.texts.len()),
-    )
-    .into_iter()
-    .map(|item_indices| PreparedEncodedMicroBatch {
-        encodings: item_indices
-            .iter()
-            .map(|index| encodings[*index].clone())
-            .collect(),
-        item_indices,
-    })
-    .collect();
-    Ok(())
-}
-
-
-
-
-
-fn embed_prepared_batch_with_breakdown_ort(
-    model: &mut OrtGpuFirstTextEmbedding,
-    prepared: &PreparedVectorEmbedBatch,
-) -> AnyhowResult<(
-    Vec<Vec<f32>>,
-    u64,
-    u64,
-    u64,
-    u64,
-    crate::embedder::gpu_backend::EmbeddingBatchStats,
-)> {
-    if !prepared.encoded_micro_batches.is_empty() {
-        let total_started = Instant::now();
-        let mut ordered_embeddings = vec![None; prepared.texts.len()];
-        let mut host_prepare_ms = 0u64;
-        let mut input_copy_ms = 0u64;
-        let mut inference_ms = 0u64;
-        let mut output_extract_ms = 0u64;
-        let mut stats = crate::embedder::gpu_backend::EmbeddingBatchStats::default();
-
-        for micro_batch in &prepared.encoded_micro_batches {
-            let (
-                batch_embeddings,
-                batch_host_prepare_ms,
-                batch_input_copy_ms,
-                batch_inference_ms,
-                batch_output_extract_ms,
-                batch_stats,
-            ) = model.transform_encoded_with_breakdown(&micro_batch.encodings)?;
-            host_prepare_ms = host_prepare_ms.saturating_add(batch_host_prepare_ms);
-            input_copy_ms = input_copy_ms.saturating_add(batch_input_copy_ms);
-            inference_ms = inference_ms.saturating_add(batch_inference_ms);
-            output_extract_ms = output_extract_ms.saturating_add(batch_output_extract_ms);
-            stats.merge(batch_stats);
-            for (index, embedding) in micro_batch
-                .item_indices
-                .iter()
-                .copied()
-                .zip(batch_embeddings)
-            {
-                ordered_embeddings[index] = Some(embedding);
-            }
-        }
-
-        let embeddings = ordered_embeddings
-            .into_iter()
-            .map(|embedding| {
-                embedding.ok_or_else(|| anyhow!("missing embedding after prepared ORT micro-batch"))
-            })
-            .collect::<AnyhowResult<Vec<_>>>()?;
-        let _total_ms = total_started.elapsed().as_millis() as u64;
-        return Ok((
-            embeddings,
-            host_prepare_ms,
-            input_copy_ms,
-            inference_ms,
-            output_extract_ms,
-            stats,
-        ));
-    }
-
-    if prepared.texts.is_empty() {
-        return Ok((
-            Vec::new(),
-            0,
-            0,
-            0,
-            0,
-            crate::embedder::gpu_backend::EmbeddingBatchStats::default(),
-        ));
-    }
-
-    Err(anyhow!(
-        "prepared batch reached ORT GPU-first runner without pre-tokenized micro-batches"
-    ))
-}
 
 pub(crate) fn embed_texts_with_breakdown_ort(
     model: &mut OrtGpuFirstTextEmbedding,
@@ -844,150 +600,6 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
     canonical_provider
 }
 
-impl VectorBatchPlan {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn next_active_after_success(self) -> Vec<FileVectorizationWork> {
-        let mut next = self.continuation_works;
-        next.extend(self.untouched_works);
-        next
-    }
-}
-
-impl PreparedVectorEmbedBatch {
-    pub(crate) fn chunk_count(&self) -> u64 {
-        self.work_items.len() as u64
-    }
-
-    pub(crate) fn into_touched_works(self) -> Vec<FileVectorizationWork> {
-        self.touched_works
-    }
-
-    pub(crate) fn touched_works_slice(&self) -> &[FileVectorizationWork] {
-        &self.touched_works
-    }
-
-    pub(crate) fn prepared_at_ms(&self) -> i64 {
-        self.prepared_at_ms
-    }
-
-    pub(crate) fn batch_lane(&self) -> VectorBatchLane {
-        self.batch_lane
-    }
-
-    pub(crate) fn mixed_fallback(&self) -> bool {
-        self.mixed_fallback
-    }
-
-    pub(crate) fn lane_thresholds(&self) -> TokenLaneThresholds {
-        self.lane_thresholds
-    }
-
-    fn from_plan(plan: VectorBatchPlan) -> Self {
-        Self::from_plan_with_prepare_started(plan, chrono::Utc::now().timestamp_millis())
-    }
-
-    fn from_plan_with_prepare_started(plan: VectorBatchPlan, prepare_started_at_ms: i64) -> Self {
-        let VectorBatchPlan {
-            work_items,
-            touched_works,
-            finalize_after_success,
-            immediate_completed,
-            oversized_works,
-            continuation_works,
-            untouched_works,
-            files_touched,
-            partial_file_cycles,
-            fetch_ms_total,
-            failed_fetches,
-        } = plan;
-        let prepared_at_ms = chrono::Utc::now().timestamp_millis();
-        let texts = work_items.iter().map(|item| item.text.clone()).collect();
-        let mut next_active_after_success = continuation_works;
-        next_active_after_success.extend(untouched_works.clone());
-        Self {
-            batch_id: format!(
-                "vec-prepared-{}",
-                chrono::Utc::now()
-                    .timestamp_nanos_opt()
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp_micros())
-            ),
-            prepare_started_at_ms,
-            prepare_finished_at_ms: prepared_at_ms,
-            prepared_at_ms,
-            batch_lane: VectorBatchLane::Mixed,
-            mixed_fallback: false,
-            lane_thresholds: current_token_lane_thresholds(),
-            texts,
-            token_counts: Vec::new(),
-            encoded_micro_batches: Vec::new(),
-            work_items,
-            touched_works,
-            finalize_after_success,
-            immediate_completed,
-            oversized_works,
-            next_active_after_success,
-            next_active_after_failure: untouched_works,
-            files_touched,
-            partial_file_cycles,
-            fetch_ms_total,
-            failed_fetches,
-        }
-    }
-
-    fn total_token_count(&self) -> u64 {
-        self.token_counts.iter().copied().sum::<usize>() as u64
-    }
-
-
-    fn max_item_tokens(&self) -> u64 {
-        self.token_counts.iter().copied().max().unwrap_or(0) as u64
-    }
-
-    fn avg_item_tokens(&self) -> f64 {
-        if self.token_counts.is_empty() {
-            0.0
-        } else {
-            self.total_token_count() as f64 / self.token_counts.len() as f64
-        }
-    }
-
-    fn micro_batch_count(&self) -> u64 {
-        self.encoded_micro_batches.len() as u64
-    }
-
-    fn max_micro_batch_tokens(&self) -> u64 {
-        self.encoded_micro_batches
-            .iter()
-            .map(|batch| {
-                batch
-                    .item_indices
-                    .iter()
-                    .map(|index| self.token_counts.get(*index).copied().unwrap_or_default())
-                    .sum::<usize>() as u64
-            })
-            .max()
-            .unwrap_or(0)
-    }
-
-    fn avg_micro_batch_tokens(&self) -> f64 {
-        if self.encoded_micro_batches.is_empty() {
-            0.0
-        } else {
-            let total = self
-                .encoded_micro_batches
-                .iter()
-                .map(|batch| {
-                    batch
-                        .item_indices
-                        .iter()
-                        .map(|index| self.token_counts.get(*index).copied().unwrap_or_default())
-                        .sum::<usize>() as u64
-                })
-                .sum::<u64>();
-            total as f64 / self.encoded_micro_batches.len() as f64
-        }
-    }
-}
 
 /// DEC-AXO-072 follow-up: spawn a thread that issues `CHECKPOINT` against
 /// the writer connection every 10s. Prevents WAL accumulation that drove
@@ -1231,168 +843,6 @@ impl SemanticWorkerPool {
 
 }
 
-fn build_vector_batch_plan(
-    graph_store: &GraphStore,
-    active_works: &[FileVectorizationWork],
-    target_chunks: usize,
-    per_file_fetch_limit: usize,
-    batch_max_bytes: usize,
-    reserved_chunk_ids: &HashSet<String>,
-) -> VectorBatchPlan {
-    let mut plan = VectorBatchPlan::default();
-    if active_works.is_empty() || target_chunks == 0 {
-        return plan;
-    }
-
-    let per_file_fetch_limit = per_file_fetch_limit.max(1);
-    let batch_max_bytes = batch_max_bytes.max(1);
-
-    // Batch-fetch all files in a single query (eliminates N+1 roundtrips).
-    let file_paths: Vec<&str> = active_works.iter().map(|w| w.file_path.as_str()).collect();
-    let fetch_started = Instant::now();
-    let fetched_map = match graph_store.fetch_unembedded_chunks_batch(
-        &file_paths,
-        CHUNK_MODEL_ID,
-        per_file_fetch_limit.saturating_add(1),
-    ) {
-        Ok(map) => {
-            let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-            service_guard::record_vector_stage_ms(
-                service_guard::VectorStageKind::Fetch,
-                fetch_ms,
-            );
-            plan.fetch_ms_total = fetch_ms;
-            map
-        }
-        Err(err) => {
-            let fetch_ms = fetch_started.elapsed().as_millis() as u64;
-            service_guard::record_vector_stage_ms(
-                service_guard::VectorStageKind::Fetch,
-                fetch_ms,
-            );
-            plan.fetch_ms_total = fetch_ms;
-            for work in active_works {
-                plan.failed_fetches
-                    .push((work.clone(), format!("{:?}", err)));
-            }
-            return plan;
-        }
-    };
-
-    let mut touched_files = HashSet::new();
-    let mut planned_chunks = 0usize;
-    let mut planned_bytes = 0usize;
-
-    for work in active_works {
-        let chunks = fetched_map
-            .get(&work.file_path)
-            .cloned()
-            .unwrap_or_default();
-
-        if chunks.is_empty() {
-            plan.immediate_completed.push(work.clone());
-            continue;
-        }
-
-        let remaining_chunk_budget = target_chunks.saturating_sub(planned_chunks).max(1);
-        let fetch_limit = per_file_fetch_limit.min(remaining_chunk_budget);
-
-        let filtered_chunks = chunks
-            .into_iter()
-            .filter(|(chunk_id, _, _)| !reserved_chunk_ids.contains(chunk_id))
-            .collect::<Vec<_>>();
-        let mut batch_chunks = Vec::new();
-        let mut fetched_bytes = 0usize;
-        let mut has_more_after_batch = false;
-        let total_filtered_chunks = filtered_chunks.len();
-        for (index, chunk) in filtered_chunks.into_iter().enumerate() {
-            let chunk_bytes = chunk.1.len();
-            let exceeds_chunk_budget = batch_chunks.len() >= fetch_limit;
-            let exceeds_byte_budget = !batch_chunks.is_empty()
-                && planned_bytes
-                    .saturating_add(fetched_bytes)
-                    .saturating_add(chunk_bytes)
-                    > batch_max_bytes;
-            if exceeds_chunk_budget || exceeds_byte_budget {
-                has_more_after_batch = true;
-                break;
-            }
-            fetched_bytes = fetched_bytes.saturating_add(chunk_bytes);
-            batch_chunks.push(chunk);
-            if index + 1 >= fetch_limit {
-                has_more_after_batch = total_filtered_chunks > fetch_limit;
-                break;
-            }
-        }
-        let fetched_count = batch_chunks.len();
-        let exceeds_chunk_budget =
-            planned_chunks.saturating_add(fetched_count) > target_chunks;
-        let exceeds_byte_budget =
-            planned_bytes.saturating_add(fetched_bytes) > batch_max_bytes;
-        if batch_chunks.is_empty() {
-            if total_filtered_chunks > 0 && fetch_limit <= 1 {
-                plan.oversized_works.push(work.clone());
-            } else {
-                plan.untouched_works.push(work.clone());
-            }
-            continue;
-        }
-        if fetched_count == 1
-            && fetched_bytes > batch_max_bytes
-            && planned_chunks == 0
-            && planned_bytes == 0
-        {
-            plan.oversized_works.push(work.clone());
-            continue;
-        }
-        if exceeds_chunk_budget || exceeds_byte_budget {
-            plan.untouched_works.push(work.clone());
-            continue;
-        }
-        touched_files.insert(work.file_path.clone());
-        plan.touched_works.push(work.clone());
-        for (chunk_id, text, content_hash) in batch_chunks {
-            plan.work_items.push(VectorChunkWorkItem {
-                file_path: work.file_path.clone(),
-                chunk_id,
-                content_hash,
-                text,
-            });
-        }
-        planned_chunks = planned_chunks.saturating_add(fetched_count);
-        planned_bytes = planned_bytes.saturating_add(fetched_bytes);
-        if has_more_after_batch {
-            plan.partial_file_cycles = plan.partial_file_cycles.saturating_add(1);
-            plan.continuation_works.push(work.clone());
-        } else {
-            plan.finalize_after_success.push(work.clone());
-        }
-    }
-
-    plan.files_touched = touched_files.len();
-    plan
-}
-
-fn prepare_vector_embed_batch(
-    graph_store: &GraphStore,
-    active_works: &[FileVectorizationWork],
-    target_chunks: usize,
-    per_file_fetch_limit: usize,
-    batch_max_bytes: usize,
-    reserved_chunk_ids: &HashSet<String>,
-) -> PreparedVectorEmbedBatch {
-    PreparedVectorEmbedBatch::from_plan(build_vector_batch_plan(
-        graph_store,
-        active_works,
-        target_chunks,
-        per_file_fetch_limit,
-        batch_max_bytes,
-        reserved_chunk_ids,
-    ))
-}
-
-
-
 
 
 
@@ -1589,20 +1039,6 @@ pub fn vector_stale_inflight_recovery_interval_ms() -> u64 {
     scale_vector_maintenance_interval_for_quiescent(base_ms, 1_000, 300_000)
 }
 
-fn vector_claimable_supply_poll_interval_ms() -> u64 {
-    scale_vector_maintenance_interval_for_quiescent(
-        std::env::var("AXON_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .filter(|value| *value >= 50)
-            .unwrap_or(DEFAULT_VECTOR_CLAIMABLE_SUPPLY_POLL_INTERVAL_MS),
-        50,
-        10_000,
-    )
-}
-
-
-
 
 
 fn scale_vector_maintenance_interval_for_quiescent(base_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
@@ -1617,22 +1053,6 @@ fn scale_vector_maintenance_interval_for_quiescent(base_ms: u64, min_ms: u64, ma
         scale_pct,
         min_ms,
         max_ms,
-    )
-}
-
-fn recover_stale_vector_inflight_now(
-    graph_store: &GraphStore,
-    now_ms: i64,
-) -> anyhow::Result<usize> {
-    graph_store.recover_stale_inflight_file_vectorization_work(
-        now_ms,
-        vector_stale_inflight_claim_age_ms() as i64,
-    )
-}
-
-fn recover_stale_vector_outbox_now(graph_store: &GraphStore, now_ms: i64) -> anyhow::Result<usize> {
-    graph_store.recover_stale_vector_persist_outbox_inflight(
-        now_ms.saturating_sub(vector_stale_inflight_claim_age_ms() as i64),
     )
 }
 
@@ -1809,48 +1229,6 @@ impl GraphStore {
         value.replace('\'', "''")
     }
 
-    fn graph_projection_embedding_text(
-        &self,
-        anchor_type: &str,
-        anchor_id: &str,
-        radius: i64,
-    ) -> anyhow::Result<String> {
-        let projection = self.query_graph_projection(anchor_type, anchor_id, radius as u64)?;
-        let rows: Vec<Vec<serde_json::Value>> =
-            serde_json::from_str(&projection).unwrap_or_default();
-        let mut lines = vec![
-            format!("anchor_type: {}", anchor_type),
-            format!("anchor_id: {}", anchor_id),
-            format!("radius: {}", radius),
-        ];
-
-        for row in rows {
-            let target_type = row
-                .first()
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            let target_id = row
-                .get(1)
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            let edge_kind = row
-                .get(2)
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            let distance = row.get(3).and_then(|value| value.as_i64()).unwrap_or(0);
-            let label = row
-                .get(4)
-                .and_then(|value| value.as_str())
-                .unwrap_or(target_id);
-            lines.push(format!(
-                "target_type: {} | target_id: {} | edge_kind: {} | distance: {} | label: {}",
-                target_type, target_id, edge_kind, distance, label
-            ));
-        }
-
-        Ok(lines.join("\n"))
-    }
-
     #[allow(clippy::type_complexity)]
     pub fn update_graph_embeddings(
         &self,
@@ -1925,40 +1303,6 @@ fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
         ServicePressure::Healthy | ServicePressure::Recovering
     )
 }
-
-fn effective_embedding_provider_is_gpu() -> bool {
-    // REQ-AXO-901737 : effective provider read from in-process struct,
-    // no longer from AXON_EMBEDDING_PROVIDER_EFFECTIVE env var.
-    let value = provider_runtime::current_embedding_provider_effective();
-    let value = value.trim().to_ascii_lowercase();
-    value.starts_with("cuda") || value.starts_with("tensorrt")
-}
-
-
-fn fatal_embedding_error_class<E: std::fmt::Debug>(err: &E) -> Option<&'static str> {
-    let rendered = format!("{:?}", err);
-    if rendered.contains("GetElementType is not implemented") {
-        Some("ort_missing_output_type")
-    } else if rendered.contains("GPU embed subprocess response timeout")
-        || rendered.contains("GPU embed subprocess init handshake timeout")
-        || rendered.contains("GPU embed subprocess recycle init handshake timeout")
-    {
-        Some("gpu_embed_subprocess_timeout")
-    } else if rendered.contains("onnxruntime") || rendered.contains("ORT") {
-        Some("onnxruntime")
-    } else {
-        None
-    }
-}
-
-fn is_gpu_recycle_immediate_error<E: std::fmt::Debug>(err: &E) -> bool {
-    format!("{:?}", err).contains("gpu_recycle_immediate_after_vram_summit")
-}
-
-fn is_fatal_embedding_error<E: std::fmt::Debug>(err: &E) -> bool {
-    fatal_embedding_error_class(err).is_some()
-}
-
 
 /// Per REQ-AXO-128 / DEC-AXO-061, brain_only and indexer_graph profiles
 /// no longer fail-fast on query-time embedding — they fall back to the
@@ -2826,30 +2170,19 @@ mod embedder_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Instant;
-
     use super::{
-        attach_preencoded_micro_batches,
-        build_token_aware_micro_batches, build_vector_batch_plan, configured_embedding_max_length,
+        build_token_aware_micro_batches, configured_embedding_max_length,
         cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
-        current_runtime_tuning_state, current_token_lane_thresholds,
-        effective_embedding_provider_is_gpu,
+        current_runtime_tuning_state,
         embedding_download_progress_enabled, embedding_lane_config_from_env,
         embedding_model_cache_dir, embedding_provider_diagnostics,
-        gpu_memory_soft_limit_mb, is_fatal_embedding_error,
-        load_runtime_embedding_tokenizer, observe_token_lane_thresholds, query_embedding_allowed,
+        gpu_memory_soft_limit_mb,
+        load_runtime_embedding_tokenizer, query_embedding_allowed,
         request_query_embedding,
-        reset_token_lane_classifier_for_tests, EmbeddingLaneConfig,
-        GpuMemorySnapshot, PreparedVectorEmbedBatch, QueryEmbeddingRequest, TokenLaneThresholdSource,
-        TokenLaneThresholds, VectorBatchLane, VectorBatchPlan, VectorChunkWorkItem,
+        EmbeddingLaneConfig,
+        GpuMemorySnapshot, QueryEmbeddingRequest,
     };
-    use crate::embedding_contract::{fastembed_model, CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH};
-    use crate::graph_ingestion::{
-        FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun,
-        VectorPersistOutboxPayload,
-    };
-    use crate::service_guard;
+    use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
     use crate::vector_control::{
         allowed_gpu_vector_workers, current_utility_first_scheduler_diagnostics,
@@ -2864,7 +2197,6 @@ mod tests {
     };
     use crossbeam_channel::{bounded, unbounded};
     use fastembed::{InitOptions, TextEmbedding};
-    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -2882,53 +2214,6 @@ mod tests {
     // `service_guard::lock_for_tests` synchronises across modules.
     fn lock_service_guard() -> parking_lot::MutexGuard<'static, ()> {
         crate::service_guard::lock_for_tests()
-    }
-
-    fn lane_test_prepared_batch(texts: &[&str]) -> PreparedVectorEmbedBatch {
-        let mut prepared = PreparedVectorEmbedBatch {
-            batch_id: "lane-test".to_string(),
-            prepare_started_at_ms: 1,
-            prepare_finished_at_ms: 1,
-            prepared_at_ms: 1,
-            batch_lane: VectorBatchLane::Mixed,
-            mixed_fallback: false,
-            lane_thresholds: current_token_lane_thresholds(),
-            work_items: texts
-                .iter()
-                .enumerate()
-                .map(|(index, text)| VectorChunkWorkItem {
-                    file_path: format!("/tmp/lane-{index}.rs"),
-                    chunk_id: format!("chunk-{index}"),
-                    content_hash: format!("hash-{index}"),
-                    text: (*text).to_string(),
-                })
-                .collect(),
-            texts: texts.iter().map(|text| (*text).to_string()).collect(),
-            token_counts: Vec::new(),
-            encoded_micro_batches: Vec::new(),
-            touched_works: Vec::new(),
-            finalize_after_success: Vec::new(),
-            immediate_completed: Vec::new(),
-            oversized_works: Vec::new(),
-            next_active_after_success: Vec::new(),
-            next_active_after_failure: Vec::new(),
-            files_touched: 0,
-            partial_file_cycles: 0,
-            fetch_ms_total: 0,
-            failed_fetches: Vec::new(),
-        };
-        let tokenizer = load_runtime_embedding_tokenizer().expect("runtime tokenizer");
-        attach_preencoded_micro_batches(&tokenizer, &mut prepared).expect("tokenized prepared");
-        prepared
-    }
-
-    #[test]
-    fn test_fatal_embedding_error_detection() {
-        assert!(is_fatal_embedding_error(
-            &"GetElementType is not implemented"
-        ));
-        assert!(is_fatal_embedding_error(&"onnxruntime failure"));
-        assert!(!is_fatal_embedding_error(&"temporary timeout"));
     }
 
     #[test]
@@ -3083,26 +2368,6 @@ mod tests {
         assert!(!query_embedding_allowed(ServicePressure::Degraded));
         assert!(!query_embedding_allowed(ServicePressure::Critical));
     }
-
-    #[test]
-    fn test_effective_embedding_provider_is_gpu_detects_cuda_variants() {
-        // REQ-AXO-901737 : effective state lives in the in-process struct,
-        // not in env vars. Tests drive it through set_effective_for_test.
-        let _guard = lock_env_guard();
-        use crate::embedder::provider_runtime::set_effective_for_test;
-        set_effective_for_test(Some("cuda"));
-        assert!(effective_embedding_provider_is_gpu());
-        set_effective_for_test(Some("cuda_service"));
-        assert!(effective_embedding_provider_is_gpu());
-        set_effective_for_test(Some("tensorrt_service"));
-        assert!(effective_embedding_provider_is_gpu());
-        set_effective_for_test(Some("cpu"));
-        assert!(!effective_embedding_provider_is_gpu());
-        set_effective_for_test(None);
-        assert!(!effective_embedding_provider_is_gpu());
-    }
-
-
 
     #[test]
     fn test_apply_cpu_fallback_ort_runtime_env_restores_cpu_threads_when_autoconfigured() {
@@ -3972,51 +3237,6 @@ mod tests {
 
 
     #[test]
-    fn test_recover_stale_vector_inflight_now_uses_configured_claim_age() {
-        let _guard = lock_env_guard();
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms) VALUES \
-                 ('/tmp/stale-helper.rs', 'inflight', 1, 'claim-stale', 1_000), \
-                 ('/tmp/fresh-helper.rs', 'inflight', 2, 'claim-fresh', 9_500)",
-            )
-            .unwrap();
-        unsafe {
-            std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS", "1000");
-        }
-
-        let recovered = super::recover_stale_vector_inflight_now(&store, 10_000).unwrap();
-
-        assert_eq!(recovered, 1);
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM FileVectorizationQueue \
-                     WHERE file_path = '/tmp/stale-helper.rs' \
-                       AND status = 'queued' \
-                       AND status_reason = 'recovered_after_stale_inflight'"
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            store
-                .query_count(
-                    "SELECT count(*) FROM FileVectorizationQueue \
-                     WHERE file_path = '/tmp/fresh-helper.rs' \
-                       AND status = 'inflight'"
-                )
-                .unwrap(),
-            1
-        );
-
-        unsafe {
-            std::env::remove_var("AXON_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS");
-        }
-    }
-
-    #[test]
     fn test_gpu_telemetry_backend_defaults_to_nvidia_smi() {
         let _guard = lock_env_guard();
         unsafe {
@@ -4386,49 +3606,6 @@ mod tests {
         assert_eq!(vector_embed_target_chunks(&lane_config, false), 64);
     }
 
-    #[test]
-    fn test_vector_batch_plan_advances_multiple_files_and_tracks_partial_cycles() {
-        let work_a = FileVectorizationWork {
-            file_path: "src/a.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        };
-        let work_b = FileVectorizationWork {
-            file_path: "src/b.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        };
-
-        let mut plan = VectorBatchPlan::default();
-        plan.work_items = vec![
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a1".to_string(),
-                content_hash: "ha1".to_string(),
-                text: "A1".to_string(),
-            },
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a2".to_string(),
-                content_hash: "ha2".to_string(),
-                text: "A2".to_string(),
-            },
-            VectorChunkWorkItem {
-                file_path: "src/b.rs".to_string(),
-                chunk_id: "b1".to_string(),
-                content_hash: "hb1".to_string(),
-                text: "B1".to_string(),
-            },
-        ];
-        plan.touched_works = vec![work_a.clone(), work_b.clone()];
-        plan.continuation_works = vec![work_a.clone()];
-        plan.finalize_after_success = vec![work_b.clone()];
-        plan.files_touched = 2;
-        plan.partial_file_cycles = 1;
-
-        let next = plan.next_active_after_success();
-        assert_eq!(next.len(), 1);
-        assert_eq!(next[0].file_path, "src/a.rs");
-        assert_eq!(next[0].resumed_after_interactive_pause, false);
-    }
 
     #[test]
     fn test_fetch_segments_for_file_returns_all_segments_in_line_order() {
@@ -4448,299 +3625,6 @@ mod tests {
         assert_eq!(chunks[1].0, "chunk-b");
         assert_eq!(chunks[2].0, "chunk-c");
     }
-
-    #[test]
-    fn test_build_vector_batch_plan_caps_first_file_to_remaining_chunk_budget() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2)",
-            )
-            .unwrap();
-
-        let active_works = vec![
-            FileVectorizationWork {
-                file_path: "/tmp/a.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-            FileVectorizationWork {
-                file_path: "/tmp/b.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-        ];
-
-        let plan =
-            build_vector_batch_plan(&store, &active_works, 2, 64, 512 * 1024, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 2);
-        assert_eq!(plan.touched_works.len(), 1);
-        assert_eq!(plan.touched_works[0].file_path, "/tmp/a.rs");
-        assert!(plan.finalize_after_success.is_empty());
-        assert_eq!(plan.untouched_works.len(), 1);
-        assert_eq!(plan.untouched_works[0].file_path, "/tmp/b.rs");
-        assert_eq!(plan.partial_file_cycles, 1);
-        assert_eq!(plan.continuation_works.len(), 1);
-        assert_eq!(plan.continuation_works[0].file_path, "/tmp/a.rs");
-        assert_eq!(plan.work_items[0].chunk_id, "chunk-a1");
-        assert_eq!(plan.work_items[1].chunk_id, "chunk-a2");
-    }
-
-    #[test]
-    fn test_build_vector_batch_plan_skips_oversized_intermediate_file_to_fill_budget() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2), \
-                 ('chunk-b2', 'symbol', 'sym-b2', 'PRJ', '/tmp/b.rs', 'function', 'B2', 'hash-b2', 3, 4), \
-                 ('chunk-b3', 'symbol', 'sym-b3', 'PRJ', '/tmp/b.rs', 'function', 'B3', 'hash-b3', 5, 6), \
-                 ('chunk-c1', 'symbol', 'sym-c1', 'PRJ', '/tmp/c.rs', 'function', 'C1', 'hash-c1', 1, 2)",
-            )
-            .unwrap();
-
-        let active_works = vec![
-            FileVectorizationWork {
-                file_path: "/tmp/a.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-            FileVectorizationWork {
-                file_path: "/tmp/b.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-            FileVectorizationWork {
-                file_path: "/tmp/c.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-        ];
-
-        let plan =
-            build_vector_batch_plan(&store, &active_works, 4, 64, 512 * 1024, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 4);
-        assert_eq!(plan.touched_works.len(), 2);
-        assert_eq!(plan.touched_works[0].file_path, "/tmp/a.rs");
-        assert_eq!(plan.touched_works[1].file_path, "/tmp/b.rs");
-        assert_eq!(plan.finalize_after_success.len(), 1);
-        assert_eq!(plan.finalize_after_success[0].file_path, "/tmp/a.rs");
-        assert_eq!(plan.untouched_works.len(), 1);
-        assert_eq!(plan.untouched_works[0].file_path, "/tmp/c.rs");
-        assert_eq!(plan.partial_file_cycles, 1);
-        assert_eq!(plan.continuation_works.len(), 1);
-        assert_eq!(plan.continuation_works[0].file_path, "/tmp/b.rs");
-    }
-
-    #[test]
-    fn test_build_vector_batch_plan_respects_per_file_fetch_limit() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/limited.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/limited.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/limited.rs', 'function', 'A3', 'hash-a3', 5, 6)",
-            )
-            .unwrap();
-        let active_works = vec![FileVectorizationWork {
-            file_path: "/tmp/limited.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        }];
-
-        let plan =
-            build_vector_batch_plan(&store, &active_works, 16, 2, 512 * 1024, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 2);
-        assert!(plan.finalize_after_success.is_empty());
-        assert_eq!(plan.continuation_works.len(), 1);
-        assert_eq!(plan.partial_file_cycles, 1);
-    }
-
-    #[test]
-    fn test_build_vector_batch_plan_finalizes_only_when_file_is_fully_covered() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/complete.rs', 'function', 'B1', 'hash-b1', 1, 2), \
-                 ('chunk-b2', 'symbol', 'sym-b2', 'PRJ', '/tmp/complete.rs', 'function', 'B2', 'hash-b2', 3, 4)",
-            )
-            .unwrap();
-        let active_works = vec![FileVectorizationWork {
-            file_path: "/tmp/complete.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        }];
-
-        let plan =
-            build_vector_batch_plan(&store, &active_works, 16, 8, 512 * 1024, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 2);
-        assert_eq!(plan.finalize_after_success.len(), 1);
-        assert!(plan.continuation_works.is_empty());
-        assert_eq!(plan.partial_file_cycles, 0);
-    }
-
-    #[test]
-    fn test_build_vector_batch_plan_respects_batch_byte_budget_after_first_file() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/bytes-a.rs', 'function', 'AAAA', 'hash-a1', 1, 2), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/bytes-b.rs', 'function', 'BBBB', 'hash-b1', 1, 2)",
-            )
-            .unwrap();
-        let active_works = vec![
-            FileVectorizationWork {
-                file_path: "/tmp/bytes-a.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-            FileVectorizationWork {
-                file_path: "/tmp/bytes-b.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            },
-        ];
-
-        let plan = build_vector_batch_plan(&store, &active_works, 16, 16, 4, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 1);
-        assert_eq!(plan.finalize_after_success.len(), 1);
-        assert_eq!(plan.untouched_works.len(), 1);
-        assert_eq!(plan.untouched_works[0].file_path, "/tmp/bytes-b.rs");
-    }
-
-    #[test]
-    fn test_build_vector_batch_plan_only_fetches_unembedded_chunks() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store
-            .execute(
-                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/vectorized.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/vectorized.rs', 'function', 'A2', 'hash-a2', 3, 4)",
-            )
-            .unwrap();
-        store
-            .update_chunk_embeddings(
-                CHUNK_MODEL_ID,
-                &[(
-                    "chunk-a1".to_string(),
-                    "hash-a1".to_string(),
-                    vec![0.0_f32; DIMENSION],
-                )],
-            )
-            .unwrap();
-
-        let active_works = vec![FileVectorizationWork {
-            file_path: "/tmp/vectorized.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        }];
-
-        let plan =
-            build_vector_batch_plan(&store, &active_works, 16, 16, 512 * 1024, &HashSet::new());
-        assert_eq!(plan.work_items.len(), 1);
-        assert_eq!(plan.work_items[0].chunk_id, "chunk-a2");
-        assert_eq!(plan.finalize_after_success.len(), 1);
-    }
-
-
-    #[test]
-    fn test_prepared_vector_embed_batch_from_plan_preserves_texts_and_work_state() {
-        let work_a = FileVectorizationWork {
-            file_path: "src/a.rs".to_string(),
-            resumed_after_interactive_pause: false,
-        };
-        let work_b = FileVectorizationWork {
-            file_path: "src/b.rs".to_string(),
-            resumed_after_interactive_pause: true,
-        };
-        let mut plan = VectorBatchPlan::default();
-        plan.work_items = vec![
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a1".to_string(),
-                content_hash: "ha1".to_string(),
-                text: "A1".to_string(),
-            },
-            VectorChunkWorkItem {
-                file_path: "src/b.rs".to_string(),
-                chunk_id: "b1".to_string(),
-                content_hash: "hb1".to_string(),
-                text: "B1".to_string(),
-            },
-        ];
-        plan.touched_works = vec![work_a.clone(), work_b.clone()];
-        plan.finalize_after_success = vec![work_b.clone()];
-        plan.continuation_works = vec![work_a.clone()];
-        plan.untouched_works = vec![work_b.clone()];
-        plan.immediate_completed = vec![work_a.clone()];
-        plan.files_touched = 2;
-
-        let prepared = PreparedVectorEmbedBatch::from_plan(plan);
-
-        assert_eq!(prepared.texts, vec!["A1".to_string(), "B1".to_string()]);
-        assert_eq!(prepared.files_touched, 2);
-        assert_eq!(prepared.touched_works.len(), 2);
-        assert_eq!(prepared.finalize_after_success.len(), 1);
-        assert_eq!(prepared.immediate_completed.len(), 1);
-        assert_eq!(prepared.next_active_after_success.len(), 2);
-        assert_eq!(prepared.next_active_after_failure.len(), 1);
-    }
-
-
-    #[test]
-    fn test_prepared_vector_embed_batch_chunk_count_matches_work_items() {
-        let mut plan = VectorBatchPlan::default();
-        plan.work_items = vec![
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a1".to_string(),
-                content_hash: "ha1".to_string(),
-                text: "A1".to_string(),
-            },
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a2".to_string(),
-                content_hash: "ha2".to_string(),
-                text: "A2".to_string(),
-            },
-            VectorChunkWorkItem {
-                file_path: "src/a.rs".to_string(),
-                chunk_id: "a3".to_string(),
-                content_hash: "ha3".to_string(),
-                text: "A3".to_string(),
-            },
-        ];
-
-        let prepared = PreparedVectorEmbedBatch::from_plan(plan);
-
-        assert_eq!(prepared.chunk_count(), 3);
-    }
-
-
-
-
-
-
-
-
-
-    #[test]
-    fn test_token_lane_thresholds_bootstrap_then_switch_to_live_quantiles() {
-        reset_token_lane_classifier_for_tests();
-        let bootstrap = current_token_lane_thresholds();
-        assert_eq!(bootstrap.source, TokenLaneThresholdSource::Bootstrap);
-
-        let samples = (1..=96).collect::<Vec<_>>();
-        let live = observe_token_lane_thresholds(&samples);
-        assert_eq!(live.source, TokenLaneThresholdSource::Live);
-        assert!(live.small_max_tokens >= 30 && live.small_max_tokens <= 35);
-        assert!(live.medium_max_tokens >= 62 && live.medium_max_tokens <= 66);
-    }
-
-
-
-
-
 
     #[test]
     fn test_vector_claim_target_expands_when_ready_reserve_is_missing() {
@@ -4815,34 +3699,6 @@ mod tests {
         super::refresh_runtime_tuning_snapshot_from_env();
     }
 
-
-    #[test]
-    fn test_build_vector_batch_plan_marks_single_oversized_chunk() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        let oversized = "x".repeat(4096);
-        store.execute(&format!(
-            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-             ('chunk-oversized', 'symbol', 'sym-oversized', 'PRJ', '/tmp/oversized.rs', 'function', '{}', 'hash-oversized', 1, 1)",
-            oversized
-        ))
-        .unwrap();
-
-        let plan = build_vector_batch_plan(
-            &store,
-            &[FileVectorizationWork {
-                file_path: "/tmp/oversized.rs".to_string(),
-                resumed_after_interactive_pause: false,
-            }],
-            8,
-            1,
-            32,
-            &HashSet::new(),
-        );
-
-        assert!(plan.work_items.is_empty());
-        assert_eq!(plan.oversized_works.len(), 1);
-        assert!(plan.untouched_works.is_empty());
-    }
 
     #[test]
     fn test_gpu_memory_soft_limit_mb_falls_back_to_operator_budget() {
@@ -5208,59 +4064,6 @@ mod tests {
     }
 
 
-
-
-
-
-    #[test]
-    fn test_gpu_recycle_after_vram_summit_can_derive_threshold_from_percentage() {
-        let _guard = lock_env_guard();
-        std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB");
-        std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT", "80");
-        std::env::set_var("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
-
-        assert_eq!(super::gpu_recycle_vram_summit_mb(), 6554);
-
-        std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_PCT");
-        std::env::remove_var("AXON_GPU_TOTAL_VRAM_MB_HINT");
-    }
-
-    #[test]
-    fn test_gpu_recycle_immediate_required_triggers_only_above_threshold_without_inflight() {
-        let _guard = lock_env_guard();
-        std::env::set_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT", "true");
-        std::env::set_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT", "true");
-        std::env::set_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB", "7000");
-
-        assert!(super::gpu_recycle_immediate_required(
-            Some(GpuMemorySnapshot {
-                total_mb: 8192,
-                used_mb: 7050,
-                free_mb: 1142,
-            }),
-            0,
-        ));
-        assert!(!super::gpu_recycle_immediate_required(
-            Some(GpuMemorySnapshot {
-                total_mb: 8192,
-                used_mb: 7050,
-                free_mb: 1142,
-            }),
-            1,
-        ));
-        assert!(!super::gpu_recycle_immediate_required(
-            Some(GpuMemorySnapshot {
-                total_mb: 8192,
-                used_mb: 6500,
-                free_mb: 1692,
-            }),
-            0,
-        ));
-
-        std::env::remove_var("AXON_GPU_RECYCLE_ON_VRAM_SUMMIT");
-        std::env::remove_var("AXON_GPU_RECYCLE_IMMEDIATE_ON_VRAM_SUMMIT");
-        std::env::remove_var("AXON_GPU_RECYCLE_VRAM_SUMMIT_MB");
-    }
 
 
 

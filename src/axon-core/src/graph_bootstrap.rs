@@ -12,6 +12,8 @@ use crate::embedding_contract::DIMENSION;
 use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
+#[allow(dead_code)]
+const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
 
 /// REQ-AXO-91562 / DEC-AXO-901594 Slice 1 — accept an explicit override so
 /// per-test harnesses can target a freshly-cloned database without leaking
@@ -84,6 +86,7 @@ fn reader_db_exists(db_path: &Option<PathBuf>) -> bool {
     db_path.as_ref().is_some_and(|path| path.exists())
 }
 
+#[allow(dead_code)]
 fn startup_vector_backfill_limit(
     _structural_graph_backlog_depth: usize,
     graph_ready_depth: usize,
