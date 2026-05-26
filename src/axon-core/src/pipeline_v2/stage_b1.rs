@@ -184,7 +184,7 @@ pub fn spawn_b1_batched_worker_with_dedup(
 ) {
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
-        let mut dedup_skipped: u64 = 0;
+        let mut _dedup_skipped: u64 = 0;
         loop {
             let recv_started = std::time::Instant::now();
             let first = match rx.recv().await {
@@ -235,7 +235,7 @@ pub fn spawn_b1_batched_worker_with_dedup(
                         if let Some(ref cache) = embedding_cache {
                             if let Some(existing) = cache.get(&payload.chunk_id) {
                                 if existing.value() == &payload.content_hash {
-                                    dedup_skipped += 1;
+                                    _dedup_skipped += 1;
                                     continue;
                                 }
                             }
