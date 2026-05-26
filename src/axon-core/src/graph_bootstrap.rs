@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use libloading::Library;
 use tracing::{info, warn};
 
-use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
+use crate::embedding_contract::DIMENSION;
 use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
@@ -188,7 +188,7 @@ impl GraphStore {
 
     fn new_with_modes(
         db_root: &str,
-        split_brain_mode: bool,
+        _split_brain_mode: bool,
         soll_access_mode: SollAccessMode,
         database_url_override: Option<&str>,
     ) -> Result<Self> {
@@ -196,7 +196,7 @@ impl GraphStore {
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
         let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib) }?;
         let init_fn = symbols.init_fn;
-        let close_fn = symbols.close_fn;
+        let _close_fn = symbols.close_fn;
         let is_memory = db_root == ":memory:";
         // PostgreSQL's MVCC handles reader/writer concurrency natively;
         // split-brain file-isolation is obsolete with the PG-only

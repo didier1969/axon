@@ -14,7 +14,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::warn;

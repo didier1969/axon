@@ -671,7 +671,7 @@ impl McpServer {
         // is generous for a `--max-count=20` filtered log on any
         // reasonable repo ; over-budget = return empty so the rest of
         // the kickoff bundle still completes.
-        let mut child = match std::process::Command::new("git")
+        let child = match std::process::Command::new("git")
             .arg("-C")
             .arg(project_path)
             .arg("log")

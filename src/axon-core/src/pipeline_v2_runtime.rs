@@ -34,7 +34,7 @@ use crate::ingress_buffer::{
     IngressSource, SharedIngressBuffer,
 };
 use crate::pipeline_v2::{
-    b1_cold_start_poll, spawn_pipeline_b_full,
+    b1_cold_start_poll,
     GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };

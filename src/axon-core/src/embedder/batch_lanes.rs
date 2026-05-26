@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
-use crate::service_guard;
 
 const VECTOR_BATCH_LANE_WINDOW_CAPACITY: usize = 512;
 const VECTOR_BATCH_LANE_LIVE_SAMPLE_MIN: usize = 64;

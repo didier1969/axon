@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
-use crate::benchmark_store;
 use crate::graph::GraphStore;
 use crate::service_guard;
 

@@ -4,7 +4,6 @@ use super::catalog::requires_indexed_runtime;
 use super::McpServer;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
-use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
 impl McpServer {
     pub(crate) fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {

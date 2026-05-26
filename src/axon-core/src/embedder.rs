@@ -1,5 +1,5 @@
 use crate::embedding_contract::{
-    fastembed_model, CHUNK_MODEL_ID, DIMENSION, MODEL_NAME, MODEL_VERSION, SYMBOL_MODEL_ID,
+    fastembed_model, CHUNK_MODEL_ID,
 };
 use crate::embedding_profile::{
     configured_embedding_max_length as profile_configured_embedding_max_length,
@@ -9,11 +9,7 @@ use crate::embedding_profile::{
     runtime_embedding_snapshot_dir as profile_runtime_embedding_snapshot_dir,
 };
 use crate::graph::GraphStore;
-use crate::graph_ingestion::{
-    FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun, VectorLaneStateRecord,
-    VectorWorkerFault, INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS,
-    INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT,
-};
+use crate::graph_ingestion::FileVectorizationWork;
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
@@ -24,26 +20,18 @@ use crate::runtime_tuning::{
     update_runtime_tuning_state as update_shared_runtime_tuning_state, RuntimeTuningSnapshot,
     RuntimeTuningState,
 };
-use crate::service_guard::{self, ServicePressure, VectorLaneState};
-use crate::vector_control::{
-    configured_gpu_ready_high_watermark_chunks, configured_gpu_ready_low_watermark_chunks,
-    configured_target_ready_chunks, current_vector_batch_controller_diagnostics,
-    observe_vector_batch_controller, reset_vector_batch_controller_for_tests,
-    symbol_embedding_allowed, vector_claim_target, vector_ready_chunk_reserve_target,
-    vector_worker_admission_decision, VectorBatchControllerObservation,
-    AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
-};
+use crate::service_guard::{self, ServicePressure};
+use crate::vector_control::reset_vector_batch_controller_for_tests;
 use anyhow::{anyhow, Result as AnyhowResult};
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{InitOptions, OutputKey, TextEmbedding};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokenizers::{Encoding, Tokenizer};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[path = "embedder/batch_lanes.rs"]
 mod batch_lanes;
@@ -87,7 +75,6 @@ use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
 use gpu_policy::{
     embedding_provider_requested_is_gpu, gpu_recycle_immediate_required,
-    gpu_recycle_vram_summit_mb,
 };
 #[cfg(test)]
 use gpu_policy::gpu_memory_pressure_active;
@@ -109,15 +96,13 @@ pub use provider_contract::{
 #[cfg(test)]
 pub(crate) use provider_runtime::provider_resolution_for_label;
 use provider_runtime::{
-    cpu_provider_effective_label, current_embedding_provider_effective,
-    publish_embedding_provider_state, register_embedding_provider_diagnostics,
+    cpu_provider_effective_label, current_embedding_provider_effective, register_embedding_provider_diagnostics,
     set_embedding_provider_runtime_state,
 };
 pub use provider_runtime::{
     current_embedding_provider_diagnostics, current_gpu_present, embedder_provider_fallback_reason,
     embedding_provider_diagnostics, set_gpu_present, EmbeddingProviderDiagnostics,
 };
-use vector_executor::VectorEmbeddingBackend;
 
 #[allow(dead_code)]
 pub(crate) fn embedder_cuda_execution_provider_dispatch(

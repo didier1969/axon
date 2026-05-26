@@ -163,7 +163,7 @@ pub async fn b1_fetch_for_embedding(
 pub type EmbeddingDedupCache = Option<Arc<dashmap::DashMap<String, String>>>;
 
 pub fn spawn_b1_batched_worker(
-    mut rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
+    rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
     tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
     store: Arc<crate::graph::GraphStore>,
     metrics: Arc<super::metrics::StageMetrics>,

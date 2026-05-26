@@ -1,6 +1,5 @@
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
-use crate::runtime_topology::current_runtime_process_role;
 use serde_json::{json, Value};
 
 fn is_public_tool(name: &str) -> bool {

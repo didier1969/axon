@@ -17,7 +17,7 @@
 
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };

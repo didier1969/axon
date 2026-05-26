@@ -1,4 +1,3 @@
-use crate::service_guard;
 
 use super::{
     canonical_embedding_provider_request_for_mode, current_gpu_memory_snapshot,
