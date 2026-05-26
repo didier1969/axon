@@ -185,6 +185,14 @@ impl RustParser {
         }
 
         if let Some(block) = self.find_child_by_type(node, "block") {
+            if let Ok(body_text) = block.utf8_text(source) {
+                if body_text.contains(".unwrap()")
+                    || body_text.contains("panic!(")
+                    || body_text.contains(".expect(")
+                {
+                    props.insert("can_panic".to_string(), "true".to_string());
+                }
+            }
             props.insert(
                 "header_end_line".to_string(),
                 block.start_position().row.saturating_add(1).to_string(),

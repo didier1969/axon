@@ -230,6 +230,7 @@ impl GraphStore {
             "reads" => Some("READS"),
             "declares" => Some("DECLARES"),
             "exposes" => Some("EXPOSES"),
+            "implements" => Some("IMPLEMENTS"),
             _ => None,
         }
     }
