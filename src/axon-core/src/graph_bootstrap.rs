@@ -12,28 +12,6 @@ use crate::embedding_contract::DIMENSION;
 use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
-const IST_SCHEMA_VERSION: &str = "3";
-const IST_INGESTION_VERSION: &str = "4";
-// Bump to force a one-time rebuild of derived embedding storage after the
-// crash-safe table reconstruction path was introduced.
-const IST_EMBEDDING_VERSION: &str = "2";
-const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
-
-/// Resolve the connection URL for the PostgreSQL plugin, honoring
-/// `AXON_INSTANCE_KIND` so dev-mode processes target `axon_dev` even
-/// when both `AXON_LIVE_DATABASE_URL` and `AXON_DEV_DATABASE_URL` are
-/// exported by the runtime scripts. Falls back to `DATABASE_URL` when
-/// the instance-scoped var is missing (plain `cargo test` etc.).
-///
-/// Bug history: prior implementation tested `AXON_LIVE_DATABASE_URL`
-/// first regardless of instance, so a dev indexer started via
-/// `./scripts/axon-dev start` (which exports both URLs from
-/// `runtime-config.dev.env` plus inherited live exports) silently wrote
-/// to `axon_live`. Reproduced 2026-05-14: dev counts stayed 0 while
-/// live grew under a dev-instance indexer.
-fn resolve_pg_database_url() -> Result<String> {
-    resolve_pg_database_url_with_override(None)
-}
 
 /// REQ-AXO-91562 / DEC-AXO-901594 Slice 1 — accept an explicit override so
 /// per-test harnesses can target a freshly-cloned database without leaking

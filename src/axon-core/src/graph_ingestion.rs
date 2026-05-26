@@ -2,27 +2,12 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
 
 use anyhow::{anyhow, Result};
 
 use crate::code_chunker::build_symbol_chunks;
 use crate::graph::GraphStore;
 
-// REQ-AXO-901653 slice-5b (recovery): restored consts/enum still consumed by
-// sql_helpers + file_ingress + tests. G1 over-deleted these because the File
-// state-machine purge stranded the live ingress path. Pipeline_v2 canonical
-// keeps file ingress + de-dup but bypasses the queues.
-pub(crate) const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
-pub const INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS: i64 = 5_000;
-pub const INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT: i64 = 2;
-pub(crate) static FILE_VECTORIZATION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileUpsertSource {
-    Scan,
-    HotDelta,
-}
 
 pub mod async_writer;
 mod file_ingress;
