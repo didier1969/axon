@@ -2,7 +2,7 @@
 # Post-crash recovery tests for purge_stale_postmaster_pid +
 # purge_stale_writer_locks. Tracks the 2026-05-19 session 48 incident
 # where a stale postmaster.pid + .axon-soll.writer.lock survived a WSL
-# crash and blocked axon-live start --brain-only.
+# crash and blocked axon-live start brain.
 #
 # Run: bash scripts/lib/ensure-runtime.test.sh
 # Exit code 0 on pass, 1 on any failed assertion.

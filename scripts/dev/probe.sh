@@ -132,7 +132,7 @@ if [[ -z "$DEV_PID" ]]; then
     # Skip the Elixir prewarm + dashboard for indexer-only throughput
     # benches: nothing in probe.sh consumes them, and prewarm/dashboard
     # boot can take minutes that count against the 90s heartbeat wait.
-    START_FLAGS=("--indexer-full" "--skip-elixir-prewarm" "--no-dashboard")
+    START_FLAGS=("full" "--no-dashboard")
     if [[ "${AXON_GPU_EMBED_SERVICE_TENSORRT:-1}" =~ ^(1|true|yes|on)$ ]]; then
         START_FLAGS+=("--tensorrt")
     fi

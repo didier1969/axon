@@ -289,7 +289,7 @@ PY
   LIVE_MCP_URL="$live_mcp_url" observed_build_id="${observed_build_id:-}"
   if [[ -z "$observed_build_id" ]]; then
     echo "--finalize-only: could not probe live MCP at $live_mcp_url for runtime_version.build_id" >&2
-    echo "Bring the live brain up first (e.g. AXON_LIVE_RELEASE_MANIFEST=$MANIFEST_PATH AXON_SKIP_BIN_SYNC=1 ./scripts/axon-live start --brain-only) and retry." >&2
+    echo "Bring the live brain up first (e.g. AXON_LIVE_RELEASE_MANIFEST=$MANIFEST_PATH AXON_SKIP_BIN_SYNC=1 ./scripts/axon-live start brain) and retry." >&2
     exit 1
   fi
   if [[ "$observed_build_id" != "$build_id" ]]; then
@@ -476,7 +476,7 @@ PY
 
   # Start services on the staged manifest (only if stop+copy succeeded)
   if [[ "$restart_failed" -ne 1 ]]; then
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start --brain-only --no-dashboard --skip-mcp-tests; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start brain --fast; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces the legacy 24*5s fixed-sleep

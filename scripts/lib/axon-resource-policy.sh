@@ -76,7 +76,7 @@ axon_default_gpu_access_policy() {
     # Dev defaults to `preferred` so that local benchmarks (REQ-AXO-221)
     # measure the GPU path that production runs on. The single-GPU
     # exclusion contract (DEC-AXO-067) is operator-managed: stop the
-    # live indexer before starting a dev `--indexer-full` session.
+    # live indexer before starting a dev `full` session.
     # An automated pause-resume mechanism is tracked separately.
     case "${1:?instance kind required}" in
         live) printf 'preferred\n' ;;

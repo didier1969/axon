@@ -47,9 +47,8 @@ FORCE_RELEASE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        brain|--brain-only)     RUNTIME_MODE="brain_only" ;;
-        full|indexer|--indexer-full|--indexer-graph|--indexer-vector)
-                                RUNTIME_MODE="indexer_full" ;;
+        brain)           RUNTIME_MODE="brain_only" ;;
+        full|indexer)    RUNTIME_MODE="indexer_full" ;;
         --release)       FORCE_RELEASE=1 ;;
         --no-dashboard)  START_DASHBOARD=0 ;;
         --skip-mcp-tests) RUN_MCP_TESTS=0 ;;

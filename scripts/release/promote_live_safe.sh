@@ -152,7 +152,7 @@ validate_dev_healthy() {
     echo "❌ Dev MCP not responding on port ${dev_mcp_port} (feedback_dev_first_no_exception)." >&2
     echo "   New binaries must validate in dev BEFORE promote-live." >&2
     echo "   Recovery:" >&2
-    echo "     ./scripts/axon-dev start --brain-only        # or --indexer-full" >&2
+    echo "     ./scripts/axon-dev start brain        # or full" >&2
     echo "     # Verify dev MCP responds, run for >5 min." >&2
     echo "     # Re-run this command." >&2
     echo "" >&2
@@ -218,7 +218,7 @@ except Exception:
     echo "     ./scripts/axon-dev stop --hard" >&2
     echo "     touch src/axon-core/build.rs 2>/dev/null  # force git-info rebuild" >&2
     echo "     devenv shell --no-reload --no-tui -- bash -lc 'cargo build --manifest-path src/axon-core/Cargo.toml --bin axon-brain --bin axon-indexer'" >&2
-    echo "     ./scripts/axon-dev start --indexer-full   # or --brain-only" >&2
+    echo "     ./scripts/axon-dev start full   # or brain" >&2
     echo "     # 2. Functional test in dev (e.g. create file, query MCP, observe effect)" >&2
     echo "     # 3. Re-run this command" >&2
     echo "" >&2

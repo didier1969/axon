@@ -42,7 +42,7 @@ env \
   AXON_GPU_PRIMARY_WORKER_MAX_USED_MB=6500 \
   AXON_WATCH_DIR="$ROOT" \
   AXON_PROJECTS_ROOT="$ROOT" \
-  ./scripts/axon-dev start --indexer-full --tensorrt \
+  ./scripts/axon-dev start full \
     > "/tmp/probe-${TAG}-start.log" 2>&1
 
 # Wait up to 60s for heartbeat

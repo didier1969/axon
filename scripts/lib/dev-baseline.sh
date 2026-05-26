@@ -64,7 +64,7 @@ dev_baseline_clean_state() {
 }
 
 dev_baseline_start_split() {
-    bash "$DEV_BASELINE_SCRIPT_DIR/axon" --instance dev start --indexer-full --no-dashboard --skip-mcp-tests
+    bash "$DEV_BASELINE_SCRIPT_DIR/axon" --instance dev start full --fast
 }
 
 dev_baseline_wait_for_role() {

@@ -67,7 +67,7 @@ Modes: `--gpu` (production), `--cpu` (ORT CPU EP), `--noop` (smoke, no GPU/PG). 
 Surface: `./scripts/axon [--instance live|dev] {start|stop|status|qualify}`
 Aliases: `./scripts/axon-live` · `./scripts/axon-dev`
 ```
-./scripts/axon-dev start --indexer-full          # dev + vectorization
+./scripts/axon-dev start full          # dev + vectorization
 ./scripts/axon-live status
 ./scripts/axon-live stop --hard                  # force teardown
 ./scripts/axon qualify --profile smoke --mode graph_only  # defaults to dev

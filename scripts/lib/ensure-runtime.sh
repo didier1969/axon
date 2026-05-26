@@ -7,7 +7,7 @@
 # fresh WSL / lost devenv up / wiped state forced the operator into a
 # ~5-step manual recovery (devenv up postgres, CREATE ROLE, restore
 # from pg_dump, then start). This library closes that gap so `axon
-# start --brain-only` works from any sane disk state.
+# start brain` works from any sane disk state.
 #
 # All functions are idempotent and safe to call on every start. They
 # exit non-zero only on real environmental failure (Docker container

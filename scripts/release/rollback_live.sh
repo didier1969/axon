@@ -193,7 +193,7 @@ PY
   elif ! assert_live_stopped; then
     restart_failed=1
   else
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start --brain-only --no-dashboard --skip-mcp-tests; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start brain --fast; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces 12*5s=60s legacy fixed-sleep loop.
