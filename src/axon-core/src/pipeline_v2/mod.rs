@@ -103,20 +103,13 @@ mod doc_invariants {
 
     #[test]
     fn six_stages_exported() {
-        // Each stage's public entrypoint is named here; if a stage
-        // disappears the import fails to compile. The docstring claims
-        // six stages — assert by counting the entrypoints we re-export.
         let _ = super::a1_prepare;
         let _ = super::a2_transform;
-        let _ = super::a3_enroll;
-        let _ = super::b1_fetch_for_embedding;
-        let _ = super::b2_embed;
-        let _ = super::b3_persist_embedding;
+        let _ = super::stage_a3::a3_enroll;
+        let _ = super::stage_b1::b1_fetch_for_embedding;
+        let _ = super::stage_b2::b2_embed;
+        let _ = super::stage_b3::b3_persist_embedding;
         let _ = super::b1_cold_start_poll;
-        // spawn_pipeline_a / spawn_pipeline_b_full are generic over
-        // `impl Into<Arc<str>>` for the project_code argument — taking
-        // a fn-pointer without parameters fails type inference. Their
-        // presence is exercised by the orchestrator's E2E tests.
     }
 
     #[test]

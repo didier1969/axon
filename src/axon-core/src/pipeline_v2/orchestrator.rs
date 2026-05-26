@@ -22,7 +22,7 @@ use super::metrics::StageMetrics;
 use super::stage_a1::a1_prepare;
 use super::stage_a2::a2_transform;
 use super::stage_a3::EnrolledFile;
-use super::stage_b1::ChunkForEmbedding;
+use super::stage_b1::{B1InboxItem, ChunkForEmbedding};
 use super::stage_b2::{B2Embedder, EmbeddedChunk};
 use super::stage_b3::PersistedEmbedding;
 use super::types::ParsedFile;
@@ -673,10 +673,14 @@ mod tests {
         );
 
         // B1 inbox must have received the chunk_ids via A3's try_send.
-        let first_id = tokio::time::timeout(Duration::from_secs(1), handles.b1_inbox_rx.recv())
+        let first_item = tokio::time::timeout(Duration::from_secs(1), handles.b1_inbox_rx.recv())
             .await
             .expect("b1_inbox must receive within 1 s")
-            .expect("b1_inbox receiver yields Some(chunk_id: String)");
+            .expect("b1_inbox receiver yields Some(B1InboxItem)");
+        let first_id = match &first_item {
+            B1InboxItem::Inline(c) => c.chunk_id.clone(),
+            B1InboxItem::FetchById(id) => id.clone(),
+        };
         assert!(
             receipt.chunk_ids.contains(&first_id),
             "chunk_id fanned out to B1 must match one of the ids returned by A3"

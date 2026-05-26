@@ -420,15 +420,18 @@ mod tests {
 
         // None of these chunk_ids has an embedding yet — cold-start
         // poll must surface all of them.
-        let (tx, mut rx) = mpsc::channel::<String>(128);
+        let (tx, mut rx) = mpsc::channel::<B1InboxItem>(128);
         let total = b1_cold_start_poll(store.clone(), tx, 32).await.unwrap();
         assert!(total >= chunk_ids.len() as usize);
 
         let mut emitted: Vec<String> = Vec::new();
-        while let Ok(Some(cid)) =
+        while let Ok(Some(item)) =
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
         {
-            emitted.push(cid);
+            match item {
+                B1InboxItem::FetchById(id) => emitted.push(id),
+                B1InboxItem::Inline(c) => emitted.push(c.chunk_id),
+            }
         }
         for cid in &chunk_ids {
             assert!(
@@ -465,15 +468,18 @@ mod tests {
             .upsert_chunk_embedding_v2(&cid, "AXO", "hash-skip-chunk", &embedding, 1)
             .unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let (tx, mut rx) = mpsc::channel::<B1InboxItem>(8);
         let total = b1_cold_start_poll(store.clone(), tx, 8).await.unwrap();
 
         // The pre-embedded chunk must not surface.
         let mut emitted: Vec<String> = Vec::new();
-        while let Ok(Some(cid)) =
+        while let Ok(Some(item)) =
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
         {
-            emitted.push(cid);
+            match item {
+                B1InboxItem::FetchById(id) => emitted.push(id),
+                B1InboxItem::Inline(c) => emitted.push(c.chunk_id),
+            }
         }
         assert!(
             !emitted.contains(&cid),

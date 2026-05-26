@@ -41,6 +41,7 @@ mod tools_ist_snapshot;
 mod tools_risk;
 mod tools_skill;
 mod tools_soll;
+pub(crate) mod tools_srs;
 mod tools_system;
 mod tools_system_debug;
 
