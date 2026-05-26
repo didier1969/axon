@@ -299,16 +299,22 @@ if ! curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
 fi
 
 # --- Wait for readiness ---
-TIMEOUT_S=$([[ "$RUNTIME_MODE" == indexer_full ]] && echo 900 || echo 120)
-echo "⏳ Waiting for :${READYZ_PORT}/readyz (timeout ${TIMEOUT_S}s)..."
-for ((i=1; i<=TIMEOUT_S; i++)); do
-    curl -sf "http://127.0.0.1:${READYZ_PORT}/readyz" >/dev/null 2>&1 && {
+# Brain readiness is the gate — MCP is usable as soon as the brain is up.
+# Indexer init (GPU model load) continues in background; process-compose
+# monitors it independently via its own readiness_probe.
+BRAIN_TIMEOUT_S=120
+echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
+for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
+    curl -sf "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
         echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
+        if [[ "$RUNTIME_MODE" == indexer_* ]]; then
+            echo "   Indexer: initializing in background (GPU model load)"
+        fi
         echo "   Stop: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
         exit 0
     }
-    (( i % 15 == 0 )) && echo "  ⏳ ${i}s/${TIMEOUT_S}s..."
+    (( i % 15 == 0 )) && echo "  ⏳ ${i}s/${BRAIN_TIMEOUT_S}s..."
     sleep 1
 done
 
