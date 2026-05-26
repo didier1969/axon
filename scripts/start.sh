@@ -136,7 +136,7 @@ if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
 fi
 
 # 5. Already running check
-if nc -z localhost "$AXON_BRAIN_PORT" 2>/dev/null; then
+if nc -z -w 3 localhost "$AXON_BRAIN_PORT" 2>/dev/null; then
     echo "ℹ️  Already running on :$AXON_BRAIN_PORT. Stop first."
     exit 0
 fi
@@ -272,14 +272,14 @@ echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 # before launching. A stale daemon from a previous run that didn't fully
 # release its port causes the new `process-compose up -D` to fail silently
 # (detached mode swallows the bind error and the parent returns 0).
-if curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+if curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
     echo "⚠️  Stale process-compose daemon on :${PC_PORT}. Sending down..."
     "$PC_BIN" down -p "$PC_PORT" 2>/dev/null || true
     for ((w=1; w<=10; w++)); do
-        curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 || break
+        curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 || break
         sleep 0.5
     done
-    if curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+    if curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
         echo "❌ Cannot reclaim process-compose port :${PC_PORT}. Kill it manually."
         exit 1
     fi
@@ -289,10 +289,10 @@ fi
 
 # Verify process-compose daemon actually started (catches silent -D failures)
 for ((w=1; w<=10; w++)); do
-    curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 && break
+    curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 && break
     sleep 0.5
 done
-if ! curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+if ! curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
     echo "❌ process-compose daemon failed to start on :${PC_PORT}."
     echo "   Check if port is occupied: ss -ltnp | grep ${PC_PORT}"
     exit 1
@@ -305,7 +305,7 @@ fi
 BRAIN_TIMEOUT_S=120
 echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
 for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
-    curl -sf "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {
+    curl -sf --connect-timeout 3 "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
         echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
         if [[ "$RUNTIME_MODE" == indexer_* ]]; then

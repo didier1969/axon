@@ -429,7 +429,7 @@ case "${AXON_INSTANCE_KIND:-live}" in
     dev)  _PC_PORT=8081 ;;
     *)    _PC_PORT=8080 ;;
 esac
-if curl -sf "http://localhost:${_PC_PORT}/live" >/dev/null 2>&1; then
+if curl -sf --connect-timeout 3 "http://localhost:${_PC_PORT}/live" >/dev/null 2>&1; then
     _PC_BIN="$(command -v process-compose 2>/dev/null || true)"
     if [[ -z "$_PC_BIN" ]]; then
         _PC_BIN="$(devenv shell --no-reload --no-tui -- bash -c 'which process-compose' 2>/dev/null | tail -1 || true)"
