@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$ROOT_DIR/scripts/lib/axon-instance.sh"
-# REQ-AXO-109 — clear AXON_*/HYDRA_* leaked from a previous run in
+# REQ-AXO-109 — clear AXON_*/AXON_* leaked from a previous run in
 # this shell before any lib re-derives instance state.
 axon_clear_inherited_env
 # shellcheck source=scripts/lib/axon-resource-policy.sh

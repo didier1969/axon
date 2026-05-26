@@ -740,7 +740,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         Err(err) => return Err(err.into()),
     };
 
-    let http_port = std::env::var("HYDRA_HTTP_PORT").unwrap_or_else(|_| "44129".to_string());
+    let http_port = std::env::var("AXON_BRAIN_PORT").unwrap_or_else(|_| "44129".to_string());
     if tel_listener.is_some() {
         info!("Telemetry Server listening on {}", tel_socket_path);
     } else {

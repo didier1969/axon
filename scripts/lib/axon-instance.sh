@@ -26,14 +26,14 @@ axon_load_worktree_env() {
     fi
 }
 
-# REQ-AXO-109 / REQ-AXO-241 — clear DERIVED AXON_*/HYDRA_* env vars
+# REQ-AXO-109 / REQ-AXO-241 — clear DERIVED AXON_* env vars
 # inherited from a previous run in the same shell. Preserves operator-
 # provided tuning knobs by default (allowlist-by-prefix); only the
 # narrow denylist of derived per-instance vars is unset.
 #
 # Without this, a `dev` start followed by a `live` start in the same
 # shell would leak dev's per-instance values (AXON_DB_ROOT, AXON_PID_FILE,
-# AXON_RUN_ROOT, HYDRA_HTTP_PORT, etc.) into the live runtime, breaking
+# AXON_RUN_ROOT, AXON_BRAIN_PORT, etc.) into the live runtime, breaking
 # the Dual-Instance Operational Discipline Pillar (PIL-AXO-004). Operator
 # tunables (AXON_VECTOR_WORKERS, AXON_DB_BACKEND, AXON_FOO_NEW, …) are
 # preserved unchanged across runs.
@@ -150,8 +150,8 @@ axon_resolve_public_endpoints() {
         export AXON_PUBLIC_HOST="$public_host"
         export AXON_PUBLIC_HOST_SOURCE="$public_host_source"
         export AXON_PUBLIC_ENDPOINTS_AVAILABLE="1"
-        export AXON_MCP_PUBLIC_URL="http://${public_host}:${HYDRA_HTTP_PORT}/mcp"
-        export AXON_SQL_PUBLIC_URL="http://${public_host}:${HYDRA_HTTP_PORT}/sql"
+        export AXON_MCP_PUBLIC_URL="http://${public_host}:${AXON_BRAIN_PORT}/mcp"
+        export AXON_SQL_PUBLIC_URL="http://${public_host}:${AXON_BRAIN_PORT}/sql"
         export AXON_DASHBOARD_PUBLIC_URL="http://${public_host}:${PHX_PORT}/"
         return 0
     fi
@@ -185,7 +185,7 @@ axon_resolve_instance() {
         export TMUX_SESSION="axon-dev"
         export ELIXIR_NODE_NAME="axon_dev_nexus"
         export PHX_PORT="44137"
-        export HYDRA_HTTP_PORT="44139"
+        export AXON_BRAIN_PORT="44139"
         export AXON_DB_ROOT="$project_root/.axon-dev/graph_v2"
         export AXON_RUN_ROOT="$project_root/.axon-dev/run"
         export AXON_TELEMETRY_SOCK="/tmp/axon-dev-telemetry.sock"
@@ -196,7 +196,7 @@ axon_resolve_instance() {
         export TMUX_SESSION="axon"
         export ELIXIR_NODE_NAME="axon_nexus"
         export PHX_PORT="44127"
-        export HYDRA_HTTP_PORT="44129"
+        export AXON_BRAIN_PORT="44129"
         export AXON_DB_ROOT="$project_root/.axon/graph_v2"
         export AXON_RUN_ROOT="$project_root/.axon/live-run"
         export AXON_TELEMETRY_SOCK="/tmp/axon-live-telemetry.sock"
@@ -207,7 +207,7 @@ axon_resolve_instance() {
     export AXON_PID_FILE="$AXON_RUN_ROOT/axon-core.pid"
     export AXON_RUNTIME_STATE_FILE="$AXON_RUN_ROOT/runtime.env"
     export AXON_DASHBOARD_URL="http://127.0.0.1:${PHX_PORT}/"
-    export AXON_SQL_URL="http://127.0.0.1:${HYDRA_HTTP_PORT}/sql"
-    export AXON_MCP_URL="http://127.0.0.1:${HYDRA_HTTP_PORT}/mcp"
+    export AXON_SQL_URL="http://127.0.0.1:${AXON_BRAIN_PORT}/sql"
+    export AXON_MCP_URL="http://127.0.0.1:${AXON_BRAIN_PORT}/mcp"
     axon_resolve_public_endpoints || true
 }

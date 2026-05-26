@@ -77,7 +77,7 @@ source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 export AXON_INSTANCE_KIND="$INSTANCE_KIND"
 axon_resolve_instance "$PROJECT_ROOT" "$(basename "$PROJECT_ROOT")"
 
-# HYDRA_MCP_PORT retired (legacy, no longer exported). Use a fixed
+# Legacy HYDRA_* prefix fully retired. Use a fixed
 # non-canonical port for the third-party listener test.
 NON_CANONICAL_PORT=44142
 echo "instance=$AXON_INSTANCE_KIND PHX_PORT=$PHX_PORT NON_CANONICAL_PORT=$NON_CANONICAL_PORT"

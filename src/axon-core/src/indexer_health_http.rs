@@ -7,7 +7,7 @@
 // donc ni probe sa liveness ni gérer ses dépendances aval.
 //
 // Ce module spawne un mini-serveur axum SUR UN PORT DÉDIÉ
-// (`AXON_INDEXER_HEALTH_PORT`, défaut `HYDRA_HTTP_PORT + 10`) avec
+// (`AXON_INDEXER_HEALTH_PORT`, défaut 44130 live / 44149 dev) avec
 // uniquement les 3 endpoints de probe — pas de surface MCP / SQL.
 //
 // V1 : les 3 endpoints retournent 200 OK. Le simple fait que axum réponde
@@ -135,20 +135,20 @@ pub async fn serve_health_probes(port: u16, state: IndexerHealthState) {
 }
 
 /// Resolve le port health depuis l'env : `AXON_INDEXER_HEALTH_PORT` >
-/// `HYDRA_HTTP_PORT + 10` > 44139. Le +10 garantit pas de collision avec
-/// le port HTTP du brain dans la même instance (brain :44129 / health
-/// indexer :44139 en live ; brain :44139 / health indexer :44149 en dev).
+/// `AXON_BRAIN_PORT + 1` > 44130. Ports explicites par instance dans
+/// process-compose yaml (live=44130, dev=44149). Le +1 est le fallback
+/// quand aucun override n'est posé.
 pub fn resolve_health_port() -> u16 {
     if let Ok(p) = std::env::var("AXON_INDEXER_HEALTH_PORT") {
         if let Ok(n) = p.trim().parse::<u16>() {
             return n;
         }
     }
-    let base = std::env::var("HYDRA_HTTP_PORT")
+    let base = std::env::var("AXON_BRAIN_PORT")
         .ok()
         .and_then(|p| p.trim().parse::<u16>().ok())
         .unwrap_or(44129);
-    base + 10
+    base + 1
 }
 
 #[cfg(test)]
@@ -156,26 +156,24 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Sérialise les tests qui mutent l env pour éviter les race entre
-    // tests parallèles (cargo test par défaut threads multiples).
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn resolve_health_port_uses_indexer_override_first() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("HYDRA_HTTP_PORT");
+        std::env::remove_var("AXON_BRAIN_PORT");
         std::env::set_var("AXON_INDEXER_HEALTH_PORT", "33333");
         assert_eq!(resolve_health_port(), 33333);
         std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
     }
 
     #[test]
-    fn resolve_health_port_falls_back_to_hydra_plus_10() {
+    fn resolve_health_port_falls_back_to_brain_port_plus_one() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
-        std::env::set_var("HYDRA_HTTP_PORT", "44129");
-        assert_eq!(resolve_health_port(), 44139);
-        std::env::remove_var("HYDRA_HTTP_PORT");
+        std::env::set_var("AXON_BRAIN_PORT", "44129");
+        assert_eq!(resolve_health_port(), 44130);
+        std::env::remove_var("AXON_BRAIN_PORT");
     }
 
     #[test]

@@ -137,8 +137,8 @@ if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
 fi
 
 # 5. Already running check
-if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null; then
-    echo "ℹ️  Already running on :$HYDRA_HTTP_PORT. Stop first."
+if nc -z localhost "$AXON_BRAIN_PORT" 2>/dev/null; then
+    echo "ℹ️  Already running on :$AXON_BRAIN_PORT. Stop first."
     exit 0
 fi
 
@@ -202,8 +202,9 @@ export AXON_WATCH_DIR="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
 # Absolute path to this Axon repo root.
 export AXON_PROJECT_ROOT="$PROJECT_ROOT"
-# HTTP health port for the indexer process (brain port + 10).
-export AXON_INDEXER_HEALTH_PORT=$((HYDRA_HTTP_PORT + 10))
+# HTTP health port for the indexer process (default: brain port + 1).
+# Explicit per-instance: live=44130, dev=44140. Yaml overrides via AXON_INDEXER_HEALTH_PORT env.
+export AXON_INDEXER_HEALTH_PORT="${AXON_INDEXER_HEALTH_PORT:-$((AXON_BRAIN_PORT + 1))}"
 # Absolute paths to the brain and indexer binaries for process-compose.
 export AXON_BRAIN_BIN="$BRAIN_BIN"
 export AXON_INDEXER_BIN="$INDEXER_BIN"
@@ -230,7 +231,7 @@ rm -f "${AXON_TELEMETRY_SOCK:-}" "${AXON_MCP_SOCK:-}" "${AXON_PID_FILE:-}"
 
 # --- Process selection ---
 PC_PROCESSES=(axon-brain)
-READYZ_PORT="$HYDRA_HTTP_PORT"
+READYZ_PORT="$AXON_BRAIN_PORT"
 
 if [[ "$RUNTIME_MODE" == indexer_* ]]; then
     PC_PROCESSES+=(axon-indexer)
@@ -253,7 +254,7 @@ export AXON_PGREADY_BIN="$(run_devenv 'which pg_isready' 2>/dev/null | tail -1)"
 
 echo "🚀 Starting Axon (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
 echo "   Brain: $BRAIN_BIN | Indexer: $INDEXER_BIN"
-echo "   MCP: http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
+echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
 echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 
 "$PC_BIN" up -f "$PC_YAML" -p "$PC_PORT" -t=false -D --ordered-shutdown --disable-dotenv "${PC_PROCESSES[@]}"
@@ -264,7 +265,7 @@ echo "⏳ Waiting for :${READYZ_PORT}/readyz (timeout ${TIMEOUT_S}s)..."
 for ((i=1; i<=TIMEOUT_S; i++)); do
     curl -sf "http://127.0.0.1:${READYZ_PORT}/readyz" >/dev/null 2>&1 && {
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
-        echo "   MCP: http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
+        echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
         echo "   Stop: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
         exit 0
     }

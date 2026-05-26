@@ -30,11 +30,11 @@ assert_eq() {
 }
 
 # ─── Phase 1: operator knobs survive axon_clear_inherited_env ────────────
-unset AXON_FOO AXON_BAR AXON_VECTOR_WORKERS HYDRA_GRPC_PORT 2>/dev/null || true
+unset AXON_FOO AXON_BAR AXON_VECTOR_WORKERS AXON_GRPC_PORT 2>/dev/null || true
 export AXON_FOO="synthetic-not-on-any-allowlist"
 export AXON_BAR="another-synthetic-knob"
 export AXON_VECTOR_WORKERS="42"
-export HYDRA_GRPC_PORT="50051"
+export AXON_GRPC_PORT="50051"
 
 axon_clear_inherited_env
 
@@ -44,13 +44,13 @@ assert_eq "${AXON_BAR:-<unset>}" "another-synthetic-knob" \
     "AXON_BAR must survive"
 assert_eq "${AXON_VECTOR_WORKERS:-<unset>}" "42" \
     "AXON_VECTOR_WORKERS (operator tuning knob) must survive"
-assert_eq "${HYDRA_GRPC_PORT:-<unset>}" "50051" \
-    "HYDRA_GRPC_PORT (operator-overridable) must survive"
+assert_eq "${AXON_GRPC_PORT:-<unset>}" "50051" \
+    "AXON_GRPC_PORT (operator-overridable) must survive"
 
 # ─── Phase 2: derived per-instance vars are cleared ──────────────────────
 export AXON_PID_FILE="/tmp/leftover-from-previous-run.pid"
 export AXON_RUNTIME_IDENTITY="leftover-id"
-export HYDRA_HTTP_PORT="33999"
+export AXON_BRAIN_PORT="33999"
 export AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY="policy_default"
 export AXON_RESOURCE_POLICY_COMPUTED_INSTANCE="dev"
 
@@ -60,8 +60,8 @@ assert_eq "${AXON_PID_FILE:-<unset>}" "<unset>" \
     "AXON_PID_FILE (derived per-instance) must be unset"
 assert_eq "${AXON_RUNTIME_IDENTITY:-<unset>}" "<unset>" \
     "AXON_RUNTIME_IDENTITY (derived per-run) must be unset"
-assert_eq "${HYDRA_HTTP_PORT:-<unset>}" "<unset>" \
-    "HYDRA_HTTP_PORT (derived per-instance) must be unset"
+assert_eq "${AXON_BRAIN_PORT:-<unset>}" "<unset>" \
+    "AXON_BRAIN_PORT (derived per-instance) must be unset"
 assert_eq "${AXON_POLICY_SOURCE_AXON_RESOURCE_PRIORITY:-<unset>}" "<unset>" \
     "AXON_POLICY_SOURCE_* (resource policy marker) must be unset by wildcard match"
 assert_eq "${AXON_RESOURCE_POLICY_COMPUTED_INSTANCE:-<unset>}" "<unset>" \
@@ -84,7 +84,7 @@ if axon_env_var_in_prefix_allowlist "AXON_PID_FILE" \
     exit 1
 fi
 
-# Foreign prefix: a non-AXON, non-HYDRA, non-OMP_NUM_THREADS/OMP_WAIT_POLICY
+# Foreign prefix: a non-AXON, non-OMP_NUM_THREADS/OMP_WAIT_POLICY
 # var must NOT match the prefix-allowlist. This guards against accidental
 # scope creep where unrelated env vars (PATH, USER, …) start being
 # propagated.

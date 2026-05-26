@@ -91,13 +91,13 @@ fi
 # normal stop path does not actively touch derived surfaces either
 # (axonctl manages brain + indexer ; dashboard runs out-of-band).
 if [[ "$STOP_ROLE" == "all" ]]; then
-    AXON_CANONICAL_TCP_PORTS=("$HYDRA_HTTP_PORT")
+    AXON_CANONICAL_TCP_PORTS=("$AXON_BRAIN_PORT")
     AXON_DERIVED_TCP_PORTS=("$PHX_PORT")
 elif axon_role_is_indexer "$STOP_ROLE"; then
     AXON_CANONICAL_TCP_PORTS=()
     AXON_DERIVED_TCP_PORTS=()
 else
-    AXON_CANONICAL_TCP_PORTS=("$HYDRA_HTTP_PORT")
+    AXON_CANONICAL_TCP_PORTS=("$AXON_BRAIN_PORT")
     AXON_DERIVED_TCP_PORTS=("$PHX_PORT")
 fi
 # Backward-compat union for the existing kill path (normal stop mode).

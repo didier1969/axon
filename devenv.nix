@@ -150,14 +150,12 @@ in
     MIX_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home/mix";
     HEX_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home/hex";
     
-    # Port Isolation for Axon (Series 6000)
+    # Port topology (PIL-AXO-004 dual-instance isolation).
+    # Brain + dashboard ports per instance are set by axon-instance.sh at runtime.
+    # devenv.nix only sets the static defaults consumed by devenv validation.
     PORT = 6000;
     PHX_PORT = 44127;
-    HYDRA_HTTP_PORT = 44129;
-    HYDRA_TCP_PORT = 44128;
-    HYDRA_ODATA_PORT = 44130;
-    HYDRA_HTTP2_PORT = 44131;
-    HYDRA_MCP_PORT = 44132;
+    AXON_BRAIN_PORT = 44129;
     WATCHER_PORT = 6001;
 
     # MIL-AXO-015 P1: PostgreSQL connection strings for Axon runtime.

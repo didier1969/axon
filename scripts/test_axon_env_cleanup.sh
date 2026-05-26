@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # REQ-AXO-109 — verify scripts/lib/axon-instance.sh's
-# axon_clear_inherited_env unsets AXON_*/HYDRA_* env vars carried over
+# axon_clear_inherited_env unsets AXON_* env vars carried over
 # from a previous lifecycle run while preserving the documented
 # user-input allowlist (instance kind, project scope, role/mode
 # selectors, GPU/embedding overrides, resource-policy knobs, etc.).
@@ -58,7 +58,7 @@ export AXON_RELEASE_VERSION="stale-version"
 export AXON_PACKAGE_VERSION="0.0.0-stale"
 export AXON_BUILD_ID="stale-build"
 export AXON_INSTALL_GENERATION="stale-gen"
-export HYDRA_HTTP_PORT="44139"
+export AXON_BRAIN_PORT="44139"
 
 # Vars from start.sh that are derived (must be unset).
 export AXON_GPU_EMBED_SERVICE_TENSORRT="1"
@@ -78,9 +78,9 @@ export AXON_VECTOR_WORKERS="4"
 export AXON_PUBLIC_HOST="public.example.com"
 export AXON_LIVE_RELEASE_MANIFEST="/path/to/live/current.json"
 export AXON_BENCHMARK_ACTIVE="1"
-export HYDRA_GRPC_PORT="55555"
+export AXON_GRPC_PORT="55555"
 
-# Non-AXON / non-HYDRA env (must remain untouched as a safety check).
+# Non-AXON env (must remain untouched as a safety check).
 export PATH_TEST_SENTINEL="should-not-be-touched"
 export USERS_OWN_VAR="hello"
 
@@ -110,7 +110,7 @@ assert_unset AXON_RELEASE_VERSION
 assert_unset AXON_PACKAGE_VERSION
 assert_unset AXON_BUILD_ID
 assert_unset AXON_INSTALL_GENERATION
-assert_unset HYDRA_HTTP_PORT
+assert_unset AXON_BRAIN_PORT
 assert_unset AXON_GPU_EMBED_SERVICE_TENSORRT
 assert_unset AXON_INSTANCE_KIND
 assert_unset AXON_PROJECT_ROOT
@@ -125,9 +125,9 @@ assert_eq AXON_VECTOR_WORKERS "4"
 assert_eq AXON_PUBLIC_HOST "public.example.com"
 assert_eq AXON_LIVE_RELEASE_MANIFEST "/path/to/live/current.json"
 assert_eq AXON_BENCHMARK_ACTIVE "1"
-assert_eq HYDRA_GRPC_PORT "55555"
+assert_eq AXON_GRPC_PORT "55555"
 
-# --- Assert non-AXON / non-HYDRA env is not touched ------------------------
+# --- Assert non-AXON env is not touched ------------------------------------
 
 assert_eq PATH_TEST_SENTINEL "should-not-be-touched"
 assert_eq USERS_OWN_VAR "hello"
