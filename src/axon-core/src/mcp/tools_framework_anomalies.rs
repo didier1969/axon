@@ -704,6 +704,40 @@ impl McpServer {
             json!({})
         };
 
+        // REQ-AXO-901755 — SRS slice 5: residual_legacy anomaly category.
+        let residual_legacy: Vec<serde_json::Value> = self
+            .soll_cache()
+            .snapshot(project)
+            .ok()
+            .map(|snap| {
+                super::tools_srs::detect_all_superseded_proximity(&snap)
+                    .into_iter()
+                    .filter(|n| {
+                        n.strategy == super::tools_srs::LegacyStrategy::ProgressiveActive
+                            || n.strategy == super::tools_srs::LegacyStrategy::Abandoned
+                    })
+                    .map(|n| {
+                        let residual = snap
+                            .nodes
+                            .get(&n.id)
+                            .map(|node| {
+                                snap.traceability_count_for(
+                                    &node.entity_type.to_ascii_lowercase(),
+                                    &n.id,
+                                )
+                            })
+                            .unwrap_or(0);
+                        json!({
+                            "id": n.id,
+                            "strategy": n.strategy,
+                            "successor": n.successor,
+                            "ist_residual_count": residual,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -726,6 +760,7 @@ impl McpServer {
                     "validation_coverage_score": validation_coverage_score,
                     "total_symbols": total_symbols,
                     "total_intent_nodes": total_intent_nodes,
+                    "residual_legacy_count": residual_legacy.len(),
                     "concept_completeness": soll_snapshot
                         .as_ref()
                         .map(|snapshot| snapshot.concept_complete())
@@ -742,6 +777,7 @@ impl McpServer {
                     "semantic_boundary": "heuristic anomaly overlays must not silently override canonical SOLL completeness"
                 },
                 "findings": findings,
+                "residual_legacy": residual_legacy,
                 "recommendations": recommendations,
                 "cognitive_signals": cognitive_signals,
                 "surfaces_used": surfaces_used,

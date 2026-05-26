@@ -580,6 +580,30 @@ impl McpServer {
                 .unwrap_or_else(|| json!({})),
             "backlog_visible": backlog_visible
         });
+        // REQ-AXO-901755 — SRS slice 5: incomplete retirements scored.
+        let incomplete_retirements: Vec<serde_json::Value> = self
+            .soll_cache()
+            .snapshot(project_code)
+            .ok()
+            .map(|snap| {
+                crate::mcp::tools_srs::detect_all_superseded_proximity(&snap)
+                    .into_iter()
+                    .filter(|n| {
+                        n.strategy == crate::mcp::tools_srs::LegacyStrategy::ProgressiveActive
+                    })
+                    .map(|n| {
+                        let residual = crate::mcp::tools_srs::residual_count_for(&n.id, &snap);
+                        json!({
+                            "id": n.id,
+                            "strategy": "progressive_active",
+                            "successor": n.successor,
+                            "ist_residual_count": residual,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let data = json!({
             "summary": {
                 "project_code": project_code,
@@ -589,12 +613,14 @@ impl McpServer {
                 "cycle_count": cycles.len(),
                 "wave_count": waves.len(),
                 "returned_items": returned_items,
-                "top_count": top_recommendations.len()
+                "top_count": top_recommendations.len(),
+                "incomplete_retirements_count": incomplete_retirements.len()
             },
             "blockers": blockers.iter().map(blocker_to_json).collect::<Vec<_>>(),
             "cycles": cycles.iter().map(cycle_to_json).collect::<Vec<_>>(),
             "ordered_waves": limited_waves.iter().map(wave_to_json).collect::<Vec<_>>(),
             "top_recommendations": top_recommendations,
+            "incomplete_retirements": incomplete_retirements,
             "validation_gates": validation_gates,
             "metadata": {
                 "algorithm_version": "v1",

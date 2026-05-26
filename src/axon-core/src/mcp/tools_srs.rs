@@ -111,6 +111,41 @@ pub fn detect_legacy_proximity(
     })
 }
 
+/// REQ-AXO-901755 — panoramic SOLL→IST scan. Returns ALL superseded
+/// nodes with their inferred strategy and IST residual count.
+/// Used by conception_view, anomalies, soll_work_plan.
+pub fn detect_all_superseded_proximity(snapshot: &SollSnapshot) -> Vec<LegacyNode> {
+    let mut results: Vec<LegacyNode> = Vec::new();
+
+    for (id, node) in &snapshot.nodes {
+        if node.status != "superseded" {
+            continue;
+        }
+        let strategy = infer_strategy(id, node, snapshot);
+        let successor = find_successor(id, snapshot);
+        let superseded_at = extract_updated_at(&node.metadata_raw);
+
+        results.push(LegacyNode {
+            id: id.clone(),
+            strategy,
+            successor,
+            superseded_at,
+        });
+    }
+
+    results.sort_by(|a, b| a.id.cmp(&b.id));
+    results
+}
+
+/// IST residual count for a superseded node (traceability rows proxy).
+pub fn residual_count_for(node_id: &str, snapshot: &SollSnapshot) -> usize {
+    let Some(node) = snapshot.nodes.get(node_id) else {
+        return 0;
+    };
+    let entity_type_lower = node.entity_type.to_ascii_lowercase();
+    snapshot.traceability_count_for(&entity_type_lower, node_id)
+}
+
 fn find_successor(superseded_id: &str, snapshot: &SollSnapshot) -> Option<String> {
     // SUPERSEDES edge: source SUPERSEDES target.
     // The superseded node is the TARGET. The successor is the SOURCE.

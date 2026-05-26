@@ -477,6 +477,29 @@ impl McpServer {
                 "medium",
             )
         );
+        // REQ-AXO-901755 — SRS slice 5: transitions[] section per
+        // superseded node with strategy and IST residual count.
+        let transitions: Vec<Value> = {
+            let snapshot = self.soll_cache().snapshot(project_code).ok();
+            snapshot
+                .map(|snap| {
+                    super::tools_srs::detect_all_superseded_proximity(&snap)
+                        .into_iter()
+                        .map(|n| {
+                            let residual = super::tools_srs::residual_count_for(&n.id, &snap);
+                            json!({
+                                "id": n.id,
+                                "strategy": n.strategy,
+                                "successor": n.successor,
+                                "superseded_at": n.superseded_at,
+                                "ist_residual_count": residual,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -494,6 +517,7 @@ impl McpServer {
                 "owners": conception.get("owners").cloned().unwrap_or_else(|| json!([])),
                 "suspected_boundary_violation_count": boundary_violations.len(),
                 "suspected_boundary_violations": boundary_violations,
+                "transitions": transitions,
                 "provenance": "derived_read_only_view",
                 "confidence": conception.get("confidence").cloned().unwrap_or_else(|| json!("medium")),
                 "evidence_sources": ["File", "Symbol", "CALLS", "CONTAINS"],
