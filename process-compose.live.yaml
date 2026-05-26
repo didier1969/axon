@@ -70,7 +70,7 @@ processes:
       backoff_seconds: 5
     shutdown:
       signal: 15
-      timeout_seconds: 30
+      timeout_seconds: 10
 
   axon-indexer:
     command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"
@@ -111,7 +111,7 @@ processes:
       backoff_seconds: 10
     shutdown:
       signal: 15
-      timeout_seconds: 60
+      timeout_seconds: 15
 
   dashboard:
     command: |

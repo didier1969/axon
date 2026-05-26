@@ -55,7 +55,7 @@ processes:
       backoff_seconds: 5
     shutdown:
       signal: 15
-      timeout_seconds: 30
+      timeout_seconds: 10
 
   # Indexer = pipeline (IST writer, SOLL reader). Holds the IST lock.
   axon-indexer:
@@ -84,7 +84,7 @@ processes:
       backoff_seconds: 10
     shutdown:
       signal: 15
-      timeout_seconds: 60
+      timeout_seconds: 15
 
   dashboard:
     command: |
