@@ -19,8 +19,8 @@ usage() {
 Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--skip-build] [--skip-qualify] [--skip-dev-validation] [--dry-run]
 
 One-shot promotion flow:
-  1. Validate dev instance healthy (`feedback_dev_first_no_exception`)
-  2. Build canonical release artifact
+  1. Build canonical release artifact
+  2. Restart dev with candidate binary + validate dev healthy
   3. Run release preflight
   4. Create qualified release manifest
   5. Promote live (copy + restart)
@@ -61,8 +61,9 @@ CURRENT_STEP=0
 CURRENT_STEP_NAME="init"
 STEP_NAMES=(
   "0:init"
-  "1:dev_gate"
-  "2:build"
+  "1:build"
+  "2:dev_restart"
+  "2b:dev_gate"
   "3:preflight"
   "4:manifest"
   "5:promote_copy_restart"
@@ -228,17 +229,41 @@ except Exception:
   fi
 }
 
-# --- Step 1: dev gate ---
-if [[ "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
-  promote_log "== step 1: dev_gate =="
-  promote_log "  ⚠️ BYPASSED via --skip-dev-validation (violation of feedback_dev_first_no_exception)"
-else
-  run_step 1 dev_gate validate_dev_healthy
+# --- Step 1: build ---
+# REQ-AXO-901763 — Build BEFORE dev-gate so the dev brain can be restarted
+# with the candidate binary. The previous ordering (dev_gate -> build) meant
+# the dev brain always ran a binary compiled pre-commit whose build_id
+# (git describe) pointed to HEAD^ instead of HEAD. The promote then failed
+# because build_id != HEAD.
+if [[ "$SKIP_BUILD" -ne 1 ]]; then
+  run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
 fi
 
-# --- Step 2: build ---
-if [[ "$SKIP_BUILD" -ne 1 ]]; then
-  run_step 2 build "$ROOT_DIR/scripts/axon" setup --artifact-only
+# --- Step 2: dev gate ---
+# After building, restart dev with the new binary so validate_dev_healthy
+# can verify the correct build_id. The restart is cheap (~5s) and ensures
+# dev always validates the exact binary that will be promoted.
+if [[ "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
+  promote_log "== step 2: dev_gate =="
+  promote_log "  ⚠️ BYPASSED via --skip-dev-validation (violation of feedback_dev_first_no_exception)"
+else
+  restart_dev_with_candidate() {
+    local dev_build_id_pre=""
+    dev_build_id_pre=$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:44139/mcp" \
+      -H "Content-Type: application/json" \
+      -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"status","arguments":{"mode":"brief"}},"id":1}' 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",{}).get("data",{}).get("runtime_version",{}).get("build_id",""))' 2>/dev/null || true)
+    local short_head="${start_head:0:8}"
+    if [[ -n "$dev_build_id_pre" && "$dev_build_id_pre" == *"$short_head"* ]]; then
+      echo "  dev brain already runs candidate (build_id=$dev_build_id_pre)"
+      return 0
+    fi
+    echo "  dev brain build_id ($dev_build_id_pre) != HEAD ($short_head), restarting dev..."
+    bash "$ROOT_DIR/scripts/axon-dev" stop 2>&1 || true
+    bash "$ROOT_DIR/scripts/axon-dev" start brain --fast 2>&1
+  }
+  run_step 2 dev_restart restart_dev_with_candidate
+  run_step 2b dev_gate validate_dev_healthy
 fi
 
 # --- Step 3: preflight ---

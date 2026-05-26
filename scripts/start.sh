@@ -257,7 +257,35 @@ echo "   Brain: $BRAIN_BIN | Indexer: $INDEXER_BIN"
 echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
 echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 
+# REQ-AXO-901762 — Ensure the process-compose management API port is free
+# before launching. A stale daemon from a previous run that didn't fully
+# release its port causes the new `process-compose up -D` to fail silently
+# (detached mode swallows the bind error and the parent returns 0).
+if curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+    echo "⚠️  Stale process-compose daemon on :${PC_PORT}. Sending down..."
+    "$PC_BIN" down -p "$PC_PORT" 2>/dev/null || true
+    for ((w=1; w<=10; w++)); do
+        curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+    if curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+        echo "❌ Cannot reclaim process-compose port :${PC_PORT}. Kill it manually."
+        exit 1
+    fi
+fi
+
 "$PC_BIN" up -f "$PC_YAML" -p "$PC_PORT" -t=false -D --ordered-shutdown --disable-dotenv "${PC_PROCESSES[@]}"
+
+# Verify process-compose daemon actually started (catches silent -D failures)
+for ((w=1; w<=10; w++)); do
+    curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 && break
+    sleep 0.5
+done
+if ! curl -sf "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+    echo "❌ process-compose daemon failed to start on :${PC_PORT}."
+    echo "   Check if port is occupied: ss -ltnp | grep ${PC_PORT}"
+    exit 1
+fi
 
 # --- Wait for readiness ---
 TIMEOUT_S=$([[ "$RUNTIME_MODE" == indexer_full ]] && echo 900 || echo 120)
