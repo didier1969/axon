@@ -1,0 +1,22 @@
+[meta]
+language = "bash"
+file_extensions = ["sh", "bash"]
+
+[[rules]]
+id = "env_var_export"
+pattern = 'export\s+([A-Z_][A-Z0-9_]*)='
+phantom_kind = "env_var"
+edge_type = "DECLARES"
+
+[[rules]]
+id = "env_var_read"
+pattern = '\$\{?([A-Z_][A-Z0-9_]{2,})\}?'
+phantom_kind = "env_var"
+edge_type = "READS"
+exclude_patterns = ["^(HOME|USER|PATH|PWD|SHELL|TERM|LANG|LC_|HOSTNAME|LOGNAME|OLDPWD|SHLVL|_)$"]
+
+[[rules]]
+id = "env_var_assign"
+pattern = '^([A-Z_][A-Z0-9_]{3,})='
+phantom_kind = "env_var"
+edge_type = "DECLARES"

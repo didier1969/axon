@@ -1,0 +1,23 @@
+[meta]
+language = "yaml"
+file_extensions = ["yaml", "yml"]
+
+[[rules]]
+id = "port_value"
+pattern = '(?i)port:\s*(\d{2,5})'
+phantom_kind = "port"
+edge_type = "EXPOSES"
+min_length = 2
+exclude_patterns = ["^(0|1|80)$"]
+
+[[rules]]
+id = "env_var_in_env_block"
+pattern = '"([A-Z_][A-Z0-9_]{3,})='
+phantom_kind = "env_var"
+edge_type = "DECLARES"
+
+[[rules]]
+id = "env_var_interpolation"
+pattern = '\$\{([A-Z_][A-Z0-9_]{3,})'
+phantom_kind = "env_var"
+edge_type = "READS"

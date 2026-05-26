@@ -1,0 +1,27 @@
+[meta]
+language = "elixir"
+file_extensions = ["ex", "exs"]
+
+[[rules]]
+id = "system_get_env"
+pattern = 'System\.get_env\("([A-Z_][A-Z0-9_]*)"\)'
+phantom_kind = "env_var"
+edge_type = "READS"
+
+[[rules]]
+id = "live_route"
+pattern = 'live\s+"(/[^"]*)"'
+phantom_kind = "route"
+edge_type = "EXPOSES"
+
+[[rules]]
+id = "get_route"
+pattern = 'get\s+"(/[^"]*)"'
+phantom_kind = "route"
+edge_type = "EXPOSES"
+
+[[rules]]
+id = "post_route"
+pattern = 'post\s+"(/[^"]*)"'
+phantom_kind = "route"
+edge_type = "EXPOSES"

@@ -1,0 +1,11 @@
+[meta]
+language = "nix"
+file_extensions = ["nix"]
+
+[[rules]]
+id = "env_var_assign"
+pattern = '([A-Z_][A-Z0-9_]{3,})\s*='
+phantom_kind = "env_var"
+edge_type = "DECLARES"
+min_length = 4
+exclude_patterns = ["^(EOF|OK|NO|YES|NULL|TRUE|FALSE)$"]

@@ -1,0 +1,23 @@
+[meta]
+language = "rust"
+file_extensions = ["rs"]
+
+[[rules]]
+id = "env_var_std"
+pattern = 'env::var(?:_os)?\("([A-Z_][A-Z0-9_]*)"\)'
+phantom_kind = "env_var"
+edge_type = "READS"
+
+[[rules]]
+id = "env_var_macro"
+pattern = 'env!\("([A-Z_][A-Z0-9_]*)"\)'
+phantom_kind = "env_var"
+edge_type = "READS"
+
+[[rules]]
+id = "tcp_bind_port"
+pattern = 'bind\([^)]*[,:]?\s*(\d{2,5})\s*[,\)]'
+phantom_kind = "port"
+edge_type = "EXPOSES"
+min_length = 2
+exclude_patterns = ["^(0|1|80)$"]

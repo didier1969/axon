@@ -159,6 +159,8 @@ pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
     }
 }
 
+pub mod phantom;
+
 pub mod c;
 pub mod c_sharp;
 pub mod cpp;

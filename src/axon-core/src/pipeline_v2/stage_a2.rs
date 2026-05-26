@@ -51,18 +51,38 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         });
     }
     let result = tokio::task::spawn_blocking(move || {
-        let parser = crate::parser::get_parser_for_file(&prep.path).ok_or_else(|| {
-            anyhow::anyhow!("A2: no parser registered for {}", prep.path.display())
-        })?;
-        let extraction = parser.parse(&prep.content);
+        let mut symbols;
+        let mut relations;
+
+        if let Some(parser) = crate::parser::get_parser_for_file(&prep.path) {
+            let extraction = parser.parse(&prep.content);
+            symbols = extraction.symbols;
+            relations = extraction.relations;
+        } else {
+            symbols = Vec::new();
+            relations = Vec::new();
+        }
+
+        let (phantom_syms, phantom_rels) =
+            crate::parser::phantom::phantom_extract(&prep.path, &prep.content, None);
+        symbols.extend(phantom_syms);
+        relations.extend(phantom_rels);
+
+        if symbols.is_empty() && relations.is_empty() {
+            return Err(anyhow::anyhow!(
+                "A2: no parser and no phantom rules for {}",
+                prep.path.display()
+            ));
+        }
+
         Ok(ParsedFile {
             path: prep.path,
             content: prep.content,
             content_hash: prep.content_hash,
             mtime_ms: prep.mtime_ms,
             size_bytes: prep.size_bytes,
-            symbols: extraction.symbols,
-            relations: extraction.relations,
+            symbols,
+            relations,
         })
     })
     .await

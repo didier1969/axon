@@ -227,6 +227,9 @@ impl GraphStore {
         match rel_type.to_lowercase().as_str() {
             "calls" | "calls_otp" => Some("CALLS"),
             "calls_nif" => Some("CALLS_NIF"),
+            "reads" => Some("READS"),
+            "declares" => Some("DECLARES"),
+            "exposes" => Some("EXPOSES"),
             _ => None,
         }
     }
