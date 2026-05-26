@@ -248,12 +248,22 @@ impl McpServer {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
+        // REQ-AXO-901754 — SRS slice 4: detect legacy proximity across
+        // all diff_paths. Non-blocking warning injected into the response.
+        let legacy_proximity_value = self.detect_diff_paths_legacy_proximity(&diff_paths);
+
         if !incremental {
-            return self.axon_commit_work(&json!({
+            let mut response = self.axon_commit_work(&json!({
                 "diff_paths": diff_paths,
                 "message": message,
                 "dry_run": true
-            }));
+            }))?;
+            if let Some(lp) = &legacy_proximity_value {
+                if let Some(data) = response.get_mut("data") {
+                    data["legacy_proximity"] = lp.clone();
+                }
+            }
+            return Some(response);
         }
 
         // REQ-AXO-145 — per-file incremental dry-run. Re-runs axon_commit_work
@@ -310,7 +320,7 @@ impl McpServer {
             )
         };
 
-        Some(json!({
+        let mut response = json!({
             "content": [{ "type": "text", "text": summary_text }],
             "isError": total_violations > 0,
             "data": {
@@ -321,6 +331,59 @@ impl McpServer {
                 "first_failing_path": first_failing_path,
                 "per_file_violations": per_file,
             }
+        });
+        if let Some(lp) = legacy_proximity_value {
+            response["data"]["legacy_proximity"] = lp;
+        }
+        Some(response)
+    }
+
+    /// REQ-AXO-901754 — scan diff_paths for legacy SOLL proximity.
+    fn detect_diff_paths_legacy_proximity(&self, diff_paths: &[Value]) -> Option<Value> {
+        use std::collections::HashSet;
+        let project_code = self.startup_project_code()?;
+        let snapshot = self.soll_cache().snapshot(&project_code).ok()?;
+
+        let mut all_nodes: Vec<super::tools_srs::LegacyNode> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for path_val in diff_paths {
+            let Some(path) = path_val.as_str() else {
+                continue;
+            };
+            if let Some(prox) = super::tools_srs::detect_legacy_proximity(path, &snapshot) {
+                for node in prox.nodes {
+                    if seen.insert(node.id.clone()) {
+                        all_nodes.push(node);
+                    }
+                }
+            }
+        }
+
+        if all_nodes.is_empty() {
+            return None;
+        }
+
+        let direction = all_nodes
+            .first()
+            .map(|n| n.strategy.direction_hint())
+            .unwrap_or("review legacy linkage")
+            .to_string();
+        let confidence = if all_nodes.iter().all(|n| n.successor.is_some()) {
+            "high"
+        } else {
+            "medium"
+        };
+        Some(json!({
+            "nodes": all_nodes.iter().map(|n| json!({
+                "id": n.id,
+                "strategy": n.strategy,
+                "successor": n.successor,
+                "superseded_at": n.superseded_at,
+            })).collect::<Vec<_>>(),
+            "direction": direction,
+            "confidence": confidence,
+            "warning": "diff touches files linked to superseded SOLL nodes"
         }))
     }
 
