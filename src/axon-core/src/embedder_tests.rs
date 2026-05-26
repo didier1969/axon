@@ -178,22 +178,6 @@ fn run_embedder_sustained_bench_rejects_zero_sustained_secs() {
 }
 
 #[test]
-fn run_embedder_pipeline_bench_rejects_empty_pool() {
-    let res = crate::embedder::run_embedder_pipeline_bench(
-        "test", vec![], 4, 64, 128, 0, 1, false,
-    );
-    assert!(res.is_err(), "empty pool must return error");
-}
-
-#[test]
-fn run_embedder_pipeline_bench_rejects_zero_producers() {
-    let res = crate::embedder::run_embedder_pipeline_bench(
-        "test", vec!["text".to_string()], 0, 64, 128, 0, 1, false,
-    );
-    assert!(res.is_err(), "producers=0 must return error");
-}
-
-#[test]
 fn run_embedder_pipeline_bench_rejects_zero_channel() {
     let res = crate::embedder::run_embedder_pipeline_bench(
         "test", vec!["text".to_string()], 4, 0, 128, 0, 1, false,

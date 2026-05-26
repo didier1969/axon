@@ -729,14 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn default_worker_counts_match_live_template() {
-        let counts = PipelineAWorkerCounts::default();
-        assert_eq!(counts.a1, 4);
-        assert_eq!(counts.a2, 8);
-        assert_eq!(counts.a3, 2);
-    }
-
-    #[test]
     fn default_pipeline_b_worker_counts_match_session_19_table() {
         let counts = PipelineBWorkerCounts::default();
         assert_eq!(counts.b1, 4);

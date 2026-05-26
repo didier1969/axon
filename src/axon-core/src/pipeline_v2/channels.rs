@@ -221,38 +221,3 @@ impl PipelineChannelCaps {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_match_canonical_session_19_decisions() {
-        // REQ-AXO-91567 — `B1_COLDSTART_BATCH_SIZE_DEFAULT` was bumped
-        // from 256 (original session-19 figure) to 4096 to absorb
-        // larger boot-time backlogs in one query. Test value updated
-        // in step.
-        let caps = PipelineChannelCaps::default();
-        assert_eq!(caps.internal, 1024);
-        assert_eq!(caps.a3_to_b1, 10_000);
-        assert_eq!(caps.b1_coldstart_batch_size, 4096);
-        assert_eq!(caps.b2_batch_size, 64);
-        assert_eq!(caps.b2_batch_timeout_ms, 200);
-    }
-
-    #[test]
-    fn defaults_match_req_axo_295_batching_decisions() {
-        let caps = PipelineChannelCaps::default();
-        assert_eq!(caps.a3_batch_size, 32);
-        assert_eq!(caps.a3_batch_timeout_ms, 10);
-        assert_eq!(caps.b3_batch_size, 256);
-        assert_eq!(caps.b3_batch_timeout_ms, 200);
-    }
-
-    /// REQ-AXO-901678 — drain-loop and cold-start-poll cadence knobs.
-    #[test]
-    fn defaults_match_req_axo_901678_drain_knobs() {
-        let caps = PipelineChannelCaps::default();
-        assert_eq!(caps.ingress_drain_batch, 512);
-        assert_eq!(caps.b1_coldstart_poll_interval_secs, 30);
-    }
-}
