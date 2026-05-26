@@ -42,7 +42,7 @@ processes:
       http_get:
         host: "127.0.0.1"
         scheme: "http"
-        path: "/livez"
+        path: "/readyz"
         port: 44139
       initial_delay_seconds: 5
       period_seconds: 5
@@ -63,6 +63,7 @@ processes:
     working_dir: "."
     environment:
       - "AXON_INSTANCE_KIND=dev"
+      - "AXON_INDEXER_HEALTH_PORT=44149"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"

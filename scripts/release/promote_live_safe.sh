@@ -59,17 +59,6 @@ PROMOTE_LOG="$LOG_DIR/promote-${PROMOTE_TIMESTAMP}.log"
 
 CURRENT_STEP=0
 CURRENT_STEP_NAME="init"
-STEP_NAMES=(
-  "0:init"
-  "1:build"
-  "2:dev_restart"
-  "2b:dev_gate"
-  "3:preflight"
-  "4:manifest"
-  "5:promote_copy_restart"
-  "6:qualify_mcp"
-  "7:finalize"
-)
 
 promote_log() {
   local ts

@@ -84,7 +84,6 @@ detect_gpu() {
 if [[ "$RUNTIME_MODE" == indexer_full || "$RUNTIME_MODE" == indexer_vector ]]; then
     if detect_gpu; then
         export AXON_EMBEDDING_PROVIDER="tensorrt"
-        _nvml="$(/usr/lib/wsl/lib/nvidia-smi --query 2>/dev/null | head -1 || true)"
         for candidate in /usr/lib/wsl/lib/libnvidia-ml.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1; do
             [[ -f "$candidate" ]] && export AXON_NVML_LIBRARY_PATH="$candidate" && break
         done
@@ -167,7 +166,9 @@ if ig: print(f'export AXON_INSTALL_GENERATION={ig}')
         if [[ -n "${BRAIN_ARTIFACT:-}" && -f "$BRAIN_ARTIFACT" ]]; then
             mkdir -p bin
             install -m 755 "$BRAIN_ARTIFACT" "$BRAIN_BIN"
-            install -m 755 "${INDEXER_ARTIFACT:-}" "$INDEXER_BIN" 2>/dev/null || true
+            if [[ -n "${INDEXER_ARTIFACT:-}" && -f "$INDEXER_ARTIFACT" ]]; then
+                install -m 755 "$INDEXER_ARTIFACT" "$INDEXER_BIN"
+            fi
         fi
     fi
 else

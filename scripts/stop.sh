@@ -496,11 +496,6 @@ if [[ -x "$AXONCTL_BIN" ]]; then
     fi
     "$AXONCTL_BIN" "${AXONCTL_ARGS[@]}" && AXONCTL_OK=1 || AXONCTL_OK=0
 
-    if [[ "${AXON_DROP_WAL_ON_STOP:-0}" == "1" ]]; then
-        echo "⚠️ AXON_DROP_WAL_ON_STOP=1 set: deleting DuckDB WAL files during stop."
-        rm -f "$AXON_DB_ROOT/"*.wal
-    fi
-
     # REQ-AXO-093 — orphan-socket guard: axonctl stop kills processes but
     # does not always unlink the AF_UNIX sockets. Leftover sockets cause
     # the next start to misread "data plane already up" and silently skip
