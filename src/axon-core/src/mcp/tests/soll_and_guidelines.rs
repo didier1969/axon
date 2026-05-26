@@ -2201,8 +2201,8 @@ fn test_axon_export_soll() {
     let vis_id = format!("VIS-{code}-001");
     let cpt_id = format!("CPT-{code}-001");
     let test_vision_title = format!("Test Vision {code}");
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', '{test_vision_title}', 'Desc', '', '{{}}')")).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_id}', 'Concept', '{code}', 'My Concept', 'Expl', '', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', '{test_vision_title}', 'Desc', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_id}', 'Concept', '{code}', 'My Concept', 'Expl', 'current', '{{}}')")).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2434,7 +2434,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_id}', 'Decision', '{code}', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'current', '{{}}')"))
         .unwrap();
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_other}', 'Concept', '{other}', 'Other Concept', 'Expl', '', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_other}', 'Concept', '{other}', 'Other Concept', 'Expl', 'current', '{{}}')")).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2722,7 +2722,7 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
     let dangling_dec = format!("DEC-{code}-404");
     server
         .graph_store
-        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pil_id}', 'Pillar', '{code}', 'Platform Core', 'Protect SOLL', '', '{{}}')"))
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pil_id}', 'Pillar', '{code}', 'Platform Core', 'Protect SOLL', 'current', '{{}}')"))
         .unwrap();
     server
         .graph_store
@@ -2774,10 +2774,10 @@ fn test_axon_export_soll_can_scope_by_project_code() {
     let cpt_kept = format!("CPT-{kept}-001");
     let vis_excluded = format!("VIS-{excluded}-001");
     let cpt_excluded = format!("CPT-{excluded}-001");
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_excluded}', 'Vision', '{excluded}', 'Excluded Vision', 'Desc', '', '{{}}')")).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_kept}', 'Vision', '{kept}', 'Kept Vision', 'Desc', '', '{{}}')")).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_excluded}', 'Concept', '{excluded}', 'Excluded Concept', 'Expl', '', '{{}}')")).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_kept}', 'Concept', '{kept}', 'Kept Concept', 'Expl', '', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_excluded}', 'Vision', '{excluded}', 'Excluded Vision', 'Desc', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_kept}', 'Vision', '{kept}', 'Kept Vision', 'Desc', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_excluded}', 'Concept', '{excluded}', 'Excluded Concept', 'Expl', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cpt_kept}', 'Concept', '{kept}', 'Kept Concept', 'Expl', 'current', '{{}}')")).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
