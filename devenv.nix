@@ -227,7 +227,6 @@ in
     echo "Plane B (Runtime + Postgres): Rust $(rustc --version | awk '{print $2}')" >&2
     echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')" >&2
     echo "Storage:                 PostgreSQL 17 + pgvector + pgmq @ 127.0.0.1:44144" >&2
-    echo "HydraDB:                 detached legacy workflow" >&2
     echo "---------------------------------------" >&2
 
     # Daily SOLL backup: fire-and-forget, idempotent (1×/UTC-day max).

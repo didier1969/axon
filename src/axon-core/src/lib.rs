@@ -3,7 +3,6 @@
 extern crate self as axon_core;
 
 pub mod bench_pipeline_stages;
-pub mod benchmark_store;
 pub mod bridge;
 pub mod code_chunker;
 pub mod config;

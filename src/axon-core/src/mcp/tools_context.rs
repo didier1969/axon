@@ -13,7 +13,6 @@ use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
 mod retrieval_model;
-mod rrf_fusion;
 use retrieval_model::{
     ChunkCandidate, EntryCandidate, RetrievalDiagnostics, RetrievalRoute, RetrievalRuntimeState,
     RetrievalTimings,

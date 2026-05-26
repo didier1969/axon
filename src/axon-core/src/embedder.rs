@@ -53,8 +53,6 @@ pub(crate) mod lifecycle_machine;
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]
 mod provider_runtime;
-#[path = "embedder/vector_executor.rs"]
-mod vector_executor;
 
 #[cfg(test)]
 pub(crate) use batch_lanes::reset_token_lane_classifier_for_tests;
