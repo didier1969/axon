@@ -33,9 +33,9 @@ struct IstNotifyPayload {
     #[serde(default)]
     project_code: String,
     #[serde(default)]
-    op: String,
+    _op: String,
     #[serde(default, rename = "table")]
-    table_name: String,
+    _table_name: String,
 }
 
 /// Supervised listener loop. Returns immediately ; reconnects forever on

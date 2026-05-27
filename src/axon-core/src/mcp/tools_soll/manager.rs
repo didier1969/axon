@@ -24,10 +24,7 @@ fn resolve_create_status<'a>(
     }
 }
 
-/// REQ-AXO-323 Fault 2 — `create` MUST NOT silently overwrite an existing
-/// id. Build a canonical error envelope when a pre-check finds the node
-/// already exists. Extracted as a pure formatter so the contract is unit
-/// testable without a live PG backend.
+#[cfg(test)]
 fn id_exists_envelope(id: &str, entity_type: &str) -> serde_json::Value {
     serde_json::json!({
         "content": [{
@@ -171,20 +168,6 @@ impl McpServer {
             return "Link error: writer rejected the edge insert. Verify both endpoints exist via `sql SELECT id FROM soll.Node WHERE id IN ('<src>','<tgt>')` and that the relation_type is allowed for the pair via `soll_relation_schema`.".to_string();
         }
         format!("Link error: {}", raw)
-    }
-
-    fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
-        if error_text.contains("Explicit relation required") {
-            "needs_relation_hint"
-        } else if error_text.contains("not found") {
-            "invalid_target_id"
-        } else if error_text.contains("\"error\":\"forbidden_relation\"")
-            || error_text.contains("No canonical relation allowed")
-        {
-            "forbidden_relation"
-        } else {
-            "attach_failed"
-        }
     }
 
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {

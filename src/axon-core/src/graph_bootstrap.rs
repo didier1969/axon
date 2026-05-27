@@ -235,7 +235,7 @@ impl GraphStore {
             }
 
             let pool = Arc::new(LatticePool {
-                lib: lib.clone(),
+                _lib: lib.clone(),
                 symbols,
                 writer_ctx: Mutex::new(writer_ptr),
                 reader_ctx: Mutex::new(std::ptr::null_mut()),

@@ -67,7 +67,7 @@ impl PluginSymbols {
 }
 
 pub(crate) struct LatticePool {
-    pub(crate) lib: Arc<Library>,
+    pub(crate) _lib: Arc<Library>,
     pub(crate) symbols: PluginSymbols,
     pub(crate) writer_ctx: Mutex<*mut c_void>,
     pub(crate) reader_ctx: Mutex<*mut c_void>,

@@ -46,25 +46,6 @@ fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String 
         .unwrap_or_else(|_| "[]".to_string())
 }
 
-fn json_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Number(number) => {
-            if let Some(v) = number.as_i64() {
-                Some(v)
-            } else if let Some(v) = number.as_u64() {
-                i64::try_from(v).ok()
-            } else {
-                number.as_f64().map(|v| v.round() as i64)
-            }
-        }
-        Value::String(s) => s
-            .parse::<i64>()
-            .ok()
-            .or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64)),
-        _ => None,
-    }
-}
-
 impl McpServer {
     fn canonical_source_names(canonical_sources: Option<&Value>) -> Vec<String> {
         canonical_sources

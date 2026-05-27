@@ -276,42 +276,6 @@ impl GraphStore {
         format!("{:016x}", hasher.finish())
     }
 
-    fn derived_cleanup_queries(source_selector: &str) -> Vec<String> {
-        let affected_symbols = format!(
-            "SELECT target_id FROM CONTAINS WHERE source_id IN ({})",
-            source_selector
-        );
-        let affected_symbol_anchors = format!(
-            "SELECT DISTINCT anchor_id FROM GraphProjection WHERE anchor_type = 'symbol' AND target_id IN ({})",
-            affected_symbols
-        );
-
-        vec![
-            format!(
-                "DELETE FROM GraphEmbedding WHERE \
-                 (anchor_type = 'file' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({}));",
-                source_selector, affected_symbols, affected_symbol_anchors
-            ),
-            format!(
-                "DELETE FROM GraphProjectionState WHERE \
-                 (anchor_type = 'file' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({}));",
-                source_selector, affected_symbols, affected_symbol_anchors
-            ),
-            format!(
-                "DELETE FROM GraphProjection WHERE \
-                 (anchor_type = 'file' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
-                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
-                 OR target_id IN ({});",
-                source_selector, affected_symbols, affected_symbol_anchors, affected_symbols
-            ),
-        ]
-    }
-
     // REQ-AXO-901653 slice-5a: `oldest_graph_pending_age_ms` +
     // `oldest_semantic_pending_age_ms` deleted ; both joined on
     // File.graph_ready / File.vector_ready / File.status.

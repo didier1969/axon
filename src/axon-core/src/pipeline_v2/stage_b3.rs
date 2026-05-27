@@ -11,7 +11,6 @@
 //! between B2 and B3 = lost in RAM; cold-start poll DB (slice S4c)
 //! catches the chunk on next boot.
 
-use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

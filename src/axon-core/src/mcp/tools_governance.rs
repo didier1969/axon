@@ -36,14 +36,6 @@ impl McpServer {
             .unwrap_or(0)
     }
 
-    fn sql_rows(&self, query: &str) -> Vec<Vec<Value>> {
-        self.graph_store
-            .execute_raw_sql_gateway(query)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-            .unwrap_or_default()
-    }
-
     fn project_filter(project: &str, column: &str) -> String {
         if project == "*" {
             "1=1".to_string()
