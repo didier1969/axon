@@ -817,12 +817,14 @@ impl GraphStore {
         let safe_path = Self::escape_sql(path);
         let safe_hash = Self::escape_sql(content_hash);
         self.execute(&format!(
-            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status) \
-             VALUES ('{path}', '{hash}', {ts}, 'indexed') \
+            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, retry_count, last_attempt_ms) \
+             VALUES ('{path}', '{hash}', {ts}, 'indexed', 0, NULL) \
              ON CONFLICT (path) DO UPDATE SET \
-                 content_hash = EXCLUDED.content_hash, \
-                 last_seen_ms = EXCLUDED.last_seen_ms, \
-                 status = 'indexed';",
+                 content_hash    = EXCLUDED.content_hash, \
+                 last_seen_ms    = EXCLUDED.last_seen_ms, \
+                 status          = 'indexed', \
+                 retry_count     = 0, \
+                 last_attempt_ms = NULL;",
             path = safe_path,
             hash = safe_hash,
             ts = last_seen_ms,
@@ -870,16 +872,35 @@ impl GraphStore {
             .collect())
     }
 
-    /// DEC-AXO-901619: select files with status='discovered' for
-    /// pipeline-A cold-start re-ingestion. Symmetric to
-    /// `select_chunks_needing_embedding` for pipeline B.
-    pub fn select_files_needing_indexing(&self, limit: usize) -> Result<Vec<String>> {
-        let raw = self.query_json_writer(&format!(
-            "SELECT path FROM IndexedFile \
-             WHERE status = 'discovered' \
-             ORDER BY discovered_ms ASC \
-             LIMIT {limit}"
-        ))?;
+    /// DEC-AXO-901620 C3+W1: atomically SELECT + claim files for indexing.
+    /// Skips poison pills (retry_count >= max_retry) and already-claimed
+    /// files (last_attempt_ms within claim_cutoff). Increments retry_count
+    /// and stamps last_attempt_ms on claimed files.
+    pub fn select_and_claim_files_for_indexing(
+        &self,
+        limit: usize,
+        max_retry: i32,
+        claim_cutoff_ms: i64,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let sql = format!(
+            "WITH candidates AS ( \
+                 SELECT path FROM IndexedFile \
+                 WHERE status = 'discovered' \
+                   AND retry_count < {max_retry} \
+                   AND (last_attempt_ms IS NULL OR last_attempt_ms < {claim_cutoff_ms}) \
+                 ORDER BY discovered_ms ASC \
+                 LIMIT {limit} \
+                 FOR UPDATE SKIP LOCKED \
+             ) \
+             UPDATE IndexedFile SET \
+                 retry_count = retry_count + 1, \
+                 last_attempt_ms = {now_ms} \
+             FROM candidates \
+             WHERE IndexedFile.path = candidates.path \
+             RETURNING IndexedFile.path"
+        );
+        let raw = self.query_json_writer(&sql)?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
             .unwrap_or_default();
         Ok(rows

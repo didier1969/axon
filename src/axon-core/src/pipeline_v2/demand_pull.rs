@@ -1,12 +1,16 @@
 //! DEC-AXO-901620 — Demand-pull pipeline feeders with PG NOTIFY wake.
 //!
-//! Each pipeline stage self-feeds: when its internal work buffer drops
-//! below a threshold, it pulls a batch from PG. PG NOTIFY wakes the
-//! puller when new work arrives; a 30s safety-net poll catches lost
-//! notifications.
+//! Two-value model per pipeline:
+//!   - **threshold**: pull only when the pipeline's in-flight count drops
+//!     below this value (= seconds_of_work × throughput)
+//!   - **batch**: max items per PG SELECT
 //!
-//! Idle detection: N consecutive empty pulls signal the pipeline to
-//! enter idle state (GPU session release, reduced polling).
+//! Claim semantics (C3/W1): demand-pull atomically increments retry_count
+//! and sets last_attempt_ms before feeding items. Files stuck after 3
+//! attempts are skipped (poison pill). A3 resets retry_count on success.
+//!
+//! W2: demand-pull checks channel capacity before pulling, preserving
+//! headroom for real-time watcher events.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,27 +28,22 @@ const BACKOFF_INITIAL_MS: u64 = 200;
 const BACKOFF_MAX_MS: u64 = 30_000;
 const SAFETY_POLL_SECS: u64 = 30;
 const IDLE_THRESHOLD: u32 = 5;
+const MAX_RETRY: i32 = 3;
+const CLAIM_TIMEOUT_MS: i64 = 300_000; // 5 min
 
 /// Spawn the demand-pull feeder for pipeline A.
-///
-/// Listens on PG channel `file_discovered`. On wake (or every 30s
-/// safety poll), pulls up to `batch_size` discovered files from
-/// `IndexedFile WHERE status='discovered'` and sends them into the
-/// pipeline A input channel.
-///
-/// When `IDLE_THRESHOLD` consecutive pulls return empty, logs idle
-/// state. The lifecycle watchdog (GpuB2Embedder) handles GPU release
-/// independently via its own idle timer.
 pub fn spawn_pipeline_a_demand_pull(
     store: Arc<GraphStore>,
     database_url: String,
     input_tx: Sender<PathBuf>,
+    threshold: usize,
     batch_size: usize,
 ) {
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_a_loop(&store, &database_url, &input_tx, batch_size).await {
+            match demand_pull_a_loop(&store, &database_url, &input_tx, threshold, batch_size).await
+            {
                 Ok(()) => {
                     warn!("demand-pull A: LISTEN loop exited cleanly; reconnecting");
                     backoff_ms = BACKOFF_INITIAL_MS;
@@ -67,6 +66,7 @@ async fn demand_pull_a_loop(
     store: &Arc<GraphStore>,
     database_url: &str,
     input_tx: &Sender<PathBuf>,
+    threshold: usize,
     batch_size: usize,
 ) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
@@ -100,20 +100,20 @@ async fn demand_pull_a_loop(
         .await
         .context("demand-pull A: LISTEN failed")?;
 
-    info!("demand-pull A: LISTEN file_discovered active, batch_size={batch_size}");
+    info!(
+        "demand-pull A: active (threshold={threshold}, batch={batch_size})"
+    );
 
     let mut consecutive_empty = 0u32;
     let safety_interval = Duration::from_secs(SAFETY_POLL_SECS);
 
-    // Initial pull to drain any backlog from before we connected.
-    pull_and_feed_a(store, input_tx, batch_size, &mut consecutive_empty).await;
+    // Initial drain of any backlog.
+    pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty).await;
 
     loop {
-        // Wait for NOTIFY or safety timeout.
         let woke_by_notify = tokio::select! {
             biased;
-            Some(_notification) = notify_rx.recv() => {
-                // Drain coalesced notifications (scanner writes batches).
+            Some(_) = notify_rx.recv() => {
                 while notify_rx.try_recv().is_ok() {}
                 true
             }
@@ -126,9 +126,10 @@ async fn demand_pull_a_loop(
             consecutive_empty = 0;
         }
 
-        // Demand-pull: keep pulling batches until PG returns empty.
         loop {
-            let pulled = pull_and_feed_a(store, input_tx, batch_size, &mut consecutive_empty).await;
+            let pulled =
+                pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty)
+                    .await;
             if pulled == 0 {
                 break;
             }
@@ -143,13 +144,31 @@ async fn demand_pull_a_loop(
 async fn pull_and_feed_a(
     store: &Arc<GraphStore>,
     input_tx: &Sender<PathBuf>,
+    threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
 ) -> usize {
+    // W2: check channel capacity — only pull if pipeline has headroom.
+    let in_flight = input_tx.max_capacity() - input_tx.capacity();
+    if in_flight >= threshold {
+        return 0;
+    }
+
     let store_clone = store.clone();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let claim_cutoff = now_ms - CLAIM_TIMEOUT_MS;
     let limit = batch_size;
+
+    // C3+W1: SELECT with retry_count < MAX_RETRY and claim timeout.
+    // Then UPDATE to claim (increment retry_count + set last_attempt_ms).
     let result = tokio::task::spawn_blocking(move || {
-        store_clone.select_files_needing_indexing(limit)
+        let paths = store_clone.select_and_claim_files_for_indexing(
+            limit,
+            MAX_RETRY,
+            claim_cutoff,
+            now_ms,
+        )?;
+        Ok::<Vec<String>, anyhow::Error>(paths)
     })
     .await;
 
@@ -165,7 +184,7 @@ async fn pull_and_feed_a(
             }
             *consecutive_empty = 0;
             if sent > 0 {
-                info!("demand-pull A: fed {sent}/{count} files to pipeline A");
+                info!("demand-pull A: fed {sent}/{count} files (in_flight was {in_flight}/{threshold})");
             }
             sent
         }
@@ -188,20 +207,19 @@ async fn pull_and_feed_a(
 }
 
 /// Spawn the demand-pull feeder for pipeline B.
-///
-/// Listens on PG channel `chunk_pending_embed`. On wake (or every 30s
-/// safety poll), pulls chunks needing embedding and sends them into
-/// the B1 inbox channel.
 pub fn spawn_pipeline_b_demand_pull(
     store: Arc<GraphStore>,
     database_url: String,
     b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
+    threshold: usize,
     batch_size: usize,
 ) {
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_b_loop(&store, &database_url, &b1_inbox_tx, batch_size).await {
+            match demand_pull_b_loop(&store, &database_url, &b1_inbox_tx, threshold, batch_size)
+                .await
+            {
                 Ok(()) => {
                     warn!("demand-pull B: LISTEN loop exited cleanly; reconnecting");
                     backoff_ms = BACKOFF_INITIAL_MS;
@@ -224,6 +242,7 @@ async fn demand_pull_b_loop(
     store: &Arc<GraphStore>,
     database_url: &str,
     b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
+    threshold: usize,
     batch_size: usize,
 ) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
@@ -257,17 +276,19 @@ async fn demand_pull_b_loop(
         .await
         .context("demand-pull B: LISTEN failed")?;
 
-    info!("demand-pull B: LISTEN chunk_pending_embed active, batch_size={batch_size}");
+    info!(
+        "demand-pull B: active (threshold={threshold}, batch={batch_size})"
+    );
 
     let mut consecutive_empty = 0u32;
     let safety_interval = Duration::from_secs(SAFETY_POLL_SECS);
 
-    pull_and_feed_b(store, b1_inbox_tx, batch_size, &mut consecutive_empty).await;
+    pull_and_feed_b(store, b1_inbox_tx, threshold, batch_size, &mut consecutive_empty).await;
 
     loop {
         let woke_by_notify = tokio::select! {
             biased;
-            Some(_notification) = notify_rx.recv() => {
+            Some(_) = notify_rx.recv() => {
                 while notify_rx.try_recv().is_ok() {}
                 true
             }
@@ -281,7 +302,14 @@ async fn demand_pull_b_loop(
         }
 
         loop {
-            let pulled = pull_and_feed_b(store, b1_inbox_tx, batch_size, &mut consecutive_empty).await;
+            let pulled = pull_and_feed_b(
+                store,
+                b1_inbox_tx,
+                threshold,
+                batch_size,
+                &mut consecutive_empty,
+            )
+            .await;
             if pulled == 0 {
                 break;
             }
@@ -296,9 +324,16 @@ async fn demand_pull_b_loop(
 async fn pull_and_feed_b(
     store: &Arc<GraphStore>,
     b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
+    threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
 ) -> usize {
+    // W2: check channel capacity.
+    let in_flight = b1_inbox_tx.max_capacity() - b1_inbox_tx.capacity();
+    if in_flight >= threshold {
+        return 0;
+    }
+
     let store_clone = store.clone();
     let result = tokio::task::spawn_blocking(move || {
         store_clone.select_chunks_needing_embedding(batch_size)
@@ -317,7 +352,7 @@ async fn pull_and_feed_b(
             }
             *consecutive_empty = 0;
             if sent > 0 {
-                info!("demand-pull B: fed {sent}/{count} chunks to pipeline B");
+                info!("demand-pull B: fed {sent}/{count} chunks (in_flight was {in_flight}/{threshold})");
             }
             sent
         }

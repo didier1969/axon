@@ -571,10 +571,9 @@ fn dispatch_scanner_batch(
     false
 }
 
-/// DEC-AXO-901619: persist discovered files in PG so the work queue
-/// survives memory pressure and restarts. Uses multi-row INSERT with
-/// hash-aware CASE to avoid regressing 'indexed' → 'discovered' for
-/// unchanged files.
+/// DEC-AXO-901619 + C1/C2 fixes: persist discovered files in PG with
+/// mtime+size change detection. Unchanged indexed files skip the UPDATE
+/// entirely (zero WAL). Changed files force status='discovered'.
 fn persist_discovery_batch(
     graph: &Arc<GraphStore>,
     batch: &[(String, String, i64, i64)],
@@ -584,27 +583,40 @@ fn persist_discovery_batch(
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut values = Vec::with_capacity(batch.len());
-    for (path, _project, _size, _mtime) in batch {
+    for (path, _project, size, mtime) in batch {
         let safe_path = path.replace('\'', "''");
+        // mtime from scanner is seconds, convert to ms for consistency
+        let mtime_ms = *mtime * 1000;
         values.push(format!(
-            "('{safe_path}', '', {now_ms}, 'discovered', {now_ms})"
+            "('{safe_path}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
         ));
     }
-    // content_hash='' for discovery (A1 hasn't computed it yet).
-    // Status CASE: if the file is already 'indexed' and its content_hash
-    // is non-empty (A3 wrote it), preserve the status. Only newly
-    // discovered files (no existing row) or files where A3 has never
-    // written get 'discovered'.
+    // C1: mtime_ms + size_bytes enable change detection without reading content.
+    // C2: WHERE clause skips UPDATE entirely when file is unchanged (zero WAL).
+    // Changed file (mtime or size differ) → force status='discovered' for re-indexing.
+    // Unchanged indexed file → no row update at all.
     let sql = format!(
-        "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, discovered_ms) \
+        "INSERT INTO IndexedFile \
+             (path, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count, last_attempt_ms) \
          VALUES {} \
          ON CONFLICT (path) DO UPDATE SET \
              discovered_ms = EXCLUDED.discovered_ms, \
              last_seen_ms  = EXCLUDED.last_seen_ms, \
+             mtime_ms      = EXCLUDED.mtime_ms, \
+             size_bytes    = EXCLUDED.size_bytes, \
+             retry_count   = CASE \
+                 WHEN IndexedFile.mtime_ms != EXCLUDED.mtime_ms \
+                   OR IndexedFile.size_bytes != EXCLUDED.size_bytes \
+                 THEN 0 ELSE IndexedFile.retry_count END, \
              status = CASE \
-                 WHEN IndexedFile.status = 'indexed' THEN IndexedFile.status \
-                 ELSE 'discovered' \
-             END",
+                 WHEN IndexedFile.mtime_ms != EXCLUDED.mtime_ms \
+                   OR IndexedFile.size_bytes != EXCLUDED.size_bytes \
+                 THEN 'discovered' \
+                 ELSE IndexedFile.status \
+             END \
+         WHERE IndexedFile.mtime_ms != EXCLUDED.mtime_ms \
+            OR IndexedFile.size_bytes != EXCLUDED.size_bytes \
+            OR IndexedFile.status = 'discovered'",
         values.join(", ")
     );
     graph.execute(&sql)

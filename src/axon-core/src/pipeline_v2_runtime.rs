@@ -73,11 +73,25 @@ pub const PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT: u8 = 50;
 /// reacting in real time.
 const PERIODIC_SWEEP_HINT_PRIORITY: i64 = 50;
 
+fn demand_pull_a_threshold_from_env() -> usize {
+    std::env::var("AXON_DEMAND_PULL_A_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+}
+
 fn demand_pull_a_batch_from_env() -> usize {
     std::env::var("AXON_DEMAND_PULL_A_BATCH")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(200)
+}
+
+fn demand_pull_b_threshold_from_env() -> usize {
+    std::env::var("AXON_DEMAND_PULL_B_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500)
 }
 
 fn demand_pull_b_batch_from_env() -> usize {
@@ -294,12 +308,14 @@ pub fn spawn_pipeline_v2_indexer(
         // DEC-AXO-901620: demand-pull B replaces the supply-push cold-start
         // poll. PG NOTIFY on `chunk_pending_embed` wakes the puller;
         // 30s safety-net poll catches lost notifications.
+        let demand_pull_b_threshold = demand_pull_b_threshold_from_env();
         let demand_pull_b_batch = demand_pull_b_batch_from_env();
         let db_url_b = resolve_database_url_for_listener();
         crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
             store.clone(),
             db_url_b,
             b1_inbox_tx_for_poll,
+            demand_pull_b_threshold,
             demand_pull_b_batch,
         );
     } else {
@@ -387,12 +403,14 @@ pub fn spawn_pipeline_v2_indexer(
     // DEC-AXO-901620: demand-pull A replaces the supply-push cold-start
     // poll. PG NOTIFY on `file_discovered` wakes the puller; 30s
     // safety-net poll catches lost notifications.
+    let demand_pull_a_threshold = demand_pull_a_threshold_from_env();
     let demand_pull_a_batch = demand_pull_a_batch_from_env();
     let db_url_a = resolve_database_url_for_listener();
     crate::pipeline_v2::demand_pull::spawn_pipeline_a_demand_pull(
         store.clone(),
         db_url_a,
         handles_a.input_tx.clone(),
+        demand_pull_a_threshold,
         demand_pull_a_batch,
     );
 

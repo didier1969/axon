@@ -787,14 +787,16 @@ async fn copy_indexed_files_in_tx(
     }
     writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
 
-    // DEC-AXO-901619: A3 unconditionally promotes to 'indexed'.
-    // discovered_ms preserved (scanner's timestamp for delete detection).
+    // DEC-AXO-901619 + C3: A3 unconditionally promotes to 'indexed'
+    // and resets retry_count + clears last_attempt_ms (success = clean slate).
     let merge_sql = "INSERT INTO indexedfile (path, content_hash, last_seen_ms, status) \
          SELECT path, content_hash, last_seen_ms, 'indexed' FROM _bulk_indexedfile_stage \
          ON CONFLICT (path) DO UPDATE SET \
-             content_hash = EXCLUDED.content_hash, \
-             last_seen_ms = EXCLUDED.last_seen_ms, \
-             status = 'indexed'";
+             content_hash    = EXCLUDED.content_hash, \
+             last_seen_ms    = EXCLUDED.last_seen_ms, \
+             status          = 'indexed', \
+             retry_count     = 0, \
+             last_attempt_ms = NULL";
     tx.batch_execute(merge_sql)
         .await
         .context("bulk_writer indexedfile stage merge")?;

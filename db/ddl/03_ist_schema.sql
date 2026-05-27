@@ -28,11 +28,15 @@ DROP TABLE IF EXISTS public.File CASCADE;
 -- file discovery persistent — scanner writes 'discovered', A3 promotes
 -- to 'indexed'. On restart, WHERE status='discovered' = pipeline A backlog.
 CREATE TABLE IF NOT EXISTS public.IndexedFile (
-    path          TEXT   PRIMARY KEY,
-    content_hash  TEXT   NOT NULL,
-    last_seen_ms  BIGINT NOT NULL,
-    status        TEXT   NOT NULL DEFAULT 'indexed',
-    discovered_ms BIGINT NOT NULL DEFAULT 0,
+    path            TEXT   PRIMARY KEY,
+    content_hash    TEXT   NOT NULL,
+    last_seen_ms    BIGINT NOT NULL,
+    status          TEXT   NOT NULL DEFAULT 'indexed',
+    discovered_ms   BIGINT NOT NULL DEFAULT 0,
+    mtime_ms        BIGINT NOT NULL DEFAULT 0,
+    size_bytes      BIGINT NOT NULL DEFAULT 0,
+    retry_count     INT    NOT NULL DEFAULT 0,
+    last_attempt_ms BIGINT,
     CONSTRAINT indexedfile_status_check CHECK (status IN ('discovered', 'indexed'))
 );
 CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
