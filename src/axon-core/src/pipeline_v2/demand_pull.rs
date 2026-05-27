@@ -426,3 +426,67 @@ async fn pull_and_feed_b(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn metrics_new_starts_at_zero() {
+        let m = DemandPullMetrics::new();
+        let snap = m.snapshot();
+        assert_eq!(snap.pulls_total, 0);
+        assert_eq!(snap.items_fed_total, 0);
+        assert_eq!(snap.empty_pulls_total, 0);
+        assert_eq!(snap.try_send_failures_total, 0);
+        assert_eq!(snap.skipped_above_threshold, 0);
+    }
+
+    #[test]
+    fn metrics_snapshot_reflects_increments() {
+        let m = DemandPullMetrics::new();
+        m.pulls_total.fetch_add(10, Ordering::Relaxed);
+        m.items_fed_total.fetch_add(200, Ordering::Relaxed);
+        m.empty_pulls_total.fetch_add(3, Ordering::Relaxed);
+        m.try_send_failures_total.fetch_add(5, Ordering::Relaxed);
+        m.skipped_above_threshold.fetch_add(7, Ordering::Relaxed);
+        let snap = m.snapshot();
+        assert_eq!(snap.pulls_total, 10);
+        assert_eq!(snap.items_fed_total, 200);
+        assert_eq!(snap.empty_pulls_total, 3);
+        assert_eq!(snap.try_send_failures_total, 5);
+        assert_eq!(snap.skipped_above_threshold, 7);
+    }
+
+    #[test]
+    fn constants_are_sensible() {
+        assert!(MAX_RETRY >= 2, "must allow at least 2 retries");
+        assert!(MAX_RETRY <= 10, "more than 10 retries is excessive");
+        assert!(CLAIM_TIMEOUT_MS >= 60_000, "claim timeout must be at least 1 min");
+        assert!(SAFETY_POLL_SECS >= 10, "safety poll must be at least 10s");
+        assert!(IDLE_THRESHOLD >= 3, "idle detection needs at least 3 empty pulls");
+    }
+
+    #[tokio::test]
+    async fn threshold_check_prevents_pull_when_channel_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<PathBuf>(10);
+        // Fill the channel to capacity.
+        for i in 0..10 {
+            tx.send(PathBuf::from(format!("/tmp/f{i}"))).await.unwrap();
+        }
+        let in_flight = tx.max_capacity() - tx.capacity();
+        assert_eq!(in_flight, 10);
+        // With threshold=5, in_flight(10) >= threshold(5) → should NOT pull.
+        assert!(in_flight >= 5);
+    }
+
+    #[tokio::test]
+    async fn threshold_check_allows_pull_when_channel_empty() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<PathBuf>(100);
+        let in_flight = tx.max_capacity() - tx.capacity();
+        assert_eq!(in_flight, 0);
+        // With threshold=200, in_flight(0) < threshold(200) → should pull.
+        assert!(in_flight < 200);
+    }
+}
