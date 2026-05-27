@@ -696,7 +696,10 @@ async fn copy_chunks_in_tx(
             chunk_part_index = EXCLUDED.chunk_part_index, \
             chunk_part_count = EXCLUDED.chunk_part_count, \
             chunk_path = EXCLUDED.chunk_path, \
-            token_count = EXCLUDED.token_count",
+            token_count = EXCLUDED.token_count, \
+            embed_status = CASE \
+                WHEN Chunk.content_hash IS DISTINCT FROM EXCLUDED.content_hash \
+                THEN 'pending' ELSE Chunk.embed_status END",
     )
     .await
     .context("bulk_writer Chunk stage merge (batch)")?;

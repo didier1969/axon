@@ -925,15 +925,16 @@ impl GraphStore {
             .filter_map(|row| row.first()?.as_str().map(String::from))
             .collect();
         if !paths.is_empty() {
-            // Cascade: remove symbols, chunks, edges, embeddings for stale files.
             for path in &paths {
                 let safe = path.replace('\'', "''");
                 let _ = self.execute(&format!(
                     "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
                         (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
                      DELETE FROM Chunk WHERE file_path = '{safe}'; \
-                     DELETE FROM Edge WHERE source_id = '{safe}'; \
-                     DELETE FROM Symbol WHERE id LIKE '%::{safe}::%';"
+                     DELETE FROM Symbol WHERE id IN \
+                        (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
+                     DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
+                        (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS');"
                 ));
             }
         }

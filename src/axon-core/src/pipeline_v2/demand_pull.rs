@@ -214,13 +214,13 @@ async fn pull_and_feed_a(
         Ok(Ok(paths)) if !paths.is_empty() => {
             let count = paths.len();
             let mut sent = 0usize;
-            let mut dropped = 0usize;
-            for path_str in paths {
-                match input_tx.try_send(PathBuf::from(&path_str)) {
+            for path_str in &paths {
+                match input_tx.try_send(PathBuf::from(path_str)) {
                     Ok(()) => sent += 1,
-                    Err(_) => { dropped += 1; break; }
+                    Err(_) => break,
                 }
             }
+            let dropped = count - sent;
             metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
             metrics.try_send_failures_total.fetch_add(dropped as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
@@ -393,13 +393,13 @@ async fn pull_and_feed_b(
         Ok(Ok(chunk_ids)) if !chunk_ids.is_empty() => {
             let count = chunk_ids.len();
             let mut sent = 0usize;
-            let mut dropped = 0usize;
-            for cid in chunk_ids {
-                match b1_inbox_tx.try_send(super::stage_b1::B1InboxItem::FetchById(cid)) {
+            for cid in &chunk_ids {
+                match b1_inbox_tx.try_send(super::stage_b1::B1InboxItem::FetchById(cid.clone())) {
                     Ok(()) => sent += 1,
-                    Err(_) => { dropped += 1; break; }
+                    Err(_) => break,
                 }
             }
+            let dropped = count - sent;
             metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
             metrics.try_send_failures_total.fetch_add(dropped as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
