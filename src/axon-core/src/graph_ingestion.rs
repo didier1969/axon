@@ -909,6 +909,37 @@ impl GraphStore {
             .collect())
     }
 
+    /// 9f: detect and remove files that disappeared from the filesystem.
+    /// Call after a complete scanner walk. Any IndexedFile row with
+    /// discovered_ms < scan_start_ms was NOT seen in this walk → stale.
+    /// Returns the paths that were deleted.
+    pub fn delete_stale_indexed_files(&self, scan_start_ms: i64) -> Result<Vec<String>> {
+        let raw = self.query_json_writer(&format!(
+            "DELETE FROM IndexedFile \
+             WHERE discovered_ms > 0 AND discovered_ms < {scan_start_ms} \
+             RETURNING path"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let paths: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| row.first()?.as_str().map(String::from))
+            .collect();
+        if !paths.is_empty() {
+            // Cascade: remove symbols, chunks, edges, embeddings for stale files.
+            for path in &paths {
+                let safe = path.replace('\'', "''");
+                let _ = self.execute(&format!(
+                    "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
+                        (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
+                     DELETE FROM Chunk WHERE file_path = '{safe}'; \
+                     DELETE FROM Edge WHERE source_id = '{safe}'; \
+                     DELETE FROM Symbol WHERE id LIKE '%::{safe}::%';"
+                ));
+            }
+        }
+        Ok(paths)
+    }
+
     /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).
     ///
     /// Returns the chunk_ids persisted. The A3 stage worker `try_send`s
@@ -1302,7 +1333,8 @@ impl GraphStore {
                  source_hash = EXCLUDED.source_hash, \
                  embedding = EXCLUDED.embedding, \
                  project_code = EXCLUDED.project_code, \
-                 embedded_at_ms = EXCLUDED.embedded_at_ms;",
+                 embedded_at_ms = EXCLUDED.embedded_at_ms; \
+             UPDATE Chunk SET embed_status = 'embedded' WHERE id = '{cid}';",
             cid = safe_chunk_id,
             mid = safe_model_id,
             pc = safe_project,
@@ -1356,6 +1388,17 @@ impl GraphStore {
             );
             queries.push(sql);
         }
+        // W3: batch-update embed_status after all embeddings are persisted.
+        let chunk_ids_in: Vec<String> = items
+            .iter()
+            .map(|(cid, _, _, _)| format!("'{}'", Self::escape_sql(cid)))
+            .collect();
+        if !chunk_ids_in.is_empty() {
+            queries.push(format!(
+                "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({});",
+                chunk_ids_in.join(", ")
+            ));
+        }
         let _ = safe_project;
         self.execute_batch(&queries)
     }
@@ -1369,22 +1412,13 @@ impl GraphStore {
     /// either never traversed the A3 → B1 `try_send` (drops on full
     /// buffer) or pre-date the v2 cut-over.
     pub fn select_chunks_needing_embedding(&self, limit: usize) -> Result<Vec<String>> {
-        let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
-        let safe_model_id = Self::escape_sql(model_id);
-        // Bucket-batching: order by token_count (BGE-Large estimate stored
-        // by A3 at chunking time) so each B1→B2 batch is token-homogeneous.
-        // Falls back to length(content)/3 (proxy for chunks pre-dating the
-        // token_count column, which back-fill to NULL). BGE-Large transformer
-        // cost = batch_size × max_seq_len² (TensorRT pads every item up to
-        // the longest in the batch, then snaps to seq_buckets
-        // [128, 256, 384, 512]). Token-sorted inputs keep each batch inside
-        // a single bucket → near-zero wasted padding compute.
+        // W3: partial index scan on embed_status='pending' replaces the
+        // LEFT JOIN ChunkEmbedding anti-pattern. Scales O(pending) not O(total).
+        // Token-count ordering preserved for GPU batch homogeneity.
         let raw = self.query_json(&format!(
-            "SELECT c.id FROM Chunk c \
-             LEFT JOIN ChunkEmbedding ce \
-               ON ce.chunk_id = c.id AND ce.model_id = '{safe_model_id}' \
-             WHERE ce.chunk_id IS NULL \
-             ORDER BY COALESCE(c.token_count, length(c.content) / 3) \
+            "SELECT id FROM Chunk \
+             WHERE embed_status = 'pending' \
+             ORDER BY COALESCE(token_count, length(content) / 3) \
              LIMIT {limit}"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();

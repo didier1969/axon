@@ -88,8 +88,13 @@ CREATE TABLE IF NOT EXISTS public.Chunk (
     chunk_part_index BIGINT,
     chunk_part_count BIGINT,
     chunk_path       TEXT,
-    token_count      INTEGER
+    token_count      INTEGER,
+    embed_status     TEXT NOT NULL DEFAULT 'pending'
 );
+-- W3: partial index for demand-pull B — only pending chunks, ordered by
+-- token_count for GPU batch homogeneity. Replaces the LEFT JOIN anti-pattern.
+CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
+    ON public.Chunk (token_count) WHERE embed_status = 'pending';
 
 -- FTS tsvector column. Initially declared GENERATED ALWAYS STORED with
 -- the 4-setweight expression below (chunk_path A / kind A / content B /

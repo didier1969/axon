@@ -13,6 +13,7 @@
 //! headroom for real-time watcher events.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,46 @@ use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
+
+/// W4: observable demand-pull metrics, queryable by dashboard/MCP.
+pub struct DemandPullMetrics {
+    pub pulls_total: AtomicU64,
+    pub items_fed_total: AtomicU64,
+    pub empty_pulls_total: AtomicU64,
+    pub try_send_failures_total: AtomicU64,
+    pub skipped_above_threshold: AtomicU64,
+}
+
+impl DemandPullMetrics {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pulls_total: AtomicU64::new(0),
+            items_fed_total: AtomicU64::new(0),
+            empty_pulls_total: AtomicU64::new(0),
+            try_send_failures_total: AtomicU64::new(0),
+            skipped_above_threshold: AtomicU64::new(0),
+        })
+    }
+
+    pub fn snapshot(&self) -> DemandPullSnapshot {
+        DemandPullSnapshot {
+            pulls_total: self.pulls_total.load(Ordering::Relaxed),
+            items_fed_total: self.items_fed_total.load(Ordering::Relaxed),
+            empty_pulls_total: self.empty_pulls_total.load(Ordering::Relaxed),
+            try_send_failures_total: self.try_send_failures_total.load(Ordering::Relaxed),
+            skipped_above_threshold: self.skipped_above_threshold.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DemandPullSnapshot {
+    pub pulls_total: u64,
+    pub items_fed_total: u64,
+    pub empty_pulls_total: u64,
+    pub try_send_failures_total: u64,
+    pub skipped_above_threshold: u64,
+}
 
 const BACKOFF_INITIAL_MS: u64 = 200;
 const BACKOFF_MAX_MS: u64 = 30_000;
@@ -38,11 +79,13 @@ pub fn spawn_pipeline_a_demand_pull(
     input_tx: Sender<PathBuf>,
     threshold: usize,
     batch_size: usize,
-) {
+) -> Arc<DemandPullMetrics> {
+    let metrics = DemandPullMetrics::new();
+    let metrics_clone = metrics.clone();
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_a_loop(&store, &database_url, &input_tx, threshold, batch_size).await
+            match demand_pull_a_loop(&store, &database_url, &input_tx, threshold, batch_size, &metrics_clone).await
             {
                 Ok(()) => {
                     warn!("demand-pull A: LISTEN loop exited cleanly; reconnecting");
@@ -60,6 +103,7 @@ pub fn spawn_pipeline_a_demand_pull(
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         }
     });
+    metrics
 }
 
 async fn demand_pull_a_loop(
@@ -68,6 +112,7 @@ async fn demand_pull_a_loop(
     input_tx: &Sender<PathBuf>,
     threshold: usize,
     batch_size: usize,
+    metrics: &Arc<DemandPullMetrics>,
 ) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
         .await
@@ -107,8 +152,7 @@ async fn demand_pull_a_loop(
     let mut consecutive_empty = 0u32;
     let safety_interval = Duration::from_secs(SAFETY_POLL_SECS);
 
-    // Initial drain of any backlog.
-    pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty).await;
+    pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty, metrics).await;
 
     loop {
         let woke_by_notify = tokio::select! {
@@ -128,7 +172,7 @@ async fn demand_pull_a_loop(
 
         loop {
             let pulled =
-                pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty)
+                pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty, metrics)
                     .await;
             if pulled == 0 {
                 break;
@@ -147,28 +191,22 @@ async fn pull_and_feed_a(
     threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
+    metrics: &Arc<DemandPullMetrics>,
 ) -> usize {
-    // W2: check channel capacity — only pull if pipeline has headroom.
     let in_flight = input_tx.max_capacity() - input_tx.capacity();
     if in_flight >= threshold {
+        metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
         return 0;
     }
 
+    metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
     let store_clone = store.clone();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let claim_cutoff = now_ms - CLAIM_TIMEOUT_MS;
     let limit = batch_size;
 
-    // C3+W1: SELECT with retry_count < MAX_RETRY and claim timeout.
-    // Then UPDATE to claim (increment retry_count + set last_attempt_ms).
     let result = tokio::task::spawn_blocking(move || {
-        let paths = store_clone.select_and_claim_files_for_indexing(
-            limit,
-            MAX_RETRY,
-            claim_cutoff,
-            now_ms,
-        )?;
-        Ok::<Vec<String>, anyhow::Error>(paths)
+        store_clone.select_and_claim_files_for_indexing(limit, MAX_RETRY, claim_cutoff, now_ms)
     })
     .await;
 
@@ -176,19 +214,23 @@ async fn pull_and_feed_a(
         Ok(Ok(paths)) if !paths.is_empty() => {
             let count = paths.len();
             let mut sent = 0usize;
+            let mut dropped = 0usize;
             for path_str in paths {
                 match input_tx.try_send(PathBuf::from(&path_str)) {
                     Ok(()) => sent += 1,
-                    Err(_) => break,
+                    Err(_) => { dropped += 1; break; }
                 }
             }
+            metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
+            metrics.try_send_failures_total.fetch_add(dropped as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
             if sent > 0 {
-                info!("demand-pull A: fed {sent}/{count} files (in_flight was {in_flight}/{threshold})");
+                info!("demand-pull A: fed {sent}/{count} files (in_flight={in_flight}/{threshold}, dropped={dropped})");
             }
             sent
         }
         Ok(Ok(_)) => {
+            metrics.empty_pulls_total.fetch_add(1, Ordering::Relaxed);
             *consecutive_empty = consecutive_empty.saturating_add(1);
             if *consecutive_empty == IDLE_THRESHOLD {
                 info!("demand-pull A: pipeline idle ({IDLE_THRESHOLD} empty pulls)");
@@ -213,11 +255,13 @@ pub fn spawn_pipeline_b_demand_pull(
     b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     threshold: usize,
     batch_size: usize,
-) {
+) -> Arc<DemandPullMetrics> {
+    let metrics = DemandPullMetrics::new();
+    let metrics_clone = metrics.clone();
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_b_loop(&store, &database_url, &b1_inbox_tx, threshold, batch_size)
+            match demand_pull_b_loop(&store, &database_url, &b1_inbox_tx, threshold, batch_size, &metrics_clone)
                 .await
             {
                 Ok(()) => {
@@ -236,6 +280,7 @@ pub fn spawn_pipeline_b_demand_pull(
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         }
     });
+    metrics
 }
 
 async fn demand_pull_b_loop(
@@ -244,6 +289,7 @@ async fn demand_pull_b_loop(
     b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
     threshold: usize,
     batch_size: usize,
+    metrics: &Arc<DemandPullMetrics>,
 ) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
         .await
@@ -283,7 +329,7 @@ async fn demand_pull_b_loop(
     let mut consecutive_empty = 0u32;
     let safety_interval = Duration::from_secs(SAFETY_POLL_SECS);
 
-    pull_and_feed_b(store, b1_inbox_tx, threshold, batch_size, &mut consecutive_empty).await;
+    pull_and_feed_b(store, b1_inbox_tx, threshold, batch_size, &mut consecutive_empty, metrics).await;
 
     loop {
         let woke_by_notify = tokio::select! {
@@ -308,6 +354,7 @@ async fn demand_pull_b_loop(
                 threshold,
                 batch_size,
                 &mut consecutive_empty,
+                metrics,
             )
             .await;
             if pulled == 0 {
@@ -327,13 +374,15 @@ async fn pull_and_feed_b(
     threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
+    metrics: &Arc<DemandPullMetrics>,
 ) -> usize {
-    // W2: check channel capacity.
     let in_flight = b1_inbox_tx.max_capacity() - b1_inbox_tx.capacity();
     if in_flight >= threshold {
+        metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
         return 0;
     }
 
+    metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
     let store_clone = store.clone();
     let result = tokio::task::spawn_blocking(move || {
         store_clone.select_chunks_needing_embedding(batch_size)
@@ -344,19 +393,23 @@ async fn pull_and_feed_b(
         Ok(Ok(chunk_ids)) if !chunk_ids.is_empty() => {
             let count = chunk_ids.len();
             let mut sent = 0usize;
+            let mut dropped = 0usize;
             for cid in chunk_ids {
                 match b1_inbox_tx.try_send(super::stage_b1::B1InboxItem::FetchById(cid)) {
                     Ok(()) => sent += 1,
-                    Err(_) => break,
+                    Err(_) => { dropped += 1; break; }
                 }
             }
+            metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
+            metrics.try_send_failures_total.fetch_add(dropped as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
             if sent > 0 {
-                info!("demand-pull B: fed {sent}/{count} chunks (in_flight was {in_flight}/{threshold})");
+                info!("demand-pull B: fed {sent}/{count} chunks (in_flight={in_flight}/{threshold}, dropped={dropped})");
             }
             sent
         }
         Ok(Ok(_)) => {
+            metrics.empty_pulls_total.fetch_add(1, Ordering::Relaxed);
             *consecutive_empty = consecutive_empty.saturating_add(1);
             if *consecutive_empty == IDLE_THRESHOLD {
                 info!("demand-pull B: pipeline idle ({IDLE_THRESHOLD} empty pulls)");

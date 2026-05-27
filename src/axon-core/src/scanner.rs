@@ -70,15 +70,27 @@ impl Scanner {
         guard: Option<&SharedFileIngressGuard>,
         ingress: Option<&SharedIngressBuffer>,
     ) {
+        let scan_start_ms = chrono::Utc::now().timestamp_millis();
         info!(
             "Lattice Engine: Initializing recursive traversal on {:?}",
             self.root
         );
-        let total_files = self.scan_path(graph, &self.root, guard, ingress);
+        let total_files = self.scan_path(graph.clone(), &self.root, guard, ingress);
         info!(
             "🏁 Nexus Scan Complete: {} files mapped to graph store (status: pending).",
             total_files
         );
+        // 9f: detect files that disappeared from the filesystem since last walk.
+        match graph.delete_stale_indexed_files(scan_start_ms) {
+            Ok(deleted) if !deleted.is_empty() => {
+                info!(
+                    "Lattice Engine: purged {} stale IndexedFile entries (not seen in this walk)",
+                    deleted.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => warn!("Lattice Engine: stale file cleanup failed: {e}"),
+        }
     }
 
     pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) -> usize {
