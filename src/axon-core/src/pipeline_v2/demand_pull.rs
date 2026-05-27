@@ -154,14 +154,22 @@ async fn demand_pull_a_loop(
 
     pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty, metrics).await;
 
+    let mut last_pull_had_work = true;
     loop {
+        // Adaptive wait: 1s when draining backlog, 30s when idle.
+        let wait_duration = if last_pull_had_work {
+            Duration::from_secs(1)
+        } else {
+            safety_interval
+        };
+
         let woke_by_notify = tokio::select! {
             biased;
             Some(_) = notify_rx.recv() => {
                 while notify_rx.try_recv().is_ok() {}
                 true
             }
-            _ = tokio::time::sleep(safety_interval) => {
+            _ = tokio::time::sleep(wait_duration) => {
                 false
             }
         };
@@ -170,6 +178,7 @@ async fn demand_pull_a_loop(
             consecutive_empty = 0;
         }
 
+        last_pull_had_work = false;
         loop {
             let pulled =
                 pull_and_feed_a(store, input_tx, threshold, batch_size, &mut consecutive_empty, metrics)
@@ -177,6 +186,7 @@ async fn demand_pull_a_loop(
             if pulled == 0 {
                 break;
             }
+            last_pull_had_work = true;
         }
 
         if driver.is_finished() {
@@ -331,14 +341,21 @@ async fn demand_pull_b_loop(
 
     pull_and_feed_b(store, b1_inbox_tx, threshold, batch_size, &mut consecutive_empty, metrics).await;
 
+    let mut last_pull_had_work = true;
     loop {
+        let wait_duration = if last_pull_had_work {
+            Duration::from_secs(1)
+        } else {
+            safety_interval
+        };
+
         let woke_by_notify = tokio::select! {
             biased;
             Some(_) = notify_rx.recv() => {
                 while notify_rx.try_recv().is_ok() {}
                 true
             }
-            _ = tokio::time::sleep(safety_interval) => {
+            _ = tokio::time::sleep(wait_duration) => {
                 false
             }
         };
@@ -347,6 +364,7 @@ async fn demand_pull_b_loop(
             consecutive_empty = 0;
         }
 
+        last_pull_had_work = false;
         loop {
             let pulled = pull_and_feed_b(
                 store,
@@ -360,6 +378,7 @@ async fn demand_pull_b_loop(
             if pulled == 0 {
                 break;
             }
+            last_pull_had_work = true;
         }
 
         if driver.is_finished() {
