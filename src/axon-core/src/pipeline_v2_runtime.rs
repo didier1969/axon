@@ -73,6 +73,32 @@ pub const PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT: u8 = 50;
 /// reacting in real time.
 const PERIODIC_SWEEP_HINT_PRIORITY: i64 = 50;
 
+use std::sync::atomic::AtomicPtr;
+use crate::pipeline_v2::demand_pull::DemandPullMetrics;
+
+static DEMAND_PULL_METRICS_A: AtomicPtr<DemandPullMetrics> =
+    AtomicPtr::new(std::ptr::null_mut());
+static DEMAND_PULL_METRICS_B: AtomicPtr<DemandPullMetrics> =
+    AtomicPtr::new(std::ptr::null_mut());
+
+pub fn demand_pull_metrics_a() -> Option<Arc<DemandPullMetrics>> {
+    let ptr = DEMAND_PULL_METRICS_A.load(std::sync::atomic::Ordering::Acquire);
+    if ptr.is_null() { return None; }
+    unsafe {
+        Arc::increment_strong_count(ptr);
+        Some(Arc::from_raw(ptr))
+    }
+}
+
+pub fn demand_pull_metrics_b() -> Option<Arc<DemandPullMetrics>> {
+    let ptr = DEMAND_PULL_METRICS_B.load(std::sync::atomic::Ordering::Acquire);
+    if ptr.is_null() { return None; }
+    unsafe {
+        Arc::increment_strong_count(ptr);
+        Some(Arc::from_raw(ptr))
+    }
+}
+
 fn demand_pull_a_threshold_from_env() -> usize {
     std::env::var("AXON_DEMAND_PULL_A_THRESHOLD")
         .ok()
@@ -311,13 +337,14 @@ pub fn spawn_pipeline_v2_indexer(
         let demand_pull_b_threshold = demand_pull_b_threshold_from_env();
         let demand_pull_b_batch = demand_pull_b_batch_from_env();
         let db_url_b = resolve_database_url_for_listener();
-        crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
+        let _metrics_b = crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
             store.clone(),
             db_url_b,
             b1_inbox_tx_for_poll,
             demand_pull_b_threshold,
             demand_pull_b_batch,
         );
+        DEMAND_PULL_METRICS_B.store(Arc::into_raw(_metrics_b) as *mut _, std::sync::atomic::Ordering::Release);
     } else {
         // No B side — keep the inbox alive so A3's try_send never gets
         // a closed-channel error, then drain silently.
@@ -406,13 +433,14 @@ pub fn spawn_pipeline_v2_indexer(
     let demand_pull_a_threshold = demand_pull_a_threshold_from_env();
     let demand_pull_a_batch = demand_pull_a_batch_from_env();
     let db_url_a = resolve_database_url_for_listener();
-    crate::pipeline_v2::demand_pull::spawn_pipeline_a_demand_pull(
+    let _metrics_a = crate::pipeline_v2::demand_pull::spawn_pipeline_a_demand_pull(
         store.clone(),
         db_url_a,
         handles_a.input_tx.clone(),
         demand_pull_a_threshold,
         demand_pull_a_batch,
     );
+    DEMAND_PULL_METRICS_A.store(Arc::into_raw(_metrics_a) as *mut _, std::sync::atomic::Ordering::Release);
 
     // Steady-state drain loop: pull file events from the shared
     // ingress_buffer (watcher pushes here on FS notifications) and

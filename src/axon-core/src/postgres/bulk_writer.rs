@@ -415,7 +415,7 @@ pub struct PgBulkBatch {
     pub contains: Vec<RelationRow>,
     pub calls: Vec<RelationRow>,
     pub calls_nif: Vec<RelationRow>,
-    pub indexed_files: Vec<(String, String, i64)>,
+    pub indexed_files: Vec<(String, String, i64, i64, i64)>,
 }
 
 impl PgBulkBatch {
@@ -755,45 +755,51 @@ async fn copy_edges_in_tx(
 /// REQ-AXO-901747 — COPY BINARY for IndexedFile rows.
 async fn copy_indexed_files_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
-    rows: &[(String, String, i64)],
+    rows: &[(String, String, i64, i64, i64)],
 ) -> Result<()> {
     let stage_ddl = "CREATE TEMP TABLE _bulk_indexedfile_stage (\
             path TEXT NOT NULL,\
             content_hash TEXT NOT NULL,\
-            last_seen_ms BIGINT NOT NULL\
+            last_seen_ms BIGINT NOT NULL,\
+            mtime_ms BIGINT NOT NULL,\
+            size_bytes BIGINT NOT NULL\
          ) ON COMMIT DROP";
     tx.batch_execute(stage_ddl)
         .await
         .context("bulk_writer indexedfile stage create")?;
 
-    let copy_stmt = "COPY _bulk_indexedfile_stage (path, content_hash, last_seen_ms) FROM STDIN BINARY";
+    let copy_stmt = "COPY _bulk_indexedfile_stage (path, content_hash, last_seen_ms, mtime_ms, size_bytes) FROM STDIN BINARY";
     let copy_sink = tx
         .copy_in(copy_stmt)
         .await
         .context("bulk_writer indexedfile copy_in begin")?;
-    let column_types = [Type::TEXT, Type::TEXT, Type::INT8];
+    let column_types = [Type::TEXT, Type::TEXT, Type::INT8, Type::INT8, Type::INT8];
     let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
     pin_mut!(writer);
-    for (path, hash, ts) in rows {
+    for (path, hash, ts, mtime, size) in rows {
         writer
             .as_mut()
             .write(&[
                 path as &(dyn tokio_postgres::types::ToSql + Sync),
                 hash,
                 ts,
+                mtime,
+                size,
             ])
             .await
             .context("bulk_writer indexedfile copy row write")?;
     }
     writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
 
-    // DEC-AXO-901619 + C3: A3 unconditionally promotes to 'indexed'
-    // and resets retry_count + clears last_attempt_ms (success = clean slate).
-    let merge_sql = "INSERT INTO indexedfile (path, content_hash, last_seen_ms, status) \
-         SELECT path, content_hash, last_seen_ms, 'indexed' FROM _bulk_indexedfile_stage \
+    let merge_sql = "INSERT INTO indexedfile \
+             (path, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
+         SELECT path, content_hash, last_seen_ms, 'indexed', mtime_ms, size_bytes \
+             FROM _bulk_indexedfile_stage \
          ON CONFLICT (path) DO UPDATE SET \
              content_hash    = EXCLUDED.content_hash, \
              last_seen_ms    = EXCLUDED.last_seen_ms, \
+             mtime_ms        = EXCLUDED.mtime_ms, \
+             size_bytes      = EXCLUDED.size_bytes, \
              status          = 'indexed', \
              retry_count     = 0, \
              last_attempt_ms = NULL";

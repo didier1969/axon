@@ -1074,7 +1074,7 @@ impl GraphStore {
             contains: contains_rows,
             calls: calls_rows,
             calls_nif: calls_nif_rows,
-            indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms)],
+            indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms, last_seen_ms, content.len() as i64)],
         };
         crate::postgres::bulk_writer::flush_batch(&batch)?;
         Ok(chunk_ids_emitted)
@@ -1138,7 +1138,7 @@ impl GraphStore {
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
         // REQ-AXO-295 Phase 2 — IndexedFile rows accumulated for one
         // multi-row INSERT VALUES (was one INSERT per file).
-        let mut indexed_file_rows: Vec<(String, String, i64)> = Vec::with_capacity(files.len());
+        let mut indexed_file_rows: Vec<(String, String, i64, i64, i64)> = Vec::with_capacity(files.len());
         // REQ-AXO-901653 slice-5a: `file_rows` accumulator (REQ-AXO-345
         // public.file UPSERT) deleted ; legacy state-machine table.
 
@@ -1275,7 +1275,7 @@ impl GraphStore {
                 }
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
-            indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms));
+            indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms, parsed.mtime_ms, parsed.size_bytes as i64));
             // REQ-AXO-901653 slice-5a: legacy `public.file` row push deleted.
             chunk_ids_per_file.push(chunk_ids_emitted);
         }
