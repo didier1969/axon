@@ -126,6 +126,14 @@ impl McpServer {
             .graph_store
             .get_orphan_intent_nodes(project)
             .unwrap_or_default();
+        let phantom_dead_refs = self
+            .graph_store
+            .get_phantom_dead_refs(project)
+            .unwrap_or_default();
+        let phantom_multi_declare = self
+            .graph_store
+            .get_phantom_multi_declare(project)
+            .unwrap_or_default();
         let soll_snapshot = self
             .soll_completeness_snapshot(if project == "*" { None } else { Some(project) })
             .ok();
@@ -449,6 +457,44 @@ impl McpServer {
                 "needs_human_confirmation": true
             }));
         }
+        for phantom_ref in phantom_dead_refs.iter().take(if brief_mode { 5 } else { 10 }) {
+            let (estimated_effort, estimated_risk) =
+                recommend_effort_and_risk("phantom_dead_ref", &json!({}));
+            findings.push(json!({
+                "type": "phantom_dead_ref",
+                "entity": phantom_ref,
+                "scope": project,
+                "severity": "medium",
+                "confidence": "high",
+                "provenance": "phantom_reads_without_declares",
+                "evidence_sources": ["Edge(READS)", "Edge(DECLARES)"],
+                "recommended_action": "add a DECLARES source or remove the read",
+                "validation_signals": json!({}),
+                "estimated_effort": estimated_effort,
+                "estimated_risk": estimated_risk,
+                "safe_to_act": false,
+                "needs_human_confirmation": true
+            }));
+        }
+        for phantom_conflict in phantom_multi_declare.iter().take(if brief_mode { 5 } else { 10 }) {
+            let (estimated_effort, estimated_risk) =
+                recommend_effort_and_risk("phantom_multi_declare", &json!({}));
+            findings.push(json!({
+                "type": "phantom_multi_declare",
+                "entity": phantom_conflict,
+                "scope": project,
+                "severity": "low",
+                "confidence": "medium",
+                "provenance": "phantom_declared_in_multiple_sources",
+                "evidence_sources": ["Edge(DECLARES)"],
+                "recommended_action": "review for intentional redundancy or consolidate",
+                "validation_signals": json!({}),
+                "estimated_effort": estimated_effort,
+                "estimated_risk": estimated_risk,
+                "safe_to_act": false,
+                "needs_human_confirmation": true
+            }));
+        }
         for cycle in circular_deps.iter().take(if brief_mode { 3 } else { 5 }) {
             let validation_signals = json!({
                 "tested": Value::Null,
@@ -621,6 +667,8 @@ impl McpServer {
 **Orphan code:** {}\n\
 **Orphan intent (canonical):** {}\n\
 **Heuristic intent gaps:** {}\n\
+**Phantom dead refs:** {}\n\
+**Phantom multi-declare:** {}\n\
 **Cycles:** {}\n\
 **God objects:** {}\n",
             project,
@@ -631,6 +679,8 @@ impl McpServer {
             orphan_code.len(),
             canonical_orphan_intent_count,
             heuristic_intent_gap_count,
+            phantom_dead_refs.len(),
+            phantom_multi_declare.len(),
             cycle_count,
             god_objects.len()
         );
@@ -757,6 +807,8 @@ impl McpServer {
                     "heuristic_intent_gap_count": heuristic_intent_gap_count,
                     "cycle_count": cycle_count,
                     "god_object_count": god_objects.len(),
+                    "phantom_dead_ref_count": phantom_dead_refs.len(),
+                    "phantom_multi_declare_count": phantom_multi_declare.len(),
                     "validation_coverage_score": validation_coverage_score,
                     "total_symbols": total_symbols,
                     "total_intent_nodes": total_intent_nodes,

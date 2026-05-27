@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 
-use super::{ExtractionResult, Relation, Symbol};
+use super::{Relation, Symbol};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PhantomRuleFile {
@@ -167,98 +167,107 @@ pub fn init_global_engine(rules_dir: &Path) {
     }
 }
 
-/// Extract phantom symbols from file content using the global rule engine.
-/// Returns additional symbols and relations to merge into the parse result.
+impl PhantomRuleEngine {
+    pub fn extract(
+        &self,
+        path: &Path,
+        content: &str,
+        project_code: Option<&str>,
+    ) -> (Vec<Symbol>, Vec<Relation>) {
+        let rules = self.rules_for_file(path);
+
+        if rules.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let file_id = format!(
+            "{}::{}",
+            project_code.unwrap_or("_"),
+            path.display()
+        );
+
+        let mut symbols = Vec::new();
+        let mut relations = Vec::new();
+        let mut seen: HashMap<(String, String), bool> = HashMap::new();
+
+        for rule in &rules {
+            for captures in rule.regex.captures_iter(content) {
+                let captured = captures
+                    .get(1)
+                    .or_else(|| captures.get(0))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+
+                if captured.len() < rule.min_length {
+                    continue;
+                }
+
+                if rule
+                    .exclude_regexes
+                    .iter()
+                    .any(|ex| ex.is_match(&captured))
+                {
+                    continue;
+                }
+
+                let phantom_id = format!(
+                    "{}::phantom::{}::{}",
+                    project_code.unwrap_or("_"),
+                    rule.phantom_kind,
+                    captured
+                );
+
+                let dedup_key = (phantom_id.clone(), rule.edge_type.clone());
+                if seen.contains_key(&dedup_key) {
+                    continue;
+                }
+                seen.insert(dedup_key, true);
+
+                let line = content[..captures.get(0).unwrap().start()]
+                    .lines()
+                    .count()
+                    + 1;
+
+                symbols.push(Symbol {
+                    name: captured.clone(),
+                    kind: rule.phantom_kind.clone(),
+                    start_line: line,
+                    end_line: line,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: false,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: {
+                        let mut p = HashMap::new();
+                        p.insert("phantom".to_string(), "true".to_string());
+                        p.insert("rule_id".to_string(), rule.id.clone());
+                        p
+                    },
+                    embedding: None,
+                });
+
+                relations.push(Relation {
+                    from: file_id.clone(),
+                    to: phantom_id,
+                    rel_type: rule.edge_type.to_lowercase(),
+                    properties: HashMap::new(),
+                });
+            }
+        }
+
+        (symbols, relations)
+    }
+}
+
 pub fn phantom_extract(
     path: &Path,
     content: &str,
     project_code: Option<&str>,
 ) -> (Vec<Symbol>, Vec<Relation>) {
     let engine = GLOBAL_ENGINE.read().unwrap();
-    let rules = engine.rules_for_file(path);
-
-    if rules.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let file_id = format!(
-        "{}::{}",
-        project_code.unwrap_or("_"),
-        path.display()
-    );
-
-    let mut symbols = Vec::new();
-    let mut relations = Vec::new();
-    let mut seen: HashMap<(String, String), bool> = HashMap::new();
-
-    for rule in &rules {
-        for captures in rule.regex.captures_iter(content) {
-            let captured = captures
-                .get(1)
-                .or_else(|| captures.get(0))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-
-            if captured.len() < rule.min_length {
-                continue;
-            }
-
-            if rule
-                .exclude_regexes
-                .iter()
-                .any(|ex| ex.is_match(&captured))
-            {
-                continue;
-            }
-
-            let phantom_id = format!(
-                "{}::phantom::{}::{}",
-                project_code.unwrap_or("_"),
-                rule.phantom_kind,
-                captured
-            );
-
-            let dedup_key = (phantom_id.clone(), rule.edge_type.clone());
-            if seen.contains_key(&dedup_key) {
-                continue;
-            }
-            seen.insert(dedup_key, true);
-
-            let line = content[..captures.get(0).unwrap().start()]
-                .lines()
-                .count()
-                + 1;
-
-            symbols.push(Symbol {
-                name: captured.clone(),
-                kind: rule.phantom_kind.clone(),
-                start_line: line,
-                end_line: line,
-                docstring: None,
-                is_entry_point: false,
-                is_public: false,
-                tested: false,
-                is_nif: false,
-                is_unsafe: false,
-                properties: {
-                    let mut p = HashMap::new();
-                    p.insert("phantom".to_string(), "true".to_string());
-                    p.insert("rule_id".to_string(), rule.id.clone());
-                    p
-                },
-                embedding: None,
-            });
-
-            relations.push(Relation {
-                from: file_id.clone(),
-                to: phantom_id,
-                rel_type: rule.edge_type.to_lowercase(),
-                properties: HashMap::new(),
-            });
-        }
-    }
-
-    (symbols, relations)
+    engine.extract(path, content, project_code)
 }
 
 #[cfg(test)]
@@ -300,9 +309,8 @@ fn main() {
     let db = env::var("DATABASE_URL").unwrap();
 }
 "#;
-        *GLOBAL_ENGINE.write().unwrap() = engine;
         let (symbols, relations) =
-            phantom_extract(Path::new("src/main.rs"), content, Some("AXO"));
+            engine.extract(Path::new("src/main.rs"), content, Some("AXO"));
 
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].name, "AXON_BRAIN_PORT");
@@ -341,15 +349,14 @@ exclude_patterns = ["^(HOME|USER|PATH|PWD|SHELL|TERM|LANG|LC_)$"]
         );
 
         let engine = PhantomRuleEngine::load_rules_dir(dir.path()).unwrap();
-        *GLOBAL_ENGINE.write().unwrap() = engine;
 
         let content = r#"
 export AXON_BRAIN_PORT="44129"
 echo "Port is $AXON_BRAIN_PORT"
 nc -z localhost ${AXON_BRAIN_PORT}
 "#;
-        let (symbols, relations) =
-            phantom_extract(Path::new("scripts/start.sh"), content, Some("AXO"));
+        let (_, relations) =
+            engine.extract(Path::new("scripts/start.sh"), content, Some("AXO"));
 
         let declares: Vec<_> = relations.iter().filter(|r| r.rel_type == "declares").collect();
         let reads: Vec<_> = relations.iter().filter(|r| r.rel_type == "reads").collect();
@@ -378,15 +385,14 @@ edge_type = "READS"
         );
 
         let engine = PhantomRuleEngine::load_rules_dir(dir.path()).unwrap();
-        *GLOBAL_ENGINE.write().unwrap() = engine;
 
         let content = r#"
 let a = env::var("DATABASE_URL").ok();
 let b = env::var("DATABASE_URL").ok();
 let c = env::var("DATABASE_URL").ok();
 "#;
-        let (symbols, relations) =
-            phantom_extract(Path::new("src/lib.rs"), content, Some("AXO"));
+        let (_, relations) =
+            engine.extract(Path::new("src/lib.rs"), content, Some("AXO"));
 
         assert_eq!(relations.len(), 1, "same phantom + same edge type = dedup");
     }
@@ -414,17 +420,132 @@ min_length = 4
         );
 
         let engine = PhantomRuleEngine::load_rules_dir(dir.path()).unwrap();
-        *GLOBAL_ENGINE.write().unwrap() = engine;
 
         let content = r#"
     AXON_BRAIN_PORT = 44129;
     PHX_PORT = 44127;
 "#;
         let (symbols, _) =
-            phantom_extract(Path::new("devenv.nix"), content, Some("AXO"));
+            engine.extract(Path::new("devenv.nix"), content, Some("AXO"));
 
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"AXON_BRAIN_PORT"));
         assert!(names.contains(&"PHX_PORT"));
+    }
+
+    #[test]
+    fn extracts_sql_table_names() {
+        let dir = TempDir::new().unwrap();
+        write_rule(
+            dir.path(),
+            "sql.toml",
+            r#"
+[meta]
+language = "sql"
+file_extensions = ["sql"]
+
+[[rules]]
+id = "create_table"
+pattern = '(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?"?(\w+)"?'
+phantom_kind = "sql_table"
+edge_type = "DECLARES"
+min_length = 2
+
+[[rules]]
+id = "select_from"
+pattern = '(?i)(?:FROM|JOIN)\s+(?:\w+\.)?"?(\w+)"?\s'
+phantom_kind = "sql_table"
+edge_type = "READS"
+min_length = 3
+exclude_patterns = ["^(?i)(pg_|information_schema|select|where|and|or|not|on|as|in|exists|values|set|null|true|false|dual)$"]
+"#,
+        );
+
+        let engine = PhantomRuleEngine::load_rules_dir(dir.path()).unwrap();
+        let content = r#"
+CREATE TABLE IF NOT EXISTS soll."Node" (
+    id TEXT PRIMARY KEY,
+    title TEXT
+);
+INSERT INTO Symbol (name, kind) VALUES ('main', 'function');
+SELECT s.name FROM Symbol s JOIN Edge e ON s.id = e.source_id WHERE e.relation_type = 'CALLS';
+"#;
+        let (symbols, relations) =
+            engine.extract(Path::new("db/ddl/schema.sql"), content, Some("AXO"));
+
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Node"), "should extract table from CREATE TABLE: got {:?}", names);
+        assert!(names.contains(&"Symbol"), "should extract table from FROM/JOIN: got {:?}", names);
+
+        let declares: Vec<_> = relations.iter().filter(|r| r.rel_type == "declares").collect();
+        let reads: Vec<_> = relations.iter().filter(|r| r.rel_type == "reads").collect();
+        assert!(!declares.is_empty(), "CREATE TABLE should produce DECLARES edge");
+        assert!(!reads.is_empty(), "SELECT FROM should produce READS edge");
+    }
+
+    #[test]
+    fn extracts_soll_references_cross_language() {
+        let dir = TempDir::new().unwrap();
+        write_rule(
+            dir.path(),
+            "rust.toml",
+            r#"
+[meta]
+language = "rust"
+file_extensions = ["rs"]
+
+[[rules]]
+id = "soll_reference"
+pattern = '((?:REQ|DEC|CPT|MIL|PIL|GUI|VIS|VAL|SKI|PRT)-[A-Z][A-Z0-9]{2}-\d{3,})'
+phantom_kind = "soll_ref"
+edge_type = "IMPLEMENTS"
+min_length = 10
+"#,
+        );
+
+        let engine = PhantomRuleEngine::load_rules_dir(dir.path()).unwrap();
+        let content = r#"
+//! Stage A2 — Transformation worker (CPT-AXO-054).
+// REQ-AXO-345 — A2 in/out trace.
+// REQ-AXO-347 — defensive empty-file fast-path.
+"#;
+        let (symbols, relations) =
+            engine.extract(Path::new("src/pipeline_v2/stage_a2.rs"), content, Some("AXO"));
+
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"CPT-AXO-054"), "should find CPT ref: got {:?}", names);
+        assert!(names.contains(&"REQ-AXO-345"), "should find REQ ref: got {:?}", names);
+        assert!(names.contains(&"REQ-AXO-347"), "should find REQ ref: got {:?}", names);
+
+        assert!(symbols.iter().all(|s| s.kind == "soll_ref"));
+        assert!(relations.iter().all(|r| r.rel_type == "implements"));
+    }
+
+    #[test]
+    fn loads_production_rules_dir() {
+        let rules_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("rules");
+        if !rules_dir.is_dir() {
+            return;
+        }
+        let engine = PhantomRuleEngine::load_rules_dir(&rules_dir).unwrap();
+        assert!(
+            !engine.rules_by_extension.is_empty(),
+            "production rules dir should have at least one extension mapping"
+        );
+        let rs_rules = engine.rules_for_file(Path::new("src/main.rs"));
+        assert!(
+            !rs_rules.is_empty(),
+            "rust file should match at least one production rule"
+        );
+        let sh_rules = engine.rules_for_file(Path::new("scripts/start.sh"));
+        assert!(
+            !sh_rules.is_empty(),
+            "shell file should match at least one production rule"
+        );
+        let sql_rules = engine.rules_for_file(Path::new("db/schema.sql"));
+        assert!(
+            !sql_rules.is_empty(),
+            "SQL file should match at least one production rule"
+        );
     }
 }

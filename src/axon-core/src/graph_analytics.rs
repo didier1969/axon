@@ -1000,6 +1000,72 @@ impl GraphStore {
             .filter_map(|row| row.first().cloned())
             .collect())
     }
+
+    /// REQ-AXO-901772 — Phantom symbols that are READS-referenced but never
+    /// DECLARES-d anywhere in the graph. Indicates a missing definition
+    /// (e.g. env var read in code but never exported/set).
+    pub fn get_phantom_dead_refs(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let scope = if scoped {
+            format!("AND e_read.project_code = '{}'", escaped)
+        } else {
+            String::new()
+        };
+        let query = format!(
+            "
+            SELECT DISTINCT e_read.target_id
+            FROM public.Edge e_read
+            WHERE e_read.relation_type IN ('reads', 'READS')
+              AND e_read.target_id LIKE '%::phantom::%'
+              {scope}
+              AND NOT EXISTS (
+                SELECT 1 FROM public.Edge e_decl
+                WHERE e_decl.relation_type IN ('declares', 'DECLARES')
+                  AND e_decl.target_id = e_read.target_id
+              )
+            ORDER BY e_read.target_id
+            LIMIT 20
+            "
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
+    }
+
+    /// REQ-AXO-901772 — Phantom symbols declared in multiple files,
+    /// signalling a potential cross-language conflict or redundancy.
+    pub fn get_phantom_multi_declare(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let scope = if scoped {
+            format!("AND e.project_code = '{}'", escaped)
+        } else {
+            String::new()
+        };
+        let query = format!(
+            "
+            SELECT e.target_id || ' (' || count(DISTINCT e.source_id)::text || ' sources)'
+            FROM public.Edge e
+            WHERE e.relation_type IN ('declares', 'DECLARES')
+              AND e.target_id LIKE '%::phantom::%'
+              {scope}
+            GROUP BY e.target_id
+            HAVING count(DISTINCT e.source_id) > 1
+            ORDER BY count(DISTINCT e.source_id) DESC
+            LIMIT 20
+            "
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
+    }
 }
 
 #[cfg(test)]

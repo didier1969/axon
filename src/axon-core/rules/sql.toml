@@ -1,0 +1,42 @@
+[meta]
+language = "sql"
+file_extensions = ["sql"]
+
+[[rules]]
+id = "create_table"
+pattern = '(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?"?(\w+)"?'
+phantom_kind = "sql_table"
+edge_type = "DECLARES"
+min_length = 2
+exclude_patterns = ["^(?i)(pg_|information_schema)"]
+
+[[rules]]
+id = "alter_table"
+pattern = '(?i)ALTER\s+TABLE\s+(?:ONLY\s+)?(?:\w+\.)?"?(\w+)"?'
+phantom_kind = "sql_table"
+edge_type = "DECLARES"
+min_length = 2
+exclude_patterns = ["^(?i)(pg_|information_schema)"]
+
+[[rules]]
+id = "insert_into"
+pattern = '(?i)INSERT\s+INTO\s+(?:\w+\.)?"?(\w+)"?'
+phantom_kind = "sql_table"
+edge_type = "READS"
+min_length = 2
+exclude_patterns = ["^(?i)(pg_|information_schema)"]
+
+[[rules]]
+id = "select_from"
+pattern = '(?i)(?:FROM|JOIN)\s+(?:\w+\.)?"?(\w+)"?\s'
+phantom_kind = "sql_table"
+edge_type = "READS"
+min_length = 3
+exclude_patterns = ["^(?i)(pg_|information_schema|select|where|and|or|not|on|as|in|exists|values|set|null|true|false|dual)$"]
+
+[[rules]]
+id = "soll_reference"
+pattern = '((?:REQ|DEC|CPT|MIL|PIL|GUI|VIS|VAL|SKI|PRT)-[A-Z][A-Z0-9]{2}-\d{3,})'
+phantom_kind = "soll_ref"
+edge_type = "IMPLEMENTS"
+min_length = 10

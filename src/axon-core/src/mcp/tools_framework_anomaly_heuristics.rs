@@ -27,6 +27,8 @@ pub(super) fn recommend_effort_and_risk(
                 ("medium", "high")
             }
         }
+        "phantom_dead_ref" => ("low", "medium"),
+        "phantom_multi_declare" => ("low", "low"),
         "feature_envy" => ("medium", "medium"),
         "detour" => ("medium", "medium"),
         "abstraction_detour" => ("medium", "medium"),
@@ -60,6 +62,14 @@ pub(super) fn sequencing_dependencies_for_anomaly(anomaly_type: &str) -> Vec<&'s
         "heuristic_intent_gap" => vec![
             "compare with `soll_validate` completeness axes",
             "defer if concept baseline is already complete",
+        ],
+        "phantom_dead_ref" => vec![
+            "search codebase for the missing DECLARES source",
+            "add export/declaration or remove the read",
+        ],
+        "phantom_multi_declare" => vec![
+            "confirm declarations are intentionally redundant",
+            "consolidate to a single source of truth if not",
         ],
         "cycle" => vec!["confirm if cycle is intentional", "review module boundary"],
         "god_object" => vec!["inspect fan-in consumers", "stage decomposition carefully"],
