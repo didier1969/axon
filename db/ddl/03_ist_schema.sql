@@ -39,6 +39,20 @@ CREATE TABLE IF NOT EXISTS public.IndexedFile (
     last_attempt_ms BIGINT,
     CONSTRAINT indexedfile_status_check CHECK (status IN ('discovered', 'indexed'))
 );
+-- Idempotent migration for existing instances (columns added session 58).
+DO $$ BEGIN
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'indexed';
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS discovered_ms BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS mtime_ms BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS last_attempt_ms BIGINT;
+EXCEPTION WHEN others THEN NULL;
+END $$;
+ALTER TABLE public.IndexedFile DROP CONSTRAINT IF EXISTS indexedfile_status_check;
+ALTER TABLE public.IndexedFile ADD CONSTRAINT indexedfile_status_check
+    CHECK (status IN ('discovered', 'indexed'));
+
 CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
     ON public.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
     WHERE status = 'discovered';
@@ -91,6 +105,8 @@ CREATE TABLE IF NOT EXISTS public.Chunk (
     token_count      INTEGER,
     embed_status     TEXT NOT NULL DEFAULT 'pending'
 );
+-- Idempotent migration for Chunk.embed_status (session 58).
+ALTER TABLE public.Chunk ADD COLUMN IF NOT EXISTS embed_status TEXT NOT NULL DEFAULT 'pending';
 -- W3: partial index for demand-pull B — only pending chunks, ordered by
 -- token_count for GPU batch homogeneity. Replaces the LEFT JOIN anti-pattern.
 CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
