@@ -34,7 +34,6 @@ use crate::ingress_buffer::{
     IngressSource, SharedIngressBuffer,
 };
 use crate::pipeline_v2::{
-    b1_cold_start_poll,
     GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
@@ -73,6 +72,35 @@ pub const PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT: u8 = 50;
 /// reconciliation walk that is, by definition, catching up rather than
 /// reacting in real time.
 const PERIODIC_SWEEP_HINT_PRIORITY: i64 = 50;
+
+fn demand_pull_a_batch_from_env() -> usize {
+    std::env::var("AXON_DEMAND_PULL_A_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+}
+
+fn demand_pull_b_batch_from_env() -> usize {
+    std::env::var("AXON_DEMAND_PULL_B_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500)
+}
+
+fn resolve_database_url_for_listener() -> String {
+    use crate::postgres::{database_url_for, AxonInstance};
+    let instance = if std::env::var("AXON_INSTANCE_KIND")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("dev")
+    {
+        AxonInstance::Dev
+    } else {
+        AxonInstance::Live
+    };
+    database_url_for(instance).unwrap_or_else(|_| {
+        "postgres://axon@127.0.0.1:44144/axon_live".to_string()
+    })
+}
 
 /// Boot the streaming pipeline v2 in the indexer binary.
 ///
@@ -263,47 +291,17 @@ pub fn spawn_pipeline_v2_indexer(
             while output_rx_b.recv().await.is_some() {}
         });
 
-        // CPT-AXO-054 cold-start poll: every 30 s, sweep public.Chunk
-        // for rows without a matching ChunkEmbedding and push their
-        // chunk_ids into the same inbox. Rattrape:
-        //   * chunks A3 try_send-dropped because the buffer was full
-        //     (the operator-validated session-22 cause: bootstrap +
-        //     watcher push 40k chunks while B side embeds at ~100 ch/s,
-        //     so ~30k chunk_ids overflow per cycle without this poll)
-        //   * chunks from previous indexer instances (pre-v2 cut-over)
-        //   * any race where B1 fetch raced with A3 commit
-        // Adaptive cold-start poll: 5s when backlog exists, 30s when idle.
-        // Ensures GPU catches up quickly after a burst of indexation.
-        let store_for_poll = store.clone();
-        let coldstart_batch_size = caps.b1_coldstart_batch_size;
-        let idle_interval = Duration::from_secs(caps.b1_coldstart_poll_interval_secs);
-        let busy_interval = Duration::from_secs(5);
-        tokio::spawn(async move {
-            tokio::time::sleep(busy_interval).await;
-            loop {
-                match b1_cold_start_poll(
-                    store_for_poll.clone(),
-                    b1_inbox_tx_for_poll.clone(),
-                    coldstart_batch_size,
-                )
-                .await
-                {
-                    Ok(n) if n > 0 => {
-                        info!(
-                            "pipeline_v2 cold-start poll: forwarded {n} chunk_id(s) to B1 (next poll in 5s)"
-                        );
-                        tokio::time::sleep(busy_interval).await;
-                    }
-                    Ok(_) => {
-                        tokio::time::sleep(idle_interval).await;
-                    }
-                    Err(err) => {
-                        warn!(error = %err, "pipeline_v2 cold-start poll failed");
-                        tokio::time::sleep(idle_interval).await;
-                    }
-                }
-            }
-        });
+        // DEC-AXO-901620: demand-pull B replaces the supply-push cold-start
+        // poll. PG NOTIFY on `chunk_pending_embed` wakes the puller;
+        // 30s safety-net poll catches lost notifications.
+        let demand_pull_b_batch = demand_pull_b_batch_from_env();
+        let db_url_b = resolve_database_url_for_listener();
+        crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
+            store.clone(),
+            db_url_b,
+            b1_inbox_tx_for_poll,
+            demand_pull_b_batch,
+        );
     } else {
         // No B side — keep the inbox alive so A3's try_send never gets
         // a closed-channel error, then drain silently.
@@ -386,50 +384,17 @@ pub fn spawn_pipeline_v2_indexer(
         );
     });
 
-    // DEC-AXO-901619: cold-start poll A — re-inject discovered-but-not-yet-
-    // indexed files from IndexedFile WHERE status='discovered'. This is the
-    // pipeline-A symmetric counterpart to the B1 cold-start poll above.
-    // Runs on a 30s loop; any file that A3 successfully processes gets
-    // promoted to 'indexed' and disappears from the next poll.
-    let store_for_a_poll = store.clone();
-    let input_tx_cold_a = handles_a.input_tx.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        loop {
-            let store_clone = store_for_a_poll.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                store_clone.select_files_needing_indexing(512)
-            })
-            .await;
-            match result {
-                Ok(Ok(paths)) if !paths.is_empty() => {
-                    let count = paths.len();
-                    let mut sent = 0usize;
-                    for path_str in paths {
-                        match input_tx_cold_a.try_send(PathBuf::from(&path_str)) {
-                            Ok(()) => sent += 1,
-                            Err(_) => break,
-                        }
-                    }
-                    info!(
-                        "pipeline_v2 cold-start A: re-injected {sent}/{count} discovered file(s)"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-                Ok(Ok(_)) => {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-                Ok(Err(err)) => {
-                    warn!(error = %err, "pipeline_v2 cold-start A poll failed");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-                Err(join_err) => {
-                    warn!(error = %join_err, "pipeline_v2 cold-start A spawn_blocking panicked");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            }
-        }
-    });
+    // DEC-AXO-901620: demand-pull A replaces the supply-push cold-start
+    // poll. PG NOTIFY on `file_discovered` wakes the puller; 30s
+    // safety-net poll catches lost notifications.
+    let demand_pull_a_batch = demand_pull_a_batch_from_env();
+    let db_url_a = resolve_database_url_for_listener();
+    crate::pipeline_v2::demand_pull::spawn_pipeline_a_demand_pull(
+        store.clone(),
+        db_url_a,
+        handles_a.input_tx.clone(),
+        demand_pull_a_batch,
+    );
 
     // Steady-state drain loop: pull file events from the shared
     // ingress_buffer (watcher pushes here on FS notifications) and

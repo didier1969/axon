@@ -39,6 +39,22 @@ CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
     ON public.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
     WHERE status = 'discovered';
 
+-- DEC-AXO-901620: NOTIFY pipeline A when new files are discovered.
+-- The demand-pull listener wakes on this channel and pulls a batch.
+CREATE OR REPLACE FUNCTION public.fn_notify_file_discovered() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'discovered' THEN
+        PERFORM pg_notify('file_discovered', NEW.path);
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_notify_file_discovered ON public.IndexedFile;
+CREATE TRIGGER trg_notify_file_discovered
+    AFTER INSERT OR UPDATE ON public.IndexedFile
+    FOR EACH ROW EXECUTE FUNCTION public.fn_notify_file_discovered();
+
 -- Code symbols (functions, types, modules, …).
 CREATE TABLE IF NOT EXISTS public.Symbol (
     id           TEXT PRIMARY KEY,

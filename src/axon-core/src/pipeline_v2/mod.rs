@@ -48,6 +48,7 @@
 //! `cargo run --release --bin axon-bench-pipeline-v2 -- --source PATH --gpu`
 
 pub mod channels;
+pub mod demand_pull;
 pub mod embedder_gpu;
 pub mod indexed_file_cache;
 pub mod metrics;
