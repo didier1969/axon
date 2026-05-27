@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 struct ProjectDependency {
     path: String,
@@ -544,15 +544,22 @@ impl Scanner {
 }
 
 fn dispatch_scanner_batch(
-    _graph: &Arc<GraphStore>,
+    graph: &Arc<GraphStore>,
     batch: &[(String, String, i64, i64)],
     _guard: Option<&SharedFileIngressGuard>,
     ingress: Option<&SharedIngressBuffer>,
 ) -> bool {
-    // REQ-AXO-901653 slice-5c — pipeline_v2 canonical : push to ingress_buffer,
-    // never call legacy GraphStore::bulk_insert_files / fetch_file_ingress_rows
-    // (those query the dropped public.File table). FileIngressGuard hydration
-    // is now driven by pipeline_v2 via ingress_buffer back-pressure.
+    // DEC-AXO-901619: durable discovery — batch UPSERT into IndexedFile
+    // with status='discovered' BEFORE pushing to in-memory ingress buffer.
+    // If memory pressure sheds the buffer entry, the file survives in PG
+    // and cold-start poll A will pick it up on next boot.
+    if let Err(e) = persist_discovery_batch(graph, batch) {
+        warn!(
+            "Scanner: durable discovery batch failed ({}), falling through to ingress-only",
+            e
+        );
+    }
+
     if let Some(shared_ingress) = ingress {
         let mut locked = shared_ingress
             .lock()
@@ -562,6 +569,45 @@ fn dispatch_scanner_batch(
     }
     error!("dispatch_scanner_batch: no ingress_buffer available — batch dropped");
     false
+}
+
+/// DEC-AXO-901619: persist discovered files in PG so the work queue
+/// survives memory pressure and restarts. Uses multi-row INSERT with
+/// hash-aware CASE to avoid regressing 'indexed' → 'discovered' for
+/// unchanged files.
+fn persist_discovery_batch(
+    graph: &Arc<GraphStore>,
+    batch: &[(String, String, i64, i64)],
+) -> anyhow::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut values = Vec::with_capacity(batch.len());
+    for (path, _project, _size, _mtime) in batch {
+        let safe_path = path.replace('\'', "''");
+        values.push(format!(
+            "('{safe_path}', '', {now_ms}, 'discovered', {now_ms})"
+        ));
+    }
+    // content_hash='' for discovery (A1 hasn't computed it yet).
+    // Status CASE: if the file is already 'indexed' and its content_hash
+    // is non-empty (A3 wrote it), preserve the status. Only newly
+    // discovered files (no existing row) or files where A3 has never
+    // written get 'discovered'.
+    let sql = format!(
+        "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, discovered_ms) \
+         VALUES {} \
+         ON CONFLICT (path) DO UPDATE SET \
+             discovered_ms = EXCLUDED.discovered_ms, \
+             last_seen_ms  = EXCLUDED.last_seen_ms, \
+             status = CASE \
+                 WHEN IndexedFile.status = 'indexed' THEN IndexedFile.status \
+                 ELSE 'discovered' \
+             END",
+        values.join(", ")
+    );
+    graph.execute(&sql)
 }
 
 fn enqueue_scanner_batch(buffer: &mut IngressBuffer, batch: &[(String, String, i64, i64)]) {

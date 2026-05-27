@@ -386,6 +386,51 @@ pub fn spawn_pipeline_v2_indexer(
         );
     });
 
+    // DEC-AXO-901619: cold-start poll A — re-inject discovered-but-not-yet-
+    // indexed files from IndexedFile WHERE status='discovered'. This is the
+    // pipeline-A symmetric counterpart to the B1 cold-start poll above.
+    // Runs on a 30s loop; any file that A3 successfully processes gets
+    // promoted to 'indexed' and disappears from the next poll.
+    let store_for_a_poll = store.clone();
+    let input_tx_cold_a = handles_a.input_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        loop {
+            let store_clone = store_for_a_poll.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                store_clone.select_files_needing_indexing(512)
+            })
+            .await;
+            match result {
+                Ok(Ok(paths)) if !paths.is_empty() => {
+                    let count = paths.len();
+                    let mut sent = 0usize;
+                    for path_str in paths {
+                        match input_tx_cold_a.try_send(PathBuf::from(&path_str)) {
+                            Ok(()) => sent += 1,
+                            Err(_) => break,
+                        }
+                    }
+                    info!(
+                        "pipeline_v2 cold-start A: re-injected {sent}/{count} discovered file(s)"
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Ok(Ok(_)) => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                Ok(Err(err)) => {
+                    warn!(error = %err, "pipeline_v2 cold-start A poll failed");
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                Err(join_err) => {
+                    warn!(error = %join_err, "pipeline_v2 cold-start A spawn_blocking panicked");
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        }
+    });
+
     // Steady-state drain loop: pull file events from the shared
     // ingress_buffer (watcher pushes here on FS notifications) and
     // forward into pipeline A. Subtree hints are completed silently

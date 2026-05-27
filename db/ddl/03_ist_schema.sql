@@ -24,13 +24,20 @@ CREATE TABLE IF NOT EXISTS public.RuntimeMetadata (
 DROP TABLE IF EXISTS public.File CASCADE;
 
 -- Streaming pipeline v2 watcher filter (REQ-AXO-289).
--- 3 columns only: path PK, content_hash for change detection,
--- last_seen_ms for hygiene. No status machine.
+-- DEC-AXO-901619: durable discovery queue. status + discovered_ms make
+-- file discovery persistent — scanner writes 'discovered', A3 promotes
+-- to 'indexed'. On restart, WHERE status='discovered' = pipeline A backlog.
 CREATE TABLE IF NOT EXISTS public.IndexedFile (
-    path         TEXT PRIMARY KEY,
-    content_hash TEXT   NOT NULL,
-    last_seen_ms BIGINT NOT NULL
+    path          TEXT   PRIMARY KEY,
+    content_hash  TEXT   NOT NULL,
+    last_seen_ms  BIGINT NOT NULL,
+    status        TEXT   NOT NULL DEFAULT 'indexed',
+    discovered_ms BIGINT NOT NULL DEFAULT 0,
+    CONSTRAINT indexedfile_status_check CHECK (status IN ('discovered', 'indexed'))
 );
+CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
+    ON public.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
+    WHERE status = 'discovered';
 
 -- Code symbols (functions, types, modules, …).
 CREATE TABLE IF NOT EXISTS public.Symbol (

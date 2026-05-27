@@ -817,11 +817,12 @@ impl GraphStore {
         let safe_path = Self::escape_sql(path);
         let safe_hash = Self::escape_sql(content_hash);
         self.execute(&format!(
-            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms) \
-             VALUES ('{path}', '{hash}', {ts}) \
+            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status) \
+             VALUES ('{path}', '{hash}', {ts}, 'indexed') \
              ON CONFLICT (path) DO UPDATE SET \
                  content_hash = EXCLUDED.content_hash, \
-                 last_seen_ms = EXCLUDED.last_seen_ms;",
+                 last_seen_ms = EXCLUDED.last_seen_ms, \
+                 status = 'indexed';",
             path = safe_path,
             hash = safe_hash,
             ts = last_seen_ms,
@@ -866,6 +867,24 @@ impl GraphStore {
                 let ts = row.get(2)?.as_i64().unwrap_or(0);
                 Some((path, hash, ts))
             })
+            .collect())
+    }
+
+    /// DEC-AXO-901619: select files with status='discovered' for
+    /// pipeline-A cold-start re-ingestion. Symmetric to
+    /// `select_chunks_needing_embedding` for pipeline B.
+    pub fn select_files_needing_indexing(&self, limit: usize) -> Result<Vec<String>> {
+        let raw = self.query_json_writer(&format!(
+            "SELECT path FROM IndexedFile \
+             WHERE status = 'discovered' \
+             ORDER BY discovered_ms ASC \
+             LIMIT {limit}"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
+            .unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first()?.as_str().map(String::from))
             .collect())
     }
 
