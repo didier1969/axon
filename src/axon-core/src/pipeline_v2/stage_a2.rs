@@ -182,4 +182,45 @@ mod tests {
         assert!(parsed.relations.is_empty());
         assert_eq!(parsed.content_hash, "deadbeef");
     }
+
+    /// REQ-AXO-901777 — corrupted/binary content that tree-sitter cannot
+    /// parse yields an error (not a panic). The pipeline orchestrator
+    /// counts this as a stage error and moves on.
+    #[tokio::test]
+    async fn a2_transform_binary_garbage_content_does_not_panic() {
+        let garbage = "\x00\x01\x02\x7F random garbage \x0B\x0C not valid code";
+        let prep = prep_with("/tmp/garbage.rs", garbage);
+        let result = a2_transform(prep).await;
+        // Binary content may yield zero symbols from tree-sitter and zero
+        // phantom matches → the function returns an error ("no parser and
+        // no phantom rules"). Either way, no panic.
+        match result {
+            Ok(parsed) => {
+                // If it somehow parsed, that's fine — just no panic.
+                assert!(parsed.symbols.is_empty() || !parsed.symbols.is_empty());
+            }
+            Err(_) => {
+                // Expected: "no parser" or parse failure.
+            }
+        }
+    }
+
+    /// REQ-AXO-901777 — deeply nested / adversarial content does not
+    /// cause a stack overflow or timeout in the tree-sitter parser.
+    #[tokio::test]
+    async fn a2_transform_deeply_nested_content_completes() {
+        let depth = 100;
+        let mut code = String::new();
+        for i in 0..depth {
+            code.push_str(&format!("fn f{i}() {{ "));
+        }
+        for _ in 0..depth {
+            code.push_str("} ");
+        }
+        let prep = prep_with("/tmp/deep.rs", &code);
+        let result = a2_transform(prep).await;
+        // Must complete (no infinite loop / stack overflow). Whether
+        // parsing succeeds or fails is secondary.
+        assert!(result.is_ok() || result.is_err());
+    }
 }

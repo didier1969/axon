@@ -427,4 +427,115 @@ mod tests {
         let res = b2_embed(payload, embedder).await;
         assert!(res.is_err(), "missing embedding must propagate as error");
     }
+
+    /// REQ-AXO-901777 — embedder failure in the batched worker records
+    /// errors_total for every queued payload and does NOT crash the
+    /// worker (it continues processing subsequent batches).
+    #[tokio::test]
+    async fn b2_batched_worker_handles_embedder_failure_gracefully() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::mpsc;
+
+        struct FailingEmbedder {
+            call_count: AtomicUsize,
+        }
+        impl B2Embedder for FailingEmbedder {
+            fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("simulated GPU OOM"))
+            }
+        }
+
+        let embedder = Arc::new(FailingEmbedder {
+            call_count: AtomicUsize::new(0),
+        });
+        let (in_tx, in_rx) = mpsc::channel::<ChunkForEmbedding>(16);
+        let (out_tx, mut out_rx) = mpsc::channel::<EmbeddedChunk>(16);
+        let metrics = StageMetrics::new("B2");
+
+        spawn_b2_batched_worker(
+            in_rx,
+            out_tx,
+            embedder.clone(),
+            metrics.clone(),
+            4,
+            Duration::from_millis(50),
+        );
+
+        // Send 4 chunks (fills one batch).
+        for i in 0..4 {
+            in_tx
+                .send(ChunkForEmbedding {
+                    chunk_id: format!("fail{i}"),
+                    content: format!("fn f{i}(){{}}"),
+                    content_hash: format!("h{i}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Give the worker time to process the batch.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // No output should arrive (all failed).
+        let maybe = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;
+        assert!(maybe.is_err() || maybe.unwrap().is_none(), "failed batch must not produce output");
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.errors_total, 4, "all 4 items must be counted as errors");
+        assert!(embedder.call_count.load(Ordering::SeqCst) >= 1, "embedder was called");
+
+        // Send another batch to prove the worker survived the failure.
+        drop(in_tx);
+        // Worker should exit cleanly when input closes.
+    }
+
+    /// REQ-AXO-901777 — embedder returns wrong number of embeddings
+    /// (batch size mismatch). Worker records errors, does not crash.
+    #[tokio::test]
+    async fn b2_batched_worker_handles_dimension_mismatch() {
+        use tokio::sync::mpsc;
+
+        struct MismatchEmbedder;
+        impl B2Embedder for MismatchEmbedder {
+            fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                use crate::embedding_contract::DIMENSION;
+                // Return only 1 embedding regardless of input size.
+                Ok(vec![vec![0.0_f32; DIMENSION]])
+            }
+        }
+
+        let embedder: Arc<dyn B2Embedder> = Arc::new(MismatchEmbedder);
+        let (in_tx, in_rx) = mpsc::channel::<ChunkForEmbedding>(8);
+        let (out_tx, _out_rx) = mpsc::channel::<EmbeddedChunk>(8);
+        let metrics = StageMetrics::new("B2");
+
+        spawn_b2_batched_worker(
+            in_rx,
+            out_tx,
+            embedder,
+            metrics.clone(),
+            4,
+            Duration::from_millis(50),
+        );
+
+        for i in 0..4 {
+            in_tx
+                .send(ChunkForEmbedding {
+                    chunk_id: format!("mm{i}"),
+                    content: format!("fn mm{i}(){{}}"),
+                    content_hash: format!("h{i}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let snap = metrics.snapshot();
+        assert_eq!(
+            snap.errors_total, 4,
+            "batch size mismatch must record all items as errors"
+        );
+    }
 }

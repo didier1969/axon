@@ -376,4 +376,83 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "ON CONFLICT must keep exactly one row per (chunk_id, model_id)");
     }
+
+    /// REQ-AXO-901777 — B3 with wrong embedding dimension propagates
+    /// the PG vector constraint error (not a panic or silent corruption).
+    #[tokio::test]
+    async fn b3_wrong_dimension_embedding_returns_error() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let body = "fn b3_dim_test() {}\n";
+        let chunk_ids = store
+            .upsert_graph_v2(
+                "/tmp/b3_dim.rs",
+                "AXO",
+                body,
+                "hash-b3dim",
+                1_700_000_000_012,
+                &[sym("b3_dim_test")],
+                &[],
+            )
+            .unwrap();
+        let cid = chunk_ids[0].clone();
+
+        // Wrong dimension: 10 instead of DIMENSION (1024).
+        let bad_embedding = vec![1.0_f32; 10];
+        let payload = EmbeddedChunk {
+            chunk_id: cid,
+            source_hash: "hash-bad-dim".to_string(),
+            embedding: bad_embedding,
+        };
+
+        let result = b3_persist_embedding(payload, store).await;
+        assert!(
+            result.is_err(),
+            "wrong dimension must surface as a PG error, not silent success"
+        );
+    }
+
+    /// REQ-AXO-901777 — B3 batched worker metrics record errors when
+    /// the PG batch write fails, and the worker continues running.
+    #[tokio::test]
+    async fn b3_batched_worker_records_errors_on_write_failure() {
+        use tokio::sync::mpsc;
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let (in_tx, in_rx) = mpsc::channel::<EmbeddedChunk>(8);
+        let (out_tx, _out_rx) = mpsc::channel::<PersistedEmbedding>(8);
+        let metrics = StageMetrics::new("B3");
+
+        spawn_b3_batched_worker(
+            in_rx,
+            out_tx,
+            store,
+            metrics.clone(),
+            4,
+            Duration::from_millis(50),
+        );
+
+        // Send chunks with no corresponding Chunk row in PG — the
+        // upsert will fail because of the FK constraint.
+        for i in 0..2 {
+            in_tx
+                .send(EmbeddedChunk {
+                    chunk_id: format!("NONEXISTENT::chunk::{i}"),
+                    source_hash: "h".to_string(),
+                    embedding: vec![0.0_f32; crate::embedding_contract::DIMENSION],
+                })
+                .await
+                .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(in_tx);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let snap = metrics.snapshot();
+        assert!(
+            snap.errors_total >= 2,
+            "B3 must record errors for chunks that fail PG write (got {})",
+            snap.errors_total
+        );
+    }
 }
