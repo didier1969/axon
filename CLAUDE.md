@@ -53,7 +53,7 @@ export ORT_DYLIB_PATH=$(jq -r .core_lib .axon/ort-artifacts/onnxruntime-tensorrt
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$(dirname $ORT_DYLIB_PATH):${LD_LIBRARY_PATH:-}
 export AXON_DEV_DATABASE_URL=postgres://axon@127.0.0.1:44144/axon_dev
 
-cargo run --release --bin axon-bench-pipeline-v2 -- --source <PATH> --max-files N --gpu --human
+cargo run --manifest-path src/axon-core/Cargo.toml --release --bin axon-bench-pipeline-v2 -- --source <PATH> --max-files N --gpu --human
 ```
 Modes: `--gpu` (production), `--cpu` (ORT CPU EP), `--noop` (smoke, no GPU/PG). CSV output via `--csv`. Reports per-stage `items_in/out/err/bp` + Symbol/Chunk/IndexedFile/ChunkEmbedding row counts via writer ctx (reader ctx is stale during the shutdown window on the embedded test backend). See REQ-AXO-289 / CPT-AXO-054 for the topology.
 
