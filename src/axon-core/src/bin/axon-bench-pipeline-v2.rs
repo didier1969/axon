@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
-    const_resolver, spawn_pipeline_a, spawn_pipeline_b_full, B2Embedder, GpuB2Embedder,
-    NoOpEmbedder,
+    const_resolver, load_embedding_dedup_cache, spawn_pipeline_a, spawn_pipeline_b_full_multi,
+    B2Embedder, GpuB2Embedder, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
 };
 
@@ -250,12 +250,34 @@ async fn run() -> Result<()> {
         &mut handles_a.b1_inbox_rx,
         tokio::sync::mpsc::channel(1).1,
     );
-    let mut handles_b = spawn_pipeline_b_full(
+    // REQ-AXO-901748 — hydrate the dedup cache so the bench mirrors the
+    // production runtime path (pipeline_v2_runtime.rs). Without this, B1
+    // skips nothing, B2 re-embeds every chunk already in PG, and the wall
+    // throughput reported is dominated by deduplicated work. The fix
+    // gives the bench the same in-memory dedup state as a steady-state
+    // live indexer.
+    let embedding_dedup = match load_embedding_dedup_cache(&store) {
+        Ok(cache) => {
+            eprintln!(
+                "axon-bench-pipeline-v2: embedding dedup cache hydrated with {} entries",
+                cache.len()
+            );
+            Some(cache)
+        }
+        Err(err) => {
+            eprintln!(
+                "axon-bench-pipeline-v2: dedup cache hydration failed ({err}); proceeding without cache"
+            );
+            None
+        }
+    };
+    let mut handles_b = spawn_pipeline_b_full_multi(
         counts_b,
         caps,
         store.clone(),
-        embedder,
+        vec![embedder],
         b1_inbox_rx,
+        embedding_dedup,
     );
     // REQ-AXO-901744 — the bench does not run a cold-start poll, so
     // drop the extra b1_inbox_tx sender that PipelineAHandles keeps
