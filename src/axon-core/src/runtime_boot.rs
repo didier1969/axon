@@ -698,6 +698,24 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             return Err(e);
         }
     };
+
+    // REQ-AXO-901806 F2 — Indexer writes its runtime config (worker
+    // counts, batch sizes, NOTIFY channel, coldstart cadence) once at
+    // boot so `dashboard_state_full(ttl)` PG function can return the
+    // composite dashboard envelope without 15+ args traveling through
+    // `main_telemetry → compose_dashboard_state_v1`. Best-effort: a
+    // PG failure here doesn't abort boot — dashboard degrades to
+    // empty `runtime_config` block.
+    if profile.role == RuntimeBootRole::Indexer {
+        if let Err(err) = crate::runtime_config::write_indexer_config_snapshot(&graph_store) {
+            warn!(
+                "runtime_config_snapshot write failed at boot: {err:#}. Dashboard runtime_config will read empty until next successful write."
+            );
+        } else {
+            info!("runtime_config_snapshot written (indexer role).");
+        }
+    }
+
     let queue_store = Arc::new(QueueStore::with_memory_budget(
         runtime_profile.queue_capacity,
         runtime_profile

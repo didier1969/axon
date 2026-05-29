@@ -72,10 +72,6 @@ defmodule AxonDashboard.LegacyControlPlaneBoundaryTest do
     mcp_config = Application.get_env(:axon_dashboard, Axon.Watcher.McpClient, [])
     assert Keyword.has_key?(mcp_config, :endpoint)
 
-    # IndexerHeartbeat: path comes from Application.env
-    hb_config = Application.get_env(:axon_dashboard, Axon.Watcher.IndexerHeartbeat, [])
-    assert Keyword.has_key?(hb_config, :path)
-
     # BridgeClient: telemetry_socket_path comes from Application.env
     # (legacy global key or per-module — at least one must be set)
     legacy_key = Application.get_env(:axon_dashboard, :telemetry_socket_path)

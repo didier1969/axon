@@ -38,6 +38,12 @@ processes:
     environment:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=live"
+      # REQ-AXO-901821 — explicit identity stops the brain from inheriting
+      # whatever AXON_RUNTIME_* the parent shell exported. Each role MUST
+      # set its own identity here ; symmetric to process-compose.dev.yaml.
+      - "AXON_RUNTIME_IDENTITY=axon-live-axon-brain"
+      - "AXON_RUNTIME_SHADOW_ROLE=brain"
+      - "AXON_RUN_ROOT=.axon/run-brain"
       - "AXON_LIVE_DATABASE_URL=${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_live}"
     depends_on:
       postgres-check:
@@ -80,6 +86,9 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_INSTANCE_KIND=live"
       - "AXON_INDEXER_HEALTH_PORT=44130"
+      # REQ-AXO-901821 — explicit identity, symmetric to brain block above.
+      - "AXON_RUNTIME_IDENTITY=axon-live-axon-indexer"
+      - "AXON_RUN_ROOT=.axon/run-indexer"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"

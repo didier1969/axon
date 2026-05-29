@@ -34,6 +34,14 @@ processes:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=dev"
       - "AXON_BRAIN_PORT=44139"
+      # REQ-AXO-901821 — explicit identity stops the brain from inheriting
+      # whatever AXON_RUNTIME_* the parent shell exported (which historically
+      # left the brain branded as `axon-dev-axon-indexer` because the parent
+      # was the indexer launcher). Each role MUST set its own identity here.
+      - "AXON_RUNTIME_IDENTITY=axon-dev-axon-brain"
+      - "AXON_RUNTIME_SHADOW_ROLE=brain"
+      - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-brain/runtime.env"
+      - "AXON_RUN_ROOT=.axon-dev/run-brain"
       - "AXON_DEV_DATABASE_URL=${AXON_DEV_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_dev}"
     depends_on:
       postgres-check:
@@ -64,6 +72,11 @@ processes:
     environment:
       - "AXON_INSTANCE_KIND=dev"
       - "AXON_INDEXER_HEALTH_PORT=44149"
+      # REQ-AXO-901821 — explicit identity, see brain block above.
+      - "AXON_RUNTIME_IDENTITY=axon-dev-axon-indexer"
+      - "AXON_RUNTIME_SHADOW_ROLE=indexer"
+      - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-indexer/runtime.env"
+      - "AXON_RUN_ROOT=.axon-dev/run-indexer"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"

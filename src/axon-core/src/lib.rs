@@ -39,6 +39,7 @@ pub mod queue;
 pub mod registry_notify_listener;
 pub mod runtime_boot;
 pub mod runtime_command_proxy;
+pub mod runtime_config;
 pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;

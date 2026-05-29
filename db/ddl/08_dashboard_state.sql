@@ -170,3 +170,54 @@ $func$;
 
 COMMENT ON FUNCTION axon_runtime.dashboard_totals(INT) IS
     'REQ-AXO-901806 — Aggregate totals across all projects with TTL cache. Returns jsonb object including coverage_pct and pending.';
+
+-- ── Runtime config snapshot (boot-written by indexer) ────────────────
+-- REQ-AXO-901806 F2 — semi-static configs (worker counts, batch sizes,
+-- notify_channel, coldstart_poll_interval_secs, a3_to_b1_buffer_cap)
+-- live in PG so dashboard_state_full() returns the full picture in a
+-- single call. Indexer writes UPSERT once at boot ; brain reads via
+-- the composite function below.
+--
+-- Why PG: aligns with PIL-AXO-009 (PG canonical) and avoids passing
+-- 15+ config args from main_telemetry.rs → compose_dashboard_state_v1
+-- on every 1 Hz tick.
+
+CREATE TABLE IF NOT EXISTS axon_runtime.runtime_config_snapshot (
+    runtime_role  TEXT PRIMARY KEY,
+    config        JSONB NOT NULL,
+    written_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+COMMENT ON TABLE axon_runtime.runtime_config_snapshot IS
+    'REQ-AXO-901806 F2 — boot-time semi-static runtime configs (pipeline_a/b workers + batch sizes, notify_channel, coldstart_poll_interval_secs, a3_to_b1_buffer_cap, ingress_drain_batch). UPSERT by runtime_role at process startup.';
+
+-- ── Composite dashboard_state_full function ──────────────────────────
+-- REQ-AXO-901806 — single PG round-trip for the dashboard. Composes
+-- the existing TTL-cached aggregates with the runtime config snapshot
+-- so the brain's `compose_dashboard_state_v1` only needs to add live
+-- in-memory metrics (rates, queues, scheduler state, embedder state,
+-- identity) to assemble the full event.
+
+CREATE OR REPLACE FUNCTION axon_runtime.dashboard_state_full(p_ttl_secs INT DEFAULT 5)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $func$
+DECLARE
+    cfg JSONB;
+BEGIN
+    SELECT config
+    INTO cfg
+    FROM axon_runtime.runtime_config_snapshot
+    WHERE runtime_role = 'indexer'
+    LIMIT 1;
+
+    RETURN jsonb_build_object(
+        'totals',         axon_runtime.dashboard_totals(p_ttl_secs),
+        'per_project',    axon_runtime.dashboard_per_project_counts(p_ttl_secs),
+        'runtime_config', COALESCE(cfg, '{}'::jsonb)
+    );
+END;
+$func$;
+
+COMMENT ON FUNCTION axon_runtime.dashboard_state_full(INT) IS
+    'REQ-AXO-901806 — Composite dashboard state from TTL-cached aggregates + runtime config snapshot. Single round-trip for the brain 1 Hz tick.';

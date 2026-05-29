@@ -12,7 +12,8 @@ defmodule AxonDashboardWeb.Live.McpLive do
   """
   use Phoenix.LiveView
 
-  alias Axon.Watcher.{IndexerHeartbeat, McpClient}
+  alias AxonDashboard.{BridgeClient, DashboardState}
+  alias Axon.Watcher.McpClient
   alias AxonDashboardWeb.Live.Nav
 
   @refresh_ms 30_000
@@ -94,7 +95,7 @@ defmodule AxonDashboardWeb.Live.McpLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       :timer.send_interval(@refresh_ms, self(), :refresh)
-      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, BridgeClient.dashboard_topic())
       send(self(), :load)
     end
 
@@ -112,7 +113,7 @@ defmodule AxonDashboardWeb.Live.McpLive do
       |> assign(:descriptions, %{})
       |> assign(:filter, "")
       |> assign(:category, :all)
-      |> assign(:heartbeat, IndexerHeartbeat.latest())
+      |> assign(:dashboard_state, BridgeClient.dashboard_state() || %DashboardState{})
       |> assign(:loaded?, loaded?)
       |> assign(:error, error)
 
@@ -151,11 +152,6 @@ defmodule AxonDashboardWeb.Live.McpLive do
   def handle_info(:refresh, socket), do: {:noreply, load_tools(socket)}
 
   @impl true
-  def handle_info({:indexer_heartbeat, snap}, socket) do
-    {:noreply, assign(socket, :heartbeat, snap)}
-  end
-
-  @impl true
   def handle_info({:tool_descriptions, map}, socket) do
     {:noreply, assign(socket, :descriptions, Map.merge(socket.assigns.descriptions, map))}
   end
@@ -178,8 +174,8 @@ defmodule AxonDashboardWeb.Live.McpLive do
   end
 
   @impl true
-  # REQ-AXO-901806 — dashboard_state_v1 handler (dual-source migration window).
-  def handle_info({:dashboard_state, state}, socket) do
+  # REQ-AXO-901826 — typed struct pattern match.
+  def handle_info({:dashboard_state, %DashboardState{} = state}, socket) do
     {:noreply, assign(socket, :dashboard_state, state)}
   end
 
@@ -215,14 +211,14 @@ defmodule AxonDashboardWeb.Live.McpLive do
     ~H"""
     <Nav.shell
       current={:mcp}
-      build_id={(@heartbeat || %{}) |> Map.get(:build_id, "n/a")}
-      install_generation={(@heartbeat || %{}) |> Map.get(:install_generation, "n/a")}
-      runtime_mode={(@heartbeat || %{}) |> Map.get(:runtime_mode, "unknown")}
-      instance_kind={Application.get_env(:axon_dashboard, :instance_kind, "unknown")}
-      gpu_effective={get_in(@heartbeat || %{}, [:embedder_provider, :effective]) || "unknown"}
-      degraded_reason={(@heartbeat || %{}) |> Map.get(:degraded_reason)}
-      stale={Map.get(@heartbeat || %{}, :stale, false) == true}
-      observed_age_ms={(@heartbeat || %{}) |> Map.get(:observed_age_ms)}
+      build_id={runtime_field(@dashboard_state, :build_id, "n/a")}
+      install_generation={runtime_field(@dashboard_state, :install_generation, "n/a")}
+      runtime_mode={runtime_field(@dashboard_state, :runtime_mode, "unknown")}
+      instance_kind={runtime_field(@dashboard_state, :instance_kind, Application.get_env(:axon_dashboard, :instance_kind, "unknown"))}
+      gpu_effective={embedder_field(@dashboard_state, :effective, "unknown")}
+      degraded_reason={runtime_field(@dashboard_state, :degraded_reason, nil)}
+      stale={is_nil(@dashboard_state.ts_ms)}
+      observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="space-y-4">
         <%!-- HEADER + SEARCH --%>
@@ -461,4 +457,12 @@ defmodule AxonDashboardWeb.Live.McpLive do
   defp cat_dot(:graph), do: "bg-pink-400"
   defp cat_dot(:system), do: "bg-slate-400"
   defp cat_dot(_), do: "bg-slate-600"
+
+  ## DashboardState accessors (REQ-AXO-901826) — typed struct, atom keys.
+
+  defp runtime_field(%DashboardState{runtime: nil}, _key, default), do: default
+  defp runtime_field(%DashboardState{runtime: r}, key, default), do: Map.get(r, key, default) || default
+
+  defp embedder_field(%DashboardState{embedder: nil}, _key, default), do: default
+  defp embedder_field(%DashboardState{embedder: e}, key, default), do: Map.get(e, key, default) || default
 end

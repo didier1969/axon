@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use crate::embedder::lifecycle::process_state as embedder_state;
 
-const LISTEN_CHANNEL: &str = "chunk_pending_embed";
+pub const LISTEN_CHANNEL: &str = "chunk_pending_embed";
 const BACKOFF_INITIAL_MS: u64 = 200;
 const BACKOFF_MAX_MS: u64 = 30_000;
 const NOTIFY_FORWARD_BUFFER: usize = 2048;

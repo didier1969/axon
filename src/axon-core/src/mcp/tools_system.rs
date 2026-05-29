@@ -26,7 +26,10 @@ static FS_COUNTER_CACHE: std::sync::Mutex<Option<FsCounterSnapshot>> =
 /// `eligible_files` = subset that passes the Scanner filter stack
 ///   (.gitignore, .axonignore, supported extensions, etc.).
 /// Returns `(-1, -1)` when `AXON_WATCH_DIR` is not set.
-fn cached_fs_counters() -> (i64, i64) {
+///
+/// REQ-AXO-901806 — exposed `pub(crate)` so `dashboard_state.rs` can
+/// reuse the same TTL-cached snapshot in the 1 Hz event composition.
+pub(crate) fn cached_fs_counters() -> (i64, i64) {
     let watch_root = match std::env::var("AXON_WATCH_DIR") {
         Ok(v) if !v.trim().is_empty() => v,
         _ => return (-1, -1),

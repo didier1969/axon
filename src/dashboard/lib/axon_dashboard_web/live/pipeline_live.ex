@@ -8,19 +8,16 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
         ─try_send (A3→B1 cap 10000)──▶
       B1 fetch    → B2 embed-GPU → B3 write-emb
 
-  Worker counts and batch sizes come from MCP `embedding_status`
-  (via `Axon.Watcher.McpPoller`), while live deltas (chunks/sec,
-  graph workers active, file vec queue, ingress hot) come from the
-  indexer heartbeat JSON (via `Axon.Watcher.IndexerHeartbeat`).
-
-  Per-stage in/out/inflight/backpressure counters do NOT currently
-  exist in the runtime surface — only the bench (`axon-bench-pipeline-v2`)
-  reads `StageSnapshot`. The dashboard surfaces the missing-counter
-  state explicitly rather than fabricate values.
+  REQ-AXO-901806 / REQ-AXO-901826 — single source of truth =
+  `%AxonDashboard.DashboardState{}` struct broadcast on the dedicated
+  PubSub topic `BridgeClient.dashboard_topic/0` at 1 Hz. No more
+  string-key map access, no more shared `bridge_events` topic
+  noise (which carries FileIndexed / ScanStarted etc.).
   """
   use Phoenix.LiveView
 
-  alias Axon.Watcher.{IndexerHeartbeat, McpPoller}
+  alias AxonDashboard.BridgeClient
+  alias AxonDashboard.DashboardState
   alias AxonDashboardWeb.Live.Nav
 
   @rate_window_size 60
@@ -29,74 +26,35 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, BridgeClient.dashboard_topic())
     end
 
-    hb = IndexerHeartbeat.latest()
-    mcp = McpPoller.latest()
+    initial = BridgeClient.dashboard_state() || %DashboardState{}
 
     socket =
       socket
       |> assign(:page_title, "Axon · Pipeline Cockpit")
-      |> assign(:heartbeat, hb)
-      |> assign(:mcp, mcp)
-      # REQ-AXO-901806 — single-event dashboard_state_v1 assign,
-      # initially nil until first :dashboard_state PubSub event lands.
-      |> assign(:dashboard_state, nil)
+      |> assign(:dashboard_state, initial)
       |> assign(:rate_series, :queue.new())
       |> assign(:last_push_ms, 0)
-      |> assign(:total_chunks_history, :queue.new())
+      |> stream(:per_project, initial.per_project, dom_id: &"proj-#{&1.project_code}")
 
     {:ok, push_pipeline_state(socket, force: true)}
   end
 
   @impl true
-  def handle_info({:indexer_heartbeat, snap}, socket) do
+  def handle_info({:dashboard_state, %DashboardState{} = state}, socket) do
     socket =
       socket
-      |> assign(:heartbeat, snap)
-      |> update_rate_series(snap)
+      |> assign(:dashboard_state, state)
+      |> update_rate_series(state)
       |> maybe_push_pipeline_state()
+      |> stream(:per_project, state.per_project, reset: true, dom_id: &"proj-#{&1.project_code}")
 
     {:noreply, socket}
   end
 
-  @impl true
-  def handle_info({:indexer_heartbeat_stale, snap}, socket) do
-    {:noreply, assign(socket, :heartbeat, snap)}
-  end
-
-  @impl true
-  def handle_info({:indexer_heartbeat_missing, _info}, socket) do
-    {:noreply, assign(socket, :heartbeat, %{status: :missing})}
-  end
-
-  @impl true
-  def handle_info({:mcp_embedding_status, snap}, socket) do
-    socket =
-      socket
-      |> assign(:mcp, snap)
-      |> push_pipeline_state(force: true)
-
-    {:noreply, socket}
-  end
-
-  @impl true
-  def handle_info({:mcp_embedding_status_error, _reason}, socket) do
-    {:noreply, socket}
-  end
-
-  # REQ-AXO-901806 — dashboard_state_v1 event handler (single-event
-  # architecture). Stored as `@dashboard_state` for future migration ;
-  # render still reads @heartbeat + @mcp during the dual-source window.
-  # Once render is migrated, the IndexerHeartbeat + McpPoller pollers
-  # in the supervision tree become removable (F6).
-  @impl true
-  def handle_info({:dashboard_state, state}, socket) do
-    {:noreply, assign(socket, :dashboard_state, state)}
-  end
-
-  # Catch-all: keep process alive on any other broadcast
+  # Catch-all keeps process alive on any other broadcast.
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
@@ -104,47 +62,71 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
     ~H"""
     <Nav.shell
       current={:pipeline}
-      build_id={hb_get(@heartbeat, :build_id, "n/a")}
-      install_generation={hb_install_generation(@heartbeat)}
-      runtime_mode={hb_get(@heartbeat, :runtime_mode, "unknown")}
-      instance_kind={hb_instance_kind(@heartbeat)}
-      gpu_effective={hb_gpu_effective(@heartbeat)}
-      degraded_reason={hb_get(@heartbeat, :degraded_reason, nil)}
-      stale={hb_stale?(@heartbeat)}
-      observed_age_ms={hb_get(@heartbeat, :observed_age_ms, nil)}
+      build_id={runtime_field(@dashboard_state, :build_id, "n/a")}
+      install_generation={runtime_field(@dashboard_state, :install_generation, "n/a")}
+      runtime_mode={runtime_field(@dashboard_state, :runtime_mode, "unknown")}
+      instance_kind={runtime_field(@dashboard_state, :instance_kind, "unknown")}
+      gpu_effective={embedder_field(@dashboard_state, :effective, "unknown")}
+      degraded_reason={runtime_field(@dashboard_state, :degraded_reason, nil)}
+      stale={is_nil(@dashboard_state.ts_ms)}
+      observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="grid grid-cols-12 gap-4">
+        <%!-- REQ-AXO-901827 — bandeau validation conditionnelle.
+             Tant que l'indexer sous-indexe (FS watcher fd exhaustion +
+             tree-sitter parsers manquants), les valeurs PG sont une
+             vérité PARTIELLE. Le dashboard reflète fidèlement ce que
+             PG retourne — mais PG retourne lui-même une valeur fausse
+             car symbols/chunks/embedded incomplets. À retirer une
+             fois REQ-AXO-901827 fermée. --%>
+        <section class="col-span-12 rounded-xl border border-red-500/40 bg-red-950/30 px-5 py-3">
+          <div class="flex items-center gap-3">
+            <span class="h-2.5 w-2.5 rounded-full bg-red-400 animate-pulse"></span>
+            <div class="flex-1">
+              <div class="text-[10px] uppercase tracking-[0.18em] text-red-300 font-semibold">
+                Valeurs non validées — REQ-AXO-901827
+              </div>
+              <div class="mt-1 text-[12px] text-red-200/90 leading-snug">
+                L'indexer dev sous-indexe (FS watcher : <code class="bg-red-950/70 px-1 rounded">Too many open files (os 24)</code> + tree-sitter parsers manquants
+                pour JSON/TOML/lock). Symptômes : 17 projets sur 25 à 0 symbols, ratio symbols/file = 0.52 (attendu 10-30).
+                Les chiffres ci-dessous sont la vérité PG actuelle, mais cette vérité est incomplète.
+                Ne pas valider comme final tant que le ratio symbols/file n'est pas dans la norme.
+              </div>
+            </div>
+          </div>
+        </section>
+
         <%!-- INDEXATION FUNNEL --%>
         <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
           <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Indexation Funnel</div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-sm text-slate-200">
             <span>
               <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Disk</span>
-              <strong class="tabular-nums">{funnel_val(@mcp, :disk_files)}</strong>
+              <strong class="tabular-nums">{fs_val(@dashboard_state, :disk_files)}</strong>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
               <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Eligible</span>
-              <strong class="tabular-nums">{funnel_val(@mcp, :eligible_files)}</strong>
+              <strong class="tabular-nums">{fs_val(@dashboard_state, :eligible_files)}</strong>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
               <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Indexed</span>
-              <strong class="tabular-nums">{mcp_get(@mcp, :indexed_files, 0) |> humanize_int()}</strong>
+              <strong class="tabular-nums">{totals_field(@dashboard_state, :files, 0) |> full_int()}</strong>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
               <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Chunks</span>
-              <strong class="tabular-nums">{mcp_get(@mcp, :total_chunks, 0) |> humanize_int()}</strong>
+              <strong class="tabular-nums">{totals_field(@dashboard_state, :chunks, 0) |> full_int()}</strong>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
               <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Embeddings</span>
-              <strong class={["tabular-nums", coverage_text_class(mcp_get(@mcp, :coverage_pct, 0.0))]}>
-                {mcp_get(@mcp, :embedded_chunks, 0) |> humanize_int()}
+              <strong class={["tabular-nums", coverage_text_class(totals_field(@dashboard_state, :coverage_pct, 0.0))]}>
+                {totals_field(@dashboard_state, :embedded, 0) |> full_int()}
               </strong>
               <span class="text-slate-500 text-[10px] ml-1">
-                ({:erlang.float_to_binary(mcp_get(@mcp, :coverage_pct, 0.0) * 1.0, decimals: 1)}%)
+                ({:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 1)}%)
               </span>
             </span>
           </div>
@@ -152,25 +134,25 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
 
         <%!-- COVERAGE SUMMARY --%>
         <section class="col-span-12 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
-          <.kpi label="Indexed Files" value={mcp_get(@mcp, :indexed_files, 0) |> humanize_int()} tone={:neutral} />
-          <.kpi label="Symbols" value={mcp_get(@mcp, :symbols, 0) |> humanize_int()} tone={:neutral} />
-          <.kpi label="Edges" value={mcp_get(@mcp, :edges, 0) |> humanize_int()} tone={:neutral} />
+          <.kpi label="Indexed Files" value={totals_field(@dashboard_state, :files, 0) |> full_int()} tone={:neutral} />
+          <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
+          <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
           <.kpi
             label="Total Chunks"
-            value={mcp_get(@mcp, :total_chunks, 0) |> humanize_int()}
+            value={totals_field(@dashboard_state, :chunks, 0) |> full_int()}
             tone={:neutral}
           />
           <.kpi
             label="Embedded"
-            value={mcp_get(@mcp, :embedded_chunks, 0) |> humanize_int()}
-            sub={"#{:erlang.float_to_binary(mcp_get(@mcp, :coverage_pct, 0.0) * 1.0, decimals: 2)}%"}
-            tone={coverage_tone(mcp_get(@mcp, :coverage_pct, 0.0))}
+            value={totals_field(@dashboard_state, :embedded, 0) |> full_int()}
+            sub={"#{:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 2)}%"}
+            tone={coverage_tone(totals_field(@dashboard_state, :coverage_pct, 0.0))}
           />
           <.kpi
             label="Pending"
-            value={mcp_get(@mcp, :pending_chunks, 0) |> humanize_int()}
-            sub={pending_sub(@mcp)}
-            tone={pending_tone(@mcp)}
+            value={totals_field(@dashboard_state, :pending, 0) |> full_int()}
+            sub={"queue: #{totals_field(@dashboard_state, :pending, 0) |> full_int()}"}
+            tone={pending_tone(@dashboard_state)}
           />
         </section>
 
@@ -187,7 +169,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
                 live · 1Hz
               </span>
               <span class="text-slate-500">
-                lifecycle: <span class="text-slate-200">{mcp_get(@mcp, :lifecycle_phase, "?")}</span>
+                lifecycle: <span class="text-slate-200">{lifecycle_field(@dashboard_state, :phase, "?")}</span>
               </span>
             </div>
           </header>
@@ -199,10 +181,10 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             style="height: 320px;"
           ></div>
           <div class="px-5 py-3 border-t border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-4 text-[10px] font-mono uppercase tracking-wider text-slate-500">
-            <span>A3→B1 buffer cap: <strong class="text-slate-200">{mcp_get_in(@mcp, [:pipeline_b, :a3_to_b1_buffer_cap], 0) |> humanize_int()}</strong></span>
-            <span>NOTIFY: <strong class="text-slate-200">{mcp_get(@mcp, :notify_channel, "n/a")}</strong></span>
-            <span>coldstart poll: <strong class="text-slate-200">{mcp_get(@mcp, :coldstart_poll_interval_secs, 0)}s × {mcp_get_in(@mcp, [:pipeline_b, :coldstart_batch_size], 0) |> humanize_int()}</strong></span>
-            <span>idle: <strong class={if mcp_get(@mcp, :runtime_idle, false), do: "text-emerald-300", else: "text-amber-300"}>{mcp_get(@mcp, :runtime_idle, false) |> to_string()}</strong></span>
+            <span>A3→B1 buffer cap: <strong class="text-slate-200">{pipeline_field(@dashboard_state, :a3_to_b1_buffer_cap, 0) |> full_int()}</strong></span>
+            <span>NOTIFY: <strong class="text-slate-200">{rc_field(@dashboard_state, :notify_channel, "n/a")}</strong></span>
+            <span>coldstart poll: <strong class="text-slate-200">{rc_field(@dashboard_state, :coldstart_poll_interval_secs, 0)}s × {pipeline_field(@dashboard_state, :coldstart_batch_size, 0) |> full_int()}</strong></span>
+            <span>idle: <strong class={if runtime_field(@dashboard_state, :runtime_idle, false), do: "text-emerald-300", else: "text-amber-300"}>{runtime_field(@dashboard_state, :runtime_idle, false) |> to_string()}</strong></span>
           </div>
         </section>
 
@@ -215,7 +197,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             </div>
             <div class="text-right">
               <div class="font-mono text-2xl font-semibold tabular-nums text-emerald-300">
-                {format_float(hb_get_in(@heartbeat, [:telemetry, :chunk_embeddings_per_second], 0.0))}
+                {format_float(telemetry_field(@dashboard_state, :chunk_embeddings_per_second, 0.0))}
               </div>
               <div class="text-[10px] uppercase tracking-wider text-slate-500">chunks/s (5s window)</div>
             </div>
@@ -231,9 +213,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               <% end %>
             </div>
             <div class="mt-3 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-500">
-              <span>chunks embedded (Σ): <strong class="text-slate-200">{hb_get_in(@heartbeat, [:telemetry, :vector_chunks_embedded_total], 0) |> humanize_int()}</strong></span>
-              <span>scheduler: <strong class="text-slate-200">{hb_get_in(@heartbeat, [:telemetry, :utility_first_scheduler_state], "?")}</strong></span>
-              <span>pressure: <strong class={pressure_class(hb_get_in(@heartbeat, [:telemetry, :service_pressure], "?"))}>{hb_get_in(@heartbeat, [:telemetry, :service_pressure], "?")}</strong></span>
+              <span>chunks embedded (Σ): <strong class="text-slate-200">{telemetry_field(@dashboard_state, :vector_chunks_embedded_total, 0) |> full_int()}</strong></span>
+              <span>scheduler: <strong class="text-slate-200">{telemetry_field(@dashboard_state, :scheduler, "?")}</strong></span>
+              <span>pressure: <strong class={pressure_class(telemetry_field(@dashboard_state, :service_pressure, "?"))}>{telemetry_field(@dashboard_state, :service_pressure, "?")}</strong></span>
             </div>
           </div>
         </section>
@@ -247,18 +229,18 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             </div>
             <span class={[
               "px-2 py-1 rounded-md text-[10px] font-mono uppercase tracking-wide border",
-              embedder_class(hb_gpu_effective(@heartbeat))
+              embedder_class(embedder_field(@dashboard_state, :effective, "unknown"))
             ]}>
-              {hb_gpu_effective(@heartbeat)}
+              {embedder_field(@dashboard_state, :effective, "unknown")}
             </span>
           </header>
           <div class="p-4 space-y-3">
-            <.kv label="Requested provider" value={hb_get_in(@heartbeat, [:embedder_provider, :requested], "n/a")} />
-            <.kv label="Effective provider" value={hb_get_in(@heartbeat, [:embedder_provider, :effective], "n/a")} />
-            <.kv label="Init error" value={hb_get_in(@heartbeat, [:embedder_provider, :init_error], "—") || "—"} />
-            <.kv label="B2 batch" value={"#{mcp_get_in(@mcp, [:pipeline_b, :b2_batch_size], 0)} chunks / #{mcp_get_in(@mcp, [:pipeline_b, :b2_batch_timeout_ms], 0)} ms"} />
-            <.kv label="B3 batch" value={"#{mcp_get_in(@mcp, [:pipeline_b, :b3_batch_size], 0)} chunks / #{mcp_get_in(@mcp, [:pipeline_b, :b3_batch_timeout_ms], 0)} ms"} />
-            <.kv label="Last lane" value={hb_get_in(@heartbeat, [:telemetry, :last_consumed_batch_lane], "unknown")} />
+            <.kv label="Requested provider" value={embedder_field(@dashboard_state, :requested, "n/a")} />
+            <.kv label="Effective provider" value={embedder_field(@dashboard_state, :effective, "n/a")} />
+            <.kv label="Init error" value={embedder_field(@dashboard_state, :init_error, nil) || "—"} />
+            <.kv label="B2 batch" value={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
+            <.kv label="B3 batch" value={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
+            <.kv label="Last lane" value={embedder_field(@dashboard_state, :last_lane, "unknown")} />
           </div>
         </section>
 
@@ -271,25 +253,25 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           <div class="grid grid-cols-2 md:grid-cols-3 gap-3 p-4">
             <.kpi
               label="Graph Workers"
-              value={"#{hb_get_in(@heartbeat, [:telemetry, :graph_workers_active_current], 0)} / #{hb_get_in(@heartbeat, [:telemetry, :graph_workers_started_total], 0)}"}
+              value={"#{telemetry_field(@dashboard_state, :graph_workers_active_current, 0)} / #{telemetry_field(@dashboard_state, :graph_workers_started_total, 0)}"}
               sub="active / started"
               tone={:neutral}
             />
             <.kpi
               label="Ingress Buffered"
-              value={hb_get_in(@heartbeat, [:telemetry, :ingress_buffered_entries], 0) |> humanize_int()}
-              sub={"#{hb_get_in(@heartbeat, [:telemetry, :ingress_hot_entries], 0)} hot"}
+              value={telemetry_field(@dashboard_state, :ingress_buffered_entries, 0) |> full_int()}
+              sub={"#{telemetry_field(@dashboard_state, :ingress_hot_entries, 0)} hot"}
               tone={:neutral}
             />
             <.kpi
               label="Ready Chunks"
-              value={hb_get_in(@heartbeat, [:telemetry, :ready_queue_chunks_current], 0) |> humanize_int()}
-              sub={"S #{hb_get_in(@heartbeat, [:telemetry, :ready_queue_chunks_small], 0)} M #{hb_get_in(@heartbeat, [:telemetry, :ready_queue_chunks_medium], 0)} L #{hb_get_in(@heartbeat, [:telemetry, :ready_queue_chunks_large], 0)}"}
+              value={telemetry_field(@dashboard_state, :ready_queue_chunks_current, 0) |> full_int()}
+              sub={"S #{telemetry_field(@dashboard_state, :ready_queue_chunks_small, 0)} M #{telemetry_field(@dashboard_state, :ready_queue_chunks_medium, 0)} L #{telemetry_field(@dashboard_state, :ready_queue_chunks_large, 0)}"}
               tone={:neutral}
             />
             <.kpi
               label="Batch Shape"
-              value={"H #{hb_get_in(@heartbeat, [:telemetry, :homogeneous_batches_total], 0)} / M #{hb_get_in(@heartbeat, [:telemetry, :mixed_fallback_batches_total], 0)}"}
+              value={"H #{telemetry_field(@dashboard_state, :homogeneous_batches_total, 0)} / M #{telemetry_field(@dashboard_state, :mixed_fallback_batches_total, 0)}"}
               sub="homogeneous / mixed"
               tone={:neutral}
             />
@@ -300,7 +282,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
         <section class="col-span-12 lg:col-span-5 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm">
           <header class="px-5 py-3 border-b border-slate-800">
             <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Worker Configuration</div>
-            <h2 class="text-base font-semibold text-slate-100 mt-0.5">From embedding_status (env-resolved)</h2>
+            <h2 class="text-base font-semibold text-slate-100 mt-0.5">From runtime_config (boot env-resolved)</h2>
           </header>
           <div class="overflow-hidden">
             <table class="w-full text-sm">
@@ -313,57 +295,54 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
                 </tr>
               </thead>
               <tbody class="font-mono text-xs divide-y divide-slate-800/60">
-                <.stage_row name="A1" tone={:cyan} purpose="read + hash" workers={mcp_get_in(@mcp, [:pipeline_a, :a1_workers], 0)} batch="—" />
-                <.stage_row name="A2" tone={:cyan} purpose="parse TS" workers={mcp_get_in(@mcp, [:pipeline_a, :a2_workers], 0)} batch="—" />
-                <.stage_row name="A3" tone={:cyan} purpose="graph UPSERT" workers={mcp_get_in(@mcp, [:pipeline_a, :a3_workers], 0)} batch={"#{mcp_get_in(@mcp, [:pipeline_a, :a3_batch_size], 0)} / #{mcp_get_in(@mcp, [:pipeline_a, :a3_batch_timeout_ms], 0)} ms"} />
-                <.stage_row name="B1" tone={:emerald} purpose="fetch chunks" workers={mcp_get_in(@mcp, [:pipeline_b, :b1_workers], 0)} batch="—" />
-                <.stage_row name="B2" tone={:emerald} purpose="embed GPU" workers={mcp_get_in(@mcp, [:pipeline_b, :b2_workers], 0)} batch={"#{mcp_get_in(@mcp, [:pipeline_b, :b2_batch_size], 0)} / #{mcp_get_in(@mcp, [:pipeline_b, :b2_batch_timeout_ms], 0)} ms"} />
-                <.stage_row name="B3" tone={:emerald} purpose="write embeddings" workers={mcp_get_in(@mcp, [:pipeline_b, :b3_workers], 0)} batch={"#{mcp_get_in(@mcp, [:pipeline_b, :b3_batch_size], 0)} / #{mcp_get_in(@mcp, [:pipeline_b, :b3_batch_timeout_ms], 0)} ms"} />
+                <.stage_row name="A1" tone={:cyan} purpose="read + hash" workers={pipeline_field(@dashboard_state, :a1_workers, 0)} batch="—" />
+                <.stage_row name="A2" tone={:cyan} purpose="parse TS" workers={pipeline_field(@dashboard_state, :a2_workers, 0)} batch="—" />
+                <.stage_row name="A3" tone={:cyan} purpose="graph UPSERT" workers={pipeline_field(@dashboard_state, :a3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :a3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :a3_batch_timeout_ms, 0)} ms"} />
+                <.stage_row name="B1" tone={:emerald} purpose="fetch chunks" workers={pipeline_field(@dashboard_state, :b1_workers, 0)} batch="—" />
+                <.stage_row name="B2" tone={:emerald} purpose="embed GPU" workers={pipeline_field(@dashboard_state, :b2_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
+                <.stage_row name="B3" tone={:emerald} purpose="write embeddings" workers={pipeline_field(@dashboard_state, :b3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
               </tbody>
             </table>
             <div class="px-4 py-3 bg-amber-950/20 border-t border-amber-900/40 text-[10px] text-amber-300/80">
               <strong class="font-semibold">Note:</strong> per-stage items_in/out/inflight/backpressure counters
               are not exported on the runtime surface yet (only the bench reads <code class="bg-slate-900 px-1 rounded">StageSnapshot</code>).
-              Add a counter export to expose live per-stage deltas.
             </div>
           </div>
         </section>
 
-        <%!-- PER-PROJECT BREAKDOWN --%>
-        <section :if={has_per_project?(@mcp)} class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm">
+        <%!-- PER-PROJECT BREAKDOWN (Phoenix.LiveView.stream) --%>
+        <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm">
           <header class="px-5 py-3 border-b border-slate-800">
             <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Per-Project Breakdown</div>
-            <h2 class="text-base font-semibold text-slate-100 mt-0.5">Indexed files, chunks, embeddings by project</h2>
+            <h2 class="text-base font-semibold text-slate-100 mt-0.5">Indexed chunks, embeddings, symbols by project</h2>
           </header>
           <div class="overflow-hidden">
             <table class="w-full text-sm">
               <thead class="bg-slate-950/40 text-[10px] uppercase tracking-wider text-slate-500">
                 <tr>
                   <th class="px-4 py-2 text-left">Project</th>
-                  <th class="px-4 py-2 text-right">Indexed Files</th>
+                  <th class="px-4 py-2 text-right">Symbols</th>
                   <th class="px-4 py-2 text-right">Chunks</th>
                   <th class="px-4 py-2 text-right">Embeddings</th>
                   <th class="px-4 py-2 text-right">Coverage</th>
                 </tr>
               </thead>
-              <tbody class="font-mono text-xs divide-y divide-slate-800/60">
-                <%= for entry <- mcp_get(@mcp, :per_project, []) do %>
-                  <tr class="hover:bg-slate-800/30 transition-colors">
-                    <td class="px-4 py-2">
-                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border border-cyan-500/30 bg-cyan-500/5 text-cyan-200">
-                        {Map.get(entry, :project_code, "?")}
-                      </span>
-                    </td>
-                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :indexed_files, 0) |> humanize_int()}</td>
-                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :chunks, 0) |> humanize_int()}</td>
-                    <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{Map.get(entry, :embeddings, 0) |> humanize_int()}</td>
-                    <td class="px-4 py-2 text-right tabular-nums">
-                      <span class={coverage_text_class(Map.get(entry, :coverage_pct, 0.0))}>
-                        {:erlang.float_to_binary(Map.get(entry, :coverage_pct, 0.0) * 1.0, decimals: 2)}%
-                      </span>
-                    </td>
-                  </tr>
-                <% end %>
+              <tbody id="per_project_rows" phx-update="stream" class="font-mono text-xs divide-y divide-slate-800/60">
+                <tr :for={{dom_id, entry} <- @streams.per_project} id={dom_id} class="hover:bg-slate-800/30 transition-colors">
+                  <td class="px-4 py-2">
+                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border border-cyan-500/30 bg-cyan-500/5 text-cyan-200">
+                      {entry.project_code}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.symbols)}</td>
+                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.chunks)}</td>
+                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.embedded)}</td>
+                  <td class="px-4 py-2 text-right tabular-nums">
+                    <span class={coverage_text_class(entry.coverage_pct)}>
+                      {:erlang.float_to_binary(entry.coverage_pct * 1.0, decimals: 2)}%
+                    </span>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -449,55 +428,39 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp stage_dot(:cyan), do: "bg-cyan-400"
   defp stage_dot(:emerald), do: "bg-emerald-400"
 
-  ## Helpers - assigns accessors
+  ## Struct accessors — atom keys, nil-safe
 
-  defp hb_get(nil, _key, default), do: default
-  defp hb_get(hb, key, default), do: Map.get(hb, key, default) || default
+  defp runtime_field(%DashboardState{runtime: nil}, _key, default), do: default
+  defp runtime_field(%DashboardState{runtime: r}, key, default), do: Map.get(r, key, default) || default
 
-  defp hb_get_in(nil, _path, default), do: default
+  defp embedder_field(%DashboardState{embedder: nil}, _key, default), do: default
+  defp embedder_field(%DashboardState{embedder: e}, key, default), do: Map.get(e, key, default) || default
 
-  defp hb_get_in(hb, path, default) do
-    case get_in(hb, path) do
-      nil -> default
-      val -> val
-    end
+  defp telemetry_field(%DashboardState{telemetry: nil}, _key, default), do: default
+  defp telemetry_field(%DashboardState{telemetry: t}, key, default), do: Map.get(t, key, default)
+
+  defp totals_field(%DashboardState{totals: nil}, _key, default), do: default
+  defp totals_field(%DashboardState{totals: t}, key, default), do: Map.get(t, key, default)
+
+  defp lifecycle_field(%DashboardState{lifecycle: nil}, _key, default), do: default
+  defp lifecycle_field(%DashboardState{lifecycle: l}, key, default), do: Map.get(l, key, default) || default
+
+  defp pipeline_field(%DashboardState{runtime_config: nil}, _key, default), do: default
+  defp pipeline_field(%DashboardState{runtime_config: rc}, key, default) do
+    Map.get(rc.pipeline, key, default)
   end
 
-  defp hb_stale?(nil), do: true
-  defp hb_stale?(%{status: :missing}), do: true
-  defp hb_stale?(%{stale: true}), do: true
-  defp hb_stale?(_), do: false
+  defp rc_field(%DashboardState{runtime_config: nil}, _key, default), do: default
+  defp rc_field(%DashboardState{runtime_config: rc}, key, default), do: Map.get(rc, key, default) || default
 
-  defp hb_install_generation(hb), do: hb_get(hb, :install_generation, hb_get(hb, :release_version, "n/a"))
+  ## Formatting
 
-  defp hb_instance_kind(hb) do
-    case Application.get_env(:axon_dashboard, :instance_kind) do
-      nil -> hb_get(hb, :runtime_mode, "unknown")
-      kind -> kind
-    end
-  end
-
-  defp hb_gpu_effective(hb), do: hb_get_in(hb, [:embedder_provider, :effective], "unknown") || "unknown"
-
-  defp mcp_get(nil, _key, default), do: default
-  defp mcp_get(mcp, key, default), do: Map.get(mcp, key, default) || default
-
-  defp mcp_get_in(nil, _path, default), do: default
-
-  defp mcp_get_in(mcp, path, default) do
-    case get_in(mcp, path) do
-      nil -> default
-      val -> val
-    end
-  end
-
-  ## Helpers - formatting
-
-  defp humanize_int(n) when is_integer(n) and n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 2)}M"
-  defp humanize_int(n) when is_integer(n) and n >= 10_000, do: "#{Float.round(n / 1_000, 1)}k"
-  defp humanize_int(n) when is_integer(n), do: Integer.to_string(n)
-  defp humanize_int(n) when is_float(n), do: humanize_int(round(n))
-  defp humanize_int(_), do: "0"
+  # REQ-AXO-901827 — opérateur veut la valeur entière brute (pas
+  # de format "14.9k" / "1.99M") tant que l'indexer sous-indexe et
+  # qu'il faut compter manuellement les écarts vs PG truth.
+  defp full_int(n) when is_integer(n), do: Integer.to_string(n)
+  defp full_int(n) when is_float(n), do: Integer.to_string(round(n))
+  defp full_int(_), do: "0"
 
   defp format_float(n) when is_float(n), do: :erlang.float_to_binary(n, decimals: 1)
   defp format_float(n) when is_integer(n), do: :erlang.float_to_binary(n * 1.0, decimals: 1)
@@ -507,18 +470,10 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp coverage_tone(pct) when is_number(pct) and pct >= 75.0, do: :neutral
   defp coverage_tone(_), do: :warn
 
-  defp pending_sub(mcp) do
-    rate = mcp_get(mcp, :runtime_pending_count, 0)
-    "runtime set: #{humanize_int(rate)}"
-  end
-
-  defp pending_tone(mcp) do
-    case mcp_get(mcp, :pending_chunks, 0) do
-      0 -> :ok
-      n when is_number(n) and n < 1000 -> :neutral
-      _ -> :warn
-    end
-  end
+  defp pending_tone(%DashboardState{totals: nil}), do: :ok
+  defp pending_tone(%DashboardState{totals: %{pending: 0}}), do: :ok
+  defp pending_tone(%DashboardState{totals: %{pending: n}}) when is_number(n) and n < 1000, do: :neutral
+  defp pending_tone(_), do: :warn
 
   defp pressure_class("healthy"), do: "text-emerald-300"
   defp pressure_class("warm"), do: "text-amber-300"
@@ -530,17 +485,11 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp embedder_class("cpu"), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
   defp embedder_class(_), do: "border-slate-700 bg-slate-800/40 text-slate-300"
 
-  defp funnel_val(mcp, key) do
-    case mcp_get(mcp, key, 0) do
-      n when is_number(n) and n >= 0 -> humanize_int(n)
+  defp fs_val(%DashboardState{filesystem: nil}, _key), do: "n/a"
+  defp fs_val(%DashboardState{filesystem: fs}, key) do
+    case Map.get(fs, key) do
+      n when is_integer(n) and n >= 0 -> full_int(n)
       _ -> "n/a"
-    end
-  end
-
-  defp has_per_project?(mcp) do
-    case mcp_get(mcp, :per_project, []) do
-      list when is_list(list) and length(list) > 0 -> true
-      _ -> false
     end
   end
 
@@ -550,8 +499,10 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
 
   ## Rate sparkline
 
-  defp update_rate_series(socket, snap) do
-    rate = get_in(snap, [:telemetry, :chunk_embeddings_per_second]) || 0.0
+  defp update_rate_series(socket, %DashboardState{telemetry: nil}), do: socket
+
+  defp update_rate_series(socket, %DashboardState{telemetry: t}) do
+    rate = t.chunk_embeddings_per_second || 0.0
     q = socket.assigns.rate_series
 
     q1 =
@@ -600,7 +551,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
 
   defp push_pipeline_state(socket, opts) do
     if connected?(socket) or Keyword.get(opts, :force, false) do
-      payload = pipeline_state_payload(socket.assigns.mcp, socket.assigns.heartbeat)
+      payload = pipeline_state_payload(socket.assigns.dashboard_state)
       now = System.monotonic_time(:millisecond)
 
       socket
@@ -611,26 +562,26 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
     end
   end
 
-  defp pipeline_state_payload(mcp, hb) do
+  defp pipeline_state_payload(%DashboardState{} = s) do
     %{
       stages: [
-        %{id: "a1", label: "A1 read+hash", workers: mcp_get_in(mcp, [:pipeline_a, :a1_workers], 0), group: "A"},
-        %{id: "a2", label: "A2 parse-TS", workers: mcp_get_in(mcp, [:pipeline_a, :a2_workers], 0), group: "A"},
-        %{id: "a3", label: "A3 graph-UPSERT", workers: mcp_get_in(mcp, [:pipeline_a, :a3_workers], 0), group: "A"},
-        %{id: "b1", label: "B1 fetch", workers: mcp_get_in(mcp, [:pipeline_b, :b1_workers], 0), group: "B"},
-        %{id: "b2", label: "B2 embed-GPU", workers: mcp_get_in(mcp, [:pipeline_b, :b2_workers], 0), group: "B"},
-        %{id: "b3", label: "B3 write-emb", workers: mcp_get_in(mcp, [:pipeline_b, :b3_workers], 0), group: "B"}
+        %{id: "a1", label: "A1 read+hash", workers: pipeline_field(s, :a1_workers, 0), group: "A"},
+        %{id: "a2", label: "A2 parse-TS", workers: pipeline_field(s, :a2_workers, 0), group: "A"},
+        %{id: "a3", label: "A3 graph-UPSERT", workers: pipeline_field(s, :a3_workers, 0), group: "A"},
+        %{id: "b1", label: "B1 fetch", workers: pipeline_field(s, :b1_workers, 0), group: "B"},
+        %{id: "b2", label: "B2 embed-GPU", workers: pipeline_field(s, :b2_workers, 0), group: "B"},
+        %{id: "b3", label: "B3 write-emb", workers: pipeline_field(s, :b3_workers, 0), group: "B"}
       ],
       buffer: %{
-        cap: mcp_get_in(mcp, [:pipeline_b, :a3_to_b1_buffer_cap], 0),
+        cap: pipeline_field(s, :a3_to_b1_buffer_cap, 0),
         fill: 0
       },
-      rate: hb_get_in(hb, [:telemetry, :chunk_embeddings_per_second], 0.0) || 0.0,
-      coverage_pct: mcp_get(mcp, :coverage_pct, 0.0) || 0.0,
-      graph_workers_active: hb_get_in(hb, [:telemetry, :graph_workers_active_current], 0) || 0,
-      ingress_hot: hb_get_in(hb, [:telemetry, :ingress_hot_entries], 0) || 0,
-      gpu: hb_gpu_effective(hb),
-      degraded: hb_get(hb, :degraded_reason, nil)
+      rate: telemetry_field(s, :chunk_embeddings_per_second, 0.0),
+      coverage_pct: totals_field(s, :coverage_pct, 0.0),
+      graph_workers_active: telemetry_field(s, :graph_workers_active_current, 0),
+      ingress_hot: telemetry_field(s, :ingress_hot_entries, 0),
+      gpu: embedder_field(s, :effective, "unknown"),
+      degraded: runtime_field(s, :degraded_reason, nil)
     }
   end
 end

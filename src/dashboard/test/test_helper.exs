@@ -10,12 +10,6 @@ ExUnit.start()
 # so updating the env var here is sufficient.
 System.put_env("AXON_MCP_ENDPOINT", "http://127.0.0.1:1/mcp")
 
-# Point IndexerHeartbeat at a guaranteed-missing path so it broadcasts
-# `:indexer_heartbeat_missing` instead of reading the live indexer's
-# on-disk runtime file. The Pipeline LiveView already handles the
-# "missing" state.
-System.put_env("AXON_INDEXER_HEARTBEAT_PATH", "/tmp/axon-test-heartbeat-missing.json")
-
 # REQ-AXO-901649 — stub the MCP catalog from a JSON fixture so McpLive
 # tests assert the 68-tool surface without a live brain.
 fixture_path =

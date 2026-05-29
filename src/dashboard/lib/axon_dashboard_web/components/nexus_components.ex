@@ -297,7 +297,8 @@ defmodule AxonDashboardWeb.NexusComponents do
   ## Formatting helpers (also re-exported for LiveViews via `import`)
 
   def fmt_rate(0), do: "0.0"
-  def fmt_rate(0.0), do: "0.0"
+  def fmt_rate(+0.0), do: "0.0"
+  def fmt_rate(-0.0), do: "0.0"
   def fmt_rate(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 1)
   def fmt_rate(_), do: "—"
 

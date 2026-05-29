@@ -45,11 +45,6 @@ config :axon_dashboard, Axon.Watcher.SqlGateway,
 config :axon_dashboard, AxonDashboard.BridgeClient,
   telemetry_socket_path: "/tmp/axon-telemetry-test.sock"
 
-# IndexerHeartbeat path: tests don't need a real heartbeat file. Set to
-# a non-existent path so the poller is harmless (logs missing, no broadcast).
-config :axon_dashboard, Axon.Watcher.IndexerHeartbeat,
-  path: "/tmp/axon-indexer-heartbeat-test.json"
-
 # REQ-AXO-901649 — Wallaby driver configuration. Headless Chrome + small
 # viewport so the suite runs identically on a developer workstation and on
 # a headless CI box. ChromeDriver binary is resolved from $PATH (devenv.nix

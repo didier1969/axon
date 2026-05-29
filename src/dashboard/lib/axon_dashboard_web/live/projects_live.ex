@@ -10,7 +10,8 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   """
   use Phoenix.LiveView
 
-  alias Axon.Watcher.{IndexerHeartbeat, SqlGateway}
+  alias AxonDashboard.{BridgeClient, DashboardState}
+  alias Axon.Watcher.SqlGateway
   alias AxonDashboardWeb.Live.Nav
 
   @refresh_ms 5_000
@@ -19,7 +20,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       :timer.send_interval(@refresh_ms, self(), :refresh)
-      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, BridgeClient.dashboard_topic())
     end
 
     {projects, error} = fetch_projects()
@@ -31,7 +32,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
       |> assign(:fetch_error, error)
       |> assign(:sort_by, :chunks)
       |> assign(:sort_dir, :desc)
-      |> assign(:heartbeat, IndexerHeartbeat.latest())
+      |> assign(:dashboard_state, BridgeClient.dashboard_state() || %DashboardState{})
       |> assign(:prev_snapshot, %{})
       |> assign(:last_refresh_ms, System.monotonic_time(:millisecond))
 
@@ -55,13 +56,8 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   end
 
   @impl true
-  def handle_info({:indexer_heartbeat, snap}, socket) do
-    {:noreply, assign(socket, :heartbeat, snap)}
-  end
-
-  @impl true
-  # REQ-AXO-901806 — dashboard_state_v1 handler (dual-source migration window).
-  def handle_info({:dashboard_state, state}, socket) do
+  # REQ-AXO-901826 — typed struct pattern match.
+  def handle_info({:dashboard_state, %DashboardState{} = state}, socket) do
     {:noreply, assign(socket, :dashboard_state, state)}
   end
 
@@ -92,16 +88,33 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
     ~H"""
     <Nav.shell
       current={:projects}
-      build_id={(@heartbeat || %{}) |> Map.get(:build_id, "n/a")}
-      install_generation={(@heartbeat || %{}) |> Map.get(:install_generation, "n/a")}
-      runtime_mode={(@heartbeat || %{}) |> Map.get(:runtime_mode, "unknown")}
-      instance_kind={Application.get_env(:axon_dashboard, :instance_kind, "unknown")}
-      gpu_effective={get_in(@heartbeat || %{}, [:embedder_provider, :effective]) || "unknown"}
-      degraded_reason={(@heartbeat || %{}) |> Map.get(:degraded_reason)}
-      stale={Map.get(@heartbeat || %{}, :stale, false) == true}
-      observed_age_ms={(@heartbeat || %{}) |> Map.get(:observed_age_ms)}
+      build_id={runtime_field(@dashboard_state, :build_id, "n/a")}
+      install_generation={runtime_field(@dashboard_state, :install_generation, "n/a")}
+      runtime_mode={runtime_field(@dashboard_state, :runtime_mode, "unknown")}
+      instance_kind={runtime_field(@dashboard_state, :instance_kind, Application.get_env(:axon_dashboard, :instance_kind, "unknown"))}
+      gpu_effective={embedder_field(@dashboard_state, :effective, "unknown")}
+      degraded_reason={runtime_field(@dashboard_state, :degraded_reason, nil)}
+      stale={is_nil(@dashboard_state.ts_ms)}
+      observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="grid grid-cols-12 gap-4">
+        <%!-- REQ-AXO-901827 — valeurs non validées (sous-indexation indexer dev). --%>
+        <section class="col-span-12 rounded-xl border border-red-500/40 bg-red-950/30 px-5 py-3">
+          <div class="flex items-center gap-3">
+            <span class="h-2.5 w-2.5 rounded-full bg-red-400 animate-pulse"></span>
+            <div class="flex-1">
+              <div class="text-[10px] uppercase tracking-[0.18em] text-red-300 font-semibold">
+                Valeurs non validées — REQ-AXO-901827
+              </div>
+              <div class="mt-1 text-[12px] text-red-200/90 leading-snug">
+                Indexer dev sous-indexe (17 projets sur 25 à 0 symbols, ratio symbols/file = 0.52 vs attendu 10-30).
+                Causes : FS watcher fd exhaustion + tree-sitter parsers manquants. Les valeurs ci-dessous reflètent PG truth
+                mais cette truth est incomplète.
+              </div>
+            </div>
+          </div>
+        </section>
+
         <%!-- TOTALS --%>
         <section class="col-span-12 grid grid-cols-2 md:grid-cols-5 gap-3">
           <.tot label="Projects" value={length(@projects)} />
@@ -345,15 +358,11 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
 
   ## Formatting
 
-  defp format_n(n) when is_integer(n), do: humanize_int(n)
+  # REQ-AXO-901827 — valeur entière brute, pas de k/M abrégé.
+  defp format_n(n) when is_integer(n), do: Integer.to_string(n)
   defp format_n(_), do: "0"
 
-  defp humanize_int(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 2)}M"
-  defp humanize_int(n) when n >= 10_000, do: "#{Float.round(n / 1_000, 1)}k"
-  defp humanize_int(n), do: Integer.to_string(n)
-
-  defp hint(n) when is_integer(n) and n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 2)}M"
-  defp hint(n) when is_integer(n) and n >= 1_000, do: "#{Float.round(n / 1_000, 1)}k"
+  defp hint(n) when is_integer(n), do: Integer.to_string(n)
   defp hint(n), do: to_string(n)
 
   defp coverage(_e, 0), do: 0.0
@@ -366,4 +375,12 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   defp coverage_text(pct) when pct >= 95, do: "text-emerald-300"
   defp coverage_text(pct) when pct >= 75, do: "text-amber-300"
   defp coverage_text(_), do: "text-red-300"
+
+  ## DashboardState accessors (REQ-AXO-901826) — typed struct, atom keys.
+
+  defp runtime_field(%DashboardState{runtime: nil}, _key, default), do: default
+  defp runtime_field(%DashboardState{runtime: r}, key, default), do: Map.get(r, key, default) || default
+
+  defp embedder_field(%DashboardState{embedder: nil}, _key, default), do: default
+  defp embedder_field(%DashboardState{embedder: e}, key, default), do: Map.get(e, key, default) || default
 end

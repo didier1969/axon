@@ -33,20 +33,14 @@ if config_env() != :test do
     raise "Unknown AXON_INSTANCE_KIND=#{inspect(instance_kind)}. Expected 'dev' or 'live'."
   end
 
-  {default_brain_port, default_telemetry_socket, default_heartbeat_subdir} =
+  {default_brain_port, default_telemetry_socket} =
     case instance_kind do
-      "dev" -> {44139, "/tmp/axon-dev-indexer-telemetry.sock", ".axon-dev"}
-      "live" -> {44129, "/tmp/axon-live-indexer-telemetry.sock", ".axon"}
+      "dev" -> {44139, "/tmp/axon-dev-indexer-telemetry.sock"}
+      "live" -> {44129, "/tmp/axon-live-indexer-telemetry.sock"}
     end
 
   default_sql_url = "http://127.0.0.1:#{default_brain_port}/sql"
   default_mcp_endpoint = "http://127.0.0.1:#{default_brain_port}/mcp"
-
-  # Heartbeat path resolution : default = ../../<subdir>/run-indexer/runtime-heartbeat.json
-  # relative to config/, but operator can override via env. We resolve at runtime
-  # based on cwd at boot (no File.cwd!() at module load in lib/).
-  default_heartbeat_path =
-    Path.expand("../../#{default_heartbeat_subdir}/run-indexer/runtime-heartbeat.json", __DIR__)
 
   config :axon_dashboard, :instance_kind, instance_kind
 
@@ -59,9 +53,6 @@ if config_env() != :test do
 
   config :axon_dashboard, AxonDashboard.BridgeClient,
     telemetry_socket_path: default_telemetry_socket
-
-  config :axon_dashboard, Axon.Watcher.IndexerHeartbeat,
-    path: System.get_env("AXON_INDEXER_HEARTBEAT_PATH") || default_heartbeat_path
 end
 
 # Prod-specific configuration (secrets, host)

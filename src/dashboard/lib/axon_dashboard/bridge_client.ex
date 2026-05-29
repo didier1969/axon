@@ -4,7 +4,20 @@ defmodule AxonDashboard.BridgeClient do
   use GenServer
   require Logger
 
+  alias AxonDashboard.DashboardState
+
   @socket_path "/tmp/axon-telemetry.sock"
+
+  @doc """
+  REQ-AXO-901826 — dedicated PubSub topic for the
+  `dashboard_state_v1` envelope. LiveViews subscribe to this topic
+  specifically, not the broader `bridge_events` legacy topic (which
+  still carries FileIndexed / SystemReady / ScanStarted etc.).
+  """
+  def dashboard_topic, do: "dashboard:state"
+
+  @doc "Legacy topic for non-dashboard bridge events (FileIndexed, etc.)."
+  def bridge_topic, do: "bridge_events"
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -12,6 +25,27 @@ defmodule AxonDashboard.BridgeClient do
 
   def get_state do
     GenServer.call(__MODULE__, :get_state)
+  end
+
+  @doc """
+  REQ-AXO-901806 — return the latest cached `%DashboardState{}` struct
+  or `nil` if no event has arrived yet. LiveView mount callsites use
+  this to pre-warm `@dashboard_state` without waiting for the first
+  PubSub event after subscribe. `catch :exit` keeps mount resilient
+  during a brain reconnect window.
+  """
+  @spec dashboard_state() :: DashboardState.t() | nil
+  def dashboard_state do
+    case GenServer.whereis(__MODULE__) do
+      nil -> nil
+      _pid -> safe_call(:dashboard_state)
+    end
+  end
+
+  defp safe_call(msg) do
+    GenServer.call(__MODULE__, msg, 500)
+  catch
+    :exit, _ -> nil
   end
 
   @doc """
@@ -37,12 +71,25 @@ defmodule AxonDashboard.BridgeClient do
        taint_paths: %{},
        engine_start_time: nil,
        # :idle | :indexing
-       engine_state: :idle
+       engine_state: :idle,
+       # REQ-AXO-901806 — cache of the latest dashboard_state_v1 payload.
+       # nil until first event arrives from brain.
+       dashboard_state: nil,
+       # REQ-AXO-901826 — TCP buffer accumulator. The brain socket emits
+       # line-terminated JSON envelopes ; dashboard_state_v1 is ~5KB so
+       # a single envelope WILL fragment across multiple `{:tcp, _, _}`
+       # messages. Without a buffer, `Jason.decode/1` fails on partial
+       # JSON and the LiveView never receives a typed event.
+       buffer: ""
      }}
   end
 
   def handle_call(:get_state, _from, state) do
     {:reply, state, state}
+  end
+
+  def handle_call(:dashboard_state, _from, state) do
+    {:reply, state.dashboard_state, state}
   end
 
   # REQ-AXO-094 — write a BEAM_ALARM (or any other line-terminated
@@ -71,7 +118,16 @@ defmodule AxonDashboard.BridgeClient do
   def handle_cast(_message, state), do: {:noreply, state}
 
   def handle_info(:connect, state) do
-    socket_path = Application.get_env(:axon_dashboard, :telemetry_socket_path, @socket_path)
+    # REQ-AXO-901826 — read nested config key (config :axon_dashboard,
+    # AxonDashboard.BridgeClient, telemetry_socket_path: ...) set by
+    # config/runtime.exs per instance kind. Legacy top-level key kept
+    # as fallback for test.exs which still writes it directly under
+    # :axon_dashboard, telemetry_socket_path.
+    socket_path =
+      Application.get_env(:axon_dashboard, __MODULE__, [])
+      |> Keyword.get(:telemetry_socket_path) ||
+        Application.get_env(:axon_dashboard, :telemetry_socket_path, @socket_path)
+
     case :gen_tcp.connect({:local, socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
         Logger.info("[BRIDGE] Connected to Data Plane")
@@ -85,31 +141,45 @@ defmodule AxonDashboard.BridgeClient do
   end
 
   def handle_info({:tcp, socket, data}, state) do
-    lines = String.split(data, "\n", trim: true)
+    # REQ-AXO-901826 — line-buffered framing. Accumulate the raw bytes
+    # into `state.buffer`, split on `\n`, keep the trailing remainder
+    # (which may be a partial envelope) for the next `:tcp` message.
+    combined = state.buffer <> data
+    {complete_lines, remainder} = split_complete_lines(combined)
 
     new_state =
-      Enum.reduce(lines, state, fn line, acc ->
-        if not String.contains?(line, "Axon Bridge Ready") do
+      Enum.reduce(complete_lines, %{state | buffer: remainder}, fn line, acc ->
+        line = String.trim(line)
+
+        if line != "" and not String.contains?(line, "Axon Bridge Ready") do
           case Jason.decode(line) do
             # REQ-AXO-901806 — dashboard_state_v1 is the single-event
             # dashboard refresh payload. Emit a typed message so LiveViews
             # pattern-match without parsing `event["event"]` every tick.
             # Skip handle_bridge_event (no BridgeClient state impact).
-            {:ok, %{"event" => "dashboard_state_v1"} = dashboard_state} ->
-              Phoenix.PubSub.broadcast(
+            {:ok, %{"event" => "dashboard_state_v1"} = raw} ->
+              # REQ-AXO-901826 idiomatic refactor :
+              # (i) convert to typed %DashboardState{} (atom keys)
+              # (ii) local_broadcast (in-VM, no cluster RPC)
+              # (iii) dedicated topic `"dashboard:state"` so LiveViews
+              #      pattern-match `{:dashboard_state, %DashboardState{}}`
+              #      without seeing FileIndexed / ScanStarted etc.
+              typed = DashboardState.from_map(raw)
+
+              Phoenix.PubSub.local_broadcast(
                 AxonDashboard.PubSub,
-                "bridge_events",
-                {:dashboard_state, dashboard_state}
+                dashboard_topic(),
+                {:dashboard_state, typed}
               )
 
-              acc
+              %{acc | dashboard_state: typed}
 
             {:ok, event} ->
               acc = handle_bridge_event(event, acc)
 
-              Phoenix.PubSub.broadcast(
+              Phoenix.PubSub.local_broadcast(
                 AxonDashboard.PubSub,
-                "bridge_events",
+                bridge_topic(),
                 {:bridge_event, event}
               )
 
@@ -130,7 +200,18 @@ defmodule AxonDashboard.BridgeClient do
     Logger.warning("[BRIDGE] Connection lost. Reconnecting...")
     Axon.Watcher.Telemetry.mark_bridge_disconnected()
     send(self(), :connect)
-    {:noreply, %{state | socket: nil, engine_state: :idle}}
+    {:noreply, %{state | socket: nil, engine_state: :idle, buffer: ""}}
+  end
+
+  # REQ-AXO-901826 — split accumulator on `\n`, return complete lines
+  # and the trailing remainder (partial envelope waiting for more bytes).
+  defp split_complete_lines(buffer) do
+    case String.split(buffer, "\n") do
+      [partial] -> {[], partial}
+      pieces ->
+        {complete, [partial]} = Enum.split(pieces, length(pieces) - 1)
+        {complete, partial}
+    end
   end
 
   defp handle_bridge_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, state) do
@@ -162,9 +243,9 @@ defmodule AxonDashboard.BridgeClient do
       if new_score < old_score do
         Logger.warning("[BRIDGE] Security Degraded for #{project}: #{old_score} -> #{new_score}")
 
-        Phoenix.PubSub.broadcast(
+        Phoenix.PubSub.local_broadcast(
           AxonDashboard.PubSub,
-          "bridge_events",
+          bridge_topic(),
           {:security_degraded, project, old_score, new_score}
         )
       end
@@ -197,7 +278,11 @@ defmodule AxonDashboard.BridgeClient do
     status = bridge_file_status(payload["status"] || "unknown")
 
     Axon.Watcher.Telemetry.report_finish("bridge:#{path}", path, status)
-    Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, status})
+    Phoenix.PubSub.local_broadcast(
+      AxonDashboard.PubSub,
+      bridge_topic(),
+      {:file_indexed, path, status}
+    )
     state
   end
 
