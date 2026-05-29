@@ -606,6 +606,11 @@ pub fn spawn_pipeline_b_full_multi(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // REQ-AXO-901825 — bring `B1InboxItem` into scope for the pattern
+    // match inside the integration test. `super::*` does not re-export
+    // it because the canonical path is `super::stage_b1::B1InboxItem`
+    // and `mod.rs` re-exports it at `crate::pipeline_v2::B1InboxItem`.
+    use super::super::stage_b1::B1InboxItem;
     use std::time::Duration;
 
     #[tokio::test]

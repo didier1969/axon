@@ -46,7 +46,7 @@ pub struct PersistedEmbedding {
 pub async fn b3_persist_embedding(
     embedded: EmbeddedChunk,
     store: Arc<GraphStore>,
-) -> Result<PersistedEmbedding> {
+) -> anyhow::Result<PersistedEmbedding> {
     let chunk_id = embedded.chunk_id.clone();
     let source_hash = embedded.source_hash.clone();
     let embedding = embedded.embedding;

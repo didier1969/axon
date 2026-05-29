@@ -380,6 +380,14 @@ impl RustParser {
         }
 
         let mut struct_name = String::new();
+        // REQ-AXO-901827 (MIL-AXO-032) — emit a Symbol for the impl
+        // block itself so the IST can resolve `impl Foo` and
+        // `impl Trait for Foo` blocks. Without this, methods orphan
+        // their container in PG. Canonical name :
+        //   * `impl Foo` → "Foo"
+        //   * `impl Trait for Foo` → "Trait for Foo"
+        // so the IST can disambiguate inherent vs trait impls.
+        let mut impl_symbol_name: Option<String> = None;
 
         if has_for && type_nodes.len() >= 2 {
             let trait_name = type_nodes[0].utf8_text(source).unwrap_or("").to_string();
@@ -387,12 +395,32 @@ impl RustParser {
 
             result.relations.push(Relation {
                 from: struct_name.clone(),
-                to: trait_name,
+                to: trait_name.clone(),
                 rel_type: "implements".to_string(),
                 properties: HashMap::new(),
             });
+
+            impl_symbol_name = Some(format!("{} for {}", trait_name, struct_name));
         } else if type_nodes.len() == 1 {
             struct_name = type_nodes[0].utf8_text(source).unwrap_or("").to_string();
+            impl_symbol_name = Some(struct_name.clone());
+        }
+
+        if let Some(name) = impl_symbol_name {
+            result.symbols.push(Symbol {
+                name,
+                kind: "impl".to_string(),
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: false,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: HashMap::new(),
+                embedding: None,
+            });
         }
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
@@ -821,5 +849,150 @@ mod tests {
         for c in calls(&result.relations) {
             assert_eq!(c.from, "", "top-level call should have empty caller, got {:?}", c);
         }
+    }
+
+    // REQ-AXO-901827 (MIL-AXO-032) — diagnostic regression : on production
+    // PG, AXO project carries function:136 + module:14 and ZERO
+    // struct/trait/impl/enum despite the parser code visibly calling
+    // extract_struct/extract_trait/extract_impl/extract_enum. These tests
+    // pin the parser-level emission contract for top-level type
+    // declarations. If they fail, the bug is in the parser (e.g. wasm
+    // grammar node kind mismatch). If they pass, the bug is downstream
+    // (chunking / bulk_writer / DB schema).
+    #[test]
+    fn top_level_struct_emits_struct_symbol() {
+        let p = parser();
+        let result = p.parse("pub struct Foo { x: u32 }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let structs: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "struct")
+            .collect();
+        assert_eq!(
+            structs.len(),
+            1,
+            "expected 1 struct symbol, got {} : {:?}",
+            structs.len(),
+            result.symbols
+        );
+        assert_eq!(structs[0].name, "Foo");
+        assert!(structs[0].is_public, "pub struct must mark is_public");
+    }
+
+    #[test]
+    fn top_level_trait_emits_interface_symbol() {
+        let p = parser();
+        let result = p.parse("pub trait Foo { fn bar(&self); }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let traits: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "interface")
+            .collect();
+        assert_eq!(
+            traits.len(),
+            1,
+            "expected 1 interface (=trait) symbol, got {} : {:?}",
+            traits.len(),
+            result.symbols
+        );
+        assert_eq!(traits[0].name, "Foo");
+    }
+
+    #[test]
+    fn top_level_enum_emits_enum_symbol() {
+        let p = parser();
+        let result = p.parse("pub enum Color { Red, Green, Blue }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let enums: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "enum")
+            .collect();
+        assert_eq!(
+            enums.len(),
+            1,
+            "expected 1 enum symbol, got {} : {:?}",
+            enums.len(),
+            result.symbols
+        );
+        assert_eq!(enums[0].name, "Color");
+    }
+
+    #[test]
+    fn impl_block_emits_class_symbol_and_methods() {
+        // REQ-AXO-901827 root cause #1 candidate : extract_impl currently
+        // does NOT push a Symbol for the impl block itself — it only
+        // walks the decl_list to extract nested methods. The impl block
+        // is invisible in the IST, which is why `inspect Foo` cannot
+        // reach `impl Foo`. Pin the desired behavior : impl block emits
+        // an `impl` Symbol with name=type identifier, and methods inside
+        // are emitted as `method` (kind already correct).
+        let p = parser();
+        let result = p.parse("impl Foo { fn bar(&self) {} fn baz(&self) {} }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let impls: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "impl")
+            .collect();
+        assert_eq!(
+            impls.len(),
+            1,
+            "expected 1 impl symbol, got {} : {:?}",
+            impls.len(),
+            result.symbols
+        );
+        assert_eq!(impls[0].name, "Foo");
+        let methods: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "method")
+            .collect();
+        assert_eq!(
+            methods.len(),
+            2,
+            "expected 2 methods inside impl, got {}",
+            methods.len()
+        );
+    }
+
+    #[test]
+    fn impl_trait_for_struct_emits_impl_symbol_with_qualified_name() {
+        let p = parser();
+        let result = p.parse("impl Display for Foo { fn fmt(&self, f: &mut Formatter) {} }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let impls: Vec<&Symbol> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "impl")
+            .collect();
+        assert_eq!(
+            impls.len(),
+            1,
+            "expected 1 impl symbol, got {} : {:?}",
+            impls.len(),
+            result.symbols
+        );
+        // Canonical name = "Display for Foo" so callers can disambiguate
+        // bare `impl Foo` from `impl Trait for Foo`. The `implements`
+        // relation already carries the from/to detail.
+        assert_eq!(impls[0].name, "Display for Foo");
     }
 }

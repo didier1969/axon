@@ -212,6 +212,14 @@ in
     export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
     export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
 
+    # REQ-AXO-901827 (MIL-AXO-032) — fd exhaustion root cause #2 :
+    # default soft ulimit (1024 on most distros) caused "Too many open files"
+    # x10+ in indexer logs and abandoned 17 projects out of 25. tree-sitter
+    # parsing + tokio FS watcher + PG connection pool + ONNX Runtime DSO
+    # handles cumulate fast under multi-project scan. 65536 is the cgroup
+    # hard cap on most modern hosts and a safe headroom over peak observed.
+    ulimit -n 65536 2>/dev/null || true
+
     # Elixir Isolation (Project Level for Service)
     mkdir -p $ELIXIR_HOME
 

@@ -60,7 +60,7 @@ pub async fn a3_enroll(
     parsed: ParsedFile,
     store: Arc<GraphStore>,
     resolver: ProjectCodeResolver,
-) -> Result<EnrolledFile> {
+) -> anyhow::Result<EnrolledFile> {
     let path_str = parsed.path.to_string_lossy().into_owned();
     let now_ms = Utc::now().timestamp_millis();
     let project_code_str = resolver(&parsed.path);
