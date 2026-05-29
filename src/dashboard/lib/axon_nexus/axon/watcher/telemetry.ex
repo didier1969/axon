@@ -480,9 +480,14 @@ defmodule Axon.Watcher.Telemetry do
     end
   end
 
+  # REQ-AXO-901802 (MIL-AXO-028 cat B) — workspace root pulled from
+  # Application.env (populated by config/runtime.exs from DEVENV_ROOT)
+  # instead of repeated `File.cwd!()` calls in the display path. The
+  # BEAM cwd is process-global, can drift, and forces every call to
+  # touch the FS for what is structurally a config value.
   defp get_top_dir(path) do
-    # Extract the first directory name relative to the current working directory
-    relative_path = Path.relative_to(path, File.cwd!())
+    workspace = Application.get_env(:axon_dashboard, :workspace_root, "/")
+    relative_path = Path.relative_to(path, workspace)
     parts = Path.split(relative_path)
 
     case parts do

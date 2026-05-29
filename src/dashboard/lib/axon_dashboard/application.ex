@@ -15,6 +15,11 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.Tracer,
       Axon.Watcher.Telemetry,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
+      # REQ-AXO-901803 (MIL-AXO-028 cat C) — supervised Task pool so
+      # LiveView fire-and-forget work (catalog fetch, async data
+      # hydration) gets graceful shutdown + crash logging instead of
+      # leaking via bare `Task.start/1`.
+      {Task.Supervisor, name: AxonDashboard.TaskSupervisor},
       # REQ-AXO-901806 F6 — IndexerHeartbeat + McpPoller GenServers retired.
       # Single source of truth = `{:dashboard_state, state}` broadcast by
       # BridgeClient from the brain's 1 Hz dashboard_state_v1 event.

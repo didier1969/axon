@@ -78,3 +78,12 @@ dev-probe-*.csv
 #       CLAUDE.md mandates SOLL tools for active plans (CPT-AXO-024); markdown plans
 #       here pre-date the policy. No new active plans should land in docs/plans/
 #       unless re-introduced via explicit SOLL DEC. Use `soll_work_plan` / `soll_apply_plan`.
+
+# REQ-AXO-901801 (MIL-AXO-028 cat A) — dashboard scaffolding turds. The
+# Phoenix `mix phx.new` blueprint provisioned an ecto_sqlite3 Repo we
+# never activated ; the .db files were created by an early experiment
+# and never cleaned. Now ignored so any rebuild stays out of git ; the
+# files themselves are removed by their owning commit.
+src/dashboard/axon_nexus.db
+src/dashboard/axon_nexus.db-shm
+src/dashboard/axon_nexus.db-wal

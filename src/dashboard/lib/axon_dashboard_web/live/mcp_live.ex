@@ -349,10 +349,16 @@ defmodule AxonDashboardWeb.Live.McpLive do
 
   ## Data
 
+  # REQ-AXO-901803 (MIL-AXO-028 cat C) — supervised Task instead of
+  # bare `Task.start/1`. The LiveView mount fires this fan-out before
+  # rendering the tool list ; under bare Task.start crashes were silent
+  # and the LiveView would hang waiting for `:tools_loaded` forever.
+  # Now the Task runs under `AxonDashboard.TaskSupervisor` so a parser
+  # crash gets logged + the supervised child gets cleaned up.
   defp load_tools(socket) do
     parent = self()
 
-    Task.start(fn ->
+    Task.Supervisor.start_child(AxonDashboard.TaskSupervisor, fn ->
       case fetch_tools() do
         {:ok, list} when is_list(list) ->
           tools =

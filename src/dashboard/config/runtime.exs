@@ -53,6 +53,15 @@ if config_env() != :test do
 
   config :axon_dashboard, AxonDashboard.BridgeClient,
     telemetry_socket_path: default_telemetry_socket
+
+  # REQ-AXO-901802 (MIL-AXO-028 cat B) — Application.env-driven workspace
+  # root replaces ad-hoc `File.cwd!()` walks in display helpers (e.g.
+  # Axon.Watcher.Telemetry.get_top_dir/1). DEVENV_ROOT is set by the
+  # devenv shell ; falls back to "/" so production deployments without
+  # devenv still work without raising on missing-env.
+  config :axon_dashboard,
+         :workspace_root,
+         System.get_env("DEVENV_ROOT") || "/"
 end
 
 # Prod-specific configuration (secrets, host)

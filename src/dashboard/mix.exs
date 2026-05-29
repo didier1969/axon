@@ -73,7 +73,14 @@ defmodule AxonDashboard.MixProject do
       {:bandit, "~> 1.5"},
       {:rustler, "~> 0.36.0", runtime: false},
       {:file_system, "~> 1.0"},
-      {:ecto_sqlite3, "~> 0.10"},
+      # REQ-AXO-901801 (MIL-AXO-028 cat A) — ecto_sqlite3 removed. The
+      # dashboard owns no canonical state — PG is the source of truth
+      # (PIL-AXO-001 data-ownership convention). The dep was a leftover
+      # from an early scaffolding experiment that left axon_nexus.db /
+      # .db-shm / .db-wal turds at the project root with no supervised
+      # Repo, no Ecto schema, and no migration path. Removing the dep
+      # closes 4 transitive dependencies (db_connection, decimal, ecto,
+      # ecto_sql) the dashboard never used.
       {:liveview_witness, path: "../liveview_witness"},
       # REQ-AXO-901649 — Wallaby drives Chrome via WebDriver for E2E feature
       # tests (test/axon_dashboard_web/features/). `runtime: false` keeps it
