@@ -99,80 +99,42 @@ pub fn demand_pull_metrics_b() -> Option<Arc<DemandPullMetrics>> {
     }
 }
 
-// REQ-AXO-901808 (MIL-AXO-029 slice 1) — additive (s, Q) aliasing.
+// REQ-AXO-901808 (MIL-AXO-029 slice 1) — canonical (s, Q) env vars.
 //
-// The DEC-AXO-901625 refinement reframes the existing demand-pull as a
-// classic (s, Q) inventory policy : `s` = reorder point (target stock
-// at which we trigger a refill = `threshold`), `Q` = reorder quantity
-// (max items per refill = `batch`). The new canonical env var names
-// expose this contract :
+// DEC-AXO-901625 reframes the existing demand-pull as a classic
+// (s, Q) inventory policy : `s` = reorder point (= threshold), `Q`
+// = reorder quantity (= batch). The env var names match that
+// vocabulary exactly :
 //
-//   AXON_PIPELINE_A_REORDER_POINT     ← was AXON_DEMAND_PULL_A_THRESHOLD
-//   AXON_PIPELINE_A_REORDER_QUANTITY  ← was AXON_DEMAND_PULL_A_BATCH
-//   AXON_PIPELINE_B_REORDER_POINT     ← was AXON_DEMAND_PULL_B_THRESHOLD
-//   AXON_PIPELINE_B_REORDER_QUANTITY  ← was AXON_DEMAND_PULL_B_BATCH
+//   AXON_PIPELINE_A_REORDER_POINT      pipeline A reorder point (s)
+//   AXON_PIPELINE_A_REORDER_QUANTITY   pipeline A reorder quantity (Q)
+//   AXON_PIPELINE_B_REORDER_POINT      pipeline B reorder point (s)
+//   AXON_PIPELINE_B_REORDER_QUANTITY   pipeline B reorder quantity (Q)
 //
-// The legacy `AXON_DEMAND_PULL_*` names remain valid for backward
-// compatibility (operator runbooks, scripts/start.sh, prod env files).
-// New names take precedence when both are set. Logged at startup so
-// the operator sees which surface won.
-/// Pure resolution of canonical-vs-legacy aliasing. Returns canonical
-/// when present, otherwise legacy, otherwise default. Extracted so
-/// unit tests can exercise the precedence rule without mutating the
-/// process-global env. See [`env_alias_usize`] for the live wrapper.
-fn resolve_alias_usize(
-    canonical_raw: Option<&str>,
-    legacy_raw: Option<&str>,
-    default: usize,
-) -> usize {
-    if let Some(v) = canonical_raw.and_then(|s| s.parse::<usize>().ok()) {
-        return v;
-    }
-    legacy_raw
-        .and_then(|s| s.parse::<usize>().ok())
+// No legacy aliasing : grep confirmed nothing in the repo (scripts,
+// yaml, prod env, docs) ever consumed the older `AXON_DEMAND_PULL_*`
+// names. Keeping a fallback layer for unused names is dead code.
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
 
-fn env_alias_usize(canonical: &str, legacy: &str, default: usize) -> usize {
-    let canonical_val = std::env::var(canonical).ok();
-    let legacy_val = std::env::var(legacy).ok();
-    resolve_alias_usize(
-        canonical_val.as_deref(),
-        legacy_val.as_deref(),
-        default,
-    )
-}
-
 fn demand_pull_a_threshold_from_env() -> usize {
-    env_alias_usize(
-        "AXON_PIPELINE_A_REORDER_POINT",
-        "AXON_DEMAND_PULL_A_THRESHOLD",
-        200,
-    )
+    env_usize("AXON_PIPELINE_A_REORDER_POINT", 200)
 }
 
 fn demand_pull_a_batch_from_env() -> usize {
-    env_alias_usize(
-        "AXON_PIPELINE_A_REORDER_QUANTITY",
-        "AXON_DEMAND_PULL_A_BATCH",
-        200,
-    )
+    env_usize("AXON_PIPELINE_A_REORDER_QUANTITY", 200)
 }
 
 fn demand_pull_b_threshold_from_env() -> usize {
-    env_alias_usize(
-        "AXON_PIPELINE_B_REORDER_POINT",
-        "AXON_DEMAND_PULL_B_THRESHOLD",
-        1500,
-    )
+    env_usize("AXON_PIPELINE_B_REORDER_POINT", 1500)
 }
 
 fn demand_pull_b_batch_from_env() -> usize {
-    env_alias_usize(
-        "AXON_PIPELINE_B_REORDER_QUANTITY",
-        "AXON_DEMAND_PULL_B_BATCH",
-        1500,
-    )
+    env_usize("AXON_PIPELINE_B_REORDER_QUANTITY", 1500)
 }
 
 fn resolve_database_url_for_listener() -> String {
@@ -927,40 +889,8 @@ fn gpu_provider_explicitly_requested() -> bool {
 /// still honored with a one-shot deprecation warning — REQ-AXO-901657).
 #[cfg(test)]
 mod tests {
-    use super::{gpu_provider_explicitly_requested, resolve_alias_usize};
+    use super::gpu_provider_explicitly_requested;
     use crate::postgres::{database_url_for, AxonInstance};
-
-    /// REQ-AXO-901808 (MIL-AXO-029 slice 1) — canonical (s, Q) env var
-    /// names take precedence over legacy `AXON_DEMAND_PULL_*` aliases.
-    /// Pure function unit-tested so we never touch process-global env
-    /// (which would race with parallel cargo test threads).
-    #[test]
-    fn resolve_alias_usize_canonical_wins_when_present() {
-        assert_eq!(resolve_alias_usize(Some("128"), Some("256"), 200), 128);
-    }
-
-    #[test]
-    fn resolve_alias_usize_legacy_falls_back_when_canonical_absent() {
-        assert_eq!(resolve_alias_usize(None, Some("256"), 200), 256);
-    }
-
-    #[test]
-    fn resolve_alias_usize_default_when_both_absent() {
-        assert_eq!(resolve_alias_usize(None, None, 200), 200);
-    }
-
-    #[test]
-    fn resolve_alias_usize_invalid_canonical_falls_back_to_legacy() {
-        // Operator typo or bad shell expansion : canonical present but
-        // unparseable. Fall back to legacy rather than silently using
-        // the default, which would mask the typo.
-        assert_eq!(resolve_alias_usize(Some("oops"), Some("256"), 200), 256);
-    }
-
-    #[test]
-    fn resolve_alias_usize_invalid_both_falls_back_to_default() {
-        assert_eq!(resolve_alias_usize(Some("oops"), Some("bad"), 200), 200);
-    }
 
     /// REQ-AXO-90009 Slice 3C — `resolve_listener_database_url` honours
     /// `AXON_INSTANCE_KIND=dev` (resolves DEV URL) ; default = live.

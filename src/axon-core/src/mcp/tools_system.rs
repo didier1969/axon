@@ -473,6 +473,44 @@ impl McpServer {
         let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
         let runtime_pending_empty = runtime_pending == 0;
 
+        // REQ-AXO-901816 (MIL-AXO-029 slice 6 P0) — pipeline A
+        // discovered-backlog count + demand-pull feeder counters.
+        // `stock_a` is NEW info (not derivable from existing fields).
+        // Pipeline B backlog is already surfaced as `pending_chunks`
+        // (total_chunks - embedded_chunks above) so re-exposing it
+        // here would violate GUI-PRO-013 (DRY). The feeder counters
+        // (replenish_a / replenish_b) come from the in-process
+        // demand_pull metrics, which are independent of the DB-derived
+        // backlog and surface the failure mode where a non-zero stock
+        // sits behind a dead feeder loop.
+        let stock_a = scalar(&format!(
+            "SELECT count(*) FROM public.indexedfile WHERE status='discovered' AND retry_count<3{}",
+            if project == "*" {
+                String::new()
+            } else {
+                format!(" AND path LIKE '{}/%'", project.replace('\'', "''"))
+            }
+        ));
+        let (replenish_a, replenish_b) = {
+            let snap_a = crate::pipeline_v2_runtime::demand_pull_metrics_a()
+                .map(|m| m.snapshot());
+            let snap_b = crate::pipeline_v2_runtime::demand_pull_metrics_b()
+                .map(|m| m.snapshot());
+            let to_json = |snap: Option<crate::pipeline_v2::demand_pull::DemandPullSnapshot>| {
+                match snap {
+                    Some(s) => json!({
+                        "pulls_total": s.pulls_total,
+                        "items_fed_total": s.items_fed_total,
+                        "empty_pulls_total": s.empty_pulls_total,
+                        "try_send_failures_total": s.try_send_failures_total,
+                        "skipped_above_threshold": s.skipped_above_threshold,
+                    }),
+                    None => json!(null),
+                }
+            };
+            (to_json(snap_a), to_json(snap_b))
+        };
+
         // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces
         // the sleep/wake state machine so operators see when the GPU
         // session is parked vs ready, and how often it has flipped.
@@ -634,8 +672,30 @@ impl McpServer {
                 "indexed_files": indexed_files,
                 "projects": projects,
                 "per_project": per_project_breakdown,
-                "pipeline_a": { "a1": a1, "a2": a2, "a3": a3, "a3_batch_size": a3_batch, "a3_batch_timeout_ms": a3_timeout },
-                "pipeline_b": { "b1": b1, "b2": b2, "b3": b3, "b2_batch_size": b2_batch, "b2_batch_timeout_ms": b2_timeout, "b3_batch_size": b3_batch, "b3_batch_timeout_ms": b3_timeout, "a3_to_b1_buffer_cap": a3_to_b1_cap, "coldstart_batch_size": coldstart_batch },
+                "pipeline_a": {
+                    "a1": a1,
+                    "a2": a2,
+                    "a3": a3,
+                    "a3_batch_size": a3_batch,
+                    "a3_batch_timeout_ms": a3_timeout,
+                    // REQ-AXO-901816 slice 6 — discovered backlog + feeder counters.
+                    "stock_discovered": stock_a,
+                    "replenish": replenish_a
+                },
+                "pipeline_b": {
+                    "b1": b1,
+                    "b2": b2,
+                    "b3": b3,
+                    "b2_batch_size": b2_batch,
+                    "b2_batch_timeout_ms": b2_timeout,
+                    "b3_batch_size": b3_batch,
+                    "b3_batch_timeout_ms": b3_timeout,
+                    "a3_to_b1_buffer_cap": a3_to_b1_cap,
+                    "coldstart_batch_size": coldstart_batch,
+                    // REQ-AXO-901816 slice 6 — feeder counters only ; B backlog
+                    // is already exposed as the top-level `pending_chunks` field.
+                    "replenish": replenish_b
+                },
                 "notify_channel": "chunk_pending_embed",
                 "coldstart_poll_interval_secs": coldstart_poll_interval_secs,
                 "runtime_pending_count": runtime_pending,
