@@ -106,6 +106,14 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run] [--finalize-only] [--resume]
 
+  --restart-live    Stop the live canonical, copy bin/* from the manifest, then
+                    bring the FULL live profile up (brain + indexer + dashboard
+                    via `start full`). REQ-AXO-901782 : the post-check enforces
+                    indexer_ready=true (runtime_authority_contract("brain"))
+                    so brain_only would always time out. Use --finalize-only
+                    instead when the operator has already pre-staged the brain
+                    via AXON_LIVE_RELEASE_MANIFEST env-override.
+
   --finalize-only   REQ-AXO-286: assume the live brain already serves the target
                     manifest (started via env-override AXON_LIVE_RELEASE_MANIFEST=
                     <pending>). Verify build_id via MCP, then archive current and
@@ -474,9 +482,15 @@ for name, entry in artifacts.items():
 PY
   fi
 
-  # Start services on the staged manifest (only if stop+copy succeeded)
+  # Start services on the staged manifest (only if stop+copy succeeded).
+  # REQ-AXO-901782 : the post-check (check_live_runtime_version.py) enforces
+  # `indexer_ready=true` as part of runtime_authority_contract("brain"), so
+  # spawning `start brain --fast` (brain_only) makes the gate impossible to
+  # pass. The canonical live profile is `start full` (brain + indexer +
+  # dashboard) — matches what the operator gets via `./scripts/axon-live
+  # start full` and what the rest of the qualified-release lineage assumes.
   if [[ "$restart_failed" -ne 1 ]]; then
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start brain --fast; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start full; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces the legacy 24*5s fixed-sleep

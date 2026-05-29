@@ -174,6 +174,37 @@ if [[ "$build_id" == *"$short_head"* ]]; then
 fi
 pass "Case 9 — mismatch : gate refuses correctly"
 
+# --- REQ-AXO-901782 : --restart-live must spawn FULL live profile, not brain_only ---
+#
+# Why : the post-check (check_live_runtime_version.py) enforces
+# `indexer_ready=true` via runtime_authority_contract("brain"), so any
+# brain_only restart times out at 150s. Operator hit the workaround twice
+# in session 59 (curl POST /process/start/{axon-indexer,dashboard} then
+# --finalize-only). The canonical spawn in promote_live.sh --restart-live
+# is now `start full` — locked in by static grep below.
+
+promote_script="$ROOT_DIR/scripts/release/promote_live.sh"
+if [[ ! -f "$promote_script" ]]; then
+    fail "Case 10 — promote_live.sh missing at $promote_script"
+fi
+
+# Case 10a : the canonical `start full` invocation lives inside the
+# RESTART_LIVE block. We grep the literal command tail to keep the
+# guard tight against unrelated edits.
+if ! grep -q "scripts/axon\" --instance live start full" "$promote_script"; then
+    fail "Case 10a — promote_live.sh does not invoke 'start full' for --restart-live (REQ-AXO-901782 regression?). Inspect lines around the RESTART_LIVE branch."
+fi
+pass "Case 10a — promote_live.sh --restart-live spawns 'start full' (brain+indexer+dashboard)"
+
+# Case 10b : the deprecated `start brain --fast` MUST NOT appear in the
+# restart-live spawn line. If it reappears, the post-check times out
+# again. We allow the substring to live in comments/docs, but not as the
+# active spawn argument.
+if grep -E '^[[:space:]]*if[[:space:]]+!.*scripts/axon".*--instance live start brain --fast' "$promote_script" >/dev/null; then
+    fail "Case 10b — promote_live.sh still spawns 'start brain --fast' (REQ-AXO-901782 regression). Replace with 'start full'."
+fi
+pass "Case 10b — promote_live.sh does not spawn 'start brain --fast' in --restart-live"
+
 echo ""
-echo "🎯 All 9 cases passed — promote-live dev gate parser locked in."
+echo "🎯 All 11 cases passed — promote-live dev gate parser + --restart-live spawn locked in."
 exit 0
