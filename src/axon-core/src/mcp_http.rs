@@ -33,6 +33,10 @@ pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
         .route("/livez", get(handle_livez))
         .route("/readyz", get(handle_readyz))
         .route("/startupz", get(handle_startupz))
+        // REQ-AXO-901806 — dashboard state v1. Read-only snapshot of the
+        // event the 1 Hz telemetry loop pushes on the broadcast channel ;
+        // served from the in-memory cache populated by main_telemetry.
+        .route("/dashboard/state", get(handle_dashboard_state))
         .layer(Extension(mcp_server))
 }
 
@@ -90,6 +94,24 @@ async fn handle_startupz() -> Response {
 #[derive(serde::Deserialize)]
 struct SqlRequest {
     query: String,
+}
+
+// REQ-AXO-901806 — /dashboard/state handler. Reads the latest snapshot
+// from the in-memory slot populated by `main_telemetry::spawn_runtime_telemetry`
+// every 1 s. Cost is constant-time (Mutex lock + clone), no PG roundtrip.
+// Returns 503 if the slot is empty (brain just booted, no tick yet).
+async fn handle_dashboard_state() -> Response {
+    match crate::dashboard_state::latest_dashboard_state() {
+        Some(state) => (StatusCode::OK, Json(state)).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "dashboard_state_not_ready",
+                "hint": "Telemetry loop has not yet completed a tick. Retry after 1s.",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn handle_sql_post(

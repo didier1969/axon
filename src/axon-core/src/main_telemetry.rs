@@ -266,6 +266,12 @@ pub(crate) fn spawn_runtime_telemetry(
             let telemetry_observed_age_ms = runtime_truth_feed.observed_age_ms;
             let telemetry_degraded_reason = runtime_truth_feed.degraded_reason.clone();
             let projected_indexer_runtime = projected_indexer_runtime_from_heartbeat();
+            // REQ-AXO-901806 — clone owned strings before they're moved
+            // into BridgeEvent so the dashboard composer below can still
+            // read them. Cheap (small strings, ~100 bytes total).
+            let dashboard_last_lane = snapshot.last_consumed_batch_lane.clone();
+            let dashboard_service_pressure = snapshot.service_pressure.clone();
+            let dashboard_claim_mode = snapshot.claim_mode.clone();
             let event = BridgeEvent::RuntimeTelemetry {
                 telemetry_source,
                 telemetry_process_role,
@@ -373,6 +379,52 @@ pub(crate) fn spawn_runtime_telemetry(
             if let Ok(message) = serde_json::to_string(&event) {
                 let _ = results_tx.send(message + "\n");
             }
+
+            // REQ-AXO-901806 — dashboard_state_v1 emit (single-event
+            // architecture replacing dashboard's polling triple).
+            // PG functions are TTL-cached server-side ; warm-path cost
+            // ~18 ms vs ~200 ms cold. Failures degrade gracefully.
+            let dashboard_ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let dashboard_install_generation = std::env::var("AXON_INSTALL_GENERATION")
+                .unwrap_or_else(|_| "workspace".to_string());
+            let dashboard_instance_kind = std::env::var("AXON_INSTANCE_KIND")
+                .unwrap_or_else(|_| "unknown".to_string());
+            let dashboard_embedder = crate::embedder::current_embedding_provider_diagnostics();
+            let dashboard_build_id = std::env::var("AXON_BUILD_ID")
+                .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+            crate::dashboard_state::compose_publish_and_emit(
+                &store,
+                &results_tx,
+                dashboard_ts_ms,
+                &dashboard_build_id,
+                &dashboard_install_generation,
+                runtime_mode.as_str(),
+                &dashboard_instance_kind,
+                runtime_truth_feed.degraded_reason.as_deref(),
+                &dashboard_embedder.provider_requested,
+                &dashboard_embedder.provider_effective,
+                dashboard_embedder.provider_init_error.as_deref(),
+                0u64, // pipeline_b_workers — sourced from embedding_status MCP tool, populated by future REQ
+                snapshot.chunk_embeddings_per_second,
+                snapshot.vector_chunks_embedded_total,
+                snapshot.graph_workers_active_current,
+                snapshot.graph_workers_started_total,
+                snapshot.ingress_buffered_entries as u64,
+                snapshot.ingress_hot_entries as u64,
+                snapshot.ready_queue_chunks_current,
+                snapshot.ready_queue_chunks_small,
+                snapshot.ready_queue_chunks_medium,
+                snapshot.ready_queue_chunks_large,
+                snapshot.homogeneous_batches_total,
+                snapshot.mixed_fallback_batches_total,
+                dashboard_last_lane.as_str(),
+                dashboard_service_pressure.as_str(),
+                dashboard_claim_mode.as_str(),
+                snapshot.queue_depth == 0 && snapshot.exhaustion_ratio < 0.1,
+            );
         }
     });
 }

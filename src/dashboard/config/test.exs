@@ -33,6 +33,23 @@ config :phoenix,
 
 config :axon_dashboard, telemetry_socket_path: "/tmp/axon-telemetry-test.sock"
 
+# REQ-AXO-901802 (MIL-AXO-028 cat B) — test-mode Application.env populates
+# the same keys as config/runtime.exs would in dev/live. Single source
+# of truth across env: every consumer reads via Application.get_env.
+config :axon_dashboard, :instance_kind, "test"
+
+config :axon_dashboard, Axon.Watcher.SqlGateway,
+  url: "http://127.0.0.1:1/sql",
+  allow_cross_instance_fallback: false
+
+config :axon_dashboard, AxonDashboard.BridgeClient,
+  telemetry_socket_path: "/tmp/axon-telemetry-test.sock"
+
+# IndexerHeartbeat path: tests don't need a real heartbeat file. Set to
+# a non-existent path so the poller is harmless (logs missing, no broadcast).
+config :axon_dashboard, Axon.Watcher.IndexerHeartbeat,
+  path: "/tmp/axon-indexer-heartbeat-test.json"
+
 # REQ-AXO-901649 — Wallaby driver configuration. Headless Chrome + small
 # viewport so the suite runs identically on a developer workstation and on
 # a headless CI box. ChromeDriver binary is resolved from $PATH (devenv.nix
@@ -46,10 +63,17 @@ config :wallaby,
   screenshot_on_failure: true,
   screenshot_dir: "tmp/wallaby_screenshots"
 
-# REQ-AXO-901649 — point the MCP client at a closed port so McpClient
-# fails fast in tests instead of hanging on the live brain (which the
-# operator MUST NOT have torn down for tests to run). McpLive handles the
-# error path gracefully (`{:tools_error, _reason}` → loaded? = true,
-# empty list), and that's exactly what the McpLive feature tests assert
-# when they stub tools via direct LiveView pid injection.
-config :axon_dashboard, mcp_endpoint: "http://127.0.0.1:1/mcp"
+# REQ-AXO-901649 + REQ-AXO-901802 — point the MCP client at a closed port
+# so McpClient fails fast in tests instead of hanging on the live brain.
+# McpLive handles the error path gracefully (`{:tools_error, _reason}` →
+# loaded? = true, empty list), and that's exactly what the McpLive feature
+# tests assert when they stub tools via direct LiveView pid injection.
+config :axon_dashboard, Axon.Watcher.McpClient,
+  endpoint: "http://127.0.0.1:1/mcp"
+
+# REQ-AXO-901649 + REQ-AXO-901802 — MCP catalog fixture path for Wallaby
+# hermetic tests. Read from env var AXON_MCP_FIXTURE_PATH at compile time
+# so the per-test setup can wire it in via Mix.env() / System.put_env.
+if path = System.get_env("AXON_MCP_FIXTURE_PATH") do
+  config :axon_dashboard, :mcp_fixture_path, path
+end

@@ -23,7 +23,7 @@ defmodule Axon.Watcher.McpPoller do
   alias Axon.Watcher.McpClient
 
   @topic "bridge_events"
-  @poll_ms 3_000
+  @default_poll_ms 3_000
 
   ## Public API
 
@@ -31,7 +31,12 @@ defmodule Axon.Watcher.McpPoller do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Latest cached `embedding_status` snapshot (or nil)."
+  @doc """
+  Latest cached `embedding_status` snapshot or `nil` if the GenServer isn't
+  started yet. `catch :exit, _ -> nil` is intentionally retained as a
+  defensive default during brain restart windows (see IndexerHeartbeat.latest
+  for the same idiom + rationale).
+  """
   def latest do
     case GenServer.whereis(__MODULE__) do
       nil -> nil
@@ -59,14 +64,18 @@ defmodule Axon.Watcher.McpPoller do
       last_error: nil
     }
 
-    Process.send_after(self(), :tick, 1_000)
+    # REQ-AXO-901803 cat C14 — `:timer.send_interval` skip-on-busy semantics
+    # over `Process.send_after` recurrent. Initial poll on `send(self(), :tick)`.
+    {:ok, _ref} = :timer.send_interval(poll_interval_ms(), self(), :tick)
+    send(self(), :tick)
+
     {:ok, state}
   end
 
   @impl true
   def handle_info(:tick, state) do
     state = poll(state)
-    Process.send_after(self(), :tick, @poll_ms)
+    # No more Process.send_after — :timer.send_interval drives cadence.
     {:noreply, state}
   end
 
@@ -81,6 +90,12 @@ defmodule Axon.Watcher.McpPoller do
   end
 
   ## Internals
+
+  # REQ-AXO-901803 cat C11 — poll cadence read from Application.env at init.
+  defp poll_interval_ms do
+    Application.get_env(:axon_dashboard, __MODULE__, [])
+    |> Keyword.get(:poll_ms, @default_poll_ms)
+  end
 
   defp poll(state) do
     case McpClient.call_tool("embedding_status", %{"project" => state.project}) do

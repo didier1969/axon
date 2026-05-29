@@ -203,7 +203,10 @@ defmodule Axon.Watcher.McpClient do
     end)
   end
 
+  # REQ-AXO-901802 (MIL-AXO-028 cat B) — single source via Application.env
+  # populated by config/runtime.exs. No more scattered System.get_env.
   defp endpoint do
-    System.get_env("AXON_MCP_ENDPOINT") || @default_endpoint
+    Application.get_env(:axon_dashboard, __MODULE__, [])
+    |> Keyword.get(:endpoint, @default_endpoint)
   end
 end

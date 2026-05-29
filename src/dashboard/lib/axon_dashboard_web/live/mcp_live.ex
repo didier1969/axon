@@ -119,12 +119,14 @@ defmodule AxonDashboardWeb.Live.McpLive do
     {:ok, socket}
   end
 
-  # If AXON_MCP_FIXTURE_PATH is set (Wallaby feature tests, hermetic
+  # If `:mcp_fixture_path` is set (Wallaby feature tests, hermetic
   # smoke runs), preload the catalog synchronously so the first HTTP
   # render already exposes every tool. Otherwise return the legacy
   # "loading…" state and let `:load` populate via async Task.
+  # REQ-AXO-901802 cat B — centralized via Application.env (driven by
+  # config/test.exs which reads AXON_MCP_FIXTURE_PATH from env).
   defp initial_tools do
-    case System.get_env("AXON_MCP_FIXTURE_PATH") do
+    case Application.get_env(:axon_dashboard, :mcp_fixture_path) do
       nil ->
         {[], false, nil}
 
@@ -176,6 +178,11 @@ defmodule AxonDashboardWeb.Live.McpLive do
   end
 
   @impl true
+  # REQ-AXO-901806 — dashboard_state_v1 handler (dual-source migration window).
+  def handle_info({:dashboard_state, state}, socket) do
+    {:noreply, assign(socket, :dashboard_state, state)}
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
@@ -211,7 +218,7 @@ defmodule AxonDashboardWeb.Live.McpLive do
       build_id={(@heartbeat || %{}) |> Map.get(:build_id, "n/a")}
       install_generation={(@heartbeat || %{}) |> Map.get(:install_generation, "n/a")}
       runtime_mode={(@heartbeat || %{}) |> Map.get(:runtime_mode, "unknown")}
-      instance_kind={System.get_env("AXON_INSTANCE_KIND") || "unknown"}
+      instance_kind={Application.get_env(:axon_dashboard, :instance_kind, "unknown")}
       gpu_effective={get_in(@heartbeat || %{}, [:embedder_provider, :effective]) || "unknown"}
       degraded_reason={(@heartbeat || %{}) |> Map.get(:degraded_reason)}
       stale={Map.get(@heartbeat || %{}, :stale, false) == true}
@@ -366,13 +373,13 @@ defmodule AxonDashboardWeb.Live.McpLive do
     socket
   end
 
-  # REQ-AXO-901649 — feature tests stub the catalog via a JSON fixture so
-  # the suite never depends on a live brain. The fixture path is given
-  # through `AXON_MCP_FIXTURE_PATH` and must point to a file containing a
-  # JSON array of `%{"name" => ..., "description" => ...}` objects. Any
-  # other env (dev / live / prod) falls through to McpClient.
+  # REQ-AXO-901649 + REQ-AXO-901802 — feature tests stub the catalog
+  # via a JSON fixture so the suite never depends on a live brain. Path
+  # comes from `:mcp_fixture_path` Application.env (populated by
+  # config/test.exs from AXON_MCP_FIXTURE_PATH). Any other env
+  # (dev / live / prod) falls through to McpClient.
   defp fetch_tools do
-    case System.get_env("AXON_MCP_FIXTURE_PATH") do
+    case Application.get_env(:axon_dashboard, :mcp_fixture_path) do
       nil ->
         McpClient.list_tools()
 

@@ -91,6 +91,19 @@ defmodule AxonDashboard.BridgeClient do
       Enum.reduce(lines, state, fn line, acc ->
         if not String.contains?(line, "Axon Bridge Ready") do
           case Jason.decode(line) do
+            # REQ-AXO-901806 — dashboard_state_v1 is the single-event
+            # dashboard refresh payload. Emit a typed message so LiveViews
+            # pattern-match without parsing `event["event"]` every tick.
+            # Skip handle_bridge_event (no BridgeClient state impact).
+            {:ok, %{"event" => "dashboard_state_v1"} = dashboard_state} ->
+              Phoenix.PubSub.broadcast(
+                AxonDashboard.PubSub,
+                "bridge_events",
+                {:dashboard_state, dashboard_state}
+              )
+
+              acc
+
             {:ok, event} ->
               acc = handle_bridge_event(event, acc)
 

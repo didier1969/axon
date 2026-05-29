@@ -14,7 +14,6 @@ defmodule AxonDashboard.Application do
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
       Axon.Watcher.Tracer,
       Axon.Watcher.Telemetry,
-      Axon.Watcher.Repo,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
       # REQ-AXO-901647: dashboard rebuild — pipeline cockpit needs a 1Hz heartbeat
       # broadcast over `bridge_events` so PipelineLive can push_event to the JS

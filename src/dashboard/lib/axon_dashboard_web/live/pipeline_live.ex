@@ -40,6 +40,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       |> assign(:page_title, "Axon · Pipeline Cockpit")
       |> assign(:heartbeat, hb)
       |> assign(:mcp, mcp)
+      # REQ-AXO-901806 — single-event dashboard_state_v1 assign,
+      # initially nil until first :dashboard_state PubSub event lands.
+      |> assign(:dashboard_state, nil)
       |> assign(:rate_series, :queue.new())
       |> assign(:last_push_ms, 0)
       |> assign(:total_chunks_history, :queue.new())
@@ -81,6 +84,16 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   @impl true
   def handle_info({:mcp_embedding_status_error, _reason}, socket) do
     {:noreply, socket}
+  end
+
+  # REQ-AXO-901806 — dashboard_state_v1 event handler (single-event
+  # architecture). Stored as `@dashboard_state` for future migration ;
+  # render still reads @heartbeat + @mcp during the dual-source window.
+  # Once render is migrated, the IndexerHeartbeat + McpPoller pollers
+  # in the supervision tree become removable (F6).
+  @impl true
+  def handle_info({:dashboard_state, state}, socket) do
+    {:noreply, assign(socket, :dashboard_state, state)}
   end
 
   # Catch-all: keep process alive on any other broadcast
@@ -458,7 +471,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp hb_install_generation(hb), do: hb_get(hb, :install_generation, hb_get(hb, :release_version, "n/a"))
 
   defp hb_instance_kind(hb) do
-    case System.get_env("AXON_INSTANCE_KIND") do
+    case Application.get_env(:axon_dashboard, :instance_kind) do
       nil -> hb_get(hb, :runtime_mode, "unknown")
       kind -> kind
     end

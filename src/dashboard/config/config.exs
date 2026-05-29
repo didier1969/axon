@@ -9,18 +9,7 @@
 import Config
 
 config :axon_dashboard,
-  ecto_repos: [Axon.Watcher.Repo],
   generators: [timestamp_type: :utc_datetime]
-
-config :axon_dashboard, Axon.Watcher.Repo,
-  adapter: Ecto.Adapters.SQLite3,
-  database: "axon_nexus.db",
-  # SERIALIZED WRITES to avoid 'Database busy'
-  pool_size: 1,
-  journal_mode: :wal,
-  busy_timeout: 5000,
-  # High performance mode for WAL
-  synchronous: :normal
 
 # Configure the endpoint
 config :axon_dashboard, AxonDashboardWeb.Endpoint,

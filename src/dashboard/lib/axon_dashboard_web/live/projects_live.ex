@@ -60,6 +60,11 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   end
 
   @impl true
+  # REQ-AXO-901806 — dashboard_state_v1 handler (dual-source migration window).
+  def handle_info({:dashboard_state, state}, socket) do
+    {:noreply, assign(socket, :dashboard_state, state)}
+  end
+
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
@@ -90,7 +95,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
       build_id={(@heartbeat || %{}) |> Map.get(:build_id, "n/a")}
       install_generation={(@heartbeat || %{}) |> Map.get(:install_generation, "n/a")}
       runtime_mode={(@heartbeat || %{}) |> Map.get(:runtime_mode, "unknown")}
-      instance_kind={System.get_env("AXON_INSTANCE_KIND") || "unknown"}
+      instance_kind={Application.get_env(:axon_dashboard, :instance_kind, "unknown")}
       gpu_effective={get_in(@heartbeat || %{}, [:embedder_provider, :effective]) || "unknown"}
       degraded_reason={(@heartbeat || %{}) |> Map.get(:degraded_reason)}
       stale={Map.get(@heartbeat || %{}, :stale, false) == true}
@@ -169,7 +174,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
                 <tr :if={@projects == []}>
                   <td colspan="8" class="px-6 py-10 text-center text-slate-500 text-[12px]">
                     No projects found. Check that the SQL gateway is reachable at
-                    <code class="text-slate-300">{System.get_env("AXON_SQL_URL") || "http://127.0.0.1:44129/sql"}</code>.
+                    <code class="text-slate-300">{Axon.Watcher.SqlGateway.source_info().configured_url}</code>.
                   </td>
                 </tr>
               </tbody>

@@ -43,7 +43,7 @@ defmodule Axon.Watcher.IndexerHeartbeat do
   require Logger
 
   @topic "bridge_events"
-  @poll_ms 1_000
+  @default_poll_ms 1_000
 
   ## Public API
 
@@ -51,7 +51,15 @@ defmodule Axon.Watcher.IndexerHeartbeat do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Return the latest snapshot (or `nil` if not yet polled)."
+  @doc """
+  Return the latest snapshot or `nil` if the GenServer is not started yet.
+
+  `catch :exit, _ -> nil` is intentionally retained : during a brain restart
+  or supervisor swap the GenServer process may briefly be gone between the
+  `whereis` lookup and the actual `call`. Returning `nil` (vs propagating
+  exit) is the right defensive default for LiveView mount callsites that
+  should not crash on transient unavailability.
+  """
   def latest do
     case GenServer.whereis(__MODULE__) do
       nil -> nil
@@ -73,17 +81,26 @@ defmodule Axon.Watcher.IndexerHeartbeat do
       path: Keyword.get(opts, :path, default_path()),
       latest: nil,
       last_chunks_embedded_total: nil,
-      last_tick_ms: nil
+      last_tick_ms: nil,
+      # REQ-AXO-901803 cat C15 — cache mtime to skip File.read when unchanged
+      last_mtime: nil
     }
 
-    Process.send_after(self(), :tick, 200)
+    # REQ-AXO-901803 cat C14 — `:timer.send_interval` over `Process.send_after`
+    # recurrent : ticks are skipped if `handle_info` is busy, preventing queue
+    # accumulation under FS-slow conditions. Initial poll triggered immediately
+    # via `send(self(), :tick)` so the first snapshot lands without waiting
+    # for the first interval boundary.
+    {:ok, _ref} = :timer.send_interval(poll_interval_ms(), self(), :tick)
+    send(self(), :tick)
+
     {:ok, state}
   end
 
   @impl true
   def handle_info(:tick, state) do
     state = poll(state)
-    Process.send_after(self(), :tick, @poll_ms)
+    # No more Process.send_after — :timer.send_interval drives the cadence.
     {:noreply, state}
   end
 
@@ -94,46 +111,62 @@ defmodule Axon.Watcher.IndexerHeartbeat do
 
   ## Internals
 
+  # REQ-AXO-901802 + REQ-AXO-901803 (MIL-AXO-028 cat B/C) — single source
+  # via Application.env populated by config/runtime.exs. No more
+  # File.cwd!() at module load + walking parent directories.
   defp default_path do
-    System.get_env("AXON_INDEXER_HEARTBEAT_PATH") ||
-      candidates()
-      |> Enum.find(&File.exists?/1)
-      |> Kernel.||(List.first(candidates()))
+    Application.get_env(:axon_dashboard, __MODULE__, [])
+    |> Keyword.get(:path) ||
+      raise """
+      Axon.Watcher.IndexerHeartbeat: no `:path` configured.
+      Set via config/runtime.exs (driven by AXON_INSTANCE_KIND) or override
+      AXON_INDEXER_HEARTBEAT_PATH explicitly.
+      """
   end
 
-  defp candidates do
-    cwd = File.cwd!()
-
-    [
-      Path.join([cwd, ".axon", "run-indexer", "runtime-heartbeat.json"]),
-      Path.expand("../.axon/run-indexer/runtime-heartbeat.json", cwd),
-      Path.expand("../../.axon/run-indexer/runtime-heartbeat.json", cwd),
-      Path.expand("../../../.axon/run-indexer/runtime-heartbeat.json", cwd)
-    ]
+  # REQ-AXO-901803 cat C11 — poll cadence read from Application.env at init.
+  # Not a `@module_attr` so tests can override per-suite without recompile.
+  defp poll_interval_ms do
+    Application.get_env(:axon_dashboard, __MODULE__, [])
+    |> Keyword.get(:poll_ms, @default_poll_ms)
   end
 
   defp poll(state) do
     now = System.monotonic_time(:millisecond)
 
+    # REQ-AXO-901803 cat C15 — cache mtime; skip File.read when unchanged.
+    # File.stat is ~100× cheaper than File.read+Jason.decode on a multi-KB
+    # heartbeat JSON, and the file changes ~1×/second normally. Most ticks
+    # become a single stat() call + broadcast of cached snapshot.
+    case File.stat(state.path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} when mtime == state.last_mtime and not is_nil(state.latest) ->
+        # File unchanged since last read AND we have a cached snapshot.
+        # Re-broadcast the cached snapshot so newly-mounted LiveViews still
+        # receive an event without waiting for the next mtime change.
+        broadcast(cached_event(state.latest))
+        %{state | last_tick_ms: now}
+
+      {:ok, %File.Stat{mtime: mtime}} ->
+        # File changed (or first read after start) — read + parse + broadcast.
+        state |> read_and_broadcast(now) |> Map.put(:last_mtime, mtime)
+
+      {:error, reason} ->
+        broadcast({:indexer_heartbeat_missing, %{reason: reason, path: state.path}})
+        %{state | latest: %{status: :missing, reason: reason, path: state.path}, last_tick_ms: now}
+    end
+  end
+
+  defp cached_event(%{stale: true} = snap), do: {:indexer_heartbeat_stale, snap}
+  defp cached_event(%{status: :ok} = snap), do: {:indexer_heartbeat, snap}
+  defp cached_event(snap), do: {:indexer_heartbeat_missing, %{reason: :unknown_shape, snapshot: snap}}
+
+  defp read_and_broadcast(state, now) do
     case File.read(state.path) do
       {:ok, raw} ->
         case Jason.decode(raw) do
           {:ok, json} ->
             {snap, new_total} = build_snapshot(json, state, now)
-
-            payload =
-              cond do
-                snap.stale == true ->
-                  {:indexer_heartbeat_stale, snap}
-
-                snap.status == :ok ->
-                  {:indexer_heartbeat, snap}
-
-                true ->
-                  {:indexer_heartbeat_missing, %{reason: :unknown_shape, snapshot: snap}}
-              end
-
-            broadcast(payload)
+            broadcast(cached_event(snap))
 
             %{
               state
@@ -145,12 +178,12 @@ defmodule Axon.Watcher.IndexerHeartbeat do
           {:error, reason} ->
             Logger.debug("IndexerHeartbeat parse error: #{inspect(reason)}")
             broadcast({:indexer_heartbeat_missing, %{reason: :parse_error}})
-            %{state | latest: %{status: :error, reason: :parse_error}}
+            %{state | latest: %{status: :error, reason: :parse_error}, last_tick_ms: now}
         end
 
       {:error, reason} ->
         broadcast({:indexer_heartbeat_missing, %{reason: reason, path: state.path}})
-        %{state | latest: %{status: :missing, reason: reason, path: state.path}}
+        %{state | latest: %{status: :missing, reason: reason, path: state.path}, last_tick_ms: now}
     end
   end
 

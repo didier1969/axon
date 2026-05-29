@@ -96,12 +96,28 @@ impl OrtGpuFirstTextEmbedding {
             .with_memory_pattern(memory_pattern_enabled)
             .map_err(|err| anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}"))?;
 
+        // REQ-AXO-901798 — track which provider the session actually loaded
+        // so we can update the shared diagnostics slot after a successful
+        // commit. Pre-pipeline-v2 code (embedder.rs legacy path) is the only
+        // place that set the slot ; the v2 path through GpuB2Embedder
+        // bypassed it entirely, causing the heartbeat to lie with
+        // `effective=cpu` while TensorRT/CUDA was actually doing work.
+        let mut provider_resolved = "cpu";
+        let mut provider_init_error: Option<String> = None;
+
         if use_cuda {
             // Default: TensorRT EP first, fall back to CUDA EP if TensorRT init fails.
             let mut providers = Vec::new();
             match tensorrt_execution_provider_dispatch() {
-                Ok(tensorrt) => providers.push(tensorrt),
-                Err(err) => warn!("TensorRT EP unavailable, using CUDA EP: {err}"),
+                Ok(tensorrt) => {
+                    providers.push(tensorrt);
+                    provider_resolved = "tensorrt";
+                }
+                Err(err) => {
+                    warn!("TensorRT EP unavailable, using CUDA EP: {err}");
+                    provider_init_error = Some(format!("tensorrt_unavailable: {err}"));
+                    provider_resolved = "cuda";
+                }
             }
             providers.push(cuda_execution_provider_dispatch());
             builder = builder.with_execution_providers(providers).map_err(|err| {
@@ -181,9 +197,25 @@ impl OrtGpuFirstTextEmbedding {
             "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded (provider={}, bind_output_per_iter={}, seq_buckets={:?})",
             lane,
             worker_idx,
-            if use_cuda { "cuda" } else { "cpu" },
+            provider_resolved,
             bind_output_per_iter,
             seq_buckets
+        );
+
+        // REQ-AXO-901798 — update the process-wide diagnostics slot now
+        // that the session has loaded successfully. This is the single
+        // point of truth read by the heartbeat (main_telemetry.rs:130)
+        // and the dashboard probe. Without these calls, the slot stays
+        // at whatever the legacy embedder.rs path last set (typically
+        // "cpu" for a TensorRT request that bypassed the CUDA-specific
+        // branch), and operators see an `effective=cpu` warning while
+        // the actual session runs TensorRT or CUDA.
+        super::provider_runtime::set_embedding_provider_runtime_state(
+            provider_resolved,
+            provider_init_error.as_deref(),
+        );
+        super::provider_runtime::register_embedding_provider_diagnostics(
+            super::provider_runtime::embedding_provider_diagnostics(provider_resolved.to_string()),
         );
 
         Ok(Self {
