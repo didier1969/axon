@@ -563,23 +563,31 @@ async fn pull_and_feed_b(
         Ok(Ok(rows)) if !rows.is_empty() => {
             let count = rows.len();
             let mut sent = 0usize;
+            // Slice 6 fix — `send().await` au lieu de `try_send` :
+            // les chunks sélectionnés via SELECT-with-content ne doivent
+            // PAS être silently dropped quand le b_chunks channel est
+            // saturé. Le backpressure naturel ralentit demand_pull au
+            // pace du GPU drum (B2) — c'est exactement le contrat
+            // « demand-pull ». Avant slice 6 fix : try_send dropping
+            // 60-90% des chunks par cycle = re-SELECT massif amplifié
+            // PG + churn allocations, sustained throughput catastrophique
+            // (14 emb/sec sur GPU capable 300).
             for (chunk_id, content, content_hash) in rows {
                 let payload = super::stage_b1::ChunkForEmbedding {
                     chunk_id,
                     content,
                     content_hash,
                 };
-                match b_chunks_tx.try_send(payload) {
-                    Ok(()) => sent += 1,
-                    Err(_) => break,
+                if b_chunks_tx.send(payload).await.is_err() {
+                    // Receiver dropped (shutdown) — stop pushing.
+                    break;
                 }
+                sent += 1;
             }
-            let dropped = count - sent;
             metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
-            metrics.try_send_failures_total.fetch_add(dropped as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
             if sent > 0 {
-                info!("demand-pull B: fed {sent}/{count} chunks (in_flight={in_flight}/{threshold}, dropped={dropped})");
+                info!("demand-pull B: fed {sent}/{count} chunks (in_flight={in_flight}/{threshold}, backpressured by B2)");
             }
             sent
         }
