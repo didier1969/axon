@@ -65,7 +65,7 @@ defmodule Axon.Watcher.Telemetry do
       pg_chunkembedding_total_bytes: Map.get(payload, "pg_chunkembedding_total_bytes", nil),
       pg_wal_bytes: Map.get(payload, "pg_wal_bytes", nil),
       pg_buffer_hit_ratio: Map.get(payload, "pg_buffer_hit_ratio", nil),
-      vector_chunks_embedded_total: Map.get(payload, "vector_chunks_embedded_total", 0),
+      vector_chunks_embedded_cumulative: Map.get(payload, "vector_chunks_embedded_cumulative", 0),
       chunk_embeddings_per_second: Map.get(payload, "chunk_embeddings_per_second", 0.0),
       chunk_embeddings_rate_window_ms: Map.get(payload, "chunk_embeddings_rate_window_ms", 0),
       prepare_inflight_chunks_current:
@@ -316,7 +316,7 @@ defmodule Axon.Watcher.Telemetry do
       pg_chunkembedding_total_bytes: Map.get(runtime, :pg_chunkembedding_total_bytes, nil),
       pg_wal_bytes: Map.get(runtime, :pg_wal_bytes, nil),
       pg_buffer_hit_ratio: Map.get(runtime, :pg_buffer_hit_ratio, nil),
-      vector_chunks_embedded_total: Map.get(runtime, :vector_chunks_embedded_total, 0),
+      vector_chunks_embedded_cumulative: Map.get(runtime, :vector_chunks_embedded_cumulative, 0),
       chunk_embeddings_per_second: Map.get(runtime, :chunk_embeddings_per_second, 0.0),
       chunk_embeddings_rate_window_ms: Map.get(runtime, :chunk_embeddings_rate_window_ms, 0),
       prepare_inflight_chunks_current:
@@ -430,7 +430,7 @@ defmodule Axon.Watcher.Telemetry do
          pg_chunkembedding_total_bytes: nil,
          pg_wal_bytes: nil,
          pg_buffer_hit_ratio: nil,
-         vector_chunks_embedded_total: 0,
+         vector_chunks_embedded_cumulative: 0,
          chunk_embeddings_per_second: 0.0,
          chunk_embeddings_rate_window_ms: 0,
          prepare_inflight_chunks_current: 0,

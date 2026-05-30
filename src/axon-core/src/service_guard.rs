@@ -1357,7 +1357,7 @@ pub fn graph_worker_heartbeat_at_ms() -> u64 {
     GRAPH_WORKER_HEARTBEAT_AT_MS.load(Ordering::Relaxed)
 }
 
-pub fn vector_chunks_embedded_total() -> u64 {
+pub fn vector_chunks_embedded_cumulative() -> u64 {
     VECTOR_CHUNKS_EMBEDDED_TOTAL.load(Ordering::Relaxed)
 }
 

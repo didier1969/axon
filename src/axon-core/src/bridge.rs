@@ -158,7 +158,7 @@ pub enum BridgeEvent {
         pg_chunkembedding_total_bytes: Option<i64>,
         pg_wal_bytes: Option<i64>,
         pg_buffer_hit_ratio: Option<f64>,
-        vector_chunks_embedded_total: u64,
+        vector_chunks_embedded_cumulative: u64,
         chunk_embeddings_per_second: f64,
         chunk_embeddings_rate_window_ms: u64,
         prepare_inflight_chunks_current: u64,
@@ -272,7 +272,7 @@ mod tests {
             pg_chunkembedding_total_bytes: Some(2_147_483_648),
             pg_wal_bytes: Some(1_073_741_824),
             pg_buffer_hit_ratio: Some(0.987),
-            vector_chunks_embedded_total: 96,
+            vector_chunks_embedded_cumulative: 96,
             chunk_embeddings_per_second: 32.0,
             chunk_embeddings_rate_window_ms: 5_000,
             prepare_inflight_chunks_current: 24,
@@ -384,7 +384,7 @@ mod tests {
         assert!(json.contains("\"pg_chunkembedding_total_bytes\":2147483648"));
         assert!(json.contains("\"pg_wal_bytes\":1073741824"));
         assert!(json.contains("\"pg_buffer_hit_ratio\":0.987"));
-        assert!(json.contains("\"vector_chunks_embedded_total\":96"));
+        assert!(json.contains("\"vector_chunks_embedded_cumulative\":96"));
         assert!(json.contains("\"chunk_embeddings_per_second\":32.0"));
         assert!(json.contains("\"chunk_embeddings_rate_window_ms\":5000"));
         assert!(json.contains("\"ready_queue_chunks_small\":8"));

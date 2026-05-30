@@ -72,7 +72,10 @@ pub(crate) struct LiveMetrics<'a> {
     pub embedder_init_error: Option<&'a str>,
     pub last_consumed_batch_lane: &'a str,
     pub chunk_embeddings_per_second: f64,
-    pub vector_chunks_embedded_total: u64,
+    /// Monotone counter since brain boot, includes re-embeddings.
+    /// NOT bounded by total chunks — comparing this to `total_chunks`
+    /// is meaningless (a chunk re-embedded twice counts twice here).
+    pub vector_chunks_embedded_cumulative: u64,
     pub graph_workers_active: u64,
     pub graph_workers_started: u64,
     pub ingress_buffered_entries: u64,
@@ -208,7 +211,7 @@ pub(crate) fn compose_dashboard_state_v1(
         },
         "telemetry": {
             "chunk_embeddings_per_second": live.chunk_embeddings_per_second,
-            "vector_chunks_embedded_total": live.vector_chunks_embedded_total,
+            "vector_chunks_embedded_cumulative": live.vector_chunks_embedded_cumulative,
             "graph_workers_active_current": live.graph_workers_active,
             "graph_workers_started_total": live.graph_workers_started,
             "ingress_buffered_entries": live.ingress_buffered_entries,
@@ -335,7 +338,7 @@ mod tests {
             embedder_init_error: None,
             last_consumed_batch_lane: "unknown",
             chunk_embeddings_per_second: 0.0,
-            vector_chunks_embedded_total: 0,
+            vector_chunks_embedded_cumulative: 0,
             graph_workers_active: 0,
             graph_workers_started: 0,
             ingress_buffered_entries: 0,
@@ -404,7 +407,7 @@ mod tests {
             embedder_init_error: None,
             last_consumed_batch_lane: "",
             chunk_embeddings_per_second: 0.0,
-            vector_chunks_embedded_total: 0,
+            vector_chunks_embedded_cumulative: 0,
             graph_workers_active: 0,
             graph_workers_started: 0,
             ingress_buffered_entries: 0,

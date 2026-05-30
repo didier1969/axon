@@ -150,7 +150,7 @@ defmodule AxonDashboard.DashboardState do
     @moduledoc "Live runtime metrics (1 Hz)."
     @type t :: %__MODULE__{
             chunk_embeddings_per_second: float(),
-            vector_chunks_embedded_total: non_neg_integer(),
+            vector_chunks_embedded_cumulative: non_neg_integer(),
             graph_workers_active_current: non_neg_integer(),
             graph_workers_started_total: non_neg_integer(),
             ingress_buffered_entries: non_neg_integer(),
@@ -165,7 +165,7 @@ defmodule AxonDashboard.DashboardState do
             scheduler: String.t()
           }
     defstruct chunk_embeddings_per_second: 0.0,
-              vector_chunks_embedded_total: 0,
+              vector_chunks_embedded_cumulative: 0,
               graph_workers_active_current: 0,
               graph_workers_started_total: 0,
               ingress_buffered_entries: 0,
@@ -184,7 +184,7 @@ defmodule AxonDashboard.DashboardState do
     def from_map(%{} = m) do
       %__MODULE__{
         chunk_embeddings_per_second: float(m, "chunk_embeddings_per_second"),
-        vector_chunks_embedded_total: int(m, "vector_chunks_embedded_total"),
+        vector_chunks_embedded_cumulative: int(m, "vector_chunks_embedded_cumulative"),
         graph_workers_active_current: int(m, "graph_workers_active_current"),
         graph_workers_started_total: int(m, "graph_workers_started_total"),
         ingress_buffered_entries: int(m, "ingress_buffered_entries"),

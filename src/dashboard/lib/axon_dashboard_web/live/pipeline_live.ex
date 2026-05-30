@@ -189,7 +189,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               <% end %>
             </div>
             <div class="mt-3 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-500">
-              <span>chunks embedded (Σ): <strong class="text-slate-200">{telemetry_field(@dashboard_state, :vector_chunks_embedded_total, 0) |> full_int()}</strong></span>
+              <span>embeddings produced since boot: <strong class="text-slate-200">{telemetry_field(@dashboard_state, :vector_chunks_embedded_cumulative, 0) |> full_int()}</strong></span>
               <span>scheduler: <strong class="text-slate-200">{telemetry_field(@dashboard_state, :scheduler, "?")}</strong></span>
               <span>pressure: <strong class={pressure_class(telemetry_field(@dashboard_state, :service_pressure, "?"))}>{telemetry_field(@dashboard_state, :service_pressure, "?")}</strong></span>
             </div>

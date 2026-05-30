@@ -82,7 +82,7 @@ BEGIN
             'edges',        edges,
             'chunks',       chunks,
             'embedded',     embedded,
-            'coverage_pct', CASE WHEN chunks > 0 THEN (embedded::numeric * 100.0 / chunks)::numeric(8,2) ELSE 0::numeric END
+            'coverage_pct', CASE WHEN chunks > 0 THEN LEAST(100.0::numeric, (embedded::numeric * 100.0 / chunks)::numeric(8,2)) ELSE 0::numeric END
         ) ORDER BY chunks DESC),
         '[]'::jsonb
     )
@@ -146,13 +146,16 @@ BEGIN
     )
     INTO cached;
 
-    -- coverage_pct = embedded / chunks * 100 (avoid div/0 ; can be > 100
-    -- transiently when embeddings outpace chunk source_hash refresh).
+    -- coverage_pct = embedded / chunks * 100 (avoid div/0). Clamped to
+    -- 100.0 so transient `embedded > chunks` regimes (orphan embeddings,
+    -- chunks deleted but embeddings retained pre-cleanup) cannot surface
+    -- a > 100 % ratio in the dashboard. Inspect `orphan_embeddings` to
+    -- detect the drift directly.
     cached := cached || jsonb_build_object(
         'coverage_pct',
         CASE
             WHEN (cached->>'chunks')::bigint > 0
-            THEN ROUND((cached->>'embedded')::numeric * 100.0 / (cached->>'chunks')::numeric, 2)
+            THEN LEAST(100.0::numeric, ROUND((cached->>'embedded')::numeric * 100.0 / (cached->>'chunks')::numeric, 2))
             ELSE 0
         END,
         'pending',
@@ -173,10 +176,10 @@ COMMENT ON FUNCTION axon_runtime.dashboard_totals(INT) IS
 
 -- ── Runtime config snapshot (boot-written by indexer) ────────────────
 -- REQ-AXO-901806 F2 — semi-static configs (worker counts, batch sizes,
--- notify_channel, coldstart_poll_interval_secs, a3_to_b1_buffer_cap)
--- live in PG so dashboard_state_full() returns the full picture in a
--- single call. Indexer writes UPSERT once at boot ; brain reads via
--- the composite function below.
+-- notify_channel, a3_to_b1_buffer_cap) live in PG so
+-- dashboard_state_full() returns the full picture in a single call.
+-- Indexer writes UPSERT once at boot ; brain reads via the composite
+-- function below.
 --
 -- Why PG: aligns with PIL-AXO-009 (PG canonical) and avoids passing
 -- 15+ config args from main_telemetry.rs → compose_dashboard_state_v1

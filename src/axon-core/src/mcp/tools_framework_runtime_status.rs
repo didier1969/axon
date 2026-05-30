@@ -670,7 +670,7 @@ impl McpServer {
             })
         };
         let (
-            vector_chunks_embedded_total,
+            vector_chunks_embedded_cumulative,
             chunk_embeddings_per_second,
             chunk_embeddings_rate_window_ms,
             graph_workers_started_total,
@@ -683,7 +683,7 @@ impl McpServer {
         ) = if use_peer_runtime {
             (
                 peer_telemetry
-                    .get("vector_chunks_embedded_total")
+                    .get("vector_chunks_embedded_cumulative")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0),
                 peer_telemetry
@@ -812,7 +812,7 @@ impl McpServer {
             .ok()
             .or_else(|| std::env::var("ORT_TENSORRT_ENGINE_CACHE_PATH").ok());
         let vector_runtime_machine = json!({
-            "chunks_embedded_total": vector_chunks_embedded_total,
+            "chunks_embedded_total": vector_chunks_embedded_cumulative,
             "chunks_inferred_total": local_vector_runtime_metrics.embed_input_texts_total,
             "chunk_embeddings_per_second": chunk_embeddings_per_second,
             "chunk_embeddings_rate_window_ms": chunk_embeddings_rate_window_ms,
