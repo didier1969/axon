@@ -944,6 +944,51 @@ impl GraphStore {
             .max(0) as u64)
     }
 
+    /// REQ-AXO-901820 — rehabilitate poisoned IndexedFile rows at indexer
+    /// cold-start. Files whose retry_count hit `max_retry` stay stuck in
+    /// status='discovered' forever (poison pill — DEC-AXO-901620 C3/W1),
+    /// because the demand_pull SELECT excludes `retry_count >= max_retry`.
+    /// Across restarts this strands every old failure indefinitely (the
+    /// session 62 observation was 12 300 files orphaned in this exact
+    /// state). Reset `retry_count` to 0 for any file whose last attempt
+    /// is older than `cool_off_ms` AND whose status is still 'discovered'
+    /// — the next demand_pull cycle will re-claim them. Returns the
+    /// number of rehabilitated files.
+    pub fn rehabilitate_poisoned_files(
+        &self,
+        cool_off_ms: i64,
+        now_ms: i64,
+    ) -> Result<u64> {
+        let cutoff = now_ms - cool_off_ms;
+        let sql = format!(
+            "UPDATE IndexedFile \
+             SET retry_count = 0, last_attempt_ms = NULL \
+             WHERE status = 'discovered' \
+               AND retry_count > 0 \
+               AND last_attempt_ms IS NOT NULL \
+               AND last_attempt_ms < {cutoff}"
+        );
+        let _ = self.query_json_writer(&sql)?;
+        // Count cannot reliably come from query_json_writer envelope on
+        // every backend (UPDATE without RETURNING); follow up with an
+        // explicit COUNT for observability.
+        let count_sql = format!(
+            "SELECT count(*)::bigint FROM IndexedFile \
+             WHERE status='discovered' \
+               AND retry_count = 0 \
+               AND last_attempt_ms IS NULL"
+        );
+        let raw = self.query_json(&count_sql)?;
+        let rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64)
+    }
+
     /// 9f: detect and remove files that disappeared from the filesystem.
     /// Call after a complete scanner walk. Any IndexedFile row with
     /// discovered_ms < scan_start_ms was NOT seen in this walk → stale.

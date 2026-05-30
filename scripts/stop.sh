@@ -435,9 +435,29 @@ if curl -sf --connect-timeout 3 "http://localhost:${_PC_PORT}/live" >/dev/null 2
         _PC_BIN="$(devenv shell --no-reload --no-tui -- bash -c 'which process-compose' 2>/dev/null | tail -1 || true)"
     fi
     if [[ -x "${_PC_BIN:-}" ]]; then
-        echo "   Stopping process-compose on :${_PC_PORT}..."
-        "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
-        sleep 1
+        if [[ "$STOP_ROLE" == "all" ]]; then
+            echo "   Stopping process-compose on :${_PC_PORT}..."
+            "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
+            sleep 1
+        else
+            # REQ-AXO-901794 — role-scoped stop must NOT tear down the whole
+            # process-compose daemon (which would kill brain + indexer + dashboard
+            # alike). Stop only the role-matching managed process via the PC
+            # process API. The other role's managed process(es) remain alive
+            # under the same supervisor (PIL-AXO-004 single-GPU exclusion
+            # contract preserves brain availability).
+            _PC_TARGET=""
+            case "$STOP_ROLE" in
+                brain)   _PC_TARGET="axon-brain" ;;
+                indexer) _PC_TARGET="axon-indexer" ;;
+            esac
+            if [[ -n "$_PC_TARGET" ]]; then
+                echo "   Stopping process-compose '${_PC_TARGET}' on :${_PC_PORT} (role=${STOP_ROLE}, others preserved)..."
+                "$_PC_BIN" process stop "$_PC_TARGET" -p "$_PC_PORT" 2>/dev/null || true
+                sleep 1
+            fi
+            unset _PC_TARGET
+        fi
     fi
 fi
 unset _PC_PORT _PC_BIN

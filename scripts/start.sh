@@ -47,19 +47,28 @@ FORCE_RELEASE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        brain)           RUNTIME_MODE="brain_only" ;;
-        full|indexer)    RUNTIME_MODE="indexer_full" ;;
-        --release)       FORCE_RELEASE=1 ;;
-        --no-dashboard)  START_DASHBOARD=0 ;;
-        --skip-mcp-tests) RUN_MCP_TESTS=0 ;;
-        --fast)          START_DASHBOARD=0; RUN_MCP_TESTS=0 ;;
+        brain)             RUNTIME_MODE="brain_only" ;;
+        full|indexer)      RUNTIME_MODE="indexer_full" ;;
+        # REQ-AXO-901796 — long-form flags advertised by ./scripts/axon usage().
+        # AxonRuntimeMode variants : BrainOnly, IndexerGraph, IndexerVector, IndexerFull.
+        --brain-only)      RUNTIME_MODE="brain_only" ;;
+        --indexer-graph)   RUNTIME_MODE="indexer_graph" ;;
+        --indexer-vector)  RUNTIME_MODE="indexer_vector" ;;
+        --indexer-full)    RUNTIME_MODE="indexer_full" ;;
+        --release)         FORCE_RELEASE=1 ;;
+        --no-dashboard)    START_DASHBOARD=0 ;;
+        --skip-mcp-tests)  RUN_MCP_TESTS=0 ;;
+        --fast)            START_DASHBOARD=0; RUN_MCP_TESTS=0 ;;
         --help|-h)
             cat <<'EOF'
 Usage: ./scripts/axon-dev start <mode> [options]
 
-Modes:
-  brain       MCP server only (no indexation)
-  full        Brain + indexer + GPU embedder + dashboard
+Modes (positional aliases or long flags):
+  brain | --brain-only        MCP server only (no indexation)
+  --indexer-graph             Graph pipeline only (A1/A2/A3, no GPU/embed)
+  --indexer-vector            Vector pipeline only (B1/B2/B3, embed-only)
+  full | indexer | --indexer-full
+                              Brain + indexer + GPU embedder + dashboard
 
 Options:
   --release        Use release binaries (10× less RAM, 10× faster)

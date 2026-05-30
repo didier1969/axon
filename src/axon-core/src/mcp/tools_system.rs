@@ -7,10 +7,17 @@ use crate::graph_query::ReadFreshness;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
-// ── Filesystem counters (cached 60 s) ──────────────────────────
-// Scanning the watch root takes ~1 s; cache the result for 60 s to
-// keep `embedding_status` cheap on repeated calls.
-const FS_COUNTER_CACHE_TTL_SECS: u64 = 60;
+// ── Filesystem counters (cached 5 s) ───────────────────────────
+// REQ-AXO-901834 — TTL lowered from 60 s to 5 s. The previous 60 s
+// budget made `disk_files` + `eligible_files` (Indexation Funnel
+// panel) freeze for a full minute (cluster head R3 per session 64
+// dashboard audit), in direct contradiction with the dashboard
+// "1 s ideal, 5 s max" refresh contract. Walk cost on the operator
+// watch root (~284 k files) is ~1 s ; cached every 5 s means at most
+// 20 % of the brain push tick budget goes to the walk. If corpus
+// growth pushes walk time above 1 s, switch to incremental delta
+// (REQ candidate).
+const FS_COUNTER_CACHE_TTL_SECS: u64 = 5;
 
 struct FsCounterSnapshot {
     disk_files: i64,

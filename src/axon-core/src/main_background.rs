@@ -2157,6 +2157,69 @@ fn federation_orchestration_candidates_from_identities(
     projects
 }
 
+/// REQ-AXO-901831 — extend reconciliation candidates with top-level dirs
+/// under `watch_root` that lack a canonical `.axon/meta.json`. Without
+/// this, ~30/57 dirs were silently skipped by the reconciliation orchestrator
+/// (cluster head D4 per session 64 TOC diagnostic), leaving 9479 files
+/// enrolled in IndexedFile but never re-walked. The synthetic code "UNK"
+/// is the same fallback the per-file pipeline_v2 resolver returns when
+/// canonical resolution fails (cf. pipeline_v2_runtime.rs:197), so the
+/// scanner's downstream `project_code_for_path` call continues to apply
+/// per-file resolution on top.
+fn discover_unbound_top_level_candidates(watch_root: &str) -> Vec<(String, String)> {
+    let trimmed = watch_root.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let root = std::path::Path::new(trimmed);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let path = entry.path();
+            // Skip canonical identities — they're already covered by the
+            // discover_project_identities() path. The meta.json check is
+            // identical to project_meta::load_raw_project_meta(meta_path).
+            let meta_path = path.join(".axon").join("meta.json");
+            if meta_path.exists() {
+                return None;
+            }
+            // Skip hidden / special directories (`.git`, `.axon`, etc.).
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') || name_str.is_empty() {
+                return None;
+            }
+            let path_str = path.to_string_lossy().trim().to_string();
+            if path_str.is_empty() {
+                return None;
+            }
+            Some(("UNK".to_string(), path_str))
+        })
+        .collect();
+    out.sort_by(|left, right| left.1.cmp(&right.1));
+    out
+}
+
+fn merge_reconciliation_candidates(
+    canonical: Vec<(String, String)>,
+    unbound: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut seen_paths: std::collections::HashSet<String> =
+        canonical.iter().map(|(_, path)| path.clone()).collect();
+    let mut merged = canonical;
+    for (code, path) in unbound {
+        if seen_paths.insert(path.clone()) {
+            merged.push((code, path));
+        }
+    }
+    merged.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    merged
+}
+
 /// REQ-AXO-172 — Restrict the federation orchestrator's project sweep
 /// to projects whose canonical path falls under the configured
 /// `AXON_WATCH_DIR`. Without this filter, `discover_project_identities`
@@ -2349,16 +2412,25 @@ pub(crate) fn spawn_scope_reconciliation_orchestrator(
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(interval);
-            // REQ-AXO-340 — reuse the canonical federation candidate filter to
-            // honour AXON_WATCH_DIR isolation (REQ-AXO-172). Projects without
-            // `.axon/meta.json` are deliberately out of scope for this slice;
-            // a follow-up REQ will auto-bootstrap meta.json for un-bound dirs.
-            let candidates = filter_orchestration_candidates_by_watch_root(
+            // REQ-AXO-340 + REQ-AXO-901831 — reconciliation candidate set =
+            // {canonical identities (.axon/meta.json present)} ∪
+            // {top-level dirs under watch_root without meta.json, code="UNK"}.
+            // Without the UNK extension, ~30/57 dirs were silently skipped
+            // (cluster head D4 per session 64 TOC diagnostic). Both buckets
+            // are filtered by AXON_WATCH_DIR (REQ-AXO-172). The pipeline_v2
+            // per-file resolver still gets the final say on project_code.
+            let canonical_candidates = filter_orchestration_candidates_by_watch_root(
                 federation_orchestration_candidates_from_identities(
                     axon_core::project_meta::discover_project_identities(),
                 ),
                 &watch_root,
             );
+            let unbound_candidates = filter_orchestration_candidates_by_watch_root(
+                discover_unbound_top_level_candidates(&watch_root),
+                &watch_root,
+            );
+            let candidates =
+                merge_reconciliation_candidates(canonical_candidates, unbound_candidates);
             if candidates.is_empty() {
                 continue;
             }

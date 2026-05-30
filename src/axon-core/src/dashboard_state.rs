@@ -107,10 +107,18 @@ fn extract_first_cell(raw: &str) -> Value {
     }
 }
 
-/// Read the `dashboard_state_full(5)` PG composite. Returns the jsonb
+/// Read the `dashboard_state_full(1)` PG composite. Returns the jsonb
 /// body or an empty fallback (PG hiccup degradation).
+///
+/// REQ-AXO-901834 — TTL lowered from 5 s to 1 s. At 1 Hz brain push,
+/// a 5 s PG cache TTL meant 4 out of 5 emitted events carried stale
+/// numbers (cluster head R2 per session 64 dashboard audit). Recompute
+/// cost (`per_project_counts` + `dashboard_totals`) is ~10-20 ms on
+/// current scope, well under the 1 s budget. If recompute pressure
+/// rises with corpus size, bump back up — but never above 5 s without
+/// breaching the dashboard refresh contract (1 s ideal, 5 s max).
 fn read_dashboard_state_full(store: &Arc<GraphStore>) -> Value {
-    match store.execute_raw_sql_gateway("SELECT axon_runtime.dashboard_state_full(5)") {
+    match store.execute_raw_sql_gateway("SELECT axon_runtime.dashboard_state_full(1)") {
         Ok(raw) => {
             let cell = extract_first_cell(&raw);
             if matches!(cell, Value::Null) {

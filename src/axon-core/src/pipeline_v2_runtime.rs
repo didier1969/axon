@@ -180,6 +180,35 @@ pub fn spawn_pipeline_v2_indexer(
     ingress_buffer: SharedIngressBuffer,
     watch_root: String,
 ) -> Result<()> {
+    // REQ-AXO-901820 — at cold-start, rehabilitate any IndexedFile rows
+    // that were poisoned by retry_count reaching the demand_pull max in
+    // a previous run. Without this, restart + truncate cycles leave
+    // thousands of files permanently stranded (session 62 observed
+    // 12 300 such orphans), and the indexer reports runtime_idle while
+    // PG still has work to do. 1 h cool-off prevents thrashing freshly
+    // failed files in the same session.
+    {
+        const REHAB_COOL_OFF_MS: i64 = 3_600_000; // 1 hour
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match store.rehabilitate_poisoned_files(REHAB_COOL_OFF_MS, now_ms) {
+            Ok(eligible) => {
+                if eligible > 0 {
+                    info!(
+                        "pipeline_v2 cold-start: {} 'discovered' files \
+                         eligible for re-claim after rehab pass (cool_off=1h)",
+                        eligible
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "pipeline_v2 cold-start: poison-pill rehab failed (non-blocking)"
+                );
+            }
+        }
+    }
+
     let caps = PipelineChannelCaps::from_env();
     let counts_a = PipelineAWorkerCounts::from_env();
 
@@ -416,21 +445,41 @@ pub fn spawn_pipeline_v2_indexer(
         );
         let mut handed = 0usize;
         let mut dropped = 0usize;
+        // REQ-AXO-901831 — bounded retry before dropping. Pre-fix code
+        // dropped the path on the first Full and relied on the 60 s
+        // reconciliation sweep as safety net ; when reconciliation
+        // skipped a directory (cluster head D4, session 64), the drop
+        // became permanent. 5 × 100 ms = 500 ms absorbs transient A1
+        // saturation while keeping bootstrap non-blocking. Lost paths
+        // (after 5 attempts) still fall through to reconciliation, but
+        // the window where this can happen is now ≤ 500 ms per path
+        // instead of "until something else triggers a re-walk".
+        const BOOTSTRAP_FULL_MAX_ATTEMPTS: u32 = 5;
+        const BOOTSTRAP_FULL_BACKOFF_MS: u64 = 100;
         for path in files {
-            match input_tx_bootstrap.try_send(path) {
-                Ok(()) => handed += 1,
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    dropped += 1;
-                    // A1 is saturated ; yield so it can drain, then
-                    // continue. The dropped path will be re-submitted
-                    // by scope_reconciliation_orchestrator on its next
-                    // sweep (DEFAULT 60 s) when IndexedFile shows no
-                    // matching (path, mtime, size) row.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed / {dropped} dropped");
-                    return;
+            let mut pending = Some(path);
+            let mut attempts: u32 = 0;
+            while let Some(current) = pending.take() {
+                match input_tx_bootstrap.try_send(current) {
+                    Ok(()) => {
+                        handed += 1;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                        attempts += 1;
+                        if attempts >= BOOTSTRAP_FULL_MAX_ATTEMPTS {
+                            dropped += 1;
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(
+                                BOOTSTRAP_FULL_BACKOFF_MS,
+                            ))
+                            .await;
+                            pending = Some(returned);
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed / {dropped} dropped");
+                        return;
+                    }
                 }
             }
         }

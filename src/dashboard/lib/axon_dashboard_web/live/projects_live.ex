@@ -3,7 +3,8 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   REQ-AXO-901647 page 2 — per-project indexing & embedding coverage.
 
   Source of truth: PostgreSQL (read-only) via `Axon.Watcher.SqlGateway`.
-  Refresh: every 5s.
+  Refresh: every 2 s (REQ-AXO-901834 — was 5 s, lowered to honour
+  the dashboard "1 s ideal, 5 s max" contract per session 64 audit).
 
   Columns: project_code · chunks · embedded · coverage% · symbols · edges
   · last_chunk_at · last_embedded_at · Δ chunks (rolling 60s).
@@ -14,7 +15,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   alias Axon.Watcher.SqlGateway
   alias AxonDashboardWeb.Live.Nav
 
-  @refresh_ms 5_000
+  @refresh_ms 2_000
 
   @impl true
   def mount(_params, _session, socket) do
@@ -112,7 +113,7 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
           <header class="flex items-center justify-between px-5 py-3 border-b border-slate-800">
             <div>
               <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Indexing per project</div>
-              <h2 class="text-base font-semibold text-slate-100 mt-0.5">{length(@projects)} project codes · refresh 5s</h2>
+              <h2 class="text-base font-semibold text-slate-100 mt-0.5">{length(@projects)} project codes · refresh 2s</h2>
             </div>
             <div :if={@fetch_error} class="text-[11px] font-mono text-red-300">
               fetch error: {@fetch_error}
