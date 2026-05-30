@@ -33,10 +33,17 @@ if config_env() != :test do
     raise "Unknown AXON_INSTANCE_KIND=#{inspect(instance_kind)}. Expected 'dev' or 'live'."
   end
 
+  # REQ-AXO-901835 — dashboard reads BRAIN telemetry socket because
+  # only the brain emits `dashboard_state_v1` events (composed via
+  # `dashboard_state::compose_publish_and_emit` against SOLL cache +
+  # FS counters + lifecycle). The indexer's socket carries raw pipeline
+  # telemetry but no dashboard composite. Pre-fix the dashboard pointed
+  # at the indexer sock and silently received no `dashboard_state_v1`
+  # events ; all KPI tiles stayed at zero.
   {default_brain_port, default_telemetry_socket} =
     case instance_kind do
-      "dev" -> {44139, "/tmp/axon-dev-indexer-telemetry.sock"}
-      "live" -> {44129, "/tmp/axon-live-indexer-telemetry.sock"}
+      "dev" -> {44139, "/tmp/axon-dev-brain-telemetry.sock"}
+      "live" -> {44129, "/tmp/axon-live-brain-telemetry.sock"}
     end
 
   default_sql_url = "http://127.0.0.1:#{default_brain_port}/sql"

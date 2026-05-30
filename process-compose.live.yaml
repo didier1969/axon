@@ -45,6 +45,11 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=brain"
       - "AXON_RUN_ROOT=.axon/run-brain"
       - "AXON_LIVE_DATABASE_URL=${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_live}"
+      # REQ-AXO-901835 — explicit per-process sockets (cf. dev YAML pour
+      # le diagnostic complet). Sans cette override, brain et indexer
+      # entrent en collision sur le même socket exporté par start.sh.
+      - "AXON_TELEMETRY_SOCK=/tmp/axon-live-brain-telemetry.sock"
+      - "AXON_MCP_SOCK=/tmp/axon-live-brain-mcp.sock"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
@@ -89,6 +94,9 @@ processes:
       # REQ-AXO-901821 — explicit identity, symmetric to brain block above.
       - "AXON_RUNTIME_IDENTITY=axon-live-axon-indexer"
       - "AXON_RUN_ROOT=.axon/run-indexer"
+      # REQ-AXO-901835 — explicit per-process sockets (cf. brain block).
+      - "AXON_TELEMETRY_SOCK=/tmp/axon-live-indexer-telemetry.sock"
+      - "AXON_MCP_SOCK=/tmp/axon-live-indexer-mcp.sock"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"

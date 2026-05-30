@@ -42,6 +42,16 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=brain"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-brain/runtime.env"
       - "AXON_RUN_ROOT=.axon-dev/run-brain"
+      # REQ-AXO-901835 — per-process socket paths. Without these explicit
+      # overrides, brain inherits AXON_TELEMETRY_SOCK from start.sh which
+      # exports a SINGLE path based on the launch mode (full→indexer name).
+      # The second process to bind silently `fs::remove_file`s the first
+      # one (runtime_boot.rs:743), orphaning brain's listener while the
+      # path resolves to indexer's listener. Dashboard then receives raw
+      # indexer events but NEVER the dashboard_state_v1 stream emitted
+      # by the brain composer — hence "no values".
+      - "AXON_TELEMETRY_SOCK=/tmp/axon-dev-brain-telemetry.sock"
+      - "AXON_MCP_SOCK=/tmp/axon-dev-brain-mcp.sock"
       - "AXON_DEV_DATABASE_URL=${AXON_DEV_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_dev}"
     depends_on:
       postgres-check:
@@ -77,6 +87,10 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-indexer/runtime.env"
       - "AXON_RUN_ROOT=.axon-dev/run-indexer"
+      # REQ-AXO-901835 — see brain block. Explicit indexer-named sockets
+      # prevent collision with brain's listener.
+      - "AXON_TELEMETRY_SOCK=/tmp/axon-dev-indexer-telemetry.sock"
+      - "AXON_MCP_SOCK=/tmp/axon-dev-indexer-mcp.sock"
       # REQ-AXO-901820 — pipeline tuning. AXON_B2_BATCH_SIZE bump
       # to 192 was reverted : with the observed A-side producer rate
       # (~10 ch/sec post-crash recovery), 192-cap batches never
