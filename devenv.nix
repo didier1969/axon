@@ -151,11 +151,21 @@ in
     HEX_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home/hex";
     
     # Port topology (PIL-AXO-004 dual-instance isolation).
-    # Brain + dashboard ports per instance are set by axon-instance.sh at runtime.
-    # devenv.nix only sets the static defaults consumed by devenv validation.
+    #
+    # REQ-AXO-901822 — single canonical source for instance-specific
+    # ports = `scripts/lib/axon-instance.sh` (PHX_PORT 44137 dev /
+    # 44127 live ; AXON_BRAIN_PORT 44139 dev / 44129 live). Sourced
+    # by every `./scripts/axon` invocation before process-compose
+    # launches, propagated into child processes via the yaml
+    # `${PHX_PORT}` substitution. devenv.nix MUST NOT duplicate the
+    # literal — keeping a second copy here re-introduces the dashboard
+    # probe mismatch that caused REQ-AXO-901822 (probe expected dev
+    # port 44137, Phoenix bound the devenv default 44127, probe
+    # failed 12× → process-compose marked the process failed and the
+    # dashboard self-exited cleanly after 126 s).
+    #
+    # Only the values that are NOT instance-aware live here.
     PORT = 6000;
-    PHX_PORT = 44127;
-    AXON_BRAIN_PORT = 44129;
     WATCHER_PORT = 6001;
 
     # MIL-AXO-015 P1: PostgreSQL connection strings for Axon runtime.

@@ -132,6 +132,11 @@ processes:
     working_dir: "."
     environment:
       - "AXON_INSTANCE_KIND=live"
+      # REQ-AXO-901822 — PHX_PORT for Phoenix comes from
+      # axon-instance.sh (live=44127). probe `port:` stays literal
+      # because process-compose does not env-expand integer fields ;
+      # keep in lockstep with the live branch of axon-instance.sh.
+      - "PHX_PORT=${PHX_PORT}"
     depends_on:
       axon-brain:
         condition: "process_healthy"

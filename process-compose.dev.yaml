@@ -109,6 +109,15 @@ processes:
     working_dir: "."
     environment:
       - "AXON_INSTANCE_KIND=dev"
+      # REQ-AXO-901822 — canonical PHX_PORT comes from
+      # scripts/lib/axon-instance.sh (dev=44137 / live=44127). Phoenix
+      # config/runtime.exs reads `System.get_env("PHX_PORT")` and
+      # binds the value. The probe `port:` field below stays a
+      # literal because process-compose does not env-expand integer
+      # fields ; keep this literal in lockstep with the dev branch
+      # of axon-instance.sh — the only other line that knows the
+      # number.
+      - "PHX_PORT=${PHX_PORT}"
     depends_on:
       axon-brain:
         condition: "process_healthy"
@@ -118,11 +127,17 @@ processes:
         scheme: "http"
         path: "/"
         port: 44137
-      initial_delay_seconds: 10
+      # REQ-AXO-901824 — Phoenix cold compile + Bandit init can exceed
+      # 60 s under the dev devenv stack (deps not pre-built). The
+      # previous 12 × 10 s window (= 120 s) clipped a slow boot and
+      # process-compose killed a healthy dashboard. Widened to 30 ×
+      # 10 s = 300 s so a 60-90 s cold start gets 3 idle cycles past
+      # the bind point before failure_threshold kicks in.
+      initial_delay_seconds: 30
       period_seconds: 10
       timeout_seconds: 5
       success_threshold: 1
-      failure_threshold: 12
+      failure_threshold: 30
     availability:
       restart: "on_failure"
       max_restarts: 3
