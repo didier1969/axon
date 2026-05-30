@@ -113,7 +113,7 @@ async fn drain_loop_reports_zero_drops_after_tuning_widens_sink_cap() {
 
     let drain_batch_cap = 64usize;
     let total_events = 256usize;
-    // After tuning : sink cap = 10_000 (canonical AXON_PIPELINE_A3_TO_B1_BUFFER_CAP default).
+    // After tuning : sink cap = 10_000 (test rig only — channel A3→B1 retired post slice 5).
     let (tx_wide, _rx_wide) = tokio::sync::mpsc::channel::<PathBuf>(10_000);
 
     let mut buffer = IngressBuffer::default();

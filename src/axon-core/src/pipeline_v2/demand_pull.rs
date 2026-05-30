@@ -350,10 +350,15 @@ async fn pull_and_feed_a(
 }
 
 /// Spawn the demand-pull feeder for pipeline B.
+///
+/// Slice 5 SOTA — feeder now emits `ChunkForEmbedding` directly to the
+/// b_chunks channel (consumed by B2 GPU). Collapses the previous
+/// B1 stage worker pool into this single async loop. SELECT-with-content
+/// happens here ; no more 2-round-trip pattern.
 pub fn spawn_pipeline_b_demand_pull(
     store: Arc<GraphStore>,
     database_url: String,
-    b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
+    b_chunks_tx: Sender<super::stage_b1::ChunkForEmbedding>,
     threshold: usize,
     batch_size: usize,
 ) -> Arc<DemandPullMetrics> {
@@ -362,7 +367,7 @@ pub fn spawn_pipeline_b_demand_pull(
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_b_loop(&store, &database_url, &b1_inbox_tx, threshold, batch_size, &metrics_clone)
+            match demand_pull_b_loop(&store, &database_url, &b_chunks_tx, threshold, batch_size, &metrics_clone)
                 .await
             {
                 Ok(()) => {
@@ -387,7 +392,7 @@ pub fn spawn_pipeline_b_demand_pull(
 async fn demand_pull_b_loop(
     store: &Arc<GraphStore>,
     database_url: &str,
-    b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
+    b_chunks_tx: &Sender<super::stage_b1::ChunkForEmbedding>,
     threshold: usize,
     batch_size: usize,
     metrics: &Arc<DemandPullMetrics>,
@@ -435,7 +440,7 @@ async fn demand_pull_b_loop(
 
     run_pull_cycle_b(
         store,
-        b1_inbox_tx,
+        b_chunks_tx,
         threshold,
         batch_size,
         &mut consecutive_empty,
@@ -480,7 +485,7 @@ async fn demand_pull_b_loop(
 
         last_pull_had_work = run_pull_cycle_b(
             store,
-            b1_inbox_tx,
+            b_chunks_tx,
             threshold,
             batch_size,
             &mut consecutive_empty,
@@ -498,7 +503,7 @@ async fn demand_pull_b_loop(
 /// REQ-AXO-901810 G2 — pipeline B mirror of [`run_pull_cycle`].
 async fn run_pull_cycle_b(
     store: &Arc<GraphStore>,
-    b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
+    b_chunks_tx: &Sender<super::stage_b1::ChunkForEmbedding>,
     threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
@@ -515,7 +520,7 @@ async fn run_pull_cycle_b(
     loop {
         let pulled = pull_and_feed_b(
             store,
-            b1_inbox_tx,
+            b_chunks_tx,
             threshold,
             batch_size,
             consecutive_empty,
@@ -533,13 +538,13 @@ async fn run_pull_cycle_b(
 
 async fn pull_and_feed_b(
     store: &Arc<GraphStore>,
-    b1_inbox_tx: &Sender<super::stage_b1::B1InboxItem>,
+    b_chunks_tx: &Sender<super::stage_b1::ChunkForEmbedding>,
     threshold: usize,
     batch_size: usize,
     consecutive_empty: &mut u32,
     metrics: &Arc<DemandPullMetrics>,
 ) -> usize {
-    let in_flight = b1_inbox_tx.max_capacity() - b1_inbox_tx.capacity();
+    let in_flight = b_chunks_tx.max_capacity() - b_chunks_tx.capacity();
     if in_flight >= threshold {
         metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
         return 0;
@@ -547,17 +552,24 @@ async fn pull_and_feed_b(
 
     metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
     let store_clone = store.clone();
+    // Slice 5 SOTA — single round-trip SELECT-with-content. Collapses
+    // the previous B1 stage worker (SELECT id then SELECT content).
     let result = tokio::task::spawn_blocking(move || {
-        store_clone.select_chunks_needing_embedding(batch_size)
+        store_clone.select_chunks_with_content_needing_embedding(batch_size)
     })
     .await;
 
     match result {
-        Ok(Ok(chunk_ids)) if !chunk_ids.is_empty() => {
-            let count = chunk_ids.len();
+        Ok(Ok(rows)) if !rows.is_empty() => {
+            let count = rows.len();
             let mut sent = 0usize;
-            for cid in &chunk_ids {
-                match b1_inbox_tx.try_send(super::stage_b1::B1InboxItem::FetchById(cid.clone())) {
+            for (chunk_id, content, content_hash) in rows {
+                let payload = super::stage_b1::ChunkForEmbedding {
+                    chunk_id,
+                    content,
+                    content_hash,
+                };
+                match b_chunks_tx.try_send(payload) {
                     Ok(()) => sent += 1,
                     Err(_) => break,
                 }

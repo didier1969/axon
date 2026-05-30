@@ -1,12 +1,15 @@
-//! Stage B1 — Triage + fetch for the GPU embedder (CPT-AXO-054).
+//! Stage B1 types module (CPT-AXO-054, slice 5 SOTA collapse).
 //!
-//! B1 receives `B1InboxItem` from A3 (Inline with content) or from the
-//! demand-pull NOTIFY listener (FetchById, requires PG SELECT).
-//! Inline items are forwarded directly — zero PG cost (REQ-AXO-901746).
-//! FetchById items are batched and SELECTed from `public.Chunk`.
+//! After slice 5, B1 as a stage worker disappears : its work (SELECT
+//! chunk content + emit ChunkForEmbedding) collapsed into
+//! `demand_pull::pull_and_feed_b` (one round-trip SELECT-with-content).
 //!
-//! Embedding dedup (REQ-AXO-901748): chunks whose `content_hash`
-//! matches the existing `ChunkEmbedding` are skipped entirely.
+//! Remaining surface here :
+//! - `ChunkForEmbedding` payload struct consumed by B2
+//! - `EmbeddingDedupCache` + `load_embedding_dedup_cache` (dedup state
+//!   hydrated at boot, applied inline by demand_pull)
+//! - `b1_fetch_for_embedding` (test-only helper, exercises single-row
+//!   SELECT path through `fetch_chunk_for_embedding`)
 
 use std::sync::Arc;
 
@@ -50,18 +53,6 @@ pub struct ChunkForEmbedding {
     pub content_hash: String,
 }
 
-/// Item on the B1 inbox channel — chunk_id pending embed.
-///
-/// Slice 4 SOTA — B1 inbox is NOTIFY-only : demand_pull_b LISTEN
-/// emits `FetchById(chunk_id)` after PG `trg_chunk_notify_pending`
-/// fires post-COMMIT on Chunk INSERT/UPDATE. The legacy `Inline(payload)`
-/// fast-path from A3 (try_send) was removed — single wake-up path
-/// reduces complexity (no silent drop mode, no dispatch branch).
-#[derive(Debug, Clone)]
-pub enum B1InboxItem {
-    FetchById(String),
-}
-
 /// SELECT the chunk content for a given `chunk_id`.
 ///
 /// Wraps the DB call inside [`tokio::task::spawn_blocking`] to keep the
@@ -90,177 +81,14 @@ pub async fn b1_fetch_for_embedding(
     }))
 }
 
-/// REQ-AXO-314 batched B1 — accumulates chunk_ids from `rx` up to
-/// `batch_size` or `batch_timeout`, then issues ONE batched SELECT
-/// (`WHERE id IN (...)`) and forwards each [`ChunkForEmbedding`] to B2.
-///
-/// Replaces the generic-per-item `spawn_stage_workers` wiring for B1.
-/// Mirrors [`super::stage_b2::spawn_b2_batched_worker`] /
-/// [`super::stage_b3::spawn_b3_batched_worker`] in shape so the three
-/// pipeline-B stages now share one batched-workload pattern.
-///
-/// Throughput rationale (CPT-AXO-054):
-/// * Per-item B1 caps at ~4 × (1 / SELECT-latency) ≈ 50-80 ch/s on PG
-///   under deadpool contention, leaving B2's GPU batch=64 chronically
-///   under-filled (B2 timeouts flush partial batches → BGE-Large
-///   under-utilized).
-/// * Batched B1 issues one SELECT per 64 chunk_ids → matches B2's
-///   batch granularity → GPU runs at peak.
 /// REQ-AXO-901748 — set of `(chunk_id, content_hash)` pairs that
-/// already have a valid embedding in ChunkEmbedding. B1 skips Inline
-/// items that match, avoiding redundant GPU work on re-indexation.
+/// already have a valid embedding in ChunkEmbedding. Demand-pull skips
+/// pending chunks that match, avoiding redundant GPU work on re-index.
+///
+/// Slice 5 SOTA — `spawn_b1_batched_worker*` deleted. The dedup logic
+/// now lives inline in `demand_pull::pull_and_feed_b` (single batched
+/// SELECT-with-content + dedup retain).
 pub type EmbeddingDedupCache = Option<Arc<dashmap::DashMap<String, String>>>;
-
-pub fn spawn_b1_batched_worker(
-    rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
-    tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
-    store: Arc<crate::graph::GraphStore>,
-    metrics: Arc<super::metrics::StageMetrics>,
-    batch_size: usize,
-    batch_timeout: std::time::Duration,
-) {
-    spawn_b1_batched_worker_with_dedup(rx, tx, store, metrics, batch_size, batch_timeout, None)
-}
-
-pub fn spawn_b1_batched_worker_with_dedup(
-    mut rx: tokio::sync::mpsc::Receiver<B1InboxItem>,
-    tx: tokio::sync::mpsc::Sender<ChunkForEmbedding>,
-    store: Arc<crate::graph::GraphStore>,
-    metrics: Arc<super::metrics::StageMetrics>,
-    batch_size: usize,
-    batch_timeout: std::time::Duration,
-    embedding_cache: EmbeddingDedupCache,
-) {
-    let batch_size = batch_size.max(1);
-    tokio::spawn(async move {
-        let mut _dedup_skipped: u64 = 0;
-        loop {
-            let recv_started = std::time::Instant::now();
-            let first = match rx.recv().await {
-                Some(item) => {
-                    let recv_us =
-                        recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    metrics.record_recv_wait(recv_us);
-                    item
-                }
-                None => break,
-            };
-            let mut batch: Vec<B1InboxItem> = Vec::with_capacity(batch_size);
-            batch.push(first);
-
-            let deadline = tokio::time::Instant::now() + batch_timeout;
-            while batch.len() < batch_size {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                let recv_started = std::time::Instant::now();
-                match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(item)) => {
-                        let recv_us = recv_started
-                            .elapsed()
-                            .as_micros()
-                            .min(u128::from(u64::MAX)) as u64;
-                        metrics.record_recv_wait(recv_us);
-                        batch.push(item);
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        let recv_us = recv_started
-                            .elapsed()
-                            .as_micros()
-                            .min(u128::from(u64::MAX)) as u64;
-                        metrics.record_recv_wait(recv_us);
-                        break;
-                    }
-                }
-            }
-
-            let mut fetch_ids: Vec<String> = Vec::new();
-            for item in &batch {
-                match item {
-                    B1InboxItem::FetchById(id) => fetch_ids.push(id.clone()),
-                }
-            }
-            // Slice 4 SOTA — embedding_cache dedup now runs against the
-            // FetchById path only (Inline removed). The cache is still
-            // honored : if the chunk already has a fresh embedding, B1
-            // skips the SELECT entirely.
-            if let Some(ref cache) = embedding_cache {
-                fetch_ids.retain(|id| {
-                    if cache.get(id).is_some() {
-                        _dedup_skipped += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-
-            for _ in &fetch_ids {
-                metrics.record_started();
-            }
-            let started = std::time::Instant::now();
-
-            if !fetch_ids.is_empty() {
-                let store_clone = store.clone();
-                let ids_for_block = fetch_ids.clone();
-                let join_result = tokio::task::spawn_blocking(move || {
-                    store_clone.fetch_chunks_for_embedding_batch(&ids_for_block)
-                })
-                .await;
-
-                match join_result {
-                    Ok(Ok(fetched)) => {
-                        let elapsed_us =
-                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                        let per_item_us = elapsed_us / (batch.len() as u64).max(1);
-                        let fetched_len = fetched.len();
-                        for (chunk_id, content, content_hash) in fetched {
-                            metrics.record_finished(per_item_us);
-                            let payload = ChunkForEmbedding {
-                                chunk_id,
-                                content,
-                                content_hash,
-                            };
-                            let send_started = std::time::Instant::now();
-                            let send_result = tx.send(payload).await;
-                            let send_us =
-                                send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                            metrics.record_send_wait(send_us);
-                            if send_result.is_err() {
-                                return;
-                            }
-                        }
-                        for _ in 0..(fetch_ids.len() - fetched_len) {
-                            metrics.record_error();
-                        }
-                    }
-                    Ok(Err(err)) => {
-                        tracing::warn!(
-                            stage = "B1",
-                            error = ?err,
-                            "fetch_chunks_for_embedding_batch failed"
-                        );
-                        for _ in 0..fetch_ids.len() {
-                            metrics.record_error();
-                        }
-                    }
-                    Err(join_err) => {
-                        tracing::warn!(
-                            stage = "B1",
-                            error = ?join_err,
-                            "B1 batched fetch spawn_blocking joined with error"
-                        );
-                        for _ in 0..fetch_ids.len() {
-                            metrics.record_error();
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
 
 #[cfg(test)]
 mod tests {

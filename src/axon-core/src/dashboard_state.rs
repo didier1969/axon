@@ -428,7 +428,7 @@ mod tests {
             ],
             "runtime_config": {
                 "pipeline_a": {"a1_workers": 4, "a2_workers": 8, "a3_workers": 2},
-                "pipeline_b": {"b2_workers": 1, "a3_to_b1_buffer_cap": 10000},
+                "pipeline_b": {"b2_workers": 1},
                 "notify_channel": "chunk_pending_embed"
             }
         });
@@ -485,10 +485,6 @@ mod tests {
         assert_eq!(event["totals"]["chunks"], 74173);
         assert_eq!(event["per_project"][0]["project_code"], "AXO");
         assert_eq!(event["runtime_config"]["pipeline_a"]["a2_workers"], 8);
-        assert_eq!(
-            event["runtime_config"]["pipeline_b"]["a3_to_b1_buffer_cap"],
-            10000
-        );
         assert_eq!(
             event["runtime_config"]["notify_channel"],
             "chunk_pending_embed"

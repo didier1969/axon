@@ -12,10 +12,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::json;
 
-use crate::env_alias::read_with_alias;
 use crate::graph::GraphStore;
 use crate::pipeline_v2::channels::{
-    A3_TO_B1_BUFFER_CAP_DEFAULT, B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT,
+    B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT,
     B3_BATCH_SIZE_DEFAULT, B3_BATCH_TIMEOUT_MS_DEFAULT, INGRESS_DRAIN_BATCH_DEFAULT,
 };
 use crate::pipeline_v2::notify_listener::LISTEN_CHANNEL;
@@ -55,13 +54,6 @@ pub fn compose_indexer_config() -> serde_json::Value {
     let b3_timeout = env_u64("AXON_B3_BATCH_TIMEOUT_MS", B3_BATCH_TIMEOUT_MS_DEFAULT);
     let ingress_drain = env_usize("AXON_INGRESS_DRAIN_BATCH", INGRESS_DRAIN_BATCH_DEFAULT);
 
-    // A3→B1 buffer cap : canonical env (with one-shot alias deprecation
-    // for `AXON_A3_TO_B1_BUFFER`) mirrors `mcp::tools_system` resolution
-    // — single source of truth = `pipeline_v2::channels` default.
-    let a3_to_b1_cap = read_with_alias("AXON_PIPELINE_A3_TO_B1_BUFFER_CAP", "AXON_A3_TO_B1_BUFFER")
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .unwrap_or(A3_TO_B1_BUFFER_CAP_DEFAULT);
-
     json!({
         "pipeline_a": {
             "a1_workers": a1,
@@ -78,7 +70,6 @@ pub fn compose_indexer_config() -> serde_json::Value {
             "b2_batch_timeout_ms": b2_timeout,
             "b3_batch_size": b3_batch,
             "b3_batch_timeout_ms": b3_timeout,
-            "a3_to_b1_buffer_cap": a3_to_b1_cap,
         },
         // Canonical PG NOTIFY channel for the brain demand-pull
         // listener — exposed as `pub const` from notify_listener so this
@@ -120,7 +111,6 @@ mod tests {
         assert!(v["pipeline_b"]["b2_workers"].is_number());
         assert!(v["pipeline_b"]["b3_workers"].is_number());
         assert!(v["pipeline_b"]["b2_batch_size"].is_number());
-        assert!(v["pipeline_b"]["a3_to_b1_buffer_cap"].is_number());
         assert_eq!(
             v["notify_channel"],
             crate::pipeline_v2::notify_listener::LISTEN_CHANNEL

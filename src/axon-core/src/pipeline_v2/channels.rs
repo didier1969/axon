@@ -4,24 +4,16 @@
 //! defaults wired here match the architecture decisions made during the
 //! session 17 design conversation (2026-05-12):
 //!
-//! * Internal channels A1→A2, A2→A3, B1→B2, B2→B3 — capacity 1024 each; this
-//!   absorbs ~1 second of burst latency variance between adjacent stages at
-//!   the typical throughput envelope.
-//! * Cross-pipeline channel A3→B1 — capacity 10 000; this is the only buffer
-//!   that has to absorb GPU-vs-CPU pace asymmetry. A3 publishes via
-//!   `try_send` (non-blocking) so the graph pipeline never stalls on B's
-//!   pace; B compensates via the demand-pull NOTIFY listener + adaptive poll.
+//! * Internal channels A1→A2, A2→A3, B2→B3, b_chunks (demand_pull→B2)
+//!   — capacity 1024 each; absorbs ~1 second of burst latency variance.
+//! * Slice 5 SOTA — cross-pipeline channel A3→B1 supprimé. B est nourri
+//!   exclusivement via demand_pull_b (PG NOTIFY `chunk_pending_embed`
+//!   wake + SELECT-with-content), single-source sans silent-drop buffer.
 
 /// Default capacity for the bounded channels that connect adjacent stages
-/// *within* the same pipeline (A1→A2, A2→A3, B1→B2, B2→B3).
+/// *within* the same pipeline (A1→A2, A2→A3, B2→B3) AND the b_chunks
+/// channel (demand_pull → B2).
 pub const INTERNAL_CHANNEL_CAP_DEFAULT: usize = 1024;
-
-/// Default capacity for the cross-pipeline buffer between A3 and B1.
-///
-/// Sized to absorb roughly 20–30 s of graph-pipeline burst at peak throughput
-/// when the GPU is the slower side. Operator override:
-/// `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP`.
-pub const A3_TO_B1_BUFFER_CAP_DEFAULT: usize = 10_000;
 
 /// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
 /// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
@@ -89,7 +81,6 @@ pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineChannelCaps {
     pub internal: usize,
-    pub a3_to_b1: usize,
     pub a3_batch_size: usize,
     pub a3_batch_timeout_ms: u64,
     pub b2_batch_size: usize,
@@ -103,7 +94,6 @@ impl Default for PipelineChannelCaps {
     fn default() -> Self {
         Self {
             internal: INTERNAL_CHANNEL_CAP_DEFAULT,
-            a3_to_b1: A3_TO_B1_BUFFER_CAP_DEFAULT,
             a3_batch_size: A3_BATCH_SIZE_DEFAULT,
             a3_batch_timeout_ms: A3_BATCH_TIMEOUT_MS_DEFAULT,
             b2_batch_size: B2_BATCH_SIZE_DEFAULT,
@@ -124,13 +114,6 @@ impl PipelineChannelCaps {
             if let Ok(parsed) = raw.trim().parse::<usize>() {
                 if parsed > 0 {
                     caps.internal = parsed;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("AXON_PIPELINE_A3_TO_B1_BUFFER_CAP") {
-            if let Ok(parsed) = raw.trim().parse::<usize>() {
-                if parsed > 0 {
-                    caps.a3_to_b1 = parsed;
                 }
             }
         }

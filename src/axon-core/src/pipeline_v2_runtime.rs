@@ -224,17 +224,14 @@ pub fn spawn_pipeline_v2_indexer(
         counts_a.a3,
         runtime_mode.as_str()
     );
-    let mut handles_a = spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
+    let handles_a = spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
 
-    let b1_inbox_rx = std::mem::replace(
-        &mut handles_a.b1_inbox_rx,
-        mpsc::channel::<crate::pipeline_v2::B1InboxItem>(1).1,
-    );
-    // Keep an extra clone of the same channel for the cold-start poll
-    // task — A3 also pushes here via try_send during steady state, but
-    // any drop on full buffer must be rattrapé by SELECT … LEFT JOIN …
-    // ChunkEmbedding IS NULL (CPT-AXO-054 contract).
-    let b1_inbox_tx_for_poll = handles_a.b1_inbox_tx.clone();
+    // Slice 5 SOTA — create the b_chunks channel here (was b1_inbox in
+    // orchestrator). demand_pull_b owns the tx ; spawn_pipeline_b_full_multi
+    // takes the rx. The channel carries ChunkForEmbedding (one
+    // round-trip SELECT-with-content per batch).
+    let (b_chunks_tx, b_chunks_rx) =
+        mpsc::channel::<crate::pipeline_v2::ChunkForEmbedding>(caps.internal);
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
@@ -340,15 +337,12 @@ pub fn spawn_pipeline_v2_indexer(
             vec![embedder]
         };
         let mut handles_b = crate::pipeline_v2::orchestrator::spawn_pipeline_b_full_multi(
-            counts_b, caps, store.clone(), embedders, b1_inbox_rx, embedding_dedup,
+            counts_b, caps, store.clone(), embedders, b_chunks_rx, embedding_dedup,
         );
         // REQ-AXO-314 — keep the receipt rx alive by draining it in a
         // background task. Dropping `handles_b.output_rx` immediately
         // would close the receipt channel; B3 then short-circuits on
-        // its first `tx.send(receipt)` failure (stage_b3.rs:185) and
-        // returns, cascading back through B2 → B1 → b1_inbox close.
-        // Observed symptom: exactly one batch embedded post-boot, then
-        // NOTIFY listener loops with "b1_inbox closed".
+        // its first `tx.send(receipt)` failure and cascades upstream.
         let mut output_rx_b = std::mem::replace(
             &mut handles_b.output_rx,
             tokio::sync::mpsc::channel(1).1,
@@ -357,33 +351,26 @@ pub fn spawn_pipeline_v2_indexer(
             while output_rx_b.recv().await.is_some() {}
         });
 
-        // DEC-AXO-901620: demand-pull B replaces the supply-push cold-start
-        // poll. PG NOTIFY on `chunk_pending_embed` wakes the puller;
-        // 30s safety-net poll catches lost notifications.
+        // DEC-AXO-901620 + slice 5 SOTA — demand-pull B feeds
+        // ChunkForEmbedding directly to the b_chunks channel (one PG
+        // round-trip with content). LISTEN chunk_pending_embed wakes
+        // the puller ; 30s safety-net poll catches lost notifications.
         let demand_pull_b_threshold = demand_pull_b_threshold_from_env();
         let demand_pull_b_batch = demand_pull_b_batch_from_env();
         let db_url_b = resolve_database_url_for_listener();
         let _metrics_b = crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
             store.clone(),
             db_url_b,
-            b1_inbox_tx_for_poll,
+            b_chunks_tx,
             demand_pull_b_threshold,
             demand_pull_b_batch,
         );
         DEMAND_PULL_METRICS_B.store(Arc::into_raw(_metrics_b) as *mut _, std::sync::atomic::Ordering::Release);
     } else {
-        // No B side — keep the inbox alive so A3's try_send never gets
-        // a closed-channel error, then drain silently.
-        let mut rx = b1_inbox_rx;
-        let _ = b1_inbox_tx_for_poll;
-        tokio::spawn(async move {
-            while rx.recv().await.is_some() {
-                // Silently drop chunk_ids — there's no B to embed them
-                // in IndexerGraph mode. They'll be picked up by
-                // pipeline_v2 cold-start poll the next time IndexerFull
-                // starts.
-            }
-        });
+        // No B side — drop the b_chunks tx so demand_pull won't be
+        // spawned. The unused rx is also dropped here.
+        drop(b_chunks_tx);
+        drop(b_chunks_rx);
     }
 
     // A3 receipts update the dedup cache so subsequent re-indexing

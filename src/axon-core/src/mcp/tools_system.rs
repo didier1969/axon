@@ -443,18 +443,6 @@ impl McpServer {
             .map(|v| v.min(100))
             .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
         let periodic_sweep_snapshot = crate::ingress_buffer::periodic_sweep_metrics_snapshot();
-        // REQ-AXO-901657 slice 4 cluster B : canonical name is
-        // `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (matches the read site in
-        // `pipeline_v2::channels::CapsCfg::from_env`). The legacy
-        // `AXON_A3_TO_B1_BUFFER` is honored with a one-shot deprecation
-        // warning so the status snapshot stays consistent with what the
-        // pipeline actually reads.
-        let a3_to_b1_cap = crate::env_alias::read_with_alias(
-            "AXON_PIPELINE_A3_TO_B1_BUFFER_CAP",
-            "AXON_A3_TO_B1_BUFFER",
-        )
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .unwrap_or(crate::pipeline_v2::channels::A3_TO_B1_BUFFER_CAP_DEFAULT);
 
         // REQ-AXO-90009 Slice 2 — in-memory pending set heartbeat.
         // `runtime_pending` reflects what THIS process's
@@ -634,7 +622,7 @@ impl McpServer {
              - Workers:           b1={b1}  b2={b2}  b3={b3}\n\
              - B2 batch:          {b2_batch} chunks, timeout {b2_timeout} ms\n\
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
-             - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par demand-pull NOTIFY listener)\n\
+             - B fed via:        demand_pull_b LISTEN chunk_pending_embed + adaptive 1s/30s poll\n\
              - NOTIFY channel:    chunk_pending_embed\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\n\
@@ -701,7 +689,6 @@ impl McpServer {
                     "b2_batch_timeout_ms": b2_timeout,
                     "b3_batch_size": b3_batch,
                     "b3_batch_timeout_ms": b3_timeout,
-                    "a3_to_b1_buffer_cap": a3_to_b1_cap,
                     // REQ-AXO-901816 slice 6 — feeder counters only ; B backlog
                     // is already exposed as the top-level `pending_chunks` field.
                     "replenish": replenish_b

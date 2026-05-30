@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
     const_resolver, load_embedding_dedup_cache, spawn_pipeline_a, spawn_pipeline_b_full_multi,
-    B2Embedder, GpuB2Embedder, NoOpEmbedder,
+    B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
 };
 
@@ -246,16 +246,16 @@ async fn run() -> Result<()> {
 
     let resolver = const_resolver(args.project.clone());
     let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), resolver);
-    let b1_inbox_rx = std::mem::replace(
-        &mut handles_a.b1_inbox_rx,
-        tokio::sync::mpsc::channel(1).1,
-    );
+
+    // Slice 5 SOTA — the bench creates its own b_chunks channel and
+    // a synthetic demand_pull task to feed B2/B3. demand_pull does
+    // SELECT-with-content from PG (a chunk B2 just persisted via A3).
+    let (b_chunks_tx, b_chunks_rx) =
+        tokio::sync::mpsc::channel::<ChunkForEmbedding>(caps.internal);
+
     // REQ-AXO-901748 — hydrate the dedup cache so the bench mirrors the
-    // production runtime path (pipeline_v2_runtime.rs). Without this, B1
-    // skips nothing, B2 re-embeds every chunk already in PG, and the wall
-    // throughput reported is dominated by deduplicated work. The fix
-    // gives the bench the same in-memory dedup state as a steady-state
-    // live indexer.
+    // production runtime path. demand_pull skips chunks whose hash is
+    // already in the cache.
     let embedding_dedup = match load_embedding_dedup_cache(&store) {
         Ok(cache) => {
             eprintln!(
@@ -276,15 +276,45 @@ async fn run() -> Result<()> {
         caps,
         store.clone(),
         vec![embedder],
-        b1_inbox_rx,
+        b_chunks_rx,
         embedding_dedup,
     );
-    // REQ-AXO-901744 — the bench does not run a cold-start poll, so
-    // drop the extra b1_inbox_tx sender that PipelineAHandles keeps
-    // for the production cold-start poller. Without this, the
-    // b1_inbox channel stays open after A3 exits, B1 never sees
-    // recv()→None, and the B shutdown cascade never fires.
-    drop(handles_a.b1_inbox_tx);
+
+    // Bench-local demand_pull feeder : poll PG for chunks needing
+    // embedding and push them via b_chunks_tx. Mirrors the production
+    // demand_pull but without the NOTIFY listener (the bench A3 writes
+    // are synchronous and we poll right after).
+    {
+        let store_for_pull = store.clone();
+        let tx = b_chunks_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let store_clone = store_for_pull.clone();
+                let pulled = tokio::task::spawn_blocking(move || {
+                    store_clone.select_chunks_with_content_needing_embedding(256)
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+                if pulled.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                for (chunk_id, content, content_hash) in pulled {
+                    let payload = ChunkForEmbedding {
+                        chunk_id,
+                        content,
+                        content_hash,
+                    };
+                    if tx.send(payload).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+    drop(b_chunks_tx);
 
     let total_files = files.len();
     let start = Instant::now();
@@ -411,7 +441,11 @@ async fn run() -> Result<()> {
     let snap_a1 = handles_a.metrics_a1.snapshot();
     let snap_a2 = handles_a.metrics_a2.snapshot();
     let snap_a3 = handles_a.metrics_a3.snapshot();
-    let snap_b1 = handles_b.metrics_b1.snapshot();
+    // Slice 5 SOTA — B1 stage worker collapsed into demand_pull. Keep
+    // a zeroed "B1 (collapsed)" snapshot so historical bench CSV/table
+    // schemas don't break ; downstream Polars scripts can treat
+    // all-zero rows as "stage gone".
+    let snap_b1 = axon_core::pipeline_v2::StageMetrics::new("B1").snapshot();
     let snap_b2 = handles_b.metrics_b2.snapshot();
     let snap_b3 = handles_b.metrics_b3.snapshot();
 

@@ -1465,6 +1465,41 @@ impl GraphStore {
             .collect())
     }
 
+    /// Slice 5 SOTA — Pipeline-v2 demand-pull B: return chunks needing
+    /// embedding **with their content** in a single round-trip.
+    ///
+    /// Collapses the previous 2-round-trip pattern (B1 SELECT id, then
+    /// SELECT content WHERE id IN(...)) into one. Used by
+    /// `demand_pull::pull_and_feed_b` to feed `ChunkForEmbedding`
+    /// directly to B2 (GPU embedder). The B1 stage worker disappears as
+    /// a result.
+    ///
+    /// Same partial index scan as `select_chunks_needing_embedding`
+    /// (embed_status='pending') with the canonical token-count ordering
+    /// so consecutive items fall into the same TensorRT seq_bucket.
+    pub fn select_chunks_with_content_needing_embedding(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        let raw = self.query_json_writer(&format!(
+            "SELECT id, content, content_hash FROM Chunk \
+             WHERE embed_status = 'pending' \
+             ORDER BY COALESCE(token_count, length(content) / 3) \
+             LIMIT {limit}"
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.first().and_then(|v| v.as_str()).map(|s| s.to_string());
+            let content = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let hash = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let (Some(id), Some(content), Some(hash)) = (id, content, hash) {
+                out.push((id, content, hash));
+            }
+        }
+        Ok(out)
+    }
+
     /// REQ-AXO-289 S4a (session 19) — Pipeline-v2 stage B1 fetch
     /// chunk content from PG for the GPU embedder lane.
     ///

@@ -66,15 +66,14 @@ pub mod types;
 pub mod worker_pool;
 
 pub use channels::{
-    PipelineChannelCaps, A3_TO_B1_BUFFER_CAP_DEFAULT,
-    INTERNAL_CHANNEL_CAP_DEFAULT,
+    PipelineChannelCaps, INTERNAL_CHANNEL_CAP_DEFAULT,
 };
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
 pub use orchestrator::{
     spawn_pipeline_a, spawn_pipeline_a_with_cache,
     spawn_pipeline_b_full, spawn_pipeline_b_full_multi, PipelineAHandles,
-    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBHandles, PipelineBWorkerCounts,
+    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBWorkerCounts,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
@@ -85,7 +84,7 @@ pub use notify_listener::{
 };
 pub use stage_b1::{
     load_embedding_dedup_cache,
-    B1InboxItem, ChunkForEmbedding, EmbeddingDedupCache,
+    ChunkForEmbedding, EmbeddingDedupCache,
 };
 pub use embedder_gpu::GpuB2Embedder;
 pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
@@ -116,7 +115,6 @@ mod doc_invariants {
     fn channel_caps_match_session_19_canonical_table() {
         // Numbers cited in CPT-AXO-054 + the module docstring.
         assert_eq!(super::INTERNAL_CHANNEL_CAP_DEFAULT, 1024);
-        assert_eq!(super::A3_TO_B1_BUFFER_CAP_DEFAULT, 10_000);
         assert_eq!(super::channels::B2_BATCH_SIZE_DEFAULT, 64);
         assert_eq!(super::channels::B2_BATCH_TIMEOUT_MS_DEFAULT, 200);
     }

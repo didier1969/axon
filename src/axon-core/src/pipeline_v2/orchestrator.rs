@@ -142,19 +142,16 @@ impl PipelineAWorkerCounts {
 ///   handler). Bounded; blocks `send().await` if A1 is saturated (natural
 ///   upstream backpressure).
 /// * `output_rx` — receive [`EnrolledFile`] receipts from A3.
-/// * `b1_inbox_rx` — `chunk_id: String` items A3 fan-outs via `try_send`
-///   (best-effort, non-blocking, cap `caps.a3_to_b1` = 10 000). Hand off
-///   this receiver to [`spawn_pipeline_b_b1_only`] to wire pipeline B.
 /// * `metrics_*` — observable per-stage telemetry.
+///
+/// Slice 5 SOTA — `b1_inbox_*` fields removed. The cross-pipeline
+/// channel A3→B1 is gone : B is fed exclusively by the demand-pull
+/// NOTIFY listener (`pipeline_v2/demand_pull.rs`) which SELECTs chunks
+/// with content directly and emits `ChunkForEmbedding` to the b_chunks
+/// channel owned by `pipeline_v2_runtime`.
 pub struct PipelineAHandles {
     pub input_tx: Sender<PathBuf>,
     pub output_rx: Receiver<EnrolledFile>,
-    pub b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
-    /// Additional clone of the same `b1_inbox_tx` A3 workers push into.
-    /// Used by external pollers (e.g. the demand-pull NOTIFY listener
-    /// in `pipeline_v2/demand_pull.rs`) to rattrape chunks A3
-    /// `try_send` dropped under buffer pressure.
-    pub b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     pub metrics_a1: Arc<StageMetrics>,
     pub metrics_a2: Arc<StageMetrics>,
     pub metrics_a3: Arc<StageMetrics>,
@@ -199,7 +196,6 @@ pub fn spawn_pipeline_a_with_cache(
     let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
     let (output_tx, output_rx) = mpsc::channel::<EnrolledFile>(caps.internal);
-    let (b1_inbox_tx, b1_inbox_rx) = mpsc::channel::<super::stage_b1::B1InboxItem>(caps.a3_to_b1);
 
     let metrics_a1 = StageMetrics::new("A1");
     let metrics_a2 = StageMetrics::new("A2");
@@ -331,97 +327,41 @@ pub fn spawn_pipeline_a_with_cache(
     PipelineAHandles {
         input_tx,
         output_rx,
-        b1_inbox_rx,
-        b1_inbox_tx,
         metrics_a1,
         metrics_a2,
         metrics_a3,
     }
 }
 
-/// Handles for talking to a running Pipeline B (S4a scope: B1 only).
-///
-/// `output_rx` yields one [`ChunkForEmbedding`] per chunk_id B1
-/// successfully fetched from `public.Chunk`. None-fetches (race with a
-/// concurrent re-parse that re-derived chunk_ids) are dropped silently
-/// and do NOT surface on this channel — they just don't get embedded
-/// this round; B1 cold-start poll DB (slice S4c) catches them later.
-pub struct PipelineBHandles {
-    pub output_rx: Receiver<ChunkForEmbedding>,
-    pub metrics_b1: Arc<StageMetrics>,
-}
-
-/// Spawn Pipeline B stage workers (B1 only for S4a).
-///
-/// `b1_inbox_rx` is the receiver returned by [`spawn_pipeline_a`] —
-/// pass it here to connect the A → B hand-off. B2 (GPU embedder) and
-/// B3 (ChunkEmbedding UPSERT) land in slice S4b.
-#[cfg(test)]
-pub fn spawn_pipeline_b_b1_only(
-    counts: PipelineBWorkerCounts,
-    caps: PipelineChannelCaps,
-    store: Arc<GraphStore>,
-    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
-) -> PipelineBHandles {
-    let (output_tx, output_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
-    let metrics_b1 = StageMetrics::new("B1");
-
-    let store_for_b1 = store.clone();
-    spawn_stage_workers(
-        counts.b1,
-        b1_inbox_rx,
-        output_tx,
-        move |item: super::stage_b1::B1InboxItem| {
-            let store = store_for_b1.clone();
-            async move {
-                match item {
-                    super::stage_b1::B1InboxItem::FetchById(chunk_id) => {
-                        match super::stage_b1::b1_fetch_for_embedding(chunk_id, store).await? {
-                            Some(payload) => Ok(payload),
-                            None => Err(anyhow::anyhow!("B1: chunk_id no longer in PG (race)")),
-                        }
-                    }
-                }
-            }
-        },
-        metrics_b1.clone(),
-    );
-
-    PipelineBHandles {
-        output_rx,
-        metrics_b1,
-    }
-}
-
-/// Handles for talking to the full Pipeline B (B1 + B2 + B3).
+/// Handles for talking to the full Pipeline B (B2 + B3 ; B1 collapsed
+/// into demand_pull in slice 5 SOTA).
 ///
 /// `output_rx` yields one [`PersistedEmbedding`] receipt per chunk that
-/// successfully traversed B1 (fetch) → B2 (GPU embed) → B3 (UPSERT).
-/// Soft-skipped chunks (B1 None-fetch on race, B2 embedder error) do
-/// NOT surface on this channel; their counts live on the
-/// `errors_total` stage metric instead.
+/// successfully traversed B2 (GPU embed) → B3 (UPSERT). Soft-skipped
+/// chunks (B2 embedder error) do NOT surface on this channel ; their
+/// counts live on the `errors_total` stage metric instead.
 pub struct PipelineBFullHandles {
     pub output_rx: Receiver<PersistedEmbedding>,
-    pub metrics_b1: Arc<StageMetrics>,
     pub metrics_b2: Arc<StageMetrics>,
     pub metrics_b3: Arc<StageMetrics>,
 }
 
-/// Spawn the three Pipeline B stages and return their handles.
+/// Spawn the Pipeline B GPU stages (B2 + B3) and return their handles.
 ///
-/// `b1_inbox_rx` is the receiver returned by [`spawn_pipeline_a`] —
-/// pass it here to connect the A → B hand-off. `embedder` is the
-/// [`B2Embedder`] trait object that drives B2's GPU work; tests inject
-/// [`super::stage_b2::NoOpEmbedder`], production wires the
-/// `OrtGpuFirstTextEmbedding` wrapper (slice S4d).
+/// Slice 5 SOTA — B1 stage worker collapsed into `demand_pull_b`. The
+/// caller must own a `Receiver<ChunkForEmbedding>` that demand_pull
+/// feeds directly (one SELECT-with-content round-trip per batch). B1
+/// stage workers (4× parallel SELECT-by-id) are gone : a single
+/// demand_pull task in `pipeline_v2_runtime` produces the b_chunks
+/// stream, B2 GPU drum consumes it.
 pub fn spawn_pipeline_b_full(
     counts: PipelineBWorkerCounts,
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
     embedder: Arc<dyn B2Embedder>,
-    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
+    b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
 ) -> PipelineBFullHandles {
-    spawn_pipeline_b_full_with_dedup(counts, caps, store, embedder, b1_inbox_rx, None)
+    spawn_pipeline_b_full_with_dedup(counts, caps, store, embedder, b_chunks_rx, None)
 }
 
 pub fn spawn_pipeline_b_full_with_dedup(
@@ -429,10 +369,10 @@ pub fn spawn_pipeline_b_full_with_dedup(
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
     embedder: Arc<dyn B2Embedder>,
-    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
+    b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
     embedding_cache: super::stage_b1::EmbeddingDedupCache,
 ) -> PipelineBFullHandles {
-    spawn_pipeline_b_full_multi(counts, caps, store, vec![embedder], b1_inbox_rx, embedding_cache)
+    spawn_pipeline_b_full_multi(counts, caps, store, vec![embedder], b_chunks_rx, embedding_cache)
 }
 
 /// REQ-AXO-901748 — multi-embedder variant. Each embedder in the vec
@@ -444,53 +384,25 @@ pub fn spawn_pipeline_b_full_multi(
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
     embedders: Vec<Arc<dyn B2Embedder>>,
-    b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
+    b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
     embedding_cache: super::stage_b1::EmbeddingDedupCache,
 ) -> PipelineBFullHandles {
     // DEC-AXO-081 — B3 self-extracts project_code from each chunk_id
     // prefix; no orchestrator-level project_code needed here.
-    let (b1_to_b2_tx, b1_to_b2_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
+    let b1_to_b2_rx = b_chunks_rx;
     let (b2_to_b3_tx, b2_to_b3_rx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
     let (output_tx, output_rx) = mpsc::channel::<PersistedEmbedding>(caps.internal);
 
-    let metrics_b1 = StageMetrics::new("B1");
     let metrics_b2 = StageMetrics::new("B2");
     let metrics_b3 = StageMetrics::new("B3");
 
-    // REQ-AXO-314 — B1 runs the canonical batched worker (mirror of B2/B3).
-    // Per-item B1 was bottlenecking GPU at 27% util: 4 PG SELECT/worker ×
-    // ~50ms each = ~80 ch/s feed rate vs B2 batch=64 / 200ms timeout
-    // (~320 ch/s needed to keep batches full). Batched B1 = 1 SELECT IN
-    // (..) per pool_size chunk_ids → matches B2 granularity → GPU saturates.
-    // `counts.b1` is no longer wired to a parallel-worker fan-out because
-    // a single batched worker already serializes the SELECTs cheaper
-    // than the deadpool can parallelize them; the count is preserved on
-    // the struct for telemetry symmetry with B3.
-    //
-    // DEC-AXO-086 follow-up (option-b bucket-sort) — B1 pool size = 4× B2
-    // batch size so every fetch returns ≥4 B2-batches worth of chunks,
-    // and the fetch SQL orders them by token_count. B2 then captures
-    // consecutive 64-windows that statistically fall in the SAME TensorRT
-    // seq_bucket → padding ≈ 0 per GPU batch. Smaller pool means B2
-    // batches cross bucket boundaries (current bug); larger pool wastes
-    // memory + latency without further benefit.
-    if counts.b1 != PipelineBWorkerCounts::default().b1 {
-        tracing::warn!(
-            "AXON_B1_WORKERS={} is set but B1 uses a single batched worker; the value is ignored",
-            counts.b1
-        );
-    }
-    let b1_pool_size = caps.b2_batch_size.saturating_mul(4).max(caps.b2_batch_size);
-    let embedding_cache_for_b3 = embedding_cache.clone();
-    super::stage_b1::spawn_b1_batched_worker_with_dedup(
-        b1_inbox_rx,
-        b1_to_b2_tx,
-        store.clone(),
-        metrics_b1.clone(),
-        b1_pool_size,
-        std::time::Duration::from_millis(caps.b2_batch_timeout_ms),
-        embedding_cache,
-    );
+    // Slice 5 SOTA — B1 stage worker eliminated. Demand_pull_b emits
+    // ChunkForEmbedding directly via SELECT-with-content (one
+    // round-trip). The embedding_cache dedup is applied inline in
+    // demand_pull's pull_and_feed_b before try_send.
+    let _ = embedding_cache;
+    let embedding_cache_for_b3 = None;
+    let _ = counts; // counts.b1 obsolete (no B1 worker)
 
     // REQ-AXO-901748 — B2 with per-worker embedder sessions. Each
     // embedder in the vec gets its own batched worker + ORT session.
@@ -593,7 +505,6 @@ pub fn spawn_pipeline_b_full_multi(
 
     PipelineBFullHandles {
         output_rx,
-        metrics_b1,
         metrics_b2,
         metrics_b3,
     }
@@ -602,11 +513,6 @@ pub fn spawn_pipeline_b_full_multi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // REQ-AXO-901825 — bring `B1InboxItem` into scope for the pattern
-    // match inside the integration test. `super::*` does not re-export
-    // it because the canonical path is `super::stage_b1::B1InboxItem`
-    // and `mod.rs` re-exports it at `crate::pipeline_v2::B1InboxItem`.
-    use super::super::stage_b1::B1InboxItem;
     use std::time::Duration;
 
     #[tokio::test]
@@ -730,12 +636,16 @@ mod tests {
 
     #[tokio::test]
     async fn pipelines_a_and_b_full_persist_chunk_embeddings_end_to_end() {
-        // Full A → B (B1+B2+B3) happy path with NoOpEmbedder. After
-        // both pipelines drain the fixture, the store must contain:
+        // Full A → B (demand_pull → B2 → B3) happy path with NoOpEmbedder.
+        // After both pipelines drain the fixture, the store must contain:
         //   * Symbol rows (A3)
         //   * Chunk rows with content_tsv-ready content (A3)
         //   * IndexedFile row (A3)
         //   * ChunkEmbedding rows (B3) — one per chunk_id A3 emitted
+        //
+        // Slice 5 SOTA — the b_chunks channel is created here and a
+        // synthetic poll-feeder mirrors what demand_pull_b does at
+        // runtime (SELECT-with-content + push to b_chunks_tx).
         use super::super::stage_b2::NoOpEmbedder;
 
         let dir = tempfile::tempdir().unwrap();
@@ -756,10 +666,40 @@ mod tests {
         };
 
         let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
-        let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
+
+        // Slice 5 SOTA — b_chunks channel + synthetic feeder.
+        let (b_chunks_tx, b_chunks_rx) =
+            mpsc::channel::<ChunkForEmbedding>(caps.internal);
+        let store_for_feeder = store.clone();
+        tokio::spawn(async move {
+            for _ in 0..50 {
+                let store_clone = store_for_feeder.clone();
+                let pulled = tokio::task::spawn_blocking(move || {
+                    store_clone.select_chunks_with_content_needing_embedding(64)
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+                if pulled.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                for (chunk_id, content, content_hash) in pulled {
+                    let _ = b_chunks_tx
+                        .send(ChunkForEmbedding {
+                            chunk_id,
+                            content,
+                            content_hash,
+                        })
+                        .await;
+                }
+            }
+        });
+
         let embedder: Arc<dyn B2Embedder> = Arc::new(NoOpEmbedder);
         let mut handles_b =
-            spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b1_inbox_rx);
+            spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b_chunks_rx);
 
         handles_a.input_tx.send(path.clone()).await.unwrap();
 
@@ -796,75 +736,18 @@ mod tests {
             .unwrap();
         assert_eq!(embed_count as usize, expected_chunks);
 
-        let snap_b1 = handles_b.metrics_b1.snapshot();
         let snap_b2 = handles_b.metrics_b2.snapshot();
         let snap_b3 = handles_b.metrics_b3.snapshot();
-        assert_eq!(snap_b1.items_out_total as usize, expected_chunks);
         assert_eq!(snap_b2.items_out_total as usize, expected_chunks);
         assert_eq!(snap_b3.items_out_total as usize, expected_chunks);
-        assert_eq!(snap_b1.errors_total, 0);
         assert_eq!(snap_b2.errors_total, 0);
         assert_eq!(snap_b3.errors_total, 0);
     }
 
-    #[tokio::test]
-    async fn pipelines_a_and_b_together_yield_chunk_for_embedding_payloads() {
-        // Full A → B (B1 only) happy path. A3 writes graph + chunks +
-        // FTS in one tx and try_sends chunk_ids to B1. B1 fetches the
-        // chunk content back from PG and emits ChunkForEmbedding ready
-        // for the slice S4b GPU embedder.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ab_fixture.rs");
-        std::fs::write(&path, "fn alpha() { 1 + 1; }\nfn beta() { let q = 2; }\n").unwrap();
-
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let caps = PipelineChannelCaps::default();
-        let counts_a = PipelineAWorkerCounts {
-            a1: 1,
-            a2: 1,
-            a3: 1,
-        };
-        let counts_b = PipelineBWorkerCounts {
-            b1: 1,
-            b2: 1,
-            b3: 1,
-        };
-
-        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
-        let b1_inbox_rx = std::mem::replace(&mut handles_a.b1_inbox_rx, mpsc::channel(1).1);
-        let mut handles_b = spawn_pipeline_b_b1_only(counts_b, caps, store.clone(), b1_inbox_rx);
-
-        handles_a.input_tx.send(path.clone()).await.unwrap();
-
-        let enrolled = tokio::time::timeout(Duration::from_secs(5), handles_a.output_rx.recv())
-            .await
-            .expect("A must produce a receipt within 5 s")
-            .expect("A output channel must yield Some(EnrolledFile)");
-        assert!(
-            !enrolled.chunk_ids.is_empty(),
-            "A3 must emit chunk_ids for the fixture"
-        );
-
-        // Drain B1: each chunk_id A3 emitted must eventually round-trip
-        // through B1 as a ChunkForEmbedding (no GPU yet, but the
-        // payload is ready for B2).
-        let expected = enrolled.chunk_ids.len();
-        let mut received = Vec::new();
-        for _ in 0..expected {
-            let payload = tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
-                .await
-                .expect("B1 must produce a payload within 5 s")
-                .expect("B1 output channel must yield Some(ChunkForEmbedding)");
-            received.push(payload);
-        }
-        assert_eq!(received.len(), expected);
-        for payload in &received {
-            assert!(enrolled.chunk_ids.contains(&payload.chunk_id));
-            assert!(!payload.content.is_empty());
-        }
-
-        let snap_b1 = handles_b.metrics_b1.snapshot();
-        assert_eq!(snap_b1.items_out_total as usize, expected);
-        assert_eq!(snap_b1.errors_total, 0);
-    }
+    // Slice 5 SOTA — `pipelines_a_and_b_together_yield_chunk_for_embedding_payloads`
+    // test removed. It validated the A3 → b1_inbox → B1 fetch-by-id
+    // path which is gone (B1 stage worker collapsed into demand_pull,
+    // A3 no longer pushes Inline payloads). The A → demand_pull → B2
+    // happy path is exercised end-to-end by the bench harness
+    // `axon-bench-pipeline-v2` and slice 6 demonstration (24K files).
 }

@@ -12,7 +12,7 @@
 //! Under `AXON_BULK_WRITER_ENABLED=1`, uses COPY BINARY (REQ-AXO-901747)
 //! instead of INSERT VALUES for ~12× file throughput.
 //!
-//! Chunk content+hash are forwarded inline to B1 via `B1InboxItem::Inline`
+//! Chunk content+hash are persisted to PG; B1 fetches via demand_pull
 //! (REQ-AXO-901746), eliminating the PG round-trip for steady-state embedding.
 
 use std::sync::Arc;
