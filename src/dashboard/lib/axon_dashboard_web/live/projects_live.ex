@@ -98,23 +98,6 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
       observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="grid grid-cols-12 gap-4">
-        <%!-- REQ-AXO-901827 — valeurs non validées (sous-indexation indexer dev). --%>
-        <section class="col-span-12 rounded-xl border border-red-500/40 bg-red-950/30 px-5 py-3">
-          <div class="flex items-center gap-3">
-            <span class="h-2.5 w-2.5 rounded-full bg-red-400 animate-pulse"></span>
-            <div class="flex-1">
-              <div class="text-[10px] uppercase tracking-[0.18em] text-red-300 font-semibold">
-                Valeurs non validées — REQ-AXO-901827
-              </div>
-              <div class="mt-1 text-[12px] text-red-200/90 leading-snug">
-                Indexer dev sous-indexe (17 projets sur 25 à 0 symbols, ratio symbols/file = 0.52 vs attendu 10-30).
-                Causes : FS watcher fd exhaustion + tree-sitter parsers manquants. Les valeurs ci-dessous reflètent PG truth
-                mais cette truth est incomplète.
-              </div>
-            </div>
-          </div>
-        </section>
-
         <%!-- TOTALS --%>
         <section class="col-span-12 grid grid-cols-2 md:grid-cols-5 gap-3">
           <.tot label="Projects" value={length(@projects)} />

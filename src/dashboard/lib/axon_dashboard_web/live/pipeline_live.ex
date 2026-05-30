@@ -72,30 +72,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="grid grid-cols-12 gap-4">
-        <%!-- REQ-AXO-901827 — bandeau validation conditionnelle.
-             Tant que l'indexer sous-indexe (FS watcher fd exhaustion +
-             tree-sitter parsers manquants), les valeurs PG sont une
-             vérité PARTIELLE. Le dashboard reflète fidèlement ce que
-             PG retourne — mais PG retourne lui-même une valeur fausse
-             car symbols/chunks/embedded incomplets. À retirer une
-             fois REQ-AXO-901827 fermée. --%>
-        <section class="col-span-12 rounded-xl border border-red-500/40 bg-red-950/30 px-5 py-3">
-          <div class="flex items-center gap-3">
-            <span class="h-2.5 w-2.5 rounded-full bg-red-400 animate-pulse"></span>
-            <div class="flex-1">
-              <div class="text-[10px] uppercase tracking-[0.18em] text-red-300 font-semibold">
-                Valeurs non validées — REQ-AXO-901827
-              </div>
-              <div class="mt-1 text-[12px] text-red-200/90 leading-snug">
-                L'indexer dev sous-indexe (FS watcher : <code class="bg-red-950/70 px-1 rounded">Too many open files (os 24)</code> + tree-sitter parsers manquants
-                pour JSON/TOML/lock). Symptômes : 17 projets sur 25 à 0 symbols, ratio symbols/file = 0.52 (attendu 10-30).
-                Les chiffres ci-dessous sont la vérité PG actuelle, mais cette vérité est incomplète.
-                Ne pas valider comme final tant que le ratio symbols/file n'est pas dans la norme.
-              </div>
-            </div>
-          </div>
-        </section>
-
         <%!-- INDEXATION FUNNEL --%>
         <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
           <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Indexation Funnel</div>
