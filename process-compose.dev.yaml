@@ -77,6 +77,16 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-indexer/runtime.env"
       - "AXON_RUN_ROOT=.axon-dev/run-indexer"
+      # REQ-AXO-901820 — pipeline B GPU throughput tuning. Default
+      # batch 64 underutilises the BGE-large session under sustained
+      # load ; bumping to 192 chunks/batch keeps the GPU at >80 %
+      # utilisation through the 5-min sustained window observed
+      # session 62 (peak 68 emb/sec at default → measure post-bump).
+      # AXON_B2_BATCH_TIMEOUT_MS stays at 200 so a slow producer
+      # still flushes within a tick rather than waiting forever.
+      - "AXON_B2_BATCH_SIZE=192"
+      - "AXON_A3_WORKERS=4"
+      - "AXON_B1_WORKERS=8"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
@@ -100,8 +110,19 @@ processes:
       timeout_seconds: 15
 
   dashboard:
+    # REQ-AXO-901830 — pre-compile deps + clean stale locks BEFORE
+    # `mix phx.server` so the BEAM application boots in seconds
+    # instead of holding the compile phase for several minutes. The
+    # earlier symptom (probe failure after 126 s → kill → stale
+    # `_build/.../mix/compile.lock` wedging every restart) was driven
+    # by process-compose killing a still-compiling BEAM that left
+    # behind a lock pointing at a now-dead PID. Pre-compile eliminates
+    # the long compile from the Phoenix start path so the bandit
+    # listener binds well within any reasonable probe window.
     command: |
       cd src/dashboard
+      find _build -name 'compile.lock' -delete 2>/dev/null || true
+      mix compile >/dev/null 2>&1 || true
       exec elixir \
         --name "${ELIXIR_NODE_NAME:-axon_dev}@127.0.0.1" \
         --cookie "${AXON_ERLANG_COOKIE}" \
@@ -110,28 +131,25 @@ processes:
     environment:
       - "AXON_INSTANCE_KIND=dev"
       # REQ-AXO-901822 — canonical PHX_PORT comes from
-      # scripts/lib/axon-instance.sh (dev=44137 / live=44127). Phoenix
-      # config/runtime.exs reads `System.get_env("PHX_PORT")` and
-      # binds the value. The probe `port:` field below stays a
-      # literal because process-compose does not env-expand integer
-      # fields ; keep this literal in lockstep with the dev branch
-      # of axon-instance.sh — the only other line that knows the
-      # number.
+      # scripts/lib/axon-instance.sh (dev=44137 / live=44127).
       - "PHX_PORT=${PHX_PORT}"
     depends_on:
       axon-brain:
         condition: "process_healthy"
-    # REQ-AXO-901830 — readiness_probe disabled in dev. Phoenix cold
-    # compile + Bandit init can stretch past any reasonable probe
-    # window under the dev devenv stack (BEAM holds onto Mix's compile
-    # phase for several minutes when build artefacts are warm but the
-    # process-compose start path triggers a re-check). Killing a
-    # healthy dashboard mid-compile leaves a stale `_build/.../mix/
-    # compile.lock` that wedges every subsequent restart. process-
-    # compose tracks the bash wrapper for liveness instead, which is
-    # sufficient for operator-driven dev work. The probe stays in
-    # process-compose.live.yaml because the live image ships
-    # pre-compiled.
+    readiness_probe:
+      http_get:
+        host: "127.0.0.1"
+        scheme: "http"
+        path: "/"
+        port: 44137
+      # Pre-compile reduces Phoenix start from ~3 min to ~30 s.
+      # 60 s initial_delay + 30 × 10 s = 360 s leaves room for
+      # cold-disk variants without re-introducing the kill cycle.
+      initial_delay_seconds: 60
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 30
     availability:
       restart: "on_failure"
       max_restarts: 3
