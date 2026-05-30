@@ -101,14 +101,18 @@ defmodule AxonDashboard.DashboardState do
             runtime_mode: String.t() | nil,
             instance_kind: String.t() | nil,
             degraded_reason: String.t() | nil,
-            runtime_idle: boolean()
+            runtime_idle: boolean(),
+            pipeline_status: String.t() | nil,
+            blocked_reason: String.t() | nil
           }
     defstruct build_id: nil,
               install_generation: nil,
               runtime_mode: nil,
               instance_kind: nil,
               degraded_reason: nil,
-              runtime_idle: false
+              runtime_idle: false,
+              pipeline_status: nil,
+              blocked_reason: nil
 
     def from_map(nil), do: nil
 
@@ -119,7 +123,9 @@ defmodule AxonDashboard.DashboardState do
         runtime_mode: Map.get(m, "runtime_mode"),
         instance_kind: Map.get(m, "instance_kind"),
         degraded_reason: Map.get(m, "degraded_reason"),
-        runtime_idle: Map.get(m, "runtime_idle", false) == true
+        runtime_idle: Map.get(m, "runtime_idle", false) == true,
+        pipeline_status: Map.get(m, "pipeline_status"),
+        blocked_reason: Map.get(m, "blocked_reason")
       }
     end
   end

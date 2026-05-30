@@ -72,6 +72,30 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
       <div class="grid grid-cols-12 gap-4">
+        <%!-- Slice 3 SOTA — pipeline_status banner. Shown only when
+             blocked_reason is set ; tells the operator exactly why the
+             pipeline isn't draining, with the canonical CLI fix. --%>
+        <%= if blocked_reason = runtime_field(@dashboard_state, :blocked_reason, nil) do %>
+          <section class="col-span-12 rounded-xl border border-amber-700/60 bg-amber-950/40 backdrop-blur-sm px-5 py-3">
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400 mb-1">Pipeline blocked</div>
+            <div class="font-mono text-sm text-amber-100">
+              <strong>{runtime_field(@dashboard_state, :pipeline_status, "unknown")}</strong>
+              <span class="text-amber-300/80 mx-2">·</span>
+              <span class="text-amber-200">reason: {blocked_reason}</span>
+              <span class="text-amber-300/80 mx-2">·</span>
+              <span class="text-amber-300/70 italic text-xs">
+                <%= case blocked_reason do %>
+                  <% "no_indexer_paired" -> %>start <code class="font-mono">./scripts/axon-live start --indexer-vector</code> to drain pending chunks
+                  <% "demand_pull_b_stalled" -> %>indexer up but B feeder dead — inspect <code class="font-mono">embedding_status.replenish</code>
+                  <% "gpu_unavailable" -> %>embedder failed to init — check ORT/TensorRT dlopen + CUDA paths
+                  <% "upstream_drain" -> %>A1 sink saturated — raise <code class="font-mono">AXON_INGRESS_DRAIN_BATCH</code>
+                  <% _ -> %><%= blocked_reason %>
+                <% end %>
+              </span>
+            </div>
+          </section>
+        <% end %>
+
         <%!-- INDEXATION FUNNEL --%>
         <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
           <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Indexation Funnel</div>

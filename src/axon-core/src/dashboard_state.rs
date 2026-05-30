@@ -180,6 +180,50 @@ fn compose_lifecycle_block(store: &Arc<GraphStore>) -> Value {
     }
 }
 
+/// Pipeline observability taxonomy (slice 3 SOTA refactor) — answers
+/// the operator's "pourquoi tu ne travailles pas ?" without needing
+/// bash + psql. Computed from `runtime_mode`, `runtime_idle`, the
+/// pending chunks count, and `embedder_init_error`. Cf. plan
+/// `tablis-le-plan-avec-bright-hare.md` section 3.
+pub(crate) fn compute_pipeline_status(
+    runtime_mode: &str,
+    runtime_idle: bool,
+    pending_chunks: i64,
+    embedder_init_error: Option<&str>,
+) -> (&'static str, Option<&'static str>) {
+    let pending_gt_zero = pending_chunks > 0;
+
+    // gpu_unavailable wins over every other diagnosis: the embedder
+    // can't run regardless of pending count.
+    if embedder_init_error.is_some() {
+        return ("indexer_idle_blocked", Some("gpu_unavailable"));
+    }
+
+    // brain_only + pending = 17K orphans without indexer paired (the
+    // canonical operator pain point session 63 — AXO 17 252 chunks).
+    if runtime_mode == "brain_only" && pending_gt_zero {
+        return ("indexer_idle_blocked", Some("no_indexer_paired"));
+    }
+
+    // brain_only + no pending = trivial happy idle.
+    if runtime_mode == "brain_only" {
+        return ("brain_only", None);
+    }
+
+    // indexer modes (indexer_graph / indexer_vector / indexer_full).
+    if !runtime_idle {
+        return ("indexer_active", None);
+    }
+
+    // Idle. Distinguish done from blocked by whether there's pending
+    // work the pipeline should be draining.
+    if pending_gt_zero {
+        ("indexer_idle_blocked", Some("demand_pull_b_stalled"))
+    } else {
+        ("indexer_idle_done", None)
+    }
+}
+
 /// Compose the `dashboard_state_v1` JSON envelope from live in-memory
 /// metrics + PG composite (totals, per_project, runtime_config) +
 /// lifecycle block + filesystem counters. Field naming matches what
@@ -192,6 +236,17 @@ pub(crate) fn compose_dashboard_state_v1(
     disk_files: i64,
     eligible_files: i64,
 ) -> Value {
+    let pending_chunks = pg_state
+        .get("totals")
+        .and_then(|t| t.get("pending"))
+        .and_then(|p| p.as_i64())
+        .unwrap_or(0);
+    let (pipeline_status, blocked_reason) = compute_pipeline_status(
+        live.runtime_mode,
+        live.runtime_idle,
+        pending_chunks,
+        live.embedder_init_error,
+    );
     json!({
         "event": "dashboard_state_v1",
         "ts_ms": live.ts_ms,
@@ -202,6 +257,8 @@ pub(crate) fn compose_dashboard_state_v1(
             "instance_kind": live.instance_kind,
             "degraded_reason": live.degraded_reason,
             "runtime_idle": live.runtime_idle,
+            "pipeline_status": pipeline_status,
+            "blocked_reason": blocked_reason,
         },
         "embedder": {
             "requested": live.embedder_requested,
@@ -269,6 +326,56 @@ pub(crate) fn compose_publish_and_emit(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Slice 3 SOTA — pipeline_status taxonomy locks. These tests pin
+    // the contract between `runtime_mode + pending + init_error` and
+    // the surfaced `pipeline_status` + `blocked_reason`. Drift here
+    // surfaces immediately to the operator via dashboard banner.
+
+    #[test]
+    fn pipeline_status_reports_blocked_when_brain_only_and_pending_gt_zero() {
+        // The canonical operator pain point session 63 : 17 252 chunks
+        // pending on AXO with brain_only and no indexer paired.
+        let (status, reason) = compute_pipeline_status("brain_only", true, 17_252, None);
+        assert_eq!(status, "indexer_idle_blocked");
+        assert_eq!(reason, Some("no_indexer_paired"));
+    }
+
+    #[test]
+    fn pipeline_status_brain_only_with_no_pending_is_trivial_idle() {
+        let (status, reason) = compute_pipeline_status("brain_only", true, 0, None);
+        assert_eq!(status, "brain_only");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn pipeline_status_indexer_active_when_runtime_not_idle() {
+        let (status, reason) = compute_pipeline_status("indexer_full", false, 1_000, None);
+        assert_eq!(status, "indexer_active");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn pipeline_status_indexer_idle_done_when_pending_zero() {
+        let (status, reason) = compute_pipeline_status("indexer_full", true, 0, None);
+        assert_eq!(status, "indexer_idle_done");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn pipeline_status_indexer_idle_blocked_when_idle_with_pending() {
+        let (status, reason) = compute_pipeline_status("indexer_full", true, 17_252, None);
+        assert_eq!(status, "indexer_idle_blocked");
+        assert_eq!(reason, Some("demand_pull_b_stalled"));
+    }
+
+    #[test]
+    fn pipeline_status_gpu_unavailable_wins_over_other_diagnoses() {
+        let (status, reason) =
+            compute_pipeline_status("indexer_full", false, 500, Some("CUDA error 35"));
+        assert_eq!(status, "indexer_idle_blocked");
+        assert_eq!(reason, Some("gpu_unavailable"));
+    }
 
     /// Reproduces the session-61 bug : the FFI SQL gateway returns
     /// jsonb columns as JSON-encoded strings inside `[[...]]`. A naive

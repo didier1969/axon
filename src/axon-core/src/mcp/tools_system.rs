@@ -465,6 +465,16 @@ impl McpServer {
         let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
         let runtime_pending_empty = runtime_pending == 0;
 
+        // Slice 3 SOTA — single source of truth for pipeline status +
+        // blocked_reason. Same function dashboard_state.rs uses so the
+        // operator sees identical strings across MCP + dashboard.
+        let (pipeline_status, blocked_reason) = crate::dashboard_state::compute_pipeline_status(
+            AxonRuntimeMode::from_env().as_str(),
+            runtime_pending_empty,
+            pending_chunks,
+            None,
+        );
+
         // REQ-AXO-901816 (MIL-AXO-029 slice 6 P0) — pipeline A
         // discovered-backlog count + demand-pull feeder counters.
         // `stock_a` is NEW info (not derivable from existing fields).
@@ -699,6 +709,13 @@ impl McpServer {
                 "notify_channel": "chunk_pending_embed",
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
+                // Slice 3 SOTA — surface pipeline_status + blocked_reason
+                // explicitly so an operator never has to guess between
+                // "no indexer paired" vs "indexer up but stuck". Single
+                // source of truth = `dashboard_state::compute_pipeline_status`
+                // so MCP + dashboard agree.
+                "pipeline_status": pipeline_status,
+                "blocked_reason": blocked_reason,
                 "lifecycle_phase": lifecycle_phase,
                 "lifecycle_last_used_ms": lifecycle_last_used_ms,
                 "lifecycle_wake_count": lifecycle_wake_count,
