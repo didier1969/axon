@@ -50,16 +50,15 @@ pub struct ChunkForEmbedding {
     pub content_hash: String,
 }
 
-/// REQ-AXO-901746 — Item on the A3→B1 inbox channel.
+/// Item on the B1 inbox channel — chunk_id pending embed.
 ///
-/// `Inline` carries the full payload (content already in A3's memory
-/// after upsert — avoids a PG round-trip for ~95% of steady-state).
-/// `FetchById` carries just the chunk_id; B1 SELECTs the content from
-/// PG (used by cold-start poll and NOTIFY listener which don't have
-/// the content in memory).
+/// Slice 4 SOTA — B1 inbox is NOTIFY-only : demand_pull_b LISTEN
+/// emits `FetchById(chunk_id)` after PG `trg_chunk_notify_pending`
+/// fires post-COMMIT on Chunk INSERT/UPDATE. The legacy `Inline(payload)`
+/// fast-path from A3 (try_send) was removed — single wake-up path
+/// reduces complexity (no silent drop mode, no dispatch branch).
 #[derive(Debug, Clone)]
 pub enum B1InboxItem {
-    Inline(ChunkForEmbedding),
     FetchById(String),
 }
 
@@ -177,48 +176,32 @@ pub fn spawn_b1_batched_worker_with_dedup(
                 }
             }
 
-            let mut inline_payloads: Vec<ChunkForEmbedding> = Vec::new();
             let mut fetch_ids: Vec<String> = Vec::new();
             for item in &batch {
                 match item {
-                    B1InboxItem::Inline(payload) => {
-                        if let Some(ref cache) = embedding_cache {
-                            if let Some(existing) = cache.get(&payload.chunk_id) {
-                                if existing.value() == &payload.content_hash {
-                                    _dedup_skipped += 1;
-                                    continue;
-                                }
-                            }
-                        }
-                        inline_payloads.push(payload.clone());
-                    }
                     B1InboxItem::FetchById(id) => fetch_ids.push(id.clone()),
                 }
             }
+            // Slice 4 SOTA — embedding_cache dedup now runs against the
+            // FetchById path only (Inline removed). The cache is still
+            // honored : if the chunk already has a fresh embedding, B1
+            // skips the SELECT entirely.
+            if let Some(ref cache) = embedding_cache {
+                fetch_ids.retain(|id| {
+                    if cache.get(id).is_some() {
+                        _dedup_skipped += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
 
-            let active_count = inline_payloads.len() + fetch_ids.len();
-            for _ in 0..active_count {
+            for _ in &fetch_ids {
                 metrics.record_started();
             }
             let started = std::time::Instant::now();
 
-            // Forward inline items directly — zero PG cost.
-            for payload in inline_payloads {
-                let elapsed_us =
-                    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                let per_item_us = elapsed_us / (batch.len() as u64).max(1);
-                metrics.record_finished(per_item_us);
-                let send_started = std::time::Instant::now();
-                let send_result = tx.send(payload).await;
-                let send_us =
-                    send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                metrics.record_send_wait(send_us);
-                if send_result.is_err() {
-                    return;
-                }
-            }
-
-            // Fetch-by-id items need a PG SELECT (cold-start / NOTIFY path).
             if !fetch_ids.is_empty() {
                 let store_clone = store.clone();
                 let ids_for_block = fetch_ids.clone();

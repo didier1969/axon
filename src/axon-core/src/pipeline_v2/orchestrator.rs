@@ -290,7 +290,6 @@ pub fn spawn_pipeline_a_with_cache(
             super::stage_a3::spawn_a3_batched_worker(
                 a2_to_a3_rx,
                 output_tx,
-                b1_inbox_tx.clone(),
                 store.clone(),
                 resolver.clone(),
                 metrics_a3.clone(),
@@ -305,7 +304,6 @@ pub fn spawn_pipeline_a_with_cache(
                 super::stage_a3::spawn_a3_batched_worker(
                     wrx,
                     output_tx.clone(),
-                    b1_inbox_tx.clone(),
                     store.clone(),
                     resolver.clone(),
                     metrics_a3.clone(),
@@ -377,7 +375,6 @@ pub fn spawn_pipeline_b_b1_only(
             let store = store_for_b1.clone();
             async move {
                 match item {
-                    super::stage_b1::B1InboxItem::Inline(payload) => Ok(payload),
                     super::stage_b1::B1InboxItem::FetchById(chunk_id) => {
                         match super::stage_b1::b1_fetch_for_embedding(chunk_id, store).await? {
                             Some(payload) => Ok(payload),
@@ -676,19 +673,10 @@ mod tests {
             "A3 must persist Chunk rows in the same transaction (session 19)"
         );
 
-        // B1 inbox must have received the chunk_ids via A3's try_send.
-        let first_item = tokio::time::timeout(Duration::from_secs(1), handles.b1_inbox_rx.recv())
-            .await
-            .expect("b1_inbox must receive within 1 s")
-            .expect("b1_inbox receiver yields Some(B1InboxItem)");
-        let first_id = match &first_item {
-            B1InboxItem::Inline(c) => c.chunk_id.clone(),
-            B1InboxItem::FetchById(id) => id.clone(),
-        };
-        assert!(
-            receipt.chunk_ids.contains(&first_id),
-            "chunk_id fanned out to B1 must match one of the ids returned by A3"
-        );
+        // Slice 4 SOTA — A3 no longer fan-outs to B1 inbox. The
+        // EnrolledFile receipt is the canonical contract from A3.
+        // B1 wake-up is via PG NOTIFY (trg_chunk_notify_pending) →
+        // demand_pull_b LISTEN, integration-tested separately.
 
         let snap_a1 = handles.metrics_a1.snapshot();
         let snap_a2 = handles.metrics_a2.snapshot();

@@ -100,9 +100,11 @@ pub async fn a3_enroll(
 /// blocks on the first `ParsedFile`, then drains additional files until
 /// `batch_size` or `batch_timeout`, and writes the whole batch in one
 /// `GraphStore::upsert_graph_v2_batch` round-trip — one BEGIN/COMMIT
-/// per batch instead of one per file. The chunk_ids returned for each
-/// file are individually `try_send`-fanned to the B1 inbox; the
-/// downstream `tx.send` carries the per-file [`EnrolledFile`] receipt.
+/// per batch instead of one per file. The downstream `tx.send` carries
+/// the per-file [`EnrolledFile`] receipt. B1 (vectorization side) is
+/// fed via the PG NOTIFY `chunk_pending_embed` trigger + demand_pull_b
+/// LISTEN listener — A3 itself does NOT push to a cross-pipeline
+/// channel (slice 4 SOTA refactor : single wake-up path = NOTIFY).
 ///
 /// `resolver` returns the project_code per file (DEC-AXO-081). Each
 /// flush groups the batch by resolved project_code and issues one
@@ -116,7 +118,6 @@ pub async fn a3_enroll(
 pub fn spawn_a3_batched_worker(
     mut rx: Receiver<ParsedFile>,
     tx: Sender<EnrolledFile>,
-    b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     store: Arc<GraphStore>,
     resolver: ProjectCodeResolver,
     metrics: Arc<StageMetrics>,
@@ -247,16 +248,14 @@ pub fn spawn_a3_batched_worker(
                         {
                             let state = embedder_state();
                             let mut chunk_ids = Vec::with_capacity(chunk_metas.len());
-                            for (cid, content, chash) in chunk_metas {
+                            for (cid, _content, _chash) in chunk_metas {
+                                // Slice 4 SOTA — A3 no longer pushes Inline payloads
+                                // to B1 inbox. The PG trigger `trg_chunk_notify_pending`
+                                // fires post-COMMIT and demand_pull_b LISTEN forwards
+                                // the chunk_id ; B1 SELECTs the content from PG.
+                                // `mark_pending` keeps the in-process embedder
+                                // freshness gate honest (REQ-AXO-90009 Slice 2).
                                 state.mark_pending(cid.clone());
-                                let payload = super::stage_b1::ChunkForEmbedding {
-                                    chunk_id: cid.clone(),
-                                    content,
-                                    content_hash: chash,
-                                };
-                                let _ = b1_inbox_tx.try_send(
-                                    super::stage_b1::B1InboxItem::Inline(payload),
-                                );
                                 chunk_ids.push(cid);
                             }
                             let receipt = EnrolledFile {
