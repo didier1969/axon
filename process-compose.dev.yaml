@@ -121,23 +121,17 @@ processes:
     depends_on:
       axon-brain:
         condition: "process_healthy"
-    readiness_probe:
-      http_get:
-        host: "127.0.0.1"
-        scheme: "http"
-        path: "/"
-        port: 44137
-      # REQ-AXO-901824 — Phoenix cold compile + Bandit init can exceed
-      # 60 s under the dev devenv stack (deps not pre-built). The
-      # previous 12 × 10 s window (= 120 s) clipped a slow boot and
-      # process-compose killed a healthy dashboard. Widened to 30 ×
-      # 10 s = 300 s so a 60-90 s cold start gets 3 idle cycles past
-      # the bind point before failure_threshold kicks in.
-      initial_delay_seconds: 30
-      period_seconds: 10
-      timeout_seconds: 5
-      success_threshold: 1
-      failure_threshold: 30
+    # REQ-AXO-901830 — readiness_probe disabled in dev. Phoenix cold
+    # compile + Bandit init can stretch past any reasonable probe
+    # window under the dev devenv stack (BEAM holds onto Mix's compile
+    # phase for several minutes when build artefacts are warm but the
+    # process-compose start path triggers a re-check). Killing a
+    # healthy dashboard mid-compile leaves a stale `_build/.../mix/
+    # compile.lock` that wedges every subsequent restart. process-
+    # compose tracks the bash wrapper for liveness instead, which is
+    # sufficient for operator-driven dev work. The probe stays in
+    # process-compose.live.yaml because the live image ships
+    # pre-compiled.
     availability:
       restart: "on_failure"
       max_restarts: 3
