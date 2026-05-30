@@ -121,15 +121,32 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// REQ-AXO-901814 (MIL-AXO-029 slice 3) — admission-controller-aware
+/// defaults. The reorder point (`s`) and quantity (`Q`) used by
+/// demand_pull share their canonical source of truth with
+/// [`crate::runtime_profile::recommend_admission_controller_profile`]
+/// so a host with more workers gets a larger backlog headroom by
+/// default. Env vars override the derived value when set —
+/// operators tuning bench / debug runs keep full control.
+fn admission_reorder_point() -> usize {
+    let profile = crate::runtime_profile::RuntimeProfile::detect();
+    crate::runtime_profile::recommend_admission_controller_profile(&profile).reorder_point
+}
+
 fn demand_pull_a_threshold_from_env() -> usize {
-    env_usize("AXON_PIPELINE_A_REORDER_POINT", 200)
+    env_usize("AXON_PIPELINE_A_REORDER_POINT", admission_reorder_point())
 }
 
 fn demand_pull_a_batch_from_env() -> usize {
-    env_usize("AXON_PIPELINE_A_REORDER_QUANTITY", 200)
+    // Reorder quantity defaults to the same value as reorder point —
+    // refill the whole stock band at once unless the operator tunes
+    // it down (e.g. to smooth GPU load). Bench (slice 8) may revisit.
+    env_usize("AXON_PIPELINE_A_REORDER_QUANTITY", admission_reorder_point())
 }
 
 fn demand_pull_b_threshold_from_env() -> usize {
+    // Pipeline B (vector embedding) flows more items per file ; keep
+    // the 1500 default until bench (slice 8) ties it to a host metric.
     env_usize("AXON_PIPELINE_B_REORDER_POINT", 1500)
 }
 
