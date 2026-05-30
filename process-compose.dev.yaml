@@ -77,14 +77,14 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-indexer/runtime.env"
       - "AXON_RUN_ROOT=.axon-dev/run-indexer"
-      # REQ-AXO-901820 — pipeline B GPU throughput tuning. Default
-      # batch 64 underutilises the BGE-large session under sustained
-      # load ; bumping to 192 chunks/batch keeps the GPU at >80 %
-      # utilisation through the 5-min sustained window observed
-      # session 62 (peak 68 emb/sec at default → measure post-bump).
-      # AXON_B2_BATCH_TIMEOUT_MS stays at 200 so a slow producer
-      # still flushes within a tick rather than waiting forever.
-      - "AXON_B2_BATCH_SIZE=192"
+      # REQ-AXO-901820 — pipeline tuning. AXON_B2_BATCH_SIZE bump
+      # to 192 was reverted : with the observed A-side producer rate
+      # (~10 ch/sec post-crash recovery), 192-cap batches never
+      # fill and flush on the 200 ms timeout with N << 192, which
+      # adds latency without raising utilisation. Default 64 stays
+      # until A-side throughput is itself improved (REQ-AXO-901820
+      # architectural). A3/B1 worker counts stay tuned because
+      # parallelism on the writer / fetcher side is cheap.
       - "AXON_A3_WORKERS=4"
       - "AXON_B1_WORKERS=8"
     depends_on:
