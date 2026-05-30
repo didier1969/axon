@@ -125,11 +125,16 @@ BEGIN
     -- compute totals — single source of truth ; rounding consistent.
     pp := axon_runtime.dashboard_per_project_counts(ttl_secs);
 
-    -- Total file count comes from indexedfile (not per-project — see
-    -- note in dashboard_per_project_counts).
+    -- Slice 7 dashboard fix — funnel sémantique correct :
+    --   files          = TOTAL enrolled in IndexedFile (discovered + indexed)
+    --   files_indexed  = ONLY status='indexed' (Pipeline A done : graphé)
+    --   files_inflight = ONLY status='discovered' (queued for A, pas encore graphé)
+    -- Le compteur historique `files` est conservé pour compat dashboard.
     SELECT jsonb_build_object(
         'projects',        jsonb_array_length(pp),
         'files',           (SELECT COUNT(*) FROM public.indexedfile)::bigint,
+        'files_indexed',   (SELECT COUNT(*) FROM public.indexedfile WHERE status='indexed')::bigint,
+        'files_inflight',  (SELECT COUNT(*) FROM public.indexedfile WHERE status='discovered')::bigint,
         'symbols',         COALESCE((SELECT SUM((p->>'symbols')::bigint)  FROM jsonb_array_elements(pp) p), 0),
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),

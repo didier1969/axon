@@ -273,6 +273,8 @@ defmodule AxonDashboard.DashboardState do
     @moduledoc "PG aggregate totals across all projects."
     @type t :: %__MODULE__{
             files: non_neg_integer(),
+            files_indexed: non_neg_integer(),
+            files_inflight: non_neg_integer(),
             symbols: non_neg_integer(),
             edges: non_neg_integer(),
             chunks: non_neg_integer(),
@@ -283,6 +285,8 @@ defmodule AxonDashboard.DashboardState do
             coverage_pct: float()
           }
     defstruct files: 0,
+              files_indexed: 0,
+              files_inflight: 0,
               symbols: 0,
               edges: 0,
               chunks: 0,
@@ -297,6 +301,8 @@ defmodule AxonDashboard.DashboardState do
     def from_map(%{} = m) do
       %__MODULE__{
         files: i(m, "files"),
+        files_indexed: i(m, "files_indexed"),
+        files_inflight: i(m, "files_inflight"),
         symbols: i(m, "symbols"),
         edges: i(m, "edges"),
         chunks: i(m, "chunks"),

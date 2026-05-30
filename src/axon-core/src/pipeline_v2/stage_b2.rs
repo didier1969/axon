@@ -195,6 +195,11 @@ pub fn spawn_b2_batched_worker(
                     let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
                         as u64;
                     let per_item_us = elapsed_us / (batch.len() as u64).max(1);
+                    // Slice 7 dashboard fix — record throughput sample for
+                    // the sliding-window rate widget (chunks/sec live).
+                    // Without this, `vector_chunk_embeddings_per_second()`
+                    // never sees production data → dashboard stuck à 0.
+                    crate::service_guard::record_vector_embed_call(batch.len() as u64, 0);
                     for (payload, embedding) in batch.into_iter().zip(embeddings.into_iter()) {
                         let emb = EmbeddedChunk {
                             chunk_id: payload.chunk_id,

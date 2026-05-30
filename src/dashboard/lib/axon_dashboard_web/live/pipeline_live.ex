@@ -2,11 +2,15 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   @moduledoc """
   REQ-AXO-901647 page 1 — Pipeline V2 streaming cockpit.
 
-  Renders the canonical CPT-AXO-054 topology
+  Renders the canonical CPT-AXO-054 topology (post slices 4+5 SOTA collapse) :
 
-      A1 read+hash → A2 parse-TS → A3 graph-UPSERT
-        ─try_send (A3→B1 cap 10000)──▶
-      B1 fetch    → B2 embed-GPU → B3 write-emb
+      A1 read+hash → A2 parse-TS → A3 graph-UPSERT (Symbol/Edge/Chunk → PG)
+                                              │
+                                              ▼  pg_notify('chunk_pending_embed')
+                                       demand_pull_b (LISTEN + 1s/30s adaptive poll)
+                                              │  SELECT-with-content + send().await backpressure
+                                              ▼
+                                       b_chunks (mpsc 1024) → B2 embed-GPU → B3 write-emb
 
   REQ-AXO-901806 / REQ-AXO-901826 — single source of truth =
   `%AxonDashboard.DashboardState{}` struct broadcast on the dedicated
@@ -111,8 +115,11 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Indexed</span>
-              <strong class="tabular-nums">{totals_field(@dashboard_state, :files, 0) |> full_int()}</strong>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Indexed (A done)</span>
+              <strong class="tabular-nums">{totals_field(@dashboard_state, :files_indexed, 0) |> full_int()}</strong>
+              <%= if (in_flight = totals_field(@dashboard_state, :files_inflight, 0)) > 0 do %>
+                <span class="text-amber-300/70 ml-1">(+{full_int(in_flight)} en queue)</span>
+              <% end %>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
@@ -161,7 +168,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           <header class="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-950/50">
             <div>
               <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Pipeline V2 · CPT-AXO-054</div>
-              <h2 class="text-base font-semibold text-slate-100 mt-0.5">A1/A2/A3 → try_send → B1/B2/B3</h2>
+              <h2 class="text-base font-semibold text-slate-100 mt-0.5">A1/A2/A3 → PG NOTIFY → demand_pull_b → B2/B3</h2>
             </div>
             <div class="flex items-center gap-3 text-[11px] font-mono">
               <span class="flex items-center gap-1.5 text-slate-300">
@@ -181,9 +188,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             style="height: 320px;"
           ></div>
           <div class="px-5 py-3 border-t border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-4 text-[10px] font-mono uppercase tracking-wider text-slate-500">
-            <span>A3→B1 buffer cap: <strong class="text-slate-200">{pipeline_field(@dashboard_state, :a3_to_b1_buffer_cap, 0) |> full_int()}</strong></span>
+            <span>b_chunks cap: <strong class="text-slate-200">1024</strong> (internal mpsc, send().await backpressure)</span>
             <span>NOTIFY: <strong class="text-slate-200">{rc_field(@dashboard_state, :notify_channel, "n/a")}</strong></span>
-            <span>coldstart poll: <strong class="text-slate-200">{rc_field(@dashboard_state, :coldstart_poll_interval_secs, 0)}s × {pipeline_field(@dashboard_state, :coldstart_batch_size, 0) |> full_int()}</strong></span>
+            <span>demand_pull adaptive: <strong class="text-slate-200">1s drain / 30s idle</strong></span>
             <span>idle: <strong class={if runtime_field(@dashboard_state, :runtime_idle, false), do: "text-emerald-300", else: "text-amber-300"}>{runtime_field(@dashboard_state, :runtime_idle, false) |> to_string()}</strong></span>
           </div>
         </section>
