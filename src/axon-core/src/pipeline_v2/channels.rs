@@ -10,8 +10,7 @@
 //! * Cross-pipeline channel A3→B1 — capacity 10 000; this is the only buffer
 //!   that has to absorb GPU-vs-CPU pace asymmetry. A3 publishes via
 //!   `try_send` (non-blocking) so the graph pipeline never stalls on B's
-//!   pace; B compensates via the cold-start poll DB pathway.
-//! * Cold-start poll batch size — 256 chunk IDs per `SELECT` rattrapage round.
+//!   pace; B compensates via the demand-pull NOTIFY listener + adaptive poll.
 
 /// Default capacity for the bounded channels that connect adjacent stages
 /// *within* the same pipeline (A1→A2, A2→A3, B1→B2, B2→B3).
@@ -23,14 +22,6 @@ pub const INTERNAL_CHANNEL_CAP_DEFAULT: usize = 1024;
 /// when the GPU is the slower side. Operator override:
 /// `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP`.
 pub const A3_TO_B1_BUFFER_CAP_DEFAULT: usize = 10_000;
-
-/// Default `LIMIT N` for the B1 cold-start poll query.
-///
-/// `SELECT chunk_id FROM Chunk LEFT JOIN ChunkEmbedding ce ON ce.chunk_id =
-/// Chunk.id WHERE ce.chunk_id IS NULL LIMIT N` — run once at indexer startup
-/// to enqueue every chunk that was graphed but never vectorised. Operator
-/// override: `AXON_B1_COLDSTART_BATCH_SIZE`.
-pub const B1_COLDSTART_BATCH_SIZE_DEFAULT: usize = 4096;
 
 /// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
 /// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
@@ -80,13 +71,6 @@ pub const B3_BATCH_SIZE_DEFAULT: usize = 256;
 /// observably ; operator override : `AXON_INGRESS_DRAIN_BATCH`.
 pub const INGRESS_DRAIN_BATCH_DEFAULT: usize = 512;
 
-/// REQ-AXO-901678 — default tick cadence for the B1 cold-start poll. Was
-/// hardcoded `const B1_COLDSTART_POLL_INTERVAL_SECS: u64 = 30` in
-/// `pipeline_v2_runtime.rs` ; promoted to an env knob so the operator
-/// can compress the catch-up window under heavy backlog. Operator
-/// override : `AXON_B1_COLDSTART_POLL_INTERVAL_SECS`.
-pub const B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT: u64 = 30;
-
 /// B3 partial-batch flush timeout. **Critical: 200 ms, not 10 ms.**
 /// Prior 10 ms default was copy-pasted from A3 (whose 10 ms floor
 /// was operator-requested 2026-05-12 for FTS visibility latency).
@@ -106,7 +90,6 @@ pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
 pub struct PipelineChannelCaps {
     pub internal: usize,
     pub a3_to_b1: usize,
-    pub b1_coldstart_batch_size: usize,
     pub a3_batch_size: usize,
     pub a3_batch_timeout_ms: u64,
     pub b2_batch_size: usize,
@@ -114,7 +97,6 @@ pub struct PipelineChannelCaps {
     pub b3_batch_size: usize,
     pub b3_batch_timeout_ms: u64,
     pub ingress_drain_batch: usize,
-    pub b1_coldstart_poll_interval_secs: u64,
 }
 
 impl Default for PipelineChannelCaps {
@@ -122,7 +104,6 @@ impl Default for PipelineChannelCaps {
         Self {
             internal: INTERNAL_CHANNEL_CAP_DEFAULT,
             a3_to_b1: A3_TO_B1_BUFFER_CAP_DEFAULT,
-            b1_coldstart_batch_size: B1_COLDSTART_BATCH_SIZE_DEFAULT,
             a3_batch_size: A3_BATCH_SIZE_DEFAULT,
             a3_batch_timeout_ms: A3_BATCH_TIMEOUT_MS_DEFAULT,
             b2_batch_size: B2_BATCH_SIZE_DEFAULT,
@@ -130,7 +111,6 @@ impl Default for PipelineChannelCaps {
             b3_batch_size: B3_BATCH_SIZE_DEFAULT,
             b3_batch_timeout_ms: B3_BATCH_TIMEOUT_MS_DEFAULT,
             ingress_drain_batch: INGRESS_DRAIN_BATCH_DEFAULT,
-            b1_coldstart_poll_interval_secs: B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
         }
     }
 }
@@ -151,13 +131,6 @@ impl PipelineChannelCaps {
             if let Ok(parsed) = raw.trim().parse::<usize>() {
                 if parsed > 0 {
                     caps.a3_to_b1 = parsed;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("AXON_B1_COLDSTART_BATCH_SIZE") {
-            if let Ok(parsed) = raw.trim().parse::<usize>() {
-                if parsed > 0 {
-                    caps.b1_coldstart_batch_size = parsed;
                 }
             }
         }
@@ -207,13 +180,6 @@ impl PipelineChannelCaps {
             if let Ok(parsed) = raw.trim().parse::<usize>() {
                 if parsed > 0 {
                     caps.ingress_drain_batch = parsed;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS") {
-            if let Ok(parsed) = raw.trim().parse::<u64>() {
-                if parsed > 0 {
-                    caps.b1_coldstart_poll_interval_secs = parsed;
                 }
             }
         }

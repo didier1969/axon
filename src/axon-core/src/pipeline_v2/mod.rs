@@ -24,9 +24,9 @@
 //!     - [`stage_b3::b3_persist_embedding`] → `upsert_chunk_embedding_v2`.
 //!
 //! A1's output blocking-sends to A2; A3 fan-outs chunk_ids to B1 via
-//! non-blocking `try_send` (cap 10 000). [`stage_b1::b1_cold_start_poll`]
-//! rattrape any chunk_ids the try_send buffer dropped, plus chunks from
-//! before the v2 cut-over.
+//! non-blocking `try_send` (cap 10 000). The demand-pull NOTIFY listener
+//! ([`demand_pull::spawn_pipeline_b_demand_pull`]) rattrape any chunk_ids
+//! the try_send buffer dropped, plus chunks from before the v2 cut-over.
 //!
 //! # Read-after-write contract (critical, see commit 294e09c)
 //!
@@ -66,7 +66,7 @@ pub mod types;
 pub mod worker_pool;
 
 pub use channels::{
-    PipelineChannelCaps, A3_TO_B1_BUFFER_CAP_DEFAULT, B1_COLDSTART_BATCH_SIZE_DEFAULT,
+    PipelineChannelCaps, A3_TO_B1_BUFFER_CAP_DEFAULT,
     INTERNAL_CHANNEL_CAP_DEFAULT,
 };
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
@@ -80,11 +80,11 @@ pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::EnrolledFile;
 pub use notify_listener::{
-    spawn_chunk_pending_listener, spawn_chunk_pending_state_listener,
+    spawn_chunk_pending_state_listener,
     spawn_pending_reconcile_loop,
 };
 pub use stage_b1::{
-    b1_cold_start_poll, load_embedding_dedup_cache,
+    load_embedding_dedup_cache,
     B1InboxItem, ChunkForEmbedding, EmbeddingDedupCache,
 };
 pub use embedder_gpu::GpuB2Embedder;
@@ -110,18 +110,13 @@ mod doc_invariants {
         let _ = super::stage_b1::b1_fetch_for_embedding;
         let _ = super::stage_b2::b2_embed;
         let _ = super::stage_b3::b3_persist_embedding;
-        let _ = super::b1_cold_start_poll;
     }
 
     #[test]
     fn channel_caps_match_session_19_canonical_table() {
         // Numbers cited in CPT-AXO-054 + the module docstring.
-        // REQ-AXO-91567 — B1_COLDSTART_BATCH_SIZE_DEFAULT bumped from
-        // 256 → 4096 to drain larger boot-time backlogs in a single
-        // poll. Other caps unchanged.
         assert_eq!(super::INTERNAL_CHANNEL_CAP_DEFAULT, 1024);
         assert_eq!(super::A3_TO_B1_BUFFER_CAP_DEFAULT, 10_000);
-        assert_eq!(super::B1_COLDSTART_BATCH_SIZE_DEFAULT, 4096);
         assert_eq!(super::channels::B2_BATCH_SIZE_DEFAULT, 64);
         assert_eq!(super::channels::B2_BATCH_TIMEOUT_MS_DEFAULT, 200);
     }

@@ -319,8 +319,7 @@ mod tests {
             "runtime_config": {
                 "pipeline_a": {"a1_workers": 4, "a2_workers": 8, "a3_workers": 2},
                 "pipeline_b": {"b2_workers": 1, "a3_to_b1_buffer_cap": 10000},
-                "notify_channel": "chunk_pending_embed",
-                "coldstart_poll_interval_secs": 30
+                "notify_channel": "chunk_pending_embed"
             }
         });
         let lifecycle = json!({"phase": "ready", "source": "indexer_heartbeat"});

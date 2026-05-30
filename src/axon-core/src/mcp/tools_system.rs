@@ -418,21 +418,13 @@ impl McpServer {
             "AXON_B3_BATCH_TIMEOUT_MS",
             crate::pipeline_v2::channels::B3_BATCH_TIMEOUT_MS_DEFAULT,
         );
-        let coldstart_batch = env_usize(
-            "AXON_B1_COLDSTART_BATCH_SIZE",
-            crate::pipeline_v2::channels::B1_COLDSTART_BATCH_SIZE_DEFAULT,
-        );
         // REQ-AXO-901678 — surface drain saturation knobs + counters so
         // the operator can spot A1 back-pressure without trawling
         // journalctl. Defaults mirror `PipelineChannelCaps` so an
-        // unconfigured env still reports the canonical 512 / 30 s.
+        // unconfigured env still reports the canonical 512.
         let ingress_drain_batch = env_usize(
             "AXON_INGRESS_DRAIN_BATCH",
             crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT,
-        );
-        let coldstart_poll_interval_secs = env_u64(
-            "AXON_B1_COLDSTART_POLL_INTERVAL_SECS",
-            crate::pipeline_v2::channels::B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
         );
         let drain_snapshot = crate::ingress_buffer::ingress_metrics_snapshot();
         // REQ-AXO-901677 — periodic_sweep_worker telemetry. Surface the
@@ -632,9 +624,8 @@ impl McpServer {
              - Workers:           b1={b1}  b2={b2}  b3={b3}\n\
              - B2 batch:          {b2_batch} chunks, timeout {b2_timeout} ms\n\
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
-             - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par cold-start poll)\n\
+             - A3→B1 try_send:    cap {a3_to_b1_cap} (drops rattrapés par demand-pull NOTIFY listener)\n\
              - NOTIFY channel:    chunk_pending_embed\n\
-             - Cold-start poll:   every {coldstart_poll_interval_secs} s, batch {coldstart_batch}\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\n\
              ### Pipeline drain (ingress → A1)\n\
@@ -701,13 +692,11 @@ impl McpServer {
                     "b3_batch_size": b3_batch,
                     "b3_batch_timeout_ms": b3_timeout,
                     "a3_to_b1_buffer_cap": a3_to_b1_cap,
-                    "coldstart_batch_size": coldstart_batch,
                     // REQ-AXO-901816 slice 6 — feeder counters only ; B backlog
                     // is already exposed as the top-level `pending_chunks` field.
                     "replenish": replenish_b
                 },
                 "notify_channel": "chunk_pending_embed",
-                "coldstart_poll_interval_secs": coldstart_poll_interval_secs,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
                 "lifecycle_phase": lifecycle_phase,

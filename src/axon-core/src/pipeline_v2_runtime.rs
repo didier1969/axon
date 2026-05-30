@@ -42,13 +42,12 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
 const INGRESS_DRAIN_POLL_MS: u64 = 200;
-// REQ-AXO-901678 — `INGRESS_DRAIN_BATCH` and `B1_COLDSTART_POLL_INTERVAL_SECS`
-// are now read from `PipelineChannelCaps::from_env` (knobs
-// `AXON_INGRESS_DRAIN_BATCH`, default 512 ; and
-// `AXON_B1_COLDSTART_POLL_INTERVAL_SECS`, default 30). The legacy
-// hardcoded constants (256 / 30) were dead knobs : the runtime ignored
-// any env override the operator set. Bench session 54 confirmed A3
-// drum saturated under multi-project cold-start with 256 cap.
+// REQ-AXO-901678 — `INGRESS_DRAIN_BATCH` is read from
+// `PipelineChannelCaps::from_env` (knob `AXON_INGRESS_DRAIN_BATCH`,
+// default 512). The legacy hardcoded constant (256) was a dead knob :
+// the runtime ignored any env override the operator set. Bench session
+// 54 confirmed A3 drum saturated under multi-project cold-start with
+// 256 cap.
 
 // REQ-AXO-901677 — periodic_sweep_worker defaults.
 //

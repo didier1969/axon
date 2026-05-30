@@ -1,12 +1,11 @@
 //! REQ-AXO-901806 F2 — Runtime config snapshot writer.
 //!
 //! At indexer boot, read the env vars that drive worker counts, batch
-//! sizes, NOTIFY channel, and coldstart cadence, then UPSERT a single
-//! row into `axon_runtime.runtime_config_snapshot` so the dashboard
-//! state composition (1 Hz) reads them via PG instead of receiving
-//! 15+ args from `main_telemetry`. Aligns with PIL-AXO-009 (PG
-//! canonical) without write amplification — the row is written once
-//! per process boot.
+//! sizes and NOTIFY channel, then UPSERT a single row into
+//! `axon_runtime.runtime_config_snapshot` so the dashboard state
+//! composition (1 Hz) reads them via PG instead of receiving 15+ args
+//! from `main_telemetry`. Aligns with PIL-AXO-009 (PG canonical) without
+//! write amplification — the row is written once per process boot.
 
 use std::sync::Arc;
 
@@ -16,8 +15,7 @@ use serde_json::json;
 use crate::env_alias::read_with_alias;
 use crate::graph::GraphStore;
 use crate::pipeline_v2::channels::{
-    A3_TO_B1_BUFFER_CAP_DEFAULT, B1_COLDSTART_BATCH_SIZE_DEFAULT,
-    B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT, B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT,
+    A3_TO_B1_BUFFER_CAP_DEFAULT, B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT,
     B3_BATCH_SIZE_DEFAULT, B3_BATCH_TIMEOUT_MS_DEFAULT, INGRESS_DRAIN_BATCH_DEFAULT,
 };
 use crate::pipeline_v2::notify_listener::LISTEN_CHANNEL;
@@ -55,14 +53,6 @@ pub fn compose_indexer_config() -> serde_json::Value {
     let b2_timeout = env_u64("AXON_B2_BATCH_TIMEOUT_MS", B2_BATCH_TIMEOUT_MS_DEFAULT);
     let b3_batch = env_usize("AXON_B3_BATCH_SIZE", B3_BATCH_SIZE_DEFAULT);
     let b3_timeout = env_u64("AXON_B3_BATCH_TIMEOUT_MS", B3_BATCH_TIMEOUT_MS_DEFAULT);
-    let coldstart_batch = env_usize(
-        "AXON_B1_COLDSTART_BATCH_SIZE",
-        B1_COLDSTART_BATCH_SIZE_DEFAULT,
-    );
-    let coldstart_poll = env_u64(
-        "AXON_B1_COLDSTART_POLL_INTERVAL_SECS",
-        B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT,
-    );
     let ingress_drain = env_usize("AXON_INGRESS_DRAIN_BATCH", INGRESS_DRAIN_BATCH_DEFAULT);
 
     // A3→B1 buffer cap : canonical env (with one-shot alias deprecation
@@ -89,13 +79,11 @@ pub fn compose_indexer_config() -> serde_json::Value {
             "b3_batch_size": b3_batch,
             "b3_batch_timeout_ms": b3_timeout,
             "a3_to_b1_buffer_cap": a3_to_b1_cap,
-            "coldstart_batch_size": coldstart_batch,
         },
         // Canonical PG NOTIFY channel for the brain demand-pull
         // listener — exposed as `pub const` from notify_listener so this
         // value isn't hardcoded in 3 separate places.
         "notify_channel": LISTEN_CHANNEL,
-        "coldstart_poll_interval_secs": coldstart_poll,
         "ingress_drain_batch": ingress_drain,
     })
 }
@@ -133,12 +121,10 @@ mod tests {
         assert!(v["pipeline_b"]["b3_workers"].is_number());
         assert!(v["pipeline_b"]["b2_batch_size"].is_number());
         assert!(v["pipeline_b"]["a3_to_b1_buffer_cap"].is_number());
-        assert!(v["pipeline_b"]["coldstart_batch_size"].is_number());
         assert_eq!(
             v["notify_channel"],
             crate::pipeline_v2::notify_listener::LISTEN_CHANNEL
         );
-        assert!(v["coldstart_poll_interval_secs"].is_number());
         assert!(v["ingress_drain_batch"].is_number());
     }
 }

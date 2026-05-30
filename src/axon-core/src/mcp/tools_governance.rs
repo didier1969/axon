@@ -223,10 +223,6 @@ impl McpServer {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT);
-        let coldstart_poll_secs = std::env::var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(crate::pipeline_v2::channels::B1_COLDSTART_POLL_INTERVAL_SECS_DEFAULT);
         let drain_status = if drain.drain_heartbeat_tick == 0 {
             "drain loop not running (pipeline_v2 runtime not spawned in this process)"
         } else if drain.drain_dropped_full_total > 0 || drain.drain_last_batch_dropped_full > 0 {
@@ -279,7 +275,6 @@ impl McpServer {
              * last_batch_sent: {}\n\
              * last_batch_dropped_full: {}\n\
              * dropped_full_total: {}\n\
-             * cold-start poll cadence: every {} s (env AXON_B1_COLDSTART_POLL_INTERVAL_SECS)\n\
              * status: {}\n\n\
              ### Periodic sweep (REQ-AXO-901677)\n\
              * cadence: every {} h (env AXON_PERIODIC_SWEEP_HOURS, 0=off)\n\
@@ -316,7 +311,6 @@ impl McpServer {
             drain.drain_last_batch_sent,
             drain.drain_last_batch_dropped_full,
             drain.drain_dropped_full_total,
-            coldstart_poll_secs,
             drain_status,
             sweep_hours,
             sweep_cpu_pct,

@@ -151,10 +151,9 @@ pub struct PipelineAHandles {
     pub output_rx: Receiver<EnrolledFile>,
     pub b1_inbox_rx: Receiver<super::stage_b1::B1InboxItem>,
     /// Additional clone of the same `b1_inbox_tx` A3 workers push into.
-    /// Used by external pollers (e.g. `pipeline_v2_runtime::spawn_pipeline_v2_indexer`'s
-    /// periodic `b1_cold_start_poll` task) to rattrape chunks A3
-    /// `try_send` dropped under buffer pressure (CPT-AXO-054 cold-start
-    /// poll DB contract).
+    /// Used by external pollers (e.g. the demand-pull NOTIFY listener
+    /// in `pipeline_v2/demand_pull.rs`) to rattrape chunks A3
+    /// `try_send` dropped under buffer pressure.
     pub b1_inbox_tx: Sender<super::stage_b1::B1InboxItem>,
     pub metrics_a1: Arc<StageMetrics>,
     pub metrics_a2: Arc<StageMetrics>,

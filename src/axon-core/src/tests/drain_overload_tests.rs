@@ -153,37 +153,26 @@ fn pipeline_channel_caps_reads_ingress_drain_batch_from_env() {
     let _g = metrics_lock();
 
     let prev_drain = std::env::var("AXON_INGRESS_DRAIN_BATCH").ok();
-    let prev_poll = std::env::var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS").ok();
 
-    // Default cap is 512 / 30s when env is unset.
+    // Default cap is 512 when env is unset.
     std::env::remove_var("AXON_INGRESS_DRAIN_BATCH");
-    std::env::remove_var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS");
     let caps_default = PipelineChannelCaps::from_env();
     assert_eq!(caps_default.ingress_drain_batch, 512);
-    assert_eq!(caps_default.b1_coldstart_poll_interval_secs, 30);
 
     // Env override.
     std::env::set_var("AXON_INGRESS_DRAIN_BATCH", "1024");
-    std::env::set_var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS", "5");
     let caps_env = PipelineChannelCaps::from_env();
     assert_eq!(caps_env.ingress_drain_batch, 1024);
-    assert_eq!(caps_env.b1_coldstart_poll_interval_secs, 5);
 
     // Reject zero (preserve default).
     std::env::set_var("AXON_INGRESS_DRAIN_BATCH", "0");
-    std::env::set_var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS", "0");
     let caps_zero = PipelineChannelCaps::from_env();
     assert_eq!(caps_zero.ingress_drain_batch, 512);
-    assert_eq!(caps_zero.b1_coldstart_poll_interval_secs, 30);
 
     // Restore previous env (avoid leaking into sibling tests).
     match prev_drain {
         Some(v) => std::env::set_var("AXON_INGRESS_DRAIN_BATCH", v),
         None => std::env::remove_var("AXON_INGRESS_DRAIN_BATCH"),
-    }
-    match prev_poll {
-        Some(v) => std::env::set_var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS", v),
-        None => std::env::remove_var("AXON_B1_COLDSTART_POLL_INTERVAL_SECS"),
     }
 
     // Yield to satisfy CPT-AXO-018 contract (tick the runtime once).

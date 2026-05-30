@@ -1,7 +1,7 @@
 //! Stage B1 — Triage + fetch for the GPU embedder (CPT-AXO-054).
 //!
-//! B1 receives `B1InboxItem` from A3 (Inline with content) or from
-//! cold-start poll / NOTIFY listener (FetchById, requires PG SELECT).
+//! B1 receives `B1InboxItem` from A3 (Inline with content) or from the
+//! demand-pull NOTIFY listener (FetchById, requires PG SELECT).
 //! Inline items are forwarded directly — zero PG cost (REQ-AXO-901746).
 //! FetchById items are batched and SELECTed from `public.Chunk`.
 //!
@@ -10,8 +10,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use tokio::sync::mpsc::Sender;
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::Context;
 
 use crate::graph::GraphStore;
 
@@ -68,59 +69,8 @@ pub enum B1InboxItem {
 /// tokio runtime responsive under multi-worker B1 contention. Returns
 /// `Ok(None)` if the row was deleted between A3's `try_send` and B1's
 /// read (race with a re-parse) — the worker drops the item silently and
-/// moves on; the cold-start poll DB pathway (slice S4c) catches anything
-/// the channel missed.
-/// REQ-AXO-289 S4c — B1 cold-start poll DB pathway.
-///
-/// Drains every chunk that exists in `public.Chunk` but has no
-/// matching `ChunkEmbedding` row for the canonical model, sending the
-/// chunk_ids into the same `b1_inbox` channel that A3 try_sends to in
-/// steady-state. Idempotent — re-running yields zero chunks once all
-/// chunks have an embedding.
-///
-/// `batch_size` caps each SQL round-trip (default 256, configurable
-/// via `AXON_B1_COLDSTART_BATCH_SIZE`). The loop keeps issuing batches
-/// until the SELECT returns less than `batch_size` rows, which means
-/// the table caught up.
-///
-/// Returns the total number of chunk_ids forwarded to the inbox.
-/// Forwarding uses `send().await` (blocking) — the cold-start runs at
-/// boot when no other producers are racing for the inbox, so blocking
-/// is safe; if the inbox is closed mid-poll, we propagate the error.
-pub async fn b1_cold_start_poll(
-    store: Arc<GraphStore>,
-    b1_inbox_tx: Sender<B1InboxItem>,
-    batch_size: usize,
-) -> Result<usize> {
-    if batch_size == 0 {
-        return Ok(0);
-    }
-    let mut total = 0usize;
-    loop {
-        let store_clone = store.clone();
-        let batch = tokio::task::spawn_blocking(move || {
-            store_clone.select_chunks_needing_embedding(batch_size)
-        })
-        .await
-        .context("B1 cold-start poll task panicked")??;
-        let drained = batch.len();
-        if drained == 0 {
-            break;
-        }
-        for cid in batch {
-            b1_inbox_tx
-                .send(B1InboxItem::FetchById(cid))
-                .await
-                .map_err(|e| anyhow::anyhow!("B1 cold-start: inbox closed mid-send ({e})"))?;
-            total += 1;
-        }
-        if drained < batch_size {
-            break;
-        }
-    }
-    Ok(total)
-}
-
+/// moves on; the demand-pull DB pathway catches anything the channel
+/// missed.
 #[cfg(test)]
 pub async fn b1_fetch_for_embedding(
     chunk_id: String,
@@ -397,98 +347,6 @@ mod tests {
             .await
             .unwrap();
         assert!(res.is_none(), "B1 must return None for unknown chunk_id");
-    }
-
-    #[tokio::test]
-    async fn b1_cold_start_poll_emits_chunks_without_embeddings() {
-        use tokio::sync::mpsc;
-
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let body = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
-        let chunk_ids = store
-            .upsert_graph_v2(
-                "/tmp/b1_poll.rs",
-                "AXO",
-                body,
-                "hash-poll",
-                1_700_000_000_020,
-                &[sym("alpha"), sym("beta"), sym("gamma")],
-                &[],
-            )
-            .unwrap();
-        assert!(chunk_ids.len() >= 3);
-
-        // None of these chunk_ids has an embedding yet — cold-start
-        // poll must surface all of them.
-        let (tx, mut rx) = mpsc::channel::<B1InboxItem>(128);
-        let total = b1_cold_start_poll(store.clone(), tx, 32).await.unwrap();
-        assert!(total >= chunk_ids.len() as usize);
-
-        let mut emitted: Vec<String> = Vec::new();
-        while let Ok(Some(item)) =
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
-        {
-            match item {
-                B1InboxItem::FetchById(id) => emitted.push(id),
-                B1InboxItem::Inline(c) => emitted.push(c.chunk_id),
-            }
-        }
-        for cid in &chunk_ids {
-            assert!(
-                emitted.contains(cid),
-                "cold-start poll must emit chunk_id {cid}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn b1_cold_start_poll_skips_already_embedded_chunks() {
-        use crate::embedding_contract::DIMENSION;
-        use tokio::sync::mpsc;
-
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let body = "fn standalone() {}\n";
-        let chunk_ids = store
-            .upsert_graph_v2(
-                "/tmp/b1_skip.rs",
-                "AXO",
-                body,
-                "hash-skip",
-                1_700_000_000_021,
-                &[sym("standalone")],
-                &[],
-            )
-            .unwrap();
-        let cid = chunk_ids[0].clone();
-
-        // Pre-embed the chunk.
-        let mut embedding = vec![0.0_f32; DIMENSION];
-        embedding[0] = 1.0;
-        store
-            .upsert_chunk_embedding_v2(&cid, "AXO", "hash-skip-chunk", &embedding, 1)
-            .unwrap();
-
-        let (tx, mut rx) = mpsc::channel::<B1InboxItem>(8);
-        let total = b1_cold_start_poll(store.clone(), tx, 8).await.unwrap();
-
-        // The pre-embedded chunk must not surface.
-        let mut emitted: Vec<String> = Vec::new();
-        while let Ok(Some(item)) =
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
-        {
-            match item {
-                B1InboxItem::FetchById(id) => emitted.push(id),
-                B1InboxItem::Inline(c) => emitted.push(c.chunk_id),
-            }
-        }
-        assert!(
-            !emitted.contains(&cid),
-            "already-embedded chunk_id must NOT surface in cold-start poll"
-        );
-        assert_eq!(
-            total as usize, emitted.len(),
-            "poll counter must match emitted count"
-        );
     }
 
     #[tokio::test]
