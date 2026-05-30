@@ -483,14 +483,24 @@ impl McpServer {
         // demand_pull metrics, which are independent of the DB-derived
         // backlog and surface the failure mode where a non-zero stock
         // sits behind a dead feeder loop.
-        let stock_a = scalar(&format!(
-            "SELECT count(*) FROM public.indexedfile WHERE status='discovered' AND retry_count<3{}",
-            if project == "*" {
-                String::new()
-            } else {
-                format!(" AND path LIKE '{}/%'", project.replace('\'', "''"))
-            }
-        ));
+        //
+        // REQ-AXO-901809 slice 2 — global stock uses the canonical
+        // `pipeline_a_discovered_stock` helper (data layer owns the
+        // SQL). The project-scoped variant still inlines its own
+        // WHERE clause because the helper doesn't take a path filter
+        // — adding one would be over-engineered for this single
+        // caller. Both paths use the same retry-count cap (3) so the
+        // numbers reconcile across surfaces.
+        let stock_a = if project == "*" {
+            self.graph_store
+                .pipeline_a_discovered_stock(3)
+                .unwrap_or(0) as i64
+        } else {
+            scalar(&format!(
+                "SELECT count(*) FROM public.indexedfile WHERE status='discovered' AND retry_count<3 AND path LIKE '{}/%'",
+                project.replace('\'', "''")
+            ))
+        };
         let (replenish_a, replenish_b) = {
             let snap_a = crate::pipeline_v2_runtime::demand_pull_metrics_a()
                 .map(|m| m.snapshot());

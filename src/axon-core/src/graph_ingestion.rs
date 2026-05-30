@@ -909,6 +909,41 @@ impl GraphStore {
             .collect())
     }
 
+    /// REQ-AXO-901809 (MIL-AXO-029 slice 2) — pipeline A discovered-
+    /// backlog count.
+    ///
+    /// Single source of truth for "how many files are awaiting an
+    /// indexing claim" — same WHERE clause as
+    /// [`Self::select_and_claim_files_for_indexing`] candidates CTE
+    /// minus the `last_attempt_ms` cutoff (callers reading stock
+    /// want the headline number, not a claim-window-corrected one).
+    ///
+    /// `max_retry` matches what the demand_pull loop uses (poison-pill
+    /// threshold) so the stock reported here matches the SELECT
+    /// eligibility seen by the claim path.
+    ///
+    /// Source = `COUNT(*) FROM IndexedFile WHERE status='discovered'`
+    /// — NOT `pg_stat_user_tables.n_live_tup`, which lags the
+    /// autovacuum cadence and double-counts uncommitted rows.
+    /// Used by the MCP `embedding_status` observability surface
+    /// (REQ-AXO-901816) and reserved for the future watcher
+    /// max-stock back-pressure (REQ-AXO-901815).
+    pub fn pipeline_a_discovered_stock(&self, max_retry: i32) -> Result<u64> {
+        let sql = format!(
+            "SELECT count(*)::bigint FROM IndexedFile \
+             WHERE status='discovered' AND retry_count<{max_retry}"
+        );
+        let raw = self.query_json(&sql)?;
+        let rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64)
+    }
+
     /// 9f: detect and remove files that disappeared from the filesystem.
     /// Call after a complete scanner walk. Any IndexedFile row with
     /// discovered_ms < scan_start_ms was NOT seen in this walk → stale.
