@@ -2,9 +2,15 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   @moduledoc """
   REQ-AXO-901647 page 2 — per-project indexing & embedding coverage.
 
-  Source of truth: PostgreSQL (read-only) via `Axon.Watcher.SqlGateway`.
-  Refresh: every 2 s (REQ-AXO-901834 — was 5 s, lowered to honour
-  the dashboard "1 s ideal, 5 s max" contract per session 64 audit).
+  Source of truth: BridgeClient push (PubSub `dashboard_topic`), derived
+  from `DashboardState.per_project_counts` populated by the brain 1 Hz
+  composer. SqlGateway is only used as a one-shot fallback at mount
+  when the BridgeClient has no fresh snapshot yet (cold-start gap).
+
+  REQ-AXO-901834 — pure push pattern : eliminates the `:timer.send_interval`
+  polling that was driving cluster head R1 per session 64 dashboard audit.
+  Phoenix LiveView principle = state pushed via WebSocket diff ; polling
+  is a fallback, not a design.
 
   Columns: project_code · chunks · embedded · coverage% · symbols · edges
   · last_chunk_at · last_embedded_at · Δ chunks (rolling 60s).
@@ -15,25 +21,34 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   alias Axon.Watcher.SqlGateway
   alias AxonDashboardWeb.Live.Nav
 
-  @refresh_ms 2_000
-
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      :timer.send_interval(@refresh_ms, self(), :refresh)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, BridgeClient.dashboard_topic())
     end
 
-    {projects, error} = fetch_projects()
+    initial_state = BridgeClient.dashboard_state() || %DashboardState{}
+    initial_projects =
+      case projects_from_dashboard_state(initial_state) do
+        [] ->
+          # Cold-start gap : brain hasn't pushed yet. One-shot SqlGateway
+          # fetch so the first paint isn't empty. Subsequent updates land
+          # via PubSub.
+          {projects, _err} = fetch_projects()
+          projects
+
+        rows ->
+          rows
+      end
 
     socket =
       socket
       |> assign(:page_title, "Axon · Projects")
-      |> assign(:projects, projects)
-      |> assign(:fetch_error, error)
+      |> assign(:projects, initial_projects)
+      |> assign(:fetch_error, nil)
       |> assign(:sort_by, :chunks)
       |> assign(:sort_dir, :desc)
-      |> assign(:dashboard_state, BridgeClient.dashboard_state() || %DashboardState{})
+      |> assign(:dashboard_state, initial_state)
       |> assign(:prev_snapshot, %{})
       |> assign(:last_refresh_ms, System.monotonic_time(:millisecond))
 
@@ -41,25 +56,29 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   end
 
   @impl true
-  def handle_info(:refresh, socket) do
-    {projects, error} = fetch_projects()
-
-    prev_snapshot = build_prev_map(socket.assigns.projects)
+  # REQ-AXO-901826 + REQ-AXO-901834 — typed struct pattern match. Push
+  # carries per_project_counts ; ProjectsLive re-derives the table rows
+  # without polling. coverage_pct computed client-side from chunks/embedded.
+  def handle_info({:dashboard_state, %DashboardState{} = state}, socket) do
+    new_projects = projects_from_dashboard_state(state)
 
     socket =
-      socket
-      |> assign(:projects, projects)
-      |> assign(:fetch_error, error)
-      |> assign(:prev_snapshot, prev_snapshot)
-      |> assign(:last_refresh_ms, System.monotonic_time(:millisecond))
+      if new_projects == [] do
+        # Push payload lacks per_project (transient brain composer hiccup):
+        # keep prior assigns rather than blank the table.
+        assign(socket, :dashboard_state, state)
+      else
+        prev_snapshot = build_prev_map(socket.assigns.projects)
+
+        socket
+        |> assign(:dashboard_state, state)
+        |> assign(:projects, new_projects)
+        |> assign(:prev_snapshot, prev_snapshot)
+        |> assign(:last_refresh_ms, System.monotonic_time(:millisecond))
+        |> assign(:fetch_error, nil)
+      end
 
     {:noreply, socket}
-  end
-
-  @impl true
-  # REQ-AXO-901826 — typed struct pattern match.
-  def handle_info({:dashboard_state, %DashboardState{} = state}, socket) do
-    {:noreply, assign(socket, :dashboard_state, state)}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -223,6 +242,26 @@ defmodule AxonDashboardWeb.Live.ProjectsLive do
   end
 
   ## Data
+
+  # REQ-AXO-901834 — derive table rows from the pushed DashboardState
+  # without polling. Returns [] when the push payload has no per_project
+  # entries (transient brain composer hiccup) ; caller decides whether
+  # to blank the table or keep the prior assigns.
+  defp projects_from_dashboard_state(%DashboardState{per_project: list})
+       when is_list(list) and list != [] do
+    Enum.map(list, fn entry ->
+      %{
+        project_code: Map.get(entry, :project_code, "?"),
+        chunks: Map.get(entry, :chunks, 0),
+        embedded: Map.get(entry, :embedded, 0),
+        symbols: Map.get(entry, :symbols, 0),
+        edges: Map.get(entry, :edges, 0),
+        coverage_pct: Map.get(entry, :coverage_pct, 0.0)
+      }
+    end)
+  end
+
+  defp projects_from_dashboard_state(_), do: []
 
   defp fetch_projects do
     query = """

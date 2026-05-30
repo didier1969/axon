@@ -7,17 +7,21 @@ use crate::graph_query::ReadFreshness;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
-// ── Filesystem counters (cached 5 s) ───────────────────────────
-// REQ-AXO-901834 — TTL lowered from 60 s to 5 s. The previous 60 s
-// budget made `disk_files` + `eligible_files` (Indexation Funnel
-// panel) freeze for a full minute (cluster head R3 per session 64
-// dashboard audit), in direct contradiction with the dashboard
-// "1 s ideal, 5 s max" refresh contract. Walk cost on the operator
-// watch root (~284 k files) is ~1 s ; cached every 5 s means at most
-// 20 % of the brain push tick budget goes to the walk. If corpus
-// growth pushes walk time above 1 s, switch to incremental delta
+// ── Filesystem counters (cached 30 s) ──────────────────────────
+// REQ-AXO-901834 — TTL=30 s compromise. The audit's "5 s max"
+// contract applies to dynamic values (chunks, embeddings, per-
+// project counters) where freshness reflects real pipeline state.
+// `disk_files` + `eligible_files` are slow-moving totals over the
+// entire watch root (~284 k files on the operator host) ; the walk
+// itself takes ~1 s and SCANS the whole tree, so a 5 s TTL had
+// brain spending ~20 % of every 6 s window on this walk alone,
+// stacking on top of the dashboard SP recompute and starving
+// /readyz under indexer write load (89-105 % CPU observed,
+// post-2767150e regression triage). 30 s keeps the walk to ~3 %
+// of brain budget while staying well under the original 60 s gap.
+// Long-term : push-based incremental counter via watcher events
 // (REQ candidate).
-const FS_COUNTER_CACHE_TTL_SECS: u64 = 5;
+const FS_COUNTER_CACHE_TTL_SECS: u64 = 30;
 
 struct FsCounterSnapshot {
     disk_files: i64,
