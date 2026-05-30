@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--axo-min", type=int, default=3000)
     parser.add_argument("--ratio-min", type=float, default=5.0)
+    parser.add_argument("--coverage-max-pct", type=float, default=105.0)
     parser.add_argument("--db-url", default=None)
     parser.add_argument(
         "--allow-zero-symbol-projects",
@@ -127,6 +128,29 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(
                 f"AXO has 0 symbols of kind='{kind}' — "
                 "REQ-AXO-901827 parser fix regressed"
+            )
+
+    # Coverage_pct sanity — MIL-AXO-032 acceptance item 4. An over-
+    # 100 % coverage typically signals orphan ChunkEmbedding rows
+    # left behind by a chunk-id churn (indexer restart / truncate
+    # cycle), which the dashboard would display as a false "fully
+    # embedded" claim. Threshold 105 % allows the small lag between
+    # an embedding write and the matching chunk being committed.
+    chunk_total = int(
+        _psql_scalar(url, "SELECT count(*) FROM public.chunk") or "0"
+    )
+    emb_total = int(
+        _psql_scalar(url, "SELECT count(*) FROM public.chunkembedding") or "0"
+    )
+    if chunk_total > 0:
+        coverage_pct = (emb_total / chunk_total) * 100.0
+        if coverage_pct > args.coverage_max_pct:
+            failures.append(
+                f"coverage_pct {coverage_pct:.2f}% > {args.coverage_max_pct}% "
+                f"(emb={emb_total} chunks={chunk_total}) — "
+                "orphan ChunkEmbedding rows ; run "
+                "`DELETE FROM chunkembedding WHERE chunk_id NOT IN "
+                "(SELECT id FROM chunk)` to reconcile (acceptance 4)"
             )
 
     if failures:
