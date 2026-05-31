@@ -590,14 +590,50 @@ impl GraphStore {
             // column-not-found / table-not-found / Prepare errors
             // now surface as `Err` instead of an indistinguishable
             // empty result.
+            //
+            // Surface the rich `pg_error.message/code/hint` populated by
+            // `plugin_db_error_envelope`: the bare `_axon_plugin_error`
+            // text is just `tokio_postgres::Error::Display` ("db error")
+            // which hides the actual `column "X" does not exist` /
+            // SQLSTATE / hint that LLM callers need to self-correct.
             if res.starts_with('{') {
                 if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
                     if let Some(message) = envelope
                         .get("_axon_plugin_error")
                         .and_then(|v| v.as_str())
                     {
+                        let pg_msg = envelope
+                            .pointer("/pg_error/message")
+                            .and_then(|v| v.as_str());
+                        let pg_code = envelope
+                            .pointer("/pg_error/code")
+                            .and_then(|v| v.as_str());
+                        let pg_hint = envelope
+                            .pointer("/pg_error/hint")
+                            .and_then(|v| v.as_str());
+                        let mut detail = String::new();
+                        if let Some(m) = pg_msg {
+                            detail.push_str(m);
+                        }
+                        if let Some(c) = pg_code {
+                            if !detail.is_empty() {
+                                detail.push(' ');
+                            }
+                            detail.push_str(&format!("[SQLSTATE {c}]"));
+                        }
+                        if let Some(h) = pg_hint {
+                            if !detail.is_empty() {
+                                detail.push_str(" — ");
+                            }
+                            detail.push_str(&format!("hint: {h}"));
+                        }
+                        if detail.is_empty() {
+                            return Err(anyhow::anyhow!(
+                                "Graph plugin error: {message}"
+                            ));
+                        }
                         return Err(anyhow::anyhow!(
-                            "Graph plugin error: {message}"
+                            "Graph plugin error: {message} — {detail}"
                         ));
                     }
                 }
@@ -1061,14 +1097,43 @@ mod tests {
     #[test]
     fn query_on_ctx_returns_ok_for_genuine_zero_rows() {
         let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
-        store
-            .execute("CREATE TABLE T (id INTEGER)")
-            .unwrap();
         // Valid SQL with empty result must remain Ok("[]") — REQ-AXO-129
         // distinguishes "binder error" from "zero rows" rigorously.
+        // Uses `pg_catalog.pg_namespace` (always present, no DDL needed)
+        // so the test does not depend on the local user having CREATE
+        // privilege on `public`.
         let result = store
-            .query_json("SELECT id FROM T WHERE id = -1")
+            .query_json(
+                "SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'definitely_not_a_namespace_xyz'",
+            )
             .expect("zero-row query must return Ok, not Err");
         assert_eq!(result.trim(), "[]");
+    }
+
+    /// The plugin error envelope already carries `pg_error.message/code/hint`
+    /// (populated by `plugin_db_error_envelope`). The wrapper must surface
+    /// that detail so an LLM sees `column "label" does not exist` instead of
+    /// the opaque `db error` from `tokio_postgres::Error::Display`.
+    ///
+    /// Selects from `pg_catalog.pg_namespace` (always present, never has a
+    /// `label` column) so the test does not depend on local DDL fixtures.
+    #[test]
+    fn query_on_ctx_surfaces_pg_error_detail_for_unknown_column() {
+        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
+        let result = store.query_json("SELECT label FROM pg_catalog.pg_namespace");
+        let err = result.expect_err("unknown column must propagate as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Graph plugin error"),
+            "must keep the Graph plugin prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("label"),
+            "must surface the unknown column name from pg_error.message, got: {msg}"
+        );
+        assert!(
+            msg.contains("SQLSTATE"),
+            "must surface the SQLSTATE code, got: {msg}"
+        );
     }
 }
