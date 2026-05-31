@@ -739,11 +739,39 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     let mcp_socket_path =
         std::env::var("AXON_MCP_SOCK").unwrap_or_else(|_| "/tmp/axon-mcp.sock".to_string());
 
+    // REQ-AXO-901835 patch 3 — fail-loud sur bind collision. Avant ce
+    // patch les `fs::remove_file` ci-dessus étaient silent (`let _ =`),
+    // ce qui orphelinait le listener du voisin (brain ou indexer) si les
+    // deux processus partageaient un path identique exporté depuis le
+    // shell parent (cf. patches 1+2 commit db422574). Désormais on warn
+    // explicitement chaque fois qu'un sock préexistant est supprimé : si
+    // un peer encore vivant écoutait dessus, le warn surface dans les
+    // logs et l'opérateur sait que la collision s'est produite.
     if std::path::Path::new(&tel_socket_path).exists() {
-        let _ = fs::remove_file(&tel_socket_path);
+        match fs::remove_file(&tel_socket_path) {
+            Ok(()) => warn!(
+                socket = %tel_socket_path,
+                "telemetry socket pre-existed at boot; removed before bind (potential brain/indexer collision — verify per-role AXON_TELEMETRY_SOCK env override)"
+            ),
+            Err(err) => warn!(
+                socket = %tel_socket_path,
+                error = %err,
+                "telemetry socket pre-existed at boot but remove failed; bind may fail"
+            ),
+        }
     }
     if std::path::Path::new(&mcp_socket_path).exists() {
-        let _ = fs::remove_file(&mcp_socket_path);
+        match fs::remove_file(&mcp_socket_path) {
+            Ok(()) => warn!(
+                socket = %mcp_socket_path,
+                "mcp socket pre-existed at boot; removed before bind (potential brain/indexer collision — verify per-role AXON_MCP_SOCK env override)"
+            ),
+            Err(err) => warn!(
+                socket = %mcp_socket_path,
+                error = %err,
+                "mcp socket pre-existed at boot but remove failed; bind may fail"
+            ),
+        }
     }
 
     let tel_listener = match UnixListener::bind(&tel_socket_path) {
