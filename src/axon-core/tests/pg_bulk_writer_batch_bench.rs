@@ -107,6 +107,7 @@ fn build_batch() -> PgBulkBatch {
         contains,
         calls,
         calls_nif,
+        indexed_files: Vec::new(),
     }
 }
 

@@ -8,6 +8,7 @@ use crate::main_background;
 use axon_core::bridge::BridgeEvent;
 use axon_core::embedder::{
     current_embedding_provider_diagnostics, embedder_provider_fallback_reason,
+    embedding_lane_config_from_env,
 };
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
@@ -124,6 +125,21 @@ fn write_runtime_heartbeat_export(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown-runtime".to_string());
     let embedder_provider = current_embedding_provider_diagnostics();
+    // REQ-AXO-901836 — publish the indexer's effective lane parameters so
+    // the brain composer can surface paired indexer's worker counts /
+    // batch sizes instead of always returning its own local (brain_only,
+    // vector_workers=0) values. Source: same `embedding_lane_config_from_env`
+    // call as the indexer's own status reporter, so the heartbeat reflects
+    // exactly what this indexer instance is configured to run.
+    let indexer_lane_config = embedding_lane_config_from_env();
+    let indexer_lane_parameters = serde_json::json!({
+        "vector_workers": indexer_lane_config.vector_workers,
+        "graph_workers": indexer_lane_config.graph_workers,
+        "query_workers": indexer_lane_config.query_workers,
+        "chunk_batch_size": indexer_lane_config.chunk_batch_size,
+        "file_vectorization_batch_size": indexer_lane_config.file_vectorization_batch_size,
+        "graph_batch_size": indexer_lane_config.graph_batch_size,
+    });
     // REQ-AXO-184 #4 / REQ-AXO-185 #2: surface silent embedder fallback in
     // heartbeat's degraded_reason so operators see "embedder_provider_fallback"
     // within one tick instead of after a full probe window.
@@ -160,6 +176,7 @@ fn write_runtime_heartbeat_export(
             "effective": embedder_provider.provider_effective,
             "init_error": embedder_provider.provider_init_error,
         },
+        "lane_parameters": indexer_lane_parameters,
         "runtime_telemetry": {
             "ingress_enabled": runtime_snapshot.ingress_enabled,
             "ingress_buffered_entries": runtime_snapshot.ingress_buffered_entries,

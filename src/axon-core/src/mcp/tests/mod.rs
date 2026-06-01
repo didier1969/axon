@@ -213,13 +213,6 @@ fn create_test_server() -> McpServer {
 
 static TEST_DBS: Mutex<Vec<TestDb>> = Mutex::new(Vec::new());
 
-fn create_test_server_with_distinct_reader(db_root: &Path) -> McpServer {
-    let store = Arc::new(GraphStore::new(db_root.to_str().unwrap()).unwrap());
-    let server = McpServer::new(store);
-    attach_distinct_reader_snapshot(&server.graph_store);
-    server
-}
-
 fn assert_runtime_authority_roles(
     authority: &serde_json::Value,
     expected_process_role: AxonProcessRole,
@@ -247,87 +240,6 @@ fn assert_runtime_authority_roles(
         authority.get("topology").is_none(),
         "public runtime authority must not expose a topology selector"
     );
-}
-
-/// REQ-AXO-099 Phase 4 — process-wide mutex for the DuckDB
-/// `INSTALL json` step. The DuckDB extension cache lives in the
-/// user's home directory and is shared across DuckDB connections;
-/// concurrent INSTALL calls from parallel tests race on the cache
-/// and fail intermittently (exec returns false). Serializing
-/// INSTALL across the test process eliminates the race. After the
-/// first install the operation is a fast no-op for subsequent
-/// connections.
-fn duckdb_install_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn attach_distinct_reader_snapshot(store: &GraphStore) {
-    let db_path = store
-        .db_path
-        .as_ref()
-        .expect("disk-backed test store required for distinct reader");
-    let reader_c_path = CString::new(db_path.to_string_lossy().to_string()).unwrap();
-    let soll_path = {
-        let mut path = PathBuf::from(db_path);
-        path.set_file_name("soll.db");
-        path
-    };
-
-    unsafe {
-        let init_fn = store.pool.symbols.init_fn;
-        let exec_fn = store.pool.symbols.exec_fn;
-        let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
-        assert!(
-            !reader_ptr.is_null(),
-            "failed to initialize distinct reader"
-        );
-
-        // INSTALL/LOAD json hold the process-wide install lock so
-        // parallel tests do not corrupt the DuckDB extension cache.
-        // SET and ATTACH are connection-local so they release the
-        // lock immediately and stay parallel across tests.
-        {
-            let _install_lock = duckdb_install_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let install = CString::new("INSTALL json").unwrap();
-            assert!(
-                exec_fn(reader_ptr, install.as_ptr()),
-                "attach_distinct_reader_snapshot: INSTALL json failed (soll_path=`{}`)",
-                soll_path.display()
-            );
-            let load = CString::new("LOAD json").unwrap();
-            assert!(
-                exec_fn(reader_ptr, load.as_ptr()),
-                "attach_distinct_reader_snapshot: LOAD json failed"
-            );
-        }
-
-        let set = CString::new("SET checkpoint_threshold = '1GB'").unwrap();
-        assert!(
-            exec_fn(reader_ptr, set.as_ptr()),
-            "attach_distinct_reader_snapshot: SET checkpoint_threshold failed"
-        );
-        let attach = CString::new(format!(
-            "ATTACH '{}' AS soll",
-            soll_path.to_string_lossy().replace("'", "''")
-        ))
-        .unwrap();
-        assert!(
-            exec_fn(reader_ptr, attach.as_ptr()),
-            "attach_distinct_reader_snapshot: ATTACH soll failed (soll_path=`{}`)",
-            soll_path.display()
-        );
-
-        let mut reader_guard = store
-            .pool
-            .reader_ctx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        *reader_guard = reader_ptr;
-    }
-    store.refresh_reader_snapshot().unwrap();
 }
 
 fn now_ms_for_tests() -> u64 {

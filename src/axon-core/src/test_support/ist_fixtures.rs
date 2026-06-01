@@ -38,10 +38,10 @@
 //!   `query_json_param` reads see all inserted rows.
 //!
 //! - **No connection-divergence.** The default [`GraphStore::new`] used here
-//!   shares one DuckDB connection for writer and reader, so writes are
-//!   visible to reads immediately. Tests that exercise distinct-reader
-//!   snapshot semantics must use the existing
-//!   `create_test_server_with_distinct_reader` helper, not this module.
+//!   targets the PG-backed canonical store (post MIL-AXO-015) where
+//!   writer/reader isolation is provided by PG MVCC. Tests that need
+//!   reader-snapshot semantics should use the canonical
+//!   `crate::tests::test_helpers::create_test_db` helper.
 
 use std::sync::Arc;
 

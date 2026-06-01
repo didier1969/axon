@@ -874,7 +874,7 @@ fn test_status_graph_only_reports_semantic_drain_not_applicable() {
         );
     }
     let tempdir = tempdir().unwrap();
-    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1636,7 +1636,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     }
     service_guard::record_runtime_truth_bridge_dispatch(None);
     let tempdir = tempdir().unwrap();
-    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -2282,7 +2282,7 @@ fn test_status_reports_brain_and_indexer_authorities() {
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     let tempdir = tempdir().unwrap();
-    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let server = create_test_server();
 
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
@@ -2404,7 +2404,7 @@ fn test_status_exposes_tensorrt_ready_vector_pipeline_telemetry() {
     service_guard::record_vector_finalize_queue_wait_ms(41);
 
     let tempdir = tempdir().unwrap();
-    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -2457,7 +2457,7 @@ fn test_status_brain_exposes_indexer_runtime_telemetry_from_heartbeat() {
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     let tempdir = tempdir().unwrap();
-    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let server = create_test_server();
     let run_root = tempdir.path().join(".axon-dev").join("run-indexer");
     std::fs::create_dir_all(&run_root).unwrap();
     let heartbeat_path = run_root.join("runtime-heartbeat.json");
@@ -2577,6 +2577,171 @@ fn test_status_brain_exposes_indexer_runtime_telemetry_from_heartbeat() {
         std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
         std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
         std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+// REQ-AXO-901798 + REQ-AXO-901836 : the brain's status composer must surface
+// the paired indexer's embedder_provider AND lane_parameters from the
+// runtime heartbeat. Without this bridge the brain returns its own local
+// (always cpu / vector_workers=0 under brain_only) view and the dashboard
+// reports zero activity while the indexer is in fact running TensorRT.
+#[test]
+fn test_status_brain_surfaces_indexer_embedder_provider_and_lane_parameters_from_heartbeat() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    let tempdir = tempdir().unwrap();
+    let server = create_test_server();
+    let run_root = tempdir.path().join(".axon-dev").join("run-indexer");
+    std::fs::create_dir_all(&run_root).unwrap();
+    let heartbeat_path = run_root.join("runtime-heartbeat.json");
+    std::fs::write(
+        &heartbeat_path,
+        serde_json::to_vec_pretty(&json!({
+            "runtime_mode": "indexer_full",
+            "release_version": "0.8.0",
+            "build_id": "v0.8.0-test-901836",
+            "install_generation": "workspace",
+            "last_heartbeat_at_ms": 2024,
+            "last_good_payload_at_ms": 2024,
+            "stale_after_ms": 5000,
+            "stale": false,
+            "degraded_reason": null,
+            "runtime_truth_feed": {
+                "stale": false,
+                "observed_age_ms": 0,
+                "stale_after_ms": 5000,
+                "last_heartbeat_at_ms": 2024,
+                "last_good_payload_at_ms": 2024,
+                "degraded_reason": null
+            },
+            "embedder_provider": {
+                "requested": "tensorrt",
+                "effective": "tensorrt",
+                "init_error": null
+            },
+            "lane_parameters": {
+                "vector_workers": 5,
+                "graph_workers": 6,
+                "query_workers": 1,
+                "chunk_batch_size": 96,
+                "file_vectorization_batch_size": 24,
+                "graph_batch_size": 8
+            },
+            "runtime_telemetry": {
+                "ingress_enabled": true,
+                "ingress_buffered_entries": 0,
+                "ingress_hot_entries": 0,
+                "ingress_scan_entries": 0,
+                "claim_mode": "fast",
+                "service_pressure": "healthy",
+                "utility_first_scheduler_state": "balanced_drain",
+                "utility_first_scheduler_reason": "steady_balanced",
+                "semantic_underfeed": false,
+                "vector_chunks_embedded_cumulative": 411651,
+                "chunk_embeddings_per_second": 73.5
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", tempdir.path());
+        std::env::set_var("AXON_INSTANCE_KIND", "dev");
+        std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "brain");
+        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "0");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_brain_surfaces_indexer_embedder_provider_from_heartbeat",
+        );
+        // Keep the brain's local AXON_VECTOR_WORKERS/AXON_GRAPH_WORKERS at
+        // values that would be the WRONG answer if the override were not
+        // applied — they emulate the brain_only resource policy.
+        std::env::set_var("AXON_VECTOR_WORKERS", "0");
+        std::env::set_var("AXON_GRAPH_WORKERS", "6");
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2220)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    // 1. indexer_runtime block exposes both new fields
+    let indexer_runtime =
+        &response["data"]["runtime_authority"]["runtime_state"]["indexer_runtime"];
+    assert_eq!(indexer_runtime["available"].as_bool(), Some(true));
+    assert_eq!(
+        indexer_runtime["embedder_provider"]["effective"].as_str(),
+        Some("tensorrt"),
+        "embedder_provider.effective from heartbeat must propagate via indexer_runtime"
+    );
+    assert_eq!(
+        indexer_runtime["embedder_provider"]["requested"].as_str(),
+        Some("tensorrt")
+    );
+    assert!(indexer_runtime["embedder_provider"]["init_error"].is_null());
+    assert_eq!(
+        indexer_runtime["lane_parameters"]["vector_workers"].as_u64(),
+        Some(5),
+        "lane_parameters.vector_workers must surface indexer's truth"
+    );
+    assert_eq!(
+        indexer_runtime["lane_parameters"]["graph_workers"].as_u64(),
+        Some(6)
+    );
+    assert_eq!(
+        indexer_runtime["lane_parameters"]["chunk_batch_size"].as_u64(),
+        Some(96)
+    );
+
+    // 2. vector_pipeline_telemetry.provider uses the peer's effective label
+    let provider =
+        &response["data"]["runtime_authority"]["vector_pipeline_telemetry"]["provider"];
+    assert_eq!(
+        provider["effective_label"].as_str(),
+        Some("tensorrt"),
+        "vector_pipeline_telemetry.provider.effective_label must reflect peer indexer's runtime, not brain's local default"
+    );
+
+    // 3. resource_policy reports the peer indexer's effective values
+    let resource_policy = &response["data"]["resource_policy"];
+    assert_eq!(
+        resource_policy["embedding_provider"].as_str(),
+        Some("tensorrt"),
+        "resource_policy.embedding_provider must surface paired indexer's provider"
+    );
+    assert_eq!(
+        resource_policy["vector_workers"].as_str(),
+        Some("5"),
+        "resource_policy.vector_workers must surface paired indexer's lane_parameters.vector_workers (not brain's local AXON_VECTOR_WORKERS=0)"
+    );
+    assert_eq!(
+        resource_policy["graph_workers"].as_str(),
+        Some("6"),
+        "resource_policy.graph_workers must surface paired indexer's lane_parameters.graph_workers"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+        std::env::remove_var("AXON_INSTANCE_KIND");
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
+        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_GRAPH_WORKERS");
     }
 }
 

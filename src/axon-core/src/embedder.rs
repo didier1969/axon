@@ -76,7 +76,10 @@ pub(crate) use gpu_telemetry::clear_gpu_memory_snapshot_cache_for_tests;
 pub use provider_contract::{
     ProductionLane, ProviderResolution, ProviderStrategy, ProviderSupportRole,
 };
-#[cfg(test)]
+// REQ-AXO-901836 — brain status composer (mcp::tools_framework_runtime_status)
+// re-derives the resolution from a paired indexer's heartbeat-supplied
+// requested/effective labels so the surfaced vector_pipeline_telemetry stays
+// coherent. Keep the re-export crate-wide, not test-only.
 pub(crate) use provider_runtime::provider_resolution_for_label;
 use provider_runtime::{
     cpu_provider_effective_label, current_embedding_provider_effective, register_embedding_provider_diagnostics,

@@ -378,9 +378,9 @@ impl McpServer {
             std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
         let watcher_policy =
             std::env::var("AXON_WATCHER_POLICY").unwrap_or_else(|_| "unknown".to_string());
-        let vector_workers =
+        let local_vector_workers =
             std::env::var("AXON_VECTOR_WORKERS").unwrap_or_else(|_| "unknown".to_string());
-        let graph_workers =
+        let local_graph_workers =
             std::env::var("AXON_GRAPH_WORKERS").unwrap_or_else(|_| "unknown".to_string());
         let package_version = std::env::var("AXON_PACKAGE_VERSION")
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
@@ -797,12 +797,59 @@ impl McpServer {
             "heartbeat_age_ms": embedder_lifecycle_heartbeat_age_ms,
             "heartbeat_freshness_window_ms": EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         });
-        let embedding_provider_diagnostics = current_embedding_provider_diagnostics();
-        let embedding_provider_resolution = embedding_provider_diagnostics.resolution.clone();
-        let provider_effective_lower = embedding_provider_diagnostics
-            .provider_effective
-            .trim()
-            .to_ascii_lowercase();
+        let local_embedding_provider_diagnostics = current_embedding_provider_diagnostics();
+        // REQ-AXO-901798 / REQ-AXO-901836 — when this is the brain composer
+        // and a paired indexer publishes its embedder_provider via
+        // runtime-heartbeat.json, surface the INDEXER's truth instead of
+        // the brain's local (always cpu/unspecified) diagnostics slot.
+        let peer_embedder_provider: Option<&Value> = if use_peer_runtime {
+            runtime_authority_state
+                .pointer("/indexer_runtime/embedder_provider")
+                .filter(|value| !value.is_null())
+        } else {
+            None
+        };
+        let provider_effective_label = peer_embedder_provider
+            .and_then(|provider| {
+                provider
+                    .get("effective")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| local_embedding_provider_diagnostics.provider_effective.clone());
+        let provider_init_error = peer_embedder_provider
+            .and_then(|provider| {
+                provider
+                    .get("init_error")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .or_else(|| local_embedding_provider_diagnostics.provider_init_error.clone());
+        let provider_requested_label = peer_embedder_provider
+            .and_then(|provider| {
+                provider
+                    .get("requested")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| local_embedding_provider_diagnostics.provider_requested.clone());
+        // Re-derive resolution from the surfaced effective label so the
+        // strategy/fallback semantics stay coherent with the value LLM
+        // callers see. Local diagnostics' resolution is reused when no
+        // peer override is present.
+        let embedding_provider_resolution = if peer_embedder_provider.is_some() {
+            crate::embedder::provider_resolution_for_label(
+                &provider_requested_label,
+                &provider_effective_label,
+                false,
+                false,
+                None,
+                provider_init_error.clone(),
+            )
+        } else {
+            local_embedding_provider_diagnostics.resolution.clone()
+        };
+        let provider_effective_lower = provider_effective_label.trim().to_ascii_lowercase();
         let provider_fallback_count = local_vector_runtime_metrics
             .prepare_fallback_inline_total
             .saturating_add(local_vector_runtime_metrics.finalize_fallback_inline_total)
@@ -892,10 +939,10 @@ impl McpServer {
             "provider": {
                 "requested_strategy": embedding_provider_resolution.requested_strategy.as_str(),
                 "effective_strategy": embedding_provider_resolution.effective_strategy.as_str(),
-                "effective_label": embedding_provider_diagnostics.provider_effective,
+                "effective_label": provider_effective_label,
                 "fallback_count": provider_fallback_count,
                 "fallback_origin": embedding_provider_resolution.fallback_origin,
-                "provider_init_error": embedding_provider_diagnostics.provider_init_error,
+                "provider_init_error": provider_init_error,
                 "tensorrt_cache_dir": tensorrt_cache_dir,
                 "tensorrt_engine_cache_hit": Value::Null,
                 "recycle_count": 0
@@ -1077,9 +1124,35 @@ impl McpServer {
                     "background_budget_class": background_budget_class,
                     "gpu_access_policy": gpu_access_policy,
                     "watcher_policy": watcher_policy,
-                    "embedding_provider": embedding_provider,
-                    "vector_workers": vector_workers,
-                    "graph_workers": graph_workers
+                    // REQ-AXO-901798 / REQ-AXO-901836 — surface paired indexer's
+                    // real provider when available; otherwise keep the canonical
+                    // request for this composer's runtime_mode so brain_only
+                    // standalone callers still see "cpu" rather than the
+                    // diagnostics slot's "unspecified" default.
+                    "embedding_provider": peer_embedder_provider
+                        .and_then(|provider| {
+                            provider
+                                .get("effective")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| embedding_provider.clone()),
+                    // REQ-AXO-901836 — same override discipline for worker counts:
+                    // when the brain is composing on behalf of a paired indexer,
+                    // surface the indexer's own lane_parameters truth instead of
+                    // the brain's local AXON_VECTOR_WORKERS/AXON_GRAPH_WORKERS
+                    // env values (which under brain_only are 0/6, never the
+                    // indexer's actual full-lane settings).
+                    "vector_workers": runtime_authority_state
+                        .pointer("/indexer_runtime/lane_parameters/vector_workers")
+                        .and_then(|value| value.as_u64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| local_vector_workers.clone()),
+                    "graph_workers": runtime_authority_state
+                        .pointer("/indexer_runtime/lane_parameters/graph_workers")
+                        .and_then(|value| value.as_u64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| local_graph_workers.clone())
                 },
                 "runtime_authority": {
                     "proposed_control_model": "admission_first_stock_control",

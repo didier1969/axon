@@ -159,6 +159,7 @@ fn flush_batch_cross_table_round_trip() {
         contains: contains.clone(),
         calls: calls.clone(),
         calls_nif: calls_nif.clone(),
+        indexed_files: Vec::new(),
     };
 
     bulk_writer::flush_batch(&batch).expect("first flush_batch should succeed");
@@ -254,6 +255,7 @@ fn flush_batch_cross_table_round_trip() {
         contains: vec![],
         calls: vec![],
         calls_nif: vec![],
+        indexed_files: Vec::new(),
     };
     bulk_writer::flush_batch(&partial_batch).expect("partial-bucket batch should succeed");
 

@@ -746,55 +746,16 @@ mod expand_params_tests;
 mod tests {
     use super::ReadFreshness;
     use crate::graph::GraphStore;
-    use std::ffi::CString;
-    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
-    fn create_test_db_with_distinct_reader() -> (tempfile::TempDir, GraphStore) {
-        let tempdir = tempdir().unwrap();
-        let store = GraphStore::new(tempdir.path().to_str().unwrap()).unwrap();
-        attach_distinct_reader_snapshot(&store);
-        (tempdir, store)
-    }
-
-    fn attach_distinct_reader_snapshot(store: &GraphStore) {
-        let db_path = store
-            .db_path
-            .as_ref()
-            .expect("disk-backed test store required for distinct reader");
-        let reader_c_path = CString::new(db_path.to_string_lossy().to_string()).unwrap();
-        let soll_path = {
-            let mut path = PathBuf::from(db_path);
-            path.set_file_name("soll.db");
-            path
-        };
-        let attach_q = format!(
-            "INSTALL json; LOAD json; SET checkpoint_threshold = '1GB'; ATTACH '{}' AS soll;",
-            soll_path.to_string_lossy().replace("'", "''")
-        );
-
-        unsafe {
-            let init_fn = store.pool.symbols.init_fn;
-            let exec_fn = store.pool.symbols.exec_fn;
-            let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
-            assert!(
-                !reader_ptr.is_null(),
-                "failed to initialize distinct reader"
-            );
-            assert!(exec_fn(
-                reader_ptr,
-                CString::new(attach_q).unwrap().as_ptr()
-            ));
-
-            let mut reader_guard = store
-                .pool
-                .reader_ctx
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            *reader_guard = reader_ptr;
-        }
-        store.refresh_reader_snapshot().unwrap();
+    // REQ-AXO-901836 cleanup — post MIL-AXO-015 PG migration the legacy
+    // DuckDB ATTACH-based "distinct reader" fixture is dead code. Reader
+    // snapshot isolation is now provided by PG MVCC, exercised by the
+    // canonical `crate::tests::test_helpers::create_test_db` fixture.
+    fn create_reader_snapshot_test_store() -> GraphStore {
+        crate::tests::test_helpers::create_test_db()
+            .expect("create_test_db must succeed for reader-snapshot tests")
     }
 
     #[test]
@@ -834,7 +795,7 @@ mod tests {
 
     #[test]
     fn stale_ok_reader_requests_refresh_without_writer_fallback() {
-        let (_tempdir, store) = create_test_db_with_distinct_reader();
+        let store = create_reader_snapshot_test_store();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(7, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(5, Ordering::Relaxed);
@@ -874,7 +835,7 @@ mod tests {
 
     #[test]
     fn fresh_required_routes_stale_reads_to_writer() {
-        let (_tempdir, store) = create_test_db_with_distinct_reader();
+        let store = create_reader_snapshot_test_store();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(9, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
@@ -911,7 +872,7 @@ mod tests {
 
     #[test]
     fn fresh_preferred_stays_on_reader_and_requests_refresh() {
-        let (_tempdir, store) = create_test_db_with_distinct_reader();
+        let store = create_reader_snapshot_test_store();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
@@ -951,7 +912,7 @@ mod tests {
 
     #[test]
     fn fresh_preferred_small_recent_lag_does_not_request_refresh() {
-        let (_tempdir, store) = create_test_db_with_distinct_reader();
+        let store = create_reader_snapshot_test_store();
         let now_ms = crate::graph::GraphStore::current_epoch_ms();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(15, Ordering::Relaxed);

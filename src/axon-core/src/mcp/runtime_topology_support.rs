@@ -14,6 +14,14 @@ pub(crate) struct SplitPeerRuntimeInfo {
     pub(crate) install_generation: Option<String>,
     pub(crate) runtime_mode: Option<String>,
     pub(crate) runtime_telemetry: Option<Value>,
+    // REQ-AXO-901836 / REQ-AXO-901798 — surface indexer's authoritative
+    // provider state so brain status doesn't return its own local
+    // (always cpu/unspecified for brain_only) embedding diagnostics.
+    pub(crate) embedder_provider: Option<Value>,
+    // REQ-AXO-901836 — indexer's lane_parameters (vector_workers,
+    // graph_workers, batch sizes) surfaced via heartbeat. Brain composer
+    // overrides its own local config with these when paired.
+    pub(crate) lane_parameters: Option<Value>,
     pub(crate) runtime_state_present: bool,
 }
 
@@ -184,6 +192,23 @@ pub(crate) fn split_peer_runtime_info(
         .map(str::to_string)
         .or_else(|| runtime_state.as_ref()?.get("AXON_RUNTIME_MODE").cloned());
     let runtime_telemetry = payload.get("runtime_telemetry").cloned();
+    // REQ-AXO-901836 — the indexer writes the canonical embedder_provider
+    // block at the top of the heartbeat (see main_telemetry.rs payload).
+    // Brain MUST forward this rather than fall back to its own local
+    // diagnostics slot, which is never populated under brain_only.
+    let embedder_provider = payload
+        .get("embedder_provider")
+        .cloned()
+        .filter(|value| !value.is_null());
+    // REQ-AXO-901836 — lane_parameters block published by indexer's heartbeat.
+    // Contains the indexer's effective vector_workers / graph_workers /
+    // batch sizes. Brain forwards these so resource_policy + lane_parameters
+    // surfaces reflect the paired indexer's truth, not the brain's local
+    // (brain_only, vector_workers=0) config.
+    let lane_parameters = payload
+        .get("lane_parameters")
+        .cloned()
+        .filter(|value| !value.is_null());
 
     Some(SplitPeerRuntimeInfo {
         runtime_truth_feed,
@@ -192,6 +217,8 @@ pub(crate) fn split_peer_runtime_info(
         install_generation,
         runtime_mode,
         runtime_telemetry,
+        embedder_provider,
+        lane_parameters,
         runtime_state_present: runtime_state.is_some(),
     })
 }
