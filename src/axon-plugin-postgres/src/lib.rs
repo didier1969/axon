@@ -1,31 +1,21 @@
-//! MIL-AXO-015 P3 — PostgreSQL replacement for axon-plugin-duckdb.
-//!
-//! Mirrors the C-FFI surface of axon-plugin-duckdb so axon-core can adopt
-//! it through the existing libloading-based plugin discovery
-//! (`graph_bootstrap.rs:907`). Function symbols are renamed to a `pg_*`
-//! prefix so both plugins can coexist during the migration window.
+//! PostgreSQL-backed graph plugin: the C-FFI cdylib axon-core loads
+//! through its libloading-based plugin discovery (`graph_bootstrap.rs`).
 //!
 //! Design rules:
 //! - Sync FFI boundary, async tokio internals: each entry point hops
 //!   through a `tokio::runtime::Runtime` that the `PgPluginContext`
 //!   owns. Callers must invoke from a thread that is NOT already
 //!   executing inside another tokio runtime, exactly as the indexer /
-//!   brain worker pools do today for axon-plugin-duckdb.
+//!   brain worker pools do.
 //! - Error envelope contract (REQ-AXO-129) preserved: invalid SQL
 //!   returns a JSON object `{"_axon_plugin_error", "stage",
 //!   "sql_excerpt"}`. A genuine empty result is still `[]`.
 //! - Per-connection session setup: when a `schema_search_path` is
-//!   configured AND/OR the AGE extension is detected at init time,
-//!   every connection acquired from the pool emits the equivalent of
-//!   `LOAD 'age'; SET search_path TO <schema>, ag_catalog, public`
-//!   before running the user SQL. This is how the per-project
-//!   namespace from CPT-AXO-039 surfaces inside dynamic SQL and how
-//!   `cypher()` / `agtype` resolve unqualified per Apache AGE README
-//!   (CPT-AXO-040).
-//!
-//! Out of scope (deferred to subsequent P3 slices):
-//! - Vector parameter binding for pgvector (P4).
-//! - axon-core graph_bootstrap wiring (separate commit).
+//!   configured, every connection acquired from the pool emits
+//!   `SET search_path TO <schema>, public` before running the user SQL.
+//!   This is how the per-project namespace from CPT-AXO-039 surfaces
+//!   inside dynamic SQL. A `SET statement_timeout` always runs
+//!   (REQ-AXO-91494) so silent planner stalls surface as errors.
 
 use std::ffi::{c_char, CStr, CString};
 
@@ -39,12 +29,6 @@ pub struct PgPluginContext {
     pool: Pool,
     runtime: Runtime,
     schema_search_path: Option<String>,
-    /// Detected at init time. When true, every connection acquired
-    /// from the pool runs `LOAD 'age'` and prepends `ag_catalog` to
-    /// `search_path` so callers can write unqualified Cypher via
-    /// `cypher()`. Disabled automatically when the AGE extension is
-    /// not installed in the database.
-    age_enabled: bool,
 }
 
 fn plugin_trace_enabled() -> bool {
@@ -113,29 +97,18 @@ fn statement_timeout_ms() -> u64 {
 }
 
 /// Build the per-connection session-setup SQL, given an optional
-/// validated schema name and whether AGE is loaded in this database.
+/// validated schema name.
 ///
 /// The ordering rules:
-/// - When AGE is enabled, `LOAD 'age'` MUST run before any cypher()
-///   call; deadpool may hand out a freshly-recycled connection that
-///   has lost the load.
-/// - `ag_catalog` MUST be on `search_path` so `cypher()` and `agtype`
-///   operators resolve unqualified, per AGE README.
 /// - The project schema goes FIRST so unqualified table names
-///   (e.g. `File`) resolve to `<schema>.File` exactly as the duckdb
-///   plugin does today.
+///   (e.g. `File`) resolve to `<schema>.File`.
 /// - REQ-AXO-91494 : `SET statement_timeout` ALWAYS runs (independent
-///   of schema/AGE) so silent planner stalls surface as errors.
-fn build_session_setup_sql(schema: Option<&str>, age_enabled: bool) -> Option<String> {
+///   of schema) so silent planner stalls surface as errors.
+fn build_session_setup_sql(schema: Option<&str>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if age_enabled {
-        parts.push("LOAD 'age'".to_string());
-    }
-    let path: Vec<&str> = match (schema, age_enabled) {
-        (Some(s), true) => vec![s, "ag_catalog", "public"],
-        (Some(s), false) => vec![s, "public"],
-        (None, true) => vec!["ag_catalog", "public"],
-        (None, false) => vec![],
+    let path: Vec<&str> = match schema {
+        Some(s) => vec![s, "public"],
+        None => vec![],
     };
     if !path.is_empty() {
         parts.push(format!("SET search_path TO {}", path.join(", ")));
@@ -155,32 +128,11 @@ fn build_session_setup_sql(schema: Option<&str>, age_enabled: bool) -> Option<St
 async fn apply_session_setup(
     conn: &deadpool_postgres::Client,
     schema: &Option<String>,
-    age_enabled: bool,
 ) -> Result<(), tokio_postgres::Error> {
-    if let Some(sql) = build_session_setup_sql(schema.as_deref(), age_enabled) {
+    if let Some(sql) = build_session_setup_sql(schema.as_deref()) {
         conn.batch_execute(&sql).await?;
     }
     Ok(())
-}
-
-/// Probe the connected database for the AGE extension. Used at init
-/// to flip `age_enabled` on the context. Returns `false` on any error
-/// (treats AGE as unavailable rather than panicking the plugin).
-async fn probe_age_installed(pool: &Pool) -> bool {
-    let conn = match pool.get().await {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match conn
-        .query_opt(
-            "SELECT 1 FROM pg_extension WHERE extname = $1",
-            &[&"age"],
-        )
-        .await
-    {
-        Ok(Some(_)) => true,
-        _ => false,
-    }
 }
 
 /// `[a-zA-Z0-9_]{1,64}` — the schema check mirrors
@@ -274,24 +226,17 @@ pub unsafe extern "C" fn pg_init_db(
         }
     };
 
-    // Probe one connection so misconfigured URLs fail fast at boot,
-    // and detect whether the AGE extension is installed so subsequent
-    // session setups can opt in.
+    // Probe one connection so misconfigured URLs fail fast at boot.
     let probe = runtime.block_on(async { pool.get().await });
     if let Err(e) = probe {
         eprintln!("[pg_init_db] probe connection failed: {e}");
         return std::ptr::null_mut();
-    }
-    let age_enabled = runtime.block_on(probe_age_installed(&pool));
-    if plugin_trace_enabled() {
-        eprintln!("[pg_init_db] age_enabled={age_enabled}");
     }
 
     Box::into_raw(Box::new(PgPluginContext {
         pool,
         runtime,
         schema_search_path,
-        age_enabled,
     }))
 }
 
@@ -379,7 +324,7 @@ pub unsafe extern "C" fn pg_execute(ctx: *mut PgPluginContext, sql: *const c_cha
                 return false;
             }
         };
-        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path).await {
             eprintln!("[pg_execute] set search_path failed: {e}");
             return false;
         }
@@ -440,7 +385,7 @@ pub unsafe extern "C" fn pg_execute_param(
                 return false;
             }
         };
-        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path).await {
             eprintln!("[pg_execute_param] set search_path failed: {e}");
             return false;
         }
@@ -484,7 +429,7 @@ pub unsafe extern "C" fn pg_query_count(ctx: *mut PgPluginContext, sql: *const c
                 return -1;
             }
         };
-        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path).await {
             eprintln!("[pg_query_count] set search_path failed: {e}");
             return -1;
         }
@@ -542,7 +487,7 @@ pub unsafe extern "C" fn pg_query_json(
             Ok(c) => c,
             Err(e) => return plugin_error_envelope("acquire", sql_str, e),
         };
-        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path, ctx_ref.age_enabled).await {
+        if let Err(e) = apply_session_setup(&conn, &ctx_ref.schema_search_path).await {
             return plugin_db_error_envelope("set_search_path", sql_str, &e);
         }
 
@@ -775,32 +720,17 @@ mod tests {
         // below remain stable regardless of test-process env.
         std::env::set_var("AXON_PG_STATEMENT_TIMEOUT_MS", "30000");
 
-        // No schema, no AGE — still emits the timeout setting (REQ-AXO-91494).
+        // No schema — still emits the timeout setting (REQ-AXO-91494).
         assert_eq!(
-            build_session_setup_sql(None, false).unwrap(),
+            build_session_setup_sql(None).unwrap(),
             "SET statement_timeout TO 30000"
         );
 
-        // Schema only — preserves the duckdb plugin's prior search_path
-        // contract, then appends the timeout (REQ-AXO-91494).
+        // Schema — project schema first so unqualified table names
+        // resolve to the project namespace, then the timeout (REQ-AXO-91494).
         assert_eq!(
-            build_session_setup_sql(Some("axo"), false).unwrap(),
+            build_session_setup_sql(Some("axo")).unwrap(),
             "SET search_path TO axo, public; SET statement_timeout TO 30000"
-        );
-
-        // AGE only — `LOAD 'age'` precedes the SET, ag_catalog first
-        // so unqualified cypher() / agtype operators resolve.
-        assert_eq!(
-            build_session_setup_sql(None, true).unwrap(),
-            "LOAD 'age'; SET search_path TO ag_catalog, public; SET statement_timeout TO 30000"
-        );
-
-        // Schema + AGE — project schema first (so unqualified table
-        // names resolve to the project namespace), ag_catalog still
-        // visible for cypher() / agtype.
-        assert_eq!(
-            build_session_setup_sql(Some("axo"), true).unwrap(),
-            "LOAD 'age'; SET search_path TO axo, ag_catalog, public; SET statement_timeout TO 30000"
         );
 
         std::env::remove_var("AXON_PG_STATEMENT_TIMEOUT_MS");
@@ -813,9 +743,9 @@ mod tests {
         // timeout (test/dev override). With no other setup needed, the
         // builder returns None.
         std::env::set_var("AXON_PG_STATEMENT_TIMEOUT_MS", "0");
-        assert_eq!(build_session_setup_sql(None, false), None);
+        assert_eq!(build_session_setup_sql(None), None);
         assert_eq!(
-            build_session_setup_sql(Some("axo"), false).unwrap(),
+            build_session_setup_sql(Some("axo")).unwrap(),
             "SET search_path TO axo, public"
         );
         std::env::remove_var("AXON_PG_STATEMENT_TIMEOUT_MS");
