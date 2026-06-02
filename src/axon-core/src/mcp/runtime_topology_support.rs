@@ -6,9 +6,12 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// REQ-AXO-901859 — peer info now carries ONLY version/telemetry metadata.
+/// Indexer liveness (feed + ready) was removed from here: it is derived
+/// exclusively from the PG heartbeat via `resolve_indexer_liveness`, so a
+/// single source of truth feeds every consumer (PIL-AXO-001).
 #[derive(Debug, Clone)]
 pub(crate) struct SplitPeerRuntimeInfo {
-    pub(crate) runtime_truth_feed: RuntimeTruthFeed,
     pub(crate) release_version: Option<String>,
     pub(crate) build_id: Option<String>,
     pub(crate) install_generation: Option<String>,
@@ -18,7 +21,6 @@ pub(crate) struct SplitPeerRuntimeInfo {
     // graph_workers, batch sizes) surfaced via heartbeat. Brain composer
     // overrides its own local config with these when paired.
     pub(crate) lane_parameters: Option<Value>,
-    pub(crate) runtime_state_present: bool,
 }
 
 fn split_now_ms() -> u64 {
@@ -26,6 +28,73 @@ fn split_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// REQ-AXO-901859 — canonical freshness window for the indexer lifecycle
+/// heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`). Shared by the
+/// runtime status composer and the topology snapshot so both judge indexer
+/// liveness against the SAME threshold (PIL-AXO-001 single source of truth,
+/// no duplicated value). Tick is ~5 s; 30 s tolerates a few missed ticks.
+pub(crate) const EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+
+/// REQ-AXO-901859 — the SINGLE canonical indexer liveness verdict, derived
+/// solely from the PG heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`).
+/// There is intentionally NO file/shadow-role fallback: under separate
+/// brain/indexer processes the file feed false-negatives, and that second
+/// source is exactly what let `status` and `embedding_status` disagree
+/// (PIL-AXO-001). If the indexer has not published a fresh heartbeat it is
+/// not provably alive — say so loudly rather than infer from launch mode.
+pub(crate) struct IndexerLiveness {
+    pub(crate) feed: RuntimeTruthFeed,
+    pub(crate) ready: bool,
+    /// Fail-loud provenance: `pg_heartbeat` (fresh row), `pg_heartbeat_stale`
+    /// (row present but past the window), `no_heartbeat` (row absent).
+    pub(crate) source: &'static str,
+}
+
+/// Pure so the verdict is unit-tested without a live `GraphStore`.
+pub(crate) fn resolve_indexer_liveness(
+    now_ms: i64,
+    indexer_heartbeat_ms: Option<i64>,
+    freshness_window_ms: i64,
+) -> IndexerLiveness {
+    let window = freshness_window_ms.max(0) as u64;
+    match indexer_heartbeat_ms {
+        Some(heartbeat_ms) => {
+            let now_u = now_ms.max(0) as u64;
+            let heartbeat_u = heartbeat_ms.max(0) as u64;
+            // saturating_sub folds clock skew (future-dated heartbeat) to
+            // age 0 — a just-written row counts as fresh, not distrusted.
+            let fresh = now_u.saturating_sub(heartbeat_u) <= window;
+            let feed = RuntimeTruthFeed::from_observed_times(
+                now_u,
+                Some(heartbeat_u),
+                Some(heartbeat_u),
+                window,
+                if fresh {
+                    None::<String>
+                } else {
+                    Some("indexer_heartbeat_stale".to_string())
+                },
+            );
+            IndexerLiveness {
+                ready: fresh,
+                source: if fresh { "pg_heartbeat" } else { "pg_heartbeat_stale" },
+                feed,
+            }
+        }
+        None => IndexerLiveness {
+            feed: RuntimeTruthFeed::from_observed_times(
+                0,
+                None,
+                None,
+                window,
+                Some("indexer_heartbeat_absent".to_string()),
+            ),
+            ready: false,
+            source: "no_heartbeat",
+        },
+    }
 }
 
 pub(crate) fn split_run_root(project_root: &str, instance_kind: &str, role_slug: &str) -> PathBuf {
@@ -154,13 +223,16 @@ pub(crate) fn split_peer_runtime_info(
     let pid_path = split_pid_file_path(project_root, instance_kind, role_slug);
     let runtime_heartbeat_path =
         split_runtime_heartbeat_path(project_root, instance_kind, role_slug);
-    let (runtime_truth_feed, payload) = if let Some((feed, payload)) =
-        split_runtime_truth_feed_from_heartbeat(&runtime_heartbeat_path)
-    {
-        (feed, payload)
-    } else {
-        let feed = split_runtime_truth_feed_from_runtime_state(&runtime_state_path, &pid_path)?;
-        (feed, json!({}))
+    // REQ-AXO-901859 — only the metadata payload is kept; the file-derived
+    // truth feed is no longer surfaced (liveness = PG heartbeat alone). The
+    // `?` on the runtime-state branch preserves the prior "peer present iff a
+    // heartbeat export OR a readable runtime.env feed exists" semantics.
+    let payload = match split_runtime_truth_feed_from_heartbeat(&runtime_heartbeat_path) {
+        Some((_feed, payload)) => payload,
+        None => {
+            split_runtime_truth_feed_from_runtime_state(&runtime_state_path, &pid_path)?;
+            json!({})
+        }
     };
     let release_version = payload
         .get("release_version")
@@ -199,14 +271,12 @@ pub(crate) fn split_peer_runtime_info(
         .filter(|value| !value.is_null());
 
     Some(SplitPeerRuntimeInfo {
-        runtime_truth_feed,
         release_version,
         build_id,
         install_generation,
         runtime_mode,
         runtime_telemetry,
         lane_parameters,
-        runtime_state_present: runtime_state.is_some(),
     })
 }
 
@@ -228,4 +298,55 @@ pub(crate) fn runtime_truth_feed_snapshot(feed: &RuntimeTruthFeed) -> Value {
         "last_good_payload_at_ms": feed.last_good_payload_at_ms,
         "degraded_reason": feed.degraded_reason
     })
+}
+
+#[cfg(test)]
+mod resolve_indexer_liveness_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_heartbeat_is_ready_and_canonical() {
+        let now = 1_000_000;
+        let live =
+            resolve_indexer_liveness(now, Some(now - 3_000), EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS);
+        assert!(!live.feed.stale, "fresh heartbeat yields a non-stale feed");
+        assert!(live.feed.degraded_reason.is_none());
+        assert!(live.ready);
+        assert_eq!(live.source, "pg_heartbeat");
+    }
+
+    #[test]
+    fn stale_heartbeat_is_degraded_not_ready() {
+        let now = 1_000_000;
+        let live = resolve_indexer_liveness(
+            now,
+            Some(now - 60_000),
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        );
+        assert!(live.feed.stale);
+        assert_eq!(live.feed.degraded_reason.as_deref(), Some("indexer_heartbeat_stale"));
+        assert!(!live.ready);
+        assert_eq!(live.source, "pg_heartbeat_stale");
+    }
+
+    #[test]
+    fn absent_heartbeat_is_loud_not_silent() {
+        let live = resolve_indexer_liveness(1_000_000, None, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS);
+        assert!(live.feed.stale);
+        assert_eq!(live.feed.degraded_reason.as_deref(), Some("indexer_heartbeat_absent"));
+        assert!(!live.ready);
+        assert_eq!(live.source, "no_heartbeat");
+    }
+
+    #[test]
+    fn future_heartbeat_clock_skew_counts_fresh() {
+        let now = 1_000_000;
+        let live = resolve_indexer_liveness(
+            now,
+            Some(now + 10_000),
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        );
+        assert!(live.ready, "a just-written (skewed) heartbeat is still proof of life");
+        assert_eq!(live.source, "pg_heartbeat");
+    }
 }

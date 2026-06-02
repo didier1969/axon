@@ -746,8 +746,9 @@ impl McpServer {
         // heartbeat row (`axon_runtime.EmbedderLifecycleHeartbeat`) over
         // the brain-local singleton so the JSON reflects the process that
         // actually owns the GPU session. Same freshness gate as
-        // `embedding_status` (tools_system.rs).
-        const EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+        // `embedding_status` (tools_system.rs). REQ-AXO-901859 — single
+        // source for the window, shared with `runtime_topology_snapshot`.
+        use super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS;
         let embedder_lifecycle_heartbeat = self
             .graph_store
             .latest_lifecycle_heartbeat("indexer")

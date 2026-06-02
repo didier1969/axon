@@ -1,15 +1,13 @@
-use crate::bridge::RuntimeTruthFeed;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{
     current_runtime_shadow_role, AxonProcessRole, RuntimeTopologyStatus,
 };
 use crate::runtime_truth_contract::RuntimeFreshnessState;
-use crate::service_guard;
 use serde_json::{json, Value};
 
 use super::runtime_topology_support::{
-    runtime_truth_feed_snapshot, split_peer_runtime_info, split_run_root,
-    split_runtime_state_from_file,
+    resolve_indexer_liveness, runtime_truth_feed_snapshot, split_peer_runtime_info,
+    split_run_root, split_runtime_state_from_file, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
 };
 use super::McpServer;
 
@@ -30,8 +28,6 @@ impl McpServer {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| ".".to_string())
             });
-        let local_feed = service_guard::current_runtime_truth_feed();
-        let mut indexer_feed = local_feed.clone();
         let ist_snapshot = self.graph_store.reader_snapshot_freshness_contract();
         let reader_snapshot_diagnostics = self.graph_store.reader_snapshot_diagnostics();
         let reader_alias_direct = self.graph_store.reader_snapshot_is_writer_alias();
@@ -51,8 +47,10 @@ impl McpServer {
         // from the indexer pid + nvidia-smi, not forwarded from a raced slot.)
         let mut peer_lane_parameters = Value::Null;
         let mut brain_ready = runtime_mode.control_plane_enabled();
-        let mut indexer_ready = runtime_mode.ingestion_enabled();
 
+        // REQ-AXO-901859 — the file/shadow-role peer info is consulted ONLY
+        // for version/telemetry/lane metadata now. Indexer liveness no longer
+        // comes from here.
         let split_process_role = AxonProcessRole::from_runtime_shadow_role(&shadow_role)
             .filter(|role| matches!(role, AxonProcessRole::Brain | AxonProcessRole::Indexer));
         match split_process_role {
@@ -60,8 +58,6 @@ impl McpServer {
                 if let Some(peer) =
                     split_peer_runtime_info(&project_root, &instance_kind, "indexer")
                 {
-                    indexer_feed = peer.runtime_truth_feed.clone();
-                    indexer_ready = peer.runtime_state_present;
                     peer_runtime_version = json!({
                         "available": true,
                         "release_version": peer.release_version,
@@ -71,15 +67,6 @@ impl McpServer {
                     });
                     peer_runtime_telemetry = peer.runtime_telemetry.unwrap_or(Value::Null);
                     peer_lane_parameters = peer.lane_parameters.unwrap_or(Value::Null);
-                } else {
-                    indexer_feed = RuntimeTruthFeed::from_observed_times(
-                        0,
-                        None,
-                        None,
-                        RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS,
-                        Some("indexer_feed_unavailable"),
-                    );
-                    indexer_ready = false;
                 }
             }
             Some(AxonProcessRole::Indexer) => {
@@ -87,10 +74,33 @@ impl McpServer {
                     &split_run_root(&project_root, &instance_kind, "brain").join("runtime.env"),
                 )
                 .is_some();
-                indexer_ready = true;
             }
             _ => {}
         }
+
+        // REQ-AXO-901859 — SINGLE canonical liveness authority: the PG
+        // heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`), the same
+        // source `embedding_status` trusts. No file/shadow-role fallback —
+        // that second source is exactly what let `status` and
+        // `embedding_status` disagree (one saw a frozen file feed, the other
+        // the live heartbeat). Now every consumer reads one truth
+        // (PIL-AXO-001). If no fresh heartbeat exists the indexer is not
+        // provably alive and we say so loudly rather than infer from launch
+        // mode.
+        let indexer_heartbeat_ms = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten()
+            .map(|row| row.heartbeat_ms);
+        let indexer_liveness = resolve_indexer_liveness(
+            Self::now_unix_ms(),
+            indexer_heartbeat_ms,
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        );
+        let indexer_liveness_source = indexer_liveness.source;
+        let indexer_ready = indexer_liveness.ready;
+        let indexer_feed = indexer_liveness.feed;
 
         let indexer_feed_healthy = !indexer_feed.stale && indexer_feed.degraded_reason.is_none();
         let ist_snapshot_healthy = matches!(ist_snapshot.state, RuntimeFreshnessState::Fresh);
@@ -121,6 +131,9 @@ impl McpServer {
             "indexer_ready": status.indexer_ready,
             "system_converged": status.system_converged,
             "indexer_feed": runtime_truth_feed_snapshot(&indexer_feed),
+            // REQ-AXO-901859 — fail-loud provenance of the liveness verdict:
+            // `pg_heartbeat` / `pg_heartbeat_stale` / `no_heartbeat`.
+            "indexer_liveness_source": indexer_liveness_source,
             "indexer_runtime": {
                 "available": !peer_runtime_telemetry.is_null(),
                 "telemetry_source": if peer_runtime_telemetry.is_null() {
