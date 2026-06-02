@@ -293,6 +293,22 @@ CREATE INDEX IF NOT EXISTS file_lifecycle_project_at_idx
 CREATE INDEX IF NOT EXISTS file_lifecycle_stage_status_idx
     ON ist.FileLifecycleEvent (stage, status);
 
+-- ── FK-covering indexes (REQ-AXO-901860) ─────────────────────────────
+-- PostgreSQL does NOT auto-index the referencing side of a FOREIGN KEY.
+-- Without these, every ON DELETE CASCADE from ist.Project / ist.IndexedFile
+-- triggers a sequential scan of the child table, and FK-join lookups are
+-- unindexed. project_code FKs on the big tables (Symbol/Chunk/Edge/
+-- ChunkEmbedding) are already covered by their project-leading indexes
+-- above; these fill the remaining gaps.
+CREATE INDEX IF NOT EXISTS idx_chunk_file_path
+    ON ist.Chunk (file_path);
+CREATE INDEX IF NOT EXISTS idx_graph_projection_project
+    ON ist.GraphProjection (project_code);
+CREATE INDEX IF NOT EXISTS idx_graph_projection_state_project
+    ON ist.GraphProjectionState (project_code);
+CREATE INDEX IF NOT EXISTS idx_graph_embedding_project
+    ON ist.GraphEmbedding (project_code);
+
 -- ── NOTIFY chunk pending (vectorization signalling) ──────────────────
 CREATE OR REPLACE FUNCTION ist.fn_notify_chunk_pending() RETURNS TRIGGER AS $$
 BEGIN

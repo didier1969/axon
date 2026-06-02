@@ -794,10 +794,17 @@ async fn copy_indexed_files_in_tx(
     }
     writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
 
+    // REQ-AXO-901860: project_code is a NOT NULL FK. A3 only promotes files
+    // the scanner already enrolled as 'discovered' (with their project_code),
+    // so we recover it via a JOIN on the existing row — the INSERT attempt
+    // then carries a non-NULL project_code before ON CONFLICT flips to
+    // UPDATE. A file not yet discovered is dropped here (its chunks' FK on
+    // indexed_file would fail anyway), preserving the discovered-first flow.
     let merge_sql = "INSERT INTO indexedfile \
-             (path, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
-         SELECT path, content_hash, last_seen_ms, 'indexed', mtime_ms, size_bytes \
-             FROM _bulk_indexedfile_stage \
+             (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
+         SELECT s.path, f.project_code, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
+             FROM _bulk_indexedfile_stage s \
+             JOIN indexedfile f ON f.path = s.path \
          ON CONFLICT (path) DO UPDATE SET \
              content_hash    = EXCLUDED.content_hash, \
              last_seen_ms    = EXCLUDED.last_seen_ms, \
