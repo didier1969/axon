@@ -20,3 +20,11 @@ EXCEPTION
         RAISE NOTICE 'pg_trgm unavailable (%); soll fuzzy search disabled.', SQLERRM;
 END
 $$;
+
+-- REQ-AXO-901860: put `ist` first on the search_path for EVERY future
+-- connection of the runtime role, set HERE (before 01) so all downstream
+-- DDL + the runtime resolve IST tables unqualified while keeping the
+-- extension schema ("$user", where vector/pg_trgm live) reachable for
+-- their opclasses, and `public` last as fallback. Role-level ALTER is
+-- persistent across connection-pool resets. CURRENT_USER avoids hard-coding.
+ALTER ROLE CURRENT_USER SET search_path = ist, "$user", public;

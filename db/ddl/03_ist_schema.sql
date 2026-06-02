@@ -17,13 +17,9 @@
 -- Idempotent: safe to re-run on every startup.
 
 CREATE SCHEMA IF NOT EXISTS ist;
-SET search_path = ist, public, "$user";
--- REQ-AXO-901860: make `ist` first on the search_path for EVERY future
--- connection of the runtime role (brain + indexer). Role-level ALTER is
--- PERSISTENT — it survives connection-pool resets (unlike a per-session
--- SET), so unqualified IST references (`FROM Symbol`) resolve to ist.*
--- robustly. CURRENT_USER avoids hard-coding the role name.
-ALTER ROLE CURRENT_USER SET search_path = ist, public, "$user";
+-- Role-level search_path is set in 00_extensions.sql (before 01). This
+-- per-session SET only covers THIS file's own CREATE statements.
+SET search_path = ist, "$user", public;
 
 -- ── Project registry ─────────────────────────────────────────────────
 -- Canonical per-project root; FK target for every IST table's
