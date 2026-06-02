@@ -33,6 +33,9 @@ defmodule AxonDashboardWeb.Endpoint do
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.
   if code_reloading? do
+    # Phoenix.LiveReloader (auto browser refresh) requiert le dep
+    # phoenix_live_reload (only: :dev) — absent de mix.exs (REQ-AXO-901851
+    # follow-up). code_reloader suffit : édit → reload manuel → recompilé.
     # socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     # plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader

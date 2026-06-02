@@ -139,26 +139,18 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           </div>
         </section>
 
-        <%!-- COVERAGE SUMMARY --%>
-        <section class="col-span-12 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
-          <.kpi label="Indexed Files" value={totals_field(@dashboard_state, :files, 0) |> full_int()} tone={:neutral} />
+        <%!-- CORPUS (REQ-AXO-901850) — métriques HORS-funnel uniquement.
+             Disk/Eligible/Indexed/Chunks/Embeddings + coverage% vivent dans
+             le funnel ci-dessus ; les répéter en tuiles créait des doublons
+             (et 'Indexed Files'=files ≈ indexed+queue contredisait le funnel
+             'Indexed'=files_indexed). On ne garde ici que ce que le funnel
+             ne montre pas. --%>
+        <section class="col-span-12 grid grid-cols-2 md:grid-cols-3 gap-3">
           <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
           <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
           <.kpi
-            label="Total Chunks"
-            value={totals_field(@dashboard_state, :chunks, 0) |> full_int()}
-            tone={:neutral}
-          />
-          <.kpi
-            label="Embedded"
-            value={totals_field(@dashboard_state, :embedded, 0) |> full_int()}
-            sub={"#{:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 2)}%"}
-            tone={coverage_tone(totals_field(@dashboard_state, :coverage_pct, 0.0))}
-          />
-          <.kpi
-            label="Pending"
+            label="Pending (queue)"
             value={totals_field(@dashboard_state, :pending, 0) |> full_int()}
-            sub={"queue: #{totals_field(@dashboard_state, :pending, 0) |> full_int()}"}
             tone={pending_tone(@dashboard_state)}
           />
         </section>
@@ -472,10 +464,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp format_float(n) when is_float(n), do: :erlang.float_to_binary(n, decimals: 1)
   defp format_float(n) when is_integer(n), do: :erlang.float_to_binary(n * 1.0, decimals: 1)
   defp format_float(_), do: "0.0"
-
-  defp coverage_tone(pct) when is_number(pct) and pct >= 95.0, do: :ok
-  defp coverage_tone(pct) when is_number(pct) and pct >= 75.0, do: :neutral
-  defp coverage_tone(_), do: :warn
 
   defp pending_tone(%DashboardState{totals: nil}), do: :ok
   defp pending_tone(%DashboardState{totals: %{pending: 0}}), do: :ok

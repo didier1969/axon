@@ -40,16 +40,28 @@ if config_env() != :test do
   # telemetry but no dashboard composite. Pre-fix the dashboard pointed
   # at the indexer sock and silently received no `dashboard_state_v1`
   # events ; all KPI tiles stayed at zero.
-  {default_brain_port, default_telemetry_socket} =
+  # Source canonique = env exporté par les scripts (axon-instance.sh /
+  # axon-role-layout.sh). Le case n'est qu'un fallback hors-scripts. Évite la
+  # duplication de ports (valeurs canoniques, toujours).
+  {fallback_brain_port, default_telemetry_socket} =
     case instance_kind do
       "dev" -> {44139, "/tmp/axon-dev-brain-telemetry.sock"}
       "live" -> {44129, "/tmp/axon-live-brain-telemetry.sock"}
+    end
+
+  default_brain_port =
+    case System.get_env("AXON_BRAIN_PORT") do
+      nil -> fallback_brain_port
+      "" -> fallback_brain_port
+      port -> String.to_integer(port)
     end
 
   default_sql_url = "http://127.0.0.1:#{default_brain_port}/sql"
   default_mcp_endpoint = "http://127.0.0.1:#{default_brain_port}/mcp"
 
   config :axon_dashboard, :instance_kind, instance_kind
+  # Exposé pour l'UI (sidebar) — source unique, pas de re-hardcode ailleurs.
+  config :axon_dashboard, :brain_port, default_brain_port
 
   config :axon_dashboard, Axon.Watcher.SqlGateway,
     url: System.get_env("AXON_SQL_URL") || default_sql_url,

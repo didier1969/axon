@@ -45,8 +45,12 @@ defmodule AxonDashboardWeb.NexusComponents do
           <div class="mt-auto space-y-2">
             <.status_chip label="Brain" up={@brain_up} />
             <.status_chip label="Indexer" up={@indexer_fresh} />
+            <%!-- REQ-AXO-901850 — instance-aware, VALEURS CANONIQUES (était codé en
+                  dur 'live · MCP 44129', mentait sur le dashboard dev). instance_kind
+                  + brain_port viennent de runtime.exs (source unique, dérivée de l'env
+                  AXON_BRAIN_PORT des scripts). PG 44144 = cluster partagé (DBs distinctes). --%>
             <div class="text-[9px] text-slate-600 leading-tight pt-2 border-t border-slate-800 font-mono">
-              live · PG 44144 · MCP 44129
+              {Application.get_env(:axon_dashboard, :instance_kind, "?")} · PG 44144 · MCP {Application.get_env(:axon_dashboard, :brain_port, "?")}
             </div>
           </div>
         </aside>

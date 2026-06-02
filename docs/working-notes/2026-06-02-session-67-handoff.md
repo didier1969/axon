@@ -1,6 +1,16 @@
 # Session 67 Hand Off — 2026-06-02
 
-Audit & remédiation SOTA (directive : rendre Axon livrable, supprimer la dette sans archiver, RCA-discipline). Mode autonome end-to-end. **2 guidelines méthodologie créés cette session : GUI-PRO-106 (RCA) + GUI-PRO-107 (grille 10 lentilles).**
+Audit & remédiation SOTA (directive : rendre Axon livrable, supprimer la dette sans archiver, RCA-discipline). Mode autonome end-to-end. **4 guidelines méthodologie créés : GUI-PRO-106 (RCA) + GUI-PRO-107 (grille 10 lentilles) + GUI-PRO-108 (pas de version dans noms internes).**
+
+## ⭐ MISE À JOUR post-promotion (fin session 67)
+
+**LIVE PROMU à jour + DASHBOARD CORRIGÉ end-to-end.** Le brain live était 38 commits périmé (`v0.8.0-757`, pré-`dashboard_state_v1`) → dashboard 0/unknown. RCA prouvée (socket : 0 dashboard_state_v1 en live, présent en dev), validée dev-first, puis `promote_live_safe` → live = **`v0.8.0-795-gf1cdab19`** (HEAD, inclut correctifs s67 AGE+fuse). Vérifié **navigateur réel** :44127 : toutes tuiles peuplées (14304 files, 78326 symbols, 210115 edges, 24 projets), console clean. REQ-AXO-901848 delivered.
+
+- Promote post-check (150s MCP poll) a crié FAILED sur un succès fonctionnel → réconcilié via `--finalize-only` (sans restart). Trouvaille contract-honest #7 (REQ-901847 metadata, à rejouer : MCP flaky in-session bloquait l'écriture).
+- **NOUVELLE directive opérateur (task #11)** : le dashboard a des valeurs REDONDANTES (tuile INDEXED FILES 14304 vs funnel INDEXED 3332 contradictoire ; CHUNKS/EMBEDDED en double tuile+funnel) + ERRONÉES (coverage_pct >100% possible) + split dev/live à reconfirmer. Re-vérifier TOUT.
+- **NOUVELLE directive (task #10)** : audit cohérence/correction du pipeline complet.
+- REQ-AXO-901849 (planned) : rename labels version résiduels cat-A (pipeline_v2→pipeline) — **session fraîche** (gros diff core, ne pas précipiter).
+- Observé : live indexer redémarré (pid 7865) mais brain `brain_only`/`no_indexer_paired`/`stale` (warmup post-restart OU gap pairing brain↔indexer — à surveiller ; freshness des tools query/inspect/impact en dépend).
 
 ## Commits (vérifiés, branch feature/pipeline-sq-reorder-point)
 

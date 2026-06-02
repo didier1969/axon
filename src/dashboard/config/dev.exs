@@ -11,7 +11,10 @@ config :axon_dashboard, AxonDashboardWeb.Endpoint,
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {0, 0, 0, 0}],
   check_origin: false,
-  code_reloader: false,
+  # REQ-AXO-901851 — hot-reload code/template activé pour la vélocité de dev.
+  # ⚠️ dev ET live partagent MIX_ENV=dev (mix phx.server) → ceci s'applique
+  # AUSSI au live tant que la séparation MIX_ENV (live→prod) n'est pas faite.
+  code_reloader: true,
   debug_errors: true,
   secret_key_base: "9goHzbAlJOE1YJBZsH2rZP6dZ8xHFxQWHyt9zRQusARsCENnMsEm0ZIlO6ZK8W7A",
   watchers: [
@@ -42,18 +45,11 @@ config :axon_dashboard, AxonDashboardWeb.Endpoint,
 # configured to run both http and https servers on
 # different ports.
 
-# Reload browser tabs when matching files change.
+# Auto browser refresh (live_reload) requiert le dep phoenix_live_reload
+# (only: :dev), absent de mix.exs — REQ-AXO-901851 follow-up. code_reloader
+# ci-dessus suffit pour que les édits réapparaissent au reload manuel.
 # config :axon_dashboard, AxonDashboardWeb.Endpoint,
-#   live_reload: [
-#     web_console_logger: true,
-#     patterns: [
-#       # Static assets, except user uploads
-#       ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
-#       # Router, Controllers, LiveViews and LiveComponents
-#       ~r"lib/axon_dashboard_web/router\.ex$",
-#       ~r"lib/axon_dashboard_web/(controllers|live|components)/.*\.(ex|heex)$"
-#     ]
-#   ]
+#   live_reload: [ ... ]  # voir historique git ; réactiver après ajout du dep
 
 # Enable dev routes for dashboard and mailbox
 config :axon_dashboard, dev_routes: true
