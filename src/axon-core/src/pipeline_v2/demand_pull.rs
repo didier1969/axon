@@ -389,6 +389,72 @@ pub fn spawn_pipeline_b_demand_pull(
     metrics
 }
 
+/// Outcome of one B pull cycle — what was fed and the identity of the
+/// pending set, so [`StallTracker`] can tell a draining consumer from a
+/// stalled one.
+struct CycleOutcome {
+    had_work: bool,
+    head: Option<String>,
+    total_fed: usize,
+}
+
+/// One `pull_and_feed_b` attempt: chunks pushed + the first chunk_id of the
+/// pulled batch (`None` when nothing was pulled — backpressure or empty).
+struct PullBatch {
+    fed: usize,
+    head: Option<String>,
+}
+
+/// REQ-AXO-901862 — detect a non-draining consumer so demand-pull B backs
+/// off instead of spinning the CPU re-pulling the same `pending` chunks that
+/// never transition to `embedded`. Live incident (indexer pid 14819): 292%
+/// CPU for 2h37, zero ChunkEmbedding rows written, because B2 drained the
+/// channel without persisting (vector_workers=0 / NoOp embedder). Lenses:
+/// #4 back-pressure (yield when downstream isn't draining), #2 idempotence
+/// (re-pull of an identical set), #10 throughput (CPU burned for 0 progress).
+///
+/// Signal: `select_chunks_with_content_needing_embedding` orders
+/// deterministically, so a frozen `pending` set (nothing embedded between
+/// cycles) yields the same `(head chunk_id, count)` fingerprint.
+/// `STALL_REPEAT` identical non-empty cycles ⇒ stalled. Any genuine drain
+/// changes the set (head advances or count drops) and resets the streak.
+#[derive(Default)]
+struct StallTracker {
+    last: Option<(String, usize)>,
+    repeat: u32,
+}
+
+impl StallTracker {
+    const STALL_REPEAT: u32 = 3;
+
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Observe a completed pull cycle. `head` is the first chunk_id pulled
+    /// this cycle (`None` if nothing was pulled). Returns true once the same
+    /// non-empty fingerprint has repeated `STALL_REPEAT` times in a row.
+    fn observe(&mut self, head: Option<String>, count: usize) -> bool {
+        match head {
+            None => {
+                self.last = None;
+                self.repeat = 0;
+                false
+            }
+            Some(h) => {
+                let fp = (h, count);
+                if self.last.as_ref() == Some(&fp) {
+                    self.repeat = self.repeat.saturating_add(1);
+                } else {
+                    self.repeat = 0;
+                }
+                self.last = Some(fp);
+                self.repeat >= Self::STALL_REPEAT
+            }
+        }
+    }
+}
+
 async fn demand_pull_b_loop(
     store: &Arc<GraphStore>,
     database_url: &str,
@@ -438,7 +504,11 @@ async fn demand_pull_b_loop(
     // REQ-AXO-901810 G2 — same single-shot guard as pipeline A.
     let in_progress = Arc::new(AtomicBool::new(false));
 
-    run_pull_cycle_b(
+    // REQ-AXO-901862 — back off when the consumer (B2) isn't draining.
+    let mut stall = StallTracker::new();
+    let mut stall_warned = false;
+
+    let seed = run_pull_cycle_b(
         store,
         b_chunks_tx,
         threshold,
@@ -448,6 +518,7 @@ async fn demand_pull_b_loop(
         &in_progress,
     )
     .await;
+    let _ = stall.observe(seed.head, seed.total_fed);
 
     let mut last_pull_had_work = true;
     loop {
@@ -483,7 +554,7 @@ async fn demand_pull_b_loop(
             consecutive_empty = 0;
         }
 
-        last_pull_had_work = run_pull_cycle_b(
+        let outcome = run_pull_cycle_b(
             store,
             b_chunks_tx,
             threshold,
@@ -493,6 +564,31 @@ async fn demand_pull_b_loop(
             &in_progress,
         )
         .await;
+
+        // REQ-AXO-901862 — if the same pending set is re-pulled with no
+        // embedding progress, the consumer is stalled (NoOp / vector_workers
+        // =0 / hung embedder). Stop the 1s tight re-pull: fall back to the
+        // safety poll and warn once, so the puller can't burn the CPU for
+        // zero throughput. Resumes automatically when the set drains.
+        if stall.observe(outcome.head, outcome.total_fed) {
+            if !stall_warned {
+                warn!(
+                    fed = outcome.total_fed,
+                    backoff_secs = SAFETY_POLL_SECS,
+                    "demand-pull B: pending chunks re-pulled with no embedding \
+                     progress; consumer (B2) not draining — backing off (check \
+                     embedder provider / vector_workers). REQ-AXO-901862"
+                );
+                stall_warned = true;
+            }
+            last_pull_had_work = false;
+        } else {
+            if stall_warned && outcome.had_work {
+                info!("demand-pull B: embedding progress resumed; leaving back-off");
+            }
+            stall_warned = false;
+            last_pull_had_work = outcome.had_work;
+        }
 
         if driver.is_finished() {
             return Ok(());
@@ -509,16 +605,22 @@ async fn run_pull_cycle_b(
     consecutive_empty: &mut u32,
     metrics: &Arc<DemandPullMetrics>,
     in_progress: &Arc<AtomicBool>,
-) -> bool {
+) -> CycleOutcome {
     if in_progress
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return false;
+        return CycleOutcome {
+            had_work: false,
+            head: None,
+            total_fed: 0,
+        };
     }
     let mut had_work = false;
+    let mut head: Option<String> = None;
+    let mut total_fed = 0usize;
     loop {
-        let pulled = pull_and_feed_b(
+        let batch = pull_and_feed_b(
             store,
             b_chunks_tx,
             threshold,
@@ -527,13 +629,21 @@ async fn run_pull_cycle_b(
             metrics,
         )
         .await;
-        if pulled == 0 {
+        if head.is_none() {
+            head = batch.head;
+        }
+        total_fed += batch.fed;
+        if batch.fed == 0 {
             break;
         }
         had_work = true;
     }
     in_progress.store(false, Ordering::Release);
-    had_work
+    CycleOutcome {
+        had_work,
+        head,
+        total_fed,
+    }
 }
 
 async fn pull_and_feed_b(
@@ -543,11 +653,11 @@ async fn pull_and_feed_b(
     batch_size: usize,
     consecutive_empty: &mut u32,
     metrics: &Arc<DemandPullMetrics>,
-) -> usize {
+) -> PullBatch {
     let in_flight = b_chunks_tx.max_capacity() - b_chunks_tx.capacity();
     if in_flight >= threshold {
         metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
-        return 0;
+        return PullBatch { fed: 0, head: None };
     }
 
     metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
@@ -562,6 +672,7 @@ async fn pull_and_feed_b(
     match result {
         Ok(Ok(rows)) if !rows.is_empty() => {
             let count = rows.len();
+            let head = rows.first().map(|(id, _, _)| id.clone());
             let mut sent = 0usize;
             // Slice 6 fix — `send().await` au lieu de `try_send` :
             // les chunks sélectionnés via SELECT-with-content ne doivent
@@ -589,7 +700,7 @@ async fn pull_and_feed_b(
             if sent > 0 {
                 info!("demand-pull B: fed {sent}/{count} chunks (in_flight={in_flight}/{threshold}, backpressured by B2)");
             }
-            sent
+            PullBatch { fed: sent, head }
         }
         Ok(Ok(_)) => {
             metrics.empty_pulls_total.fetch_add(1, Ordering::Relaxed);
@@ -597,15 +708,15 @@ async fn pull_and_feed_b(
             if *consecutive_empty == IDLE_THRESHOLD {
                 info!("demand-pull B: pipeline idle ({IDLE_THRESHOLD} empty pulls)");
             }
-            0
+            PullBatch { fed: 0, head: None }
         }
         Ok(Err(err)) => {
             warn!(error = %err, "demand-pull B: SELECT failed");
-            0
+            PullBatch { fed: 0, head: None }
         }
         Err(join_err) => {
             warn!(error = %join_err, "demand-pull B: spawn_blocking panicked");
-            0
+            PullBatch { fed: 0, head: None }
         }
     }
 }
@@ -614,6 +725,42 @@ async fn pull_and_feed_b(
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    // REQ-AXO-901862 — StallTracker flags a consumer that drains the channel
+    // without persisting (same pending set re-pulled), so the puller backs off
+    // instead of spinning the CPU.
+    #[test]
+    fn stall_tracker_flags_repeated_nondraining_pull() {
+        let mut t = StallTracker::new();
+        // Same (head, count) re-pulled: stall trips on the STALL_REPEAT-th repeat.
+        assert!(!t.observe(Some("AXO:c1".into()), 1500)); // repeat=0
+        assert!(!t.observe(Some("AXO:c1".into()), 1500)); // repeat=1
+        assert!(!t.observe(Some("AXO:c1".into()), 1500)); // repeat=2
+        assert!(t.observe(Some("AXO:c1".into()), 1500)); // repeat=3 ⇒ stalled
+        assert!(t.observe(Some("AXO:c1".into()), 1500)); // stays stalled
+    }
+
+    #[test]
+    fn stall_tracker_resets_when_set_drains() {
+        let mut t = StallTracker::new();
+        for _ in 0..5 {
+            t.observe(Some("AXO:c1".into()), 1500);
+        }
+        // Head advances (lowest-token chunk embedded) ⇒ not stalled, streak reset.
+        assert!(!t.observe(Some("AXO:c2".into()), 1499));
+        assert!(!t.observe(Some("AXO:c2".into()), 1499)); // repeat=1, not yet
+    }
+
+    #[test]
+    fn stall_tracker_resets_on_empty_pull() {
+        let mut t = StallTracker::new();
+        for _ in 0..5 {
+            t.observe(Some("AXO:c1".into()), 1500);
+        }
+        // Empty pull (idle / fully drained) ⇒ reset, never reports stalled.
+        assert!(!t.observe(None, 0));
+        assert!(!t.observe(Some("AXO:c1".into()), 1500)); // fresh streak
+    }
 
     #[test]
     fn metrics_new_starts_at_zero() {
