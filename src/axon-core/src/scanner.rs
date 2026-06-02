@@ -617,6 +617,29 @@ fn persist_discovery_batch(
         "INSERT INTO Project (code, enrolled_at_ms) VALUES {} ON CONFLICT (code) DO NOTHING",
         proj_values.join(", ")
     ))?;
+    // REQ-AXO-901867 — enrich ist.Project.name / root_path from the canonical
+    // registry (soll.ProjectCodeRegistry). The discovery INSERT above only
+    // carries (code, enrolled_at_ms), leaving name/root_path blank, so the
+    // project_telemetry view (and the dashboard reading it) showed empty
+    // identity columns. Fill ONLY when empty → idempotent, never clobbers an
+    // operator-set value, and a no-op once populated. Name falls back to the
+    // project_path basename when the registry name is blank (parity with
+    // project_meta::registered_project_identities).
+    let code_list: Vec<String> = projects
+        .iter()
+        .map(|p| format!("'{}'", p.replace('\'', "''")))
+        .collect();
+    graph.execute(&format!(
+        "UPDATE ist.Project p \
+         SET name = COALESCE(NULLIF(r.project_name, ''), \
+                             NULLIF(regexp_replace(r.project_path, '^.*/', ''), ''), p.name), \
+             root_path = COALESCE(NULLIF(r.project_path, ''), p.root_path) \
+         FROM soll.ProjectCodeRegistry r \
+         WHERE upper(r.project_code) = p.code \
+           AND (p.name = '' OR p.root_path = '') \
+           AND p.code IN ({})",
+        code_list.join(", ")
+    ))?;
     // C1: mtime_ms + size_bytes enable change detection without reading content.
     // C2: WHERE clause skips UPDATE entirely when file is unchanged (zero WAL).
     // Changed file (mtime or size differ) → force status='discovered' for re-indexing.
