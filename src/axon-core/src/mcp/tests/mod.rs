@@ -102,15 +102,95 @@ impl Drop for SollSiteRootGuard {
 /// REQ-AXO-91562 Slice 2 — per-test database isolation via PG template.
 ///
 /// Each test gets a fresh database cloned from `axon_test_template`.
-/// The database is dropped when the `TestDb` guard goes out of scope.
-/// This prevents test pollution of live/dev SOLL data.
+///
+/// Lifecycle / reclamation (REQ-AXO-901848): the `TestDb` guard's `Drop`
+/// (below) issues a best-effort `dropdb`, but every guard created through
+/// `create_test_server` is parked for the test's duration in the
+/// process-lifetime `static TEST_DBS` Vec — and Rust never runs `Drop` on the
+/// contents of a `static` at process exit. Combined with `panic = "abort"` and
+/// the possibility of a SIGKILL, the `Drop` path is effectively dead for parked
+/// guards, so each run permanently leaked one database per test (727 leaked /
+/// 96 GB observed before this fix). The canonical reclamation is therefore the
+/// idempotent, connection-safe pre-run sweep [`sweep_stale_test_databases`],
+/// invoked once per process the first time a `TestDb` is created. It reclaims
+/// databases leaked by *previous* runs and is independent of how this process
+/// terminates. The `Drop` is retained only as an opportunistic fast path for
+/// the rare guard that is dropped normally.
 struct TestDb {
     db_name: String,
     pg_port: String,
 }
 
+/// REQ-AXO-901848 — reclaim `axon_test_*` databases leaked by previous test
+/// runs. Runs exactly once per test process (guarded by [`sweep_once`]) before
+/// the first database is created.
+///
+/// Concurrency safety: only databases with **zero** active backends in
+/// `pg_stat_activity` are dropped, so a database currently in use by a
+/// parallel test binary is never touched. Fresh databases created by *this*
+/// run carry unique nanosecond+thread-id names that cannot collide with the
+/// leaked names being swept, so there is no create/sweep race. The template
+/// (`axon_test_template`) and any non-test database are excluded by the
+/// `LIKE 'axon\_test\_%'` filter plus an explicit guard.
+fn sweep_stale_test_databases(pg_port: &str) {
+    // `DROP DATABASE` cannot run inside a transaction block, so a DO/loop is
+    // not an option; `\gexec` executes each generated statement as its own
+    // top-level command. ON_ERROR_STOP=0 keeps one failed drop (e.g. a
+    // database that acquired a connection between SELECT and DROP) from
+    // aborting the rest.
+    let script = "\\set ON_ERROR_STOP 0\n\
+        SELECT format('DROP DATABASE IF EXISTS %I', d.datname)\n\
+        FROM pg_database d\n\
+        WHERE d.datname LIKE 'axon\\_test\\_%'\n\
+          AND d.datname <> 'axon_test_template'\n\
+          AND NOT EXISTS (\n\
+            SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname\n\
+          )\n\
+        \\gexec\n";
+
+    let mut child = match std::process::Command::new("psql")
+        .args([
+            "-h", "127.0.0.1",
+            "-p", pg_port,
+            "-U", "axon",
+            "-d", "postgres",
+            "-X", // ignore ~/.psqlrc for deterministic behaviour
+            "-q",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        // psql unavailable (e.g. unit-only environment without PG): the sweep
+        // is best-effort, so a missing binary must not fail the test run.
+        Err(_) => return,
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        let _ = stdin.write_all(script.as_bytes());
+    }
+    let _ = child.wait();
+}
+
+/// Run [`sweep_stale_test_databases`] at most once per test process.
+fn sweep_once(pg_port: &str) {
+    static SWEEP: OnceLock<()> = OnceLock::new();
+    SWEEP.get_or_init(|| {
+        sweep_stale_test_databases(pg_port);
+    });
+}
+
 impl TestDb {
     fn create() -> Self {
+        // REQ-AXO-901848 — reclaim databases leaked by previous runs before
+        // creating this run's database. Idempotent and connection-safe.
+        let pg_port_for_sweep =
+            std::env::var("PGPORT").unwrap_or_else(|_| "44144".to_string());
+        sweep_once(&pg_port_for_sweep);
+
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -212,6 +292,76 @@ fn create_test_server() -> McpServer {
 }
 
 static TEST_DBS: Mutex<Vec<TestDb>> = Mutex::new(Vec::new());
+
+/// REQ-AXO-901848 — helper: does database `name` exist on the test cluster?
+fn test_database_exists(pg_port: &str, name: &str) -> bool {
+    let out = std::process::Command::new("psql")
+        .args([
+            "-h", "127.0.0.1",
+            "-p", pg_port,
+            "-U", "axon",
+            "-d", "postgres",
+            "-X", "-tAc",
+            &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'"),
+        ])
+        .output()
+        .expect("psql existence check failed to execute");
+    String::from_utf8_lossy(&out.stdout).trim() == "1"
+}
+
+/// REQ-AXO-901848 — regression guard for the leaked-test-database fix.
+///
+/// Creates a database that mimics a leak from a previous run (no active
+/// connection), runs the reclamation sweep, and asserts the leak is dropped
+/// while the shared `axon_test_template` is preserved. This locks in the
+/// canonical reclamation mechanism that replaces the dead `Drop` path
+/// (see [`TestDb`]).
+#[test]
+fn sweep_reclaims_leaked_test_databases_but_preserves_template() {
+    let pg_port = std::env::var("PGPORT").unwrap_or_else(|_| "44144".to_string());
+
+    // Simulate a database leaked by a previous run: a real clone of the
+    // template, with no connection held against it.
+    let leaked = format!(
+        "axon_test_sweepguard_{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let created = std::process::Command::new("createdb")
+        .args([
+            "-h", "127.0.0.1",
+            "-p", &pg_port,
+            "-U", "axon",
+            "-T", "axon_test_template",
+            &leaked,
+        ])
+        .output()
+        .expect("createdb failed to execute");
+    assert!(
+        created.status.success(),
+        "setup createdb failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        test_database_exists(&pg_port, &leaked),
+        "leaked test database should exist before the sweep"
+    );
+
+    // Reclamation: call the sweep directly (not `sweep_once`, whose
+    // process-wide guard may already be consumed by other tests).
+    sweep_stale_test_databases(&pg_port);
+
+    assert!(
+        !test_database_exists(&pg_port, &leaked),
+        "sweep must reclaim a connection-free leaked axon_test_* database"
+    );
+    assert!(
+        test_database_exists(&pg_port, "axon_test_template"),
+        "sweep must never drop the shared template database"
+    );
+}
 
 fn assert_runtime_authority_roles(
     authority: &serde_json::Value,
