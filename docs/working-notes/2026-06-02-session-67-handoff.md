@@ -64,8 +64,26 @@ Dashboard + Memgraph = produit. Benches = conserver (garde-fous perf). Seam FFI 
 ## Probes vérif prochaine session
 
 ```
-git log --oneline -7
-psql -h127.0.0.1 -p44144 -U axon -d axon_live -tAc "SELECT id,status FROM soll.node WHERE id IN ('GUI-PRO-106','GUI-PRO-107','REQ-AXO-901846','REQ-AXO-901847','REQ-AXO-901848')"
-# heartbeat racine : pourquoi missing_runtime_truth_heartbeat ? grep bridge::RuntimeTruthFeed publisher (indexer) vs consumer (brain)
-timeout 4 python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('/tmp/axon-live-brain-telemetry.sock');s.settimeout(3);print(s.recv(4000))"
+git log --oneline -10
+psql -h127.0.0.1 -p44144 -U axon -d axon_live -tAc "SELECT id,status FROM soll.node WHERE id IN ('GUI-PRO-106','GUI-PRO-107','GUI-PRO-108','REQ-AXO-901846','REQ-AXO-901847','REQ-AXO-901848','REQ-AXO-901849','REQ-AXO-901850','REQ-AXO-901851')"
 ```
+
+## ⭐⭐ SUITE post-promotion (fin de session 67)
+
+**LIVE PROMU** `v0.8.0-795` (commit `e65d52ab` inclus à promouvoir aussi). Dashboard alimenté vérifié navigateur. Commits ajoutés : `7480f137` (fuse), `f1cdab19` (handoff), `e65d52ab` (dashboard dedupe+canonical+hot-reload).
+
+**Audit correction dashboard (#11) — fait :**
+- **Split dev↔live VÉRIFIÉ SÛR** : contamination impossible par défaut — socket per-instance + SqlGateway `allow_cross_instance_fallback:false` fail-loud (REQ-901800/901802) + **aucun Ecto Repo** (retiré REQ-901801 / PIL-AXO-001, dashboard owns no canonical state). Seule fuite = label sidebar codé en dur « live·MCP44129 » → corrigé instance-aware + **valeurs canoniques** (instance_kind + brain_port via env AXON_BRAIN_PORT). `priv/repo/migrations` = résidus morts Ecto à nettoyer.
+- **Redondances supprimées** : tuiles Indexed Files / Total Chunks / Embedded (dupliquaient funnel) → tuiles = hors-funnel (Symbols/Edges/Pending). coverage_pct déjà clampé ≤100% (pas un bug). defp coverage_tone mort supprimé.
+- **Ecto** : NE PAS réintroduire (PIL-001 + ajouterait un risque split). Réponse à « mieux avec ecto ? » = non.
+- **Hot-reload dev** : `code_reloader:true` activé (édits réapparaissent au reload). live_reload auto-refresh = follow-up (ajouter dep `phoenix_live_reload only::dev`). Sur LIVE : à NE PAS activer (anti-pattern prod) ; vraie correction = séparer MIX_ENV (live→prod, dev→dev), REQ-901851.
+
+**ROOT CAUSE valeurs « non fiables » (mode brain_only / chunks_sec 0 / provider cpu)** : le dashboard source l'état LOCAL du brain (brain_only, n'embed pas) au lieu de l'INDEXER. Le heartbeat indexer live dit `effective:tensorrt` (GPU OK post-promote) mais le dashboard montre le provider brain-local `cpu`. **FIX (prochain P1, EN COURS, non commité)** : `compose_dashboard_state_v1` (dashboard_state.rs) + main_telemetry.rs doivent sourcer provider/runtime_mode/rates depuis `projected_indexer_runtime_from_heartbeat()` (déjà lu par le brain) quand brain_only + indexer pairé. C'est le slice concret de DEC-AXO-901626 (observable runtime truth) qui corrige aussi freshness-stale.
+
+**EXIGENCE OPÉRATEUR (3 valeurs compute distinctes, pas un seul 'GPU/CPU' ambigu)** : le dashboard doit indiquer SÉPARÉMENT le compute de : (1) **Brain** = CPU (n'embed pas) ; (2) **Pipeline A** (A1/A2/A3 graphe/chunks/FTS) = CPU ; (3) **Pipeline B** (B1/B2/B3 embedding) = GPU/tensorrt (ou cpu si fallback, depuis heartbeat indexer embedder_provider.effective). Le header actuel « GPU cpu » conflate les trois et montre le cpu brain-local → trompeur. Source : heartbeat indexer (B) + rôle local (brain) + nature des stages (A=CPU par design).
+
+**SOLL ajoutés session 67** : GUI-PRO-106 (RCA), GUI-PRO-107 (10 lentilles), GUI-PRO-108 (no version interne), REQ-901841/843/845/846/847/848/849/850/851. MIL-027 réévalué (metadata).
+
+**Prochaines P1 (ordre)** : (1) slice DEC-901626 dashboard-from-indexer-heartbeat (provider/mode/rates + freshness) — brain-side, rebuild+promote ; (2) re-promouvoir live avec e65d52ab (dashboard dedupe visible) ; (3) GPU : confirmer indexer utilise vraiment le GPU (nvidia-smi pid actif pendant embedding) ; (4) REQ-901849 rename pipeline_v2→pipeline (session fraîche) ; (5) #2 DuckDB comments + priv/repo/migrations morts ; (6) #3/#10 audit structurel IST (gated freshness) ; (7) #4 dead_code.
+
+**Runtime @ handoff** : live `v0.8.0-795` UP (brain 44129 + indexer 44130 effective:tensorrt + dashboard 44127). Dev STOPPÉ (libéré). PG 44144 sain. Arbre propre.
