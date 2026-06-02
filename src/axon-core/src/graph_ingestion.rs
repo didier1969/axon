@@ -1042,6 +1042,13 @@ impl GraphStore {
         };
         use std::collections::HashSet;
 
+        // REQ-AXO-901860 — skip the "UNK" sentinel (unregistered file) so a
+        // single-file enrol can't pollute an UNK bucket or poison the writer
+        // tx on the NOT NULL project_code FK. Mirrors upsert_graph_v2_batch.
+        if project_code == "UNK" {
+            return Ok(Vec::new());
+        }
+
         // REQ-AXO-271 slice 2k : PG canonical only. The legacy SQL
         // relation render block (render_contains_pg / render_calls_pg /
         // render_calls_nif_pg) was gated on `!skip_legacy_relations`
@@ -1156,6 +1163,7 @@ impl GraphStore {
             calls: calls_rows,
             calls_nif: calls_nif_rows,
             indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms, last_seen_ms, content.len() as i64)],
+            project_code: project_code.to_string(),
         };
         crate::postgres::bulk_writer::flush_batch(&batch)?;
         Ok(chunk_ids_emitted)
@@ -1192,6 +1200,16 @@ impl GraphStore {
 
         if files.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // REQ-AXO-901860 — unregistered files resolve to the "UNK" sentinel
+        // (pipeline_v2_runtime resolver fallback). project_code is now a NOT
+        // NULL FK to ist.Project, so writing UNK rows would either resurrect
+        // the "UNK" bucket the refonte deleted or fail the FK and poison the
+        // pooled writer connection (25P02 cascade). Skip cleanly — the
+        // resolver already logged the resolution failure (fail-loud, graceful).
+        if project_code == "UNK" {
+            return Ok(files.iter().map(|_| Vec::new()).collect());
         }
 
         // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph_v2).
@@ -1372,6 +1390,7 @@ impl GraphStore {
             calls: calls_rows,
             calls_nif: calls_nif_rows,
             indexed_files: indexed_file_rows,
+            project_code: project_code.to_string(),
         };
         crate::postgres::bulk_writer::flush_batch(&batch)?;
         Ok(chunk_ids_per_file)

@@ -416,6 +416,15 @@ pub struct PgBulkBatch {
     pub calls: Vec<RelationRow>,
     pub calls_nif: Vec<RelationRow>,
     pub indexed_files: Vec<(String, String, i64, i64, i64)>,
+    /// REQ-AXO-901860 — the single project_code this batch belongs to
+    /// (A3 groups by resolved project_code, one group per flush). The
+    /// writer uses it to UPSERT the `ist.Project` FK parent first and to
+    /// stamp `ist.IndexedFile.project_code` directly, so a file reaching
+    /// A3 before the scanner enrolled it still satisfies the NOT NULL FK
+    /// instead of poisoning the whole writer transaction with a FK
+    /// violation (25P02 cascade). Empty only for the legacy single-row
+    /// entrypoints that never carry a batch.
+    pub project_code: String,
 }
 
 impl PgBulkBatch {
@@ -480,6 +489,28 @@ async fn flush_batch_async(
         .await
         .context("bulk_writer batch begin tx")?;
 
+    // REQ-AXO-901860 — guarantee the FK parents exist before any child row.
+    // Symbol / Chunk / IndexedFile all carry a NOT NULL project_code FK to
+    // ist.Project; Chunk additionally FKs ist.IndexedFile(path). A file that
+    // reaches A3 before the scanner enrolled it (the bootstrap walk feeds A1
+    // directly) used to fail the Symbol/Chunk insert with a FK violation,
+    // aborting the tx and poisoning the pooled connection — a 25P02 cascade
+    // that blocked embeddings, the heartbeat UPSERT, and dashboard_state for
+    // every project sharing the connection. The writer now owns its FK
+    // parents: ensure ist.Project, then ist.IndexedFile, before the children.
+    if !batch.project_code.is_empty() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO Project (code, enrolled_at_ms) VALUES ($1, $2) \
+             ON CONFLICT (code) DO NOTHING",
+            &[&batch.project_code, &now_ms],
+        )
+        .await
+        .context("bulk_writer batch ensure ist.Project FK parent")?;
+    }
+    if !batch.indexed_files.is_empty() {
+        copy_indexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
+    }
     if !batch.symbols.is_empty() {
         let vec_type = vec_type_opt
             .as_ref()
@@ -506,9 +537,6 @@ async fn flush_batch_async(
             edge_rows.push(("CALLS_NIF", r));
         }
         copy_edges_in_tx(&tx, &edge_rows).await?;
-    }
-    if !batch.indexed_files.is_empty() {
-        copy_indexed_files_in_tx(&tx, &batch.indexed_files).await?;
     }
 
     tx.commit().await.context("bulk_writer batch commit")?;
@@ -759,6 +787,7 @@ async fn copy_edges_in_tx(
 async fn copy_indexed_files_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     rows: &[(String, String, i64, i64, i64)],
+    project_code: &str,
 ) -> Result<()> {
     let stage_ddl = "CREATE TEMP TABLE _bulk_indexedfile_stage (\
             path TEXT NOT NULL,\
@@ -794,17 +823,19 @@ async fn copy_indexed_files_in_tx(
     }
     writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
 
-    // REQ-AXO-901860: project_code is a NOT NULL FK. A3 only promotes files
-    // the scanner already enrolled as 'discovered' (with their project_code),
-    // so we recover it via a JOIN on the existing row — the INSERT attempt
-    // then carries a non-NULL project_code before ON CONFLICT flips to
-    // UPDATE. A file not yet discovered is dropped here (its chunks' FK on
-    // indexed_file would fail anyway), preserving the discovered-first flow.
+    // REQ-AXO-901860: project_code is a NOT NULL FK to ist.Project. A3 owns
+    // its FK parents (the ist.Project row is UPSERTed first in
+    // flush_batch_async), so the IndexedFile row is stamped with the batch's
+    // resolved project_code directly. The previous JOIN-recovery against an
+    // already-discovered IndexedFile row silently DROPPED any file the
+    // scanner hadn't enrolled yet — the bootstrap walk feeds A1 directly, so
+    // those files reached A3 first and their chunks then failed the
+    // chunk_file_path FK. ON CONFLICT keeps an existing row's project_code
+    // (DO UPDATE doesn't touch it) so a scanner-discovered file is unaffected.
     let merge_sql = "INSERT INTO indexedfile \
              (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
-         SELECT s.path, f.project_code, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
+         SELECT s.path, $1, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
              FROM _bulk_indexedfile_stage s \
-             JOIN indexedfile f ON f.path = s.path \
          ON CONFLICT (path) DO UPDATE SET \
              content_hash    = EXCLUDED.content_hash, \
              last_seen_ms    = EXCLUDED.last_seen_ms, \
@@ -813,7 +844,7 @@ async fn copy_indexed_files_in_tx(
              status          = 'indexed', \
              retry_count     = 0, \
              last_attempt_ms = NULL";
-    tx.batch_execute(merge_sql)
+    tx.execute(merge_sql, &[&project_code])
         .await
         .context("bulk_writer indexedfile stage merge")?;
     Ok(())
@@ -913,6 +944,7 @@ mod tests {
                 project_code: "AXO".to_string(),
             }],
             indexed_files: vec![],
+            project_code: "AXO".to_string(),
         };
         assert!(!b.is_empty());
         assert_eq!(b.row_count(), 4);
