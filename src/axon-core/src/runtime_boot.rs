@@ -891,7 +891,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // REQ-AXO-901658 — wire the `ist_mutated` LISTEN/NOTIFY consumer that
     // was DEFINED (REQ-AXO-91487) but never spawned. The PG triggers in
     // `db/ddl/05_ist_notify.sql` fire `pg_notify('ist_mutated', ...)`
-    // on every `public.symbol` / `public.edge` mutation. The listener
+    // on every `ist.symbol` / `ist.edge` mutation. The listener
     // evicts the affected project from the process `IstSnapshotCache` ;
     // the next MCP call cold-loads a fresh CSR snapshot from PG.
     //

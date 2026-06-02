@@ -1683,12 +1683,12 @@ impl McpServer {
         limit: usize,
     ) -> Vec<EntryCandidate> {
         // REQ-AXO-901653 slice-5d — public.File dropped ; project_code per
-        // file derives from public.Chunk (canonical pivot post pipeline_v2).
+        // file derives from ist.Chunk (canonical pivot post pipeline_v2).
         let path_match = Self::path_match_sql(path_hints, "c.file_path");
         let term_match = Self::term_match_sql(terms, "c.file_path");
         let query = format!(
             "SELECT DISTINCT c.file_path, COALESCE(c.project_code, 'unknown') \
-             FROM public.Chunk c \
+             FROM ist.Chunk c \
              WHERE c.file_path IS NOT NULL \
                AND ({path_match} OR {term_match}){project_filter} \
              LIMIT {limit}",
@@ -1736,7 +1736,7 @@ impl McpServer {
             return Vec::new();
         }
         // REQ-AXO-299 / MIL-AXO-017 slice 5 : CONTAINS legacy table superseded
-        // by public.Edge (REQ-AXO-295) with relation_type='contains'. A3
+        // by ist.Edge (REQ-AXO-295) with relation_type='contains'. A3
         // dual-writes the relation since REQ-AXO-297 slice 3.
         let values = file_paths
             .iter()
@@ -1745,7 +1745,7 @@ impl McpServer {
             .join(", ");
         let query = format!(
             "SELECT target_id, source_id \
-             FROM public.Edge \
+             FROM ist.Edge \
              WHERE relation_type = 'CONTAINS' \
                AND source_id IN ({values}){project_filter}",
             project_filter = Self::sql_project_filter_for_fields(project, &["project_code"]),
@@ -2183,7 +2183,7 @@ impl McpServer {
 
     /// DEC-AXO-093 / REQ-AXO-324 — FTS modality for hybrid retrieval.
     ///
-    /// Queries `public.Chunk.content_tsv` (GIN-indexed by MIL-AXO-017
+    /// Queries `ist.Chunk.content_tsv` (GIN-indexed by MIL-AXO-017
     /// slice 4 / REQ-AXO-292) via `websearch_to_tsquery` so operators
     /// can pass natural-language questions, multi-word phrases, or
     /// boolean operators interchangeably. Ranked by `ts_rank_cd`
@@ -2224,9 +2224,9 @@ impl McpServer {
             return Vec::new();
         }
         let escaped_question = Self::escape_sql(trimmed);
-        // `public.Chunk` carries `file_path` directly — no need to
+        // `ist.Chunk` carries `file_path` directly — no need to
         // join the legacy `CONTAINS` table (which was retired by
-        // MIL-AXO-017 slice 6 in favour of `public.Edge` with
+        // MIL-AXO-017 slice 6 in favour of `ist.Edge` with
         // relation_type='CONTAINS'). Filter on `c.project_code` only.
         let project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]);
         // websearch_to_tsquery with the `english` dictionary matches
@@ -2247,7 +2247,7 @@ impl McpServer {
                     COALESCE(c.chunk_part_count, 1), \
                     COALESCE(c.chunk_path, '1/1'), \
                     ts_rank_cd(c.content_tsv, q.tsq) AS fts_score \
-             FROM public.Chunk c \
+             FROM ist.Chunk c \
              CROSS JOIN q \
              WHERE c.content_tsv @@ q.tsq AND q.tsq IS NOT NULL{project_filter} \
              ORDER BY ts_rank_cd(c.content_tsv, q.tsq) DESC \

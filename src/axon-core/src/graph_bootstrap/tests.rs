@@ -17,7 +17,7 @@ fn brain_reader_only_refresh_opens_late_and_republished_ist_replica() {
     let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
     indexer
         .execute(
-            "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+            "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
              VALUES ('/tmp/late-reader.txt', 'hash-1', 1)",
         )
         .unwrap();
@@ -31,13 +31,13 @@ fn brain_reader_only_refresh_opens_late_and_republished_ist_replica() {
         crate::runtime_truth_contract::RuntimeFreshnessState::Fresh
     ));
     let raw = brain
-        .query_json_on_reader("SELECT count(*) FROM public.IndexedFile")
+        .query_json_on_reader("SELECT count(*) FROM ist.IndexedFile")
         .unwrap();
     assert!(raw.contains("1"), "{raw}");
 
     indexer
         .execute(
-            "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+            "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
              VALUES ('/tmp/late-reader-2.txt', 'hash-2', 2)",
         )
         .unwrap();
@@ -48,7 +48,7 @@ fn brain_reader_only_refresh_opens_late_and_republished_ist_replica() {
         "brain should reopen the IST reader after indexer republishes it"
     );
     let raw = brain
-        .query_json_on_reader("SELECT count(*) FROM public.IndexedFile")
+        .query_json_on_reader("SELECT count(*) FROM ist.IndexedFile")
         .unwrap();
     assert!(raw.contains("2"), "{raw}");
 

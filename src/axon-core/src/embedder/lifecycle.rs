@@ -2,8 +2,8 @@
 //!
 //! `EmbedderRuntimeState` is a process-wide set of chunk_ids known to need
 //! a fresh embedding. Pipeline A3 marks chunks `pending` pre-commit when
-//! it writes new `public.Chunk` rows, and pipeline B3 marks them
-//! `embedded` post-commit after the matching `public.ChunkEmbedding`
+//! it writes new `ist.Chunk` rows, and pipeline B3 marks them
+//! `embedded` post-commit after the matching `ist.ChunkEmbedding`
 //! row lands. `retrieve_context` consults `pending_subset` to expose a
 //! cheap freshness gate without an extra DB round-trip.
 //!
@@ -72,12 +72,12 @@ impl EmbedderRuntimeState {
     }
 
     /// Idempotent. Called by A3 pre-commit when a new or content-changed
-    /// `public.Chunk` row is about to be written.
+    /// `ist.Chunk` row is about to be written.
     pub fn mark_pending(&self, chunk_id: impl Into<String>) {
         self.pending.write().insert(chunk_id.into());
     }
 
-    /// Idempotent. Called by B3 post-commit after `public.ChunkEmbedding`
+    /// Idempotent. Called by B3 post-commit after `ist.ChunkEmbedding`
     /// INSERT succeeds. A chunk_id absent from the set is a no-op (the
     /// reconcile loop or the LISTEN task may have already cleared it).
     pub fn mark_embedded(&self, chunk_id: &str) {

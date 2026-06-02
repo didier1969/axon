@@ -594,24 +594,39 @@ fn persist_discovery_batch(
         return Ok(());
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
+    // REQ-AXO-901860: IndexedFile.project_code is a NOT NULL FK to
+    // ist.Project, so every project this batch references must exist BEFORE
+    // the file rows. Enrol the distinct projects first (idempotent).
+    let mut projects: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut values = Vec::with_capacity(batch.len());
-    for (path, _project, size, mtime) in batch {
+    for (path, project, size, mtime) in batch {
         let safe_path = path.replace('\'', "''");
+        let safe_project = project.replace('\'', "''");
+        projects.insert(project.as_str());
         // mtime from scanner is seconds, convert to ms for consistency
         let mtime_ms = *mtime * 1000;
         values.push(format!(
-            "('{safe_path}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
+            "('{safe_path}', '{safe_project}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
         ));
     }
+    let proj_values: Vec<String> = projects
+        .iter()
+        .map(|p| format!("('{}', {now_ms})", p.replace('\'', "''")))
+        .collect();
+    graph.execute(&format!(
+        "INSERT INTO Project (code, enrolled_at_ms) VALUES {} ON CONFLICT (code) DO NOTHING",
+        proj_values.join(", ")
+    ))?;
     // C1: mtime_ms + size_bytes enable change detection without reading content.
     // C2: WHERE clause skips UPDATE entirely when file is unchanged (zero WAL).
     // Changed file (mtime or size differ) → force status='discovered' for re-indexing.
     // Unchanged indexed file → no row update at all.
     let sql = format!(
         "INSERT INTO IndexedFile \
-             (path, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count, last_attempt_ms) \
+             (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count, last_attempt_ms) \
          VALUES {} \
          ON CONFLICT (path) DO UPDATE SET \
+             project_code  = EXCLUDED.project_code, \
              discovered_ms = EXCLUDED.discovered_ms, \
              last_seen_ms  = EXCLUDED.last_seen_ms, \
              mtime_ms      = EXCLUDED.mtime_ms, \

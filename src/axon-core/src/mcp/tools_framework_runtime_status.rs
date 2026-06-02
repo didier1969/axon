@@ -136,7 +136,7 @@ impl McpServer {
             || runtime_mode.semantic_workers_enabled()
         {
             self.graph_store
-                .query_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
+                .query_count("SELECT count(DISTINCT file_path) FROM ist.Chunk")
                 .unwrap_or(0) as usize
         } else {
             0
@@ -207,7 +207,7 @@ impl McpServer {
         let total_file_count =
             if runtime_mode.ingestion_enabled() || runtime_mode.semantic_workers_enabled() {
                 self.graph_store
-                    .query_count("SELECT count(*) FROM public.IndexedFile")
+                    .query_count("SELECT count(*) FROM ist.IndexedFile")
                     .unwrap_or(0) as usize
             } else {
                 0
@@ -215,8 +215,8 @@ impl McpServer {
         let vector_ready_depth = if runtime_mode.semantic_workers_enabled() {
             self.graph_store
                 .query_count(
-                    "SELECT count(DISTINCT c.file_path) FROM public.Chunk c \
-                     JOIN public.ChunkEmbedding e ON e.chunk_id = c.id",
+                    "SELECT count(DISTINCT c.file_path) FROM ist.Chunk c \
+                     JOIN ist.ChunkEmbedding e ON e.chunk_id = c.id",
                 )
                 .unwrap_or(0) as usize
         } else {
@@ -1343,7 +1343,7 @@ impl McpServer {
 
     // REQ-AXO-91484 — surface per-project/per-language call-graph coverage so
     // operators (and the next-session LLM) can spot parser regressions like
-    // "Rust fns=N, outgoing_calls=0" without manually grepping public.edge.
+    // "Rust fns=N, outgoing_calls=0" without manually grepping ist.edge.
     // Lang derived from CONTAINS source_id extension (read-only SQL, one round
     // trip, <50ms budget).
     pub(crate) fn ist_call_graph_coverage_snapshot(&self) -> Value {
@@ -1417,17 +1417,17 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
                   WHEN e.source_id LIKE '%.ts' THEN 'typescript' \
                   ELSE NULL \
                 END AS lang \
-         FROM public.edge e WHERE e.relation_type = 'CONTAINS'\
+         FROM ist.edge e WHERE e.relation_type = 'CONTAINS'\
        ), fn_per AS (\
          SELECT sf.project_code, sf.lang, COUNT(*) AS fns \
          FROM symbol_file sf \
-         JOIN public.symbol s ON s.id = sf.symbol_id \
+         JOIN ist.symbol s ON s.id = sf.symbol_id \
          WHERE sf.lang IS NOT NULL AND s.kind IN ('function','method') \
          GROUP BY sf.project_code, sf.lang\
        ), calls_per AS (\
          SELECT sf.project_code, sf.lang, COUNT(*) AS outgoing_calls \
          FROM symbol_file sf \
-         JOIN public.edge e ON e.source_id = sf.symbol_id AND e.relation_type = 'CALLS' \
+         JOIN ist.edge e ON e.source_id = sf.symbol_id AND e.relation_type = 'CALLS' \
          WHERE sf.lang IS NOT NULL \
          GROUP BY sf.project_code, sf.lang\
        ) SELECT \
@@ -1441,7 +1441,7 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
 impl McpServer {
     /// REQ-AXO-231 — staleness magnitude diagnostic.
     /// REQ-AXO-901653 slice-5c — migrated from `public.File` (dropped) to
-    /// `public.IndexedFile` (pipeline_v2 canonical). `last_seen_ms` is the
+    /// `ist.IndexedFile` (pipeline_v2 canonical). `last_seen_ms` is the
     /// pipeline_v2 ingestion timestamp. Staleness here means : how far is
     /// the indexer behind the most-recent ingestion ? Returns 0 stale files
     /// when IndexedFile keeps pace (pipeline_v2 writes in-line ; the legacy
@@ -1452,7 +1452,7 @@ impl McpServer {
                      '0'::text AS modified_count, \
                      '0'::text AS oldest_age_secs, \
                      ''::text AS sample_paths_pipe \
-                   FROM public.IndexedFile";
+                   FROM ist.IndexedFile";
         let json = self
             .graph_store
             .query_json(sql)

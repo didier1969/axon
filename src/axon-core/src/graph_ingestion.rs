@@ -800,7 +800,7 @@ impl GraphStore {
     // `count_graph_wip_files` deleted ; queried public.File status +
     // graph_ready + file_stage columns. Pipeline-v2 has no
     // status='pending'/'indexing' phase ; chunks land directly in
-    // public.Chunk via A3.
+    // ist.Chunk via A3.
 
     /// REQ-AXO-289 S3c — UPSERT a row into the v2 watcher filter table
     /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent via
@@ -835,14 +835,14 @@ impl GraphStore {
     /// graph + chunks + FTS persistence. All artefacts a parsed file
     /// produces land in ONE PG transaction:
     ///
-    ///   * `public.Symbol` (UPSERT, idempotent)
+    ///   * `ist.Symbol` (UPSERT, idempotent)
     ///   * AGE Symbol + File vertex enrichment (under PG)
     ///   * `CONTAINS` / `CALLS` / `CALLS_NIF` edges (SQL + AGE dual-write)
-    ///   * `public.Chunk` — full `content` text stored so the
+    ///   * `ist.Chunk` — full `content` text stored so the
     ///     REQ-AXO-292 `content_tsv` GENERATED column populates the
     ///     GIN FTS index automatically. Lexical retrieval works
     ///     CPU-only, no GPU dependency.
-    ///   * `public.IndexedFile(path, content_hash, last_seen_ms)`
+    ///   * `ist.IndexedFile(path, content_hash, last_seen_ms)`
     ///
     /// **Session 19 pivot** (operator critique 2026-05-12 post-S3d):
     /// putting chunking in B1 made FTS dependent on the GPU lane having
@@ -1046,7 +1046,7 @@ impl GraphStore {
         // relation render block (render_contains_pg / render_calls_pg /
         // render_calls_nif_pg) was gated on `!skip_legacy_relations`
         // which is always false under PG → that whole block was dead
-        // code. `public.Edge` (REQ-AXO-295 / REQ-AXO-297) is the sole
+        // code. `ist.Edge` (REQ-AXO-295 / REQ-AXO-297) is the sole
         // structural edge storage.
         let mut symbol_rows: Vec<SymbolRow> = Vec::new();
         let mut chunk_rows: Vec<ChunkRow> = Vec::new();
@@ -1196,7 +1196,7 @@ impl GraphStore {
 
         // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph_v2).
         // legacy relation render block + public.file fallback gate
-        // collapsed below ; `public.Edge` (REQ-AXO-295 / REQ-AXO-297) is
+        // collapsed below ; `ist.Edge` (REQ-AXO-295 / REQ-AXO-297) is
         // the sole structural edge storage.
 
         // Per-file chunk_ids preserved for the return value.
@@ -1485,8 +1485,8 @@ impl GraphStore {
     }
 
     /// REQ-AXO-289 S4c — Pipeline-v2 B1 cold-start poll: return up to
-    /// `limit` chunk_ids that exist in `public.Chunk` but have no
-    /// matching `public.ChunkEmbedding` row for the canonical model.
+    /// `limit` chunk_ids that exist in `ist.Chunk` but have no
+    /// matching `ist.ChunkEmbedding` row for the canonical model.
     ///
     /// Run by B1 at indexer boot, and once after any
     /// brain-only-to-indexer reactivation, to rattrape chunks that
@@ -1551,7 +1551,7 @@ impl GraphStore {
     /// B1 receives a `chunk_id: String` from A3's `try_send` fan-out
     /// (or from the cold-start poll DB pathway) and needs to load the
     /// chunk's text content to feed B2 (GPU). A3 already persisted the
-    /// row inside `public.Chunk`, so B1 just SELECTs it back.
+    /// row inside `ist.Chunk`, so B1 just SELECTs it back.
     ///
     /// Returns `Ok(None)` if the chunk_id no longer exists (race with
     /// a re-parse that re-derived chunk_ids — caller drops silently and

@@ -14,7 +14,7 @@ impl McpServer {
             .graph_store
             .query_json(&format!(
                 "SELECT c.file_path AS path, count(DISTINCT c.source_id) AS symbol_count
-                 FROM public.Chunk c
+                 FROM ist.Chunk c
                  WHERE c.project_code = '{}'
                    AND c.file_path IS NOT NULL
                  GROUP BY c.file_path
@@ -40,8 +40,8 @@ impl McpServer {
             .graph_store
             .query_json(&format!(
                 "SELECT s.name, c.file_path AS path
-                 FROM public.Symbol s
-                 LEFT JOIN public.Chunk c
+                 FROM ist.Symbol s
+                 LEFT JOIN ist.Chunk c
                    ON c.source_id = s.id
                   AND c.project_code = s.project_code
                  WHERE s.project_code = '{}'
@@ -70,8 +70,8 @@ impl McpServer {
             .graph_store
             .query_json(&format!(
                 "SELECT s.name, s.kind, c.file_path AS path
-                 FROM public.Symbol s
-                 LEFT JOIN public.Chunk c
+                 FROM ist.Symbol s
+                 LEFT JOIN ist.Chunk c
                    ON c.source_id = s.id
                   AND c.project_code = s.project_code
                  WHERE s.project_code = '{}'
@@ -97,11 +97,11 @@ impl McpServer {
             .collect::<Vec<_>>();
 
         // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-        // Post-MIL-AXO-017: flows via canonical public.Edge + Chunk.file_path.
+        // Post-MIL-AXO-017: flows via canonical ist.Edge + Chunk.file_path.
         let flows_raw = self.graph_store
             .query_json(&format!(
                 "SELECT src.name, COALESCE(src_ch.file_path, ''), dst.name, COALESCE(dst_ch.file_path, '')
-                 FROM public.Edge e
+                 FROM ist.Edge e
                  JOIN Symbol src ON src.id = e.source_id
                  JOIN Symbol dst ON dst.id = e.target_id
                  LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'
@@ -149,7 +149,7 @@ impl McpServer {
         let flow_count = self.graph_store
             .query_count(&format!(
                 "SELECT count(*)
-                 FROM public.Edge e
+                 FROM ist.Edge e
                  JOIN Symbol src ON src.id = e.source_id
                  JOIN Symbol dst ON dst.id = e.target_id
                  LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'

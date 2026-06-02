@@ -1,7 +1,7 @@
 //! Stage B2 — GPU embedder (CPT-AXO-054 session 19).
 //!
 //! B2 receives [`super::stage_b1::ChunkForEmbedding`] payloads from B1
-//! (already content-resolved against `public.Chunk`), forwards the text
+//! (already content-resolved against `ist.Chunk`), forwards the text
 //! through a [`B2Embedder`] implementation (the production wrapper around
 //! `OrtGpuFirstTextEmbedding` + TensorRT BGE-Large for live deployments,
 //! a deterministic no-op for tests), and emits an [`EmbeddedChunk`] for

@@ -46,7 +46,7 @@ impl McpServer {
 
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
         // REQ-AXO-901653 slice-5c — public.File retired ; canonical file
-        // surface is now public.IndexedFile + public.Chunk via project_code
+        // surface is now ist.IndexedFile + ist.Chunk via project_code
         // on Chunk (IndexedFile has no project_code by design — pipeline_v2
         // resolves project_code at Chunk write time). status/pending/indexing
         // concepts don't exist in pipeline_v2 (writes are in-line) ; the
@@ -54,10 +54,10 @@ impl McpServer {
         let chunk_filter = Self::project_filter(project, "project_code");
         let symbol_filter = Self::project_filter(project, "project_code");
         let known = self.sql_scalar(&format!(
-            "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE {}",
+            "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE {}",
             chunk_filter
         ));
-        let global_known = self.sql_scalar("SELECT count(*) FROM public.IndexedFile");
+        let global_known = self.sql_scalar("SELECT count(*) FROM ist.IndexedFile");
         let pending = 0i64;
         let indexing = 0i64;
         let completed = known;
@@ -65,13 +65,13 @@ impl McpServer {
             "SELECT count(*) FROM Symbol WHERE {}",
             symbol_filter
         ));
-        // Post-MIL-AXO-017: edge counts from canonical public.Edge table.
+        // Post-MIL-AXO-017: edge counts from canonical ist.Edge table.
         let calls_direct = self.sql_scalar(&format!(
-            "SELECT count(*) FROM public.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS' AND {}",
+            "SELECT count(*) FROM ist.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS' AND {}",
             Self::project_filter(project, "s.project_code")
         ));
         let calls_nif = self.sql_scalar(&format!(
-            "SELECT count(*) FROM public.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS_NIF' AND {}",
+            "SELECT count(*) FROM ist.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS_NIF' AND {}",
             Self::project_filter(project, "s.project_code")
         ));
         // REQ-AXO-901653 slice-5c — `status_reason` + `last_error_reason`
@@ -335,10 +335,10 @@ impl McpServer {
         // REQ-AXO-901653 slice-5c — IndexedFile is the canonical file
         // surface ; Chunk carries project_code (IndexedFile is global).
         let query = if project == "*" {
-            "SELECT count(*) FROM public.IndexedFile".to_string()
+            "SELECT count(*) FROM ist.IndexedFile".to_string()
         } else {
             format!(
-                "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE project_code = '{}'",
+                "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = '{}'",
                 project.replace('\'', "''")
             )
         };
@@ -1006,7 +1006,7 @@ impl McpServer {
             surfaces_used.push("graph_ram_pending");
             surfaces_degraded.push("graph_ram_unavailable");
             let report = format!(
-                "🛠️ **architectural_drift requires a warm IstGraph snapshot for project `{}`**\n\nSource layer: `{source_layer}`\nTarget layer: `{target_layer}`\n\nLoad the snapshot via `ist_snapshot_warm project={}` then retry. Pre-warm path uses `public.symbol` + `public.edge` (PG canonical).",
+                "🛠️ **architectural_drift requires a warm IstGraph snapshot for project `{}`**\n\nSource layer: `{source_layer}`\nTarget layer: `{target_layer}`\n\nLoad the snapshot via `ist_snapshot_warm project={}` then retry. Pre-warm path uses `ist.symbol` + `ist.edge` (PG canonical).",
                 project_for_graph,
                 project_for_graph
             );

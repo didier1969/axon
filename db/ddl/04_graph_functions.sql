@@ -1,7 +1,9 @@
+SET search_path = ist, public, "$user";
+
 -- Axon canonical schema — graph traversal SQL function library.
 --
 -- Five SQL functions + one hybrid-retrieval function wrapping
--- WITH RECURSIVE queries on `public.Edge`. Each function is
+-- WITH RECURSIVE queries on `ist.Edge`. Each function is
 -- LANGUAGE sql STABLE PARALLEL SAFE so PG can:
 --   * cache the plan as a prepared statement,
 --   * parallelise execution across workers,
@@ -24,7 +26,7 @@
 -- Returns one row per reachable node ordered by (target_id, distance).
 -- Powers the MCP `impact` tool ("blast radius of changing this symbol").
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.impact(
+CREATE OR REPLACE FUNCTION ist.impact(
     p_start_id     TEXT,
     p_max_depth    INT  DEFAULT 5,
     p_project_code TEXT DEFAULT ''
@@ -40,7 +42,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             1                              AS distance,
             e.relation_type                AS relation_type,
             ARRAY[p_start_id, e.target_id] AS visited
-        FROM public.Edge e
+        FROM ist.Edge e
         WHERE e.source_id = p_start_id
           AND (p_project_code = '' OR e.project_code = p_project_code)
         UNION
@@ -50,7 +52,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             e.relation_type,
             w.visited || e.target_id
         FROM walk w
-        JOIN public.Edge e ON e.source_id = w.target_id
+        JOIN ist.Edge e ON e.source_id = w.target_id
         WHERE w.distance < p_max_depth
           AND NOT (e.target_id = ANY(w.visited))
           AND (p_project_code = '' OR e.project_code = p_project_code)
@@ -63,8 +65,8 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
     ORDER BY target_id, distance;
 $$;
 
-COMMENT ON FUNCTION public.impact(TEXT, INT, TEXT) IS
-'Forward traversal on public.Edge: nodes reachable from start_id within max_depth hops. Cycle-safe.';
+COMMENT ON FUNCTION ist.impact(TEXT, INT, TEXT) IS
+'Forward traversal on ist.Edge: nodes reachable from start_id within max_depth hops. Cycle-safe.';
 
 -- ─────────────────────────────────────────────────────────────────────
 -- callers_of(p_target_id, p_max_depth, p_project_code)
@@ -73,7 +75,7 @@ COMMENT ON FUNCTION public.impact(TEXT, INT, TEXT) IS
 -- "What points TO target_id, within max_depth reverse hops?"
 -- Powers the MCP `why` tool's first-level reverse lookup.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.callers_of(
+CREATE OR REPLACE FUNCTION ist.callers_of(
     p_target_id    TEXT,
     p_max_depth    INT  DEFAULT 1,
     p_project_code TEXT DEFAULT ''
@@ -89,7 +91,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             1                               AS distance,
             e.relation_type                 AS relation_type,
             ARRAY[p_target_id, e.source_id] AS visited
-        FROM public.Edge e
+        FROM ist.Edge e
         WHERE e.target_id = p_target_id
           AND (p_project_code = '' OR e.project_code = p_project_code)
         UNION
@@ -99,7 +101,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             e.relation_type,
             w.visited || e.source_id
         FROM walk w
-        JOIN public.Edge e ON e.target_id = w.source_id
+        JOIN ist.Edge e ON e.target_id = w.source_id
         WHERE w.distance < p_max_depth
           AND NOT (e.source_id = ANY(w.visited))
           AND (p_project_code = '' OR e.project_code = p_project_code)
@@ -112,8 +114,8 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
     ORDER BY source_id, distance;
 $$;
 
-COMMENT ON FUNCTION public.callers_of(TEXT, INT, TEXT) IS
-'Reverse traversal on public.Edge: nodes pointing TO target_id within max_depth hops. Cycle-safe.';
+COMMENT ON FUNCTION ist.callers_of(TEXT, INT, TEXT) IS
+'Reverse traversal on ist.Edge: nodes pointing TO target_id within max_depth hops. Cycle-safe.';
 
 -- ─────────────────────────────────────────────────────────────────────
 -- why_chain(p_target_id, p_max_depth, p_project_code)
@@ -122,7 +124,7 @@ COMMENT ON FUNCTION public.callers_of(TEXT, INT, TEXT) IS
 -- (concatenated `r1->r2->...`) so the MCP `why` tool can present the
 -- chain of reasoning.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.why_chain(
+CREATE OR REPLACE FUNCTION ist.why_chain(
     p_target_id    TEXT,
     p_max_depth    INT  DEFAULT 5,
     p_project_code TEXT DEFAULT ''
@@ -138,7 +140,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             1                               AS distance,
             e.relation_type                 AS relation_chain,
             ARRAY[p_target_id, e.source_id] AS visited
-        FROM public.Edge e
+        FROM ist.Edge e
         WHERE e.target_id = p_target_id
           AND (p_project_code = '' OR e.project_code = p_project_code)
         UNION
@@ -148,7 +150,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             e.relation_type || '->' || w.relation_chain,
             w.visited || e.source_id
         FROM walk w
-        JOIN public.Edge e ON e.target_id = w.source_id
+        JOIN ist.Edge e ON e.target_id = w.source_id
         WHERE w.distance < p_max_depth
           AND NOT (e.source_id = ANY(w.visited))
           AND (p_project_code = '' OR e.project_code = p_project_code)
@@ -161,7 +163,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
     ORDER BY source_id, distance;
 $$;
 
-COMMENT ON FUNCTION public.why_chain(TEXT, INT, TEXT) IS
+COMMENT ON FUNCTION ist.why_chain(TEXT, INT, TEXT) IS
 'Reverse traversal with relation-path concatenation. Each row carries the chain of relation_types from source to target.';
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -171,17 +173,17 @@ COMMENT ON FUNCTION public.why_chain(TEXT, INT, TEXT) IS
 -- Useful for ranking impact without paying the cost of returning every
 -- node.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.blast_radius(
+CREATE OR REPLACE FUNCTION ist.blast_radius(
     p_start_id     TEXT,
     p_max_depth    INT  DEFAULT 5,
     p_project_code TEXT DEFAULT ''
 ) RETURNS BIGINT
 LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT COUNT(DISTINCT target_id)::BIGINT
-    FROM public.impact(p_start_id, p_max_depth, p_project_code);
+    FROM ist.impact(p_start_id, p_max_depth, p_project_code);
 $$;
 
-COMMENT ON FUNCTION public.blast_radius(TEXT, INT, TEXT) IS
+COMMENT ON FUNCTION ist.blast_radius(TEXT, INT, TEXT) IS
 'Count of distinct nodes reachable from start_id within max_depth hops. Wraps impact() with COUNT(DISTINCT).';
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -190,7 +192,7 @@ COMMENT ON FUNCTION public.blast_radius(TEXT, INT, TEXT) IS
 -- Shortest path from start to end, up to max_depth hops. One row per
 -- hop, empty if no path exists within depth. Powers the MCP `path` tool.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.path(
+CREATE OR REPLACE FUNCTION ist.path(
     p_start_id     TEXT,
     p_end_id       TEXT,
     p_max_depth    INT  DEFAULT 10,
@@ -214,7 +216,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             w.path_rels  || e.relation_type,
             w.depth + 1
         FROM walk w
-        JOIN public.Edge e ON e.source_id = w.current_id
+        JOIN ist.Edge e ON e.source_id = w.current_id
         WHERE w.depth < p_max_depth
           AND NOT (e.target_id = ANY(w.path_nodes))
           AND (p_project_code = '' OR e.project_code = p_project_code)
@@ -238,17 +240,17 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
     ORDER BY ord.ord;
 $$;
 
-COMMENT ON FUNCTION public.path(TEXT, TEXT, INT, TEXT) IS
-'Shortest path from start_id to end_id on public.Edge, up to max_depth hops. One row per hop. Empty if unreachable.';
+COMMENT ON FUNCTION ist.path(TEXT, TEXT, INT, TEXT) IS
+'Shortest path from start_id to end_id on ist.Edge, up to max_depth hops. One row per hop. Empty if unreachable.';
 
 -- ─────────────────────────────────────────────────────────────────────
 -- retrieve_context_v2(query_text, query_embedding, project_code, k)
 --
 -- Unified hybrid retrieval over three orthogonal indexes on Chunk
 -- substance:
---   1. FTS lane    — public.Chunk.content_tsv GIN.
---   2. Vector lane — public.ChunkEmbedding.embedding HNSW (cosine).
---   3. Graph lane  — public.Edge 2-hop expansion around lanes 1 & 2 seeds.
+--   1. FTS lane    — ist.Chunk.content_tsv GIN.
+--   2. Vector lane — ist.ChunkEmbedding.embedding HNSW (cosine).
+--   3. Graph lane  — ist.Edge 2-hop expansion around lanes 1 & 2 seeds.
 --
 -- The three candidate sets are fused with Reciprocal Rank Fusion
 -- (Cormack et al. 2009, k_rrf = 60). RRF is robust to score-scale
@@ -257,7 +259,7 @@ COMMENT ON FUNCTION public.path(TEXT, TEXT, INT, TEXT) IS
 --
 -- Acceptance target (VAL-AXO-073 gate 4): p95 < 100 ms on the AXO corpus.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.retrieve_context_v2(
+CREATE OR REPLACE FUNCTION ist.retrieve_context_v2(
     p_query_text      TEXT,
     p_query_embedding vector(1024),
     p_project_code    TEXT,
@@ -285,7 +287,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             ) AS rank,
             ts_rank_cd(c.content_tsv,
                        plainto_tsquery('english', p_query_text)) AS score
-        FROM public.Chunk c
+        FROM ist.Chunk c
         WHERE (p_project_code = '' OR c.project_code = p_project_code)
           AND c.content_tsv @@ plainto_tsquery('english', p_query_text)
         ORDER BY score DESC
@@ -298,7 +300,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             ce.chunk_id,
             ROW_NUMBER() OVER (ORDER BY ce.embedding <=> p_query_embedding) AS rank,
             (ce.embedding <=> p_query_embedding) AS distance
-        FROM public.ChunkEmbedding ce
+        FROM ist.ChunkEmbedding ce
         WHERE (p_project_code = '' OR ce.project_code = p_project_code)
         ORDER BY ce.embedding <=> p_query_embedding
         LIMIT GREATEST(p_k * 3, 30)
@@ -309,7 +311,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
     -- semantics.
     seed_symbols AS (
         SELECT DISTINCT c.source_id AS sym_id
-        FROM public.Chunk c
+        FROM ist.Chunk c
         WHERE c.source_type = 'symbol'
           AND c.id IN (
               SELECT chunk_id FROM fts_lane
@@ -317,21 +319,21 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
               SELECT chunk_id FROM vector_lane
           )
     ),
-    -- Lane 3b — Two-hop expansion on public.Edge. Depth bound to 2 so
+    -- Lane 3b — Two-hop expansion on ist.Edge. Depth bound to 2 so
     -- the join volume stays tractable. Cycle-safe by construction (each
     -- hop is a separate JOIN, not a recursive CTE).
     expanded_symbols AS (
         SELECT sym_id, 0 AS distance FROM seed_symbols
         UNION
         SELECT e.target_id, 1 AS distance
-        FROM public.Edge e
+        FROM ist.Edge e
         JOIN seed_symbols s ON e.source_id = s.sym_id
         WHERE p_project_code = '' OR e.project_code = p_project_code
         UNION
         SELECT e2.target_id, 2 AS distance
-        FROM public.Edge e1
+        FROM ist.Edge e1
         JOIN seed_symbols s ON e1.source_id = s.sym_id
-        JOIN public.Edge e2 ON e2.source_id = e1.target_id
+        JOIN ist.Edge e2 ON e2.source_id = e1.target_id
         WHERE p_project_code = ''
            OR (e1.project_code = p_project_code AND e2.project_code = p_project_code)
     ),
@@ -340,7 +342,7 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
             c.id AS chunk_id,
             ROW_NUMBER() OVER (ORDER BY MIN(es.distance), c.id) AS rank,
             MIN(es.distance)::INT AS distance
-        FROM public.Chunk c
+        FROM ist.Chunk c
         JOIN expanded_symbols es ON c.source_id = es.sym_id
         WHERE c.source_type = 'symbol'
           AND (p_project_code = '' OR c.project_code = p_project_code)
@@ -374,12 +376,12 @@ LANGUAGE sql STABLE PARALLEL SAFE AS $$
         COALESCE(v.distance, 1.0)::DOUBLE PRECISION AS vector_distance,
         COALESCE(g.distance, 999)::INT              AS graph_distance
     FROM ranked r
-    LEFT JOIN public.Chunk c ON c.id = r.chunk_id
+    LEFT JOIN ist.Chunk c ON c.id = r.chunk_id
     LEFT JOIN fts_lane    f ON f.chunk_id = r.chunk_id
     LEFT JOIN vector_lane v ON v.chunk_id = r.chunk_id
     LEFT JOIN graph_lane  g ON g.chunk_id = r.chunk_id
     ORDER BY r.rrf_score DESC;
 $$;
 
-COMMENT ON FUNCTION public.retrieve_context_v2(TEXT, vector, TEXT, INT) IS
-'Hybrid retrieval over Chunk substance: FTS (content_tsv) + vector ANN (pgvector cosine) + graph expansion (public.Edge depth-2). RRF k=60 fusion in one PG plan. VAL-AXO-073 target: p95 < 100ms.';
+COMMENT ON FUNCTION ist.retrieve_context_v2(TEXT, vector, TEXT, INT) IS
+'Hybrid retrieval over Chunk substance: FTS (content_tsv) + vector ANN (pgvector cosine) + graph expansion (ist.Edge depth-2). RRF k=60 fusion in one PG plan. VAL-AXO-073 target: p95 < 100ms.';

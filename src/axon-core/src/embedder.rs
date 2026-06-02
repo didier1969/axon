@@ -696,7 +696,7 @@ impl SemanticWorkerPool {
         // public.GraphProjectionQueue (a DROP'd table) and emitted
         // `[pg_query_count] db error` + `graph projection fetch error`
         // every iteration, drowning logs and consuming PG conn pool.
-        // Authoritative call-graph reads route through public.Edge
+        // Authoritative call-graph reads route through ist.Edge
         // (db/ddl/04_graph_functions.sql) ; the projection cache has no
         // remaining consumer.
         //

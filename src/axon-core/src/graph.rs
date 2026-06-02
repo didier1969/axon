@@ -127,7 +127,7 @@ impl GraphStore {
     /// REQ-AXO-271 slice 2d : under PG canonical (post-MIL-AXO-017 / AGE
     /// retirement), the legacy SQL relation tables (CALLS, CALLS_NIF,
     /// CONTAINS, IMPACTS, SUBSTANTIATES) are dropped or empty. Callers
-    /// uniformly short-circuit reads to `public.Edge` + the SQL graph
+    /// uniformly short-circuit reads to `ist.Edge` + the SQL graph
     /// function library (`callers_of`, `path`). The function is kept as
     /// a stable read-path predicate ; the value is now invariantly `true`.
     pub fn skip_legacy_relations(&self) -> bool {

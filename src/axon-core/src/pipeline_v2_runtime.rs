@@ -843,7 +843,7 @@ pub fn periodic_sweep_tick_for_tests(
 }
 
 /// REQ-AXO-901677 — pull a `HashSet<path>` of every row currently in
-/// `public.IndexedFile`. Used by the worker on each tick so changes
+/// `ist.IndexedFile`. Used by the worker on each tick so changes
 /// since the last sweep are accounted for (no stale closure capture).
 ///
 /// Returns an empty set on a fresh DB ; propagates SQL gateway errors
@@ -852,7 +852,7 @@ pub fn periodic_sweep_tick_for_tests(
 /// workspace into A1).
 fn load_indexed_file_paths(store: &GraphStore) -> Result<HashSet<String>> {
     let raw = store
-        .execute_raw_sql_gateway("SELECT path FROM public.IndexedFile")
+        .execute_raw_sql_gateway("SELECT path FROM ist.IndexedFile")
         .map_err(|e| anyhow!("load IndexedFile snapshot: {e}"))?;
     let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
     let mut out = HashSet::with_capacity(rows.len());

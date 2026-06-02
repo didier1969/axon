@@ -3,11 +3,11 @@
 //! A3 is the **single-transaction persistence stage** for pipeline A. It
 //! consumes a [`ParsedFile`] from A2 and writes atomically:
 //!
-//!   * `public.Symbol` (UPSERT, idempotent)
-//!   * `public.Edge` (CONTAINS / CALLS / CALLS_NIF, ON CONFLICT DO NOTHING)
-//!   * `public.Chunk` rows with full `content` text — FTS via async TSV
+//!   * `ist.Symbol` (UPSERT, idempotent)
+//!   * `ist.Edge` (CONTAINS / CALLS / CALLS_NIF, ON CONFLICT DO NOTHING)
+//!   * `ist.Chunk` rows with full `content` text — FTS via async TSV
 //!     worker (REQ-AXO-901624 P4), lexical retrieval without GPU.
-//!   * `public.IndexedFile(path, content_hash, last_seen_ms)` watcher filter
+//!   * `ist.IndexedFile(path, content_hash, last_seen_ms)` watcher filter
 //!
 //! Under `AXON_BULK_WRITER_ENABLED=1`, uses COPY BINARY (REQ-AXO-901747)
 //! instead of INSERT VALUES for ~12× file throughput.
@@ -475,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn a3_enroll_dual_writes_public_edge_rows() {
         // REQ-AXO-297 (MIL-AXO-017 slice 3) — A3 must dual-write
-        // CONTAINS rows into the unified `public.Edge` table so MCP
+        // CONTAINS rows into the unified `ist.Edge` table so MCP
         // tools can be bascule onto WITH RECURSIVE traversal before AGE
         // is dropped.
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
@@ -492,10 +492,10 @@ mod tests {
 
         // The A3 path emits a CONTAINS edge from File path to each
         // Symbol. With two symbols we expect at least 2 rows in
-        // public.Edge keyed on the file path.
+        // ist.Edge keyed on the file path.
         let n = store
             .query_count(
-                "SELECT count(*) FROM public.Edge \
+                "SELECT count(*) FROM ist.Edge \
                  WHERE source_id = '/tmp/a3_edge_dual.rs' \
                  AND relation_type = 'CONTAINS' \
                  AND project_code = 'AXO'",
@@ -503,7 +503,7 @@ mod tests {
             .unwrap();
         assert!(
             n >= 2,
-            "A3 must emit at least 2 CONTAINS rows in public.Edge for two parsed symbols (got {n})"
+            "A3 must emit at least 2 CONTAINS rows in ist.Edge for two parsed symbols (got {n})"
         );
 
         // Idempotence: re-running the same enrolment must not duplicate
@@ -519,13 +519,13 @@ mod tests {
             .unwrap();
         let n2 = store
             .query_count(
-                "SELECT count(*) FROM public.Edge \
+                "SELECT count(*) FROM ist.Edge \
                  WHERE source_id = '/tmp/a3_edge_dual.rs' \
                  AND relation_type = 'CONTAINS' \
                  AND project_code = 'AXO'",
             )
             .unwrap();
-        assert_eq!(n, n2, "public.Edge dual-write must be idempotent");
+        assert_eq!(n, n2, "ist.Edge dual-write must be idempotent");
     }
 
     #[tokio::test]

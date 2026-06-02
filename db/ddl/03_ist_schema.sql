@@ -1,65 +1,82 @@
 -- Axon canonical schema — IST (Indexed Symbol Tree).
--- Multi-project: every table lives in `public` with a `project_code`
--- column to scope rows.
--- Idempotent: safe to re-run on every startup.
+-- REQ-AXO-901860: the IST now lives in its OWN schema `ist` (symmetric to
+-- `soll` for intent), NOT in `public`. Table identifiers are preserved
+-- verbatim (only the schema changes public→ist) so the code migration is a
+-- pure schema-qualification, not a rename.
+--
+-- Every table carries a `project_code` that is a NOT NULL FOREIGN KEY to
+-- ist.Project(code): a row cannot exist without a registered project, so
+-- the old silent `UNK` bucket is impossible (fail-loud at enrolment).
+-- Pre-launch full-reindex rewrite: NO data migration; the indexer
+-- repopulates ist from source.
 --
 -- Embedding dimension is hard-coded to 1024 (BGE-Large 1024-d, see
 -- src/axon-core/src/embedding_contract.rs::DIMENSION). Any model swap
 -- must update this file AND the Rust constant in lockstep.
+--
+-- Idempotent: safe to re-run on every startup.
 
--- ── Tables ───────────────────────────────────────────────────────────
+CREATE SCHEMA IF NOT EXISTS ist;
+SET search_path = ist, public, "$user";
+-- REQ-AXO-901860: make `ist` first on the search_path for EVERY future
+-- connection of the runtime role (brain + indexer). Role-level ALTER is
+-- PERSISTENT — it survives connection-pool resets (unlike a per-session
+-- SET), so unqualified IST references (`FROM Symbol`) resolve to ist.*
+-- robustly. CURRENT_USER avoids hard-coding the role name.
+ALTER ROLE CURRENT_USER SET search_path = ist, public, "$user";
 
--- KV store for runtime build metadata (active install generation, last
--- promote timestamp, …). Probed by scripts/start.sh as the schema gate.
-CREATE TABLE IF NOT EXISTS public.RuntimeMetadata (
+-- ── Project registry ─────────────────────────────────────────────────
+-- Canonical per-project root; FK target for every IST table's
+-- `project_code`. Enriched vs the old name-only public.Project so the
+-- scanner can resolve path→project and telemetry reports per-project
+-- roots. Populated by the scanner BEFORE enrolling files.
+CREATE TABLE IF NOT EXISTS ist.Project (
+    code           TEXT PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
+    root_path      TEXT NOT NULL DEFAULT '',
+    watch_root     TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'active',
+    enrolled_at_ms BIGINT NOT NULL DEFAULT 0,
+    CONSTRAINT project_status_check CHECK (status IN ('active', 'paused', 'retired'))
+);
+
+-- ── Runtime build metadata (KV) ──────────────────────────────────────
+-- Probed by scripts/start.sh as the schema gate.
+CREATE TABLE IF NOT EXISTS ist.RuntimeMetadata (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
 
--- REQ-AXO-901653 slice-5c — public.File state-machine retired.
--- Pipeline-v2 (REQ-AXO-289 / CPT-AXO-054) writes IndexedFile directly ;
--- the per-file status/stage/ready flags + worker claim metadata are no
--- longer needed (Chunk + ChunkEmbedding presence is the canonical
--- truth). DROP IF EXISTS makes the bootstrap idempotent on legacy DBs.
-DROP TABLE IF EXISTS public.File CASCADE;
-
--- Streaming pipeline v2 watcher filter (REQ-AXO-289).
--- DEC-AXO-901619: durable discovery queue. status + discovered_ms make
--- file discovery persistent — scanner writes 'discovered', A3 promotes
--- to 'indexed'. On restart, WHERE status='discovered' = pipeline A backlog.
-CREATE TABLE IF NOT EXISTS public.IndexedFile (
+-- ── Indexed files (durable discovery queue) ──────────────────────────
+-- DEC-AXO-901619: scanner writes 'discovered', A3 promotes to 'indexed'.
+-- REQ-AXO-901831: status models the FULL lifecycle incl. exclusions
+-- ('failed'/'skipped' + skip_reason) so the eligible→enrolled gap is never
+-- silent. REQ-AXO-901860: project_code FK (was structurally absent — the
+-- root of indexed_files=0 per project).
+CREATE TABLE IF NOT EXISTS ist.IndexedFile (
     path            TEXT   PRIMARY KEY,
-    content_hash    TEXT   NOT NULL,
+    project_code    TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    content_hash    TEXT   NOT NULL DEFAULT '',
     last_seen_ms    BIGINT NOT NULL,
-    status          TEXT   NOT NULL DEFAULT 'indexed',
+    status          TEXT   NOT NULL DEFAULT 'discovered',
+    skip_reason     TEXT,
     discovered_ms   BIGINT NOT NULL DEFAULT 0,
     mtime_ms        BIGINT NOT NULL DEFAULT 0,
     size_bytes      BIGINT NOT NULL DEFAULT 0,
     retry_count     INT    NOT NULL DEFAULT 0,
     last_attempt_ms BIGINT,
-    CONSTRAINT indexedfile_status_check CHECK (status IN ('discovered', 'indexed'))
+    CONSTRAINT indexedfile_status_check
+        CHECK (status IN ('discovered', 'indexed', 'failed', 'skipped'))
 );
--- Idempotent migration for existing instances (columns added session 58).
-DO $$ BEGIN
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'indexed';
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS discovered_ms BIGINT NOT NULL DEFAULT 0;
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS mtime_ms BIGINT NOT NULL DEFAULT 0;
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
-    ALTER TABLE public.IndexedFile ADD COLUMN IF NOT EXISTS last_attempt_ms BIGINT;
-EXCEPTION WHEN others THEN NULL;
-END $$;
-ALTER TABLE public.IndexedFile DROP CONSTRAINT IF EXISTS indexedfile_status_check;
-ALTER TABLE public.IndexedFile ADD CONSTRAINT indexedfile_status_check
-    CHECK (status IN ('discovered', 'indexed'));
 
 CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
-    ON public.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
+    ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
     WHERE status = 'discovered';
+CREATE INDEX IF NOT EXISTS idx_indexedfile_project_status
+    ON ist.IndexedFile (project_code, status);
 
 -- DEC-AXO-901620: NOTIFY pipeline A when new files are discovered.
--- The demand-pull listener wakes on this channel and pulls a batch.
-CREATE OR REPLACE FUNCTION public.fn_notify_file_discovered() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION ist.fn_notify_file_discovered() RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.status = 'discovered' THEN
         PERFORM pg_notify('file_discovered', NEW.path);
@@ -68,13 +85,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_notify_file_discovered ON public.IndexedFile;
+DROP TRIGGER IF EXISTS trg_notify_file_discovered ON ist.IndexedFile;
 CREATE TRIGGER trg_notify_file_discovered
-    AFTER INSERT OR UPDATE ON public.IndexedFile
-    FOR EACH ROW EXECUTE FUNCTION public.fn_notify_file_discovered();
+    AFTER INSERT OR UPDATE ON ist.IndexedFile
+    FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_file_discovered();
 
--- Code symbols (functions, types, modules, …).
-CREATE TABLE IF NOT EXISTS public.Symbol (
+-- ── Symbols ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ist.Symbol (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     kind         TEXT,
@@ -82,18 +99,18 @@ CREATE TABLE IF NOT EXISTS public.Symbol (
     is_public    BOOLEAN NOT NULL DEFAULT FALSE,
     is_nif       BOOLEAN NOT NULL DEFAULT FALSE,
     is_unsafe    BOOLEAN NOT NULL DEFAULT FALSE,
-    project_code TEXT    NOT NULL DEFAULT '',
+    project_code TEXT    NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     embedding    vector(1024)
 );
 
--- Sliced code blocks (1 symbol → 1+ chunks). `token_count` stores the
--- BGE-Large estimated token count for length-homogeneous batching.
-CREATE TABLE IF NOT EXISTS public.Chunk (
+-- ── Chunks (1 symbol → 1+ chunks) ────────────────────────────────────
+-- file_path FK to IndexedFile: a chunk cannot outlive its file.
+CREATE TABLE IF NOT EXISTS ist.Chunk (
     id               TEXT PRIMARY KEY,
     source_type      TEXT,
     source_id        TEXT,
-    project_code     TEXT NOT NULL DEFAULT '',
-    file_path        TEXT,
+    project_code     TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    file_path        TEXT REFERENCES ist.IndexedFile(path) ON DELETE CASCADE,
     kind             TEXT,
     content          TEXT,
     content_hash     TEXT,
@@ -103,22 +120,16 @@ CREATE TABLE IF NOT EXISTS public.Chunk (
     chunk_part_count BIGINT,
     chunk_path       TEXT,
     token_count      INTEGER,
-    embed_status     TEXT NOT NULL DEFAULT 'pending'
+    embed_status     TEXT NOT NULL DEFAULT 'pending',
+    CONSTRAINT chunk_embed_status_check CHECK (embed_status IN ('pending', 'embedded', 'failed'))
 );
--- Idempotent migration for Chunk.embed_status (session 58).
-ALTER TABLE public.Chunk ADD COLUMN IF NOT EXISTS embed_status TEXT NOT NULL DEFAULT 'pending';
--- W3: partial index for demand-pull B — only pending chunks, ordered by
--- token_count for GPU batch homogeneity. Replaces the LEFT JOIN anti-pattern.
-CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
-    ON public.Chunk (token_count) WHERE embed_status = 'pending';
 
--- FTS tsvector column. Initially declared GENERATED ALWAYS STORED with
--- the 4-setweight expression below (chunk_path A / kind A / content B /
--- file_path C); the pgmq lazy-build path (06_pgmq_tsv_async.sql) DROPs
--- the expression on the canonical install so a worker can populate the
--- column out-of-band. Fresh installs without pgmq keep the GENERATED
--- semantics.
-ALTER TABLE public.Chunk
+CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
+    ON ist.Chunk (token_count) WHERE embed_status = 'pending';
+
+-- FTS tsvector. 06_pgmq_tsv_async.sql may DROP the GENERATED expression on
+-- the canonical install so a worker populates it out-of-band.
+ALTER TABLE ist.Chunk
     ADD COLUMN IF NOT EXISTS content_tsv tsvector
     GENERATED ALWAYS AS (
         setweight(to_tsvector('simple',  coalesce(chunk_path, '')), 'A') ||
@@ -127,48 +138,31 @@ ALTER TABLE public.Chunk
         setweight(to_tsvector('simple',  coalesce(file_path,  '')), 'C')
     ) STORED;
 
--- pgvector storage (1024-d cosine, HNSW). PK is (chunk_id, model_id) so
--- multiple models can co-exist during embedding migrations.
-CREATE TABLE IF NOT EXISTS public.ChunkEmbedding (
-    chunk_id        TEXT NOT NULL,
+-- ── Chunk embeddings (pgvector 1024-d cosine, HNSW) ──────────────────
+-- PK (chunk_id, model_id) so multiple models co-exist during migrations.
+-- chunk_id FK so an embedding cannot outlive its chunk.
+CREATE TABLE IF NOT EXISTS ist.ChunkEmbedding (
+    chunk_id        TEXT NOT NULL REFERENCES ist.Chunk(id) ON DELETE CASCADE,
     model_id        TEXT NOT NULL,
-    project_code    TEXT NOT NULL DEFAULT '',
+    project_code    TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     source_hash     TEXT NOT NULL,
     embedding       vector(1024) NOT NULL,
     embedded_at_ms  BIGINT NOT NULL,
     PRIMARY KEY (chunk_id, model_id)
 );
 
--- Unified structural edge table backing the IST graph. Composite PK so
--- the same source/target pair may carry multiple typed relations.
--- Graph traversal exposed via the SQL function library (04_graph_functions.sql).
-CREATE TABLE IF NOT EXISTS public.Edge (
+-- ── Structural edges (IST graph) ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ist.Edge (
     source_id     TEXT NOT NULL,
     target_id     TEXT NOT NULL,
     relation_type TEXT NOT NULL,
-    project_code  TEXT NOT NULL DEFAULT '',
+    project_code  TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     metadata      JSONB,
     created_at_ms BIGINT NOT NULL,
     PRIMARY KEY (source_id, target_id, relation_type, project_code)
 );
 
--- Vectorization signalling: pg_notify on Chunk INSERT or content_hash
--- change. The B1 listener maintains an in-memory pending set; a 5s
--- reconciliation tick catches missed NOTIFYs via LEFT JOIN anti-join on
--- ChunkEmbedding. No disk queue.
-DROP TABLE IF EXISTS public.FileVectorizationQueue;
-
--- REQ-AXO-901653 slice-5c — public.GraphProjectionQueue retired.
--- Graph-projection refreshes are now driven inline by pipeline-v2 (no
--- on-disk queue ; the worker pool consumes Chunk/Edge directly).
-DROP TABLE IF EXISTS public.GraphProjectionQueue CASCADE;
-
--- Project registry consumed by the indexer hot path.
-CREATE TABLE IF NOT EXISTS public.Project (
-    name TEXT PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS public.EmbeddingModel (
+CREATE TABLE IF NOT EXISTS ist.EmbeddingModel (
     id          TEXT PRIMARY KEY,
     kind        TEXT,
     model_name  TEXT,
@@ -177,8 +171,8 @@ CREATE TABLE IF NOT EXISTS public.EmbeddingModel (
     created_at  BIGINT
 );
 
--- Graph traversal cache (anchor_type, anchor_id, radius).
-CREATE TABLE IF NOT EXISTS public.GraphProjection (
+-- ── Graph traversal caches ───────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ist.GraphProjection (
     anchor_type        TEXT NOT NULL,
     anchor_id          TEXT NOT NULL,
     target_type        TEXT,
@@ -186,28 +180,28 @@ CREATE TABLE IF NOT EXISTS public.GraphProjection (
     edge_kind          TEXT,
     distance           BIGINT,
     radius             BIGINT NOT NULL,
-    project_code       TEXT   NOT NULL DEFAULT '',
+    project_code       TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     projection_version TEXT,
     created_at         BIGINT
 );
 
-CREATE TABLE IF NOT EXISTS public.GraphProjectionState (
+CREATE TABLE IF NOT EXISTS ist.GraphProjectionState (
     anchor_type        TEXT NOT NULL,
     anchor_id          TEXT NOT NULL,
     radius             BIGINT NOT NULL,
-    project_code       TEXT   NOT NULL DEFAULT '',
+    project_code       TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     source_signature   TEXT,
     projection_version TEXT,
     updated_at         BIGINT,
     PRIMARY KEY (anchor_type, anchor_id, radius, project_code)
 );
 
-CREATE TABLE IF NOT EXISTS public.GraphEmbedding (
+CREATE TABLE IF NOT EXISTS ist.GraphEmbedding (
     anchor_type        TEXT NOT NULL,
     anchor_id          TEXT NOT NULL,
     radius             BIGINT NOT NULL,
     model_id           TEXT NOT NULL,
-    project_code       TEXT NOT NULL DEFAULT '',
+    project_code       TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
     source_signature   TEXT,
     projection_version TEXT,
     embedding          vector(1024),
@@ -215,8 +209,8 @@ CREATE TABLE IF NOT EXISTS public.GraphEmbedding (
     PRIMARY KEY (anchor_type, anchor_id, radius, model_id, project_code)
 );
 
--- Post-decision reward observation log (optimiser feedback loop).
-CREATE TABLE IF NOT EXISTS public.RewardObservationLog (
+-- ── Optimiser reward observation log ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS ist.RewardObservationLog (
     decision_id                TEXT NOT NULL,
     observed_at_ms             BIGINT,
     window_start_ms            BIGINT,
@@ -228,8 +222,10 @@ CREATE TABLE IF NOT EXISTS public.RewardObservationLog (
     pressure_summary_json      TEXT
 );
 
--- Per-file lifecycle event log (one row per stage transition).
-CREATE TABLE IF NOT EXISTS public.FileLifecycleEvent (
+-- ── Per-file lifecycle event log (fail-loud ledger) ──────────────────
+-- REQ-AXO-901831: every stage transition incl. exclusion (reason) so the
+-- eligible→enrolled gap is observable, never silent.
+CREATE TABLE IF NOT EXISTS ist.FileLifecycleEvent (
     file_path    TEXT NOT NULL,
     project_code TEXT NOT NULL DEFAULT '',
     stage        TEXT NOT NULL,
@@ -241,8 +237,8 @@ CREATE TABLE IF NOT EXISTS public.FileLifecycleEvent (
     run_id       TEXT
 );
 
--- Hourly aggregates for vectorization throughput dashboards.
-CREATE TABLE IF NOT EXISTS public.HourlyVectorizationRollup (
+-- ── Hourly vectorization throughput rollup ───────────────────────────
+CREATE TABLE IF NOT EXISTS ist.HourlyVectorizationRollup (
     bucket_start_ms    BIGINT NOT NULL,
     project_code       TEXT   NOT NULL DEFAULT '',
     model_id           TEXT   NOT NULL,
@@ -256,77 +252,53 @@ CREATE TABLE IF NOT EXISTS public.HourlyVectorizationRollup (
     PRIMARY KEY (bucket_start_ms, project_code, model_id)
 );
 
--- ── Additive column migrations (legacy DBs predating columns) ────────
-
--- REQ-AXO-901653 slice-5c — public.File ALTER block removed alongside
--- the table itself.
-
-ALTER TABLE public.Chunk ADD COLUMN IF NOT EXISTS token_count INTEGER;
-
 -- ── Indexes ──────────────────────────────────────────────────────────
-
--- REQ-AXO-901653 slice-5c — public.File indexes removed alongside the table.
-
 CREATE INDEX IF NOT EXISTS symbol_project_kind_idx
-    ON public.Symbol (project_code, kind);
+    ON ist.Symbol (project_code, kind);
 CREATE INDEX IF NOT EXISTS symbol_project_name_idx
-    ON public.Symbol (project_code, name);
--- Partial index keeps the lookup lean on indexer-only deployments that
--- don't compute symbol embeddings.
+    ON ist.Symbol (project_code, name);
 CREATE INDEX IF NOT EXISTS symbol_embedding_present_idx
-    ON public.Symbol (project_code) WHERE embedding IS NOT NULL;
+    ON ist.Symbol (project_code) WHERE embedding IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS chunk_project_source_idx
-    ON public.Chunk (project_code, source_type, source_id);
+    ON ist.Chunk (project_code, source_type, source_id);
 CREATE INDEX IF NOT EXISTS chunk_project_file_idx
-    ON public.Chunk (project_code, file_path);
--- B1 cold-start poll joins Chunk with ChunkEmbedding; keep the join cheap.
+    ON ist.Chunk (project_code, file_path);
 CREATE INDEX IF NOT EXISTS chunk_content_hash_idx
-    ON public.Chunk (content_hash);
+    ON ist.Chunk (content_hash);
 CREATE INDEX IF NOT EXISTS idx_chunk_project_code
-    ON public.Chunk (project_code);
+    ON ist.Chunk (project_code);
 CREATE INDEX IF NOT EXISTS idx_chunk_token_count
-    ON public.Chunk (token_count);
+    ON ist.Chunk (token_count);
 CREATE INDEX IF NOT EXISTS idx_chunk_content_tsv
-    ON public.Chunk USING GIN (content_tsv);
+    ON ist.Chunk USING GIN (content_tsv);
 
 CREATE INDEX IF NOT EXISTS chunk_embedding_project_idx
-    ON public.ChunkEmbedding (project_code);
+    ON ist.ChunkEmbedding (project_code);
 CREATE INDEX IF NOT EXISTS chunk_embedding_source_hash_idx
-    ON public.ChunkEmbedding (source_hash);
+    ON ist.ChunkEmbedding (source_hash);
 CREATE INDEX IF NOT EXISTS chunk_embedding_embedded_at_idx
-    ON public.ChunkEmbedding (embedded_at_ms);
-
--- Single global HNSW index (CPT-AXO-041). project_code is post-filter
--- via WHERE; pgvector iterative scan handles it efficiently.
+    ON ist.ChunkEmbedding (embedded_at_ms);
 CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw_idx
-    ON public.ChunkEmbedding USING hnsw (embedding vector_cosine_ops)
+    ON ist.ChunkEmbedding USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
--- Edge: forward (impact / blast_radius), reverse (callers_of / why_chain),
--- project-scoped scans, metadata filtering.
 CREATE INDEX IF NOT EXISTS edge_fwd_idx
-    ON public.Edge (source_id, relation_type, target_id);
+    ON ist.Edge (source_id, relation_type, target_id);
 CREATE INDEX IF NOT EXISTS edge_rev_idx
-    ON public.Edge (target_id, relation_type, source_id);
+    ON ist.Edge (target_id, relation_type, source_id);
 CREATE INDEX IF NOT EXISTS edge_proj_idx
-    ON public.Edge (project_code, relation_type);
+    ON ist.Edge (project_code, relation_type);
 CREATE INDEX IF NOT EXISTS edge_metadata_idx
-    ON public.Edge USING GIN (metadata jsonb_path_ops);
-
--- REQ-AXO-901653 slice-5c — public.GraphProjectionQueue index removed alongside the table.
+    ON ist.Edge USING GIN (metadata jsonb_path_ops);
 
 CREATE INDEX IF NOT EXISTS file_lifecycle_project_at_idx
-    ON public.FileLifecycleEvent (project_code, at_ms);
+    ON ist.FileLifecycleEvent (project_code, at_ms);
 CREATE INDEX IF NOT EXISTS file_lifecycle_stage_status_idx
-    ON public.FileLifecycleEvent (stage, status);
+    ON ist.FileLifecycleEvent (stage, status);
 
--- ── Functions & triggers ─────────────────────────────────────────────
-
--- NOTIFY on Chunk INSERT or content_hash change. The B1 listener
--- maintains an in-memory pending set; reconciliation tick catches
--- missed NOTIFYs via LEFT JOIN anti-join on ChunkEmbedding.
-CREATE OR REPLACE FUNCTION public.fn_notify_chunk_pending() RETURNS TRIGGER AS $$
+-- ── NOTIFY chunk pending (vectorization signalling) ──────────────────
+CREATE OR REPLACE FUNCTION ist.fn_notify_chunk_pending() RETURNS TRIGGER AS $$
 BEGIN
     PERFORM pg_notify('chunk_pending_embed', NEW.id);
     RETURN NEW;
@@ -334,5 +306,49 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE TRIGGER trg_chunk_notify_pending
-    AFTER INSERT OR UPDATE OF content_hash ON public.Chunk
-    FOR EACH ROW EXECUTE FUNCTION public.fn_notify_chunk_pending();
+    AFTER INSERT OR UPDATE OF content_hash ON ist.Chunk
+    FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_chunk_pending();
+
+-- ── Canonical per-project telemetry view (the ONE source) ────────────
+-- REQ-AXO-901854/901859: dashboard + MCP read THIS, not in-memory
+-- counters / dashboard_cache / scattered rollups. files_total −
+-- (indexed+discovered+failed+skipped) cannot diverge silently; symbols /
+-- chunks / embedded are canonical per project.
+CREATE OR REPLACE VIEW ist.project_telemetry AS
+SELECT
+    p.code AS project_code,
+    p.name,
+    p.root_path,
+    COALESCE(f.files_total, 0)      AS files_total,
+    COALESCE(f.files_discovered, 0) AS files_discovered,
+    COALESCE(f.files_indexed, 0)    AS files_indexed,
+    COALESCE(f.files_failed, 0)     AS files_failed,
+    COALESCE(f.files_skipped, 0)    AS files_skipped,
+    COALESCE(s.symbols, 0)          AS symbols,
+    COALESCE(c.chunks_total, 0)     AS chunks_total,
+    COALESCE(c.chunks_embedded, 0)  AS chunks_embedded,
+    COALESCE(c.chunks_pending, 0)   AS chunks_pending,
+    COALESCE(e.edges, 0)            AS edges
+FROM ist.Project p
+LEFT JOIN (
+    SELECT project_code,
+           count(*)                                       AS files_total,
+           count(*) FILTER (WHERE status = 'discovered')  AS files_discovered,
+           count(*) FILTER (WHERE status = 'indexed')     AS files_indexed,
+           count(*) FILTER (WHERE status = 'failed')      AS files_failed,
+           count(*) FILTER (WHERE status = 'skipped')     AS files_skipped
+    FROM ist.IndexedFile GROUP BY project_code
+) f ON f.project_code = p.code
+LEFT JOIN (
+    SELECT project_code, count(*) AS symbols FROM ist.Symbol GROUP BY project_code
+) s ON s.project_code = p.code
+LEFT JOIN (
+    SELECT project_code,
+           count(*)                                          AS chunks_total,
+           count(*) FILTER (WHERE embed_status = 'embedded') AS chunks_embedded,
+           count(*) FILTER (WHERE embed_status = 'pending')  AS chunks_pending
+    FROM ist.Chunk GROUP BY project_code
+) c ON c.project_code = p.code
+LEFT JOIN (
+    SELECT project_code, count(*) AS edges FROM ist.Edge GROUP BY project_code
+) e ON e.project_code = p.code;

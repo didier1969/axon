@@ -7,7 +7,7 @@ use crate::graph::GraphStore;
 // REQ-AXO-350 follow-up : pre-MIL-AXO-017 this gate returned false
 // in `brain_only` mode because IST edges lived in DuckDB / AGE
 // in-process state — the brain alone had no access. Post-REQ-AXO-295
-// (`public.Edge`) the IST is persistent in PG and any role with a
+// (`ist.Edge`) the IST is persistent in PG and any role with a
 // `GraphStore` (brain or indexer) can query it directly. The gate is
 // retained as a single inlined identity so the 16 analytics call
 // sites stay token-stable, but always returns true. Once the call
@@ -22,7 +22,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok((100, "[]".to_string()));
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CALLS_NIF (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CALLS_NIF (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
@@ -34,14 +34,14 @@ impl GraphStore {
             "
             WITH dangerous_paths AS (
                 SELECT s1.name, s2.name AS target_name
-                FROM public.Edge c
+                FROM ist.Edge c
                 JOIN Symbol s1 ON s1.id = c.source_id
                 JOIN Symbol s2 ON s2.id = c.target_id
                 WHERE c.relation_type = 'CALLS'
                   AND (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
-                FROM public.Edge c
+                FROM ist.Edge c
                 JOIN Symbol s1 ON s1.id = c.source_id
                 JOIN Symbol s2 ON s2.id = c.target_id
                 WHERE c.relation_type = 'CALLS_NIF'
@@ -49,17 +49,17 @@ impl GraphStore {
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
                 FROM Symbol s1
-                JOIN public.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS'
+                JOIN ist.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS'
                 JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN public.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
+                JOIN ist.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
                 JOIN Symbol s2 ON s2.id = c2.target_id
                 WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
                 UNION ALL
                 SELECT s1.name, s2.name AS target_name
                 FROM Symbol s1
-                JOIN public.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS_NIF'
+                JOIN ist.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS_NIF'
                 JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN public.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
+                JOIN ist.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
                 JOIN Symbol s2 ON s2.id = c2.target_id
                 WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
             )
@@ -116,8 +116,8 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS / CALLS (MIL-AXO-017).
-        // REQ-AXO-901653 slice-5c : public.File retired ; public.IndexedFile is
+        // REQ-AXO-350 : ist.Edge replaces legacy CONTAINS / CALLS (MIL-AXO-017).
+        // REQ-AXO-901653 slice-5c : public.File retired ; ist.IndexedFile is
         // the canonical per-file pivot. IndexedFile has no `project_code`
         // column ; the scoping happens via Symbol.project_code on the
         // CONTAINS edge target.
@@ -126,16 +126,16 @@ impl GraphStore {
         let query = format!(
             "
             SELECT f.path, s.name
-            FROM public.IndexedFile f
-            JOIN public.Edge c ON c.source_id = f.path AND c.relation_type = 'CONTAINS'
-            JOIN public.Symbol s ON s.id = c.target_id
+            FROM ist.IndexedFile f
+            JOIN ist.Edge c ON c.source_id = f.path AND c.relation_type = 'CONTAINS'
+            JOIN ist.Symbol s ON s.id = c.target_id
             WHERE (lower(s.name) LIKE '%todo%'
                OR lower(s.name) LIKE '%fixme%'
                OR lower(s.name) LIKE '%secret%'
                OR lower(s.name) LIKE '%hardcoded credential%'
                OR EXISTS (
-                    SELECT 1 FROM public.Edge call
-                    JOIN public.Symbol target ON target.id = call.target_id
+                    SELECT 1 FROM ist.Edge call
+                    JOIN ist.Symbol target ON target.id = call.target_id
                     WHERE call.relation_type = 'CALLS'
                       AND call.source_id = s.id
                       AND lower(target.name) IN ('unwrap', 'eval')
@@ -167,15 +167,15 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT s.name, count(*) AS fan_in
             FROM Symbol s
-            JOIN public.Edge c ON c.target_id = s.id AND c.relation_type = 'CALLS'
-            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+            JOIN ist.Edge c ON c.target_id = s.id AND c.relation_type = 'CALLS'
+            LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             {}
             AND length(s.name) >= 3
@@ -215,13 +215,13 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(100);
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS table (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS table (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT count(*)
-            FROM public.Edge call
+            FROM ist.Edge call
             JOIN Symbol target ON target.id = call.target_id
             WHERE call.relation_type = 'CALLS'
               AND lower(target.name) IN ('println!', 'dbg!', 'console.log', 'io.puts', 'print', 'printf')
@@ -241,19 +241,19 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS / CALLS / CALLS_NIF (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CONTAINS / CALLS / CALLS_NIF (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             SELECT count(*)
             FROM Symbol s
-            JOIN public.Edge c ON c.target_id = s.id AND c.relation_type = 'CONTAINS'
+            JOIN ist.Edge c ON c.target_id = s.id AND c.relation_type = 'CONTAINS'
             JOIN File f ON f.path = c.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
-              AND s.id NOT IN (SELECT target_id FROM public.Edge WHERE relation_type = 'CALLS')
-              AND s.id NOT IN (SELECT target_id FROM public.Edge WHERE relation_type = 'CALLS_NIF')
+              AND s.id NOT IN (SELECT target_id FROM ist.Edge WHERE relation_type = 'CALLS')
+              AND s.id NOT IN (SELECT target_id FROM ist.Edge WHERE relation_type = 'CALLS_NIF')
               AND f.path NOT LIKE '%/tests/%' AND f.path NOT LIKE '%_test.rs' AND f.path NOT LIKE '%_test.exs'
             {}
             ",
@@ -270,32 +270,32 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
             WITH outbound AS (
                 SELECT source_id, count(*) AS total_calls
-                FROM public.Edge
+                FROM ist.Edge
                 WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             ),
             inbound AS (
                 SELECT target_id, count(*) AS total_callers
-                FROM public.Edge
+                FROM ist.Edge
                 WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             )
             SELECT s.name, target.name, COALESCE(inbound.total_callers, 0)
             FROM outbound o
-            JOIN public.Edge c ON c.source_id = o.source_id AND c.relation_type = 'CALLS'
+            JOIN ist.Edge c ON c.source_id = o.source_id AND c.relation_type = 'CALLS'
             JOIN Symbol s ON s.id = o.source_id
             JOIN Symbol target ON target.id = c.target_id
             LEFT JOIN inbound ON inbound.target_id = target.id
-            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+            LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             WHERE o.total_calls = 1
               AND COALESCE(s.is_public, false) = false
@@ -341,7 +341,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -349,7 +349,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, f.path
                 FROM Symbol s
-                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+                JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
@@ -365,7 +365,7 @@ impl GraphStore {
                     src.path AS source_path,
                     dst.path AS target_path,
                     count(*) AS call_count
-                FROM public.Edge c
+                FROM ist.Edge c
                 JOIN symbol_files src ON src.id = c.source_id
                 JOIN symbol_files dst ON dst.id = c.target_id
                 WHERE c.relation_type = 'CALLS'
@@ -419,7 +419,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -427,7 +427,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, f.path, COALESCE(s.is_public, false) AS is_public
                 FROM Symbol s
-                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+                JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
@@ -439,14 +439,14 @@ impl GraphStore {
             ),
             inbound AS (
                 SELECT target_id, count(*) AS inbound_calls
-                FROM public.Edge
+                FROM ist.Edge
                 WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
             ),
             outbound AS (
                 SELECT source_id, count(*) AS outbound_calls
-                FROM public.Edge
+                FROM ist.Edge
                 WHERE relation_type = 'CALLS'
                 {}
                 GROUP BY 1
@@ -455,8 +455,8 @@ impl GraphStore {
                 src.name,
                 mid.name,
                 dst.name
-            FROM public.Edge c1
-            JOIN public.Edge c2 ON c1.target_id = c2.source_id AND c2.relation_type = 'CALLS'
+            FROM ist.Edge c1
+            JOIN ist.Edge c2 ON c1.target_id = c2.source_id AND c2.relation_type = 'CALLS'
             JOIN symbol_files src ON src.id = c1.source_id
             JOIN symbol_files mid ON mid.id = c1.target_id
             JOIN symbol_files dst ON dst.id = c2.target_id
@@ -510,7 +510,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -518,7 +518,7 @@ impl GraphStore {
             WITH symbol_files AS (
                 SELECT s.id, s.name, lower(s.name) AS lowered_name, s.kind, f.path
                 FROM Symbol s
-                JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+                JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
                 JOIN File f ON f.path = rel.source_id
                 WHERE (
                     lower(f.path) NOT LIKE '%/tests/%'
@@ -573,7 +573,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CONTAINS ; the dead
+        // REQ-AXO-350 : ist.Edge replaces legacy CONTAINS ; the dead
         // SUBSTANTIATES / IMPACTS NOT EXISTS clauses (AGE-era proxies for
         // Symbol↔intent linkage) are dropped — `soll.Traceability` is the
         // canonical post-Stop A authority for the same relation.
@@ -583,7 +583,7 @@ impl GraphStore {
             "
             SELECT DISTINCT s.name
             FROM Symbol s
-            LEFT JOIN public.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
+            LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN File f ON f.path = rel.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
@@ -721,20 +721,20 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS ; DuckDB array
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS ; DuckDB array
         // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`, array_length).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
             format!(
                 "SELECT c.source_id, c.target_id
-                 FROM public.Edge c
+                 FROM ist.Edge c
                  JOIN Symbol s ON s.id = c.source_id
                  WHERE c.relation_type = 'CALLS' AND s.project_code = '{}'",
                 escaped
             )
         } else {
-            "SELECT source_id, target_id FROM public.Edge WHERE relation_type = 'CALLS'".to_string()
+            "SELECT source_id, target_id FROM ist.Edge WHERE relation_type = 'CALLS'".to_string()
         };
 
         let query = format!(
@@ -758,7 +758,7 @@ impl GraphStore {
                     p.path_names || ARRAY[s.name],
                     c.target_id = ANY(p.path_ids)
                 FROM call_paths p
-                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
+                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
                 JOIN Symbol s ON s.id = c.source_id
                 WHERE NOT p.is_cycle AND array_length(p.path_ids, 1) < 10
             )
@@ -798,7 +798,7 @@ impl GraphStore {
                 return Ok(count as i64);
             }
         }
-        // REQ-AXO-350 : public.Edge self-join replaces legacy CALLS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge self-join replaces legacy CALLS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let query = format!(
@@ -808,8 +808,8 @@ impl GraphStore {
                 SELECT
                     least(c1.source_id, c1.target_id) AS left_id,
                     greatest(c1.source_id, c1.target_id) AS right_id
-                FROM public.Edge c1
-                JOIN public.Edge c2
+                FROM ist.Edge c1
+                JOIN ist.Edge c2
                   ON c1.source_id = c2.target_id
                  AND c1.target_id = c2.source_id
                  AND c2.relation_type = 'CALLS'
@@ -844,7 +844,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CONTAINS (MIL-AXO-017).
         let scoped = project != "*";
         let escaped_project = project.replace('\'', "''");
         let escaped_domain = domain_path.replace('\'', "''");
@@ -853,13 +853,13 @@ impl GraphStore {
         let query = format!(
             "
             SELECT s_domain.name || ' (' || f_domain.path || ') -> ' || s_infra.name || ' (' || f_infra.path || ')'
-            FROM public.Edge c
+            FROM ist.Edge c
             JOIN Symbol s_domain ON c.source_id = s_domain.id
-            JOIN public.Edge c_domain ON c_domain.target_id = s_domain.id AND c_domain.relation_type = 'CONTAINS'
+            JOIN ist.Edge c_domain ON c_domain.target_id = s_domain.id AND c_domain.relation_type = 'CONTAINS'
             JOIN File f_domain ON f_domain.path = c_domain.source_id
 
             JOIN Symbol s_infra ON c.target_id = s_infra.id
-            JOIN public.Edge c_infra ON c_infra.target_id = s_infra.id AND c_infra.relation_type = 'CONTAINS'
+            JOIN ist.Edge c_infra ON c_infra.target_id = s_infra.id AND c_infra.relation_type = 'CONTAINS'
             JOIN File f_infra ON f_infra.path = c_infra.source_id
 
             WHERE c.relation_type = 'CALLS'
@@ -891,7 +891,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS ; DuckDB array
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS ; DuckDB array
         // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
@@ -910,7 +910,7 @@ impl GraphStore {
                     1,
                     ARRAY[c.source_id],
                     s_src.name
-                FROM public.Edge c
+                FROM ist.Edge c
                 JOIN Symbol s_src ON s_src.id = c.source_id
                 WHERE c.relation_type = 'CALLS'
                   AND COALESCE(s_src.is_public, false) = true
@@ -925,7 +925,7 @@ impl GraphStore {
                     p.path_ids || ARRAY[c.target_id],
                     p.initial_name
                 FROM call_paths p
-                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
+                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
                 WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 10
             )
             SELECT DISTINCT p.initial_name || ' -> ... -> ' || s_tgt.name
@@ -948,7 +948,7 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS_NIF / CALLS ;
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS_NIF / CALLS ;
         // DuckDB array syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
@@ -968,7 +968,7 @@ impl GraphStore {
                     ARRAY[c.source_id],
                     c.target_id,
                     s_nif.name
-                FROM public.Edge c
+                FROM ist.Edge c
                 JOIN Symbol s_nif ON s_nif.id = c.target_id
                 WHERE c.relation_type = 'CALLS_NIF' {scope}
 
@@ -982,7 +982,7 @@ impl GraphStore {
                     p.initial_target_id,
                     p.initial_name
                 FROM call_depths p
-                JOIN public.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
+                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
                 WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 20
             )
             SELECT initial_name || ' (profondeur: ' || max(depth) || ')'
@@ -1015,12 +1015,12 @@ impl GraphStore {
         let query = format!(
             "
             SELECT DISTINCT e_read.target_id
-            FROM public.Edge e_read
+            FROM ist.Edge e_read
             WHERE e_read.relation_type IN ('reads', 'READS')
               AND e_read.target_id LIKE '%::phantom::%'
               {scope}
               AND NOT EXISTS (
-                SELECT 1 FROM public.Edge e_decl
+                SELECT 1 FROM ist.Edge e_decl
                 WHERE e_decl.relation_type IN ('declares', 'DECLARES')
                   AND e_decl.target_id = e_read.target_id
               )
@@ -1049,7 +1049,7 @@ impl GraphStore {
         let query = format!(
             "
             SELECT e.target_id || ' (' || count(DISTINCT e.source_id)::text || ' sources)'
-            FROM public.Edge e
+            FROM ist.Edge e
             WHERE e.relation_type IN ('declares', 'DECLARES')
               AND e.target_id LIKE '%::phantom::%'
               {scope}
@@ -1072,7 +1072,7 @@ impl GraphStore {
 mod migration_guard_tests {
     // REQ-AXO-350 batch (a) — source-level regression guard. Asserts the three
     // migrated functions no longer carry a `skip_legacy_relations()` early
-    // return and that their SQL bodies reference `public.Edge`. Fast unit
+    // return and that their SQL bodies reference `ist.Edge`. Fast unit
     // test with no PG fixture (the live PG-backed end-to-end is exercised
     // by tests::maillon_tests::test_graph_analytics_detects_*).
     const SOURCE: &str = include_str!("graph_analytics.rs");
@@ -1099,7 +1099,7 @@ mod migration_guard_tests {
     fn batch_a_get_security_audit_uses_public_edge() {
         let body = extract_fn_body(SOURCE, "pub fn get_security_audit");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("relation_type = 'CALLS'"));
         assert!(body.contains("relation_type = 'CALLS_NIF'"));
     }
@@ -1108,7 +1108,7 @@ mod migration_guard_tests {
     fn batch_a_get_telemetry_score_uses_public_edge() {
         let body = extract_fn_body(SOURCE, "pub fn get_telemetry_score");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("relation_type = 'CALLS'"));
     }
 
@@ -1116,7 +1116,7 @@ mod migration_guard_tests {
     fn batch_a_get_circular_dependency_count_fast_uses_public_edge() {
         let body = extract_fn_body(SOURCE, "pub fn get_circular_dependency_count_fast");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("c1.relation_type = 'CALLS'"));
         assert!(body.contains("c2.relation_type = 'CALLS'"));
     }
@@ -1144,8 +1144,8 @@ mod migration_guard_tests {
         let body = extract_fn_body(SOURCE, "pub fn get_dead_code_count");
         assert!(!body.contains("skip_legacy_relations"));
         assert!(body.contains("c.relation_type = 'CONTAINS'"));
-        assert!(body.contains("FROM public.Edge WHERE relation_type = 'CALLS'"));
-        assert!(body.contains("FROM public.Edge WHERE relation_type = 'CALLS_NIF'"));
+        assert!(body.contains("FROM ist.Edge WHERE relation_type = 'CALLS'"));
+        assert!(body.contains("FROM ist.Edge WHERE relation_type = 'CALLS_NIF'"));
     }
 
     #[test]
@@ -1214,7 +1214,7 @@ mod migration_guard_tests {
     fn batch_c_get_circular_dependencies_uses_public_edge_and_pg_syntax() {
         let body = extract_fn_body(SOURCE, "pub fn get_circular_dependencies");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("c.relation_type = 'CALLS'"));
         assert!(body.contains("ARRAY[c.source_id]"));
         assert!(body.contains("|| ARRAY["));
@@ -1230,7 +1230,7 @@ mod migration_guard_tests {
     fn batch_c_get_unsafe_exposure_uses_public_edge_and_pg_syntax() {
         let body = extract_fn_body(SOURCE, "pub fn get_unsafe_exposure");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("c.relation_type = 'CALLS'"));
         assert!(body.contains("ARRAY[c.source_id]"));
         assert!(body.contains("c.target_id = ANY(p.path_ids)"));
@@ -1242,7 +1242,7 @@ mod migration_guard_tests {
     fn batch_c_get_nif_blocking_risks_uses_public_edge_and_pg_syntax() {
         let body = extract_fn_body(SOURCE, "pub fn get_nif_blocking_risks");
         assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM public.Edge"));
+        assert!(body.contains("FROM ist.Edge"));
         assert!(body.contains("c.relation_type = 'CALLS_NIF'"));
         assert!(body.contains("c.relation_type = 'CALLS'"));
         assert!(body.contains("ARRAY[c.source_id]"));

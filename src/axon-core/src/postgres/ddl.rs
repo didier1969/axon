@@ -336,18 +336,18 @@ mod tests {
         // dropped from the canonical schema ; assertion list updated to match.
         let joined = generate_global_schema().join("\n");
         for tbl in [
-            "public.IndexedFile",
-            "public.Symbol",
-            "public.Chunk",
-            "public.ChunkEmbedding",
-            "public.FileLifecycleEvent",
-            "public.HourlyVectorizationRollup",
-            "public.Project",
-            "public.EmbeddingModel",
-            "public.GraphProjection",
-            "public.GraphProjectionState",
-            "public.GraphEmbedding",
-            "public.RewardObservationLog",
+            "ist.IndexedFile",
+            "ist.Symbol",
+            "ist.Chunk",
+            "ist.ChunkEmbedding",
+            "ist.FileLifecycleEvent",
+            "ist.HourlyVectorizationRollup",
+            "ist.Project",
+            "ist.EmbeddingModel",
+            "ist.GraphProjection",
+            "ist.GraphProjectionState",
+            "ist.GraphEmbedding",
+            "ist.RewardObservationLog",
         ] {
             assert!(
                 joined.contains(tbl),
@@ -357,14 +357,14 @@ mod tests {
         // ChunkEmbedding gains project_code column for multi-project
         // filtering under the single global HNSW index.
         assert!(
-            joined.contains("public.ChunkEmbedding")
+            joined.contains("ist.ChunkEmbedding")
                 && joined.contains("project_code TEXT NOT NULL")
         );
         // Single global HNSW index (CPT-AXO-041). Substrings rather than
         // a single contiguous match because the canonical SQL formats
         // the statement across multiple lines.
         assert!(joined.contains("chunk_embedding_hnsw_idx"));
-        assert!(joined.contains("public.ChunkEmbedding"));
+        assert!(joined.contains("ist.ChunkEmbedding"));
         assert!(joined.contains("USING hnsw"));
         assert!(joined.contains("vector_cosine_ops"));
         // create_graph assertion retired (MIL-AXO-017 Phase E).

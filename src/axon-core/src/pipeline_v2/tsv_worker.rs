@@ -1,7 +1,7 @@
 //! TSV builder worker — REQ-AXO-901624 P4 Lazy Async TSV Build via pgmq.
 //!
 //! Drains the `pgmq.tsv_pending` queue and back-fills
-//! `public.Chunk.content_tsv` out of band of the A3 critical write path.
+//! `ist.Chunk.content_tsv` out of band of the A3 critical write path.
 //! Decouples the ~95 % CPU cost of the 4-setweight tsvector computation
 //! (P1 EXPLAIN ANALYZE session 48 ; was a GENERATED ALWAYS STORED column
 //! synchronous to A3 INSERT) from A3's transaction latency.
@@ -155,7 +155,7 @@ pub(crate) fn build_update_sql(chunk_ids: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "UPDATE public.Chunk \
+        "UPDATE ist.Chunk \
          SET content_tsv = axon.compute_chunk_tsv(chunk_path, kind, content, file_path) \
          WHERE id IN ({id_list})"
     )
@@ -390,7 +390,7 @@ mod tests {
         assert!(sql.contains("'plain'"));
         assert!(sql.contains("'with''quote'"));
         assert!(sql.contains("axon.compute_chunk_tsv"));
-        assert!(sql.contains("UPDATE public.Chunk"));
+        assert!(sql.contains("UPDATE ist.Chunk"));
     }
 
     #[test]

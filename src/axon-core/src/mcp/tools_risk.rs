@@ -579,11 +579,11 @@ impl McpServer {
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
-        // REQ-AXO-350 : public.Edge replaces legacy CALLS / CALLS_NIF.
+        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CALLS_NIF.
         let calls_count = self
             .graph_store
             .query_count(
-                "SELECT count(*) FROM public.Edge WHERE relation_type IN ('CALLS', 'CALLS_NIF')",
+                "SELECT count(*) FROM ist.Edge WHERE relation_type IN ('CALLS', 'CALLS_NIF')",
             )
             .unwrap_or(0);
         if calls_count > 0 {
@@ -838,7 +838,7 @@ impl McpServer {
         // IstGraphView. The blast-radius probe is a reverse BFS of
         // CALLS edges up to `depth`; the in-memory CSR walks that
         // in O(N+M) without a PG roundtrip, then falls back to
-        // `public.callers_of` SQL when the per-project cache is cold.
+        // `ist.callers_of` SQL when the per-project cache is cold.
         let view = crate::ist_snapshot::process_view();
         let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
         let mut surfaces_used: Vec<&'static str> = Vec::new();
@@ -854,15 +854,15 @@ impl McpServer {
             callers.len() as i64
         } else {
             // REQ-AXO-271 slice 2d : legacy CALLS table dropped ;
-            // public.Edge is canonical. `public.callers_of` SQL
+            // ist.Edge is canonical. `ist.callers_of` SQL
             // function (MIL-AXO-017 slice 4) wraps the WITH RECURSIVE
-            // walk over `public.Edge WHERE relation_type='CALLS'`.
+            // walk over `ist.Edge WHERE relation_type='CALLS'`.
             surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
             let depth_i = depth.clamp(1, 10) as i64;
             let safe_target = target_id.replace('\'', "''");
             let sql = format!(
-                "SELECT count(*) FROM public.callers_of('{safe_target}', {depth_i}, NULL)"
+                "SELECT count(*) FROM ist.callers_of('{safe_target}', {depth_i}, NULL)"
             );
             self.graph_store
                 .query_count(&sql)
@@ -913,7 +913,7 @@ impl McpServer {
     /// error, or empty result so the caller falls back to SQL —
     /// covers AGE empty (dual-write opt-in not enabled), schema gaps,
     /// or AGE quirks we haven't covered yet.
-    /// MIL-AXO-017 slice 5 (REQ-AXO-299) — query `public.callers_of`
+    /// MIL-AXO-017 slice 5 (REQ-AXO-299) — query `ist.callers_of`
     /// REQ-AXO-91512 — RAM-first counterpart of
     /// `impact_callers_via_public_edge`. Performs the reverse traversal
     /// in the in-memory IST snapshot (PIL-AXO-9002), classifies each
@@ -968,7 +968,7 @@ impl McpServer {
             .collect();
         let sql = format!(
             "SELECT id, name, kind, COALESCE(project_code, 'unknown') \
-             FROM public.Symbol WHERE id IN ({})",
+             FROM ist.Symbol WHERE id IN ({})",
             escaped.join(", ")
         );
         let raw = self
@@ -1006,7 +1006,7 @@ impl McpServer {
     }
 
     /// SQL function (REQ-AXO-296) for reverse-traversal callers. Joins
-    /// with `public.Symbol` + `public.Chunk` to surface the 5-column
+    /// with `ist.Symbol` + `ist.Chunk` to surface the 5-column
     /// shape `axon_impact` expects (caller_id, edge_type, origin, name,
     /// kind), keeping the JSON contract identical to the AGE-based
     /// `impact_callers_via_age` helper. Returns `None` on empty / error
@@ -1022,7 +1022,7 @@ impl McpServer {
         let project_code_param = project.unwrap_or("");
         // Uses Axon's positional `?` placeholders (`expand_named_params`
         // inlines escaped string literals before dispatch). The graph
-        // SQL function `public.callers_of` returns (source_id, distance,
+        // SQL function `ist.callers_of` returns (source_id, distance,
         // relation_type) — we map relation_type to the lowercased
         // canonical labels (`calls`, `calls_nif`) that `axon_impact`
         // parses for direct vs nif edge accounting.
@@ -1041,8 +1041,8 @@ impl McpServer {
                         COALESCE(s.kind, '-') AS kind,\
                         COALESCE(MIN(ch.file_path), '-') AS origin\
                  FROM callers c\
-                 LEFT JOIN public.Symbol s ON s.id = c.source_id\
-                 LEFT JOIN public.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'\
+                 LEFT JOIN ist.Symbol s ON s.id = c.source_id\
+                 LEFT JOIN ist.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'\
                  GROUP BY c.source_id, c.relation_type, s.name, s.kind\
              )\
              SELECT caller_id, edge_type, origin, name, kind FROM enriched"
@@ -1061,5 +1061,5 @@ impl McpServer {
         Some(raw)
     }
 
-    // MIL-AXO-017 slice 6B: AGE helper impact_callers_via_age removed ; public.callers_of is canonical.
+    // MIL-AXO-017 slice 6B: AGE helper impact_callers_via_age removed ; ist.callers_of is canonical.
 }

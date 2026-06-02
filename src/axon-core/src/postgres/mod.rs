@@ -19,7 +19,7 @@
 //     multi-project after the CPT-AXO-039 supersedure.
 //   - `seed::{apply_seed, load_seed_if_needed, SeedDocument}` (P5):
 //     SOLL bootstrap loader for empty PG instances.
-// MIL-AXO-017 slice 6B Phase D: `age` module retired ; canonical edge storage = public.Edge.
+// MIL-AXO-017 slice 6B Phase D: `age` module retired ; canonical edge storage = ist.Edge.
 
 pub mod bulk_writer;
 pub mod ddl;

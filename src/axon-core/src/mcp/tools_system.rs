@@ -195,22 +195,22 @@ impl McpServer {
         let examples = r#"## 📚 Query Examples (SQL gateway / cypher tool)
 
 1) Workspace size (canonical pipeline_v2)
-`SELECT count(*) AS indexed_files FROM public.IndexedFile;`
+`SELECT count(*) AS indexed_files FROM ist.IndexedFile;`
 
 2) Project health (Chunk = canonical per-file per-project pivot)
-`SELECT project_code, count(DISTINCT file_path) AS files, count(*) AS chunks FROM public.Chunk GROUP BY project_code ORDER BY chunks DESC;`
+`SELECT project_code, count(DISTINCT file_path) AS files, count(*) AS chunks FROM ist.Chunk GROUP BY project_code ORDER BY chunks DESC;`
 
 3) Vector embedding coverage
-`SELECT c.project_code, count(DISTINCT c.file_path) AS files_with_embeddings FROM public.Chunk c JOIN public.ChunkEmbedding e ON e.chunk_id = c.id GROUP BY c.project_code ORDER BY 2 DESC;`
+`SELECT c.project_code, count(DISTINCT c.file_path) AS files_with_embeddings FROM ist.Chunk c JOIN ist.ChunkEmbedding e ON e.chunk_id = c.id GROUP BY c.project_code ORDER BY 2 DESC;`
 
 4) Per-file chunk distribution
-`SELECT file_path, count(*) AS chunks FROM public.Chunk GROUP BY file_path ORDER BY chunks DESC LIMIT 20;`
+`SELECT file_path, count(*) AS chunks FROM ist.Chunk GROUP BY file_path ORDER BY chunks DESC LIMIT 20;`
 
 5) Inter-language bridge visibility (Edge canonical)
-`SELECT relation_type, count(*) FROM public.Edge GROUP BY relation_type ORDER BY 2 DESC;`
+`SELECT relation_type, count(*) FROM ist.Edge GROUP BY relation_type ORDER BY 2 DESC;`
 
 6) Symbol lookup by project
-`SELECT id, name, kind FROM public.Symbol WHERE project_code = 'AXO' ORDER BY name LIMIT 50;`
+`SELECT id, name, kind FROM ist.Symbol WHERE project_code = 'AXO' ORDER BY name LIMIT 50;`
 "#;
         Some(json!({ "content": [{ "type": "text", "text": examples }] }))
     }
@@ -229,11 +229,11 @@ impl McpServer {
 
         // Canonical IST tables (post-MIL-AXO-017 migration).
         let checks: Vec<(&str, &str)> = vec![
-            ("IndexedFile", "SELECT count(*) FROM public.IndexedFile"),
-            ("Symbol", "SELECT count(*) FROM public.Symbol"),
-            ("Edge", "SELECT count(*) FROM public.Edge"),
-            ("Chunk", "SELECT count(*) FROM public.Chunk"),
-            ("ChunkEmbedding", "SELECT count(*) FROM public.ChunkEmbedding"),
+            ("IndexedFile", "SELECT count(*) FROM ist.IndexedFile"),
+            ("Symbol", "SELECT count(*) FROM ist.Symbol"),
+            ("Edge", "SELECT count(*) FROM ist.Edge"),
+            ("Chunk", "SELECT count(*) FROM ist.Chunk"),
+            ("ChunkEmbedding", "SELECT count(*) FROM ist.ChunkEmbedding"),
         ];
 
         let mut rows = Vec::new();
@@ -318,22 +318,22 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
-        let total_chunks = scalar(&format!("SELECT count(*) FROM public.Chunk{}", where_project));
+        let total_chunks = scalar(&format!("SELECT count(*) FROM ist.Chunk{}", where_project));
         let embedded_chunks = scalar(&format!(
-            "SELECT count(*) FROM public.ChunkEmbedding{}",
+            "SELECT count(*) FROM ist.ChunkEmbedding{}",
             where_project
         ));
         let symbols = scalar(&format!(
-            "SELECT count(*) FROM public.Symbol{}",
+            "SELECT count(*) FROM ist.Symbol{}",
             where_project
         ));
         let indexed_files = scalar(&format!(
-            "SELECT count(*) FROM public.IndexedFile{}",
+            "SELECT count(*) FROM ist.IndexedFile{}",
             where_project
         ));
         // Edge + Project tables don't carry project_code → always global.
-        let edges = scalar("SELECT count(*) FROM public.Edge");
-        let projects = scalar("SELECT count(*) FROM public.Project");
+        let edges = scalar("SELECT count(*) FROM ist.Edge");
+        let projects = scalar("SELECT count(*) FROM ist.Project");
         let pending_chunks = (total_chunks - embedded_chunks).max(0);
         let coverage_pct = if total_chunks > 0 {
             (embedded_chunks as f64 / total_chunks as f64) * 100.0
@@ -351,9 +351,9 @@ impl McpServer {
             let breakdown_sql = "\
                 SELECT c.project_code, \
                        count(*) AS chunks, \
-                       (SELECT count(*) FROM public.ChunkEmbedding ce WHERE ce.chunk_id IN (SELECT id FROM public.Chunk c2 WHERE c2.project_code = c.project_code)) AS embeddings, \
-                       (SELECT count(*) FROM public.IndexedFile f WHERE f.project_code = c.project_code) AS indexed_files \
-                FROM public.Chunk c \
+                       (SELECT count(*) FROM ist.ChunkEmbedding ce WHERE ce.chunk_id IN (SELECT id FROM ist.Chunk c2 WHERE c2.project_code = c.project_code)) AS embeddings, \
+                       (SELECT count(*) FROM ist.IndexedFile f WHERE f.project_code = c.project_code) AS indexed_files \
+                FROM ist.Chunk c \
                 GROUP BY c.project_code \
                 ORDER BY chunks DESC";
             match self.graph_store.execute_raw_sql_gateway(breakdown_sql) {
@@ -498,7 +498,7 @@ impl McpServer {
                 .unwrap_or(0) as i64
         } else {
             scalar(&format!(
-                "SELECT count(*) FROM public.indexedfile WHERE status='discovered' AND retry_count<3 AND path LIKE '{}/%'",
+                "SELECT count(*) FROM ist.indexedfile WHERE status='discovered' AND retry_count<3 AND path LIKE '{}/%'",
                 project.replace('\'', "''")
             ))
         };
@@ -782,7 +782,7 @@ impl McpServer {
 
         // REQ-AXO-271 slice 2d invariant : `skip_legacy_relations` is
         // always true under PG canonical (the SQL relation tables
-        // CALLS / CALLS_NIF are dropped — `public.Edge` + the
+        // CALLS / CALLS_NIF are dropped — `ist.Edge` + the
         // `WITH RECURSIVE` SQL graph functions handle traversal).
         // REQ-AXO-91501 vague 1d : the legacy `WITH RECURSIVE hops`
         // translation layer for `MATCH [:CALLS*1..3]` Cypher-style
@@ -793,7 +793,7 @@ impl McpServer {
             Ok(result) => {
                 if result.trim() == "[]" && ql.contains("match") {
                     let note =
-                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use the SQL graph functions in `public.path` or `query_examples`.";
+                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use the SQL graph functions in `ist.path` or `query_examples`.";
                     Some(json!({ "content": [{ "type": "text", "text": note }] }))
                 } else {
                     Some(json!({ "content": [{ "type": "text", "text": result }] }))
@@ -867,7 +867,7 @@ impl McpServer {
     ///  - `full=false` (default) : delta scan only ; IndexedFile
     ///    cache is preserved so the indexer skips files whose
     ///    `content_hash` already matches the disk hash.
-    ///  - `full=true` : wipes `public.IndexedFile` rows whose `path`
+    ///  - `full=true` : wipes `ist.IndexedFile` rows whose `path`
     ///    is under the project_path prefix BEFORE triggering the
     ///    NOTIFY, so every file is forced through A1/A2/A3 + B1/B2/B3
     ///    on the next scanner pass.
@@ -1013,7 +1013,7 @@ impl McpServer {
     fn rescan_wipe_indexed_files(&self, project_path: &str) -> String {
         let escaped = project_path.replace('\'', "''");
         let sql = format!(
-            "DELETE FROM public.IndexedFile WHERE path LIKE '{}/%'",
+            "DELETE FROM ist.IndexedFile WHERE path LIKE '{}/%'",
             escaped
         );
         match self.graph_store.execute_raw_sql_gateway(&sql) {

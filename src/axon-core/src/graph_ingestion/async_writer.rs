@@ -446,8 +446,8 @@ mod tests {
         // Renderers removed. This test now only verifies RawQueries passthrough.
         let mut acc = WriteAccumulator::new();
         acc.absorb(WriteDiff::RawQueries(vec![
-            "DELETE FROM public.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
-            "UPDATE public.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'".to_string(),
+            "DELETE FROM ist.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
+            "UPDATE ist.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'".to_string(),
         ]));
         assert_eq!(acc.raw_queries.len(), 2);
     }
@@ -602,8 +602,8 @@ mod tests {
 
         dispatcher
             .dispatch(WriteDiff::RawQueries(vec![
-                "DELETE FROM public.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
-                "UPDATE public.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'"
+                "DELETE FROM ist.ChunkEmbedding WHERE chunk_id = 'c1'".to_string(),
+                "UPDATE ist.IndexedFile SET last_seen_ms = 42 WHERE path = '/tmp/a.rs'"
                     .to_string(),
             ]))
             .expect("dispatch ok");
@@ -619,8 +619,8 @@ mod tests {
         let batches = sink.batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 2);
-        assert!(batches[0][0].starts_with("DELETE FROM public.ChunkEmbedding"));
-        assert!(batches[0][1].starts_with("UPDATE public.IndexedFile"));
+        assert!(batches[0][0].starts_with("DELETE FROM ist.ChunkEmbedding"));
+        assert!(batches[0][1].starts_with("UPDATE ist.IndexedFile"));
         drop(dispatcher);
         handle.join().expect("writer thread joined");
     }

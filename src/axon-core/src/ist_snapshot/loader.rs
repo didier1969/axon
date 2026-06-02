@@ -1,6 +1,6 @@
 // REQ-AXO-91485 — cold-load IstGraph from PG.
 //
-// One round trip on public.symbol (nodes) + one on public.edge (edges), both
+// One round trip on ist.symbol (nodes) + one on ist.edge (edges), both
 // scoped to a single project_code. Read-only ; no DDL ; no incremental sync
 // (that lives in REQ-AXO-91487).
 
@@ -29,8 +29,8 @@ pub trait JsonSqlStore {
     fn query_json(&self, sql: &str) -> Result<String, String>;
 }
 
-const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text FROM public.symbol WHERE project_code = '{P}'";
-const EDGE_SQL: &str = "SELECT source_id, target_id, relation_type FROM public.edge WHERE project_code = '{P}'";
+const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text FROM ist.symbol WHERE project_code = '{P}'";
+const EDGE_SQL: &str = "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
 
 /// Cold-load one project's snapshot. `project_code` is escaped at the
 /// call site by replacing `'` with `''` ; callers must not pass arbitrary
@@ -118,9 +118,9 @@ mod tests {
     impl JsonSqlStore for FakeStore {
         fn query_json(&self, sql: &str) -> Result<String, String> {
             self.calls.borrow_mut().push(sql.to_string());
-            if sql.contains("public.symbol") {
+            if sql.contains("ist.symbol") {
                 Ok(self.nodes_json.clone())
-            } else if sql.contains("public.edge") {
+            } else if sql.contains("ist.edge") {
                 Ok(self.edges_json.clone())
             } else {
                 Err(format!("unexpected sql: {}", sql))

@@ -2019,7 +2019,7 @@ impl GraphStore {
     // public.File status state machine columns (graph_ready /
     // vector_ready / file_stage / status). Pipeline-v2 (REQ-AXO-289)
     // makes the per-file recovery cursor obsolete — A/B stages are
-    // idempotent and replay from public.IndexedFile + public.Chunk.
+    // idempotent and replay from ist.IndexedFile + ist.Chunk.
 
     fn load_runtime_metadata(&self) -> Result<std::collections::HashMap<String, String>> {
         let existing = self.query_json("SELECT key, value FROM RuntimeMetadata")?;
@@ -2199,7 +2199,7 @@ mod graph_bootstrap_tests {
         assert!(!indexer.soll_attached);
         indexer
             .execute(
-                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
                  VALUES ('/tmp/indexer.txt', 'hash-indexer', 1)",
             )
             .unwrap();
@@ -2221,7 +2221,7 @@ mod graph_bootstrap_tests {
         let indexer = GraphStore::new(&db_root_str).unwrap();
         indexer
             .execute(
-                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
                  VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
             )
             .unwrap();
@@ -2233,7 +2233,7 @@ mod graph_bootstrap_tests {
 
         let brain = GraphStore::new_brain_reader_soll_writer(&db_root_str).unwrap();
         let raw = brain
-            .query_json_on_reader("SELECT count(*) FROM public.IndexedFile")
+            .query_json_on_reader("SELECT count(*) FROM ist.IndexedFile")
             .unwrap();
         assert!(raw.contains("1"), "{raw}");
         assert!(matches!(
@@ -2252,7 +2252,7 @@ mod graph_bootstrap_tests {
         let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
         indexer
             .execute(
-                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms)
+                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
                  VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
             )
             .unwrap();

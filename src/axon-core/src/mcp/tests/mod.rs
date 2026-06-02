@@ -258,17 +258,17 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         .collect();
     let list = quoted.join(", ");
     let _ = server.graph_store.execute(&format!(
-        "DELETE FROM public.ChunkEmbedding WHERE chunk_id IN \
-         (SELECT id FROM public.Chunk WHERE source_id IN ({list}))"
+        "DELETE FROM ist.ChunkEmbedding WHERE chunk_id IN \
+         (SELECT id FROM ist.Chunk WHERE source_id IN ({list}))"
     ));
     let _ = server.graph_store.execute(&format!(
-        "DELETE FROM public.Chunk WHERE source_id IN ({list})"
+        "DELETE FROM ist.Chunk WHERE source_id IN ({list})"
     ));
     let _ = server.graph_store.execute(&format!(
-        "DELETE FROM public.Edge WHERE source_id IN ({list}) OR target_id IN ({list})"
+        "DELETE FROM ist.Edge WHERE source_id IN ({list}) OR target_id IN ({list})"
     ));
     let _ = server.graph_store.execute(&format!(
-        "DELETE FROM public.Symbol WHERE id IN ({list})"
+        "DELETE FROM ist.Symbol WHERE id IN ({list})"
     ));
 }
 

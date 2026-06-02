@@ -128,7 +128,7 @@ mod tests {
             let escaped = f.replace('\'', "''");
             store
                 .execute_raw_sql_gateway(&format!(
-                    "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms) \
+                    "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms) \
                      VALUES ('{}', 'stale-hash', {}) \
                      ON CONFLICT (path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
                     escaped, now_ms
@@ -225,7 +225,7 @@ mod tests {
         let escaped = project_path.replace('\'', "''");
         let raw = store
             .execute_raw_sql_gateway(&format!(
-                "SELECT count(*) FROM public.IndexedFile WHERE path LIKE '{}/%'",
+                "SELECT count(*) FROM ist.IndexedFile WHERE path LIKE '{}/%'",
                 escaped
             ))
             .expect("count indexed");

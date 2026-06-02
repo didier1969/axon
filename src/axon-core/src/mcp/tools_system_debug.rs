@@ -153,7 +153,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     // pipeline_v2 (REQ-AXO-289). File presence is now `IndexedFile`,
     // graph-readiness = Chunk row, vector-readiness = ChunkEmbedding row.
     let file_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM public.IndexedFile")
+        snapshot_count("SELECT count(*) FROM ist.IndexedFile")
     } else {
         0
     };
@@ -163,14 +163,14 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let oversized_count: i64 = 0;
     let skipped_count: i64 = 0;
     let graph_ready_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
+        snapshot_count("SELECT count(DISTINCT file_path) FROM ist.Chunk")
     } else {
         0
     };
     let vector_ready_query = format!(
         "SELECT count(DISTINCT c.file_path) \
-         FROM public.Chunk c \
-         JOIN public.ChunkEmbedding ce \
+         FROM ist.Chunk c \
+         JOIN ist.ChunkEmbedding ce \
            ON ce.chunk_id = c.id \
           AND ce.model_id = '{CHUNK_MODEL_ID}' \
           AND ce.source_hash = c.content_hash \
@@ -188,7 +188,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let reader_refresh_failures_total = server.graph_store.reader_refresh_failures_total();
     let reader_snapshot = server.graph_store.reader_snapshot_diagnostics();
     let canonical_file_count = if graph_runtime_enabled || vector_runtime_enabled {
-        canonical_count("SELECT count(*) FROM public.IndexedFile")
+        canonical_count("SELECT count(*) FROM ist.IndexedFile")
     } else {
         0
     };
@@ -204,9 +204,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     } else {
         0
     };
-    // Post-MIL-AXO-017: canonical edge count from public.Edge.
+    // Post-MIL-AXO-017: canonical edge count from ist.Edge.
     let edge_count = if graph_runtime_enabled || vector_runtime_enabled {
-        snapshot_count("SELECT count(*) FROM public.Edge")
+        snapshot_count("SELECT count(*) FROM ist.Edge")
     } else {
         0
     };

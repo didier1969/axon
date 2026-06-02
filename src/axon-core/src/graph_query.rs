@@ -321,7 +321,7 @@ impl GraphStore {
         // the legacy GraphProjection cache refresh via SQL CALLS / CALLS_NIF
         // tables was conditional on `skip_legacy_relations()`, which always
         // returns true under PG canonical. Authoritative call-graph reads
-        // now route through `public.Edge` + db/ddl/04_graph_functions.sql
+        // now route through `ist.Edge` + db/ddl/04_graph_functions.sql
         // (`callers_of`, `path`, etc.). This function is reduced to anchor
         // resolution: callers receive the resolved id for downstream
         // bookkeeping but no row is written into GraphProjection.
@@ -449,7 +449,7 @@ impl GraphStore {
     /// catalog error.
     pub fn pg_chunkembedding_total_bytes(&self) -> Option<i64> {
         self.query_single_i64_writer(
-            "SELECT pg_total_relation_size('public.ChunkEmbedding')::BIGINT",
+            "SELECT pg_total_relation_size('ist.ChunkEmbedding')::BIGINT",
         )
         .ok()
         .flatten()
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
         // REQ-AXO-901653 slice-5c — File table dropped ; test migrated to
-        // public.IndexedFile (3 cols : path, content_hash, last_seen_ms).
+        // ist.IndexedFile (3 cols : path, content_hash, last_seen_ms).
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let read = store.execute_raw_sql_gateway("SELECT 1").unwrap();
@@ -779,7 +779,7 @@ mod tests {
 
         let write = store
             .execute_raw_sql_gateway(
-                "INSERT INTO public.IndexedFile (path, content_hash, last_seen_ms) \
+                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms) \
                  VALUES ('/tmp/sql_gateway.ex', 'hash-1', 1)",
             )
             .unwrap();
@@ -787,7 +787,7 @@ mod tests {
 
         let count = store
             .query_count(
-                "SELECT count(*) FROM public.IndexedFile WHERE path = '/tmp/sql_gateway.ex'",
+                "SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/sql_gateway.ex'",
             )
             .unwrap();
         assert_eq!(count, 1);

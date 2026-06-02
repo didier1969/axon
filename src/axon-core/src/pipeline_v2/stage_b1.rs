@@ -42,7 +42,7 @@ pub fn load_embedding_dedup_cache(store: &GraphStore) -> Result<Arc<dashmap::Das
 
 /// Output of stage B1 — the payload B2 (GPU embedder) consumes.
 ///
-/// `chunk_id` is the PK in `public.Chunk`. `content` is the raw text to
+/// `chunk_id` is the PK in `ist.Chunk`. `content` is the raw text to
 /// embed (capped at the model's tokenizer max len upstream of B2 via the
 /// seq-len bucketing — REQ-AXO-262). `content_hash` lets B3 dedup
 /// embeddings against the same source revision.

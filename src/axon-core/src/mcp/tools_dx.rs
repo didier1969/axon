@@ -24,7 +24,7 @@ pub(crate) struct ProjectScopeSummary {
 
 /// REQ-AXO-91511 — materialize IST symbol ids into the JSON row-of-row
 /// format `format_table_from_json` consumes (`[[name, kind, project], ...]`).
-/// One round-trip on public.Symbol for display ; the BFS itself already
+/// One round-trip on ist.Symbol for display ; the BFS itself already
 /// ran in RAM via IstGraphView. Returns `"[]"` when ids is empty so the
 /// downstream string parser is happy.
 fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String {
@@ -37,7 +37,7 @@ fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String 
         .collect();
     let sql = format!(
         "SELECT name, kind, COALESCE(project_code, 'unknown') \
-         FROM public.Symbol WHERE id IN ({})",
+         FROM ist.Symbol WHERE id IN ({})",
         escaped.join(", ")
     );
     server
@@ -158,14 +158,14 @@ impl McpServer {
         }
 
         // REQ-AXO-901653 slice-5d — public.File dropped ; project-scope files
-        // count derives from public.Chunk (project_code carrier). pending /
+        // count derives from ist.Chunk (project_code carrier). pending /
         // indexing have no pipeline_v2 equivalent (writes are in-line) ;
         // collapse to 0 and treat all known files as completed.
         let params = json!({ "project": project });
         let total_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(DISTINCT file_path) FROM public.Chunk WHERE project_code = $project",
+                "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = $project",
                 &params,
             )
             .unwrap_or(0);
@@ -535,24 +535,24 @@ impl McpServer {
         let safe_project = project.replace('\'', "''");
         let sql = format!(
             "WITH anchors AS ( \
-                SELECT id FROM public.Symbol \
+                SELECT id FROM ist.Symbol \
                 WHERE project_code = '{safe_project}' AND name IN ({names_sql}) \
              ), \
              neighbor_edges AS ( \
-                SELECT e.target_id AS nid FROM public.Edge e \
+                SELECT e.target_id AS nid FROM ist.Edge e \
                 JOIN anchors a ON a.id = e.source_id \
                 WHERE e.project_code = '{safe_project}' \
                   AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
                 UNION \
-                SELECT e.source_id AS nid FROM public.Edge e \
+                SELECT e.source_id AS nid FROM ist.Edge e \
                 JOIN anchors a ON a.id = e.target_id \
                 WHERE e.project_code = '{safe_project}' \
                   AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
              ) \
              SELECT DISTINCT s.name, COALESCE(s.kind, '') AS kind, \
-                    COALESCE((SELECT c.file_path FROM public.Chunk c \
+                    COALESCE((SELECT c.file_path FROM ist.Chunk c \
                               WHERE c.source_id = s.id LIMIT 1), '') AS uri \
-             FROM public.Symbol s \
+             FROM ist.Symbol s \
              JOIN neighbor_edges n ON n.nid = s.id \
              WHERE s.project_code = '{safe_project}' \
                AND s.name NOT IN ({names_sql}) \
@@ -1974,7 +1974,7 @@ impl McpServer {
         // REQ-AXO-91513 (MIL-AXO-019 vague 1d) — RAM-first via IstGraphView.
         // Direct callers (depth=1, reverse_at_radius) of the resolved
         // symbol = the surface of API consumers. Fallback to
-        // `public.callers_of` SQL function when the cache is cold.
+        // `ist.callers_of` SQL function when the cache is cold.
         let view = crate::ist_snapshot::process_view();
         let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
         let mut surfaces_used: Vec<&'static str> = Vec::new();
@@ -1989,7 +1989,7 @@ impl McpServer {
             surfaces_degraded.push("graph_ram_unavailable");
             let safe_target = target_id.replace('\'', "''");
             let sql = format!(
-                "SELECT caller_id FROM public.callers_of('{safe_target}', 1, NULL)"
+                "SELECT caller_id FROM ist.callers_of('{safe_target}', 1, NULL)"
             );
             self.graph_store
                 .query_json(&sql)

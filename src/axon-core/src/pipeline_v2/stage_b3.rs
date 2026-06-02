@@ -4,7 +4,7 @@
 //! them via [`crate::graph::GraphStore::upsert_chunk_embedding_v2`]
 //! (`ON CONFLICT (chunk_id, model_id) DO UPDATE`). The Chunk row B2
 //! embedded was already written by A3, so B3 only touches
-//! `public.ChunkEmbedding`.
+//! `ist.ChunkEmbedding`.
 //!
 //! B3 is the canonical write boundary for the vector lane — a successful
 //! commit means the chunk is queryable via pgvector ANN search. Crash
@@ -33,7 +33,7 @@ pub struct PersistedEmbedding {
     pub embedded_at_ms: i64,
 }
 
-/// UPSERT `embedded`'s embedding row into `public.ChunkEmbedding`.
+/// UPSERT `embedded`'s embedding row into `ist.ChunkEmbedding`.
 ///
 /// DEC-AXO-081 — `project_code` is extracted from the canonical
 /// `chunk_id` prefix (`"{project_code}::path::name::chunk[::part-NN]"`).

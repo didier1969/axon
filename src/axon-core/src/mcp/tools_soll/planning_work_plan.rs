@@ -789,7 +789,7 @@ impl McpServer {
     fn count_degraded_links_for_node(&self, node_id: &str) -> usize {
         // Post-MIL-AXO-017: legacy SUBSTANTIATES/IMPACTS/CONTAINS tables
         // are retired. Degraded file detection not yet migrated to
-        // public.Edge; return 0 conservatively.
+        // ist.Edge; return 0 conservatively.
         let _ = node_id;
         0
     }

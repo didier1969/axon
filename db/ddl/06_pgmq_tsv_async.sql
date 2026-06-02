@@ -1,3 +1,5 @@
+SET search_path = ist, public, "$user";
+
 -- REQ-AXO-901624 — P4 Lazy Async TSV Build via pgmq.
 --
 -- Mesure P1 EXPLAIN ANALYZE session 48 : `content_tsv` GENERATED ALWAYS
@@ -19,17 +21,17 @@
 --   PG 17 ne supporte pas `ALTER COLUMN ... SET EXPRESSION AS (...)
 --   STORED` directement sur une colonne stockée existante. Le rollback
 --   nécessite donc :
---     1. DROP TRIGGER trg_chunk_enqueue_tsv ON public.Chunk;
---     2. DROP FUNCTION public.fn_chunk_enqueue_tsv();
---     3. ALTER TABLE public.Chunk DROP COLUMN content_tsv;
---     4. ALTER TABLE public.Chunk ADD COLUMN content_tsv tsvector
+--     1. DROP TRIGGER trg_chunk_enqueue_tsv ON ist.Chunk;
+--     2. DROP FUNCTION ist.fn_chunk_enqueue_tsv();
+--     3. ALTER TABLE ist.Chunk DROP COLUMN content_tsv;
+--     4. ALTER TABLE ist.Chunk ADD COLUMN content_tsv tsvector
 --        GENERATED ALWAYS AS (
 --            setweight(to_tsvector('simple', coalesce(chunk_path, '')), 'A')
 --         || setweight(to_tsvector('simple', coalesce(kind, '')), 'A')
 --         || setweight(to_tsvector('english', coalesce(content, '')), 'B')
 --         || setweight(to_tsvector('simple', coalesce(file_path, '')), 'C')
 --        ) STORED;
---     5. CREATE INDEX idx_chunk_content_tsv ON public.Chunk USING GIN(content_tsv);
+--     5. CREATE INDEX idx_chunk_content_tsv ON ist.Chunk USING GIN(content_tsv);
 --   Coût : réécriture full-table (O(N)). Faire en off-hours.
 --   La queue pgmq.tsv_pending et la fn axon.compute_chunk_tsv peuvent
 --   rester en place (inertes après step 1) ou être droppées séparément.
@@ -92,13 +94,13 @@ BEGIN
     --    verbatim (PG ALTER TABLE ... DROP EXPRESSION semantics).
     --    Post-migration, new INSERTs land with content_tsv = NULL until
     --    the worker fills them.
-    EXECUTE 'ALTER TABLE public.Chunk ALTER COLUMN content_tsv DROP EXPRESSION IF EXISTS';
+    EXECUTE 'ALTER TABLE ist.Chunk ALTER COLUMN content_tsv DROP EXPRESSION IF EXISTS';
 
     -- 6. Trigger function : fires AFTER INSERT or AFTER UPDATE OF
     --    content. Targeting OF content (not all UPDATE) so the worker's
     --    own UPDATE-of-content_tsv path doesn't recurse.
     EXECUTE $exec$
-        CREATE OR REPLACE FUNCTION public.fn_chunk_enqueue_tsv()
+        CREATE OR REPLACE FUNCTION ist.fn_chunk_enqueue_tsv()
         RETURNS trigger
         LANGUAGE plpgsql
         AS $body$
@@ -123,7 +125,7 @@ BEGIN
     --    ré-index même si content n'a pas bougé. content_hash (déjà
     --    filé par A3) est l'invariant qui distingue real-change vs
     --    no-op. INSERT enqueue toujours.
-    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_insert AFTER INSERT ON public.Chunk FOR EACH ROW EXECUTE FUNCTION public.fn_chunk_enqueue_tsv()';
-    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_update AFTER UPDATE OF content ON public.Chunk FOR EACH ROW WHEN (NEW.content_hash IS DISTINCT FROM OLD.content_hash) EXECUTE FUNCTION public.fn_chunk_enqueue_tsv()';
+    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_insert AFTER INSERT ON ist.Chunk FOR EACH ROW EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()';
+    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_update AFTER UPDATE OF content ON ist.Chunk FOR EACH ROW WHEN (NEW.content_hash IS DISTINCT FROM OLD.content_hash) EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()';
 END;
 $migration$;

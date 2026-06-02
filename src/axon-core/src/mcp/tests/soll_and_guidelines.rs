@@ -2828,11 +2828,11 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
     let file_pool = format!("src/dashboard/lib/{code}/axon/watcher/pool_facade.ex");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_server}', 'symbol', 'sym-{file_server}', '{code}', '{file_server}', 'hash-{file_server}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_server}', 'symbol', 'sym-{file_server}', '{code}', '{file_server}', 'hash-{file_server}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_pool}', 'symbol', 'sym-{file_pool}', '{code}', '{file_pool}', 'hash-{file_pool}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_pool}', 'symbol', 'sym-{file_pool}', '{code}', '{file_pool}', 'hash-{file_pool}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_trigger}', 'trigger_scan', 'function', true, true, false, '{code}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_global}', 'trigger_global_scan', 'function', true, true, false, '{code}')")).unwrap();
@@ -2879,7 +2879,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
     let chunk_id = format!("{sym}::chunk");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym}', 'opaque_worker', 'function', true, true, false, '{code}')")).unwrap();
     server
@@ -2926,11 +2926,11 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
     let sym_b = format!("{code}::worker_beta");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_a}', 'worker_alpha', 'function', true, true, false, '{code}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', 'worker_beta', 'function', true, true, false, '{code}')")).unwrap();
@@ -2992,11 +2992,11 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
     let sym_truth = format!("{code}::truth_probe");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_path_only}', 'symbol', 'sym-{file_path_only}', '{code}', '{file_path_only}', 'hash-{file_path_only}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_path_only}', 'symbol', 'sym-{file_path_only}', '{code}', '{file_path_only}', 'hash-{file_path_only}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_truth}', 'symbol', 'sym-{file_truth}', '{code}', '{file_truth}', 'hash-{file_truth}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_truth}', 'symbol', 'sym-{file_truth}', '{code}', '{file_truth}', 'hash-{file_truth}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_path}', 'path_only_probe', 'function', true, true, false, '{code}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_truth}', 'truth_probe', 'function', true, true, false, '{code}')")).unwrap();
@@ -3060,11 +3060,11 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
     let sym_audit = format!("{code}::audit_section");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_config}', 'symbol', 'sym-{file_config}', '{code}', '{file_config}', 'hash-{file_config}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_config}', 'symbol', 'sym-{file_config}', '{code}', '{file_config}', 'hash-{file_config}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_runtime}', 'runtime_config', 'module', true, true, false, '{code}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_audit}', 'audit_section', 'section', true, true, false, '{code}')")).unwrap();
@@ -3128,7 +3128,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
     let sym_audit = format!("{code}::audit_section");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_audit}', 'audit_section', 'section', true, true, false, '{code}')")).unwrap();
     server
@@ -3183,7 +3183,7 @@ fn test_axon_query_underscore_fragment_matches_underscore_symbol() {
     let sym = format!("{code}::reserve_memory_budget");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
         .unwrap();
     server
         .graph_store
@@ -3315,15 +3315,15 @@ fn test_vcr2_impact_before_change_on_public_api() {
     let file_b = format!("src/core/{code}_consumer_b.rs");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_api}', 'symbol', 'sym-{file_api}', '{code}', '{file_api}', 'hash-{file_api}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_api}', 'symbol', 'sym-{file_api}', '{code}', '{file_api}', 'hash-{file_api}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_parse}', '{name_parse}', 'function', true, true, false, '{code}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_a}', '{name_a}', 'function', false, true, false, '{code}')")).unwrap();
@@ -3463,19 +3463,19 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
     let file_b_consumer = format!("src/{code_b}/consumer.rs");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_api}', 'symbol', 'sym-{file_a_api}', '{code_a}', '{file_a_api}', 'hash-{file_a_api}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_api}', 'symbol', 'sym-{file_a_api}', '{code_a}', '{file_a_api}', 'hash-{file_a_api}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_consumer}', 'symbol', 'sym-{file_a_consumer}', '{code_a}', '{file_a_consumer}', 'hash-{file_a_consumer}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_consumer}', 'symbol', 'sym-{file_a_consumer}', '{code_a}', '{file_a_consumer}', 'hash-{file_a_consumer}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_api}', 'symbol', 'sym-{file_b_api}', '{code_b}', '{file_b_api}', 'hash-{file_b_api}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_api}', 'symbol', 'sym-{file_b_api}', '{code_b}', '{file_b_api}', 'hash-{file_b_api}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_consumer}', 'symbol', 'sym-{file_b_consumer}', '{code_b}', '{file_b_consumer}', 'hash-{file_b_consumer}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_consumer}', 'symbol', 'sym-{file_b_consumer}', '{code_b}', '{file_b_consumer}', 'hash-{file_b_consumer}')"))
         .unwrap();
 
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_a_parse}', '{name_parse}', 'function', true, true, false, '{code_a}')")).unwrap();
@@ -3551,11 +3551,11 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     let file_b = format!("/tmp/{code_a}_{code_b}/worker.rs");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_a}', '{name_parse}', 'function', true, true, false, '{code_a}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', '{name_parse}', 'function', true, true, false, '{code_b}')")).unwrap();
@@ -3604,11 +3604,11 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
     let file_b = format!("/tmp/{code_a}_{code_b}/worker.rs");
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_a}', '{name_parse}', 'function', true, true, false, '{code_a}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', '{name_parse}', 'module', false, true, false, '{code_b}')")).unwrap();
@@ -7837,7 +7837,7 @@ fn test_axon_impact_traces_through_soll_architecture() {
     // 1. Create Code Symbols and Calls
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('payment::process', 'process', 'function', 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'payment::process', 'BKS')").unwrap();

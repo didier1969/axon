@@ -3,7 +3,7 @@
 //! Extracts "implicit identifiers" (env vars, ports, routes, config keys,
 //! metrics) from string literals using declarative pattern rules. The rules
 //! are TOML files loaded at startup -- adding a language is configuration,
-//! not code. Phantom symbols are stored in public.Symbol with dedicated
+//! not code. Phantom symbols are stored in ist.Symbol with dedicated
 //! `kind` values and connected via READS/DECLARES/EXPOSES edges.
 
 use once_cell::sync::Lazy;

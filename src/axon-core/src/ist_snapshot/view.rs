@@ -84,7 +84,7 @@ impl IstGraphView {
     }
 
     /// REQ-AXO-91510 — RAM shortest path source→sink. `None` ⇒ caller
-    /// falls back to PG (`public.path` SQL). `Some((names, rels))` ⇒
+    /// falls back to PG (`ist.path` SQL). `Some((names, rels))` ⇒
     /// canonical names along the shortest path, with relation_type per
     /// node (placeholder `Calls` for the source slot — see snapshot.rs).
     pub fn shortest_path(

@@ -310,7 +310,7 @@ impl McpServer {
         // are always 0 (in-memory pipeline_v2 stages own back-pressure).
         let persisted_file_count = if graph_runtime_enabled || vector_runtime_enabled {
             self.graph_store
-                .query_count("SELECT count(*) FROM public.IndexedFile")
+                .query_count("SELECT count(*) FROM ist.IndexedFile")
                 .unwrap_or(0)
         } else {
             0
@@ -324,7 +324,7 @@ impl McpServer {
                 .unwrap_or(0);
         let graph_ready_count = if graph_runtime_enabled || vector_runtime_enabled {
             self.graph_store
-                .query_count("SELECT count(DISTINCT file_path) FROM public.Chunk")
+                .query_count("SELECT count(DISTINCT file_path) FROM ist.Chunk")
                 .unwrap_or(0)
         } else {
             0
@@ -333,8 +333,8 @@ impl McpServer {
         let vector_ready_count = if vector_runtime_enabled {
             self.graph_store
                 .query_count(
-                    "SELECT count(DISTINCT c.file_path) FROM public.Chunk c \
-                     JOIN public.ChunkEmbedding e ON e.chunk_id = c.id",
+                    "SELECT count(DISTINCT c.file_path) FROM ist.Chunk c \
+                     JOIN ist.ChunkEmbedding e ON e.chunk_id = c.id",
                 )
                 .unwrap_or(0)
         } else {

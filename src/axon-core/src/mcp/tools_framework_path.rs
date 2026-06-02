@@ -8,7 +8,7 @@ use crate::ist_snapshot::process_view;
 
 /// REQ-AXO-91510 — single-shot name materialization for a path's node ids.
 /// The BFS itself runs in RAM via IstGraphView ; this helper does ONE
-/// round-trip on public.Symbol to render human-friendly names. Returns a
+/// round-trip on ist.Symbol to render human-friendly names. Returns a
 /// map id → name ; ids without a hit are absent (caller falls back to id).
 fn build_name_lookup_sql(ids: &[String]) -> String {
     let escaped: Vec<String> = ids
@@ -16,21 +16,21 @@ fn build_name_lookup_sql(ids: &[String]) -> String {
         .map(|id| format!("'{}'", id.replace('\'', "''")))
         .collect();
     format!(
-        "SELECT id, name FROM public.Symbol WHERE id IN ({})",
+        "SELECT id, name FROM ist.Symbol WHERE id IN ({})",
         escaped.join(", ")
     )
 }
 
 /// REQ-AXO-299 / MIL-AXO-017 slice 5 : build the SQL that wraps
-/// `public.path` and LEFT-JOINs Symbol to materialize names alongside
+/// `ist.path` and LEFT-JOINs Symbol to materialize names alongside
 /// hops. Pure formatter — extracted so the SQL-escape contract is unit
 /// testable without a live PG backend.
 fn build_path_sql(source_id: &str, sink_id: &str, depth: u64, project: &str) -> String {
     format!(
         "SELECT p.hop, p.node_id, COALESCE(s.name, p.node_id) AS name, \
                 COALESCE(p.relation_type, 'anchor') AS relation_type \
-         FROM public.path('{src}', '{snk}', {depth}, '{proj}') p \
-         LEFT JOIN public.Symbol s ON s.id = p.node_id \
+         FROM ist.path('{src}', '{snk}', {depth}, '{proj}') p \
+         LEFT JOIN ist.Symbol s ON s.id = p.node_id \
          ORDER BY p.hop",
         src = source_id.replace('\'', "''"),
         snk = sink_id.replace('\'', "''"),
@@ -111,7 +111,7 @@ impl McpServer {
 
         // REQ-AXO-91510 — RAM-first via IstGraphView (PIL-AXO-9002).
         // `feedback_trimodal_use_ram_graph_not_pg` mandates the in-memory
-        // CSR snapshot for structural/graph tools ; PG `public.path` is
+        // CSR snapshot for structural/graph tools ; PG `ist.path` is
         // only the degraded fallback when the cache is cold or the query
         // is project-unscoped (cache is per-project).
         let view = process_view();
@@ -147,7 +147,7 @@ impl McpServer {
                     })
                     .collect();
                 // Materialize names via a single batch SELECT on
-                // public.Symbol ; the BFS itself ran in RAM (CSR
+                // ist.Symbol ; the BFS itself ran in RAM (CSR
                 // snapshot) so the per-edge traversal cost stays
                 // RAM-bound. One round-trip for display is acceptable
                 // and far cheaper than the previous WITH RECURSIVE.
@@ -294,7 +294,7 @@ impl McpServer {
         // serves the BFS (PIL-AXO-9002, feedback_trimodal_use_ram_graph_
         // not_pg) ; `graph_pg` only when the cache is cold or the query
         // is project-unscoped. Source of truth for traversal logic
-        // lives in IstGraph::bfs_shortest_path (RAM) or public.path SQL
+        // lives in IstGraph::bfs_shortest_path (RAM) or ist.path SQL
         // (PG fallback). No vector, no FTS, no RRF.
         // Like inspect (REQ-AXO-91509), no `results[]` is added: the
         // path itself IS the result, already exposed as `data.path[]`
@@ -305,7 +305,7 @@ impl McpServer {
         let provenance = if surfaces_used.iter().any(|s| *s == "graph_ram") {
             "IstGraph::bfs_shortest_path (RAM CSR snapshot, PIL-AXO-9002)"
         } else {
-            "public.path SQL function (WITH RECURSIVE on public.Edge) — RAM cache cold"
+            "ist.path SQL function (WITH RECURSIVE on ist.Edge) — RAM cache cold"
         };
         Some(json!({
             "content": [{ "type": "text", "text": report }],
@@ -330,7 +330,7 @@ impl McpServer {
                 "detours": [],
                 "confidence": "medium",
                 "provenance": provenance,
-                "evidence_sources": ["public.Edge"],
+                "evidence_sources": ["ist.Edge"],
                 "safe_to_act": false,
                 "needs_human_confirmation": true,
                 "operator_guidance": {
@@ -363,12 +363,12 @@ mod tests {
     fn build_path_sql_wraps_public_path_with_symbol_join() {
         let sql = build_path_sql("foo", "bar", 5, "AXO");
         assert!(
-            sql.contains("FROM public.path('foo', 'bar', 5, 'AXO')"),
-            "must call public.path SQL fn with positional args: {sql}"
+            sql.contains("FROM ist.path('foo', 'bar', 5, 'AXO')"),
+            "must call ist.path SQL fn with positional args: {sql}"
         );
         assert!(
-            sql.contains("LEFT JOIN public.Symbol s ON s.id = p.node_id"),
-            "must JOIN public.Symbol to materialize names: {sql}"
+            sql.contains("LEFT JOIN ist.Symbol s ON s.id = p.node_id"),
+            "must JOIN ist.Symbol to materialize names: {sql}"
         );
         assert!(
             sql.contains("ORDER BY p.hop"),
@@ -380,7 +380,7 @@ mod tests {
     fn build_path_sql_escapes_single_quotes_and_unscoped_when_project_empty() {
         let sql = build_path_sql("o'brien", "ba'r", 3, "");
         assert!(
-            sql.contains("public.path('o''brien', 'ba''r', 3, '')"),
+            sql.contains("ist.path('o''brien', 'ba''r', 3, '')"),
             "must double single quotes for SQL safety and pass '' for unscoped: {sql}"
         );
     }

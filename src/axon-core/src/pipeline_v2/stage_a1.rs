@@ -6,7 +6,7 @@
 //! workers (default 4 live, 2 dev) and underlying disk parallelism.
 //!
 //! The hashing choice is SHA-256 because the same hash is later persisted to
-//! `public.IndexedFile.content_hash` and read back at indexer startup to
+//! `ist.IndexedFile.content_hash` and read back at indexer startup to
 //! rebuild the in-RAM filter cache. SHA-256 is cross-restart stable, while
 //! Rust's `DefaultHasher` is not.
 

@@ -1,3 +1,5 @@
+SET search_path = ist, public, "$user";
+
 -- Axon canonical schema — observable embedder state (DEC-AXO-901626).
 --
 -- The brain composer derives `embedder_runtime` (status + dashboard_state_v1)
@@ -31,17 +33,17 @@ AS $$
     ),
     embedded_60s AS (
         SELECT count(*)::bigint AS n
-        FROM public.ChunkEmbedding, now_ms
+        FROM ist.ChunkEmbedding, now_ms
         WHERE embedded_at_ms > now_ms.v - 60000
     ),
     embedded_total AS (
         SELECT count(*)::bigint AS n
-        FROM public.ChunkEmbedding
+        FROM ist.ChunkEmbedding
     ),
     oldest_pending AS (
         SELECT min(f.discovered_ms) AS min_ms
-        FROM public.Chunk c
-        JOIN public.IndexedFile f ON f.path = c.file_path
+        FROM ist.Chunk c
+        JOIN ist.IndexedFile f ON f.path = c.file_path
         WHERE c.embed_status = 'pending'
     )
     SELECT jsonb_build_object(

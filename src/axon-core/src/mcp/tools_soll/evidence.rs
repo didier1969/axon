@@ -40,10 +40,10 @@ impl McpServer {
         candidates.dedup();
 
         // REQ-AXO-901653 slice-5d — public.File retired ; canonical file
-        // presence probe now reads public.IndexedFile (3-col pipeline_v2 pivot).
+        // presence probe now reads ist.IndexedFile (3-col pipeline_v2 pivot).
         for candidate in &candidates {
             let query = format!(
-                "SELECT path FROM public.IndexedFile WHERE path = '{}' LIMIT 1",
+                "SELECT path FROM ist.IndexedFile WHERE path = '{}' LIMIT 1",
                 escape_sql(candidate)
             );
             if let Ok(paths) = self.query_single_column(&query) {

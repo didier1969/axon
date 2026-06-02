@@ -211,7 +211,7 @@ async fn flush_chunk_embeddings_async(
     let vec_type = vector_type(client).await?;
     let vec_schema = vec_type.schema();
 
-    // Stage in a TEMP table mirroring public.ChunkEmbedding so we can
+    // Stage in a TEMP table mirroring ist.ChunkEmbedding so we can
     // ON CONFLICT-merge after COPY BINARY. COPY itself doesn't accept
     // ON CONFLICT semantics. The temp is dropped on tx commit so
     // there's no cross-call visibility / clean-up concern.
@@ -287,7 +287,7 @@ async fn flush_chunk_embeddings_async(
         .context("bulk_writer copy_in finish")?;
 
     tx.batch_execute(
-        "INSERT INTO public.ChunkEmbedding \
+        "INSERT INTO ist.ChunkEmbedding \
             (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
          SELECT chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms \
          FROM _bulk_chunk_embedding_stage \
@@ -305,7 +305,7 @@ async fn flush_chunk_embeddings_async(
 }
 
 // RelationTable enum removed — legacy per-type CONTAINS/CALLS/CALLS_NIF
-// tables retired. All edges go through unified public.Edge via
+// tables retired. All edges go through unified ist.Edge via
 // copy_edges_in_tx (REQ-AXO-901747).
 
 /// Sync entrypoint for the producer hot path: flush a Symbol batch
@@ -600,7 +600,7 @@ async fn copy_symbols_in_tx(
         .context("bulk_writer Symbol copy_in finish (batch)")?;
 
     tx.batch_execute(
-        "INSERT INTO public.Symbol \
+        "INSERT INTO ist.Symbol \
             (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
          SELECT id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding \
          FROM _bulk_symbol_stage \
@@ -679,7 +679,7 @@ async fn copy_chunks_in_tx(
         .context("bulk_writer Chunk copy_in finish (batch)")?;
 
     tx.batch_execute(
-        "INSERT INTO public.Chunk \
+        "INSERT INTO ist.Chunk \
             (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) \
          SELECT id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count \
          FROM _bulk_chunk_stage \
@@ -706,7 +706,7 @@ async fn copy_chunks_in_tx(
     Ok(())
 }
 
-/// REQ-AXO-901747 — COPY BINARY into unified `public.Edge`.
+/// REQ-AXO-901747 — COPY BINARY into unified `ist.Edge`.
 async fn copy_edges_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     rows: &[(&str, &RelationRow)],
@@ -746,7 +746,7 @@ async fn copy_edges_in_tx(
     }
     writer.finish().await.context("bulk_writer edge copy_in finish")?;
 
-    let merge_sql = "INSERT INTO public.edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+    let merge_sql = "INSERT INTO ist.edge (source_id, target_id, relation_type, project_code, created_at_ms) \
          SELECT source_id, target_id, relation_type, project_code, created_at_ms FROM _bulk_edge_stage \
          ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING";
     tx.batch_execute(merge_sql)

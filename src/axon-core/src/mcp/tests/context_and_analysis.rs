@@ -18,7 +18,7 @@ fn test_retrieve_context_intent_mode_prefers_plan_docs_over_feedback_docs() {
 fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-why', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout orchestrates payment capture and settlement', 'hash-why-checkout', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
@@ -112,7 +112,7 @@ fn test_why_surfaces_missing_governing_intent_without_laundering_inference_into_
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/refund.rs', 'symbol', 'sym-src/refund.rs', 'BKS', 'src/refund.rs', 'hash-src/refund.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/refund.rs', 'symbol', 'sym-src/refund.rs', 'BKS', 'src/refund.rs', 'hash-src/refund.rs')")
         .unwrap();
     server
         .graph_store
@@ -166,7 +166,7 @@ fn test_why_uses_concept_links_to_recover_governing_requirement() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/dashboard/lib/axon_dashboard/application.ex', 'symbol', 'sym-src/dashboard/lib/axon_dashboard/application.ex', 'AXO', 'src/dashboard/lib/axon_dashboard/application.ex', 'hash-src/dashboard/lib/axon_dashboard/application.ex')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/dashboard/lib/axon_dashboard/application.ex', 'symbol', 'sym-src/dashboard/lib/axon_dashboard/application.ex', 'AXO', 'src/dashboard/lib/axon_dashboard/application.ex', 'hash-src/dashboard/lib/axon_dashboard/application.ex')")
         .unwrap();
     server
         .graph_store
@@ -234,7 +234,7 @@ fn test_why_marks_script_artifacts_as_correlated_weak_support() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-scripts/refund_probe.rs', 'symbol', 'sym-scripts/refund_probe.rs', 'BKS', 'scripts/refund_probe.rs', 'hash-scripts/refund_probe.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-scripts/refund_probe.rs', 'symbol', 'sym-scripts/refund_probe.rs', 'BKS', 'scripts/refund_probe.rs', 'hash-scripts/refund_probe.rs')")
         .unwrap();
     server
         .graph_store
@@ -288,7 +288,7 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     server
         .graph_store
         .execute(
-            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -390,7 +390,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     server
         .graph_store
         .execute(
-            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -479,7 +479,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     server
         .graph_store
         .execute(
-            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -620,12 +620,12 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
     server
         .graph_store
         .execute(
-            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'AXO', 'src/api.rs', 'hash-src/api.rs')",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'AXO', 'src/api.rs', 'hash-src/api.rs')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/impl.rs', 'symbol', 'sym-src/impl.rs', 'AXO', 'src/impl.rs', 'hash-src/impl.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/impl.rs', 'symbol', 'sym-src/impl.rs', 'AXO', 'src/impl.rs', 'hash-src/impl.rs')")
         .unwrap();
     server
         .graph_store
@@ -886,14 +886,14 @@ fn test_path_returns_bounded_call_path_between_symbols() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::mid', 'mid_fn', 'function', true, false, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::sink', 'sink_fn', 'function', true, true, false, 'BKS')").unwrap();
     // MIL-AXO-017 / REQ-AXO-216 — legacy CALLS table dropped, edges
-    // now live in unified public.Edge with relation_type='CALLS'.
+    // now live in unified ist.Edge with relation_type='CALLS'.
     server
         .graph_store
-        .execute("INSERT INTO public.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::source', 'bks::mid', 'CALLS', 'BKS', 0)")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::source', 'bks::mid', 'CALLS', 'BKS', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::mid', 'bks::sink', 'CALLS', 'BKS', 0)")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::mid', 'bks::sink', 'CALLS', 'BKS', 0)")
         .unwrap();
 
     let response = server
@@ -1144,7 +1144,7 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
     server
         .graph_store
         .execute(
-            "INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
         )
         .unwrap();
     server
@@ -1264,15 +1264,15 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/source.rs', 'symbol', 'sym-src/source.rs', 'AXO', 'src/source.rs', 'hash-src/source.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/source.rs', 'symbol', 'sym-src/source.rs', 'AXO', 'src/source.rs', 'hash-src/source.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/foreign.rs', 'symbol', 'sym-src/foreign.rs', 'AXO', 'src/foreign.rs', 'hash-src/foreign.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/foreign.rs', 'symbol', 'sym-src/foreign.rs', 'AXO', 'src/foreign.rs', 'hash-src/foreign.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/interface.rs', 'symbol', 'sym-src/interface.rs', 'AXO', 'src/interface.rs', 'hash-src/interface.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/interface.rs', 'symbol', 'sym-src/interface.rs', 'AXO', 'src/interface.rs', 'hash-src/interface.rs')")
         .unwrap();
 
     server
@@ -2078,12 +2078,12 @@ fn test_axon_architectural_drift() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-ui/app.js', 'symbol', 'sym-ui/app.js', 'PRJ', 'ui/app.js', 'hash-ui/app.js')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-ui/app.js', 'symbol', 'sym-ui/app.js', 'PRJ', 'ui/app.js', 'hash-ui/app.js')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::fetchData', 'fetchData', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-db/repo.rs', 'symbol', 'sym-db/repo.rs', 'PRJ', 'db/repo.rs', 'hash-db/repo.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-db/repo.rs', 'symbol', 'sym-db/repo.rs', 'PRJ', 'db/repo.rs', 'hash-db/repo.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::executeSQL', 'executeSQL', 'function', false, true, false, 'PRJ')").unwrap();
     server
@@ -2138,11 +2138,11 @@ fn test_axon_query_with_project() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f1.rs', 'symbol', 'sym-prj/f1.rs', 'PRJ', 'prj/f1.rs', 'hash-prj/f1.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f1.rs', 'symbol', 'sym-prj/f1.rs', 'PRJ', 'prj/f1.rs', 'hash-prj/f1.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f2.rs', 'symbol', 'sym-prj/f2.rs', 'PRJ', 'prj/f2.rs', 'hash-prj/f2.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-prj/f2.rs', 'symbol', 'sym-prj/f2.rs', 'PRJ', 'prj/f2.rs', 'hash-prj/f2.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::auth_func', 'auth_func', 'function', false, true, false, 'PRJ')").unwrap();
     server
@@ -2183,15 +2183,15 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/api.rs', 'symbol', 'sym-src/core/api.rs', 'AXO', 'src/core/api.rs', 'hash-src/core/api.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/api.rs', 'symbol', 'sym-src/core/api.rs', 'AXO', 'src/core/api.rs', 'hash-src/core/api.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_a.rs', 'symbol', 'sym-src/core/consumer_a.rs', 'AXO', 'src/core/consumer_a.rs', 'hash-src/core/consumer_a.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_a.rs', 'symbol', 'sym-src/core/consumer_a.rs', 'AXO', 'src/core/consumer_a.rs', 'hash-src/core/consumer_a.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_b.rs', 'symbol', 'sym-src/core/consumer_b.rs', 'AXO', 'src/core/consumer_b.rs', 'hash-src/core/consumer_b.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/core/consumer_b.rs', 'symbol', 'sym-src/core/consumer_b.rs', 'AXO', 'src/core/consumer_b.rs', 'hash-src/core/consumer_b.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'AXO')").unwrap();
@@ -2279,7 +2279,7 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
 
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
         .unwrap();
     server
         .graph_store
@@ -2360,7 +2360,7 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/runtime/router.rs', 'symbol', 'sym-src/runtime/router.rs', 'AXO', 'src/runtime/router.rs', 'hash-src/runtime/router.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/runtime/router.rs', 'symbol', 'sym-src/runtime/router.rs', 'AXO', 'src/runtime/router.rs', 'hash-src/runtime/router.rs')")
         .unwrap();
     server
         .graph_store
@@ -3058,11 +3058,11 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -3119,11 +3119,11 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
     let stale_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -3180,11 +3180,11 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/auth.rs', 'symbol', 'sym-src/auth.rs', 'PRJ', 'src/auth.rs', 'hash-src/auth.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/access.rs', 'symbol', 'sym-src/access.rs', 'PRJ', 'src/access.rs', 'hash-src/access.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
@@ -3234,11 +3234,11 @@ fn test_axon_audit_taint_analysis() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'PRJ', 'src/api.rs', 'hash-src/api.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'PRJ', 'src/api.rs', 'hash-src/api.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.rs', 'symbol', 'sym-src/api_dummy.rs', 'PRJ', 'src/api_dummy.rs', 'hash-src/api_dummy.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.rs', 'symbol', 'sym-src/api_dummy.rs', 'PRJ', 'src/api_dummy.rs', 'hash-src/api_dummy.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::user_input', 'user_input', 'function', false, true, false, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::run_task', 'run_task', 'function', false, true, false, false, 'PRJ')").unwrap();
@@ -3289,7 +3289,7 @@ fn test_axon_audit_technical_debt() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/danger.rs', 'symbol', 'sym-src/danger.rs', 'PRJ', 'src/danger.rs', 'hash-src/danger.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/danger.rs', 'symbol', 'sym-src/danger.rs', 'PRJ', 'src/danger.rs', 'hash-src/danger.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::risky_func', 'risky_func', 'function', false, true, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::unwrap', 'unwrap', 'method', false, true, false, 'PRJ')").unwrap();
@@ -3333,7 +3333,7 @@ fn test_axon_audit_technical_debt_comments() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/todo.rs', 'symbol', 'sym-src/todo.rs', 'PRJ', 'src/todo.rs', 'hash-src/todo.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/todo.rs', 'symbol', 'sym-src/todo.rs', 'PRJ', 'src/todo.rs', 'hash-src/todo.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::todo1', '// TODO: Fix this', 'TODO', false, true, false, 'PRJ')").unwrap();
     server
@@ -3374,7 +3374,7 @@ fn test_axon_audit_secrets_detection() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/config.rs', 'symbol', 'sym-src/config.rs', 'PRJ', 'src/config.rs', 'hash-src/config.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/config.rs', 'symbol', 'sym-src/config.rs', 'PRJ', 'src/config.rs', 'hash-src/config.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'PRJ')").unwrap();
     server
@@ -3413,11 +3413,11 @@ fn test_axon_audit_cross_language_taint() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.ex', 'symbol', 'sym-src/api.ex', 'PRJ', 'src/api.ex', 'hash-src/api.ex')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.ex', 'symbol', 'sym-src/api.ex', 'PRJ', 'src/api.ex', 'hash-src/api.ex')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.ex', 'symbol', 'sym-src/api_dummy.ex', 'PRJ', 'src/api_dummy.ex', 'hash-src/api_dummy.ex')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.ex', 'symbol', 'sym-src/api_dummy.ex', 'PRJ', 'src/api_dummy.ex', 'hash-src/api_dummy.ex')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::elixir_func', 'elixir_func', 'function', false, true, false, false, 'PRJ')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::rust_nif', 'rust_nif', 'function', false, true, true, false, 'PRJ')").unwrap();
@@ -3467,11 +3467,11 @@ fn test_axon_health_god_objects() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god.rs', 'symbol', 'sym-src/god.rs', 'PRJ', 'src/god.rs', 'hash-src/god.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god.rs', 'symbol', 'sym-src/god.rs', 'PRJ', 'src/god.rs', 'hash-src/god.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god_dummy.rs', 'symbol', 'sym-src/god_dummy.rs', 'PRJ', 'src/god_dummy.rs', 'hash-src/god_dummy.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god_dummy.rs', 'symbol', 'sym-src/god_dummy.rs', 'PRJ', 'src/god_dummy.rs', 'hash-src/god_dummy.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::GodClass', 'GodClass', 'class', false, true, false, 'PRJ')").unwrap();
     server
@@ -3518,11 +3518,11 @@ fn test_axon_audit_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/input.rs', 'symbol', 'sym-apps/pja/lib/input.rs', 'PJA', 'apps/pja/lib/input.rs', 'hash-apps/pja/lib/input.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/input.rs', 'symbol', 'sym-apps/pja/lib/input.rs', 'PJA', 'apps/pja/lib/input.rs', 'hash-apps/pja/lib/input.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/unsafe.rs', 'symbol', 'sym-apps/pjb/lib/unsafe.rs', 'PJB', 'apps/pjb/lib/unsafe.rs', 'hash-apps/pjb/lib/unsafe.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/unsafe.rs', 'symbol', 'sym-apps/pjb/lib/unsafe.rs', 'PJB', 'apps/pjb/lib/unsafe.rs', 'hash-apps/pjb/lib/unsafe.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::safe_entry', 'safe_entry', 'function', true, true, false, false, 'PJA')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::beta_entry', 'beta_entry', 'function', false, true, false, false, 'PJB')").unwrap();
@@ -3574,11 +3574,11 @@ fn test_axon_health_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/covered.rs', 'symbol', 'sym-apps/pja/lib/covered.rs', 'PJA', 'apps/pja/lib/covered.rs', 'hash-apps/pja/lib/covered.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/covered.rs', 'symbol', 'sym-apps/pja/lib/covered.rs', 'PJA', 'apps/pja/lib/covered.rs', 'hash-apps/pja/lib/covered.rs')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/god.rs', 'symbol', 'sym-apps/pjb/lib/god.rs', 'PJB', 'apps/pjb/lib/god.rs', 'hash-apps/pjb/lib/god.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pjb/lib/god.rs', 'symbol', 'sym-apps/pjb/lib/god.rs', 'PJB', 'apps/pjb/lib/god.rs', 'hash-apps/pjb/lib/god.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::covered', 'covered', 'function', true, true, false, 'PJA')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::GodClass', 'GodClass', 'class', false, true, false, 'PJB')").unwrap();
@@ -3642,7 +3642,7 @@ fn test_axon_health_respects_project_scope() {
 fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::checkout', 'checkout', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'AXO', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'AXO', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'axo::checkout', 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-layered', 'symbol', 'axo::checkout', 'AXO', 'body', 'checkout orchestrates payment capture', 'hash-checkout-layered', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-264-T', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
@@ -3735,7 +3735,7 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
 fn test_retrieve_context_legacy_shape_unchanged_after_layered_addition() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::cl', 'cl', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/cl.rs', 'symbol', 'sym-src/cl.rs', 'AXO', 'src/cl.rs', 'hash-src/cl.rs')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/cl.rs', 'symbol', 'sym-src/cl.rs', 'AXO', 'src/cl.rs', 'hash-src/cl.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/cl.rs', 'axo::cl', 'AXO')").unwrap();
 
     let response = server
@@ -3831,7 +3831,7 @@ fn test_recent_band_returns_git_error_when_not_a_repo() {
 fn test_retrieve_context_layered_surfaces_default_budgets() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::small', 'small', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/small.rs', 'symbol', 'sym-src/small.rs', 'AXO', 'src/small.rs', 'hash-src/small.rs')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/small.rs', 'symbol', 'sym-src/small.rs', 'AXO', 'src/small.rs', 'hash-src/small.rs')").unwrap();
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/small.rs', 'axo::small', 'AXO')").unwrap();
 
     let response = server
@@ -3883,7 +3883,7 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
             "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('{chunk_id}', 'symbol', '{sym_id}', 'AXO', 'body', '{chunk_content}', 'hash-big-{i}', 1, 30)"
         )).unwrap();
     }
-    server.graph_store.execute("INSERT INTO public.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/big.rs', 'symbol', 'sym-src/big.rs', 'AXO', 'src/big.rs', 'hash-src/big.rs')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/big.rs', 'symbol', 'sym-src/big.rs', 'AXO', 'src/big.rs', 'hash-src/big.rs')").unwrap();
     for i in 0..30 {
         server.graph_store.execute(&format!(
             "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/big.rs', 'axo::big_{i}', 'AXO')"

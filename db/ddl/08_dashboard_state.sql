@@ -1,3 +1,5 @@
+SET search_path = ist, public, "$user";
+
 -- Axon canonical schema — dashboard state cache (REQ-AXO-901806).
 -- Idempotent: safe to re-run on every startup.
 --
@@ -66,14 +68,14 @@ BEGIN
             COALESCE(c.chunks,   0) AS chunks,
             COALESCE(ce.embedded, 0) AS embedded
         FROM (
-            SELECT DISTINCT project_code FROM public.symbol
-            UNION SELECT DISTINCT project_code FROM public.chunk
-            UNION SELECT DISTINCT project_code FROM public.edge
+            SELECT DISTINCT project_code FROM ist.symbol
+            UNION SELECT DISTINCT project_code FROM ist.chunk
+            UNION SELECT DISTINCT project_code FROM ist.edge
         ) p
-        LEFT JOIN (SELECT project_code, COUNT(*) AS symbols  FROM public.symbol         GROUP BY 1) s  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS edges    FROM public.edge           GROUP BY 1) e  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS chunks   FROM public.chunk          GROUP BY 1) c  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS embedded FROM public.chunkembedding GROUP BY 1) ce USING (project_code)
+        LEFT JOIN (SELECT project_code, COUNT(*) AS symbols  FROM ist.symbol         GROUP BY 1) s  USING (project_code)
+        LEFT JOIN (SELECT project_code, COUNT(*) AS edges    FROM ist.edge           GROUP BY 1) e  USING (project_code)
+        LEFT JOIN (SELECT project_code, COUNT(*) AS chunks   FROM ist.chunk          GROUP BY 1) c  USING (project_code)
+        LEFT JOIN (SELECT project_code, COUNT(*) AS embedded FROM ist.chunkembedding GROUP BY 1) ce USING (project_code)
     )
     SELECT COALESCE(
         jsonb_agg(jsonb_build_object(
@@ -132,9 +134,9 @@ BEGIN
     -- Le compteur historique `files` est conservé pour compat dashboard.
     SELECT jsonb_build_object(
         'projects',        jsonb_array_length(pp),
-        'files',           (SELECT COUNT(*) FROM public.indexedfile)::bigint,
-        'files_indexed',   (SELECT COUNT(*) FROM public.indexedfile WHERE status='indexed')::bigint,
-        'files_inflight',  (SELECT COUNT(*) FROM public.indexedfile WHERE status='discovered')::bigint,
+        'files',           (SELECT COUNT(*) FROM ist.indexedfile)::bigint,
+        'files_indexed',   (SELECT COUNT(*) FROM ist.indexedfile WHERE status='indexed')::bigint,
+        'files_inflight',  (SELECT COUNT(*) FROM ist.indexedfile WHERE status='discovered')::bigint,
         'symbols',         COALESCE((SELECT SUM((p->>'symbols')::bigint)  FROM jsonb_array_elements(pp) p), 0),
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),
@@ -145,8 +147,8 @@ BEGIN
         -- query : indexed antijoin via chunkembedding_pkey + chunk.id.
         'orphan_embeddings', (
             SELECT COUNT(*)
-            FROM public.chunkembedding ce
-            WHERE NOT EXISTS (SELECT 1 FROM public.chunk c WHERE c.id = ce.chunk_id)
+            FROM ist.chunkembedding ce
+            WHERE NOT EXISTS (SELECT 1 FROM ist.chunk c WHERE c.id = ce.chunk_id)
         )::bigint
     )
     INTO cached;

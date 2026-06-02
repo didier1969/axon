@@ -7,7 +7,7 @@
 //!
 //! Pairs with the trigger `trg_chunk_notify_pending` in
 //! `db/ddl/03_ist_schema.sql` which fires `pg_notify` post-commit on
-//! every `public.Chunk` INSERT or `content_hash` UPDATE.
+//! every `ist.Chunk` INSERT or `content_hash` UPDATE.
 //!
 //! Resilience : on connection drop / channel close, loops forever with
 //! exponential backoff (200ms → 30s cap).

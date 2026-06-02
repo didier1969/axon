@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// IST relation_type domain (mirrors public.edge.relation_type post-AGE
+/// IST relation_type domain (mirrors ist.edge.relation_type post-AGE
 /// retirement, before REQ-AXO-91505 broadens it). Stored as u8 in the CSR
 /// edge arrays for compactness.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl RelationType {
     /// REQ-AXO-91505 — accept canonical DB strings case-insensitively.
     /// Parsers emit lowercase (`imports`, `implements`, `uses`, `calls`)
     /// while legacy code paths emit uppercase. Both must map to the
-    /// canonical variant so IstGraph reads cleanly from public.edge.
+    /// canonical variant so IstGraph reads cleanly from ist.edge.
     pub fn from_db(s: &str) -> Self {
         match s.to_ascii_uppercase().as_str() {
             "CONTAINS" => Self::Contains,
@@ -112,7 +112,7 @@ impl NodeKind {
     }
 }
 
-/// Bitfield matching public.symbol bool columns (tested / is_public / is_nif
+/// Bitfield matching ist.symbol bool columns (tested / is_public / is_nif
 /// / is_unsafe). Stored as a single u8 ; 4 bits free for future flags.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeFlags(pub u8);
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn relation_type_from_db_accepts_lowercase_parser_output() {
         // REQ-AXO-91505 — parsers emit lowercase ("imports", "implements",
-        // "uses", "calls") ; reading from public.edge must canonicalize.
+        // "uses", "calls") ; reading from ist.edge must canonicalize.
         assert_eq!(RelationType::from_db("imports"), RelationType::Imports);
         assert_eq!(
             RelationType::from_db("implements"),

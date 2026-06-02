@@ -93,7 +93,7 @@ pub fn parse_vector_text(text: &str) -> Result<Vec<f32>, VectorError> {
 /// per-chunk under the PostgreSQL backend. The rest of the row is
 /// inlined as quoted strings since pg_execute does not bind parameters.
 ///
-/// Post-CPT-AXO-039 supersedure (2026-05-08): targets `public.ChunkEmbedding`
+/// Post-CPT-AXO-039 supersedure (2026-05-08): targets `ist.ChunkEmbedding`
 /// with a `project_code` row column scoping the entry, instead of a
 /// per-project schema. Multi-project queries become a simple
 /// `WHERE project_code IN (...)` filter rather than UNION ALL.
@@ -113,7 +113,7 @@ pub fn upsert_chunk_embedding_sql(
 ) -> Result<String, VectorError> {
     let vec_lit = vector_literal(embedding)?;
     Ok(format!(
-        "INSERT INTO public.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+        "INSERT INTO ist.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
          VALUES ('{}', '{}', '{}', '{}', {}, {}) \
          ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
          project_code = EXCLUDED.project_code, \
@@ -131,7 +131,7 @@ pub fn upsert_chunk_embedding_sql(
 
 /// Build a HNSW-backed cosine similarity ANN query body for the
 /// post-CPT-AXO-039 multi-project layout. Returns the
-/// `FROM public.ChunkEmbedding WHERE ... ORDER BY ... LIMIT ...`
+/// `FROM ist.ChunkEmbedding WHERE ... ORDER BY ... LIMIT ...`
 /// segment scoped to a single project.
 ///
 /// Caller composes the SELECT projection — typically `chunk_id` plus
@@ -144,7 +144,7 @@ pub fn cosine_ann_where_order_limit(
 ) -> Result<String, VectorError> {
     let vec_lit = vector_literal(query)?;
     Ok(format!(
-        "FROM public.ChunkEmbedding \
+        "FROM ist.ChunkEmbedding \
          WHERE model_id = '{}' AND project_code = '{}' \
          ORDER BY embedding <=> {} \
          LIMIT {}",
@@ -277,7 +277,7 @@ mod tests {
             1714999999000,
         )
         .unwrap();
-        assert!(sql.contains("INSERT INTO public.ChunkEmbedding"));
+        assert!(sql.contains("INSERT INTO ist.ChunkEmbedding"));
         assert!(sql.contains("ON CONFLICT (chunk_id, model_id) DO UPDATE"));
         assert!(sql.contains("'chunk-x'"));
         assert!(sql.contains("'code-1024'"));
@@ -301,7 +301,7 @@ mod tests {
     fn cosine_query_uses_pgvector_distance_operator_and_project_filter() {
         let v = sample_vector(1.0);
         let body = cosine_ann_where_order_limit("code-1024", "AXO", &v, 10).unwrap();
-        assert!(body.contains("FROM public.ChunkEmbedding"));
+        assert!(body.contains("FROM ist.ChunkEmbedding"));
         assert!(body.contains("WHERE model_id = 'code-1024' AND project_code = 'AXO'"));
         assert!(body.contains("<=>"));
         assert!(body.ends_with("LIMIT 10"));

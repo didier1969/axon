@@ -30,7 +30,7 @@ pub fn const_resolver(project_code: impl Into<String>) -> ProjectCodeResolver {
 /// `"{project_code}::{path_namespace}::{name}::chunk[::part-NN]"`).
 ///
 /// Returns `None` when the chunk_id is malformed (no `::` delimiter).
-/// B3 uses this so it can stamp `public.ChunkEmbedding.project_code`
+/// B3 uses this so it can stamp `ist.ChunkEmbedding.project_code`
 /// without having to thread the code through B1/B2.
 pub fn project_code_from_chunk_id(chunk_id: &str) -> Option<&str> {
     chunk_id.split("::").next().filter(|s| !s.is_empty())
