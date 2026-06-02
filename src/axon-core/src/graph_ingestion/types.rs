@@ -136,6 +136,25 @@ pub struct EmbedderLifecycleHeartbeatRecord {
     pub sleep_count: i64,
     pub pending_count: i64,
     pub heartbeat_ms: i64,
+    /// DEC-AXO-901626 — observed compute verdict published by the embedder
+    /// owner (indexer self-observation). "GPU" | "CPU"; `None`/empty when the
+    /// publisher predates the column.
+    pub compute: Option<String>,
+    /// How `compute` was determined: "nvidia_smi" | "unknown".
+    pub compute_source: Option<String>,
+    /// DEC-AXO-901626 — release identity of the publishing process; lets
+    /// the brain confirm the paired indexer runs the same build.
+    pub build_id: Option<String>,
+}
+
+/// DEC-AXO-901626 — PG-canonical half of the observable embedder state,
+/// materialised by `axon_runtime.embedder_observed_state()`. The GPU/CPU
+/// half is OS-level (`nvidia-smi`, see `crate::observed_gpu`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbedderObservedState {
+    pub embedded_60s: i64,
+    pub embedded_total: i64,
+    pub oldest_pending_age_s: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

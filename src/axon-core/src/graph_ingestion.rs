@@ -21,10 +21,10 @@ mod vector_runtime;
 // inside graph_ingestion.rs root after the test mod purge. vector_runtime
 // imports parse_i64_field + parse_u64_field directly from super::sql_helpers.
 pub use types::{
-    EmbedderLifecycleHeartbeatRecord, FileLifecycleEvent, FileVectorizationLeaseSnapshot,
-    FileVectorizationWork, IgnoreReconcileStats, VectorBatchRun, VectorLaneStateRecord,
-    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork,
-    VectorWorkerFault,
+    EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, FileLifecycleEvent,
+    FileVectorizationLeaseSnapshot, FileVectorizationWork, IgnoreReconcileStats, VectorBatchRun,
+    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
+    VectorPersistOutboxWork, VectorWorkerFault,
 };
 
 impl GraphStore {

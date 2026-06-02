@@ -84,6 +84,7 @@ pub fn load_canonical_ddl_files() -> Vec<String> {
         ("06_pgmq_tsv_async.sql", include_str!("../../../../db/ddl/06_pgmq_tsv_async.sql")),
         ("07_registry_notify.sql", include_str!("../../../../db/ddl/07_registry_notify.sql")),
         ("08_dashboard_state.sql", include_str!("../../../../db/ddl/08_dashboard_state.sql")),
+        ("09_embedder_observed.sql", include_str!("../../../../db/ddl/09_embedder_observed.sql")),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {

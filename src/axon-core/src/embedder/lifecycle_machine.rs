@@ -161,7 +161,7 @@ pub fn process_lifecycle() -> &'static Arc<EmbedderLifecycle> {
 /// publication via `axon_runtime.EmbedderLifecycleHeartbeat`
 /// (REQ-AXO-91572 option B). Captured at heartbeat tick by the
 /// indexer ; consumed by the brain `embedding_status` MCP tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleHeartbeatSnapshot {
     pub phase: EmbedderPhase,
     pub last_used_ms: i64,
@@ -169,13 +169,24 @@ pub struct LifecycleHeartbeatSnapshot {
     pub sleep_count: i64,
     pub pending_count: i64,
     pub heartbeat_ms: i64,
+    /// DEC-AXO-901626 — observed compute verdict for THIS process, captured
+    /// by self-observation (`crate::observed_gpu::observed_self_compute`).
+    /// "GPU" | "CPU".
+    pub compute: String,
+    /// How `compute` was determined: "nvidia_smi" | "unknown".
+    pub compute_source: String,
+    /// DEC-AXO-901626 — release identity (`AXON_BUILD_ID`) of the
+    /// publishing process. `None` when the env var is unset.
+    pub build_id: Option<String>,
 }
 
 impl LifecycleHeartbeatSnapshot {
-    /// Capture the process-singleton state. Cheap : 4 atomic loads +
-    /// 1 RwLock read (pending_count) + 1 system-time read.
+    /// Capture the process-singleton state. The compute verdict is the one
+    /// non-trivial read: a single self-`nvidia-smi` probe (timeout-bounded),
+    /// run on the heartbeat cadence (~5 s), never in a hot loop.
     pub fn capture() -> Self {
         let lc = process_lifecycle();
+        let (compute, compute_source) = crate::observed_gpu::observed_self_compute();
         Self {
             phase: lc.phase(),
             last_used_ms: lc.last_used_ms(),
@@ -183,6 +194,11 @@ impl LifecycleHeartbeatSnapshot {
             sleep_count: lc.sleep_count(),
             pending_count: super::lifecycle::process_state().pending_count() as i64,
             heartbeat_ms: now_unix_ms(),
+            compute: compute.to_string(),
+            compute_source: compute_source.to_string(),
+            build_id: std::env::var("AXON_BUILD_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         }
     }
 }

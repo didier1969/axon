@@ -240,6 +240,36 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             <.kv label="B2 batch" value={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
             <.kv label="B3 batch" value={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
             <.kv label="Last lane" value={embedder_field(@dashboard_state, :last_lane, "unknown")} />
+            <%!-- DEC-AXO-901626 — 3 distinct compute lanes, observed (nvidia-smi + PG),
+                  never a self-reported provider slot. Brain + Pipeline A are CPU by
+                  architecture; Pipeline B is the observed embedder verdict. --%>
+            <div class="pt-2 mt-1 border-t border-slate-800/60">
+              <div class="flex items-center justify-between mb-1.5">
+                <div class="text-[10px] uppercase tracking-[0.18em] text-slate-500">Compute (observed)</div>
+                <div class="text-[10px] text-slate-500 font-mono">
+                  src: {embedder_field(@dashboard_state, :compute_source, "unknown")}
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-2">
+                <div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
+                  <div class="text-[9px] uppercase tracking-wide text-slate-400">Brain</div>
+                  <div class="text-xs font-mono text-amber-200 mt-0.5">CPU</div>
+                </div>
+                <div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
+                  <div class="text-[9px] uppercase tracking-wide text-slate-400">Pipeline A</div>
+                  <div class="text-xs font-mono text-amber-200 mt-0.5">CPU</div>
+                </div>
+                <div class={[
+                  "rounded-md border px-2 py-1.5",
+                  compute_class(embedder_field(@dashboard_state, :compute, "unknown"))
+                ]}>
+                  <div class="text-[9px] uppercase tracking-wide text-slate-400">Pipeline B</div>
+                  <div class="text-xs font-mono mt-0.5">
+                    {embedder_field(@dashboard_state, :compute, "unknown")}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -479,6 +509,11 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp embedder_class("tensorrt"), do: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
   defp embedder_class("cpu"), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
   defp embedder_class(_), do: "border-slate-700 bg-slate-800/40 text-slate-300"
+
+  # DEC-AXO-901626 — tone for the observed compute chips (GPU/CPU).
+  defp compute_class("GPU"), do: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+  defp compute_class("CPU"), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
+  defp compute_class(_), do: "border-slate-700 bg-slate-800/40 text-slate-300"
 
   defp fs_val(%DashboardState{filesystem: nil}, _key), do: "n/a"
   defp fs_val(%DashboardState{filesystem: fs}, key) do

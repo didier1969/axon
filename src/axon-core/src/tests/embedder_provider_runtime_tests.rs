@@ -3,7 +3,6 @@
 #[cfg(test)]
 mod tests {
     use crate::embedder::{
-        current_embedding_provider_diagnostics, embedding_provider_diagnostics,
         provider_resolution_for_label, ProductionLane, ProviderStrategy, ProviderSupportRole,
     };
 

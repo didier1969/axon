@@ -44,12 +44,11 @@ impl McpServer {
             "runtime_mode": Value::Null
         });
         let mut peer_runtime_telemetry = Value::Null;
-        // REQ-AXO-901836 — embedder_provider published by indexer's heartbeat
-        // (main_telemetry.rs). Brain forwards it instead of returning its own
-        // local diagnostics slot, which under brain_only is always cpu/unspecified.
-        let mut peer_embedder_provider = Value::Null;
         // REQ-AXO-901836 — lane_parameters block published by indexer's
         // heartbeat, surfacing vector_workers / graph_workers / batch sizes.
+        // (DEC-AXO-901626 removed the sibling embedder_provider block: the
+        // effective provider is now derived observably by the brain composer
+        // from the indexer pid + nvidia-smi, not forwarded from a raced slot.)
         let mut peer_lane_parameters = Value::Null;
         let mut brain_ready = runtime_mode.control_plane_enabled();
         let mut indexer_ready = runtime_mode.ingestion_enabled();
@@ -71,7 +70,6 @@ impl McpServer {
                         "runtime_mode": peer.runtime_mode
                     });
                     peer_runtime_telemetry = peer.runtime_telemetry.unwrap_or(Value::Null);
-                    peer_embedder_provider = peer.embedder_provider.unwrap_or(Value::Null);
                     peer_lane_parameters = peer.lane_parameters.unwrap_or(Value::Null);
                 } else {
                     indexer_feed = RuntimeTruthFeed::from_observed_times(
@@ -131,12 +129,6 @@ impl McpServer {
                     Value::String("runtime_heartbeat".to_string())
                 },
                 "telemetry": peer_runtime_telemetry,
-                // REQ-AXO-901836 — embedder_provider published by indexer's
-                // heartbeat. Brain surfaces it under indexer_runtime so
-                // downstream callers (vector_pipeline_telemetry, dashboard
-                // composer) read the indexer's canonical view rather than
-                // the brain's local diagnostics slot.
-                "embedder_provider": peer_embedder_provider,
                 // REQ-AXO-901836 — lane_parameters block exposes indexer's
                 // effective vector_workers / graph_workers / batch sizes so
                 // brain status surfaces the indexer's truth in resource_policy

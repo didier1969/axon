@@ -132,6 +132,18 @@ CREATE TABLE IF NOT EXISTS axon_runtime.EmbedderLifecycleHeartbeat (
     pending_count  BIGINT NOT NULL DEFAULT 0,
     heartbeat_ms   BIGINT NOT NULL
 );
+-- DEC-AXO-901626: the indexer OBSERVES ITS OWN GPU footprint (nvidia-smi on
+-- its own pid) and publishes the binary verdict here. Observation happens
+-- where the observed thing lives — the brain only READS this row, never
+-- cross-references a remote pid. `compute` ∈ {GPU,CPU}; `compute_source` ∈
+-- {nvidia_smi,unknown}. `build_id` lets the brain confirm the paired indexer
+-- runs the same release. Idempotent for existing instances.
+ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS compute        TEXT;
+ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS compute_source TEXT;
+ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS build_id       TEXT;
 
 -- ── Indexes ──────────────────────────────────────────────────────────
 

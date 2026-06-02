@@ -2580,13 +2580,15 @@ fn test_status_brain_exposes_indexer_runtime_telemetry_from_heartbeat() {
     }
 }
 
-// REQ-AXO-901798 + REQ-AXO-901836 : the brain's status composer must surface
-// the paired indexer's embedder_provider AND lane_parameters from the
-// runtime heartbeat. Without this bridge the brain returns its own local
-// (always cpu / vector_workers=0 under brain_only) view and the dashboard
-// reports zero activity while the indexer is in fact running TensorRT.
+// REQ-AXO-901836 + DEC-AXO-901626 : the brain's status composer surfaces the
+// paired indexer's lane_parameters from the runtime heartbeat (worker-count
+// bridge), and exposes an observable `embedder_runtime` block. The provider
+// `effective` is NO LONGER forwarded from the heartbeat self-report (that was
+// the raced lie DEC-AXO-901626 removed); compute is derived from the indexer
+// pid + nvidia-smi, so in a unit test (no GPU, no PG embeddings) it resolves
+// to CPU/unknown.
 #[test]
-fn test_status_brain_surfaces_indexer_embedder_provider_and_lane_parameters_from_heartbeat() {
+fn test_status_brain_surfaces_indexer_lane_parameters_and_observable_embedder_runtime() {
     let _guard = env_lock();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
@@ -2614,11 +2616,6 @@ fn test_status_brain_surfaces_indexer_embedder_provider_and_lane_parameters_from
                 "last_heartbeat_at_ms": 2024,
                 "last_good_payload_at_ms": 2024,
                 "degraded_reason": null
-            },
-            "embedder_provider": {
-                "requested": "tensorrt",
-                "effective": "tensorrt",
-                "init_error": null
             },
             "lane_parameters": {
                 "vector_workers": 5,
@@ -2682,16 +2679,23 @@ fn test_status_brain_surfaces_indexer_embedder_provider_and_lane_parameters_from
     let indexer_runtime =
         &response["data"]["runtime_authority"]["runtime_state"]["indexer_runtime"];
     assert_eq!(indexer_runtime["available"].as_bool(), Some(true));
+    // DEC-AXO-901626 — the raced embedder_provider block is gone from
+    // indexer_runtime; the observable verdict lives under embedder_runtime.
+    assert!(
+        indexer_runtime.get("embedder_provider").is_none(),
+        "embedder_provider self-report must no longer be forwarded (DEC-AXO-901626)"
+    );
+    let embedder_runtime = &response["data"]["runtime_authority"]["embedder_runtime"];
     assert_eq!(
-        indexer_runtime["embedder_provider"]["effective"].as_str(),
-        Some("tensorrt"),
-        "embedder_provider.effective from heartbeat must propagate via indexer_runtime"
+        embedder_runtime["compute"].as_str(),
+        Some("CPU"),
+        "no GPU + no PG embeddings in unit test → observed compute resolves to CPU"
     );
     assert_eq!(
-        indexer_runtime["embedder_provider"]["requested"].as_str(),
-        Some("tensorrt")
+        embedder_runtime["compute_source"].as_str(),
+        Some("unknown"),
+        "no fresh lifecycle heartbeat row → compute_source unknown"
     );
-    assert!(indexer_runtime["embedder_provider"]["init_error"].is_null());
     assert_eq!(
         indexer_runtime["lane_parameters"]["vector_workers"].as_u64(),
         Some(5),
@@ -2706,21 +2710,23 @@ fn test_status_brain_surfaces_indexer_embedder_provider_and_lane_parameters_from
         Some(96)
     );
 
-    // 2. vector_pipeline_telemetry.provider uses the peer's effective label
+    // 2. vector_pipeline_telemetry.provider.effective_label now reflects the
+    //    OBSERVED compute (DEC-AXO-901626), not the heartbeat self-report.
+    //    No GPU + no fresh lifecycle heartbeat in this unit test → "cpu".
     let provider =
         &response["data"]["runtime_authority"]["vector_pipeline_telemetry"]["provider"];
     assert_eq!(
         provider["effective_label"].as_str(),
-        Some("tensorrt"),
-        "vector_pipeline_telemetry.provider.effective_label must reflect peer indexer's runtime, not brain's local default"
+        Some("cpu"),
+        "effective_label is now observable (nvidia-smi); resolves to cpu without an observed GPU footprint"
     );
 
-    // 3. resource_policy reports the peer indexer's effective values
+    // 3. resource_policy.embedding_provider is coherent with the observed verdict.
     let resource_policy = &response["data"]["resource_policy"];
     assert_eq!(
         resource_policy["embedding_provider"].as_str(),
-        Some("tensorrt"),
-        "resource_policy.embedding_provider must surface paired indexer's provider"
+        Some("cpu"),
+        "resource_policy.embedding_provider mirrors the observable effective label"
     );
     assert_eq!(
         resource_policy["vector_workers"].as_str(),

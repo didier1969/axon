@@ -798,57 +798,64 @@ impl McpServer {
             "heartbeat_freshness_window_ms": EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         });
         let local_embedding_provider_diagnostics = current_embedding_provider_diagnostics();
-        // REQ-AXO-901798 / REQ-AXO-901836 — when this is the brain composer
-        // and a paired indexer publishes its embedder_provider via
-        // runtime-heartbeat.json, surface the INDEXER's truth instead of
-        // the brain's local (always cpu/unspecified) diagnostics slot.
-        let peer_embedder_provider: Option<&Value> = if use_peer_runtime {
-            runtime_authority_state
-                .pointer("/indexer_runtime/embedder_provider")
-                .filter(|value| !value.is_null())
+        // DEC-AXO-901626 — observable embedder compute. The brain reads the
+        // indexer's pid from its lifecycle heartbeat and cross-references
+        // `nvidia-smi --query-compute-apps`; PG counters prove throughput.
+        // No self-reported provider slot, no cross-process race. The GPU/CPU
+        // verdict here SUPERSEDES the old `peer_embedder_provider` extraction
+        // (which surfaced the raced `effective=cpu` lie).
+        let embedder_observed = self
+            .graph_store
+            .embedder_observed_state()
+            .unwrap_or_default();
+        // DEC-AXO-901626 — the compute verdict is OBSERVED and PUBLISHED by the
+        // indexer (self nvidia-smi → EmbedderLifecycleHeartbeat.compute). The
+        // brain is a pure reader here: no remote pid, no nvidia-smi. Defaults
+        // to CPU/unknown when no fresh indexer heartbeat exists.
+        let embedder_compute = embedder_lifecycle_heartbeat
+            .as_ref()
+            .and_then(|row| row.compute.as_deref())
+            .unwrap_or("CPU");
+        let embedder_compute_source = embedder_lifecycle_heartbeat
+            .as_ref()
+            .and_then(|row| row.compute_source.as_deref())
+            .unwrap_or("unknown");
+        let embedder_runtime_snapshot = json!({
+            "compute": embedder_compute,
+            "compute_source": embedder_compute_source,
+            "embedded_per_minute": embedder_observed.embedded_60s,
+            "embedded_total": embedder_observed.embedded_total,
+            "oldest_pending_age_s": embedder_observed.oldest_pending_age_s,
+            "indexer_build_id": embedder_lifecycle_heartbeat
+                .as_ref()
+                .and_then(|row| row.build_id.clone()),
+            "heartbeat_age_ms": embedder_lifecycle_heartbeat_age_ms,
+        });
+        // Provider strings for the (legacy) vector_pipeline_telemetry block,
+        // kept coherent with the observable verdict above so neither surface
+        // lies. effective_label reflects observed compute; init_error is no
+        // longer tracked (failures surface via logs + VectorWorkerFault).
+        let provider_effective_label = if embedder_compute == "GPU" {
+            if local_embedding_provider_diagnostics
+                .provider_requested
+                .eq_ignore_ascii_case("tensorrt")
+            {
+                "tensorrt".to_string()
+            } else {
+                "cuda".to_string()
+            }
         } else {
-            None
+            "cpu".to_string()
         };
-        let provider_effective_label = peer_embedder_provider
-            .and_then(|provider| {
-                provider
-                    .get("effective")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| local_embedding_provider_diagnostics.provider_effective.clone());
-        let provider_init_error = peer_embedder_provider
-            .and_then(|provider| {
-                provider
-                    .get("init_error")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            })
-            .or_else(|| local_embedding_provider_diagnostics.provider_init_error.clone());
-        let provider_requested_label = peer_embedder_provider
-            .and_then(|provider| {
-                provider
-                    .get("requested")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| local_embedding_provider_diagnostics.provider_requested.clone());
-        // Re-derive resolution from the surfaced effective label so the
-        // strategy/fallback semantics stay coherent with the value LLM
-        // callers see. Local diagnostics' resolution is reused when no
-        // peer override is present.
-        let embedding_provider_resolution = if peer_embedder_provider.is_some() {
-            crate::embedder::provider_resolution_for_label(
-                &provider_requested_label,
-                &provider_effective_label,
-                false,
-                false,
-                None,
-                provider_init_error.clone(),
-            )
-        } else {
-            local_embedding_provider_diagnostics.resolution.clone()
-        };
+        let provider_init_error: Option<String> = None;
+        let embedding_provider_resolution = crate::embedder::provider_resolution_for_label(
+            &local_embedding_provider_diagnostics.provider_requested,
+            &provider_effective_label,
+            false,
+            false,
+            local_embedding_provider_diagnostics.ort_dylib_path.clone(),
+            None,
+        );
         let provider_effective_lower = provider_effective_label.trim().to_ascii_lowercase();
         let provider_fallback_count = local_vector_runtime_metrics
             .prepare_fallback_inline_total
@@ -1124,19 +1131,11 @@ impl McpServer {
                     "background_budget_class": background_budget_class,
                     "gpu_access_policy": gpu_access_policy,
                     "watcher_policy": watcher_policy,
-                    // REQ-AXO-901798 / REQ-AXO-901836 — surface paired indexer's
-                    // real provider when available; otherwise keep the canonical
-                    // request for this composer's runtime_mode so brain_only
-                    // standalone callers still see "cpu" rather than the
-                    // diagnostics slot's "unspecified" default.
-                    "embedding_provider": peer_embedder_provider
-                        .and_then(|provider| {
-                            provider
-                                .get("effective")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                        })
-                        .unwrap_or_else(|| embedding_provider.clone()),
+                    // DEC-AXO-901626 — observable effective provider (derived
+                    // from the indexer pid's `nvidia-smi` footprint), never the
+                    // raced self-reported slot. Coherent with
+                    // runtime_authority.embedder_runtime.compute below.
+                    "embedding_provider": provider_effective_label.clone(),
                     // REQ-AXO-901836 — same override discipline for worker counts:
                     // when the brain is composing on behalf of a paired indexer,
                     // surface the indexer's own lane_parameters truth instead of
@@ -1166,6 +1165,11 @@ impl McpServer {
                     // published a fresh heartbeat (or the table is empty) and
                     // we fell back to the brain's own (likely idle) lifecycle.
                     "embedder_lifecycle": embedder_lifecycle_snapshot,
+                    // DEC-AXO-901626 — observable embedder compute (GPU/CPU)
+                    // + PG-canonical throughput. The single source of truth
+                    // for "is the embedder really on the GPU?", replacing the
+                    // raced provider slot the dashboard used to mis-read.
+                    "embedder_runtime": embedder_runtime_snapshot,
                     "loop_semantics": Self::loop_semantics_snapshot(),
                     "canonical_ingestion_stage_model": canonical_ingestion_stage_model,
                     "admission_controller": admission_controller,

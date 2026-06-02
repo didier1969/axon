@@ -565,6 +565,22 @@ impl McpServer {
         let lifecycle_heartbeat_age_ms = indexer_heartbeat
             .as_ref()
             .map(|row| (now_ms - row.heartbeat_ms).max(0));
+        // DEC-AXO-901626 — observed compute verdict from the SAME canonical
+        // source the dashboard reads (indexer self-observation published to
+        // the PG heartbeat). LLM callers get the GPU/CPU truth + how it was
+        // determined, without a separate probe. Defaults CPU/unknown when no
+        // fresh indexer heartbeat is present.
+        let observed_compute = indexer_heartbeat
+            .as_ref()
+            .and_then(|row| row.compute.as_deref())
+            .unwrap_or("CPU");
+        let observed_compute_source = indexer_heartbeat
+            .as_ref()
+            .and_then(|row| row.compute_source.as_deref())
+            .unwrap_or("unknown");
+        let indexer_build_id = indexer_heartbeat
+            .as_ref()
+            .and_then(|row| row.build_id.clone());
         let heartbeat_age_suffix = lifecycle_heartbeat_age_ms
             .map(|age| format!(", heartbeat_age_ms={age}"))
             .unwrap_or_default();
@@ -636,7 +652,8 @@ impl McpServer {
              - B fed via:        demand_pull_b LISTEN chunk_pending_embed + adaptive 1s/30s poll\n\
              - NOTIFY channel:    chunk_pending_embed\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
-             - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\n\
+             - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
+             - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\n\
              ### Pipeline drain (ingress → A1)\n\
              - Drain batch cap:      {ingress_drain_batch} (env AXON_INGRESS_DRAIN_BATCH)\n\
              - Heartbeat tick:       {drain_heartbeat_tick}\n\
@@ -720,6 +737,11 @@ impl McpServer {
                 "lifecycle_sleep_count": lifecycle_sleep_count,
                 "lifecycle_source": lifecycle_source,
                 "lifecycle_heartbeat_age_ms": lifecycle_heartbeat_age_ms,
+                // DEC-AXO-901626 — observed compute verdict (canonical, same
+                // source as status.embedder_runtime + the dashboard).
+                "compute": observed_compute,
+                "compute_source": observed_compute_source,
+                "indexer_build_id": indexer_build_id,
                 // REQ-AXO-901678 — drain saturation telemetry surface.
                 // `batch_size` and `heartbeat_tick` reflect what the
                 // runtime drain loop ran with on its last tick (0 if the

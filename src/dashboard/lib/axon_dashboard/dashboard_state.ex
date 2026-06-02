@@ -136,9 +136,17 @@ defmodule AxonDashboard.DashboardState do
             requested: String.t() | nil,
             effective: String.t() | nil,
             init_error: String.t() | nil,
-            last_lane: String.t() | nil
+            last_lane: String.t() | nil,
+            compute: String.t() | nil,
+            compute_source: String.t() | nil
           }
-    defstruct requested: nil, effective: nil, init_error: nil, last_lane: nil
+    defstruct requested: nil,
+              effective: nil,
+              init_error: nil,
+              last_lane: nil,
+              # DEC-AXO-901626 — observable Pipeline B compute verdict.
+              compute: nil,
+              compute_source: nil
 
     def from_map(nil), do: nil
 
@@ -147,7 +155,9 @@ defmodule AxonDashboard.DashboardState do
         requested: Map.get(m, "requested"),
         effective: Map.get(m, "effective"),
         init_error: Map.get(m, "init_error"),
-        last_lane: Map.get(m, "last_lane")
+        last_lane: Map.get(m, "last_lane"),
+        compute: Map.get(m, "compute"),
+        compute_source: Map.get(m, "compute_source")
       }
     end
   end

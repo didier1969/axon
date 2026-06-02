@@ -392,29 +392,10 @@ pub fn summarize_end_to_end(label: &str, samples: &[(u64, usize, u64)]) -> EndTo
 /// Sampling is single-shot here; benches that want a peak reading
 /// across a window must call this periodically and keep the max.
 pub fn vram_used_mib_self() -> Option<u64> {
-    let pid = std::process::id().to_string();
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-compute-apps=pid,used_memory",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let mut parts = line.splitn(2, ',').map(|s| s.trim());
-        let line_pid = parts.next()?;
-        let mib_str = parts.next()?;
-        if line_pid == pid {
-            if let Ok(mib) = mib_str.parse::<u64>() {
-                return Some(mib);
-            }
-        }
-    }
-    None
+    // DEC-AXO-901626: single source of the `--query-compute-apps` probe +
+    // parser lives in `crate::observed_gpu` (DRY / GUI-PRO-013). Self-VRAM
+    // is just the probe applied to the current pid.
+    crate::observed_gpu::observed_gpu_used_mib(std::process::id())
 }
 
 #[cfg(test)]

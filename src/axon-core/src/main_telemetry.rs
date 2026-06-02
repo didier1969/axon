@@ -171,11 +171,10 @@ fn write_runtime_heartbeat_export(
         "stale": runtime_truth_feed.stale,
         "degraded_reason": merged_degraded_reason,
         "runtime_truth_feed": runtime_truth_feed,
-        "embedder_provider": {
-            "requested": embedder_provider.provider_requested,
-            "effective": embedder_provider.provider_effective,
-            "init_error": embedder_provider.provider_init_error,
-        },
+        // DEC-AXO-901626 — the raced `embedder_provider` self-report block is
+        // gone. The effective provider is derived observably by the brain
+        // composer (indexer pid + nvidia-smi). `degraded_reason` above still
+        // flags a GPU→CPU fallback as a fail-loud signal.
         "lane_parameters": indexer_lane_parameters,
         "runtime_telemetry": {
             "ingress_enabled": runtime_snapshot.ingress_enabled,
@@ -412,6 +411,40 @@ pub(crate) fn spawn_runtime_telemetry(
             let dashboard_embedder = crate::embedder::current_embedding_provider_diagnostics();
             let dashboard_build_id = std::env::var("AXON_BUILD_ID")
                 .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+            // DEC-AXO-901626 — observable Pipeline B compute for the dashboard
+            // is READ from the indexer's PG heartbeat (the indexer self-observes
+            // and publishes the verdict). The brain does no nvidia-smi here.
+            // Brain = CPU and Pipeline A = CPU are rendered as constants
+            // dashboard-side (architectural invariants).
+            let dashboard_heartbeat = store
+                .latest_lifecycle_heartbeat("indexer")
+                .ok()
+                .flatten()
+                .filter(|row| (dashboard_ts_ms as i64 - row.heartbeat_ms).max(0) <= 30_000);
+            let dashboard_compute = dashboard_heartbeat
+                .as_ref()
+                .and_then(|row| row.compute.as_deref())
+                .unwrap_or("CPU");
+            let dashboard_compute_source = dashboard_heartbeat
+                .as_ref()
+                .and_then(|row| row.compute_source.as_deref())
+                .unwrap_or("unknown");
+            // Effective provider label coherent with the observed compute:
+            // the brain-local diagnostics slot would say "cpu" (the brain
+            // never embeds), so derive the label from the observed verdict
+            // instead — otherwise the dashboard would resurface the old lie.
+            let dashboard_effective_label = if dashboard_compute == "GPU" {
+                if dashboard_embedder
+                    .provider_requested
+                    .eq_ignore_ascii_case("tensorrt")
+                {
+                    "tensorrt"
+                } else {
+                    "cuda"
+                }
+            } else {
+                "cpu"
+            };
             crate::dashboard_state::compose_publish_and_emit(
                 &store,
                 &results_tx,
@@ -423,8 +456,10 @@ pub(crate) fn spawn_runtime_telemetry(
                     instance_kind: &dashboard_instance_kind,
                     degraded_reason: runtime_truth_feed.degraded_reason.as_deref(),
                     embedder_requested: &dashboard_embedder.provider_requested,
-                    embedder_effective: &dashboard_embedder.provider_effective,
+                    embedder_effective: dashboard_effective_label,
                     embedder_init_error: dashboard_embedder.provider_init_error.as_deref(),
+                    embedder_compute: dashboard_compute,
+                    embedder_compute_source: dashboard_compute_source,
                     last_consumed_batch_lane: dashboard_last_lane.as_str(),
                     chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
                     vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,

@@ -81,10 +81,7 @@ pub use provider_contract::{
 // requested/effective labels so the surfaced vector_pipeline_telemetry stays
 // coherent. Keep the re-export crate-wide, not test-only.
 pub(crate) use provider_runtime::provider_resolution_for_label;
-use provider_runtime::{
-    cpu_provider_effective_label, current_embedding_provider_effective, register_embedding_provider_diagnostics,
-    set_embedding_provider_runtime_state,
-};
+use provider_runtime::cpu_provider_effective_label;
 pub use provider_runtime::{
     current_embedding_provider_diagnostics, current_gpu_present, embedder_provider_fallback_reason,
     embedding_provider_diagnostics, set_gpu_present, EmbeddingProviderDiagnostics,
@@ -776,7 +773,6 @@ impl SemanticWorkerPool {
                 "❌ Semantic {} Worker [{}]: CUDA requested but ONNX Runtime provider library is missing: {}",
                 lane, worker_idx, provider_path
             );
-            set_embedding_provider_runtime_state("cpu_missing_cuda_provider", None);
         }
         let cuda_options = if cuda_requested && cuda_available && cuda_provider_library_available {
             Some(
@@ -788,56 +784,46 @@ impl SemanticWorkerPool {
             None
         };
 
-        let model_result = if let Some(cuda_options) = cuda_options {
+        // DEC-AXO-901626 : the effective provider is no longer written to a
+        // shared slot (the race that this decision removes). The label below
+        // is local — used only for this worker's init log line. The
+        // canonical, observable effective provider is derived on read from
+        // the OS (nvidia-smi) by `current_embedding_provider_diagnostics`.
+        let (model_result, provider_label) = if let Some(cuda_options) = cuda_options {
             match TextEmbedding::try_new(cuda_options) {
-                Ok(model) => {
-                    set_embedding_provider_runtime_state("cuda", None);
-                    Ok(model)
-                }
+                Ok(model) => (Ok(model), "cuda"),
                 Err(err) => {
-                    let rendered = format!("{err:?}");
                     error!(
                         "❌ Semantic {} Worker [{}]: CUDA init failed, falling back to CPU: {:?}",
                         lane, worker_idx, err
                     );
-                    set_embedding_provider_runtime_state("cpu_fallback", Some(&rendered));
                     apply_cpu_fallback_ort_runtime_env();
-                    TextEmbedding::try_new(options)
+                    (TextEmbedding::try_new(options), "cpu_fallback")
                 }
             }
         } else {
-            set_embedding_provider_runtime_state(
+            (
+                TextEmbedding::try_new(options),
                 cpu_provider_effective_label(
                     cuda_requested,
                     cuda_available,
                     cuda_provider_library_available,
                 ),
-                None,
-            );
-            TextEmbedding::try_new(options)
+            )
         };
 
         match model_result {
             Ok(model) => {
-                let provider_effective = current_embedding_provider_effective();
-                register_embedding_provider_diagnostics(embedding_provider_diagnostics(
-                    provider_effective.clone(),
-                ));
                 info!(
-                    "✅ Semantic {} Worker [{}]: BGE-Large model loaded successfully (provider_effective={}).",
-                    lane, worker_idx, provider_effective
+                    "✅ Semantic {} Worker [{}]: BGE-Large model loaded successfully (provider={}).",
+                    lane, worker_idx, provider_label
                 );
                 Some(model)
             }
             Err(e) => {
-                let rendered = format!("{e:?}");
                 error!(
                     "❌ Semantic {} Worker [{}]: FATAL ONNX INIT ERROR: {:?}",
                     lane, worker_idx, e
-                );
-                set_embedding_provider_runtime_state(
-                    &current_embedding_provider_effective(),
-                    Some(&rendered),
                 );
                 None
             }

@@ -70,6 +70,12 @@ pub(crate) struct LiveMetrics<'a> {
     pub embedder_requested: &'a str,
     pub embedder_effective: &'a str,
     pub embedder_init_error: Option<&'a str>,
+    /// DEC-AXO-901626 — observable Pipeline B compute ("GPU" | "CPU"),
+    /// derived from the indexer pid + nvidia-smi (not the raced slot).
+    pub embedder_compute: &'a str,
+    /// "nvidia_smi" | "pg_inferred" | "unknown" — how `embedder_compute`
+    /// was determined, so the dashboard can flag inference vs OS truth.
+    pub embedder_compute_source: &'a str,
     pub last_consumed_batch_lane: &'a str,
     pub chunk_embeddings_per_second: f64,
     /// Monotone counter since brain boot, includes re-embeddings.
@@ -280,6 +286,9 @@ pub(crate) fn compose_dashboard_state_v1(
             "effective": live.embedder_effective,
             "init_error": live.embedder_init_error,
             "last_lane": live.last_consumed_batch_lane,
+            // DEC-AXO-901626 — observable Pipeline B compute verdict.
+            "compute": live.embedder_compute,
+            "compute_source": live.embedder_compute_source,
         },
         "telemetry": {
             "chunk_embeddings_per_second": live.chunk_embeddings_per_second,
@@ -458,6 +467,8 @@ mod tests {
             embedder_requested: "cpu",
             embedder_effective: "cpu",
             embedder_init_error: None,
+            embedder_compute: "CPU",
+            embedder_compute_source: "unknown",
             last_consumed_batch_lane: "unknown",
             chunk_embeddings_per_second: 0.0,
             vector_chunks_embedded_cumulative: 0,
@@ -523,6 +534,8 @@ mod tests {
             embedder_requested: "",
             embedder_effective: "",
             embedder_init_error: None,
+            embedder_compute: "CPU",
+            embedder_compute_source: "unknown",
             last_consumed_batch_lane: "",
             chunk_embeddings_per_second: 0.0,
             vector_chunks_embedded_cumulative: 0,

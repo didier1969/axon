@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::provider_contract::{
     requested_strategy_from_label, ProductionLane, ProviderResolution, ProviderStrategy,
@@ -25,87 +25,27 @@ pub struct EmbeddingProviderDiagnostics {
     pub resolution: ProviderResolution,
 }
 
-static EMBEDDING_PROVIDER_DIAGNOSTICS: OnceLock<Mutex<EmbeddingProviderDiagnostics>> =
-    OnceLock::new();
+// DEC-AXO-901626 — the raced `Mutex<EmbeddingProviderDiagnostics>` slot is
+// GONE. Storing the effective provider was anti-SOTA: several embedder
+// init lanes wrote it last-writer-wins (GpuB2Embedder → "tensorrt", the
+// fastembed query lane → "cpu_fallback"), so the value lied most of the
+// time. `provider_effective` is now DERIVED from an OS observation (cached
+// nvidia-smi footprint, see `crate::observed_gpu`) — it cannot be raced.
+//
+// `gpu_present` remains a boot-time fact (single writer at startup via
+// `set_gpu_present`), kept in a plain AtomicBool — not a provider slot.
+static GPU_PRESENT: AtomicBool = AtomicBool::new(false);
 
-fn embedding_provider_slot() -> &'static Mutex<EmbeddingProviderDiagnostics> {
-    // REQ-AXO-901737 fix : la closure init ne doit JAMAIS re-call
-    // `embedding_provider_slot()` (réentrance OnceLock = deadlock).
-    // Init plat avec defaults : tout consumer downstream qui veut un
-    // vrai diagnostic appelle `embedding_provider_diagnostics(...)`
-    // APRÈS init, qui peut alors re-lire le slot sans réentrance.
-    EMBEDDING_PROVIDER_DIAGNOSTICS.get_or_init(|| {
-        let initial_provider_effective = "unspecified".to_string();
-        let resolution = provider_resolution_for_label(
-            "unspecified",
-            &initial_provider_effective,
-            false,
-            false,
-            None,
-            None,
-        );
-        Mutex::new(EmbeddingProviderDiagnostics {
-            provider_requested: "unspecified".to_string(),
-            provider_effective: initial_provider_effective,
-            ort_strategy: "unspecified".to_string(),
-            ort_dylib_path: None,
-            gpu_service_enabled: false,
-            gpu_service_tensorrt_requested: false,
-            provider_init_error: None,
-            gpu_present: false,
-            resolution,
-        })
-    })
-}
-
-pub(crate) fn current_embedding_provider_effective() -> String {
-    embedding_provider_slot()
-        .lock()
-        .map(|guard| guard.provider_effective.clone())
-        .unwrap_or_else(|poison| poison.into_inner().provider_effective.clone())
-}
-
-/// REQ-AXO-901737 : in-process state mutation. No more env::set_var for
-/// AXON_EMBEDDING_PROVIDER_EFFECTIVE / _INIT_ERROR.
-pub(crate) fn set_embedding_provider_runtime_state(
-    provider_effective: &str,
-    init_error: Option<&str>,
-) {
-    let mut slot = embedding_provider_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    slot.provider_effective = provider_effective.to_string();
-    slot.provider_init_error = init_error
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-}
-
-/// REQ-AXO-901737 : recorded at boot, then read by downstream consumers
-/// instead of AXON_EMBEDDING_GPU_PRESENT env var.
+/// Record GPU presence once at boot (runtime_boot). Single-writer fact,
+/// not a raced provider label.
 pub fn set_gpu_present(gpu_present: bool) {
-    let mut slot = embedding_provider_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    slot.gpu_present = gpu_present;
+    GPU_PRESENT.store(gpu_present, Ordering::Relaxed);
 }
 
+/// GPU presence as recorded at boot; falls back to a live probe for
+/// ad-hoc callers that bypass the boot path (e.g. unit tests).
 pub fn current_gpu_present() -> bool {
-    embedding_provider_slot()
-        .lock()
-        .map(|guard| guard.gpu_present)
-        .unwrap_or_else(|poison| poison.into_inner().gpu_present)
-}
-
-/// REQ-AXO-901737 : test-only helper to override the effective provider
-/// label without going through env vars. Production code MUST use
-/// `set_embedding_provider_runtime_state`.
-#[cfg(test)]
-pub(crate) fn set_effective_for_test(provider_effective: Option<&str>) {
-    let mut slot = embedding_provider_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    slot.provider_effective = provider_effective.unwrap_or("cpu").to_string();
+    GPU_PRESENT.load(Ordering::Relaxed) || RuntimeProfile::detect().gpu_present
 }
 
 pub(crate) fn cpu_provider_effective_label(
@@ -120,58 +60,62 @@ pub(crate) fn cpu_provider_effective_label(
     }
 }
 
-pub(crate) fn register_embedding_provider_diagnostics(diagnostics: EmbeddingProviderDiagnostics) {
-    let mut slot = embedding_provider_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    *slot = diagnostics;
+/// DEC-AXO-901626 — derive the effective provider label from CONFIGURED
+/// INTENT (requested GPU strategy ∧ GPU present), not from a raced slot.
+/// This in-process label answers "should this process expect GPU work?" for
+/// scheduling consumers (quiescence drain policy, optimizer) — it is cheap,
+/// non-raced, and never shells out. The CANONICAL OBSERVED verdict (does the
+/// embedder REALLY run on the GPU) lives in the indexer's PG heartbeat
+/// (`EmbedderLifecycleHeartbeat.compute`, published from `observed_self_compute`)
+/// and is surfaced to humans via `status.embedder_runtime` + the dashboard.
+fn derive_effective_label(provider_requested: &str, gpu_present: bool) -> String {
+    let requested = provider_requested.trim().to_ascii_lowercase();
+    if gpu_present && (requested == "tensorrt" || requested == "cuda") {
+        requested
+    } else {
+        "cpu".to_string()
+    }
 }
 
 pub fn current_embedding_provider_diagnostics() -> EmbeddingProviderDiagnostics {
-    let mut diagnostics = embedding_provider_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    // REQ-AXO-901737 : gpu_present read from struct (set at boot via
-    // set_gpu_present) ; fall back to runtime probe for ad-hoc callers
-    // that bypass the boot path (e.g. unit tests with no boot phase).
-    let gpu_present = if diagnostics.gpu_present {
-        true
-    } else {
-        RuntimeProfile::detect().gpu_present
-    };
-    diagnostics.gpu_present = gpu_present;
-    diagnostics.provider_requested = canonical_embedding_provider_request_for_mode(
-        AxonRuntimeMode::from_env(),
-        gpu_present,
+    let gpu_present = current_gpu_present();
+    let provider_requested =
+        canonical_embedding_provider_request_for_mode(AxonRuntimeMode::from_env(), gpu_present);
+    embedding_provider_diagnostics_with_request(provider_requested, gpu_present)
+}
+
+/// Build the diagnostics struct from an explicit effective label. Pure: no
+/// stored state. `provider_init_error` is no longer tracked here — init
+/// failures surface via tracing logs + `axon_runtime.VectorWorkerFault`.
+pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingProviderDiagnostics {
+    let gpu_present = current_gpu_present();
+    let provider_requested =
+        canonical_embedding_provider_request_for_mode(AxonRuntimeMode::from_env(), gpu_present);
+    let mut diagnostics = embedding_provider_diagnostics_with_request(provider_requested, gpu_present);
+    diagnostics.provider_effective = provider_effective.clone();
+    diagnostics.resolution = provider_resolution_for_label(
+        &diagnostics.provider_requested,
+        &provider_effective,
+        diagnostics.gpu_service_enabled,
+        diagnostics.gpu_service_tensorrt_requested,
+        diagnostics.ort_dylib_path.clone(),
+        None,
     );
-    diagnostics.resolution.requested_strategy =
-        requested_strategy_from_label(&diagnostics.provider_requested);
     diagnostics
 }
 
-pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingProviderDiagnostics {
-    // REQ-AXO-901737 : init_error pulled from in-process slot (preserves
-    // diagnostic across factory calls). Only `AXON_EMBEDDING_PROVIDER`
-    // (request) and ORT_* (toolchain) remain env-driven.
-    let runtime_mode = AxonRuntimeMode::from_env();
-    let stored = embedding_provider_slot()
-        .lock()
-        .ok()
-        .map(|guard| (guard.gpu_present, guard.provider_init_error.clone()));
-    let (gpu_present, provider_init_error) = match stored {
-        Some((gp, err)) if gp => (true, err),
-        Some((_, err)) => (RuntimeProfile::detect().gpu_present, err),
-        None => (RuntimeProfile::detect().gpu_present, None),
-    };
-    let provider_requested =
-        canonical_embedding_provider_request_for_mode(runtime_mode, gpu_present);
+/// Shared pure builder: assemble the full diagnostics from a requested
+/// label + gpu_present, deriving `provider_effective` observably.
+fn embedding_provider_diagnostics_with_request(
+    provider_requested: String,
+    gpu_present: bool,
+) -> EmbeddingProviderDiagnostics {
+    let provider_effective = derive_effective_label(&provider_requested, gpu_present);
     let ort_dylib_path = std::env::var("ORT_DYLIB_PATH")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    // DEC-AXO-070 commit F: subprocess GPU embed service removed; the
-    // diagnostic surface keeps the field shape (false/false) for backward
-    // compatibility with the JSON contract expected by status callers.
+    // DEC-AXO-070 commit F: subprocess GPU embed service removed; field
+    // shape kept (false/false) for the JSON contract expected by callers.
     let gpu_service_enabled = false;
     let gpu_service_tensorrt_requested = false;
     let resolution = provider_resolution_for_label(
@@ -180,9 +124,8 @@ pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingPr
         gpu_service_enabled,
         gpu_service_tensorrt_requested,
         ort_dylib_path.clone(),
-        provider_init_error.clone(),
+        None,
     );
-
     EmbeddingProviderDiagnostics {
         provider_requested,
         provider_effective,
@@ -193,7 +136,7 @@ pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingPr
         ort_dylib_path,
         gpu_service_enabled,
         gpu_service_tensorrt_requested,
-        provider_init_error,
+        provider_init_error: None,
         gpu_present,
         resolution,
     }

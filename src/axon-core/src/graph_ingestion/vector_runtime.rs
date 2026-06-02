@@ -4,7 +4,10 @@ use crate::graph::GraphStore;
 use crate::service_guard;
 
 use super::sql_helpers::{parse_i64_field, parse_u64_field};
-use super::{EmbedderLifecycleHeartbeatRecord, VectorLaneStateRecord, VectorWorkerFault};
+use super::{
+    EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, VectorLaneStateRecord,
+    VectorWorkerFault,
+};
 
 impl GraphStore {
     /// REQ-AXO-271 slice 2e (PG canonical only, post-MIL-AXO-017) :
@@ -178,7 +181,7 @@ impl GraphStore {
     ) -> Result<Option<EmbedderLifecycleHeartbeatRecord>> {
         let table_ref = self.axon_runtime_table_ref("EmbedderLifecycleHeartbeat");
         let raw = self.query_json_writer(&format!(
-            "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms \
+            "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -207,7 +210,44 @@ impl GraphStore {
             sleep_count: row.get(4).and_then(parse_i64_field).unwrap_or_default(),
             pending_count: row.get(5).and_then(parse_i64_field).unwrap_or_default(),
             heartbeat_ms: row.get(6).and_then(parse_i64_field).unwrap_or_default(),
+            compute: row
+                .get(7)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            compute_source: row
+                .get(8)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            build_id: row
+                .get(9)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         }))
+    }
+
+    /// DEC-AXO-901626 — PG-canonical embedder observation in one round-trip
+    /// via `axon_runtime.embedder_observed_state()`. Feeds the brain
+    /// composer's `embedder_runtime` block (throughput + staleness) and the
+    /// `pg_inferred` GPU fallback when `nvidia-smi` is unreachable.
+    pub fn embedder_observed_state(&self) -> Result<EmbedderObservedState> {
+        let raw = self.query_json_writer(
+            "SELECT (s->>'embedded_60s')::bigint, \
+                    (s->>'embedded_total')::bigint, \
+                    (s->>'oldest_pending_age_s')::bigint \
+             FROM (SELECT axon_runtime.embedder_observed_state() AS s) q",
+        )?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(EmbedderObservedState::default());
+        };
+        Ok(EmbedderObservedState {
+            embedded_60s: row.first().and_then(parse_i64_field).unwrap_or_default(),
+            embedded_total: row.get(1).and_then(parse_i64_field).unwrap_or_default(),
+            oldest_pending_age_s: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
+        })
     }
 }
 
@@ -218,14 +258,21 @@ fn build_lifecycle_heartbeat_upsert_sql(
     process_role: &str,
     snapshot: &crate::embedder::lifecycle_machine::LifecycleHeartbeatSnapshot,
 ) -> String {
+    // DEC-AXO-901626 — `build_id` is NULL when the env var is unset; SQL
+    // literal is built accordingly (quoted string vs NULL keyword).
+    let build_id_sql = match snapshot.build_id.as_deref() {
+        Some(value) => format!("'{}'", GraphStore::escape_sql(value)),
+        None => "NULL".to_string(),
+    };
     format!(
         "INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat \
-         (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms) \
-         VALUES ('{}', '{}', {}, {}, {}, {}, {}) \
+         (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id) \
+         VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             phase = EXCLUDED.phase, last_used_ms = EXCLUDED.last_used_ms, \
             wake_count = EXCLUDED.wake_count, sleep_count = EXCLUDED.sleep_count, \
-            pending_count = EXCLUDED.pending_count, heartbeat_ms = EXCLUDED.heartbeat_ms",
+            pending_count = EXCLUDED.pending_count, heartbeat_ms = EXCLUDED.heartbeat_ms, \
+            compute = EXCLUDED.compute, compute_source = EXCLUDED.compute_source, build_id = EXCLUDED.build_id",
         GraphStore::escape_sql(process_role),
         snapshot.phase.as_str(),
         snapshot.last_used_ms,
@@ -233,6 +280,9 @@ fn build_lifecycle_heartbeat_upsert_sql(
         snapshot.sleep_count,
         snapshot.pending_count,
         snapshot.heartbeat_ms,
+        GraphStore::escape_sql(&snapshot.compute),
+        GraphStore::escape_sql(&snapshot.compute_source),
+        build_id_sql,
     )
 }
 
@@ -357,6 +407,9 @@ mod tests {
             sleep_count: 4,
             pending_count: 12,
             heartbeat_ms: 1_700_000_005_000,
+            compute: "GPU".to_string(),
+            compute_source: "nvidia_smi".to_string(),
+            build_id: Some("v0.8.0-795-gf1cdab19".to_string()),
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // Shape contract.
@@ -364,18 +417,45 @@ mod tests {
         assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
         for col in [
             "phase", "last_used_ms", "wake_count", "sleep_count",
-            "pending_count", "heartbeat_ms",
+            "pending_count", "heartbeat_ms", "compute", "compute_source", "build_id",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
                 "ON CONFLICT update should refresh column `{col}`"
             );
         }
-        // Value plumbing.
+        // Value plumbing (DEC-AXO-901626 observed compute + build_id).
         assert!(sql.contains("'indexer'"));
         assert!(sql.contains("'sleeping'"));
         assert!(sql.contains("1700000000000"));
         assert!(sql.contains("1700000005000"));
+        assert!(sql.contains("'GPU'"));
+        assert!(sql.contains("'nvidia_smi'"));
+        assert!(sql.contains("'v0.8.0-795-gf1cdab19'"));
+    }
+
+    #[test]
+    fn lifecycle_heartbeat_upsert_sql_emits_null_build_id_when_absent() {
+        use crate::embedder::lifecycle_machine::{
+            EmbedderPhase, LifecycleHeartbeatSnapshot,
+        };
+        let snapshot = LifecycleHeartbeatSnapshot {
+            phase: EmbedderPhase::Ready,
+            last_used_ms: 1,
+            wake_count: 0,
+            sleep_count: 0,
+            pending_count: 0,
+            heartbeat_ms: 2,
+            compute: "CPU".to_string(),
+            compute_source: "unknown".to_string(),
+            build_id: None,
+        };
+        let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
+        // No quoted build_id literal; the NULL keyword carries the absence.
+        assert!(sql.contains("'CPU'"));
+        assert!(sql.contains("'unknown'"));
+        assert!(sql.trim_end().ends_with("build_id = EXCLUDED.build_id"));
+        assert!(sql.contains(", NULL)"));
     }
 
     #[test]
@@ -390,6 +470,9 @@ mod tests {
             sleep_count: 0,
             pending_count: 0,
             heartbeat_ms: 0,
+            compute: "CPU".to_string(),
+            compute_source: "unknown".to_string(),
+            build_id: None,
         };
         // Pathological role containing single quote must be escaped.
         let sql = super::build_lifecycle_heartbeat_upsert_sql("ind'exer", &snapshot);
