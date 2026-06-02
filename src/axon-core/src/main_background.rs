@@ -1641,7 +1641,7 @@ fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget>
         Err(_) => return targets,
     };
 
-    let mut child_targets = Vec::new();
+    let mut clean_children: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -1650,26 +1650,80 @@ fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget>
         let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
             continue;
         };
-        if name.starts_with('.') {
+        // REQ-AXO-91561 — exclude hidden + build-artefact dirs from the watch.
+        if name.starts_with('.') || EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
             continue;
         }
-        // REQ-AXO-91561 — exclude build-artefact directories from
-        // recursive watch. See module-level constant for rationale.
-        if EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
+        clean_children.push(path);
+    }
+
+    clean_children.sort_by_key(|path| project_hot_target_rank(path));
+    // REQ-AXO-901853 — expand each project child into pruned watch targets so
+    // nested build dirs (e.g. <project>/.axon/cargo-target) are excluded at the
+    // inotify-registration layer, not after flooding the event handler.
+    for child in clean_children {
+        collect_pruned_watch_targets(&child, &mut targets);
+    }
+    targets
+}
+
+/// REQ-AXO-901853 — register the largest build-free subtrees RECURSIVELY (so
+/// newly-created subdirs stay auto-watched) while NEVER descending into an
+/// excluded build dir (`.`-prefixed dirs + `EXCLUDED_BUILD_DIR_SEGMENTS`) at
+/// any depth.
+///
+/// Root cause it fixes: a single `RecursiveMode::Recursive` watch on a project
+/// dir descends into nested build output (`.axon/cargo-target`), and notify has
+/// no per-path exclusion in recursive mode — so build-artefact churn floods the
+/// debouncer (observed: 22 972 inotify watches, ~6-8 `excluded_build_dir`
+/// events/s, 428 % CPU). Pruning at registration removes the flood at its
+/// source (10-lens: back-pressure + robustness + dead-code).
+///
+/// A dir with no excluded child → one recursive watch covers its whole subtree.
+/// A dir WITH an excluded child → non-recursive watch on it + recurse only into
+/// its clean children. Single top-down pass: clean subtrees are never walked
+/// into (the recursive watch handles them), so this is O(dirs above a build
+/// boundary), not O(whole tree).
+fn collect_pruned_watch_targets(dir: &Path, targets: &mut Vec<WatchTarget>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut has_excluded_child = false;
+    let mut clean_children: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
-        if std::fs::read_dir(&path).is_err() {
+        let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
             continue;
+        };
+        if name.starts_with('.') || EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
+            has_excluded_child = true;
+        } else {
+            clean_children.push(path);
         }
-        child_targets.push(WatchTarget {
-            path,
+    }
+
+    if has_excluded_child {
+        // Prune: watch this dir's own entries non-recursively, then recurse
+        // into clean children only — never into the excluded ones.
+        targets.push(WatchTarget {
+            path: dir.to_path_buf(),
+            recursive: false,
+        });
+        clean_children.sort();
+        for child in clean_children {
+            collect_pruned_watch_targets(&child, targets);
+        }
+    } else {
+        // Entire subtree is build-free → one recursive watch (auto-watches
+        // future subdirs created under it).
+        targets.push(WatchTarget {
+            path: dir.to_path_buf(),
             recursive: true,
         });
     }
-
-    child_targets.sort_by_key(|target| project_hot_target_rank(&target.path));
-    targets.extend(child_targets);
-    targets
 }
 
 fn project_hot_target_rank(path: &Path) -> (u8, String) {
@@ -3120,5 +3174,47 @@ mod tests {
         assert!(!names.iter().any(|n| n == "_build"));
         assert!(!names.iter().any(|n| n == "node_modules"));
         assert!(!names.iter().any(|n| n == ".git"));
+    }
+
+    #[test]
+    fn active_project_hot_targets_prunes_nested_build_dirs() {
+        // REQ-AXO-901853 — the storm came from build dirs NESTED inside an
+        // otherwise-watched project (e.g. <project>/.axon/cargo-target), which
+        // the top-level filter never saw. Registration must prune them.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("axon");
+        std::fs::create_dir_all(proj.join("src").join("sub")).unwrap();
+        std::fs::create_dir_all(proj.join(".axon").join("cargo-target").join("deps")).unwrap();
+        std::fs::create_dir_all(proj.join("target").join("debug")).unwrap();
+
+        let targets = active_project_hot_targets(Some(tmp.path()));
+
+        // No watch target may cross a build dir (the flood source) — at any depth.
+        for target in &targets {
+            assert!(
+                !path_in_excluded_build_dir(&target.path),
+                "watch target {} crosses an excluded build dir",
+                target.path.display()
+            );
+            assert!(
+                !target.path.to_string_lossy().contains("/.axon"),
+                "watch target {} crosses nested hidden dir .axon",
+                target.path.display()
+            );
+        }
+        // The clean source subtree IS watched recursively (auto-watch new subdirs).
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.path.ends_with("axon/src") && t.recursive),
+            "clean source subtree must be watched recursively"
+        );
+        // The project root has an excluded child → watched non-recursively.
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.path.ends_with("axon") && !t.recursive),
+            "project root with build children must be non-recursive"
+        );
     }
 }
