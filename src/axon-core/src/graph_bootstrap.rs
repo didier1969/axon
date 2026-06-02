@@ -837,12 +837,27 @@ impl GraphStore {
                     );
                 }
                 Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "PostgreSQL global schema bootstrap failed on statement: {}",
-                            stmt.chars().take(80).collect::<String>()
-                        )
-                    });
+                    // REQ-AXO-901868 (lens #8 observabilité) : embarquer le
+                    // message PG réel dans le contexte — pas seulement le
+                    // statement tronqué à 80 chars, qui est souvent un
+                    // commentaire `--` (split_top_level_statements garde les
+                    // commentaires de tête attachés). En session 69 l'erreur
+                    // réelle « gin_trgm_ops does not exist » était masquée
+                    // derrière un commentaire affiché comme « statement »,
+                    // forçant un diagnostic manuel par repro psql.
+                    let pg_error = err.to_string();
+                    let stmt_head: String = stmt
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty() && !l.starts_with("--"))
+                        .unwrap_or_else(|| stmt.trim())
+                        .chars()
+                        .take(120)
+                        .collect();
+                    return Err(err).context(format!(
+                        "PostgreSQL global schema bootstrap failed — PG error: \
+                         {pg_error} (statement: {stmt_head})"
+                    ));
                 }
             }
         }
