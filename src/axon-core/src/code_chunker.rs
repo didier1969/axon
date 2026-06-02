@@ -370,10 +370,19 @@ pub fn fuse_small_chunks(
     let mut result: Vec<TaggedChunk> = Vec::with_capacity(tagged.len());
     let mut group: Vec<TaggedChunk> = Vec::new();
     let mut group_tokens: usize = 0;
+    // REQ-AXO-901846 — monotonic per-file fused-group counter. The line
+    // range alone is NOT a unique key: duplicate-span symbols (macros,
+    // decorators, re-exports, generated code) can split into several fused
+    // groups that share (start_line, end_line); without the counter they
+    // collapse to one id and the writer's ON CONFLICT (id) silently drops
+    // all but one distinct content. Stable for an unchanged file (group
+    // order is fixed by the start_line sort above).
+    let mut fused_seq: usize = 0;
 
     let flush = |group: &mut Vec<TaggedChunk>,
                  group_tokens: &mut usize,
-                 result: &mut Vec<TaggedChunk>| {
+                 result: &mut Vec<TaggedChunk>,
+                 fused_seq: &mut usize| {
         if group.is_empty() {
             return;
         }
@@ -389,16 +398,18 @@ pub fn fuse_small_chunks(
             .join("\n\n");
         let start_line = group.first().unwrap().chunk.start_line;
         let end_line = group.last().unwrap().chunk.end_line;
-        // F-08 fix: use a line-range-based ID instead of first symbol's
-        // name. This is stable across minor symbol additions/renames —
-        // the chunk_id only changes if the actual line range shifts.
+        // F-08: line-range-based ID (stable across minor symbol
+        // additions/renames). REQ-AXO-901846: disambiguated by a per-file
+        // fused-group sequence so identical spans never collide.
         let first = &group[0];
         let file_prefix = first.symbol_id
             .rsplit_once("::")
             .map(|(prefix, _)| prefix)
             .unwrap_or(&first.symbol_id);
+        let seq = *fused_seq;
+        *fused_seq += 1;
         let fused = TaggedChunk {
-            symbol_id: format!("{file_prefix}::fused_L{start_line}_{end_line}"),
+            symbol_id: format!("{file_prefix}::fused_L{start_line}_{end_line}_{seq}"),
             symbol_name: "fused_group".to_string(),
             chunk: DerivedCodeChunk {
                 estimated_tokens: estimated_token_count(&combined_content),
@@ -420,18 +431,18 @@ pub fn fuse_small_chunks(
             item.chunk.part_count == 1 && item.chunk.estimated_tokens < MIN_FUSE_TOKENS;
 
         if !is_fusable {
-            flush(&mut group, &mut group_tokens, &mut result);
+            flush(&mut group, &mut group_tokens, &mut result, &mut fused_seq);
             result.push(item);
             continue;
         }
 
         if group_tokens + item.chunk.estimated_tokens > target_tokens && !group.is_empty() {
-            flush(&mut group, &mut group_tokens, &mut result);
+            flush(&mut group, &mut group_tokens, &mut result, &mut fused_seq);
         }
         group_tokens += item.chunk.estimated_tokens;
         group.push(item);
     }
-    flush(&mut group, &mut group_tokens, &mut result);
+    flush(&mut group, &mut group_tokens, &mut result, &mut fused_seq);
 
     result
 }
@@ -449,6 +460,44 @@ mod tests {
         assert!(should_accept_symbol_fast_path(profile, &small));
         assert!(!should_accept_symbol_fast_path(profile, &gray));
         assert!(should_measure_symbol_tokens(profile, &gray));
+    }
+
+    /// REQ-AXO-901846 — root cause regression: two fused groups in the
+    /// same file that share a (start_line, end_line) span (duplicate-span
+    /// symbols from macros / decorators / re-exports / generated code,
+    /// split across groups by the token budget) MUST NOT collapse to the
+    /// same fused chunk id. A collision means two DISTINCT chunk contents
+    /// map to one id → silent loss via the writer's ON CONFLICT (id).
+    #[test]
+    fn fused_groups_with_identical_span_get_unique_ids() {
+        let mk = |content: &str| TaggedChunk {
+            symbol_id: "AXO::src__dup_rs::sym".to_string(),
+            symbol_name: "sym".to_string(),
+            chunk: DerivedCodeChunk {
+                estimated_tokens: 1,
+                content: content.to_string(),
+                part_index: 1,
+                part_count: 1,
+                chunk_path: "1/1".to_string(),
+                // identical span for every chunk — the pathological case.
+                start_line: 10,
+                end_line: 10,
+            },
+        };
+        // 6 tiny fusable chunks + target_tokens=2 → forces ≥2 fused groups,
+        // all sharing span L10_10 but carrying different content.
+        let tagged: Vec<TaggedChunk> = (0..6).map(|i| mk(&format!("body-{i}"))).collect();
+        let fused = fuse_small_chunks(tagged, 2);
+
+        let ids: Vec<String> = fused.iter().map(|t| t.symbol_id.clone()).collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "fused chunk ids must be unique even for identical spans; got collisions: {ids:?}"
+        );
     }
 
     #[test]
