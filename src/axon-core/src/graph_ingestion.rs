@@ -993,10 +993,26 @@ impl GraphStore {
     /// Call after a complete scanner walk. Any IndexedFile row with
     /// discovered_ms < scan_start_ms was NOT seen in this walk → stale.
     /// Returns the paths that were deleted.
-    pub fn delete_stale_indexed_files(&self, scan_start_ms: i64) -> Result<Vec<String>> {
+    ///
+    /// REQ-AXO-901831 — the deletion MUST be scoped to the subtree that was
+    /// actually walked (`root_prefix`). Reconciliation + federation invoke the
+    /// scanner once PER candidate project; an unscoped DELETE wiped every other
+    /// project's IndexedFile rows (their `discovered_ms` predates the current
+    /// walk and unchanged files never get re-stamped), draining ~9479 enrolled
+    /// files down to a single project's worth on the first 60 s reconciliation
+    /// pass. Scoping by canonical path prefix is correct for the full-root
+    /// indexer scan, per-project reconciliation, and UNK/empty project_code
+    /// candidates alike (path is independent of code).
+    pub fn delete_stale_indexed_files(
+        &self,
+        scan_start_ms: i64,
+        root_prefix: &str,
+    ) -> Result<Vec<String>> {
+        let safe_prefix = root_prefix.replace('\'', "''");
         let raw = self.query_json_writer(&format!(
             "DELETE FROM IndexedFile \
              WHERE discovered_ms > 0 AND discovered_ms < {scan_start_ms} \
+               AND path LIKE '{safe_prefix}/%' \
              RETURNING path"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();

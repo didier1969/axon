@@ -81,7 +81,10 @@ impl Scanner {
             total_files
         );
         // 9f: detect files that disappeared from the filesystem since last walk.
-        match graph.delete_stale_indexed_files(scan_start_ms) {
+        // REQ-AXO-901831 — scope the purge to THIS walk's subtree so a
+        // per-project scan never deletes sibling projects' IndexedFile rows.
+        let root_prefix = self.root_canonical.to_string_lossy();
+        match graph.delete_stale_indexed_files(scan_start_ms, root_prefix.as_ref()) {
             Ok(deleted) if !deleted.is_empty() => {
                 info!(
                     "Lattice Engine: purged {} stale IndexedFile entries (not seen in this walk)",

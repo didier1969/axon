@@ -120,6 +120,16 @@ mod tests {
             .expect("register project");
 
         // Seed IndexedFile rows so we can assert the full sweep wipes them.
+        // REQ-AXO-901860 — IndexedFile.project_code is a NOT NULL FK to
+        // ist.Project, so the parent row + an explicit project_code are
+        // required (the legacy seed omitted both and broke post-901860).
+        let safe_code = code.replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO ist.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_code
+            ))
+            .expect("seed ist.Project parent");
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -128,10 +138,10 @@ mod tests {
             let escaped = f.replace('\'', "''");
             store
                 .execute_raw_sql_gateway(&format!(
-                    "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms) \
-                     VALUES ('{}', 'stale-hash', {}) \
+                    "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+                     VALUES ('{}', '{}', 'stale-hash', {}) \
                      ON CONFLICT (path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
-                    escaped, now_ms
+                    escaped, safe_code, now_ms
                 ))
                 .expect("seed IndexedFile row");
         }
