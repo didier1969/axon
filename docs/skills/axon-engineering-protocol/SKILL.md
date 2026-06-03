@@ -71,7 +71,7 @@ Snapshot / async / `soll_work_plan` scoring → `references/graphrag-and-soll-in
 | Excuse | Reality |
 |---|---|
 | "Quick `cargo build --release` + copy to `bin/` is faster than the promote script" | Live binaries must match manifest identity (PIL-AXO-005). Use `bash scripts/release/promote_live_safe.sh --project AXO`. |
-| "I'll spawn a sub-agent to read Axon source — faster" | No MCP in sub-agent → reconstructs IST from raw reads = 100-200K tokens (GUI-PRO-027). Main-thread MCP = 5-50 tokens. |
+| "Sub-agents can't use Axon MCP" | False (GUI-PRO-027, REQ-AXO-901651, re-verified s71) — they reach MCP via ToolSearch with `project="AXO"` explicit. Use for parallel RCA/research. Real caution: each costs ~10-30K tokens (token-economy) + Rust edits/builds stay serial orchestrator-side (cargo build = global lock). |
 | "Status looks fine, IST is probably fresh enough" | `trust:degraded` or `freshness:stale` → frozen snapshot. Restart indexer-graph or qualify before trusting `inspect` / `impact`. |
 | "I'll delete the bad SOLL node and recreate clean" | SOLL is preserve-always (PIL-AXO-003). Use `soll_rollback_revision`. Mass-deletes destroy intent history. |
 | "I'll log a CPT-AXO-025 issue without picking a branch" | REQ-AXO-129 corrupted CPT-AXO-021 exactly this way. Pick 1 / 2 / 3 first. |
@@ -102,4 +102,4 @@ Pick exactly one : (1) hallucination → `schema_overview` + 3 repros, drop if e
 
 ## Pointers
 
-Sub-agents : shell / doc / MCP-independent only ; never code exploration (GUI-PRO-027). Arch : CPT-AXO-054 (streaming pipeline v2), CPT-AXO-053 (canonical product split). Hand Off : GUI-PRO-028 (5 steps, body via `soll_query_context`) ; SKILL.md edits in step 4 forbidden except tool rename / surface change / runtime authority change / methodology change (GUI-AXO-1002).
+Sub-agents : MCP-accessible first-class (GUI-PRO-027 ; pass `project="AXO"` explicit) — use for parallel RCA/research ; shell/docs delegable (worktree) ; Rust edits/builds serial orchestrator-side ; SOLL/promote-live never delegated. Arch : CPT-AXO-054 (streaming pipeline v2), CPT-AXO-053 (canonical product split). Hand Off : GUI-PRO-028 (5 steps, body via `soll_query_context`) ; SKILL.md edits in step 4 forbidden except tool rename / surface change / runtime authority change / methodology change (GUI-AXO-1002).
