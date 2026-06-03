@@ -39,6 +39,19 @@ fn scoped_test_project_code(server: &McpServer) -> String {
     code
 }
 
+/// REQ-AXO-91560 — satisfy the `ist.Chunk` FK parents (`ist.Project` +
+/// `ist.IndexedFile`, both made NOT NULL by the FK-integrity hardening of
+/// REQ-AXO-901860) before a test inserts a chunk against the isolated DB.
+/// Idempotent — safe to call once per chunk insert.
+fn seed_ist_path(server: &McpServer, code: &str, path: &str) {
+    let _ = server.graph_store.execute(&format!(
+        "INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms) VALUES ('{path}', '{code}', 0) ON CONFLICT (path) DO NOTHING"
+    ));
+}
+
 #[test]
 fn test_axon_query_global_default() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
@@ -2826,10 +2839,12 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
     let sym_global = format!("{code}::trigger_global_scan");
     let file_server = format!("src/dashboard/lib/{code}/axon/watcher/server.ex");
     let file_pool = format!("src/dashboard/lib/{code}/axon/watcher/pool_facade.ex");
+    seed_ist_path(&server, &code, &file_server);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_server}', 'symbol', 'sym-{file_server}', '{code}', '{file_server}', 'hash-{file_server}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_pool);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_pool}', 'symbol', 'sym-{file_pool}', '{code}', '{file_pool}', 'hash-{file_pool}')"))
@@ -2877,6 +2892,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
     let file = format!("src/runtime/{code}_watcher.rs");
     let sym = format!("{code}::opaque_worker");
     let chunk_id = format!("{sym}::chunk");
+    seed_ist_path(&server, &code, &file);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
@@ -2924,10 +2940,12 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
     let file_b = format!("src/runtime/{code}_noise.rs");
     let sym_a = format!("{code}::worker_alpha");
     let sym_b = format!("{code}::worker_beta");
+    seed_ist_path(&server, &code, &file_a);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_b);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
@@ -2990,10 +3008,12 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
     let file_truth = format!("src/runtime/{code}_docstring_truth.rs");
     let sym_path = format!("{code}::path_only_probe");
     let sym_truth = format!("{code}::truth_probe");
+    seed_ist_path(&server, &code, &file_path_only);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_path_only}', 'symbol', 'sym-{file_path_only}', '{code}', '{file_path_only}', 'hash-{file_path_only}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_truth);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_truth}', 'symbol', 'sym-{file_truth}', '{code}', '{file_truth}', 'hash-{file_truth}')"))
@@ -3058,10 +3078,12 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
     let file_doc = format!("docs/{code}_TEXT_PARSING_AUDIT.md");
     let sym_runtime = format!("{code}::runtime_config");
     let sym_audit = format!("{code}::audit_section");
+    seed_ist_path(&server, &code, &file_config);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_config}', 'symbol', 'sym-{file_config}', '{code}', '{file_config}', 'hash-{file_config}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_doc);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
@@ -3126,6 +3148,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
     let code = scoped_test_project_code(&server);
     let file_doc = format!("docs/{code}_TEXT_PARSING_AUDIT.md");
     let sym_audit = format!("{code}::audit_section");
+    seed_ist_path(&server, &code, &file_doc);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_doc}', 'symbol', 'sym-{file_doc}', '{code}', '{file_doc}', 'hash-{file_doc}')"))
@@ -3181,6 +3204,7 @@ fn test_axon_query_underscore_fragment_matches_underscore_symbol() {
     let code = scoped_test_project_code(&server);
     let file = format!("src/axon-core/src/{code}_queue.rs");
     let sym = format!("{code}::reserve_memory_budget");
+    seed_ist_path(&server, &code, &file);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file}', 'symbol', 'sym-{file}', '{code}', '{file}', 'hash-{file}')"))
@@ -3313,14 +3337,17 @@ fn test_vcr2_impact_before_change_on_public_api() {
     let file_api = format!("src/core/{code}_api.rs");
     let file_a = format!("src/core/{code}_consumer_a.rs");
     let file_b = format!("src/core/{code}_consumer_b.rs");
+    seed_ist_path(&server, &code, &file_api);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_api}', 'symbol', 'sym-{file_api}', '{code}', '{file_api}', 'hash-{file_api}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_a);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
+    seed_ist_path(&server, &code, &file_b);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code}', '{file_b}', 'hash-{file_b}')"))
@@ -3461,18 +3488,22 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
     let file_a_consumer = format!("src/{code_a}/consumer.rs");
     let file_b_api = format!("src/{code_b}/api.rs");
     let file_b_consumer = format!("src/{code_b}/consumer.rs");
+    seed_ist_path(&server, &code_a, &file_a_api);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_api}', 'symbol', 'sym-{file_a_api}', '{code_a}', '{file_a_api}', 'hash-{file_a_api}')"))
         .unwrap();
+    seed_ist_path(&server, &code_a, &file_a_consumer);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a_consumer}', 'symbol', 'sym-{file_a_consumer}', '{code_a}', '{file_a_consumer}', 'hash-{file_a_consumer}')"))
         .unwrap();
+    seed_ist_path(&server, &code_b, &file_b_api);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_api}', 'symbol', 'sym-{file_b_api}', '{code_b}', '{file_b_api}', 'hash-{file_b_api}')"))
         .unwrap();
+    seed_ist_path(&server, &code_b, &file_b_consumer);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b_consumer}', 'symbol', 'sym-{file_b_consumer}', '{code_b}', '{file_b_consumer}', 'hash-{file_b_consumer}')"))
@@ -3549,10 +3580,12 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     let sym_b = format!("{code_b}::{name_parse}");
     let file_a = format!("/tmp/{code_a}_{code_b}/api.rs");
     let file_b = format!("/tmp/{code_a}_{code_b}/worker.rs");
+    seed_ist_path(&server, &code_a, &file_a);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
+    seed_ist_path(&server, &code_b, &file_b);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
@@ -3602,10 +3635,12 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
     let sym_b = format!("{code_b}::{name_parse}");
     let file_a = format!("/tmp/{code_a}_{code_b}/api.rs");
     let file_b = format!("/tmp/{code_a}_{code_b}/worker.rs");
+    seed_ist_path(&server, &code_a, &file_a);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_a}', 'symbol', 'sym-{file_a}', '{code_a}', '{file_a}', 'hash-{file_a}')"))
         .unwrap();
+    seed_ist_path(&server, &code_b, &file_b);
     server
         .graph_store
         .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{file_b}', 'symbol', 'sym-{file_b}', '{code_b}', '{file_b}', 'hash-{file_b}')"))
@@ -8002,7 +8037,7 @@ fn test_relation_policy_accepts_cpt_to_cpt_inherits_from() {
     // CPT-PRO sibling (universal)
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-PRO-099', 'Concept', 'PRO', 'Universal concept', 'cross-project mental model', 'active', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-PRO-099', 'Concept', 'PRO', 'Universal concept', 'cross-project mental model', 'active', '{}') ON CONFLICT (id) DO NOTHING")
         .unwrap();
     // CPT-AXO project-specific specialization
     server
@@ -8046,11 +8081,19 @@ fn test_relation_policy_accepts_gui_to_pil_belongs_to() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-PRO-099', 'Pillar', 'PRO', 'Test methodology pillar', 'theming axis', 'active', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-PRO-099', 'Pillar', 'PRO', 'Test methodology pillar', 'theming axis', 'active', '{}') ON CONFLICT (id) DO NOTHING")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-PRO-099', 'Guideline', 'PRO', 'Test guideline', 'rule', 'active', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-PRO-099', 'Guideline', 'PRO', 'Test guideline', 'rule', 'active', '{}') ON CONFLICT (id) DO NOTHING")
+        .unwrap();
+    // REQ-AXO-91560 — the canonical seed (db/seed/01_global_soll.sql) ships
+    // the GUI-PRO-099→PIL-PRO-099 BELONGS_TO sentinel edge, now baked into
+    // the test template. Drop it so this test exercises a fresh `Link created`
+    // rather than colliding with the seeded edge.
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE source_id='GUI-PRO-099' AND target_id='PIL-PRO-099' AND relation_type='BELONGS_TO'")
         .unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -8082,11 +8125,11 @@ fn test_relation_policy_accepts_cpt_to_dec_inherits_from() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-PRO-099', 'Decision', 'PRO', 'Cross-project canonical decision', 'body', 'current', '{\"rationale\":\"R\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-PRO-099', 'Decision', 'PRO', 'Cross-project canonical decision', 'body', 'current', '{\"rationale\":\"R\"}') ON CONFLICT (id) DO NOTHING")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-098', 'Concept', 'AXO', 'Axon mirror concept', 'specialization of DEC-PRO-099', 'active', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-098', 'Concept', 'AXO', 'Axon mirror concept', 'specialization of DEC-PRO-099', 'active', '{}') ON CONFLICT (id) DO NOTHING")
         .unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

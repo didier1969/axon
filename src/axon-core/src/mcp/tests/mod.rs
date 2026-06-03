@@ -183,6 +183,80 @@ fn sweep_once(pg_port: &str) {
     });
 }
 
+/// REQ-AXO-91560 — guarantee `axon_test_template` carries the canonical
+/// schema **and** the global SOLL seed before any test clones it.
+///
+/// The ephemeral-DB isolation (`createdb -T template`) hands each test a
+/// pristine database, but a bare/empty template strips the ambient global
+/// seed (the `PRO` sentinel rows + `GUI-PRO-*` guidelines) that the shared
+/// devenv PG used to provide for free. Tests asserting bootstrap/init
+/// guideline injection, or attaching nodes to seeded global pillars, then
+/// fail. Applying the idempotent `db/ddl/*.sql` + `db/seed/*.sql` to the
+/// template once per process bakes the seed INTO it, so every clone
+/// inherits the canonical baseline for free. Reproducible on a fresh
+/// machine — no manual template setup required (the previous template was
+/// hand-created and partial, which violated build reproducibility).
+///
+/// Runs at most once per process via `OnceLock`; `get_or_init` blocks
+/// concurrent callers until the template is fully built, so no clone ever
+/// sees a half-seeded template. Every psql command is synchronous and its
+/// connection is closed before the first `createdb -T`, so the
+/// "template in use" hazard cannot arise.
+fn ensure_template_once(pg_port: &str) {
+    static TEMPLATE: OnceLock<()> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let template = std::env::var("AXON_TEST_TEMPLATE")
+            .unwrap_or_else(|_| "axon_test_template".to_string());
+
+        // Create the template database if absent. A pre-existing (possibly
+        // empty) template is fine — the idempotent DDL+seed below brings it
+        // to canonical state. A failure here (already exists) is ignored.
+        let _ = std::process::Command::new("createdb")
+            .args(["-h", "127.0.0.1", "-p", pg_port, "-U", "axon", &template])
+            .output();
+
+        // Apply canonical DDL then seed in lexical order, mirroring
+        // scripts/lib/ensure-runtime.sh {apply_canonical_ddl,
+        // apply_canonical_seed}. `generate_global_schema()` compiles the
+        // same db/ddl files (DEC-AXO-082), so there is no schema divergence.
+        let db_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("db");
+        apply_sql_dir(pg_port, &template, &db_dir.join("ddl"));
+        apply_sql_dir(pg_port, &template, &db_dir.join("seed"));
+    });
+}
+
+/// Apply every `NN_*.sql` file in `dir` (lexical order) to `dbname` via
+/// psql. Best-effort: a missing directory or psql binary is a silent no-op
+/// (unit-only environments without PG), matching the sweep's tolerance.
+fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "sql")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.bytes().next())
+                        .is_some_and(|b| b.is_ascii_digit())
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    files.sort();
+    for f in files {
+        let Some(path) = f.to_str() else { continue };
+        let _ = std::process::Command::new("psql")
+            .args([
+                "-h", "127.0.0.1", "-p", pg_port, "-U", "axon", "-d", dbname,
+                "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", path,
+            ])
+            .output();
+    }
+}
+
 impl TestDb {
     fn create() -> Self {
         // REQ-AXO-901848 — reclaim databases leaked by previous runs before
@@ -190,6 +264,9 @@ impl TestDb {
         let pg_port_for_sweep =
             std::env::var("PGPORT").unwrap_or_else(|_| "44144".to_string());
         sweep_once(&pg_port_for_sweep);
+        // REQ-AXO-91560 — bring the clone template to canonical schema+seed
+        // before the first `createdb -T` below.
+        ensure_template_once(&pg_port_for_sweep);
 
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
