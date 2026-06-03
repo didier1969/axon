@@ -71,6 +71,10 @@ pub(crate) fn start_runtime_services(
     let mcp_store_for_axum = graph_store;
     tokio::spawn(async move {
         let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
+        // REQ-AXO-901732 — wire the weak self-reference so SOLL mutations
+        // render the non-canonical derived docs on a background thread
+        // instead of blocking (and timing out) the canonical write response.
+        mcp_server.init_self_arc();
         McpServer::startup_prewarm(mcp_server.clone());
         let app = axon_core::mcp_http::app_router(mcp_server);
         let http_port = std::env::var("AXON_BRAIN_PORT").unwrap_or_else(|_| "44129".to_string());

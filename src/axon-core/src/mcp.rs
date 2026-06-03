@@ -64,6 +64,25 @@ pub struct McpServer {
     // Invalidated after every MCP-side mutation tool via
     // `attach_derived_docs_refresh_metadata`.
     soll_cache: Arc<SollSnapshotCache>,
+    // REQ-AXO-901732 — weak self-reference, set in production via
+    // `init_self_arc` once the server is wrapped in `Arc`. Lets
+    // `attach_derived_docs_refresh_metadata` hand an owned `Arc<Self>` to a
+    // detached background thread so the non-canonical derived-docs render
+    // never blocks (or times out) the canonical mutation response
+    // (PIL-AXO-009). Unset in unit tests (server used un-`Arc`'d) → the
+    // render stays synchronous there, preserving the legacy "ok" contract.
+    self_arc: std::sync::OnceLock<std::sync::Weak<McpServer>>,
+    // REQ-AXO-901732 — coalescing guard: project_codes whose background
+    // derived-docs refresh is already in flight. Prevents thread pile-up
+    // under rapid mutations on the same project.
+    derived_docs_refresh_inflight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    // REQ-AXO-901732 — global render serialization. `write_if_changed` is a
+    // non-atomic `fs::write`, and every project render also rewrites the
+    // shared ROOT index/manifest; two concurrent background renders (distinct
+    // projects) could otherwise tear the root file. Renders hold this lock so
+    // at most one runs at a time across all projects (the per-project guard
+    // above still bounds the number of threads spawned).
+    derived_docs_render_lock: Arc<std::sync::Mutex<()>>,
 }
 
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
@@ -94,7 +113,20 @@ impl McpServer {
         Self {
             graph_store,
             soll_cache,
+            self_arc: std::sync::OnceLock::new(),
+            derived_docs_refresh_inflight: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            derived_docs_render_lock: Arc::new(std::sync::Mutex::new(())),
         }
+    }
+
+    /// REQ-AXO-901732 — wire the weak self-reference. Call exactly once, in
+    /// production, immediately after wrapping the server in `Arc` (see
+    /// `main_services.rs`). Enables non-blocking background derived-docs
+    /// refresh; without it the refresh stays synchronous (the unit-test path).
+    pub fn init_self_arc(self: &Arc<Self>) {
+        let _ = self.self_arc.set(Arc::downgrade(self));
     }
 
     /// REQ-AXO-322 — access the in-memory SOLL snapshot for hot reads.
@@ -840,34 +872,20 @@ impl McpServer {
             // reloads from PG and reflects this mutation.
             self.soll_cache.invalidate(&project_code);
             if let Some(site_root) = canonical_soll_site_dir() {
-                match self.generate_soll_derived_docs(
-                    &project_code,
-                    Some(&site_root),
-                    &site_root.join(&project_code),
-                ) {
-                    Ok(summary) => json!({
-                        "status": "ok",
-                        "project_code": summary.project_code,
-                        "site_root": if summary.site_root.is_empty() { Value::Null } else { json!(summary.site_root) },
-                        "output_root": summary.project_output_root,
-                        "manifest_path": summary.project_manifest_path,
-                        "root_manifest_path": if summary.root_manifest_path.is_empty() { Value::Null } else { json!(summary.root_manifest_path) },
-                        "root_index_path": if summary.root_index_path.is_empty() { Value::Null } else { json!(summary.root_index_path) },
-                        "refresh_mode": summary.refresh_mode,
-                        "pages_total": summary.pages_total,
-                        "pages_written": summary.pages_written,
-                        "pages_unchanged": summary.pages_unchanged,
-                        "pages_deleted": summary.pages_deleted,
-                        "deleted_paths": summary.deleted_paths,
-                        "root_written": summary.root_written,
-                        "stale_docs": summary.stale_docs,
-                    }),
-                    Err(error) => json!({
-                        "status": "failed",
-                        "project_code": project_code,
-                        "stale_docs": true,
-                        "error_text": error,
-                    }),
+                // PIL-AXO-009 / REQ-AXO-901732 — in production the server is
+                // `Arc`-wrapped and `self_arc` is set, so render the
+                // non-canonical derived docs on a detached background thread:
+                // the canonical mutation has already committed, and a slow
+                // render must never block (or time out) its response. In unit
+                // tests `self_arc` is unset → render synchronously so the
+                // legacy "ok" + immediate-file contract still holds.
+                match self.self_arc.get().and_then(std::sync::Weak::upgrade) {
+                    Some(server) => self.schedule_background_derived_docs_refresh(
+                        server,
+                        project_code.clone(),
+                        site_root,
+                    ),
+                    None => self.render_derived_docs_sync_payload(&project_code, &site_root),
                 }
             } else {
                 json!({
@@ -894,6 +912,99 @@ impl McpServer {
         }
         enriched["data"]["derived_docs_refresh"] = refresh_payload;
         enriched
+    }
+
+    /// REQ-AXO-901732 — synchronous derived-docs render + response payload.
+    /// Used in unit tests (server not `Arc`-wrapped) and as the body the
+    /// background thread runs in production. Same logic as before; extracted
+    /// so the sync and async paths share one implementation (DRY).
+    fn render_derived_docs_sync_payload(
+        &self,
+        project_code: &str,
+        site_root: &std::path::Path,
+    ) -> Value {
+        match self.generate_soll_derived_docs(
+            project_code,
+            Some(site_root),
+            &site_root.join(project_code),
+        ) {
+            Ok(summary) => json!({
+                "status": "ok",
+                "project_code": summary.project_code,
+                "site_root": if summary.site_root.is_empty() { Value::Null } else { json!(summary.site_root) },
+                "output_root": summary.project_output_root,
+                "manifest_path": summary.project_manifest_path,
+                "root_manifest_path": if summary.root_manifest_path.is_empty() { Value::Null } else { json!(summary.root_manifest_path) },
+                "root_index_path": if summary.root_index_path.is_empty() { Value::Null } else { json!(summary.root_index_path) },
+                "refresh_mode": summary.refresh_mode,
+                "pages_total": summary.pages_total,
+                "pages_written": summary.pages_written,
+                "pages_unchanged": summary.pages_unchanged,
+                "pages_deleted": summary.pages_deleted,
+                "deleted_paths": summary.deleted_paths,
+                "root_written": summary.root_written,
+                "stale_docs": summary.stale_docs,
+            }),
+            Err(error) => json!({
+                "status": "failed",
+                "project_code": project_code,
+                "stale_docs": true,
+                "error_text": error,
+            }),
+        }
+    }
+
+    /// REQ-AXO-901732 / PIL-AXO-009 — schedule the derived-docs render on a
+    /// detached background thread and return immediately, so the canonical
+    /// mutation response is never blocked by the non-canonical render. A
+    /// coalescing guard keyed by `project_code` prevents thread pile-up: if a
+    /// refresh for the same project is already in flight, the request is
+    /// dropped (the in-flight render reads the latest committed state).
+    fn schedule_background_derived_docs_refresh(
+        &self,
+        server: Arc<Self>,
+        project_code: String,
+        site_root: std::path::PathBuf,
+    ) -> Value {
+        {
+            let mut inflight = self
+                .derived_docs_refresh_inflight
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !inflight.insert(project_code.clone()) {
+                return json!({
+                    "status": "coalesced",
+                    "project_code": project_code,
+                    "stale_docs": false,
+                    "render": "background",
+                });
+            }
+        }
+        let inflight = self.derived_docs_refresh_inflight.clone();
+        let render_lock = self.derived_docs_render_lock.clone();
+        let pc = project_code.clone();
+        std::thread::spawn(move || {
+            let output_root = site_root.join(&pc);
+            {
+                // Serialize the actual render across all projects (shared root
+                // index is rewritten by every project render; fs::write is not
+                // atomic). The per-project guard already bounds thread count.
+                let _render = render_lock
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                let _ = server.generate_soll_derived_docs(&pc, Some(&site_root), &output_root);
+            }
+            inflight
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&pc);
+        });
+        json!({
+            "status": "scheduled",
+            "project_code": project_code,
+            "stale_docs": false,
+            "render": "background",
+        })
     }
 
     #[allow(dead_code)]
