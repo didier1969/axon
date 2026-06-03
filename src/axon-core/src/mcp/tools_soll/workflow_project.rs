@@ -1327,6 +1327,10 @@ impl McpServer {
 
         let mut applied: Vec<String> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
+        // REQ-AXO-901613 bug #2 — idempotence ledger (already INHERITS_FROM)
+        let mut already_applied: Vec<String> = Vec::new();
+        // REQ-AXO-901613 bug #1 — node INSERT failures surfaced, never silent
+        let mut failed: Vec<String> = Vec::new();
         for id_val in accepted_ids {
             let global_id = id_val.as_str().unwrap_or("").trim();
             if global_id.is_empty() {
@@ -1347,6 +1351,21 @@ impl McpServer {
                 let desc = &row[1];
                 let meta = &row[2];
 
+                // REQ-AXO-901613 bug #2 — idempotence gate BEFORE id allocation.
+                // soll.allocate_node_id increments last_gui irreversibly, so a
+                // duplicate must short-circuit here and never consume an id.
+                let existing = self
+                    .graph_store
+                    .query_count_param(
+                        "SELECT count(*) FROM soll.Edge WHERE relation_type = 'INHERITS_FROM' AND target_id = ? AND project_code = ?",
+                        &serde_json::json!([global_id, project_code]),
+                    )
+                    .unwrap_or(0);
+                if existing > 0 {
+                    already_applied.push(global_id.to_string());
+                    continue;
+                }
+
                 let (_scope_code, p_code, prefix, num) = match self
                     .next_soll_numeric_id(&project_code, "guideline")
                 {
@@ -1364,19 +1383,38 @@ impl McpServer {
                 };
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
-                let _ = self.graph_store.execute_param(
+                // REQ-AXO-901613 bug #1 — status='planned' is the canonical
+                // draft vocabulary (DEC-PRO-100) honoured by the
+                // soll_node_status_canonical CHECK ; legacy 'active' violated it
+                // and the swallowed error left a phantom edge with no node.
+                if let Err(e) = self.graph_store.execute_param(
                     "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
-                     VALUES (?, 'Guideline', ?, ?, ?, 'active', ?)",
+                     VALUES (?, 'Guideline', ?, ?, ?, 'planned', ?)",
                     &serde_json::json!([local_id, p_code, title, desc, meta])
-                );
+                ) {
+                    tracing::warn!(project_code = %p_code, local_id = %local_id, global_id = %global_id, error = %e, "guideline node insert failed; skipping edge");
+                    failed.push(global_id.to_string());
+                    continue;
+                }
 
                 // REQ-AXO-152: project_code on INSERT. p_code is in scope (the
                 // local tenant the Guideline is being inherited into), so use it
                 // directly rather than re-deriving from canonical ID prefixes.
-                let _ = self.graph_store.execute_param(
+                if let Err(e) = self.graph_store.execute_param(
                     "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata, project_code) VALUES (?, ?, 'INHERITS_FROM', '{}', ?)",
                     &serde_json::json!([local_id, global_id, p_code])
-                );
+                ) {
+                    // Edge failed after the node committed — roll back the
+                    // just-created orphan node (best-effort) so we never leave a
+                    // node without its inheritance edge (mirror of the bug).
+                    tracing::warn!(project_code = %p_code, local_id = %local_id, global_id = %global_id, error = %e, "inheritance edge insert failed; rolling back node");
+                    let _ = self.graph_store.execute_param(
+                        "DELETE FROM soll.Node WHERE id = ?",
+                        &serde_json::json!([local_id]),
+                    );
+                    failed.push(global_id.to_string());
+                    continue;
+                }
 
                 applied.push(local_id);
             } else {
@@ -1395,34 +1433,54 @@ impl McpServer {
         let empty_input = accepted_ids.is_empty();
         let nothing_applied = applied.is_empty();
         let recovery_hint = "discover valid IDs via sql SELECT id, title FROM soll.Node WHERE type='Guideline' AND project_code='PRO'";
+        // REQ-AXO-901613 — already_applied (idempotent no-op) is a SUCCESS
+        // outcome, not an error ; failed (node/edge insert error) is.
+        let suffix_already = if already_applied.is_empty() {
+            String::new()
+        } else {
+            format!(" Already applied (idempotent no-op): {already_applied:?}.")
+        };
+        let suffix_failed = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" Failed (node/edge write error, see logs): {failed:?}.")
+        };
         let text = if empty_input {
             format!(
                 "axon_apply_guidelines requires at least one canonical Guideline ID in `accepted_global_rule_ids`. {recovery_hint}.")
         } else if !applied.is_empty() && !unknown.is_empty() {
             format!(
-                "Inheritance applied. New local rules created: {applied:?}. Unknown global rule IDs (skipped): {unknown:?}.")
+                "Inheritance applied. New local rules created: {applied:?}. Unknown global rule IDs (skipped): {unknown:?}.{suffix_already}{suffix_failed}")
         } else if !applied.is_empty() {
-            format!("Inheritance applied. New local rules created: {applied:?}")
+            format!("Inheritance applied. New local rules created: {applied:?}.{suffix_already}{suffix_failed}")
+        } else if !already_applied.is_empty() && failed.is_empty() && unknown.is_empty() {
+            format!("No new rules applied — all requested guidelines were already inherited (idempotent no-op): {already_applied:?}.")
         } else {
             format!(
-                "No rules applied. All requested global rule IDs were unknown: {unknown:?}. {recovery_hint}.")
+                "No rules applied. Unknown global rule IDs: {unknown:?}.{suffix_already}{suffix_failed} {recovery_hint}.")
         };
 
         let mut data = serde_json::json!({
             "applied": applied,
             "unknown_global_rule_ids": unknown,
+            "already_applied": already_applied,
+            "failed": failed,
         });
         if empty_input {
             data["empty_input"] = serde_json::json!(true);
         }
-        if empty_input || nothing_applied {
+        // already_applied with no failures is a successful idempotent no-op.
+        let pure_already_applied =
+            nothing_applied && failed.is_empty() && unknown.is_empty() && !already_applied.is_empty();
+        let is_error = empty_input || (nothing_applied && !pure_already_applied) || !failed.is_empty();
+        if empty_input || (nothing_applied && !pure_already_applied) {
             data["recovery_hint"] = serde_json::json!(recovery_hint);
         }
         let mut response = serde_json::json!({
             "content": [{ "type": "text", "text": text }],
             "data": data,
         });
-        if empty_input || nothing_applied {
+        if is_error {
             response["isError"] = serde_json::json!(true);
         }
         Some(response)
