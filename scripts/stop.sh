@@ -534,6 +534,25 @@ if [[ -x "$AXONCTL_BIN" ]]; then
     fi
     axon_cleanup_legacy_instance_paths "$AXON_INSTANCE_KIND"
 
+    # REQ-AXO-901857 : sweep résiduel final. axonctl stop est ancré PID-file ;
+    # un brain dont le PID-file est stale/absent (lancé hors superviseur, ou
+    # désync process-compose) survit alors qu'AXONCTL_OK=1 → faux "stopped".
+    # collect_canonical_listener_pids est ancré PORT (AXON_CANONICAL_TCP_PORTS),
+    # donc voit le résidu sur AXON_BRAIN_PORT (44139 dev / 44129 live) quel que
+    # soit le chemin du binaire — y compris le brain dev depuis
+    # .axon/cargo-target/release/axon-brain (hors bin/, invisible au matcher
+    # binaire canonical_axon_processes_alive_pids).
+    _residual_pids="$(collect_canonical_listener_pids)"
+    if [[ -n "$_residual_pids" && "$STOP_ROLE" == "all" && "$HARD_MODE" != "1" ]]; then
+        echo "⚠️ Résidu canonical détecté après stop (pids: $_residual_pids) — escalade --hard."
+        "$AXONCTL_BIN" "${AXONCTL_ARGS[@]}" --hard >/dev/null 2>&1 || true
+        _residual_pids="$(collect_canonical_listener_pids)"
+    fi
+    if [[ -n "$_residual_pids" ]]; then
+        echo "❌ Stop incomplet : processus canonical encore en écoute (pids: $_residual_pids, ports: ${AXON_CANONICAL_TCP_PORTS[*]:-none})." >&2
+        echo "   Re-essayez avec --hard, ou kill manuel par PID." >&2
+        exit 1
+    fi
     if [ "$AXONCTL_OK" = "1" ]; then
         echo "✅ Axon stopped (Other projects preserved)."
         exit 0

@@ -20,7 +20,11 @@ RESUME=0
 # All durations in seconds (sub-second fractions accepted by bash sleep).
 ASSERT_STOPPED_TIMEOUT_S="${PROMOTE_LIVE_ASSERT_STOPPED_TIMEOUT_S:-5}"
 ASSERT_STOPPED_INTERVAL_S="${PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S:-0.1}"
-POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-150}"
+# REQ-AXO-901857 : budget par défaut relevé 150→300s. Sous cold-reindex /
+# backlog-embed (~500% CPU, REQ-AXO-155 cold-start : BGE-Large load + Phoenix
+# + indexer rise), 150s expirait alors que readyz=ready + build_id correct ⇒
+# promote marqué FAILED à tort + manifeste désynchronisé (viole PIL-AXO-005).
+POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-300}"
 POSTCHECK_INTERVAL_S="${PROMOTE_LIVE_POSTCHECK_INTERVAL_S:-2}"
 
 # poll_until <description> <timeout_seconds> <interval_seconds> <command...>
@@ -497,12 +501,19 @@ PY
       # loop. Default 150s timeout (covers brain cold-start: BGE-Large model
       # load + Phoenix dashboard, REQ-AXO-155 cold-start budget). Polling
       # interval 2s = sub-5s-cache-TTL window. Tunable via env.
+      # REQ-AXO-901857 : gate léger /readyz (SELECT 1, cheap même à 500% CPU)
+      # AVANT toute composition. Puis identité manifeste via
+      # check_live_runtime_version.py, qui valide DÉJÀ build_id + package_version
+      # + install_generation + instance_kind + brain_ready + indexer_ready +
+      # authority. Le `status` lourd (requêtes PG + assemblage) était redondant
+      # ET le maillon lent qui expirait le budget sous cold-reindex → retiré.
+      _readyz_url="http://127.0.0.1:${AXON_BRAIN_PORT}/readyz"
       _postcheck_predicate() {
-        python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+        curl -fsS --connect-timeout 3 --max-time 5 "$_readyz_url" >/dev/null 2>&1 \
+        && python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
           --manifest "$MANIFEST_PATH" \
           --url "$AXON_MCP_URL" \
-          --install-generation "$install_generation" >/dev/null 2>&1 \
-        && bash "$ROOT_DIR/scripts/axon" --instance live status >/dev/null 2>&1
+          --install-generation "$install_generation" >/dev/null 2>&1
       }
       export -f _postcheck_predicate 2>/dev/null || true
       if poll_until "live MCP build_id + status indexer + status brain" \
