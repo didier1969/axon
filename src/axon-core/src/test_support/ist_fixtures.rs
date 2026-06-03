@@ -1,9 +1,11 @@
 //! REQ-AXO-142 — IST/SOLL test fixtures for TDD-friendly contributor tooling.
 //!
-//! Builds Symbol/CALLS/Edge/Node rows in production format and seeds them
-//! into a tempdir-backed [`GraphStore`]. Lets contributors TDD changes to
-//! IST/SOLL projection logic with the same column names, types and edge
-//! shapes the live indexer emits.
+//! Builds Symbol / Edge (CALLS, CONTAINS, …) / soll.Node rows in production
+//! format and seeds them into an **isolated** [`GraphStore`] — a per-test
+//! clone of the canonical test template (`axon_test_template`), never the
+//! shared `axon_dev` database. Lets contributors TDD changes to IST/SOLL
+//! projection logic with the same column names, types and edge shapes the
+//! live indexer emits.
 //!
 //! ## Example
 //!
@@ -22,10 +24,11 @@
 //! // harness.server / harness.store available; tempdir cleans up on Drop.
 //! ```
 //!
-//! ## Known parity quirks (test-mode tempdir DuckDB vs live indexer)
+//! ## Known parity quirks
 //!
 //! - **CALLS.target_id format.** The live IST indexer emits two forms of
-//!   CALLS edges that downstream queries must handle:
+//!   `CALLS` edges (rows of `ist.Edge` with `relation_type='CALLS'`) that
+//!   downstream queries must handle:
 //!   1. canonical Symbol.id (e.g. `axon::core_func`)
 //!   2. synthetic `<caller_file>::<callee_name>` for cross-module Rust impl
 //!      method calls (REQ-AXO-134). `tools_dx::inspect_callers_query`
@@ -35,13 +38,7 @@
 //!
 //! - **Reader snapshot freshness.** [`seed_ist`] calls
 //!   [`GraphStore::refresh_reader_snapshot`] after the batch so subsequent
-//!   `query_json_param` reads see all inserted rows.
-//!
-//! - **No connection-divergence.** The default [`GraphStore::new`] used here
-//!   targets the PG-backed canonical store (post MIL-AXO-015) where
-//!   writer/reader isolation is provided by PG MVCC. Tests that need
-//!   reader-snapshot semantics should use the canonical
-//!   `crate::tests::test_helpers::create_test_db` helper.
+//!   reads see all inserted rows.
 
 use std::sync::Arc;
 
@@ -49,6 +46,7 @@ use anyhow::Result;
 use tempfile::TempDir;
 
 use crate::graph::GraphStore;
+use crate::test_support::test_db::TestDb;
 
 /// Builder for one row of `Symbol (id, name, kind, tested, is_public, is_nif,
 /// is_unsafe, project_code, embedding)`. Embedding is left NULL — symbol
@@ -106,7 +104,7 @@ impl SymbolFixture {
 
     fn insert_sql(&self) -> String {
         format!(
-            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) \
+            "INSERT INTO ist.Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) \
              VALUES ('{}', '{}', '{}', {}, {}, {}, {}, '{}')",
             sql_escape(&self.id),
             sql_escape(&self.name),
@@ -162,8 +160,12 @@ impl CallFixture {
     }
 
     fn insert_sql(&self) -> String {
+        // Post-AGE-retirement: CALLS is a `relation_type` on the unified
+        // `ist.Edge` table, not a standalone table. `created_at_ms` is NOT
+        // NULL; fixtures use 0 (epoch) since ordering is irrelevant in tests.
         format!(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+             VALUES ('{}', '{}', 'CALLS', '{}', 0)",
             sql_escape(&self.source_id),
             sql_escape(&self.target_id),
             sql_escape(&self.project_code),
@@ -231,10 +233,13 @@ impl SollNodeFixture {
     }
 }
 
-/// Builder for one row of any IST edge table sharing the
-/// `(source_id, target_id, project_code)` shape: `CONTAINS`, `IMPACTS`,
-/// `SUBSTANTIATES`, `CALLS_NIF`. Use [`CallFixture`] for `CALLS`.
+/// Builder for one IST edge of any `relation_type` on the unified
+/// `ist.Edge` table: `CONTAINS`, `IMPACTS`, `SUBSTANTIATES`, `CALLS_NIF`.
+/// The `table` argument is the `relation_type`. Use [`CallFixture`] for the
+/// `CALLS` relation (it also exposes the synthetic-target form).
 pub struct EdgeFixture {
+    /// Becomes `ist.Edge.relation_type`. Named `table` for backward source
+    /// compatibility with the AGE-era per-relation-table fixtures.
     table: String,
     source_id: String,
     target_id: String,
@@ -258,10 +263,11 @@ impl EdgeFixture {
 
     fn insert_sql(&self) -> String {
         format!(
-            "INSERT INTO {} (source_id, target_id, project_code) VALUES ('{}', '{}', '{}')",
-            self.table,
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+             VALUES ('{}', '{}', '{}', '{}', 0)",
             sql_escape(&self.source_id),
             sql_escape(&self.target_id),
+            sql_escape(&self.table),
             sql_escape(&self.project_code),
         )
     }
@@ -340,10 +346,15 @@ pub struct TestServerHarness {
     pub server: crate::mcp::McpServer,
     pub store: Arc<GraphStore>,
     _tempdir: TempDir,
+    /// Declared last so it drops last: `server` then `store` release the PG
+    /// pool first, then `TestDb`'s Drop best-effort `dropdb`s the isolated
+    /// clone. Leaks are reclaimed by the pre-run sweep regardless.
+    _test_db: TestDb,
 }
 
-/// Build a tempdir-backed [`GraphStore`], wrap it in an
-/// [`crate::mcp::McpServer`], and seed `seed` before returning the harness.
+/// Build an **isolated** [`GraphStore`] (a fresh clone of the canonical test
+/// template), wrap it in an [`crate::mcp::McpServer`], and seed `seed` before
+/// returning the harness.
 pub fn create_test_server_with_ist_seed(seed: IstSeed) -> Result<TestServerHarness> {
     let tempdir = tempfile::tempdir()?;
     let db_root = tempdir
@@ -351,13 +362,20 @@ pub fn create_test_server_with_ist_seed(seed: IstSeed) -> Result<TestServerHarne
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("tempdir path is not valid UTF-8"))?
         .to_string();
-    let store = Arc::new(GraphStore::new(&db_root)?);
+    // REQ-AXO-91560 — clone the canonical test template (DDL + global seed +
+    // auto-seed triggers) via `new_with_database`. The previous
+    // `GraphStore::new` path resolved to the shared `axon_dev` database, which
+    // lacked the test triggers (FK failures on Symbol/Edge/Chunk) and leaked
+    // fixture writes across tests and into dev.
+    let test_db = TestDb::create();
+    let store = Arc::new(GraphStore::new_with_database(&db_root, &test_db.url())?);
     seed_ist(&store, &seed)?;
     let server = crate::mcp::McpServer::new(store.clone());
     Ok(TestServerHarness {
         server,
         store,
         _tempdir: tempdir,
+        _test_db: test_db,
     })
 }
 

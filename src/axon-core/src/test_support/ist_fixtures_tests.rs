@@ -1,5 +1,6 @@
 //! Sanity tests for [`super`] — the fixtures themselves must round-trip
-//! through DuckDB before any production test relies on them.
+//! through the isolated PG template clone before any production test relies
+//! on them.
 
 use super::{
     assert_ist_count, create_test_server_with_ist_seed, seed_ist, CallFixture, EdgeFixture,
@@ -7,7 +8,7 @@ use super::{
 };
 
 #[test]
-fn symbol_fixture_round_trips_to_duckdb() {
+fn symbol_fixture_round_trips() {
     let harness = create_test_server_with_ist_seed(IstSeed::new().symbol(
         SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ")
             .tested(true)
@@ -18,7 +19,7 @@ fn symbol_fixture_round_trips_to_duckdb() {
 
     assert_ist_count(
         &harness.store,
-        "SELECT count(*) FROM Symbol WHERE id = 'prj::core_func' AND tested = true AND is_nif = false",
+        "SELECT count(*) FROM ist.Symbol WHERE id = 'prj::core_func' AND tested = true AND is_nif = false",
         1,
     );
 }
@@ -49,12 +50,14 @@ fn call_fixture_canonical_and_synthetic_both_persist() {
 
     assert_ist_count(
         &harness.store,
-        "SELECT count(*) FROM CALLS WHERE target_id = 'axon::wrong_project_scope_response'",
+        "SELECT count(*) FROM ist.Edge WHERE relation_type = 'CALLS' \
+         AND target_id = 'axon::wrong_project_scope_response'",
         1,
     );
     assert_ist_count(
         &harness.store,
-        "SELECT count(*) FROM CALLS WHERE target_id = 'tools_dx::wrong_project_scope_response'",
+        "SELECT count(*) FROM ist.Edge WHERE relation_type = 'CALLS' \
+         AND target_id = 'tools_dx::wrong_project_scope_response'",
         1,
     );
 }
@@ -72,13 +75,13 @@ fn soll_node_fixture_round_trips() {
     assert_ist_count(
         &harness.store,
         "SELECT count(*) FROM soll.Node WHERE id = 'REQ-AXO-9999' \
-         AND json_extract_string(metadata, '$.priority') = 'P3'",
+         AND metadata->>'priority' = 'P3'",
         1,
     );
 }
 
 #[test]
-fn edge_fixture_round_trips_to_contains_table() {
+fn edge_fixture_round_trips_to_ist_edge() {
     let harness = create_test_server_with_ist_seed(IstSeed::new().edge(EdgeFixture::new(
         "CONTAINS",
         "src/file.rs",
@@ -89,7 +92,8 @@ fn edge_fixture_round_trips_to_contains_table() {
 
     assert_ist_count(
         &harness.store,
-        "SELECT count(*) FROM CONTAINS WHERE source_id = 'src/file.rs' AND target_id = 'axon::sym'",
+        "SELECT count(*) FROM ist.Edge WHERE relation_type = 'CONTAINS' \
+         AND source_id = 'src/file.rs' AND target_id = 'axon::sym'",
         1,
     );
 }
@@ -107,7 +111,7 @@ fn seed_ist_escapes_single_quotes_in_values() {
     let _ = seed_ist(&harness.store, &IstSeed::new()).unwrap();
     assert_ist_count(
         &harness.store,
-        "SELECT count(*) FROM Symbol WHERE name = 'it''s_a_func'",
+        "SELECT count(*) FROM ist.Symbol WHERE name = 'it''s_a_func'",
         1,
     );
 }

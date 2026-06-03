@@ -256,6 +256,8 @@ impl McpServer {
             let mut response = self.axon_commit_work(&json!({
                 "diff_paths": diff_paths,
                 "message": message,
+                "project_code": args.get("project_code"),
+                "project_path": args.get("project_path"),
                 "dry_run": true
             }))?;
             if let Some(lp) = &legacy_proximity_value {
@@ -281,6 +283,8 @@ impl McpServer {
             let result = self.axon_commit_work(&json!({
                 "diff_paths": [path_value.clone()],
                 "message": message,
+                "project_code": args.get("project_code"),
+                "project_path": args.get("project_path"),
                 "dry_run": true
             }));
             let mut entry = json!({ "ok": true, "violations": [] });

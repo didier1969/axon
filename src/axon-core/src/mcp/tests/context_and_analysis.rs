@@ -234,7 +234,7 @@ fn test_why_marks_script_artifacts_as_correlated_weak_support() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-scripts/refund_probe.rs', 'symbol', 'sym-scripts/refund_probe.rs', 'BKS', 'scripts/refund_probe.rs', 'hash-scripts/refund_probe.rs')")
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-scripts/refund_probe.rs', 'symbol', 'bks::refund_probe', 'BKS', 'scripts/refund_probe.rs', 'hash-scripts/refund_probe.rs')")
         .unwrap();
     server
         .graph_store
@@ -3645,8 +3645,8 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'AXO', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
     server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/payment.rs', 'axo::checkout', 'CONTAINS', 'AXO', 0)").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-layered', 'symbol', 'axo::checkout', 'AXO', 'body', 'checkout orchestrates payment capture', 'hash-checkout-layered', 1, 4)").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-264-T', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-LAYERED', 'Requirement', 'REQ-AXO-264-T', 'Symbol', 'checkout', 1.0, 0)").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-2640', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-LAYERED', 'Requirement', 'REQ-AXO-2640', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -3711,8 +3711,8 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        intent_reqs.iter().any(|row| row["id"].as_str() == Some("REQ-AXO-264-T")),
-        "intent_band.requirements should contain REQ-AXO-264-T, got {:?}",
+        intent_reqs.iter().any(|row| row["id"].as_str() == Some("REQ-AXO-2640")),
+        "intent_band.requirements should contain REQ-AXO-2640, got {:?}",
         intent_reqs
     );
 

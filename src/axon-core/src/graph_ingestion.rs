@@ -779,15 +779,6 @@ impl GraphStore {
         self.execute_batch(&queries)
     }
 
-    pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
-        // MIL-AXO-017 slice 6B Phase C: AGE dual-write retired ; SQL canonical.
-        self.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
-            from, to, from
-        ))?;
-        Ok(())
-    }
-
     // MIL-AXO-017 slice 6B Phase C: dual_write_vertices_age / dual_write_relation_edges_age
     // helpers removed ; AGE retired entirely.
 }

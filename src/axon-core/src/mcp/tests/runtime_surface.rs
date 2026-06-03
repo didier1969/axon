@@ -321,10 +321,12 @@ fn test_mcp_tools_list_include_internal_adds_resume_vectorization_only() {
 #[test]
 fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
-    }
+    // REQ-AXO-099 — panic-safe: the guard restores the prior value on unwind,
+    // so a panic in this test cannot leak AXON_MCP_MUTATION_JOBS=true into
+    // concurrent/subsequent tests (root cause of the async-job test cluster).
+    let _mj = crate::test_support::EnvVarGuard::set("AXON_MCP_MUTATION_JOBS", "true");
     let server = create_test_server();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Sync Pillar', '', 'current', '{}')").unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -338,7 +340,8 @@ fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
                     "project_code": "AXO",
                     "name": "Async Concept",
                     "explanation": "Created through MCP job",
-                    "rationale": "Shared-server mutation path"
+                    "rationale": "Shared-server mutation path",
+                    "attach_to": "PIL-AXO-001", "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -460,9 +463,10 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
 #[test]
 fn test_axon_init_project_stays_sync_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
-    }
+    // REQ-AXO-099 — panic-safe: the guard restores the prior value on unwind,
+    // so a panic in this test cannot leak AXON_MCP_MUTATION_JOBS=true into
+    // concurrent/subsequent tests (root cause of the async-job test cluster).
+    let _mj = crate::test_support::EnvVarGuard::set("AXON_MCP_MUTATION_JOBS", "true");
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -680,9 +684,10 @@ fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_
 #[test]
 fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
-    }
+    // REQ-AXO-099 — panic-safe: the guard restores the prior value on unwind,
+    // so a panic in this test cannot leak AXON_MCP_MUTATION_JOBS=true into
+    // concurrent/subsequent tests (root cause of the async-job test cluster).
+    let _mj = crate::test_support::EnvVarGuard::set("AXON_MCP_MUTATION_JOBS", "true");
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -695,7 +700,8 @@ fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled()
                 "entity": "concept",
                 "data": {
                     "name": "Missing project scope",
-                    "explanation": "Jobs must reject implicit project identity"
+                    "explanation": "Jobs must reject implicit project identity",
+                    "attach_to": "PIL-PRO-001", "relation_type": "BELONGS_TO"
                 }
             }
         })),
@@ -724,9 +730,10 @@ fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled()
 #[test]
 fn test_soll_commit_revision_requires_preview_id_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
-    }
+    // REQ-AXO-099 — panic-safe: the guard restores the prior value on unwind,
+    // so a panic in this test cannot leak AXON_MCP_MUTATION_JOBS=true into
+    // concurrent/subsequent tests (root cause of the async-job test cluster).
+    let _mj = crate::test_support::EnvVarGuard::set("AXON_MCP_MUTATION_JOBS", "true");
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -1402,10 +1409,7 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
     );
     // The line must name an actual tool. status is a safe default fallback;
     // project_status is the canonical when the runtime is canonical.
-    assert!(
-        text.contains("`project_status`") || text.contains("`status`"),
-        "next best action must name a tool; got: {text}"
-    );
+    assert!(text.contains("`start_indexer`") || text.contains("`read_project_truth`") || text.contains("`inspect_runtime_status`"), "next best action must name the recovery action kind; got: {text}");
 }
 
 #[test]
@@ -2241,8 +2245,7 @@ fn test_initialize_reports_brain_server_identity_when_shadow_role_is_brain() {
     let _guard = env_lock();
     service_guard::reset_for_tests();
     unsafe {
-        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "brain");
-        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "1");
+        std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
         std::env::set_var(
             "AXON_RUNTIME_IDENTITY",
             "test_initialize_reports_brain_server_identity_when_shadow_role_is_brain",
@@ -2270,8 +2273,7 @@ fn test_initialize_reports_brain_server_identity_when_shadow_role_is_brain() {
     assert_eq!(response["serverInfo"]["version"].as_str(), Some("2.2.0"));
 
     unsafe {
-        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
-        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_MODE");
         std::env::remove_var("AXON_RUNTIME_IDENTITY");
     }
 }

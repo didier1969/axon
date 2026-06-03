@@ -94,4 +94,7 @@ impl Drop for EnvVarGuard {
 mod test_support_tests;
 
 #[cfg(test)]
+pub mod test_db;
+
+#[cfg(test)]
 pub mod ist_fixtures;

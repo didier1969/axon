@@ -986,7 +986,7 @@ impl McpServer {
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, ch.file_path AS uri, \
+                    SELECT s.name, s.kind, c.file_path AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1025,7 +1025,7 @@ impl McpServer {
         } else {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, ch.file_path AS uri, \
+                    SELECT s.name, s.kind, c.file_path AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -2193,9 +2193,9 @@ mod inspect_callers_query_tests {
         // attributes any query mismatch to the projection logic, not seeding.
         assert_ist_count(
             &harness.store,
-            "SELECT count(*) FROM CALLS \
-             WHERE target_id = 'axon::wrong_project_scope_response' \
-                OR target_id LIKE '%::wrong_project_scope_response'",
+            "SELECT count(*) FROM ist.Edge WHERE relation_type = 'CALLS' \
+             AND (target_id = 'axon::wrong_project_scope_response' \
+                OR target_id LIKE '%::wrong_project_scope_response')",
             3,
         );
 

@@ -176,7 +176,7 @@ impl GraphStore {
             FROM Symbol s
             JOIN ist.Edge c ON c.target_id = s.id AND c.relation_type = 'CALLS'
             LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-            LEFT JOIN File f ON f.path = rel.source_id
+            LEFT JOIN ist.IndexedFile f ON f.path = rel.source_id
             {}
             AND length(s.name) >= 3
             AND lower(s.name) NOT LIKE '__webpack%'
@@ -249,7 +249,7 @@ impl GraphStore {
             SELECT count(*)
             FROM Symbol s
             JOIN ist.Edge c ON c.target_id = s.id AND c.relation_type = 'CONTAINS'
-            JOIN File f ON f.path = c.source_id
+            JOIN ist.IndexedFile f ON f.path = c.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
               AND s.id NOT IN (SELECT target_id FROM ist.Edge WHERE relation_type = 'CALLS')
@@ -296,7 +296,7 @@ impl GraphStore {
             JOIN Symbol target ON target.id = c.target_id
             LEFT JOIN inbound ON inbound.target_id = target.id
             LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-            LEFT JOIN File f ON f.path = rel.source_id
+            LEFT JOIN ist.IndexedFile f ON f.path = rel.source_id
             WHERE o.total_calls = 1
               AND COALESCE(s.is_public, false) = false
               AND s.kind IN ('function', 'method')
@@ -350,7 +350,7 @@ impl GraphStore {
                 SELECT s.id, s.name, f.path
                 FROM Symbol s
                 JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-                JOIN File f ON f.path = rel.source_id
+                JOIN ist.IndexedFile f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
                     lower(f.path) NOT LIKE '%/tests/%'
@@ -428,7 +428,7 @@ impl GraphStore {
                 SELECT s.id, s.name, f.path, COALESCE(s.is_public, false) AS is_public
                 FROM Symbol s
                 JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-                JOIN File f ON f.path = rel.source_id
+                JOIN ist.IndexedFile f ON f.path = rel.source_id
                 WHERE s.kind IN ('function', 'method')
                   AND (
                     lower(f.path) NOT LIKE '%/tests/%'
@@ -519,7 +519,7 @@ impl GraphStore {
                 SELECT s.id, s.name, lower(s.name) AS lowered_name, s.kind, f.path
                 FROM Symbol s
                 JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-                JOIN File f ON f.path = rel.source_id
+                JOIN ist.IndexedFile f ON f.path = rel.source_id
                 WHERE (
                     lower(f.path) NOT LIKE '%/tests/%'
                     AND lower(f.path) NOT LIKE '%_test.rs'
@@ -584,7 +584,7 @@ impl GraphStore {
             SELECT DISTINCT s.name
             FROM Symbol s
             LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
-            LEFT JOIN File f ON f.path = rel.source_id
+            LEFT JOIN ist.IndexedFile f ON f.path = rel.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
               AND NOT EXISTS (
@@ -856,11 +856,11 @@ impl GraphStore {
             FROM ist.Edge c
             JOIN Symbol s_domain ON c.source_id = s_domain.id
             JOIN ist.Edge c_domain ON c_domain.target_id = s_domain.id AND c_domain.relation_type = 'CONTAINS'
-            JOIN File f_domain ON f_domain.path = c_domain.source_id
+            JOIN ist.IndexedFile f_domain ON f_domain.path = c_domain.source_id
 
             JOIN Symbol s_infra ON c.target_id = s_infra.id
             JOIN ist.Edge c_infra ON c_infra.target_id = s_infra.id AND c_infra.relation_type = 'CONTAINS'
-            JOIN File f_infra ON f_infra.path = c_infra.source_id
+            JOIN ist.IndexedFile f_infra ON f_infra.path = c_infra.source_id
 
             WHERE c.relation_type = 'CALLS'
               AND f_domain.path LIKE '%{}%'

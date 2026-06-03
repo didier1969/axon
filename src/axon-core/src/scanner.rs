@@ -14,11 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 
-struct ProjectDependency {
-    path: String,
-    to: String,
-}
-
 pub struct Scanner {
     root: PathBuf,
     root_canonical: PathBuf,
@@ -469,21 +464,6 @@ impl Scanner {
                     }
                 };
 
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == "pyproject.toml" || name == "Cargo.toml" || name == "mix.exs" {
-                        if let Ok(content) = fs::read_to_string(path) {
-                            let deps = extract_toml_dependencies(&content);
-                            for dep in deps {
-                                let _ = graph.insert_project_dependency(
-                                    &project_name,
-                                    &dep.to,
-                                    &dep.path,
-                                );
-                            }
-                        }
-                    }
-                }
-
                 let path_str = if let Ok(abs_path) = fs::canonicalize(path) {
                     abs_path.to_string_lossy().to_string()
                 } else {
@@ -748,11 +728,6 @@ fn discovery_policy(
     DiscoveryPolicy {
         sleep: std::time::Duration::from_millis(sleep_ms),
     }
-}
-
-// Temporary stubs for dependency extraction
-fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
-    Vec::new()
 }
 
 #[cfg(test)]
