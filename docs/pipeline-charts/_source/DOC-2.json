@@ -1,0 +1,122 @@
+{
+ "doc_id": "DOC-2",
+ "title": "Pipeline d'ingestion complet — fichier → graphe + FTS + vecteurs (IDÉAL vs ACTUEL)",
+ "ideal_summary": "Ancré sur CPT-AXO-054 (topologie session-19) + PIL-AXO-007 (graph-first). Deux pipelines indépendants dans l'indexer. Pipeline A (graphe, CPU) : A1 read+hash (gate IndexedFile delta) -> A2 tree-sitter single-parse -> A3 UPSERT atomique Symbol/Edge + persiste le contenu complet des Chunk (substrat FTS+vecteur). Pipeline B (vectorisation, GPU) : B1 chunk prep -> B2 embed BGE-Large 1024d -> B3 UPSERT ChunkEmbedding (HNSW). A3 ne bloque jamais B : try_send sur mpsc bounded(10k), best-effort, plus cold-start poll DB (chunks sans embedding). La 3e sortie FTS est dérivée du contenu Chunk : trigger d'enqueue -> pgmq.tsv_pending -> pool tsv_worker out-of-band -> UPDATE content_tsv via axon.compute_chunk_tsv (REQ-AXO-901624 P4, hors chemin critique d'A3). North-star : 150+ chunks/sec, FK chain project->file->chunk->embedding NOT NULL, FTS coverage 100%, embedding coverage ~100%.",
+ "ideal_mermaid": "flowchart TD\n  W[watcher notify 750ms] --> A1[A1 read plus hash IndexedFile gate]\n  A1 -->|bounded mpsc| A2[A2 tree-sitter single parse]\n  A2 -->|bounded mpsc| A3[A3 UPSERT atomique]\n  A3 --> SYM[(ist.Symbol plus ist.Edge graphe)]\n  A3 --> CH[(ist.Chunk contenu complet)]\n  A3 -.try_send bounded 10k.-> B1[B1 chunk prep]\n  A3 -.trigger enqueue.-> Q[(pgmq.tsv_pending)]\n  Q --> TSV[tsv_worker pool out-of-band]\n  TSV --> FTS[(content_tsv GIN axon.compute_chunk_tsv)]\n  CH -.cold-start poll DB.-> B1\n  B1 --> B2[B2 embed BGE-Large 1024d GPU]\n  B2 --> B3[B3 UPSERT ChunkEmbedding]\n  B3 --> VEC[(ist.ChunkEmbedding HNSW 1024d)]\n  SYM --> RAM[RAM IstGraphView CSR plus public.edge fallback]",
+ "current_summary": "Le squelette IDÉAL est en place et la topologie A1-A2-A3 / B1-B2-B3 + tsv_worker out-of-band est codée dans src/axon-core/src/pipeline_v2/. Sortie graphe (a) : SAINE — 40499 Symbol, 104569 Edge, 14438 IndexedFile, 27 projets, chaîne FK project->indexedfile->chunk->embedding NOT NULL complète, 0 orphelin (REQ-AXO-901860 delivered). Sortie vecteurs (c) : QUASI-SAINE — 41131 ChunkEmbedding BGE-Large 1024d, index HNSW présent, mais 6370 chunks pending (couverture 86.6%). Sortie FTS (b) : CASSÉE — la colonne content_tsv et l'index GIN existent mais sont 100% NULL (0/47499 peuplés). Le trigger trg_chunk_enqueue_tsv enfile bien dans pgmq.tsv_pending (backlog 1156504 messages, 1158533 envoyés au total) mais le pool tsv_worker ne draine pas : il n'est spawné qu'au boot de l'orchestrator/brain et le brain est actuellement down (port 44129 unavailable) — FTS donc inexploitable. Reste aussi le gap scanner REQ-AXO-901831 (9479 fichiers éligibles non enrôlés) et le plafond GPU ~105 ch/s vs cible 150.",
+ "current_mermaid": "flowchart TD\n  W[watcher] --> A1[A1 read plus hash]\n  A1 --> A2[A2 tree-sitter parse]\n  A2 --> A3[A3 UPSERT atomique]\n  A3 --> SYM[(ist.Symbol 40499 plus Edge 104569 OK)]\n  A3 --> CH[(ist.Chunk 47499 contenu OK)]\n  A3 -.try_send.-> B1[B1 chunk prep]\n  A3 -.trigger enqueue.-> Q[(pgmq.tsv_pending BACKLOG 1.16M)]\n  Q -.X worker non drainant brain down.-> TSV[tsv_worker pool]\n  TSV -.X.-> FTS[(content_tsv 100 pct NULL GAP CRITIQUE)]\n  CH -.cold-start poll.-> B1\n  B1 --> B2[B2 embed BGE-Large 1024d]\n  B2 --> B3[B3 UPSERT ChunkEmbedding]\n  B3 --> VEC[(ist.ChunkEmbedding 41131 HNSW 6370 pending 86.6 pct)]\n  SCAN[scanner discovery] -.gap 9479 fichiers perdus REQ-901831.-> A1",
+ "deltas": [
+  {
+   "element": "Sortie FTS (b) — content_tsv tsvector",
+   "ideal_state": "100% des Chunk ont content_tsv peuplé via tsv_worker drainant pgmq.tsv_pending ; FTS @@ tsquery retourne des hits ; index GIN actif",
+   "current_state": "0/47499 content_tsv peuplé (100% NULL) ; backlog pgmq.tsv_pending = 1156504 messages ; le pool tsv_worker n'est spawné qu'au boot orchestrator et le brain est down (44129 unavailable) → aucune drainage, index GIN dormant",
+   "importance": "critical",
+   "criticality_pct": 92,
+   "evidence": "sql: count content_tsv IS NULL = 47499/47499 ; pgmq.metrics('tsv_pending') queue_length=1156504 total=1158533 ; trigger trg_chunk_enqueue_tsv_insert/update→fn_chunk_enqueue_tsv() ; src/axon-core/src/pipeline_v2/tsv_worker.rs:264 spawn_tsv_workers (lifetime=process) ; orchestrator.rs:210-215 spawn gated AXON_TSV_WORKER_CONCURRENCY ; status: brain backend 44129 unavailable"
+  },
+  {
+   "element": "Drainage tsv_worker vs débit d'enqueue",
+   "ideal_state": "tsv_worker (concurrency 2, batch 256) draine au moins au rythme du trigger d'enqueue → backlog ~0",
+   "current_state": "backlog monotone à 1.16M ; le worker ne tourne que pendant que brain/orchestrator est up et n'a manifestement jamais rattrapé ; aucune métrique de drain exposée pour alerter",
+   "importance": "critical",
+   "criticality_pct": 80,
+   "evidence": "pgmq.tsv_pending queue_length=1156504 alors que total ever sent=1158533 (≈99.8% non drainé) ; tsv_worker.rs:195 drain_once batch_size 256 poll 100ms"
+  },
+  {
+   "element": "Couverture embeddings (c)",
+   "ideal_state": "~100% des Chunk embarqués ; cold-start poll B1 résorbe le pending",
+   "current_state": "41131/47499 embedded = 86.6% ; 6370 chunks embed_status='pending' restants",
+   "importance": "medium",
+   "criticality_pct": 45,
+   "evidence": "sql: embed_status embedded=41129 pending=6370 ; chunks sans embedding=6368 ; chunkembedding=41131 model chunk-bge-large-en-v1.5-1024 dim=1024"
+  },
+  {
+   "element": "Débit GPU B2 vs north-star PIL-AXO-007",
+   "ideal_state": "150+ chunks/sec soutenu",
+   "current_state": "plafond observé ~105 ch/s (≈70% de la cible) — B2 single-worker par GPU saturé",
+   "importance": "high",
+   "criticality_pct": 60,
+   "evidence": "PIL-AXO-007 north-star 150+ ch/s ; CLAUDE.md bench session55 16→124.5 ch/s GPU ceiling ; B2 = 1 worker/GPU (CPT-AXO-054 operational rules)"
+  },
+  {
+   "element": "Scanner discovery (amont A1)",
+   "ideal_state": "tous les fichiers éligibles enrôlés en IndexedFile (no silent loss)",
+   "current_state": "REQ-AXO-901831 PLANNED : 9479 fichiers éligibles (23899 eligible vs ~14420 enrolled) non enrôlés ; cause probable watcher subtree hint budget + watchdog flips",
+   "importance": "high",
+   "criticality_pct": 58,
+   "evidence": "REQ-AXO-901831 status=planned ; ist.indexedfile count=14438 ; SOLL body: eligible_files=23899 vs enrolled 14358-14420 → gap 9479"
+  },
+  {
+   "element": "Unicité chunk_id (intégrité amont C/B)",
+   "ideal_state": "chunk_id collision-free, pas de perte silencieuse au bulk UPSERT",
+   "current_state": "RÉSOLU — fused_L{s}_{e}_{seq} monotone par fichier",
+   "importance": "low",
+   "criticality_pct": 12,
+   "evidence": "REQ-AXO-901846 delivered (session 67, commit 7480f137, RED→GREEN) ; cause: fuse_small_chunks même (start,end)→même id→ON CONFLICT écrase"
+  },
+  {
+   "element": "Doc canonique vs code (FTS en A3)",
+   "ideal_state": "CPT-AXO-054 décrit FTS comme sous-produit d'A3 (GENERATED tsvector synchrone)",
+   "current_state": "DIVERGENCE doc/code : le tsvector GENERATED synchrone a été retiré (coût CPU 95% session 48) au profit de pgmq async (REQ-AXO-901624 P4) ; CPT-AXO-054 mentionne encore le modèle GENERATED, non remis à jour",
+   "importance": "medium",
+   "criticality_pct": 40,
+   "evidence": "tsv_worker.rs:6 'was a GENERATED ALWAYS STORED column synchronous to A3' ; pg_attribute attgenerated vide (pas GENERATED) ; CPT-AXO-054 TARGETED-BY REQ-AXO-292 GENERATED column"
+  }
+ ],
+ "targets": [
+  {
+   "metric": "Throughput vectorisation (chunks/sec, B2 GPU)",
+   "target_value": "150+ ch/s (PIL-AXO-007 north-star)",
+   "current_value": "~105 ch/s (plafond GPU, ≈70%)",
+   "measurable_via": "axon-bench-pipeline-v2 --gpu --human (chunks/s) ; StageMetrics B2 duration_p95_ms ; CLAUDE.md bench session55"
+  },
+  {
+   "metric": "Couverture FTS (content_tsv NON NULL / total chunks)",
+   "target_value": "100%",
+   "current_value": "0% (0 / 47499)",
+   "measurable_via": "SELECT count(*) FILTER (WHERE content_tsv IS NOT NULL)::float/count(*) FROM ist.chunk"
+  },
+  {
+   "metric": "Backlog pgmq.tsv_pending (queue_length)",
+   "target_value": "≈0 (drainé en continu)",
+   "current_value": "1 156 504 messages",
+   "measurable_via": "SELECT queue_length FROM pgmq.metrics('tsv_pending')"
+  },
+  {
+   "metric": "Couverture embeddings (ChunkEmbedding / Chunk)",
+   "target_value": "≈100%",
+   "current_value": "86.6% (41131 / 47499 ; 6370 pending)",
+   "measurable_via": "SELECT count(*) FROM ist.chunkembedding ::float / (SELECT count(*) FROM ist.chunk) ; embed_status='pending'"
+  },
+  {
+   "metric": "Intégrité FK IST (orphelins project_code)",
+   "target_value": "0 orphelin sur symbol/edge/chunk/embedding/indexedfile",
+   "current_value": "0 orphelin (chaîne FK NOT NULL complète, conforme)",
+   "measurable_via": "LEFT JOIN ist.project sur chaque table WHERE p.code IS NULL ; pg_constraint contype='f' schema ist"
+  },
+  {
+   "metric": "Couverture discovery scanner (enrolled / eligible)",
+   "target_value": "100% des fichiers éligibles enrôlés",
+   "current_value": "≈60% (14438 IndexedFile vs 23899 eligible → 9479 perdus)",
+   "measurable_via": "ist.indexedfile count vs brain cached_fs_counters.eligible_files (REQ-AXO-901831)"
+  },
+  {
+   "metric": "Variance débit graphe sous contention GPU (independence A vs B)",
+   "target_value": "≈0 (A3 ne ralentit jamais sous charge B, best-effort try_send)",
+   "current_value": "non instrumenté en continu ; design try_send bounded(10k)+poll DB respecté en code, pas de métrique variance exportée",
+   "measurable_via": "StageMetrics A3 items_out_total avec/sans B actif (bench --gpu vs --noop) ; CPT-AXO-054 per-stage metrics"
+  }
+ ],
+ "layers": [],
+ "key_facts": [
+  "Counts IST vérifiés (sql) : ist.symbol=40499, ist.edge=104569, ist.chunk=47499, ist.chunkembedding=41131, ist.indexedfile=14438, ist.project=27.",
+  "Sortie GRAPHE (a) SAINE : chaîne FK complète project->indexedfile(path)->chunk->chunkembedding NOT NULL + project_code FK sur symbol/edge, ON DELETE CASCADE, 0 orphelin (sym/file/edge orphan = 0). REQ-AXO-901860 delivered (schéma dédié ist.*).",
+  "Sortie VECTEURS (c) : 41131 embeddings model chunk-bge-large-en-v1.5-1024, dimension=1024 confirmée, index HNSW chunk_embedding_hnsw_idx (vector_cosine_ops, m=16, ef_construction=64). 6370 chunks embed_status='pending' → couverture 86.6%.",
+  "Sortie FTS (b) CASSÉE : colonne content_tsv (tsvector) + index GIN idx_chunk_content_tsv existent mais 100% NULL (0/47499). Ce n'est PAS une colonne GENERATED (pg_attribute attgenerated vide) — peuplée out-of-band.",
+  "Mécanisme FTS réel (diverge de CPT-AXO-054) : trigger trg_chunk_enqueue_tsv_insert/update -> fn_chunk_enqueue_tsv() enfile dans pgmq.tsv_pending ; pool tsv_worker (src/axon-core/src/pipeline_v2/tsv_worker.rs, REQ-AXO-901624 P4) draine via pgmq.read -> UPDATE content_tsv = axon.compute_chunk_tsv(...) -> pgmq.archive. Fonction axon.compute_chunk_tsv présente.",
+  "Backlog FTS massif : pgmq.metrics('tsv_pending') queue_length=1156504, total_messages=1158533 → ≈99.8% jamais drainé. Le worker n'est spawné qu'au boot orchestrator (orchestrator.rs:210-215, gated AXON_TSV_WORKER_CONCURRENCY>0) et le brain est actuellement DOWN (MCP backend 44129 unavailable) → aucun drainage en cours.",
+  "Topologie code conforme à CPT-AXO-054 session-19 : single parse en A2, A3 UPSERT atomique Symbol/Edge+Chunk, handoff best-effort A3->B1 via try_send mpsc bounded + cold-start poll DB (chunks sans embedding). Modules présents : stage_a1/a2/a3.rs, stage_b1/b2/b3.rs, embedder_gpu.rs (GpuB2Embedder), orchestrator.rs.",
+  "Gaps amont : REQ-AXO-901831 (planned) — 9479 fichiers éligibles non enrôlés (23899 eligible vs ~14420 enrolled), cause probable watcher subtree hint budget + watchdog flips. REQ-AXO-901846 (delivered session 67) — collision chunk_id fused_L{s}_{e} résolue via suffixe seq monotone.",
+  "Plafond débit : PIL-AXO-007 north-star = 150+ chunks/sec ; bench session55 (CLAUDE.md) plafonne ~105-124.5 ch/s côté GPU (B2 = 1 worker/GPU). PIL-AXO-007 impose graph-first : A3 ne doit jamais être ralenti par la contention GPU de B."
+ ]
+}

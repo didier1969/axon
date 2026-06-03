@@ -1,0 +1,88 @@
+{
+ "doc_id": "DOC-1-METRICS-PIPELINE",
+ "title": "Pipeline des métriques : source canonique → clients (dashboard Elixir, MCP, CLI)",
+ "ideal_summary": "Ancré sur PIL-AXO-001 (Shared Runtime Truth) + PIL-AXO-009 (surfaces de visualisation non-canoniques). UNE source canonique par classe de métrique : (a) métriques de stock par-projet (files/symbols/chunks/embeddings/edges) servies par la vue PG unique ist.project_telemetry, déjà ventilée par project_code ; (b) métriques de flux haute-fréquence (rates, workers, queues, scheduler) publiées par l'indexer (propriétaire) à chaque tick dans une ligne PG axon_runtime.indexer_runtime_truth, le brain n'étant que lecteur pur. Un compositeur unique brain-side assemble l'enveloppe dashboard_state_v1 en lisant ces deux sources canoniques, puis fait un fan-out IDENTIQUE vers les trois consommateurs : humains/dashboard (socket télémétrie → PubSub → LiveViews), LLM/MCP (status, project_status, embedding_status, diagnose_indexing, mcp_surface_diagnostics projettent la même enveloppe), automation/CLI (axon-live status). Aucune requête ad-hoc ni pont fichier : truth observable identiquement partout, refresh automatique des trois surfaces (REQ-AXO-309).",
+ "ideal_mermaid": "flowchart TD\n  subgraph SRC[Sources canoniques uniques]\n    PT[ist.project_telemetry vue PG par-projet]\n    IRT[axon_runtime.indexer_runtime_truth ligne PG par tick]\n    FSC[Compteurs FS par-projet DashMap incremental]\n  end\n  IDX[Indexer proprietaire ecrit IST + flux] --> PT\n  IDX --> IRT\n  IDX --> FSC\n  PT --> COMP[Compositeur unique brain-side compose_dashboard_state_v1]\n  IRT --> COMP\n  FSC --> COMP\n  COMP --> ENV[Enveloppe dashboard_state_v1]\n  ENV --> DASH[Dashboard Elixir socket PubSub LiveViews]\n  ENV --> MCP[MCP status project_status embedding_status diagnose_indexing surface_diagnostics]\n  ENV --> CLI[CLI axon-live status]\n  DASH -. refresh auto REQ-309 .-> ENV\n  MCP -. memes chiffres .-> ENV\n  CLI -. memes chiffres .-> ENV",
+ "current_summary": "Aujourd'hui la vue canonique ist.project_telemetry EXISTE (db/ddl/03_ist_schema.sql:329) mais AUCUN consommateur ne la lit. Le dashboard a un compositeur unique brain-side (compose_dashboard_state_v1, dashboard_state.rs) qui assemble dashboard_state_v1 à partir de TROIS sources hétérogènes : (1) le composite PG dashboard_state_full(3) qui recompute son PROPRE rollup ad-hoc (dashboard_per_project_counts : UNION de ist.symbol/chunk/edge/chunkembedding, PAS la vue) et ne peut PAS ventiler les fichiers par projet ; (2) cached_fs_counters() — un walk filesystem GLOBAL (~284k fichiers) sur AXON_WATCH_DIR, non ventilé par projet, TTL 60s ; (3) des métriques de flux RAM (rates/workers/queues) plus le pont FICHIER runtime-heartbeat.json lu via split_peer_runtime_info. Le dashboard est bien alimenté par un seul événement (bon), mais les clients MCP divergent : embedding_status (tools_system.rs:303) refait ses propres requêtes ad-hoc sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge + appelle le même cached_fs_counters() global ; diagnose_indexing (tools_governance.rs:47/328) refait encore d'autres requêtes ad-hoc sur ist.IndexedFile/Chunk ; status/project_status passent par un chemin runtime séparé. Résultat : multi-source, multi-pont, scope-honesty cassée (disk/eligible GLOBAL mélangés avec symbols/chunks AXO-scoped dans un même payload embedding_status), et les 3 surfaces ne se rafraîchissent pas automatiquement (REQ-309 planned).",
+ "current_mermaid": "flowchart TD\n  PTV[ist.project_telemetry vue canonique EXISTE mais NON LUE]:::gap\n  subgraph PGSP[Composite PG ad-hoc]\n    DSF[dashboard_state_full 3]\n    DPP[dashboard_per_project_counts UNION symbol chunk edge chunkembedding]:::gap\n    DT[dashboard_totals]\n    DSF --> DPP\n    DSF --> DT\n  end\n  FSG[cached_fs_counters walk GLOBAL 284k TTL60s]:::gap\n  HB[runtime-heartbeat.json pont FICHIER + split_peer_runtime_info]:::gap\n  RAM[Metriques flux RAM rates workers queues]\n  COMP[compose_dashboard_state_v1 brain-side]\n  DSF --> COMP\n  FSG --> COMP\n  HB --> COMP\n  RAM --> COMP\n  COMP --> ENV[dashboard_state_v1]\n  ENV --> SOCK[socket telemetry BridgeClient PubSub]\n  SOCK --> LV[LiveViews pipeline projects mcp]\n  ES[MCP embedding_status requetes ad-hoc ist.Chunk Symbol etc]:::gap\n  ES --> FSG\n  DI[MCP diagnose_indexing requetes ad-hoc ist.IndexedFile Chunk]:::gap\n  ST[MCP status project_status chemin runtime separe]:::gap\n  classDef gap fill:#ffd5d5,stroke:#c0392b;",
+ "deltas": [
+  {
+   "element": "Vue canonique ist.project_telemetry inutilisée",
+   "ideal_state": "dashboard + embedding_status + diagnose_indexing + dashboard SP lisent TOUS la vue unique ist.project_telemetry (files/symbols/chunks/embedded/pending/edges par project_code)",
+   "current_state": "La vue existe (db/ddl/03:329) mais zéro consommateur ; chaque client refait ses propres requêtes ad-hoc sur ist.Chunk/Symbol/Edge/ChunkEmbedding/IndexedFile",
+   "importance": "critical",
+   "criticality_pct": 90,
+   "evidence": "db/ddl/03_ist_schema.sql:329 CREATE VIEW ist.project_telemetry ; REQ-AXO-901865 (planned) ; aucune occurrence de project_telemetry dans src/axon-core/src (grep)"
+  },
+  {
+   "element": "dashboard_per_project_counts recompute son rollup au lieu de la vue",
+   "ideal_state": "Le composite PG dashboard_state_full projette ist.project_telemetry (une seule définition de l'agrégat par-projet)",
+   "current_state": "dashboard_per_project_counts fait son propre UNION DISTINCT project_code + 4 LEFT JOIN ad-hoc sur ist.symbol/chunk/edge/chunkembedding ; logique d'agrégat dupliquée vs la vue",
+   "importance": "high",
+   "criticality_pct": 70,
+   "evidence": "db/ddl/08_dashboard_state.sql:63-92 (WITH per_project ... UNION) ; comment lignes 57-62 admet l'impossibilité des file-counts par projet"
+  },
+  {
+   "element": "embedding_status fait des requêtes ad-hoc + scope mélangé",
+   "ideal_state": "embedding_status projette la vue canonique ; scope-honest (ne mélange pas disk/eligible GLOBAL avec symbols/chunks AXO-scoped)",
+   "current_state": "Refait scalar() sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge/Project + per-project breakdown SQL maison + cached_fs_counters() global, tout dans un même payload",
+   "importance": "high",
+   "criticality_pct": 72,
+   "evidence": "src/axon-core/src/mcp/tools_system.rs:303-393 (axon_embedding_status) ; REQ-AXO-901865 acceptance #1 scope-honest"
+  },
+  {
+   "element": "diagnose_indexing fait encore d'autres requêtes ad-hoc",
+   "ideal_state": "diagnose_indexing projette la même vue/enveloppe que le dashboard",
+   "current_state": "indexing_diagnosis_markdown + file_count_for_project refont count(*) FROM ist.IndexedFile / count(DISTINCT file_path) FROM ist.Chunk — 3e jeu de requêtes divergent",
+   "importance": "medium",
+   "criticality_pct": 55,
+   "evidence": "src/axon-core/src/mcp/tools_governance.rs:47-60 et 334-353"
+  },
+  {
+   "element": "Compteurs filesystem : scan GLOBAL non ventilé par projet",
+   "ideal_state": "Compteurs FS par-projet via DashMap incrémental dans le scanner (init au boot + ajusté par inotify), lus en O(1) par project_code",
+   "current_state": "cached_fs_counters() walk complet de AXON_WATCH_DIR (~284k fichiers) à chaque expiration TTL 60s, retourne un (disk,eligible) GLOBAL ; partagé par dashboard ET embedding_status",
+   "importance": "high",
+   "criticality_pct": 68,
+   "evidence": "src/axon-core/src/mcp/tools_system.rs:43-83 (WalkBuilder global, TTL FS_COUNTER_CACHE) ; REQ-AXO-901749 (planned) ; consommé en commun dashboard_state.rs:336 + tools_system.rs:345"
+  },
+  {
+   "element": "rates/workers/queues via pont FICHIER, pas observé au propriétaire",
+   "ideal_state": "L'indexer (propriétaire) publie chaque tick une ligne PG axon_runtime.indexer_runtime_truth ; brain lecteur pur ; dashboard + MCP projettent ; pont fichier retiré",
+   "current_state": "Métriques de flux transitent par runtime-heartbeat.json (pont fichier) lu via split_peer_runtime_info + snapshot RAM brain-local ; multi-pont, non-SOTA",
+   "importance": "critical",
+   "criticality_pct": 85,
+   "evidence": "src/axon-core/src/mcp/runtime_topology_support.rs:131-236 (runtime-heartbeat.json + split_peer_runtime_info) ; main_telemetry.rs:229 ; REQ-AXO-901854 (planned) cible indexer_runtime_truth, delta observabilité 72%->90%"
+  },
+  {
+   "element": "Pas de refresh automatique des 3 surfaces",
+   "ideal_state": "Autodoc/dashboard/Memgraph rafraîchis automatiquement (hook post-mutation SOLL, post-promote-live, PubSub LiveView) sans dérive silencieuse",
+   "current_state": "Surfaces rafraîchies à la demande uniquement ; le dashboard LiveView a déjà du PubSub mais autodoc + Memgraph dérivent ; aucun déclencheur auto bout-en-bout",
+   "importance": "medium",
+   "criticality_pct": 50,
+   "evidence": "REQ-AXO-309 (planned) acceptance : manifest < 1 min après mutation, Memgraph frais < 5 min post-promote, dashboard temps-réel sans restart"
+  },
+  {
+   "element": "status/project_status sur chemin runtime séparé",
+   "ideal_state": "status/project_status projettent la même enveloppe canonique que dashboard/embedding_status (cohérence stricte PIL-AXO-001 acceptance)",
+   "current_state": "project_status délègue à axon_status (chemin runtime/availability) + soll_query_context + conception, sans passer par la vue de métriques ni l'enveloppe dashboard_state_v1",
+   "importance": "medium",
+   "criticality_pct": 45,
+   "evidence": "src/axon-core/src/mcp/tools_framework_rationale.rs:13-72 (axon_project_status_impl appelle axon_status, pas la vue de métriques)"
+  }
+ ],
+ "targets": [],
+ "layers": [],
+ "key_facts": [
+  "La vue canonique ist.project_telemetry existe (db/ddl/03_ist_schema.sql:329) et expose par project_code : files_total/discovered/indexed/failed/skipped, symbols, chunks_total/embedded/pending, edges. Aucun consommateur Rust ne la lit (grep project_telemetry dans src/axon-core/src = 0).",
+  "Le dashboard utilise UN seul événement (dashboard_state_v1) — bon design — composé brain-side par compose_dashboard_state_v1 (dashboard_state.rs:253) à 1 Hz, mais à partir de 3 sources hétérogènes : composite PG dashboard_state_full(3), cached_fs_counters() global, métriques RAM + pont fichier.",
+  "dashboard_state_full(3) (db/ddl/08:211) ne lit PAS la vue : il appelle dashboard_per_project_counts (db/ddl/08:39) qui recompute un rollup ad-hoc (UNION DISTINCT project_code + 4 LEFT JOIN sur ist.symbol/chunk/edge/chunkembedding) et déclare explicitement (commentaire 57-62) que les file-counts par projet sont impossibles depuis ce chemin.",
+  "embedding_status (tools_system.rs:303) refait ses propres requêtes scalar sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge/Project + un per-project breakdown SQL maison, et appelle le même cached_fs_counters() global — mélangeant disk/eligible GLOBAL avec symbols/chunks scoped (scope-honesty cassée, cible REQ-AXO-901865).",
+  "diagnose_indexing (tools_governance.rs:328 → indexing_diagnosis_markdown:47 + file_count_for_project:334) constitue un TROISIÈME jeu de requêtes ad-hoc (count(*) FROM ist.IndexedFile, count(DISTINCT file_path) FROM ist.Chunk).",
+  "cached_fs_counters() (tools_system.rs:43-83) fait un ignore::WalkBuilder complet de AXON_WATCH_DIR à chaque expiration TTL 60s et retourne un couple (disk_files, eligible_files) GLOBAL non ventilé par projet — la cible REQ-AXO-901749 est un DashMap<project_code, ProjectFileCounters> incrémental rempli au boot + ajusté par inotify.",
+  "Les métriques de flux (rates/graph_workers/queues) arrivent via le pont FICHIER runtime-heartbeat.json lu par split_peer_runtime_info (runtime_topology_support.rs:215, main_telemetry.rs:229) + snapshot RAM brain-local ; REQ-AXO-901854 cible une ligne PG axon_runtime.indexer_runtime_truth écrite par l'indexer (propriétaire), brain lecteur pur, retrait du pont fichier (delta observabilité ~72%->90%).",
+  "Côté Elixir le fan-out est propre : socket /tmp/axon-telemetry.sock → BridgeClient (line-buffered, topic dédié dashboard:state, REQ-AXO-901826) → DashboardState.from_map → Phoenix.PubSub.local_broadcast → LiveViews (pipeline_live/projects_live/mcp_live).",
+  "PIL-AXO-001 acceptance exige que status() et project_status() ne divergent jamais sur HEALTHY/DEGRADED et que CLI/MCP émettent des champs d'évidence identiques ; aujourd'hui project_status (tools_framework_rationale.rs:13) délègue à axon_status sans projeter la vue de métriques, donc divergence possible sur les chiffres de stock.",
+  "REQ-AXO-309 (planned) : les 3 surfaces (autodoc SOLL, dashboard, Memgraph) sont rafraîchies à la demande uniquement, sans déclencheur automatique — risque de dérive silencieuse vs la vérité PG."
+ ]
+}

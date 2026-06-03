@@ -1,0 +1,190 @@
+<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Environnement de travail Axon — macro → meso → micro (LIVE + DEV)</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#30363d;--txt:#e6edf3;--muted:#9aa7b4;--accent:#58a6ff;--accent2:#7ee787}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+h2 .dot{width:10px;height:10px;border-radius:50%}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#f0883e} .delta .dot{background:#e74c3c}
+.targets .dot{background:#58a6ff} .layers .dot{background:#bc8cff} .facts .dot{background:#8b949e}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#cdd9e5}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px}
+.mermaid{display:flex;justify-content:center}
+details{margin:0 0 8px;color:var(--muted);font-size:12px}
+details pre{background:#0a0e14;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#9aa7b4;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
+tr:hover td{background:#11161d}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#0d1117}
+.critbar{position:relative;height:18px;background:#0a0e14;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+.critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#fff;text-shadow:0 1px 2px #000}
+.ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.facts li{margin:5px 0;color:#cdd9e5}
+.facts code{background:#0a0e14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#7ee787}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}
+.layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
+.layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.chip{background:#1c2330;border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#cdd9e5}
+.foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>Environnement de travail Axon — macro → meso → micro (LIVE + DEV)</h1>
+<p class="sub">DOC-3-ENV · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal (tel qu'il devrait être)</h2><div class="summary">Axon porte deux identités simultanées (PIL-AXO-9003) : Axon-produit (plateforme commerciale + méthodologie cross-tenant namespace PRO, vendable) et Axon-projet (codebase AXO, tenant zéro dogfood). Le produit se livre en deux sous-produits binaires activables isolément (PIL-AXO-008) : Brain (axon-brain, surface MCP HTTP, owns soll.*) et Indexer (axon-indexer, IST writer, owns public.*), co-supervisés par axonctl en mode BrainAndIndexer mais déployables séparément. Trois surfaces de visualisation dérivées non-canoniques (PIL-AXO-009) : Dashboard Elixir/Phoenix, autodoc SOLL web, projection Memgraph. Le stockage est unifié deux-étages (PIL-AXO-9002) : PG OLTP canonique (soll.* + public.*) + pgvector HNSW + tsvector FTS + miroirs RAM read-only (SOLL petgraph toujours, IST CSR optionnel). Deux instances du même produit cohabitent (PIL-AXO-004) : live = vérité stable, dev = bac à sable resettable, topologie strictement isolée (ports/sockets/pidfiles/DB distincts) avec priorité asymétrique sous contention (live &gt; dev).</div>
+    <div class="diagram"><pre class="mermaid">flowchart TD
+  VIS[Axon Two-Sided Identity PIL-9003]
+  VIS --&gt; PROD[Axon-produit plateforme commerciale]
+  VIS --&gt; PROJ[Axon-projet codebase AXO tenant zero dogfood]
+  PROD --&gt; METH[Methodologie cross-tenant namespace PRO]
+  PROD --&gt; SUB[Dual sous-produit PIL-008]
+  SUB --&gt; BRAIN[Brain axon-brain MCP HTTP owns soll]
+  SUB --&gt; INDEX[Indexer axon-indexer IST writer owns public]
+  BRAIN --&gt; SUPER[axonctl + process-compose supervisor]
+  INDEX --&gt; SUPER
+  SUPER --&gt; STORE[Stockage PIL-9002 PG OLTP unifie]
+  STORE --&gt; PGV[pgvector HNSW 1024d]
+  STORE --&gt; FTS[tsvector FTS]
+  STORE --&gt; RAMS[RAM SOLL petgraph + IST CSR]
+  PROD --&gt; VIZ[Surfaces visu non-canoniques PIL-009]
+  VIZ --&gt; DASH[Dashboard Elixir Phoenix]
+  VIZ --&gt; AUTODOC[Autodoc SOLL web]
+  VIZ --&gt; MEM[Memgraph projection]
+  SUB --&gt; DUAL[Deux instances PIL-004 live + dev isolees]</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TD
+  VIS[Axon Two-Sided Identity PIL-9003]
+  VIS --&gt; PROD[Axon-produit plateforme commerciale]
+  VIS --&gt; PROJ[Axon-projet codebase AXO tenant zero dogfood]
+  PROD --&gt; METH[Methodologie cross-tenant namespace PRO]
+  PROD --&gt; SUB[Dual sous-produit PIL-008]
+  SUB --&gt; BRAIN[Brain axon-brain MCP HTTP owns soll]
+  SUB --&gt; INDEX[Indexer axon-indexer IST writer owns public]
+  BRAIN --&gt; SUPER[axonctl + process-compose supervisor]
+  INDEX --&gt; SUPER
+  SUPER --&gt; STORE[Stockage PIL-9002 PG OLTP unifie]
+  STORE --&gt; PGV[pgvector HNSW 1024d]
+  STORE --&gt; FTS[tsvector FTS]
+  STORE --&gt; RAMS[RAM SOLL petgraph + IST CSR]
+  PROD --&gt; VIZ[Surfaces visu non-canoniques PIL-009]
+  VIZ --&gt; DASH[Dashboard Elixir Phoenix]
+  VIZ --&gt; AUTODOC[Autodoc SOLL web]
+  VIZ --&gt; MEM[Memgraph projection]
+  SUB --&gt; DUAL[Deux instances PIL-004 live + dev isolees]</pre></details>
+<h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Réalité runtime observée 2026-06-03 : un seul postmaster PostgreSQL 17.9 (pid 4923, port 44144) sert DEUX bases distinctes axon_live et axon_dev (plus 6 axon_test_*), isolation au niveau base de données pas au niveau cluster. Deux process-compose tournent : live (-p 8080, pid 27579) lancé avec axon-brain+axon-indexer+dashboard et dev (-p 8081, pid 25240) lancé avec axon-brain seul. MAIS dans les faits seuls les deux brains tournent : live brain (pid 27599, bin/axon-brain, port 44129) et dev brain (pid 26087, .axon/cargo-target/release/axon-brain, port 44139). Aucun indexer, aucun dashboard (ports 44127/44130/44137/44149 morts HTTP 000) ne tourne — live et dev sont de facto en brain_only. Anomalie : live brain et dev brain partagent le MÊME binaire (md5 4c970ca8…) — dev pointe sur le release promu, pas un debug. Le live brain est dégradé (HTTP 404 sur /, /readyz vide, MCP status = freshness stale + trust degraded, blocker indexed_projections_not_fresh) tandis que le dev brain est sain ({state:ready}). Divergence de schéma IST live↔dev : axon_live stocke l_IST dans public.* (29047 symbols) alors qu_axon_dev le stocke dans ist.* (82940 symbols), public.symbol n_existe pas en dev.</div>
+    <div class="diagram"><pre class="mermaid">flowchart TD
+  subgraph PG[PostgreSQL 17.9 postmaster pid 4923 port 44144]
+    DBL[(axon_live 1736 soll + 29047 sym public)]
+    DBD[(axon_dev 943 soll + 82940 sym ist)]
+    DBT[(6x axon_test)]
+  end
+  subgraph LIVE[process-compose live -p 8080 pid 27579]
+    LB[axon-brain pid 27599 bin/axon-brain :44129 DEGRADED 404 stale]
+    LIX[axon-indexer :44130 ABSENT]
+    LDASH[dashboard :44127 ABSENT]
+  end
+  subgraph DEV[process-compose dev -p 8081 pid 25240]
+    DB2[axon-brain pid 26087 release :44139 READY]
+    DIX[axon-indexer :44149 ABSENT]
+    DDASH[dashboard :44137 ABSENT]
+  end
+  LB --&gt; DBL
+  DB2 --&gt; DBD
+  LB -. md5 identique 4c970ca8 .- DB2
+  PGV[pgvector + pg_trgm AGE absent]
+  DBL --&gt; PGV</pre></div>
+    <details><summary>source Mermaid (actuel)</summary><pre>flowchart TD
+  subgraph PG[PostgreSQL 17.9 postmaster pid 4923 port 44144]
+    DBL[(axon_live 1736 soll + 29047 sym public)]
+    DBD[(axon_dev 943 soll + 82940 sym ist)]
+    DBT[(6x axon_test)]
+  end
+  subgraph LIVE[process-compose live -p 8080 pid 27579]
+    LB[axon-brain pid 27599 bin/axon-brain :44129 DEGRADED 404 stale]
+    LIX[axon-indexer :44130 ABSENT]
+    LDASH[dashboard :44127 ABSENT]
+  end
+  subgraph DEV[process-compose dev -p 8081 pid 25240]
+    DB2[axon-brain pid 26087 release :44139 READY]
+    DIX[axon-indexer :44149 ABSENT]
+    DDASH[dashboard :44137 ABSENT]
+  end
+  LB --&gt; DBL
+  DB2 --&gt; DBD
+  LB -. md5 identique 4c970ca8 .- DB2
+  PGV[pgvector + pg_trgm AGE absent]
+  DBL --&gt; PGV</pre></details>
+<h2 class="layers"><span class="dot"></span>Couches macro · meso · micro</h2>
+    <div class="layer"><h3>MACRO — Identité produit two-sided + dual sous-produit (PIL-AXO-9003, PIL-AXO-008)</h3>
+      <div class="chips"><span class="chip">Axon-produit (plateforme commerciale, méthodologie PRO cross-tenant)</span><span class="chip">Axon-projet (codebase AXO, tenant zéro dogfood)</span><span class="chip">Sous-produit Brain (axon-brain, surface MCP)</span><span class="chip">Sous-produit Indexer (axon-indexer, IST writer)</span><span class="chip">Méthodologie cross-tenant (namespace PRO) comme 3e axe commercial séparable</span></div>
+      <div class="scope">Axon est opéré sous deux identités simultanées (PIL-AXO-9003) dont la confusion est la 1re cause de drift de placement : Axon-produit vendu aux entreprises (runtime + méthodologie embarquée, namespace PRO = brochure commerciale queryable) et Axon-projet (codebase /home/dstadel/projects/axon, namespace AXO = scripts/build/qualify/promote/tests). Métacircularité dogfood : Axon-projet = tenant zéro parmi N+1. Le produit se décompose en deux sous-produits binaires (PIL-AXO-008) activables isolément : Brain (owns soll.*, expose MCP HTTP, 60 outils) et Indexer (owns public.* IST, aucune surface MCP). Cas de déploiement légitimes : Brain seul (consommer KG préconstruit), Indexer seul (backfill/reindex), Brain+Indexer même hôte (standard, régi par PIL-004), Brain+Indexer hôtes séparés (scale-out futur). AxonRuntimeMode (runtime.rs) = unique source de vérité d_activation.</div></div>
+    <div class="layer"><h3>MESO — Topologie runtime : processus, ports, stockage, superviseur (PIL-AXO-9002, PIL-AXO-009, PIL-AXO-004)</h3>
+      <div class="chips"><span class="chip">axon-brain (MCP HTTP : live 44129 / dev 44139)</span><span class="chip">axon-indexer (IST writer : health live 44130 / dev 44149)</span><span class="chip">Dashboard Elixir/Phoenix (live 44127 / dev 44137)</span><span class="chip">axonctl + process-compose (superviseur DAG, probes k8s-style, admin live :8080 / dev :8081)</span><span class="chip">PostgreSQL 17.9 unique (port 44144, postmaster pid 4923) : DB axon_live + axon_dev + axon_test_*</span><span class="chip">pgvector HNSW (BGE-Large 1024d) + tsvector FTS</span><span class="chip">Miroirs RAM read-only : SOLL petgraph (toujours) + IST CSR (AXON_IST_RAM_ENABLED, défaut on)</span><span class="chip">Surfaces visu dérivées non-canoniques : autodoc SOLL web, projection Memgraph</span></div>
+      <div class="scope">Stockage deux-étages (PIL-AXO-9002) : PG seul écrivain canonique (soll.* possédé par Brain, public.* IST possédé par Indexer), miroirs RAM read-only dérivés avec re-vérification PG au fetch (aucun fantôme atteint le LLM) et fallback gradienté sur freshness_lag_ms. AGE retiré (pg_extension : vector + pg_trgm seulement, pas age). Le superviseur process-compose pilote un DAG déclaratif (postgres-check -&gt; brain -&gt; dashboard) avec readiness/liveness probes HTTP, restart on_failure, shutdown ordonné. Trois surfaces de visualisation humaine (PIL-AXO-009) read-only 100% reconstructibles depuis PG : Dashboard Phoenix LiveView (src/dashboard/), autodoc SOLL HTML (docs/derived/soll/ via soll_generate_docs), Memgraph (scripts/memgraph-projection.sh). Aucune n_est autoritative.</div></div>
+    <div class="layer"><h3>MICRO — Modules, binaires, isolation live↔dev (PIL-AXO-004, scripts/lib/axon-instance.sh)</h3>
+      <div class="chips"><span class="chip">Binaires live : bin/axon-brain, bin/axon-indexer, bin/axonctl (release, promus)</span><span class="chip">Binaires dev : .axon/cargo-target/{debug,release}/ (cargo build)</span><span class="chip">Resolver d_instance : scripts/lib/axon-instance.sh (axon_resolve_instance, ports/sockets/DB par kind)</span><span class="chip">Hygiène env : axon_clear_inherited_env + axon-env-vars.sh (denylist derived vars, REQ-AXO-109/241)</span><span class="chip">Sockets per-process : /tmp/axon-{live,dev}-{brain,indexer}-{telemetry,mcp}.sock (REQ-AXO-901835)</span><span class="chip">Run roots : live .axon/run-brain + .axon/run-indexer ; dev .axon-dev/run-brain + .axon-dev/run-indexer</span><span class="chip">Manifest release : .axon/live-release/current.json (build_id, sha256, promote)</span><span class="chip">Politique mutation : live advisory_guarded / dev advisory_mutable</span><span class="chip">Knobs contention asymétrique : resource_priority critical/best_effort, gpu_access_policy preferred/avoid</span></div>
+      <div class="scope">Isolation topologique stricte (PIL-AXO-004) : live et dev n_ont aucun état partagé sauf le cluster PG (DB séparées). axon-instance.sh fixe par kind : live -&gt; PHX 44127 / brain 44129 / DB axon_live / run .axon/live-run / sockets axon-live-* / advisory_guarded ; dev -&gt; PHX 44137 / brain 44139 / DB axon_dev / run .axon-dev/run / sockets axon-dev-* / advisory_mutable. Priorité asymétrique sous contention : live garde la réactivité, dev cède en premier (CPU/RAM/GPU/I/O) ; seul couplage = exclusion GPU single-card (dev indexer_full -&gt; live indexer s_arrête, live brain reste up car ne consomme pas de GPU). axon_clear_inherited_env empêche la contamination env d_un start dev vers un start live dans le même shell. Promotion dev-&gt;live via promote_live_safe.sh --project AXO ; jamais cargo build --release manuel + copie.</div></div><h2 class="delta"><span class="dot"></span>3 · Delta & criticité (%)</h2><table><thead><tr><th>Élément</th><th>Idéal</th><th>Actuel</th><th>Importance</th><th>Criticité</th><th>Évidence</th></tr></thead><tbody>
+      <tr>
+        <td><strong>Indexer live + dev</strong></td>
+        <td>PIL-008 : Indexer activable ; live indexer_full écrit public.* IST, dev indexer pour migrations/bench. process-compose.live.yaml et .dev.yaml déclarent axon-indexer avec probes 44130/44149.</td>
+        <td>Aucun axon-indexer ne tourne (pgrep vide, ports 44130/44149 HTTP 000). Live et dev sont de facto brain_only servant un IST figé. MCP status confirme blocker=indexed_projections_not_fresh, next_action=start_indexer.</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:70%;background:#e67e22"></div><span class="critnum">70%</span></div></td>
+        <td class="ev">pgrep axon-indexer vide ; curl :44130/:44149 -&gt; HTTP 000 ; mcp status: freshness stale, trust degraded, next_best_action ./scripts/axon-live start --indexer-graph</td>
+      </tr>
+      <tr>
+        <td><strong>Dashboard (PIL-009 surface visu)</strong></td>
+        <td>Dashboard Elixir/Phoenix observable ; live :44127, dev :44137 ; process-compose le démarre (disabled=false par défaut).</td>
+        <td>Aucun beam.smp/dashboard ne tourne ; ports 44127 et 44137 HTTP 000. La surface de visualisation humaine canonique est absente du runtime courant.</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:45%;background:#f1c40f"></div><span class="critnum">45%</span></div></td>
+        <td class="ev">pgrep beam.smp|dashboard vide ; curl :44127 et :44137 -&gt; HTTP 000 ; process-compose.live.yaml ligne 133-169 declare dashboard</td>
+      </tr>
+      <tr>
+        <td><strong>Santé live brain vs dev brain</strong></td>
+        <td>Live = vérité stable réactive (PIL-004) ; brain ready, MCP canonical, freshness fresh.</td>
+        <td>Live brain DÉGRADÉ : HTTP 404 sur /, /readyz vide, MCP timeout/stale, trust degraded. Dev brain SAIN : /readyz {state:ready}. La hiérarchie de qualité live&gt;dev est inversée en l_état actuel.</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:65%;background:#e67e22"></div><span class="critnum">65%</span></div></td>
+        <td class="ev">curl :44129/readyz vide + HTTP 404 ; curl :44139/readyz {&quot;state&quot;:&quot;ready&quot;} ; mcp status instance_kind=live trust_boundary=degraded</td>
+      </tr>
+      <tr>
+        <td><strong>Binaire dev = binaire live (isolation artefact)</strong></td>
+        <td>PIL-004 + CLAUDE.md : dev = .axon/cargo-target/debug/ (build cargo), live = bin/ (release promu via promote_live_safe.sh). Artefacts distincts.</td>
+        <td>Dev brain tourne depuis .axon/cargo-target/release/axon-brain avec md5 IDENTIQUE (4c970ca8…) à bin/axon-brain (live). Dev exécute le binaire release promu, pas un build debug — la séparation d_artefact dev/live est aplatie dans ce runtime.</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:40%;background:#f1c40f"></div><span class="critnum">40%</span></div></td>
+        <td class="ev">md5sum bin/axon-brain = md5sum .axon/cargo-target/release/axon-brain = 4c970ca835e8c526543c42c3e6b48c13 ; /proc/26087/exe -&gt; .axon/cargo-target/release/axon-brain ; process-compose.dev.yaml ligne 31 défaut = debug mais override AXON_BRAIN_BIN actif</td>
+      </tr>
+      <tr>
+        <td><strong>Schéma IST live↔dev divergent</strong></td>
+        <td>Stockage unifié cohérent (PIL-9002) : IST dans une localisation canonique stable entre instances.</td>
+        <td>axon_live stocke l_IST dans public.* (public.symbol 29047) ; axon_dev l_a migré vers le schéma ist.* (ist.symbol 82940) et public.symbol n_existe PAS en dev. Migration de schéma appliquée en dev mais pas encore en live.</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:55%;background:#f1c40f"></div><span class="critnum">55%</span></div></td>
+        <td class="ev">psql axon_live: public.symbol=29047 ; psql axon_dev: ERROR public.symbol does not exist, ist.symbol=82940 ; schemas dev/live: ist + public + axon_runtime</td>
+      </tr>
+      <tr>
+        <td><strong>Ports : indice tâche (44127-132/44137-142) vs réalité</strong></td>
+        <td>Plages live 44127-44132 / dev 44137-44142.</td>
+        <td>Vérifié dans axon-instance.sh + YAML : live PHX 44127 brain 44129 indexer-health 44130 ; dev PHX 44137 brain 44139 indexer-health 44149 ; PG partagé 44144. Le dev indexer health (44149) sort de la plage 44137-44142 supposée.</td>
+        <td><span class="badge" style="background:#2ecc71">low</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:20%;background:#2ecc71"></div><span class="critnum">20%</span></div></td>
+        <td class="ev">scripts/lib/axon-instance.sh L188-204 ; process-compose.dev.yaml L84 AXON_INDEXER_HEALTH_PORT=44149 ; process-compose.live.yaml L93 =44130</td>
+      </tr>
+      <tr>
+        <td><strong>Isolation cross-instance (état partagé)</strong></td>
+        <td>PIL-004 : aucun état partagé live↔dev (ports, sockets, pidfiles, run roots, graph roots, DB).</td>
+        <td>Bien isolé : sockets distincts (/tmp/axon-{live,dev}-{brain,indexer}-*.sock), run roots (.axon/run-brain vs .axon-dev/run-brain), DB distinctes (axon_live vs axon_dev), ports distincts. SEUL point partagé légitime : le cluster PG (postmaster unique 44144) — isolation au niveau base, pas instance.</td>
+        <td><span class="badge" style="background:#2ecc71">low</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:15%;background:#2ecc71"></div><span class="critnum">15%</span></div></td>
+        <td class="ev">process-compose YAML AXON_*_SOCK explicites REQ-AXO-901835 ; un seul postmaster pid 4923:44144 sert axon_live+axon_dev</td>
+      </tr></tbody></table><h2 class="facts"><span class="dot"></span>Faits vérifiés (MCP / code)</h2><ul class="facts"><li>PIL-AXO-9003 (vérifié via sql soll.Node) : Axon = two-sided identity — Axon-produit (plateforme commerciale + méthodologie cross-tenant namespace PRO) vs Axon-projet (codebase AXO, tenant zéro dogfood métacircularité).</li><li>PIL-AXO-008 (vérifié) : dual sous-produit — Brain (axon-brain, owns soll.*, MCP HTTP @127.0.0.1:44129/mcp, ~60 outils) + Indexer (axon-indexer, owns public.* IST, aucune surface MCP), activables isolément via AxonRuntimeMode.</li><li>PIL-AXO-9002 (vérifié) : stockage deux-étages — PG OLTP canonique + pgvector HNSW 1024d + tsvector FTS + miroirs RAM read-only (SOLL petgraph toujours, IST CSR optionnel AXON_IST_RAM_ENABLED). PG seul écrivain, re-vérif au fetch, fallback sur freshness_lag_ms.</li><li>PIL-AXO-004 (vérifié) : deux instances du même produit, topologie strictement isolée (ports/sockets/pidfiles/run roots/DB distincts) + priorité asymétrique sous contention (live critical &gt; dev best_effort), seul couplage = exclusion GPU single-card.</li><li>PIL-AXO-009 (vérifié) : 3 surfaces visu non-canoniques reconstructibles depuis PG — Dashboard Elixir/Phoenix, autodoc SOLL web (soll_generate_docs), projection Memgraph.</li><li>Ports vérifiés (scripts/lib/axon-instance.sh L188-204) : LIVE PHX 44127 / brain 44129 / DB axon_live / sockets axon-live-* ; DEV PHX 44137 / brain 44139 / DB axon_dev / sockets axon-dev-* ; indexer health live 44130 (YAML L93) / dev 44149 (YAML L84).</li><li>RUNTIME OBSERVÉ : un seul postmaster PG 17.9 (pid 4923, port 44144) sert axon_live + axon_dev + 6 bases axon_test_* — isolation au niveau base de données, pas cluster.</li><li>RUNTIME OBSERVÉ : live brain pid 27599 depuis bin/axon-brain (:44129, HTTP 404 sur /, /readyz vide = DÉGRADÉ, MCP status freshness stale + trust degraded). Dev brain pid 26087 depuis .axon/cargo-target/release/axon-brain (:44139, /readyz {state:ready} = SAIN).</li><li>RUNTIME OBSERVÉ : md5 IDENTIQUE entre bin/axon-brain (live) et .axon/cargo-target/release/axon-brain (dev) = 4c970ca835e8c526543c42c3e6b48c13 — dev exécute le binaire release promu, pas un debug.</li><li>RUNTIME OBSERVÉ : AUCUN indexer ni dashboard ne tourne (pgrep vide ; ports 44127/44130/44137/44149 HTTP 000). Live et dev sont de facto brain_only ; live blocker = indexed_projections_not_fresh, next_action ./scripts/axon-live start --indexer-graph.</li><li>Divergence schéma IST live↔dev : axon_live = public.symbol (29047) ; axon_dev = ist.symbol (82940) et public.symbol absent — migration schéma ist.* appliquée en dev mais pas live.</li><li>Volumétrie : axon_live 1736 soll nodes / 29047 symbols / 27875 chunks / 27126 embeddings ; axon_dev 943 soll nodes / 82940 ist symbols. Registry soll.projectcoderegistry = 45 project codes (AXO, PRO, NEX…), colonnes project_code/project_path/project_name/session_pointer_json.</li><li>AGE confirmé retiré : pg_extension axon_live = {vector, pg_trgm} (pas age). DuckDB purgé. Release manifest .axon/live-release/current.json : build_id v0.8.0-809-g1a5c9054, promoted_at 2026-06-03T00:23:41Z, state promoted.</li><li>process-compose admin : live -p 8080 (pid 27579, lancé avec axon-brain+axon-indexer+dashboard) / dev -p 8081 (pid 25240, lancé avec axon-brain seul). Politique mutation : live advisory_guarded / dev advisory_mutable (axon-instance.sh L193/204).</li></ul><div class="foot">Généré session 71 — recherche MCP-powered (3 sous-agents, project=AXO) + synthèse. Mermaid 11 (CDN). Diagrammes : si un rendu échoue, la source Mermaid est dans le &lt;details&gt; sous chaque schéma.</div></div>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true, theme:'dark', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+</script></body></html>
