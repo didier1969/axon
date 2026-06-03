@@ -197,6 +197,23 @@ pub(super) fn gpu_bootstrap_vector_worker_cap(
     requested_vector_workers.min(cap)
 }
 
+/// REQ-AXO-901634 — canonical disable flag for the graph-embedding lane.
+/// Graph embeddings are on by default; `AXON_GRAPH_EMBEDDINGS_ENABLED=false`
+/// (or `0`/`no`/`off`) forces `graph_workers=0`, overriding any explicit
+/// `AXON_GRAPH_WORKERS`. Without this gate the disable flag was silently
+/// ignored and operators kept getting graph workers they asked to turn off.
+fn graph_embeddings_enabled_from_env() -> bool {
+    std::env::var("AXON_GRAPH_EMBEDDINGS_ENABLED")
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
 fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
     let query_workers = env_usize("AXON_QUERY_EMBED_WORKERS", 1);
     let requested_vector_workers = env_usize("AXON_VECTOR_WORKERS", 1);
@@ -213,7 +230,11 @@ fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
     EmbeddingLaneConfig {
         query_workers,
         vector_workers,
-        graph_workers: env_usize_nonnegative("AXON_GRAPH_WORKERS", 1),
+        graph_workers: if graph_embeddings_enabled_from_env() {
+            env_usize_nonnegative("AXON_GRAPH_WORKERS", 1)
+        } else {
+            0
+        },
         chunk_batch_size: env_usize("AXON_CHUNK_BATCH_SIZE", CHUNK_BATCH_SIZE),
         file_vectorization_batch_size: env_usize(
             "AXON_FILE_VECTORIZATION_BATCH_SIZE",
