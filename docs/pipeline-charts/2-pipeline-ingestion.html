@@ -2,37 +2,37 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pipeline d&#x27;ingestion complet — fichier → graphe + FTS + vecteurs (IDÉAL vs ACTUEL)</title>
 <style>
-:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#30363d;--txt:#e6edf3;--muted:#9aa7b4;--accent:#58a6ff;--accent2:#7ee787}
+:root{--bg:#f6f8fa;--panel:#ffffff;--panel2:#f0f3f6;--line:#d0d7de;--txt:#1f2328;--muted:#57606a;--accent:#0969da;--accent2:#1a7f37}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
-h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px;color:#0d1117}
 .sub{color:var(--muted);font-size:13px;margin:0 0 26px}
-h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;color:#0d1117}
 h2 .dot{width:10px;height:10px;border-radius:50%}
-.ideal .dot{background:var(--accent2)} .actuel .dot{background:#f0883e} .delta .dot{background:#e74c3c}
-.targets .dot{background:#58a6ff} .layers .dot{background:#bc8cff} .facts .dot{background:#8b949e}
-.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#cdd9e5}
-.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#bc4c00} .delta .dot{background:#cf222e}
+.targets .dot{background:var(--accent)} .layers .dot{background:#8250df} .facts .dot{background:#6e7781}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#24292f;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .mermaid{display:flex;justify-content:center}
 details{margin:0 0 8px;color:var(--muted);font-size:12px}
-details pre{background:#0a0e14;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#9aa7b4;font-size:12px}
-table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px}
+details pre{background:#f6f8fa;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#57606a;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
-tr:hover td{background:#11161d}
-.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#0d1117}
-.critbar{position:relative;height:18px;background:#0a0e14;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+tr:hover td{background:#f6f8fa}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#1f2328}
+.critbar{position:relative;height:18px;background:#eaeef2;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
 .critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
-.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#fff;text-shadow:0 1px 2px #000}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#1f2328}
 .ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.facts li{margin:5px 0;color:#cdd9e5}
-.facts code{background:#0a0e14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#7ee787}
-.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}
+.facts li{margin:5px 0;color:#24292f}
+.facts code{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#0a3069}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
 .layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.chip{background:#1c2330;border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#cdd9e5}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#24292f}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Pipeline d&#x27;ingestion complet — fichier → graphe + FTS + vecteurs (IDÉAL vs ACTUEL)</h1>
@@ -185,5 +185,5 @@ tr:hover td{background:#11161d}
       <td class="ev">StageMetrics A3 items_out_total avec/sans B actif (bench --gpu vs --noop) ; CPT-AXO-054 per-stage metrics</td></tr></tbody></table><h2 class="facts"><span class="dot"></span>Faits vérifiés (MCP / code)</h2><ul class="facts"><li>Counts IST vérifiés (sql) : ist.symbol=40499, ist.edge=104569, ist.chunk=47499, ist.chunkembedding=41131, ist.indexedfile=14438, ist.project=27.</li><li>Sortie GRAPHE (a) SAINE : chaîne FK complète project-&gt;indexedfile(path)-&gt;chunk-&gt;chunkembedding NOT NULL + project_code FK sur symbol/edge, ON DELETE CASCADE, 0 orphelin (sym/file/edge orphan = 0). REQ-AXO-901860 delivered (schéma dédié ist.*).</li><li>Sortie VECTEURS (c) : 41131 embeddings model chunk-bge-large-en-v1.5-1024, dimension=1024 confirmée, index HNSW chunk_embedding_hnsw_idx (vector_cosine_ops, m=16, ef_construction=64). 6370 chunks embed_status=&#x27;pending&#x27; → couverture 86.6%.</li><li>Sortie FTS (b) CASSÉE : colonne content_tsv (tsvector) + index GIN idx_chunk_content_tsv existent mais 100% NULL (0/47499). Ce n&#x27;est PAS une colonne GENERATED (pg_attribute attgenerated vide) — peuplée out-of-band.</li><li>Mécanisme FTS réel (diverge de CPT-AXO-054) : trigger trg_chunk_enqueue_tsv_insert/update -&gt; fn_chunk_enqueue_tsv() enfile dans pgmq.tsv_pending ; pool tsv_worker (src/axon-core/src/pipeline_v2/tsv_worker.rs, REQ-AXO-901624 P4) draine via pgmq.read -&gt; UPDATE content_tsv = axon.compute_chunk_tsv(...) -&gt; pgmq.archive. Fonction axon.compute_chunk_tsv présente.</li><li>Backlog FTS massif : pgmq.metrics(&#x27;tsv_pending&#x27;) queue_length=1156504, total_messages=1158533 → ≈99.8% jamais drainé. Le worker n&#x27;est spawné qu&#x27;au boot orchestrator (orchestrator.rs:210-215, gated AXON_TSV_WORKER_CONCURRENCY&gt;0) et le brain est actuellement DOWN (MCP backend 44129 unavailable) → aucun drainage en cours.</li><li>Topologie code conforme à CPT-AXO-054 session-19 : single parse en A2, A3 UPSERT atomique Symbol/Edge+Chunk, handoff best-effort A3-&gt;B1 via try_send mpsc bounded + cold-start poll DB (chunks sans embedding). Modules présents : stage_a1/a2/a3.rs, stage_b1/b2/b3.rs, embedder_gpu.rs (GpuB2Embedder), orchestrator.rs.</li><li>Gaps amont : REQ-AXO-901831 (planned) — 9479 fichiers éligibles non enrôlés (23899 eligible vs ~14420 enrolled), cause probable watcher subtree hint budget + watchdog flips. REQ-AXO-901846 (delivered session 67) — collision chunk_id fused_L{s}_{e} résolue via suffixe seq monotone.</li><li>Plafond débit : PIL-AXO-007 north-star = 150+ chunks/sec ; bench session55 (CLAUDE.md) plafonne ~105-124.5 ch/s côté GPU (B2 = 1 worker/GPU). PIL-AXO-007 impose graph-first : A3 ne doit jamais être ralenti par la contention GPU de B.</li></ul><div class="foot">Généré session 71 — recherche MCP-powered (3 sous-agents, project=AXO) + synthèse. Mermaid 11 (CDN). Diagrammes : si un rendu échoue, la source Mermaid est dans le &lt;details&gt; sous chaque schéma.</div></div>
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-mermaid.initialize({startOnLoad:true, theme:'dark', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
 </script></body></html>

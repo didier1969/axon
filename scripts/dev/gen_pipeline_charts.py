@@ -31,37 +31,37 @@ def crit_color(pct):
 IMP_BADGE = {"critical": "#e74c3c", "high": "#e67e22", "medium": "#f1c40f", "low": "#2ecc71"}
 
 CSS = """
-:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#30363d;--txt:#e6edf3;--muted:#9aa7b4;--accent:#58a6ff;--accent2:#7ee787}
+:root{--bg:#f6f8fa;--panel:#ffffff;--panel2:#f0f3f6;--line:#d0d7de;--txt:#1f2328;--muted:#57606a;--accent:#0969da;--accent2:#1a7f37}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
-h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px;color:#0d1117}
 .sub{color:var(--muted);font-size:13px;margin:0 0 26px}
-h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;color:#0d1117}
 h2 .dot{width:10px;height:10px;border-radius:50%}
-.ideal .dot{background:var(--accent2)} .actuel .dot{background:#f0883e} .delta .dot{background:#e74c3c}
-.targets .dot{background:#58a6ff} .layers .dot{background:#bc8cff} .facts .dot{background:#8b949e}
-.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#cdd9e5}
-.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#bc4c00} .delta .dot{background:#cf222e}
+.targets .dot{background:var(--accent)} .layers .dot{background:#8250df} .facts .dot{background:#6e7781}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#24292f;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .mermaid{display:flex;justify-content:center}
 details{margin:0 0 8px;color:var(--muted);font-size:12px}
-details pre{background:#0a0e14;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#9aa7b4;font-size:12px}
-table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px}
+details pre{background:#f6f8fa;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#57606a;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
-tr:hover td{background:#11161d}
-.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#0d1117}
-.critbar{position:relative;height:18px;background:#0a0e14;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+tr:hover td{background:#f6f8fa}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#1f2328}
+.critbar{position:relative;height:18px;background:#eaeef2;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
 .critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
-.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#fff;text-shadow:0 1px 2px #000}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#1f2328}
 .ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.facts li{margin:5px 0;color:#cdd9e5}
-.facts code{background:#0a0e14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#7ee787}
-.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}
+.facts li{margin:5px 0;color:#24292f}
+.facts code{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#0a3069}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
 .layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.chip{background:#1c2330;border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#cdd9e5}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#24292f}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 """
 
@@ -152,7 +152,7 @@ def render(doc):
     parts.append("""</div>
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-mermaid.initialize({startOnLoad:true, theme:'dark', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
 </script></body></html>""")
     return "".join(parts)
 

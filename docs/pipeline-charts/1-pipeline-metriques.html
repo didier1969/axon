@@ -2,37 +2,37 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pipeline des métriques : source canonique → clients (dashboard Elixir, MCP, CLI)</title>
 <style>
-:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#30363d;--txt:#e6edf3;--muted:#9aa7b4;--accent:#58a6ff;--accent2:#7ee787}
+:root{--bg:#f6f8fa;--panel:#ffffff;--panel2:#f0f3f6;--line:#d0d7de;--txt:#1f2328;--muted:#57606a;--accent:#0969da;--accent2:#1a7f37}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
 .wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
-h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px;color:#0d1117}
 .sub{color:var(--muted);font-size:13px;margin:0 0 26px}
-h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;color:#0d1117}
 h2 .dot{width:10px;height:10px;border-radius:50%}
-.ideal .dot{background:var(--accent2)} .actuel .dot{background:#f0883e} .delta .dot{background:#e74c3c}
-.targets .dot{background:#58a6ff} .layers .dot{background:#bc8cff} .facts .dot{background:#8b949e}
-.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#cdd9e5}
-.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#bc4c00} .delta .dot{background:#cf222e}
+.targets .dot{background:var(--accent)} .layers .dot{background:#8250df} .facts .dot{background:#6e7781}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#24292f;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .mermaid{display:flex;justify-content:center}
 details{margin:0 0 8px;color:var(--muted);font-size:12px}
-details pre{background:#0a0e14;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#9aa7b4;font-size:12px}
-table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px}
+details pre{background:#f6f8fa;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#57606a;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
-tr:hover td{background:#11161d}
-.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#0d1117}
-.critbar{position:relative;height:18px;background:#0a0e14;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+tr:hover td{background:#f6f8fa}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#1f2328}
+.critbar{position:relative;height:18px;background:#eaeef2;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
 .critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
-.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#fff;text-shadow:0 1px 2px #000}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#1f2328}
 .ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.facts li{margin:5px 0;color:#cdd9e5}
-.facts code{background:#0a0e14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#7ee787}
-.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}
+.facts li{margin:5px 0;color:#24292f}
+.facts code{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#0a3069}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
 .layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
 .layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
-.chip{background:#1c2330;border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#cdd9e5}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#24292f}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Pipeline des métriques : source canonique → clients (dashboard Elixir, MCP, CLI)</h1>
@@ -193,5 +193,5 @@ tr:hover td{background:#11161d}
       </tr></tbody></table><h2 class="facts"><span class="dot"></span>Faits vérifiés (MCP / code)</h2><ul class="facts"><li>La vue canonique ist.project_telemetry existe (db/ddl/03_ist_schema.sql:329) et expose par project_code : files_total/discovered/indexed/failed/skipped, symbols, chunks_total/embedded/pending, edges. Aucun consommateur Rust ne la lit (grep project_telemetry dans src/axon-core/src = 0).</li><li>Le dashboard utilise UN seul événement (dashboard_state_v1) — bon design — composé brain-side par compose_dashboard_state_v1 (dashboard_state.rs:253) à 1 Hz, mais à partir de 3 sources hétérogènes : composite PG dashboard_state_full(3), cached_fs_counters() global, métriques RAM + pont fichier.</li><li>dashboard_state_full(3) (db/ddl/08:211) ne lit PAS la vue : il appelle dashboard_per_project_counts (db/ddl/08:39) qui recompute un rollup ad-hoc (UNION DISTINCT project_code + 4 LEFT JOIN sur ist.symbol/chunk/edge/chunkembedding) et déclare explicitement (commentaire 57-62) que les file-counts par projet sont impossibles depuis ce chemin.</li><li>embedding_status (tools_system.rs:303) refait ses propres requêtes scalar sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge/Project + un per-project breakdown SQL maison, et appelle le même cached_fs_counters() global — mélangeant disk/eligible GLOBAL avec symbols/chunks scoped (scope-honesty cassée, cible REQ-AXO-901865).</li><li>diagnose_indexing (tools_governance.rs:328 → indexing_diagnosis_markdown:47 + file_count_for_project:334) constitue un TROISIÈME jeu de requêtes ad-hoc (count(*) FROM ist.IndexedFile, count(DISTINCT file_path) FROM ist.Chunk).</li><li>cached_fs_counters() (tools_system.rs:43-83) fait un ignore::WalkBuilder complet de AXON_WATCH_DIR à chaque expiration TTL 60s et retourne un couple (disk_files, eligible_files) GLOBAL non ventilé par projet — la cible REQ-AXO-901749 est un DashMap&lt;project_code, ProjectFileCounters&gt; incrémental rempli au boot + ajusté par inotify.</li><li>Les métriques de flux (rates/graph_workers/queues) arrivent via le pont FICHIER runtime-heartbeat.json lu par split_peer_runtime_info (runtime_topology_support.rs:215, main_telemetry.rs:229) + snapshot RAM brain-local ; REQ-AXO-901854 cible une ligne PG axon_runtime.indexer_runtime_truth écrite par l&#x27;indexer (propriétaire), brain lecteur pur, retrait du pont fichier (delta observabilité ~72%-&gt;90%).</li><li>Côté Elixir le fan-out est propre : socket /tmp/axon-telemetry.sock → BridgeClient (line-buffered, topic dédié dashboard:state, REQ-AXO-901826) → DashboardState.from_map → Phoenix.PubSub.local_broadcast → LiveViews (pipeline_live/projects_live/mcp_live).</li><li>PIL-AXO-001 acceptance exige que status() et project_status() ne divergent jamais sur HEALTHY/DEGRADED et que CLI/MCP émettent des champs d&#x27;évidence identiques ; aujourd&#x27;hui project_status (tools_framework_rationale.rs:13) délègue à axon_status sans projeter la vue de métriques, donc divergence possible sur les chiffres de stock.</li><li>REQ-AXO-309 (planned) : les 3 surfaces (autodoc SOLL, dashboard, Memgraph) sont rafraîchies à la demande uniquement, sans déclencheur automatique — risque de dérive silencieuse vs la vérité PG.</li></ul><div class="foot">Généré session 71 — recherche MCP-powered (3 sous-agents, project=AXO) + synthèse. Mermaid 11 (CDN). Diagrammes : si un rendu échoue, la source Mermaid est dans le &lt;details&gt; sous chaque schéma.</div></div>
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-mermaid.initialize({startOnLoad:true, theme:'dark', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
 </script></body></html>
