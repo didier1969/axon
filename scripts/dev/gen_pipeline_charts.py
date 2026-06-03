@@ -123,9 +123,14 @@ def render(doc):
 <h1>{html.escape(doc.get('title',''))}</h1>
 <p class="sub">{html.escape(doc.get('doc_id',''))} · Axon · idéal vs actuel vs delta · session 71</p>"""]
 
-    parts.append('<h2 class="ideal"><span class="dot"></span>1 · Flux idéal (tel qu\'il devrait être)</h2>')
+    parts.append('<h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2>')
     parts.append(f'<div class="summary">{html.escape(doc.get("ideal_summary",""))}</div>')
     parts.append(diagram_block("idéal", doc.get("ideal_mermaid", "")))
+    if doc.get("ideal_rationale"):
+        parts.append(f'<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c\'est l\'idéal (pas un refactor) :</strong> {html.escape(doc["ideal_rationale"])}</div>')
+    if doc.get("sota_principles"):
+        chips = "".join(f'<span class="chip">{html.escape(p)}</span>' for p in doc["sota_principles"])
+        parts.append(f'<div class="chips" style="margin-top:2px">{chips}</div>')
 
     parts.append('<h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu\'il est)</h2>')
     parts.append(f'<div class="summary">{html.escape(doc.get("current_summary",""))}</div>')
