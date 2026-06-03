@@ -762,7 +762,7 @@ fn test_axon_soll_manager_create_without_project_code_auto_resolves_or_errors() 
                     "title": "Auto-resolve test",
                     "context": "project_code omitted — should auto-detect from cwd or single project",
                     "rationale": "Zero-config onboarding for single-project or cwd-matched usage",
-                    "status": "accepted"
+                    "status": "current"
                 }
             }
         })),
@@ -2157,7 +2157,7 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
                 "entity": "requirement",
                 "data": {
                     "id": missing_id,
-                    "status": "completed"
+                    "status": "delivered"
                 }
             }
         })),
@@ -6958,7 +6958,7 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
                         "logical_key": "CPT-anchor-protocol",
                         "title": "Anchor protocol concept",
                         "description": "Concept created via plan to test logical_key resolution",
-                        "status": "accepted",
+                        "status": "current",
                         "metadata": {}
                     }]
                 },
