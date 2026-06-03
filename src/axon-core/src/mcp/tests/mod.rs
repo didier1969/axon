@@ -269,7 +269,29 @@ CREATE TRIGGER trg_test_autoseed_edge BEFORE INSERT ON ist.Edge\n\
     FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_project();\n\
 DROP TRIGGER IF EXISTS trg_test_autoseed_chunk ON ist.Chunk;\n\
 CREATE TRIGGER trg_test_autoseed_chunk BEFORE INSERT ON ist.Chunk\n\
-    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_chunk();\n";
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_chunk();\n\
+CREATE OR REPLACE FUNCTION ist.test_autofill_soll_node() RETURNS TRIGGER AS $$\n\
+BEGIN\n\
+    IF NEW.project_code IS NULL OR NEW.project_code = '' THEN\n\
+        NEW.project_code := split_part(NEW.id, '-', 2);\n\
+    END IF;\n\
+    RETURN NEW;\n\
+END;\n\
+$$ LANGUAGE plpgsql;\n\
+CREATE OR REPLACE FUNCTION ist.test_autofill_soll_edge() RETURNS TRIGGER AS $$\n\
+BEGIN\n\
+    IF NEW.project_code IS NULL OR NEW.project_code = '' THEN\n\
+        NEW.project_code := split_part(NEW.source_id, '-', 2);\n\
+    END IF;\n\
+    RETURN NEW;\n\
+END;\n\
+$$ LANGUAGE plpgsql;\n\
+DROP TRIGGER IF EXISTS a_test_autofill_soll_node ON soll.Node;\n\
+CREATE TRIGGER a_test_autofill_soll_node BEFORE INSERT ON soll.Node\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autofill_soll_node();\n\
+DROP TRIGGER IF EXISTS a_test_autofill_soll_edge ON soll.Edge;\n\
+CREATE TRIGGER a_test_autofill_soll_edge BEFORE INSERT ON soll.Edge\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autofill_soll_edge();\n";
 
     let mut child = match std::process::Command::new("psql")
         .args([
