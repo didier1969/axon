@@ -36,46 +36,90 @@ tr:hover td{background:#f6f8fa}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Pipeline des métriques : source canonique → clients (dashboard Elixir, MCP, CLI)</h1>
-<p class="sub">DOC-1-METRICS-PIPELINE · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal (tel qu'il devrait être)</h2><div class="summary">Ancré sur PIL-AXO-001 (Shared Runtime Truth) + PIL-AXO-009 (surfaces de visualisation non-canoniques). UNE source canonique par classe de métrique : (a) métriques de stock par-projet (files/symbols/chunks/embeddings/edges) servies par la vue PG unique ist.project_telemetry, déjà ventilée par project_code ; (b) métriques de flux haute-fréquence (rates, workers, queues, scheduler) publiées par l&#x27;indexer (propriétaire) à chaque tick dans une ligne PG axon_runtime.indexer_runtime_truth, le brain n&#x27;étant que lecteur pur. Un compositeur unique brain-side assemble l&#x27;enveloppe dashboard_state_v1 en lisant ces deux sources canoniques, puis fait un fan-out IDENTIQUE vers les trois consommateurs : humains/dashboard (socket télémétrie → PubSub → LiveViews), LLM/MCP (status, project_status, embedding_status, diagnose_indexing, mcp_surface_diagnostics projettent la même enveloppe), automation/CLI (axon-live status). Aucune requête ad-hoc ni pont fichier : truth observable identiquement partout, refresh automatique des trois surfaces (REQ-AXO-309).</div>
-    <div class="diagram"><pre class="mermaid">flowchart TD
-  subgraph SRC[Sources canoniques uniques]
-    PT[ist.project_telemetry vue PG par-projet]
-    IRT[axon_runtime.indexer_runtime_truth ligne PG par tick]
-    FSC[Compteurs FS par-projet DashMap incremental]
-  end
-  IDX[Indexer proprietaire ecrit IST + flux] --&gt; PT
-  IDX --&gt; IRT
-  IDX --&gt; FSC
-  PT --&gt; COMP[Compositeur unique brain-side compose_dashboard_state_v1]
-  IRT --&gt; COMP
-  FSC --&gt; COMP
-  COMP --&gt; ENV[Enveloppe dashboard_state_v1]
-  ENV --&gt; DASH[Dashboard Elixir socket PubSub LiveViews]
-  ENV --&gt; MCP[MCP status project_status embedding_status diagnose_indexing surface_diagnostics]
-  ENV --&gt; CLI[CLI axon-live status]
-  DASH -. refresh auto REQ-309 .-&gt; ENV
-  MCP -. memes chiffres .-&gt; ENV
-  CLI -. memes chiffres .-&gt; ENV</pre></div>
-    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TD
-  subgraph SRC[Sources canoniques uniques]
-    PT[ist.project_telemetry vue PG par-projet]
-    IRT[axon_runtime.indexer_runtime_truth ligne PG par tick]
-    FSC[Compteurs FS par-projet DashMap incremental]
-  end
-  IDX[Indexer proprietaire ecrit IST + flux] --&gt; PT
-  IDX --&gt; IRT
-  IDX --&gt; FSC
-  PT --&gt; COMP[Compositeur unique brain-side compose_dashboard_state_v1]
-  IRT --&gt; COMP
-  FSC --&gt; COMP
-  COMP --&gt; ENV[Enveloppe dashboard_state_v1]
-  ENV --&gt; DASH[Dashboard Elixir socket PubSub LiveViews]
-  ENV --&gt; MCP[MCP status project_status embedding_status diagnose_indexing surface_diagnostics]
-  ENV --&gt; CLI[CLI axon-live status]
-  DASH -. refresh auto REQ-309 .-&gt; ENV
-  MCP -. memes chiffres .-&gt; ENV
-  CLI -. memes chiffres .-&gt; ENV</pre></details>
-<h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Aujourd&#x27;hui la vue canonique ist.project_telemetry EXISTE (db/ddl/03_ist_schema.sql:329) mais AUCUN consommateur ne la lit. Le dashboard a un compositeur unique brain-side (compose_dashboard_state_v1, dashboard_state.rs) qui assemble dashboard_state_v1 à partir de TROIS sources hétérogènes : (1) le composite PG dashboard_state_full(3) qui recompute son PROPRE rollup ad-hoc (dashboard_per_project_counts : UNION de ist.symbol/chunk/edge/chunkembedding, PAS la vue) et ne peut PAS ventiler les fichiers par projet ; (2) cached_fs_counters() — un walk filesystem GLOBAL (~284k fichiers) sur AXON_WATCH_DIR, non ventilé par projet, TTL 60s ; (3) des métriques de flux RAM (rates/workers/queues) plus le pont FICHIER runtime-heartbeat.json lu via split_peer_runtime_info. Le dashboard est bien alimenté par un seul événement (bon), mais les clients MCP divergent : embedding_status (tools_system.rs:303) refait ses propres requêtes ad-hoc sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge + appelle le même cached_fs_counters() global ; diagnose_indexing (tools_governance.rs:47/328) refait encore d&#x27;autres requêtes ad-hoc sur ist.IndexedFile/Chunk ; status/project_status passent par un chemin runtime séparé. Résultat : multi-source, multi-pont, scope-honesty cassée (disk/eligible GLOBAL mélangés avec symbols/chunks AXO-scoped dans un même payload embedding_status), et les 3 surfaces ne se rafraîchissent pas automatiquement (REQ-309 planned).</div>
+<p class="sub">DOC-1-METRICS-PIPELINE · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2><div class="summary">Le nord-vrai du pipeline de métriques est un BUS DE TÉLÉMÉTRIE EVENT-SOURCED, OTLP-natif, à source unique : chaque composant (indexer, brain, embedder, supervisor, pipeline A/B) émet, à l&#x27;instant où le fait se produit, un événement structuré auto-descriptif dans une enveloppe versionnée unique (schema_version + event_type + trace_id + project_scope + timestamp monotone + payload typé), sans jamais produire de log textuel à parser. Ces événements sont écrits une fois dans un journal append-only ordonné et immuable (event store) qui EST la source canonique : aucune métrique n&#x27;est « calculée puis stockée », tout état dérivé (compteurs, débits, latences p50/p99, santé par projet) n&#x27;est qu&#x27;une PROJECTION rejouable de ce journal. Les consommateurs — dashboard, MCP, CLI, automation, alerting — ne pollent jamais et ne recalculent jamais : ils SOUSCRIVENT au bus et reçoivent le MÊME flux fan-outé en push temps-réel via un protocole de streaming (gRPC/OTLP stream ou WebSocket sur un broker), chacun matérialisant localement la seule vue dont il a besoin. La granularité par-projet ET globale est native parce qu&#x27;elle est portée par une dimension d&#x27;enveloppe (project_scope) et non reconstruite par client. Comme tout est event-sourced, un nouveau consommateur, ou un consommateur qui a manqué une fenêtre, rejoue le journal depuis un offset et obtient un état exact — exactly-once à la projection, at-least-once au transport. Enfin la télémétrie s&#x27;observe elle-même : le bus émet ses propres méta-événements (lag de souscription, débit d&#x27;émission, événements perdus, fraîcheur de chaque projection), de sorte que la santé de l&#x27;observabilité est elle-même un flux observable et alertable.</div>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    subgraph EMIT[&quot;Emetteurs instrumentes (zero log texte)&quot;]
+        IDX[&quot;Indexer&quot;]
+        BRN[&quot;Brain MCP&quot;]
+        EMB[&quot;Embedder GPU&quot;]
+        SUP[&quot;Supervisor&quot;]
+        PIP[&quot;Pipeline A/B&quot;]
+    end
+
+    IDX -- &quot;event OTLP\n+ trace_id\n+ project_scope&quot; --&gt; SDK
+    BRN --&gt; SDK
+    EMB --&gt; SDK
+    SUP --&gt; SDK
+    PIP --&gt; SDK
+
+    SDK[&quot;SDK telemetrie unique\nenveloppe versionnee self-describing&quot;]
+
+    SDK -- &quot;append-only\nat-least-once&quot; --&gt; STORE
+
+    subgraph CANON[&quot;Source canonique&quot;]
+        STORE[(&quot;Event Store\njournal immuable ordonne\nevent-sourced replayable&quot;)]
+    end
+
+    STORE -- &quot;ordered log\noffset/replay&quot; --&gt; BUS
+
+    BUS{{&quot;Bus de souscription\npush temps-reel\nfan-out identique\nexactly-once projection&quot;}}
+
+    BUS -- &quot;subscribe push&quot; --&gt; PDASH[&quot;Projection Dashboard&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PMCP[&quot;Projection MCP&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PCLI[&quot;Projection CLI&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PAUTO[&quot;Projection Automation / Alerting&quot;]
+
+    PDASH --&gt; DASH[&quot;Dashboard temps reel&quot;]
+    PMCP --&gt; MCPC[&quot;status / health tools&quot;]
+    PCLI --&gt; CLIC[&quot;axon status&quot;]
+    PAUTO --&gt; ALERT[&quot;Alertes / SLO&quot;]
+
+    BUS -. &quot;meta-events:\nlag, debit, pertes,\nfraicheur projection&quot; .-&gt; META[&quot;Observabilite de l_observabilite&quot;]
+    META -- &quot;self-observed\nflux alertable&quot; --&gt; BUS
+
+    SCOPE[&quot;project_scope dimension\nper-projet ET global natif&quot;] -.-&gt; SDK</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart LR
+    subgraph EMIT[&quot;Emetteurs instrumentes (zero log texte)&quot;]
+        IDX[&quot;Indexer&quot;]
+        BRN[&quot;Brain MCP&quot;]
+        EMB[&quot;Embedder GPU&quot;]
+        SUP[&quot;Supervisor&quot;]
+        PIP[&quot;Pipeline A/B&quot;]
+    end
+
+    IDX -- &quot;event OTLP\n+ trace_id\n+ project_scope&quot; --&gt; SDK
+    BRN --&gt; SDK
+    EMB --&gt; SDK
+    SUP --&gt; SDK
+    PIP --&gt; SDK
+
+    SDK[&quot;SDK telemetrie unique\nenveloppe versionnee self-describing&quot;]
+
+    SDK -- &quot;append-only\nat-least-once&quot; --&gt; STORE
+
+    subgraph CANON[&quot;Source canonique&quot;]
+        STORE[(&quot;Event Store\njournal immuable ordonne\nevent-sourced replayable&quot;)]
+    end
+
+    STORE -- &quot;ordered log\noffset/replay&quot; --&gt; BUS
+
+    BUS{{&quot;Bus de souscription\npush temps-reel\nfan-out identique\nexactly-once projection&quot;}}
+
+    BUS -- &quot;subscribe push&quot; --&gt; PDASH[&quot;Projection Dashboard&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PMCP[&quot;Projection MCP&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PCLI[&quot;Projection CLI&quot;]
+    BUS -- &quot;subscribe push&quot; --&gt; PAUTO[&quot;Projection Automation / Alerting&quot;]
+
+    PDASH --&gt; DASH[&quot;Dashboard temps reel&quot;]
+    PMCP --&gt; MCPC[&quot;status / health tools&quot;]
+    PCLI --&gt; CLIC[&quot;axon status&quot;]
+    PAUTO --&gt; ALERT[&quot;Alertes / SLO&quot;]
+
+    BUS -. &quot;meta-events:\nlag, debit, pertes,\nfraicheur projection&quot; .-&gt; META[&quot;Observabilite de l_observabilite&quot;]
+    META -- &quot;self-observed\nflux alertable&quot; --&gt; BUS
+
+    SCOPE[&quot;project_scope dimension\nper-projet ET global natif&quot;] -.-&gt; SDK</pre></details>
+<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c'est l'idéal (pas un refactor) :</strong> C&#x27;est l&#x27;idéal et non un refactor parce qu&#x27;il inverse le sens du flux et le siège de la vérité par rapport à toute architecture pull/SQL-ad-hoc : la vérité n&#x27;est plus un état agrégé qu&#x27;on interroge, c&#x27;est un JOURNAL D&#x27;ÉVÉNEMENTS immuable dont tout le reste est une projection jetable. Cinq principes SOTA structurels, qu&#x27;un refactor de l&#x27;existant ne pourrait pas atteindre en nettoyant du SQL : (1) Event sourcing — la métrique n&#x27;est jamais « écrite », elle est DÉRIVÉE et rejouable, ce qui donne le replay, le time-travel, l&#x27;audit post-mortem et la régénération à coût nul de toute vue ; un nouveau consommateur rejoue depuis l&#x27;offset zéro et obtient l&#x27;état exact, supprimant la classe entière de bugs « cache TTL périmé / pont fichier désynchronisé ». (2) Push/streaming au lieu de polling — la latence dashboard→fait observé devient celle du réseau, pas celle d&#x27;un intervalle de poll ; zéro charge de scrutation, zéro cache, zéro fichier-pont. (3) Source unique fan-outée par souscription — les N clients reçoivent le MÊME flux, ce qui rend impossible la dérive inter-clients et élimine la recomputation par-client (chaque client matérialise sa vue mais ne recalcule pas la vérité). (4) Enveloppe unique versionnée + self-describing (incarnant GUI-PRO-007 OTLP/JSON, trace_id propagé, zéro regex) — un seul schéma à faire évoluer, compatibilité ascendante portée par schema_version, et la granularité projet/global est une DIMENSION de l&#x27;enveloppe (project_scope), donc native plutôt que reconstruite. (5) Observabilité de l&#x27;observabilité — le bus émet ses propres méta-événements (lag, pertes, fraîcheur de projection), donc la honnêteté exigée par PIL-TE2-006 est elle-même mesurée et alertable au lieu d&#x27;être supposée. La distinction nette avec l&#x27;existant nettoyé : un meilleur SQL reste pull, reste multi-source-de-vérité (chaque table agrégée est une vérité concurrente), et ne se rejoue pas ; l&#x27;idéal supprime la notion même de « table de métriques » au profit d&#x27;un log + projections, ce qui est précisément le saut que GUI-PRO-007 + PIL-TE2-006 appellent sans que l&#x27;existant l&#x27;ait franchi.</div><div class="chips" style="margin-top:2px"><span class="chip">GUI-PRO-007 Télémétrie Structurée Native (OTLP/JSON, zéro parsing regex, propagation trace_id obligatoire)</span><span class="chip">PIL-TE2-006 Honest Observability And Incident Operations (télémétrie véridique, traçabilité post-mortem, reconcile)</span><span class="chip">PIL-AXO-009 surfaces dérivées non-canoniques reconstructibles 100% depuis la source, fire-and-forget</span><span class="chip">Event sourcing : journal append-only immuable comme source unique ; tout état dérivé est une projection rejouable (replay / time-travel / audit)</span><span class="chip">Push / streaming temps-réel (gRPC/OTLP stream, WebSocket, broker) — abolition du polling, du cache TTL et des ponts fichiers</span><span class="chip">Fan-out par souscription : une source canonique diffusée à l_identique à tous les consommateurs, zéro recomputation par-client, zéro dérive inter-clients</span><span class="chip">Enveloppe unique versionnée self-describing (schema_version + event_type + trace_id + project_scope + timestamp monotone + payload typé)</span><span class="chip">Granularité native par-projet ET globale portée par une dimension d_enveloppe (project_scope), pas reconstruite côté client</span><span class="chip">Garanties de livraison : at-least-once au transport + exactly-once à la projection (idempotence par offset/event_id)</span><span class="chip">CQRS : séparation stricte write-model (event store) / read-models (projections matérialisées spécifiques par consommateur)</span><span class="chip">Observabilité de l_observabilité : méta-événements de lag, débit, pertes et fraîcheur de projection, eux-mêmes streamés et alertables</span><span class="chip">OpenTelemetry comme standard d_interopérabilité de l_émission (sémantique de spans/metrics/logs unifiée, trace context W3C)</span></div><h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Aujourd&#x27;hui la vue canonique ist.project_telemetry EXISTE (db/ddl/03_ist_schema.sql:329) mais AUCUN consommateur ne la lit. Le dashboard a un compositeur unique brain-side (compose_dashboard_state_v1, dashboard_state.rs) qui assemble dashboard_state_v1 à partir de TROIS sources hétérogènes : (1) le composite PG dashboard_state_full(3) qui recompute son PROPRE rollup ad-hoc (dashboard_per_project_counts : UNION de ist.symbol/chunk/edge/chunkembedding, PAS la vue) et ne peut PAS ventiler les fichiers par projet ; (2) cached_fs_counters() — un walk filesystem GLOBAL (~284k fichiers) sur AXON_WATCH_DIR, non ventilé par projet, TTL 60s ; (3) des métriques de flux RAM (rates/workers/queues) plus le pont FICHIER runtime-heartbeat.json lu via split_peer_runtime_info. Le dashboard est bien alimenté par un seul événement (bon), mais les clients MCP divergent : embedding_status (tools_system.rs:303) refait ses propres requêtes ad-hoc sur ist.Chunk/ChunkEmbedding/Symbol/IndexedFile/Edge + appelle le même cached_fs_counters() global ; diagnose_indexing (tools_governance.rs:47/328) refait encore d&#x27;autres requêtes ad-hoc sur ist.IndexedFile/Chunk ; status/project_status passent par un chemin runtime séparé. Résultat : multi-source, multi-pont, scope-honesty cassée (disk/eligible GLOBAL mélangés avec symbols/chunks AXO-scoped dans un même payload embedding_status), et les 3 surfaces ne se rafraîchissent pas automatiquement (REQ-309 planned).</div>
     <div class="diagram"><pre class="mermaid">flowchart TD
   PTV[ist.project_telemetry vue canonique EXISTE mais NON LUE]:::gap
   subgraph PGSP[Composite PG ad-hoc]

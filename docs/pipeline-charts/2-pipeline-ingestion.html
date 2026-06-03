@@ -36,38 +36,136 @@ tr:hover td{background:#f6f8fa}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Pipeline d&#x27;ingestion complet — fichier → graphe + FTS + vecteurs (IDÉAL vs ACTUEL)</h1>
-<p class="sub">DOC-2 · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal (tel qu'il devrait être)</h2><div class="summary">Ancré sur CPT-AXO-054 (topologie session-19) + PIL-AXO-007 (graph-first). Deux pipelines indépendants dans l&#x27;indexer. Pipeline A (graphe, CPU) : A1 read+hash (gate IndexedFile delta) -&gt; A2 tree-sitter single-parse -&gt; A3 UPSERT atomique Symbol/Edge + persiste le contenu complet des Chunk (substrat FTS+vecteur). Pipeline B (vectorisation, GPU) : B1 chunk prep -&gt; B2 embed BGE-Large 1024d -&gt; B3 UPSERT ChunkEmbedding (HNSW). A3 ne bloque jamais B : try_send sur mpsc bounded(10k), best-effort, plus cold-start poll DB (chunks sans embedding). La 3e sortie FTS est dérivée du contenu Chunk : trigger d&#x27;enqueue -&gt; pgmq.tsv_pending -&gt; pool tsv_worker out-of-band -&gt; UPDATE content_tsv via axon.compute_chunk_tsv (REQ-AXO-901624 P4, hors chemin critique d&#x27;A3). North-star : 150+ chunks/sec, FK chain project-&gt;file-&gt;chunk-&gt;embedding NOT NULL, FTS coverage 100%, embedding coverage ~100%.</div>
-    <div class="diagram"><pre class="mermaid">flowchart TD
-  W[watcher notify 750ms] --&gt; A1[A1 read plus hash IndexedFile gate]
-  A1 --&gt;|bounded mpsc| A2[A2 tree-sitter single parse]
-  A2 --&gt;|bounded mpsc| A3[A3 UPSERT atomique]
-  A3 --&gt; SYM[(ist.Symbol plus ist.Edge graphe)]
-  A3 --&gt; CH[(ist.Chunk contenu complet)]
-  A3 -.try_send bounded 10k.-&gt; B1[B1 chunk prep]
-  A3 -.trigger enqueue.-&gt; Q[(pgmq.tsv_pending)]
-  Q --&gt; TSV[tsv_worker pool out-of-band]
-  TSV --&gt; FTS[(content_tsv GIN axon.compute_chunk_tsv)]
-  CH -.cold-start poll DB.-&gt; B1
-  B1 --&gt; B2[B2 embed BGE-Large 1024d GPU]
-  B2 --&gt; B3[B3 UPSERT ChunkEmbedding]
-  B3 --&gt; VEC[(ist.ChunkEmbedding HNSW 1024d)]
-  SYM --&gt; RAM[RAM IstGraphView CSR plus public.edge fallback]</pre></div>
-    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TD
-  W[watcher notify 750ms] --&gt; A1[A1 read plus hash IndexedFile gate]
-  A1 --&gt;|bounded mpsc| A2[A2 tree-sitter single parse]
-  A2 --&gt;|bounded mpsc| A3[A3 UPSERT atomique]
-  A3 --&gt; SYM[(ist.Symbol plus ist.Edge graphe)]
-  A3 --&gt; CH[(ist.Chunk contenu complet)]
-  A3 -.try_send bounded 10k.-&gt; B1[B1 chunk prep]
-  A3 -.trigger enqueue.-&gt; Q[(pgmq.tsv_pending)]
-  Q --&gt; TSV[tsv_worker pool out-of-band]
-  TSV --&gt; FTS[(content_tsv GIN axon.compute_chunk_tsv)]
-  CH -.cold-start poll DB.-&gt; B1
-  B1 --&gt; B2[B2 embed BGE-Large 1024d GPU]
-  B2 --&gt; B3[B3 UPSERT ChunkEmbedding]
-  B3 --&gt; VEC[(ist.ChunkEmbedding HNSW 1024d)]
-  SYM --&gt; RAM[RAM IstGraphView CSR plus public.edge fallback]</pre></details>
-<h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Le squelette IDÉAL est en place et la topologie A1-A2-A3 / B1-B2-B3 + tsv_worker out-of-band est codée dans src/axon-core/src/pipeline_v2/. Sortie graphe (a) : SAINE — 40499 Symbol, 104569 Edge, 14438 IndexedFile, 27 projets, chaîne FK project-&gt;indexedfile-&gt;chunk-&gt;embedding NOT NULL complète, 0 orphelin (REQ-AXO-901860 delivered). Sortie vecteurs (c) : QUASI-SAINE — 41131 ChunkEmbedding BGE-Large 1024d, index HNSW présent, mais 6370 chunks pending (couverture 86.6%). Sortie FTS (b) : CASSÉE — la colonne content_tsv et l&#x27;index GIN existent mais sont 100% NULL (0/47499 peuplés). Le trigger trg_chunk_enqueue_tsv enfile bien dans pgmq.tsv_pending (backlog 1156504 messages, 1158533 envoyés au total) mais le pool tsv_worker ne draine pas : il n&#x27;est spawné qu&#x27;au boot de l&#x27;orchestrator/brain et le brain est actuellement down (port 44129 unavailable) — FTS donc inexploitable. Reste aussi le gap scanner REQ-AXO-901831 (9479 fichiers éligibles non enrôlés) et le plafond GPU ~105 ch/s vs cible 150.</div>
+<p class="sub">DOC-2 · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2><div class="summary">Le nord-vrai de l&#x27;ingestion est un substrat de matérialisation incrémentale piloté par le contenu, où chaque artefact (graphe, FTS, vecteur) est une projection déterministe et pure d&#x27;un hash de contenu — jamais d&#x27;un fichier ni d&#x27;un chemin. Un fichier qui change émet un évènement immuable dans un log ordonné et durable (Merkle DAG par fichier + log d&#x27;évènements à la Kafka) ; tout le reste est un consommateur de ce log avec sémantique exactly-once via clés idempotentes content-addressed. Le parse est unique et canonique : un seul passage produit un AST/CST typé qui devient la SOURCE de TROIS dérivations parallèles (arêtes de graphe, segments FTS, embeddings GPU) — on ne relit jamais l&#x27;octet source après le parse. Le débit n&#x27;est borné que par la saturation du seul étage rare (le GPU) ; tous les étages CPU sont des pools élastiques auto-dimensionnés au matériel sous backpressure crédit-based bornée, de sorte que le GPU reste à 100% d&#x27;occupation tant qu&#x27;il y a du travail. L&#x27;incrémentalité est exacte au niveau du chunk : grâce au content-addressing, un fichier modifié ne recalcule QUE les chunks dont le hash a changé, et un embedding déjà calculé pour un hash donné n&#x27;est JAMAIS recalculé (cache content-addressed global, dédup cross-fichier et cross-projet native). La durabilité est transactionnelle et fail-loud : aucune perte silencieuse, tout crash se répare par replay idempotent depuis le dernier offset commité, et la convergence du substrat vers l&#x27;état du Merkle root est une propriété vérifiable, pas un espoir. L&#x27;observabilité est intrinsèque : chaque étage expose débit/latence/backpressure/occupation et un contrôleur auto-tune les profondeurs de pool vers le point de saturation GPU.</div>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    subgraph SOURCE[&quot;Source de verite — content-addressed&quot;]
+        FS[&quot;Filesystem / VCS watcher&quot;]
+        MERKLE[&quot;Merkle DAG par fichier&lt;br/&gt;fichier = arbre de hashes de chunks&lt;br/&gt;root hash = identite du fichier&quot;]
+        FS --&gt;|&quot;changement detecte&quot;| MERKLE
+    end
+
+    MERKLE --&gt;|&quot;diff Merkle : SEULS les sous-arbres changes&quot;| LOG
+
+    subgraph LOG[&quot;Log d&#x27;evenements durable et ordonne (Kafka-like)&quot;]
+        EVT[&quot;Evenements immuables append-only&lt;br/&gt;cle = content_hash&lt;br/&gt;offset = position durable&quot;]
+    end
+
+    EVT --&gt;|&quot;consume @ offset, exactly-once&quot;| DEDUP
+
+    subgraph DEDUP[&quot;Frontiere de deduplication content-addressed&quot;]
+        CACHE[&quot;Cache global hash -&gt; artefact&lt;br/&gt;(graphe + FTS + vecteur)&lt;br/&gt;dedup cross-fichier ET cross-projet&quot;]
+        CACHE --&gt;|&quot;hash deja vu : skip total&quot;| DONE_FAST[&quot;Convergence immediate&lt;br/&gt;(zero recompute)&quot;]
+        CACHE --&gt;|&quot;hash inconnu&quot;| PARSE
+    end
+
+    subgraph PARSE[&quot;PARSE UNIQUE — un seul passage octets -&gt; AST/CST type&quot;]
+        AST[&quot;AST/CST canonique en memoire&lt;br/&gt;source des 3 derivations&quot;]
+    end
+
+    AST --&gt;|&quot;derivation pure 1&quot;| GRAPHGEN
+    AST --&gt;|&quot;derivation pure 2&quot;| FTSGEN
+    AST --&gt;|&quot;derivation pure 3&quot;| CHUNKGEN
+
+    subgraph CPU[&quot;Pools CPU elastiques — auto-dimensionnes au materiel, backpressure credit-based bornee&quot;]
+        GRAPHGEN[&quot;Derivation graphe&lt;br/&gt;noeuds + aretes typees&quot;]
+        FTSGEN[&quot;Derivation FTS&lt;br/&gt;segments tsvector&quot;]
+        CHUNKGEN[&quot;Derivation chunks&lt;br/&gt;fenetres semantiques 512 tok&quot;]
+    end
+
+    CHUNKGEN --&gt;|&quot;file de chunks non-caches&lt;br/&gt;(credit-based, profondeur auto-tunee)&quot;| GPUQ
+
+    subgraph GPU[&quot;SEUL plafond de debit — sature a 100%&quot;]
+        GPUQ[&quot;File d&#x27;embeddings micro-batchee&lt;br/&gt;remplie pour saturer le GPU&quot;]
+        EMBED[&quot;Embedding GPU&lt;br/&gt;BGE-Large 1024d&lt;br/&gt;occupation = 100% tant qu&#x27;il y a du travail&quot;]
+        GPUQ --&gt; EMBED
+    end
+
+    GRAPHGEN --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+    FTSGEN --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+    EMBED --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+
+    subgraph SINK[&quot;Sink transactionnel fail-loud + commit d&#x27;offset&quot;]
+        TXN[&quot;Ecriture atomique des 3 projections&lt;br/&gt;+ avance l&#x27;offset SEULEMENT apres commit durable&quot;]
+        TXN --&gt;|&quot;re-verification au commit&quot;| STORE[&quot;Substrat canonique&lt;br/&gt;graphe + FTS + vecteurs&quot;]
+        TXN -.-&gt;|&quot;crash&quot;| REPLAY[&quot;Replay idempotent&lt;br/&gt;depuis dernier offset commite&lt;br/&gt;(auto-reparation, zero perte)&quot;]
+    end
+
+    REPLAY -.-&gt;|&quot;reconsume&quot;| EVT
+
+    subgraph OBS[&quot;Observabilite intrinseque + auto-tuning&quot;]
+        CTRL[&quot;Controleur : debit/latence/backpressure/occupation par etage&lt;br/&gt;ajuste profondeur des pools CPU vers la saturation GPU&quot;]
+    end
+
+    CPU -.-&gt;|&quot;metriques&quot;| CTRL
+    GPU -.-&gt;|&quot;occupation GPU&quot;| CTRL
+    CTRL -.-&gt;|&quot;redimensionne pools&quot;| CPU
+
+    STORE --&gt;|&quot;convergence verifiable :&lt;br/&gt;substrat == Merkle root ?&quot;| VERIFY[&quot;Invariant de convergence&lt;br/&gt;(propriete prouvee, pas espoir)&quot;]</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TB
+    subgraph SOURCE[&quot;Source de verite — content-addressed&quot;]
+        FS[&quot;Filesystem / VCS watcher&quot;]
+        MERKLE[&quot;Merkle DAG par fichier&lt;br/&gt;fichier = arbre de hashes de chunks&lt;br/&gt;root hash = identite du fichier&quot;]
+        FS --&gt;|&quot;changement detecte&quot;| MERKLE
+    end
+
+    MERKLE --&gt;|&quot;diff Merkle : SEULS les sous-arbres changes&quot;| LOG
+
+    subgraph LOG[&quot;Log d&#x27;evenements durable et ordonne (Kafka-like)&quot;]
+        EVT[&quot;Evenements immuables append-only&lt;br/&gt;cle = content_hash&lt;br/&gt;offset = position durable&quot;]
+    end
+
+    EVT --&gt;|&quot;consume @ offset, exactly-once&quot;| DEDUP
+
+    subgraph DEDUP[&quot;Frontiere de deduplication content-addressed&quot;]
+        CACHE[&quot;Cache global hash -&gt; artefact&lt;br/&gt;(graphe + FTS + vecteur)&lt;br/&gt;dedup cross-fichier ET cross-projet&quot;]
+        CACHE --&gt;|&quot;hash deja vu : skip total&quot;| DONE_FAST[&quot;Convergence immediate&lt;br/&gt;(zero recompute)&quot;]
+        CACHE --&gt;|&quot;hash inconnu&quot;| PARSE
+    end
+
+    subgraph PARSE[&quot;PARSE UNIQUE — un seul passage octets -&gt; AST/CST type&quot;]
+        AST[&quot;AST/CST canonique en memoire&lt;br/&gt;source des 3 derivations&quot;]
+    end
+
+    AST --&gt;|&quot;derivation pure 1&quot;| GRAPHGEN
+    AST --&gt;|&quot;derivation pure 2&quot;| FTSGEN
+    AST --&gt;|&quot;derivation pure 3&quot;| CHUNKGEN
+
+    subgraph CPU[&quot;Pools CPU elastiques — auto-dimensionnes au materiel, backpressure credit-based bornee&quot;]
+        GRAPHGEN[&quot;Derivation graphe&lt;br/&gt;noeuds + aretes typees&quot;]
+        FTSGEN[&quot;Derivation FTS&lt;br/&gt;segments tsvector&quot;]
+        CHUNKGEN[&quot;Derivation chunks&lt;br/&gt;fenetres semantiques 512 tok&quot;]
+    end
+
+    CHUNKGEN --&gt;|&quot;file de chunks non-caches&lt;br/&gt;(credit-based, profondeur auto-tunee)&quot;| GPUQ
+
+    subgraph GPU[&quot;SEUL plafond de debit — sature a 100%&quot;]
+        GPUQ[&quot;File d&#x27;embeddings micro-batchee&lt;br/&gt;remplie pour saturer le GPU&quot;]
+        EMBED[&quot;Embedding GPU&lt;br/&gt;BGE-Large 1024d&lt;br/&gt;occupation = 100% tant qu&#x27;il y a du travail&quot;]
+        GPUQ --&gt; EMBED
+    end
+
+    GRAPHGEN --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+    FTSGEN --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+    EMBED --&gt;|&quot;upsert idempotent&lt;br/&gt;cle = content_hash&quot;| SINK
+
+    subgraph SINK[&quot;Sink transactionnel fail-loud + commit d&#x27;offset&quot;]
+        TXN[&quot;Ecriture atomique des 3 projections&lt;br/&gt;+ avance l&#x27;offset SEULEMENT apres commit durable&quot;]
+        TXN --&gt;|&quot;re-verification au commit&quot;| STORE[&quot;Substrat canonique&lt;br/&gt;graphe + FTS + vecteurs&quot;]
+        TXN -.-&gt;|&quot;crash&quot;| REPLAY[&quot;Replay idempotent&lt;br/&gt;depuis dernier offset commite&lt;br/&gt;(auto-reparation, zero perte)&quot;]
+    end
+
+    REPLAY -.-&gt;|&quot;reconsume&quot;| EVT
+
+    subgraph OBS[&quot;Observabilite intrinseque + auto-tuning&quot;]
+        CTRL[&quot;Controleur : debit/latence/backpressure/occupation par etage&lt;br/&gt;ajuste profondeur des pools CPU vers la saturation GPU&quot;]
+    end
+
+    CPU -.-&gt;|&quot;metriques&quot;| CTRL
+    GPU -.-&gt;|&quot;occupation GPU&quot;| CTRL
+    CTRL -.-&gt;|&quot;redimensionne pools&quot;| CPU
+
+    STORE --&gt;|&quot;convergence verifiable :&lt;br/&gt;substrat == Merkle root ?&quot;| VERIFY[&quot;Invariant de convergence&lt;br/&gt;(propriete prouvee, pas espoir)&quot;]</pre></details>
+<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c'est l'idéal (pas un refactor) :</strong> Ce design n&#x27;est PAS un refactor de la pipeline v2 existante (qui reste un file-watcher + 6 étages mpsc + UPSERT par chemin, avec recompute par fichier entier). Il part d&#x27;une feuille blanche autour d&#x27;un principe unique : le content-addressing rend l&#x27;identité indépendante du fichier et du chemin, ce qui transforme TOUS les autres problèmes. (1) Dédup et incrémentalité deviennent gratuites et exactes au chunk : un hash déjà embeddé n&#x27;est jamais recalculé, peu importe le fichier ou le projet d&#x27;origine — impossible avec un upsert keyé par path. (2) L&#x27;idempotence exactly-once n&#x27;est plus un effort sur l&#x27;UPSERT mais une propriété du système : la clé d&#x27;écriture EST le hash, donc tout replay converge vers le même état. (3) Le Merkle DAG par fichier rend le diff incrémental exact (seuls les sous-arbres changés émettent un évènement), au lieu de re-parser et re-comparer le fichier entier. (4) Le log d&#x27;évènements durable et ordonné (sémantique Kafka/Flink) découple production et consommation : la durabilité, l&#x27;auto-réparation par replay-depuis-offset, et le commit transactionnel d&#x27;offset éliminent toute perte silencieuse — fail-loud par construction. (5) Le parse unique alimentant TROIS dérivations pures est le seul invariant que l&#x27;existant partage déjà, mais ici il est radicalisé : les dérivations sont des fonctions pures du hash, donc cachables et vérifiables. (6) La saturation GPU comme seul plafond n&#x27;est pas un slogan : la backpressure crédit-based bornée par étage + le contrôleur d&#x27;auto-tuning qui dimensionne les pools CPU vers l&#x27;occupation GPU est l&#x27;architecture concrète qui maintient le GPU à 100%, avec dégradation gracieuse (le log absorbe les pics, les étages CPU scalent, seul le GPU plafonne). Un architecte SOTA reconnaît ici le pattern materialized-view incrémentale content-addressed (Bazel/Nix pour le cache, Kafka/Flink pour le log + exactly-once, Merkle/Git pour l&#x27;identité) appliqué à l&#x27;ingestion de code — c&#x27;est la cible, pas l&#x27;existant nettoyé.</div><div class="chips" style="margin-top:2px"><span class="chip">Content-addressing (Merkle DAG par fichier) — identite = hash du contenu, indépendante du chemin ; dédup et incrémentalité exactes au niveau chunk, cross-fichier et cross-projet (intention PIL-AXO-9002 content_hash, radicalisée)</span><span class="chip">Exactly-once / idempotent-replay — la clé d&#x27;écriture EST le hash ; tout replay converge ; convergence vers Merkle root = invariant vérifiable (au-delà du simple UPSERT idempotent de REQ-AXO-289)</span><span class="chip">Log d&#x27;évènements durable et ordonné (Kafka/Flink) — découplage producteur/consommateur, commit d&#x27;offset transactionnel, auto-réparation par replay-depuis-offset, zéro perte silencieuse (fail-loud)</span><span class="chip">Single-parse → trois dérivations pures (graphe + FTS + vecteurs) — jamais re-lire l&#x27;octet source ; dérivations = fonctions pures du hash donc cachables (intention CPT-AXO-054, généralisée)</span><span class="chip">Cache content-addressed global (Bazel/Nix-style) — un embedding calculé pour un hash n&#x27;est JAMAIS recalculé ; skip total sur hash déjà vu</span><span class="chip">Backpressure crédit-based bornée par étage + pools CPU élastiques auto-dimensionnés au matériel — la file GPU reste pleine, les étages CPU scalent (PIL-AXO-008 indexer, élevé au scale-out)</span><span class="chip">Saturation GPU comme SEUL plafond de débit + dégradation gracieuse — le log absorbe les pics, contrôleur auto-tune les profondeurs de pool vers l&#x27;occupation GPU 100%</span><span class="chip">Observabilité intrinsèque + auto-tuning par étage (débit/latence/backpressure/occupation) — feedback fermé contrôleur→pools (PIL-AXO-001 telemetry-backed snapshot, étendu au contrôle)</span><span class="chip">Écriture transactionnelle fail-loud + re-vérification au commit — aucun fantôme atteint le substrat ; les 3 projections committées atomiquement (PIL-AXO-9002 re-vérification PG au fetch, déplacée à l&#x27;écriture)</span></div><h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Le squelette IDÉAL est en place et la topologie A1-A2-A3 / B1-B2-B3 + tsv_worker out-of-band est codée dans src/axon-core/src/pipeline_v2/. Sortie graphe (a) : SAINE — 40499 Symbol, 104569 Edge, 14438 IndexedFile, 27 projets, chaîne FK project-&gt;indexedfile-&gt;chunk-&gt;embedding NOT NULL complète, 0 orphelin (REQ-AXO-901860 delivered). Sortie vecteurs (c) : QUASI-SAINE — 41131 ChunkEmbedding BGE-Large 1024d, index HNSW présent, mais 6370 chunks pending (couverture 86.6%). Sortie FTS (b) : CASSÉE — la colonne content_tsv et l&#x27;index GIN existent mais sont 100% NULL (0/47499 peuplés). Le trigger trg_chunk_enqueue_tsv enfile bien dans pgmq.tsv_pending (backlog 1156504 messages, 1158533 envoyés au total) mais le pool tsv_worker ne draine pas : il n&#x27;est spawné qu&#x27;au boot de l&#x27;orchestrator/brain et le brain est actuellement down (port 44129 unavailable) — FTS donc inexploitable. Reste aussi le gap scanner REQ-AXO-901831 (9479 fichiers éligibles non enrôlés) et le plafond GPU ~105 ch/s vs cible 150.</div>
     <div class="diagram"><pre class="mermaid">flowchart TD
   W[watcher] --&gt; A1[A1 read plus hash]
   A1 --&gt; A2[A2 tree-sitter parse]

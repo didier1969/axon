@@ -36,46 +36,138 @@ tr:hover td{background:#f6f8fa}
 .foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 </style></head><body><div class="wrap">
 <h1>Environnement de travail Axon — macro → meso → micro (LIVE + DEV)</h1>
-<p class="sub">DOC-3-ENV · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal (tel qu'il devrait être)</h2><div class="summary">Axon porte deux identités simultanées (PIL-AXO-9003) : Axon-produit (plateforme commerciale + méthodologie cross-tenant namespace PRO, vendable) et Axon-projet (codebase AXO, tenant zéro dogfood). Le produit se livre en deux sous-produits binaires activables isolément (PIL-AXO-008) : Brain (axon-brain, surface MCP HTTP, owns soll.*) et Indexer (axon-indexer, IST writer, owns public.*), co-supervisés par axonctl en mode BrainAndIndexer mais déployables séparément. Trois surfaces de visualisation dérivées non-canoniques (PIL-AXO-009) : Dashboard Elixir/Phoenix, autodoc SOLL web, projection Memgraph. Le stockage est unifié deux-étages (PIL-AXO-9002) : PG OLTP canonique (soll.* + public.*) + pgvector HNSW + tsvector FTS + miroirs RAM read-only (SOLL petgraph toujours, IST CSR optionnel). Deux instances du même produit cohabitent (PIL-AXO-004) : live = vérité stable, dev = bac à sable resettable, topologie strictement isolée (ports/sockets/pidfiles/DB distincts) avec priorité asymétrique sous contention (live &gt; dev).</div>
-    <div class="diagram"><pre class="mermaid">flowchart TD
-  VIS[Axon Two-Sided Identity PIL-9003]
-  VIS --&gt; PROD[Axon-produit plateforme commerciale]
-  VIS --&gt; PROJ[Axon-projet codebase AXO tenant zero dogfood]
-  PROD --&gt; METH[Methodologie cross-tenant namespace PRO]
-  PROD --&gt; SUB[Dual sous-produit PIL-008]
-  SUB --&gt; BRAIN[Brain axon-brain MCP HTTP owns soll]
-  SUB --&gt; INDEX[Indexer axon-indexer IST writer owns public]
-  BRAIN --&gt; SUPER[axonctl + process-compose supervisor]
-  INDEX --&gt; SUPER
-  SUPER --&gt; STORE[Stockage PIL-9002 PG OLTP unifie]
-  STORE --&gt; PGV[pgvector HNSW 1024d]
-  STORE --&gt; FTS[tsvector FTS]
-  STORE --&gt; RAMS[RAM SOLL petgraph + IST CSR]
-  PROD --&gt; VIZ[Surfaces visu non-canoniques PIL-009]
-  VIZ --&gt; DASH[Dashboard Elixir Phoenix]
-  VIZ --&gt; AUTODOC[Autodoc SOLL web]
-  VIZ --&gt; MEM[Memgraph projection]
-  SUB --&gt; DUAL[Deux instances PIL-004 live + dev isolees]</pre></div>
-    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TD
-  VIS[Axon Two-Sided Identity PIL-9003]
-  VIS --&gt; PROD[Axon-produit plateforme commerciale]
-  VIS --&gt; PROJ[Axon-projet codebase AXO tenant zero dogfood]
-  PROD --&gt; METH[Methodologie cross-tenant namespace PRO]
-  PROD --&gt; SUB[Dual sous-produit PIL-008]
-  SUB --&gt; BRAIN[Brain axon-brain MCP HTTP owns soll]
-  SUB --&gt; INDEX[Indexer axon-indexer IST writer owns public]
-  BRAIN --&gt; SUPER[axonctl + process-compose supervisor]
-  INDEX --&gt; SUPER
-  SUPER --&gt; STORE[Stockage PIL-9002 PG OLTP unifie]
-  STORE --&gt; PGV[pgvector HNSW 1024d]
-  STORE --&gt; FTS[tsvector FTS]
-  STORE --&gt; RAMS[RAM SOLL petgraph + IST CSR]
-  PROD --&gt; VIZ[Surfaces visu non-canoniques PIL-009]
-  VIZ --&gt; DASH[Dashboard Elixir Phoenix]
-  VIZ --&gt; AUTODOC[Autodoc SOLL web]
-  VIZ --&gt; MEM[Memgraph projection]
-  SUB --&gt; DUAL[Deux instances PIL-004 live + dev isolees]</pre></details>
-<h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Réalité runtime observée 2026-06-03 : un seul postmaster PostgreSQL 17.9 (pid 4923, port 44144) sert DEUX bases distinctes axon_live et axon_dev (plus 6 axon_test_*), isolation au niveau base de données pas au niveau cluster. Deux process-compose tournent : live (-p 8080, pid 27579) lancé avec axon-brain+axon-indexer+dashboard et dev (-p 8081, pid 25240) lancé avec axon-brain seul. MAIS dans les faits seuls les deux brains tournent : live brain (pid 27599, bin/axon-brain, port 44129) et dev brain (pid 26087, .axon/cargo-target/release/axon-brain, port 44139). Aucun indexer, aucun dashboard (ports 44127/44130/44137/44149 morts HTTP 000) ne tourne — live et dev sont de facto en brain_only. Anomalie : live brain et dev brain partagent le MÊME binaire (md5 4c970ca8…) — dev pointe sur le release promu, pas un debug. Le live brain est dégradé (HTTP 404 sur /, /readyz vide, MCP status = freshness stale + trust degraded, blocker indexed_projections_not_fresh) tandis que le dev brain est sain ({state:ready}). Divergence de schéma IST live↔dev : axon_live stocke l_IST dans public.* (29047 symbols) alors qu_axon_dev le stocke dans ist.* (82940 symbols), public.symbol n_existe pas en dev.</div>
+<p class="sub">DOC-3-ENV · Axon · idéal vs actuel vs delta · session 71</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2><div class="summary">Le nord-vrai de l&#x27;environnement Axon est une plateforme de connaissance structurelle native-cloud, multi-tenant et multi-hôtes, où chaque environnement (live, dev, éphémère-PR, edge-client) est une cible de déploiement déclarée en IaC et recréable bit-pour-bit à la demande, jamais un état muté à la main. Le control-plane (placement, politique de ressources, lignée de release, identité de tenant, santé plateforme) est strictement séparé du data-plane (indexation tree-sitter, embeddings GPU, requêtes IST/SOLL) — le premier ne bloque jamais sur le second, et le second scale-out horizontalement sur un pool de workers hétérogènes (CPU graph, GPU vector) sans toucher au control-plane. Les deux sous-produits Brain et Indexer sont des artefacts OCI/Nix indépendants, à empreinte SHA-256 identique partout (air-gap), placés et répliqués par un orchestrateur piloté par politique qui arbitre live&gt;dev sous contention et garantit l&#x27;isolation par tenant via des frontières de calcul, de réseau et de données. La promotion est zéro-downtime, artefact-driven, et chaque release porte une lignée qualifiée vérifiée contre l&#x27;identité du runtime réellement en cours. Toute la topologie est self-describing : un agent ou un opérateur interroge en UN appel l&#x27;état complet de la plateforme — quels tenants, quels environnements, quels workers, quelle santé, quelle lignée — comme une carte vivante plutôt qu&#x27;une collection de pidfiles et de ports. L&#x27;environnement s&#x27;observe lui-même (santé de la plateforme, pas seulement du pipeline) et toute dérive entre l&#x27;IaC déclaré et le runtime observé est une anomalie détectée, jamais un mystère opérationnel.</div>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    subgraph SOURCE[&quot;Déclaration GitOps - source de verite&quot;]
+        IAC[&quot;IaC declarative\nNix flakes + manifests tenant/env\nversionnee, hash-pinned, air-gap&quot;]
+        POLICY[&quot;Policy-as-code\nplacement, ressources live&gt;dev,\nisolation tenant, lignee release&quot;]
+    end
+
+    subgraph CP[&quot;CONTROL PLANE - async, non bloquant, faible latence&quot;]
+        REC[&quot;Reconciler\ndesired-state vs observed-state\nenvironnements ephemeres a la demande&quot;]
+        SCHED[&quot;Scheduler pilote par politique\nplacement multi-hotes, arbitrage contention&quot;]
+        REL[&quot;Release lineage manager\nartefact-driven, generation-id, zero-downtime&quot;]
+        TEN[&quot;Tenant identity registry\nfrontieres calcul/reseau/donnees&quot;]
+        INTRO[&quot;Self-describing topology API\nUN appel = carte vivante complete&quot;]
+    end
+
+    subgraph DP[&quot;DATA PLANE - scale-out horizontal, workers heterogenes&quot;]
+        subgraph H1[&quot;Hote A&quot;]
+            BR1[&quot;Brain MCP\nartefact OCI/Nix SHA-256&quot;]
+            IDXG1[&quot;Indexer-Graph\nCPU tree-sitter&quot;]
+        end
+        subgraph H2[&quot;Hote B&quot;]
+            IDXV1[&quot;Indexer-Vector\nGPU embed BGE 1024d&quot;]
+            IDXV2[&quot;Indexer-Vector\nGPU pool scale-out&quot;]
+        end
+        subgraph EDGE[&quot;Edge / on-prem client&quot;]
+            BREDGE[&quot;Brain edge\nco-localise tenant&quot;]
+        end
+    end
+
+    subgraph STORE[&quot;Data plane - stockage canonique par tenant&quot;]
+        PG[(&quot;PG17 + pgvector + FTS\nIST + SOLL, isole par tenant&quot;)]
+        RAM[(&quot;RAM graph view\nCSR snapshot IST/SOLL&quot;)]
+    end
+
+    subgraph OBS[&quot;Observabilite plateforme&quot;]
+        HEALTH[&quot;Sante plateforme elle-meme\nworkers, lignee, contention, drift&quot;]
+        DRIFT[&quot;Drift detector\nIaC declare vs runtime observe = anomalie&quot;]
+    end
+
+    IAC --&gt; REC
+    POLICY --&gt; SCHED
+    POLICY --&gt; TEN
+    REC --&gt; SCHED
+    SCHED --&gt;|place artefacts| H1
+    SCHED --&gt;|place artefacts| H2
+    SCHED --&gt;|place artefacts| EDGE
+    REL --&gt;|promotion qualifiee zero-downtime| BR1
+    REL --&gt;|promotion qualifiee zero-downtime| BREDGE
+    TEN --&gt;|isolation| PG
+
+    BR1 --&gt; RAM
+    BR1 --&gt; PG
+    IDXG1 --&gt;|graph FIRST| PG
+    IDXV1 --&gt;|vector best-effort| PG
+    IDXV2 --&gt;|vector best-effort| PG
+    BREDGE --&gt; PG
+
+    H1 --&gt; HEALTH
+    H2 --&gt; HEALTH
+    EDGE --&gt; HEALTH
+    HEALTH --&gt; INTRO
+    REC -.observed-state.-&gt; DRIFT
+    SCHED -.observed-state.-&gt; DRIFT
+    DRIFT --&gt;|reconcilie| REC
+    INTRO --&gt;|UN appel self-describe| AGENT([&quot;LLM / Operateur&quot;])
+    AGENT --&gt;|intent declaratif| IAC</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart TB
+    subgraph SOURCE[&quot;Déclaration GitOps - source de verite&quot;]
+        IAC[&quot;IaC declarative\nNix flakes + manifests tenant/env\nversionnee, hash-pinned, air-gap&quot;]
+        POLICY[&quot;Policy-as-code\nplacement, ressources live&gt;dev,\nisolation tenant, lignee release&quot;]
+    end
+
+    subgraph CP[&quot;CONTROL PLANE - async, non bloquant, faible latence&quot;]
+        REC[&quot;Reconciler\ndesired-state vs observed-state\nenvironnements ephemeres a la demande&quot;]
+        SCHED[&quot;Scheduler pilote par politique\nplacement multi-hotes, arbitrage contention&quot;]
+        REL[&quot;Release lineage manager\nartefact-driven, generation-id, zero-downtime&quot;]
+        TEN[&quot;Tenant identity registry\nfrontieres calcul/reseau/donnees&quot;]
+        INTRO[&quot;Self-describing topology API\nUN appel = carte vivante complete&quot;]
+    end
+
+    subgraph DP[&quot;DATA PLANE - scale-out horizontal, workers heterogenes&quot;]
+        subgraph H1[&quot;Hote A&quot;]
+            BR1[&quot;Brain MCP\nartefact OCI/Nix SHA-256&quot;]
+            IDXG1[&quot;Indexer-Graph\nCPU tree-sitter&quot;]
+        end
+        subgraph H2[&quot;Hote B&quot;]
+            IDXV1[&quot;Indexer-Vector\nGPU embed BGE 1024d&quot;]
+            IDXV2[&quot;Indexer-Vector\nGPU pool scale-out&quot;]
+        end
+        subgraph EDGE[&quot;Edge / on-prem client&quot;]
+            BREDGE[&quot;Brain edge\nco-localise tenant&quot;]
+        end
+    end
+
+    subgraph STORE[&quot;Data plane - stockage canonique par tenant&quot;]
+        PG[(&quot;PG17 + pgvector + FTS\nIST + SOLL, isole par tenant&quot;)]
+        RAM[(&quot;RAM graph view\nCSR snapshot IST/SOLL&quot;)]
+    end
+
+    subgraph OBS[&quot;Observabilite plateforme&quot;]
+        HEALTH[&quot;Sante plateforme elle-meme\nworkers, lignee, contention, drift&quot;]
+        DRIFT[&quot;Drift detector\nIaC declare vs runtime observe = anomalie&quot;]
+    end
+
+    IAC --&gt; REC
+    POLICY --&gt; SCHED
+    POLICY --&gt; TEN
+    REC --&gt; SCHED
+    SCHED --&gt;|place artefacts| H1
+    SCHED --&gt;|place artefacts| H2
+    SCHED --&gt;|place artefacts| EDGE
+    REL --&gt;|promotion qualifiee zero-downtime| BR1
+    REL --&gt;|promotion qualifiee zero-downtime| BREDGE
+    TEN --&gt;|isolation| PG
+
+    BR1 --&gt; RAM
+    BR1 --&gt; PG
+    IDXG1 --&gt;|graph FIRST| PG
+    IDXV1 --&gt;|vector best-effort| PG
+    IDXV2 --&gt;|vector best-effort| PG
+    BREDGE --&gt; PG
+
+    H1 --&gt; HEALTH
+    H2 --&gt; HEALTH
+    EDGE --&gt; HEALTH
+    HEALTH --&gt; INTRO
+    REC -.observed-state.-&gt; DRIFT
+    SCHED -.observed-state.-&gt; DRIFT
+    DRIFT --&gt;|reconcilie| REC
+    INTRO --&gt;|UN appel self-describe| AGENT([&quot;LLM / Operateur&quot;])
+    AGENT --&gt;|intent declaratif| IAC</pre></details>
+<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c'est l'idéal (pas un refactor) :</strong> Ce qui distingue cet idéal d&#x27;un refactor de l&#x27;existant : Axon aujourd&#x27;hui modélise live/dev comme deux jeux de processus sur UN hôte, sélectionnés par `--instance`, coordonnés par des pidfiles, ports, sockets et run-roots distincts (PIL-AXO-004), avec une promotion scriptée single-host (PIL-AXO-005). L&#x27;idéal SOTA inverse la primitive : l&#x27;unité n&#x27;est plus le processus ni le port, c&#x27;est l&#x27;ENVIRONNEMENT DÉCLARÉ (tenant × stage × région), matérialisé par réconciliation desired-vs-observed d&#x27;un control-plane sur un pool de workers multi-hôtes. C&#x27;est le saut conceptuel qui transforme « les ports actuels mieux rangés » en topologie de déploiement world-class. Principes invoqués : (1) GUI-PRO-005 control-plane/data-plane — ici poussé à sa conséquence logique extrême : le control-plane ne fait QUE du placement/politique/lignée non-bloquant et est physiquement séparable du data-plane qui porte tout le calcul lourd (tree-sitter, GPU), ce qui rend le scale-out horizontal possible. (2) PIL-AXO-008 dual sous-produit — l&#x27;idéal réalise le futur que le pilier POSE sans l&#x27;implémenter : Brain et Indexer ne sont plus seulement « activables indépendamment » mais réellement DÉPLOYABLES indépendamment et répliquables sur des hôtes différents (Brain edge co-localisé tenant, pool d&#x27;Indexer-Vector GPU scale-out). (3) PIL-AXO-004 isolation + arbitrage : l&#x27;arbitrage live&gt;dev sous contention devient policy-as-code évaluée par un scheduler, pas un nice-level codé en dur — généralisable à N tenants, pas 2 instances. (4) GUI-PRO-006 builds déterministes hermétiques : chaque sous-produit est un artefact à empreinte SHA-256 identique partout, prérequis non-négociable d&#x27;un placement multi-hôtes fiable (on ne place que des artefacts reproductibles). (5) GUI-PRO-012 IaC/GitOps : les environnements sont ÉPHÉMÈRES et recréables — un environnement-PR se crée et se détruit à la demande, l&#x27;état d&#x27;infra est versionné, la dérive IaC↔runtime est une anomalie détectée et non un mystère. (6) PIL-AXO-005 lignée qualifiée : promotion zéro-downtime artefact-driven avec vérification d&#x27;identité runtime, généralisée multi-environnements. (7) Idée Slice-8 self-introspection de MIL-AXO-027 : la topologie est self-describing — un agent interroge en UN appel la carte vivante complète (tenants, environnements, workers, santé, lignée), ce qui ferme la boucle agent-native : le LLM lit l&#x27;état réel ET émet l&#x27;intent déclaratif qui réconcilie. (8) PIL-AXO-9003 two-sided identity : le multi-tenant est natif — Axon-projet est le tenant-zéro d&#x27;une plateforme conçue dès l&#x27;origine pour N+1 tenants, edge/cloud, pas un mono-déploiement dont on extrairait après-coup le multi-tenant. Un architecte SOTA reconnaît ici le pattern Kubernetes/control-loop + GitOps + supply-chain reproductible appliqué à la connaissance structurelle, et non un superviseur de processus amélioré.</div><div class="chips" style="margin-top:2px"><span class="chip">GUI-PRO-005 — separation control-plane (async, non bloquant) / data-plane (calcul lourd), poussee jusqu&#x27;a la separabilite physique et le scale-out horizontal</span><span class="chip">GUI-PRO-006 — builds deterministes hermetiques, empreinte SHA-256 identique partout, air-gap : prerequis du placement multi-hotes fiable</span><span class="chip">GUI-PRO-012 — IaC/GitOps, environnements ephemeres recreables a la demande, etat d&#x27;infra versionne</span><span class="chip">PIL-AXO-008 — dual sous-produit Brain/Indexer reellement deployables ET repliquables independamment sur hotes distincts (le futur que le pilier pose sans l&#x27;implementer)</span><span class="chip">PIL-AXO-004 — isolation live/dev + arbitrage de ressources sous contention generalise en policy-as-code multi-tenant</span><span class="chip">PIL-AXO-005 — lignee de release qualifiee, promotion zero-downtime artefact-driven, verification d&#x27;identite runtime</span><span class="chip">PIL-AXO-9003 — multi-tenant natif (N+1 tenants, edge/cloud), Axon-projet = tenant-zero</span><span class="chip">MIL-AXO-027 Slice-8 — self-describing topology : carte vivante interrogeable en UN appel par agent/operateur</span><span class="chip">Control-loop / reconciliation desired-vs-observed (pattern Kubernetes) applique a la connaissance structurelle</span><span class="chip">Drift detection IaC-declare vs runtime-observe = anomalie de premiere classe, jamais mystere operationnel</span><span class="chip">Supply-chain reproductible : on ne place que des artefacts a hash verifiable (content-addressing)</span><span class="chip">Scale-out horizontal sur pool de workers heterogenes (CPU graph FIRST, GPU vector best-effort) sans toucher au control-plane</span><span class="chip">Closed-loop agent-native : le LLM lit l&#x27;etat reel (self-describe) ET emet l&#x27;intent declaratif qui reconcilie</span></div><h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Réalité runtime observée 2026-06-03 : un seul postmaster PostgreSQL 17.9 (pid 4923, port 44144) sert DEUX bases distinctes axon_live et axon_dev (plus 6 axon_test_*), isolation au niveau base de données pas au niveau cluster. Deux process-compose tournent : live (-p 8080, pid 27579) lancé avec axon-brain+axon-indexer+dashboard et dev (-p 8081, pid 25240) lancé avec axon-brain seul. MAIS dans les faits seuls les deux brains tournent : live brain (pid 27599, bin/axon-brain, port 44129) et dev brain (pid 26087, .axon/cargo-target/release/axon-brain, port 44139). Aucun indexer, aucun dashboard (ports 44127/44130/44137/44149 morts HTTP 000) ne tourne — live et dev sont de facto en brain_only. Anomalie : live brain et dev brain partagent le MÊME binaire (md5 4c970ca8…) — dev pointe sur le release promu, pas un debug. Le live brain est dégradé (HTTP 404 sur /, /readyz vide, MCP status = freshness stale + trust degraded, blocker indexed_projections_not_fresh) tandis que le dev brain est sain ({state:ready}). Divergence de schéma IST live↔dev : axon_live stocke l_IST dans public.* (29047 symbols) alors qu_axon_dev le stocke dans ist.* (82940 symbols), public.symbol n_existe pas en dev.</div>
     <div class="diagram"><pre class="mermaid">flowchart TD
   subgraph PG[PostgreSQL 17.9 postmaster pid 4923 port 44144]
     DBL[(axon_live 1736 soll + 29047 sym public)]
