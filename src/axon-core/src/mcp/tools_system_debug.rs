@@ -377,7 +377,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     );
     let latest_optimizer_reward_row = snapshot_json(
         "SELECT decision_id, observed_at_ms, throughput_chunks_per_hour, throughput_files_per_hour \
-         FROM axon_runtime.RewardObservationLog \
+         FROM ist.RewardObservationLog \
          ORDER BY observed_at_ms DESC \
          LIMIT 1",
     );

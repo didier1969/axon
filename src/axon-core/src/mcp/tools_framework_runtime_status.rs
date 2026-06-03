@@ -480,7 +480,6 @@ impl McpServer {
 **Runtime profile:** `{}`\n\
 **Instance kind:** `{}`\n\
 **Runtime identity:** `{}`\n\
-**IST projection freshness:** {} ({})\n\
 **Vector backlog:** queued={} inflight={}\n\
 **Utility-first scheduler:** `{}` ({})\n\
 **Drain state:** `{}`\n",
@@ -493,12 +492,6 @@ impl McpServer {
                 "unknown",
             ),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
-            if indexed_projection_fresh { "fresh" } else { "stale" },
-            if indexed_projection_fresh {
-                "reads reflect latest indexed source"
-            } else {
-                "reads may lag latest source; tools remain usable"
-            },
             queued_files,
             inflight_files,
             utility_scheduler.state.as_str(),
@@ -520,40 +513,60 @@ impl McpServer {
         let recovery_reason = recovery_hint
             .get("reason")
             .and_then(|value| value.as_str());
-        evidence.push_str(&format!(
-            "**Trust boundary:** `{}`\n\
-**Next best action:** `{}`{}\n",
-            truth_status,
-            next_best_kind,
-            recovery_command
-                .map(|cmd| format!(" → `{}`", cmd))
-                .unwrap_or_default(),
-        ));
-        if let Some(reason) = recovery_reason {
-            evidence.push_str(&format!("**Recovery:** {}\n", reason));
-        }
-        // REQ-AXO-231 — surface staleness magnitude inline so the LLM
-        // does not need to drill into data.truth_cockpit.staleness on
-        // every status call. Empty / Null staleness is rendered as a
-        // single line so the brief mode stays terse.
-        if let Some(count) = staleness.get("modified_files_since").and_then(Value::as_u64) {
-            if count > 0 {
-                let age = staleness
-                    .get("oldest_modified_age_seconds")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                evidence.push_str(&format!(
-                    "**Staleness magnitude:** {} file(s) modified since last publish ; oldest = {}s\n",
-                    count, age
-                ));
-            }
-        }
-        if !degraded_notes.is_empty() {
+        // REQ-AXO-901871 — usability-first IST reads signal (operator
+        // directive 2026-06-04). The freshness gate is TRUST CALIBRATION,
+        // not availability: a brain serving a snapshot with 0 files changed
+        // since last index is effectively current. Lead with usability and
+        // quantify the real lag (modified_files_since, REQ-AXO-231) so an
+        // LLM uses the structural tools instead of refusing them on a
+        // process-liveness flag (REQ-AXO-087 family: lag misclassified as
+        // unavailability). The recurring failure mode: LLMs read
+        // `stale`/`degraded`/`blocker` and decline query/inspect/impact.
+        let modified_since = staleness
+            .get("modified_files_since")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let oldest_age = staleness
+            .get("oldest_modified_age_seconds")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if indexed_projection_fresh {
+            evidence.push_str(
+                "**IST reads:** live — reflects latest indexed source\n\
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid\n",
+            );
+        } else if modified_since == 0 {
+            evidence.push_str(
+                "**IST reads:** usable — snapshot in sync with source (0 files changed since last index; indexer idle)\n\
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid\n",
+            );
+        } else {
             evidence.push_str(&format!(
-                "**Current blocker:** {}\n",
-                degraded_notes.first().cloned().unwrap_or_default(),
+                "**IST reads:** usable with lag — {n} file(s) changed since last index (oldest {oldest_age}s)\n\
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid; cross-check the {n} changed file(s) before high-stakes mutations\n",
+                n = modified_since,
             ));
         }
+        if !indexed_projection_fresh {
+            if let Some(cmd) = recovery_command {
+                evidence.push_str(&format!("**Optional refresh (live reads):** `{}`\n", cmd));
+            }
+        }
+        // Genuine degradation (NOT the freshness lag, already conveyed above)
+        // still surfaces as a blocker so real problems are never hidden.
+        let real_blocker = degraded_notes
+            .iter()
+            .find(|note| note.as_str() != "indexed_projections_not_fresh");
+        if let Some(blocker) = real_blocker {
+            evidence.push_str(&format!(
+                "**Trust:** `{}`\n**Blocker:** {}\n",
+                truth_status, blocker
+            ));
+            if let Some(reason) = recovery_reason {
+                evidence.push_str(&format!("**Recovery:** {}\n", reason));
+            }
+        }
+        let _ = next_best_kind; // retained in data.truth_cockpit.next_best_action
         if matches!(mode, Some("verbose") | Some("VERBOSE")) {
             evidence.push_str(&format!(
                 "**Public tools:** {}\n",

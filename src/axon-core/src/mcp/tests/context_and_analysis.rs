@@ -2070,48 +2070,57 @@ fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
 
 #[test]
 fn test_axon_architectural_drift() {
+    // REQ-AXO-91516 — architectural_drift reads the RAM IstGraphView via
+    // ist_snapshot::algorithms::layer_violations (prefix-match on NODE ids),
+    // NOT SQL/file-paths. To exercise it we must (a) warm a RAM snapshot whose
+    // node ids start with the layer prefixes, (b) connect them with one upward
+    // CALLS edge (src_layer < tgt_layer), and (c) pass the `project` arg so
+    // project_for_graph is non-empty and the warm-RAM path is taken.
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
+    use std::sync::Arc;
+
     let _guard = env_lock();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
-    }
     let server = create_test_server();
-    server
-        .graph_store
-        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-ui/app.js', 'symbol', 'sym-ui/app.js', 'PRJ', 'ui/app.js', 'hash-ui/app.js')")
-        .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::fetchData', 'fetchData', 'function', false, true, false, 'PRJ')").unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-db/repo.rs', 'symbol', 'sym-db/repo.rs', 'PRJ', 'db/repo.rs', 'hash-db/repo.rs')")
-        .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::executeSQL', 'executeSQL', 'function', false, true, false, 'PRJ')").unwrap();
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('ui/app.js', 'prj::fetchData', 'CONTAINS', 'PRJ', 0)",
-        )
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('db/repo.rs', 'prj::executeSQL', 'CONTAINS', 'PRJ', 0)")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::fetchData', 'prj::executeSQL', 'CALLS', 'PRJ', 0)")
-        .unwrap();
+
+    let nodes = vec![
+        NodeRecord {
+            id: "ui/app.js".into(),
+            project_code: "PRJ".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        },
+        NodeRecord {
+            id: "db/repo.rs".into(),
+            project_code: "PRJ".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        },
+    ];
+    let edges = vec![EdgeTriple {
+        source: "ui/app.js".into(),
+        target: "db/repo.rs".into(),
+        rel: RelationType::Calls,
+    }];
+    crate::ist_snapshot::publish_process_snapshot("PRJ".into(), Arc::new(IstGraph::build(nodes, edges)));
+    std::env::set_var("AXON_IST_RAM_ENABLED", "1");
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "architectural_drift",
-            "arguments": { "source_layer": "ui", "target_layer": "db" }
+            "arguments": { "source_layer": "ui", "target_layer": "db", "project": "PRJ" }
         })),
         id: Some(json!(2)),
     };
 
     let response = server.handle_request(req);
+
+    std::env::remove_var("AXON_IST_RAM_ENABLED");
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+
     let result = response.unwrap().result.expect("Expected result");
     let content = result.get("content").unwrap()[0]
         .get("text")
@@ -2120,16 +2129,10 @@ fn test_axon_architectural_drift() {
         .unwrap();
     println!("AUDIT_ALPHA_CONTENT={content}");
 
-    assert!(
-        content.contains("VIOLATION")
-            || content.contains("Détectée")
-            || content.contains("détectée")
-    );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-    }
+    assert!(content.contains("Architectural drift"), "{content}");
+    let data = result.get("data").unwrap();
+    assert_eq!(data["total_available"].as_u64(), Some(1));
+    assert_eq!(data["surfaces_used"][0].as_str(), Some("graph_ram"));
 }
 
 #[test]

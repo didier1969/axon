@@ -653,11 +653,12 @@ impl McpServer {
         for pillar in restore.pillars {
             let metadata = pillar.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, title, description, metadata)
-                 VALUES ($id, 'Pillar', $title, $description, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, description, metadata)
+                 VALUES ($id, 'Pillar', $project_code, $title, $description, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": pillar.id,
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&pillar.id).unwrap_or_else(|| "AXO".to_string()),
                     "title": pillar.title,
                     "description": pillar.description,
                     "metadata": metadata
@@ -681,11 +682,12 @@ impl McpServer {
                 }
             }
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, title, description, status, metadata)
-                 VALUES ($id, 'Requirement', $title, $description, $status, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ($id, 'Requirement', $project_code, $title, $description, $status, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": req.id,
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&req.id).unwrap_or_else(|| "AXO".to_string()),
                     "title": req.title,
                     "description": req.description,
                     "status": req.status.clone(),
@@ -704,11 +706,12 @@ impl McpServer {
                 .parse()
                 .unwrap_or(serde_json::json!({}));
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, title, description, status, metadata)
-                 VALUES ($id, 'Decision', $title, $description, $status, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ($id, 'Decision', $project_code, $title, $description, $status, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": dec.id,
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&dec.id).unwrap_or_else(|| "AXO".to_string()),
                     "title": dec.title,
                     "description": dec.description,
                     "status": dec.status.clone(),
@@ -723,11 +726,12 @@ impl McpServer {
         for mil in restore.milestones {
             let metadata = mil.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, title, status, metadata)
-                 VALUES ($id, 'Milestone', $title, $status, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, status, metadata)
+                 VALUES ($id, 'Milestone', $project_code, $title, $status, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": mil.id,
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&mil.id).unwrap_or_else(|| "AXO".to_string()),
                     "title": mil.title,
                     "status": mil.status.clone(),
                     "metadata": metadata
@@ -745,11 +749,12 @@ impl McpServer {
                 .parse()
                 .unwrap_or(serde_json::json!({}));
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, status, metadata)
-                 VALUES ($id, 'Validation', $result, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, status, metadata)
+                 VALUES ($id, 'Validation', $project_code, $result, $metadata)
                  ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": val.id,
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&val.id).unwrap_or_else(|| "AXO".to_string()),
                     "result": val.result.clone(),
                     "metadata": meta_out.to_string()
                 }),
@@ -777,7 +782,7 @@ impl McpServer {
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": cpt.id,
-                    "project_code": "AXO".to_string(),
+                    "project_code": super::shared::project_code_from_canonical_entity_id(&cpt.id).unwrap_or_else(|| "AXO".to_string()),
                     "name": cpt.name,
                     "explanation": cpt.explanation,
                     "metadata": meta_out.to_string()

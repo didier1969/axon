@@ -728,10 +728,7 @@ fn status_response_gets_default_rich_operator_guidance() {
     assert!(result["data"]["operator_guidance"]["token_efficiency_hint"]
         .as_str()
         .is_some_and(|text| text.contains("runtime truth")));
-    assert_eq!(
-        result["data"]["next_action"]["tool"].as_str(),
-        Some("status")
-    );
+    assert_ne!(result["data"]["next_action"]["tool"].as_str(), Some("status"));
     assert!(
         result["data"]["operator_guidance"]["alternative_strategies"]
             .as_array()

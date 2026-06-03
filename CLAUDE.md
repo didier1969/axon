@@ -7,8 +7,8 @@
 3. `query("symbol")` — find code symbols
 4. `help(tool=X)` — tool schema + examples
 
-## ⚠️ IST freshness gate
-Before relying on `inspect`/`query`/`impact`, verify `status` reports `freshness: fresh` + `trust: canonical`. If degraded, brain serves a stale snapshot — start indexer-graph alongside. Full contract + recovery commands: **CPT-AXO-029**.
+## IST reads — usable by default (freshness = trust calibration, NOT a gate)
+`query`/`inspect`/`impact`/`why`/`anomalies`/`path` are usable whenever `status` returns — **including when the indexer is idle**. `status` leads with `IST reads: usable` + the real lag `modified_files_since`: **0 = snapshot current**; **N>0 = cross-check those N files before high-stakes mutations**. Start indexer-graph only for continuous live refresh — never decline structural tools on a process-liveness flag. Genuine unavailability surfaces as an explicit `Blocker`. The historical bias: LLMs saw `stale`/`degraded`/`blocker` and fell back to grep (REQ-AXO-901871 / REQ-AXO-087 family). Contract: **CPT-AXO-029**.
 
 ## Build & Test
 ```

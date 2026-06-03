@@ -243,6 +243,18 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     let code = scoped_test_project_code(&server);
     let title = format!("Preview Commit Requirement {code}");
 
+    // Self-seed a canonical Pillar so the plan's requirement create can attach
+    // to it (MIL-AXO-020 requires attach_to+relation_type on every create).
+    // project_code MUST equal the id segment ('{code}') or the BEFORE INSERT
+    // trigger soll_node_id_segment_check rejects the row.
+    let pillar_id = format!("PIL-{code}-001");
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Preview Commit Pillar', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
@@ -258,7 +270,9 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
                         "title": title,
                         "description": "Commit should read back the persisted preview",
                         "priority": "P1",
-                        "status": "current"
+                        "status": "current",
+                        "attach_to": pillar_id,
+                        "relation_type": "BELONGS_TO"
                     }]
                 }
             }
@@ -3659,6 +3673,8 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
 
 #[test]
 fn test_vcr4_soll_continuity_create_export_restore_verify() {
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     // REQ-AXO-91560 — per-test project_code isolation. Restore counts
     // ('Vision: 1', 'Pillars: 1', ...) depend on a fresh per-code
     // namespace because the restore server is a different McpServer that
@@ -3671,91 +3687,18 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vision_id}', 'Vision', '{code}', 'Axon Vision', 'Stable conceptual continuity', '', '{{\"goal\":\"Protect SOLL while evolving IST\"}}')"))
         .unwrap();
 
-    let create_calls = vec![
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "pillar",
-                "data": {
-                    "project_code": code,
-                    "title": "Concept Preservation",
-                    "description": "SOLL must survive runtime churn"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "requirement",
-                "data": {
-                    "project_code": code,
-                    "title": "Reliable Restore",
-                    "description": "Restore from official export without destructive reset",
-                    "priority": "P1"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "concept",
-                "data": {
-                    "project_code": code,
-                    "name": "Merge Restore",
-                    "explanation": "Reconstruct conceptual entities from export",
-                    "rationale": "Avoid losing intent across iterations"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "decision",
-                "data": {
-                    "project_code": code,
-                    "title": "Protect SOLL",
-                    "context": "Agents previously removed conceptual state",
-                    "rationale": "Exports must preserve the conceptual thread",
-                    "status": "accepted"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "milestone",
-                "data": {
-                    "project_code": code,
-                    "title": "Usable Internal Continuity",
-                    "status": "in_progress"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "validation",
-                "data": {
-                    "project_code": code,
-                    "method": "vcr4-e2e",
-                    "result": "passed"
-                }
-            }
-        }),
-    ];
-
-    for (idx, call) in create_calls.into_iter().enumerate() {
+    // Sequential creates: each non-Vision node attaches to a prior node via
+    // the canonical relation. created_id captured from result.data.created_id.
+    // Canonical statuses only (current|planned|delivered|superseded|rejected).
+    let do_create = |entity: &str, data: serde_json::Value, id: i64| -> String {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
-            params: Some(call),
-            id: Some(json!(100 + idx)),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": { "action": "create", "entity": entity, "data": data }
+            })),
+            id: Some(json!(id)),
         };
         let response = source_server.handle_request(req);
         let result = response
@@ -3767,8 +3710,94 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             .unwrap()
             .as_str()
             .unwrap();
-        assert!(content.contains("SOLL entity created"));
-    }
+        assert!(content.contains("SOLL entity created"), "{content}");
+        result["data"]["created_id"]
+            .as_str()
+            .expect("created_id present")
+            .to_string()
+    };
+
+    // Pillar -> seeded Vision (EPITOMIZES)
+    let pillar_id = do_create(
+        "pillar",
+        json!({
+            "project_code": code,
+            "title": "Concept Preservation",
+            "description": "SOLL must survive runtime churn",
+            "attach_to": vision_id,
+            "relation_type": "EPITOMIZES"
+        }),
+        100,
+    );
+
+    // Requirement -> Pillar (BELONGS_TO)
+    let requirement_id = do_create(
+        "requirement",
+        json!({
+            "project_code": code,
+            "title": "Reliable Restore",
+            "description": "Restore from official export without destructive reset",
+            "priority": "P1",
+            "attach_to": pillar_id,
+            "relation_type": "BELONGS_TO"
+        }),
+        101,
+    );
+
+    // Concept -> Requirement (EXPLAINS)
+    let _concept_id = do_create(
+        "concept",
+        json!({
+            "project_code": code,
+            "name": "Merge Restore",
+            "explanation": "Reconstruct conceptual entities from export",
+            "rationale": "Avoid losing intent across iterations",
+            "attach_to": requirement_id,
+            "relation_type": "EXPLAINS"
+        }),
+        102,
+    );
+
+    // Decision -> Requirement (SOLVES), status current
+    let _decision_id = do_create(
+        "decision",
+        json!({
+            "project_code": code,
+            "title": "Protect SOLL",
+            "context": "Agents previously removed conceptual state",
+            "rationale": "Exports must preserve the conceptual thread",
+            "status": "current",
+            "attach_to": requirement_id,
+            "relation_type": "SOLVES"
+        }),
+        103,
+    );
+
+    // Milestone -> Requirement (TARGETS), status current
+    let _milestone_id = do_create(
+        "milestone",
+        json!({
+            "project_code": code,
+            "title": "Usable Internal Continuity",
+            "status": "current",
+            "attach_to": requirement_id,
+            "relation_type": "TARGETS"
+        }),
+        104,
+    );
+
+    // Validation -> Requirement (VERIFIES), result delivered
+    let _validation_id = do_create(
+        "validation",
+        json!({
+            "project_code": code,
+            "method": "vcr4-e2e",
+            "result": "delivered",
+            "attach_to": requirement_id,
+            "relation_type": "VERIFIES"
+        }),
+        105,
+    );
 
     let export_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -4137,13 +4166,16 @@ fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_a
     assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
     let data = response.get("data").expect("expected create data");
     assert_eq!(data["status"].as_str(), Some("input_invalid"));
+    // The non-canonical status "accepted" is rejected by the canonical-status
+    // gate (manager.rs) BEFORE the attach_required gate is reached, so
+    // production returns problem_class="input_invalid" + invalid_field="data.status".
     assert_eq!(
         data["operator_guidance"]["problem_class"].as_str(),
-        Some("attach_required")
+        Some("input_invalid")
     );
     assert_eq!(
         data["parameter_repair"]["invalid_field"].as_str(),
-        Some("data.relation_type")
+        Some("data.status")
     );
 }
 
@@ -5298,7 +5330,7 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'Healthy validation', '', 'passed', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'Healthy validation', '', 'delivered', '{}')")
         .unwrap();
     server
         .graph_store
@@ -5351,77 +5383,23 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
 
 #[test]
 fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let source_server = create_test_server();
     source_server
         .graph_store
         .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-900', 'Vision', 'AXO', 'Axon Vision', 'Stable conceptual continuity', '', '{\"goal\":\"Protect SOLL while evolving IST\"}')")
         .unwrap();
 
-    let create_calls = vec![
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "pillar",
-                "data": {
-                    "project_code": "AXO",
-                    "title": "Concept Preservation",
-                    "description": "SOLL must survive runtime churn",
-                    "metadata": { "owner": "platform" }
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "requirement",
-                "data": {
-                    "project_code": "AXO",
-                    "title": "Reliable Restore",
-                    "description": "Restore from official export without destructive reset",
-                    "priority": "P1",
-                    "metadata": { "risk": "high" }
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "decision",
-                "data": {
-                    "project_code": "AXO",
-                    "title": "Protect SOLL",
-                    "context": "Agents previously removed conceptual state",
-                    "rationale": "Exports must preserve the conceptual thread",
-                    "status": "accepted",
-                    "metadata": { "scope": "restore" }
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "validation",
-                "data": {
-                    "project_code": "AXO",
-                    "method": "vcr4-links",
-                    "result": "passed",
-                    "metadata": { "evidence": "test" }
-                }
-            }
-        }),
-    ];
-
-    let mut created_ids = Vec::new();
-    for (idx, call) in create_calls.into_iter().enumerate() {
+    let do_create = |entity: &str, data: serde_json::Value, id: i64| -> String {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
-            params: Some(call),
-            id: Some(json!(300 + idx)),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": { "action": "create", "entity": entity, "data": data }
+            })),
+            id: Some(json!(id)),
         };
         let response = source_server.handle_request(req);
         let result = response
@@ -5433,76 +5411,71 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             .unwrap()
             .as_str()
             .unwrap();
-        assert!(content.contains("SOLL entity created"));
-        created_ids.push(
-            content
-                .split('`')
-                .nth(1)
-                .expect("Expected generated SOLL id")
-                .to_string(),
-        );
-    }
-
-    let pillar_id = created_ids[0].clone();
-    let requirement_id = created_ids[1].clone();
-    let decision_id = created_ids[2].clone();
-    let validation_id = created_ids[3].clone();
-
-    let link_calls = vec![
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "requirement",
-                "data": {
-                    "source_id": requirement_id.clone(),
-                    "target_id": pillar_id.clone(),
-                    "relation_type": "BELONGS_TO"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "decision",
-                "data": {
-                    "source_id": decision_id.clone(),
-                    "target_id": requirement_id.clone(),
-                    "relation_type": "SOLVES"
-                }
-            }
-        }),
-        json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "validation",
-                "data": {
-                    "source_id": validation_id.clone(),
-                    "target_id": requirement_id.clone(),
-                    "relation_type": "VERIFIES"
-                }
-            }
-        }),
-    ];
-
-    for (idx, call) in link_calls.into_iter().enumerate() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(call),
-            id: Some(json!(400 + idx)),
-        };
-        let response = source_server.handle_request(req);
-        let result = response.unwrap().result.expect("Expected SOLL link result");
-        let content = result.get("content").unwrap()[0]
-            .get("text")
-            .unwrap()
+        assert!(content.contains("SOLL entity created"), "{content}");
+        result["data"]["created_id"]
             .as_str()
-            .unwrap();
-        assert!(content.contains("Link created"));
-    }
+            .expect("created_id present")
+            .to_string()
+    };
+
+    // Pillar -> seeded Vision (EPITOMIZES)
+    let pillar_id = do_create(
+        "pillar",
+        json!({
+            "project_code": "AXO",
+            "title": "Concept Preservation",
+            "description": "SOLL must survive runtime churn",
+            "metadata": { "owner": "platform" },
+            "attach_to": "VIS-AXO-900",
+            "relation_type": "EPITOMIZES"
+        }),
+        300,
+    );
+
+    // Requirement -> Pillar (BELONGS_TO)
+    let requirement_id = do_create(
+        "requirement",
+        json!({
+            "project_code": "AXO",
+            "title": "Reliable Restore",
+            "description": "Restore from official export without destructive reset",
+            "priority": "P1",
+            "metadata": { "risk": "high" },
+            "attach_to": pillar_id,
+            "relation_type": "BELONGS_TO"
+        }),
+        301,
+    );
+
+    // Decision -> Requirement (SOLVES), status current
+    let decision_id = do_create(
+        "decision",
+        json!({
+            "project_code": "AXO",
+            "title": "Protect SOLL",
+            "context": "Agents previously removed conceptual state",
+            "rationale": "Exports must preserve the conceptual thread",
+            "status": "current",
+            "metadata": { "scope": "restore" },
+            "attach_to": requirement_id,
+            "relation_type": "SOLVES"
+        }),
+        302,
+    );
+
+    // Validation -> Requirement (VERIFIES), result delivered
+    let validation_id = do_create(
+        "validation",
+        json!({
+            "project_code": "AXO",
+            "method": "vcr4-links",
+            "result": "delivered",
+            "metadata": { "evidence": "test" },
+            "attach_to": requirement_id,
+            "relation_type": "VERIFIES"
+        }),
+        303,
+    );
 
     let export_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -6709,6 +6682,15 @@ fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
     let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
 
+    // Self-seed canonical AXO parents so the plan's create operations can
+    // attach (MIL-AXO-020). attach_to is NOT logical-key-resolved in the
+    // create path, so each parent must already exist in soll.Node. The new
+    // Requirement attaches to a Pillar (REQ->PIL=BELONGS_TO); the new Decision
+    // attaches to a Requirement (DEC->REQ=SOLVES is the only canonical DEC
+    // attach target — there is no DEC->PIL pair).
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-901', 'Pillar', 'AXO', 'Identity-mapping anchor pillar', '', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-901', 'Requirement', 'AXO', 'Identity-mapping anchor requirement', '', 'current', '{}')").unwrap();
+
     // Create a plan with logical keys and a relation using those keys
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -6721,10 +6703,10 @@ fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
                 "dry_run": false,
                 "plan": {
                     "requirements": [
-                        { "logical_key": "req-1", "title": "Req A", "description": "Desc A" }
+                        { "logical_key": "req-1", "title": "Req A", "description": "Desc A", "attach_to": "PIL-AXO-901", "relation_type": "BELONGS_TO" }
                     ],
                     "decisions": [
-                        { "logical_key": "dec-1", "title": "Dec B", "description": "Desc B" }
+                        { "logical_key": "dec-1", "title": "Dec B", "description": "Desc B", "attach_to": "REQ-AXO-901", "relation_type": "SOLVES" }
                     ]
                 },
                 "relations": [
@@ -6922,7 +6904,9 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
                         "title": "Anchor protocol concept",
                         "description": "Concept created via plan to test logical_key resolution",
                         "status": "current",
-                        "metadata": {}
+                        "metadata": {},
+                        "attach_to": "PIL-AXO-001",
+                        "relation_type": "BELONGS_TO"
                     }]
                 },
                 "relations": [{
@@ -7236,8 +7220,10 @@ fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter
                         "logical_key": "CPT-resolved-cpt-91",
                         "title": "Resolved concept slice 5",
                         "description": "Concept created via plan; its logical_key resolves",
-                        "status": "accepted",
-                        "metadata": {}
+                        "status": "current",
+                        "metadata": {},
+                        "attach_to": "PIL-AXO-091",
+                        "relation_type": "BELONGS_TO"
                     }]
                 },
                 "relations": [

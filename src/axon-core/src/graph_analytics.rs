@@ -378,7 +378,7 @@ impl GraphStore {
                     source_path,
                     sum(call_count) AS total_calls,
                     sum(CASE WHEN source_path != target_path THEN call_count ELSE 0 END) AS foreign_calls,
-                    max_by(target_path, CASE WHEN source_path != target_path THEN call_count ELSE 0 END) AS dominant_foreign_path
+                    (array_agg(target_path ORDER BY (CASE WHEN source_path != target_path THEN call_count ELSE 0 END) DESC, target_path ASC))[1] AS dominant_foreign_path
                 FROM outbound
                 GROUP BY 1, 2
             )

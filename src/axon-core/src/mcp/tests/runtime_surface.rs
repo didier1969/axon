@@ -962,8 +962,8 @@ fn test_status_uses_ist_projection_freshness_label_and_field() {
 
     let evidence = response["content"][0]["text"].as_str().unwrap();
     assert!(
-        evidence.contains("IST projection freshness:"),
-        "human-readable label should name the IST freshness semantic: {evidence}"
+        evidence.contains("IST reads:"),
+        "human-readable label should name the IST reads usability semantic: {evidence}"
     );
     assert!(
         !evidence.contains("Advanced indexed surfaces"),
@@ -1399,17 +1399,18 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
         .result
         .unwrap();
     let text = brief["content"][0]["text"].as_str().unwrap();
+    // REQ-AXO-901871 — the brief surfaces a usability-first IST signal, not a
+    // `stale`/`degraded`/`blocker` alarm. It leads with `IST reads:` (usable /
+    // usable with lag / live) and affirms which structural tools are valid, so
+    // an LLM uses them instead of declining on a process-liveness flag.
     assert!(
-        text.contains("**Trust boundary:**"),
-        "brief text must surface a trust boundary line; got: {text}"
+        text.contains("**IST reads:**"),
+        "brief text must surface the IST reads usability signal; got: {text}"
     );
     assert!(
-        text.contains("**Next best action:**"),
-        "brief text must surface a next best action line; got: {text}"
+        text.contains("**Structural tools"),
+        "brief text must affirm which structural tools are valid; got: {text}"
     );
-    // The line must name an actual tool. status is a safe default fallback;
-    // project_status is the canonical when the runtime is canonical.
-    assert!(text.contains("`start_indexer`") || text.contains("`read_project_truth`") || text.contains("`inspect_runtime_status`"), "next best action must name the recovery action kind; got: {text}");
 }
 
 #[test]
@@ -1733,12 +1734,14 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             .as_str()
             .is_some()
     );
-    assert_eq!(
-        data["runtime_authority"]["runtime_state"]["indexer_feed"]["last_good_payload_at_ms"]
-            .as_u64()
-            .is_some(),
-        true
-    );
+    // REQ-AXO-901859 — with no PG heartbeat seeded, indexer liveness is
+    // fail-loud absent: last_good_payload_at_ms is canonically null. The
+    // contract is that the KEY is always present (u64 when a heartbeat
+    // exists, null when absent), never missing.
+    {
+        let v = &data["runtime_authority"]["runtime_state"]["indexer_feed"]["last_good_payload_at_ms"];
+        assert!(v.is_u64() || v.is_null(), "last_good_payload_at_ms must be u64 or null, got {v:?}");
+    }
     assert!(
         data["runtime_authority"]["runtime_state"]["ist_snapshot"]["state"]
             .as_str()

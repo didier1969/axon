@@ -98,19 +98,6 @@ fn startup_vector_backfill_limit(
     startup_budget.min(graph_ready_depth)
 }
 
-fn remove_path_if_exists(path: &std::path::Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(path)?;
-    } else {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
 // REQ-AXO-901653 slice-5a: `IstCompatibilityAction` enum deleted ;
 // only consumed by the deleted `ensure_runtime_compatibility` helper.
 
@@ -330,112 +317,16 @@ impl GraphStore {
     }
 
     pub fn refresh_reader_snapshot(&self) -> Result<()> {
-        if self.db_path.is_none() {
-            self.sync_reader_epoch_to_commit();
-            self.reader_state
-                .refresh_inflight
-                .store(false, Ordering::Release);
-            return Ok(());
-        }
-
-        if cfg!(test) && !self.reader_only_ist_mode {
-            self.publish_ist_reader_replica()?;
-            self.sync_reader_epoch_to_commit();
-            self.reader_state
-                .refresh_inflight
-                .store(false, Ordering::Release);
-            return Ok(());
-        }
-
-        let Some(db_path) = self.db_path.as_ref() else {
-            unreachable!("db_path checked above")
-        };
-
-        if !db_path.exists() {
-            self.sync_reader_epoch_to_commit();
-            self.reader_state
-                .refresh_inflight
-                .store(false, Ordering::Release);
-            return Ok(());
-        }
-
-        let requested_epoch = self
-            .reader_state
-            .refresh_requested_epoch
-            .load(Ordering::Acquire);
-        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
-        let target_epoch = requested_epoch.max(commit_epoch);
-
-        let c_path = CString::new(db_path.to_string_lossy().to_string())?;
-        let refresh_result = unsafe {
-            let init_fn = self.pool.symbols.init_fn;
-            let close_fn = self.pool.symbols.close_fn;
-
-            if !self.reader_only_ist_mode {
-                self.publish_ist_reader_replica()?;
-            }
-
-            let new_reader = init_fn(c_path.as_ptr(), true);
-            if new_reader.is_null() {
-                Err(anyhow!("Failed to init refreshed reader"))
-            } else {
-                let writer_ctx = *self
-                    .pool
-                    .writer_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                let old_reader = {
-                    let mut reader_guard = self
-                        .pool
-                        .reader_ctx
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    let previous = *reader_guard;
-                    *reader_guard = new_reader;
-                    previous
-                };
-
-                if !old_reader.is_null() && old_reader != writer_ctx {
-                    close_fn(old_reader);
-                }
-                Ok(())
-            }
-        };
-
-        let now_ms = Self::current_epoch_ms();
-        match refresh_result {
-            Ok(()) => {
-                let commit_epoch_after = self.reader_state.commit_epoch.load(Ordering::Acquire);
-                let requested_epoch_after = self
-                    .reader_state
-                    .refresh_requested_epoch
-                    .load(Ordering::Acquire);
-                let desired_epoch = commit_epoch_after
-                    .max(requested_epoch_after)
-                    .max(target_epoch);
-                self.last_reader_refresh_epoch_ms
-                    .store(now_ms, Ordering::Relaxed);
-                self.reader_state
-                    .reader_epoch
-                    .store(desired_epoch, Ordering::Release);
-                self.reader_state
-                    .last_refresh_completed_ms
-                    .store(now_ms, Ordering::Relaxed);
-                let _ = self.bump_refresh_requested_epoch(desired_epoch);
-                self.reader_state
-                    .refresh_inflight
-                    .store(false, Ordering::Release);
-                Ok(())
-            }
-            Err(err) => {
-                self.reader_refresh_failures_total
-                    .fetch_add(1, Ordering::Relaxed);
-                self.reader_state
-                    .refresh_inflight
-                    .store(false, Ordering::Release);
-                Err(err)
-            }
-        }
+        // PG mode (MIL-AXO-015): db_path is always None — reads share the
+        // writer pool under MVCC, so there is no DuckDB-file reader replica to
+        // publish. The legacy split-brain refresh path (publish replica +
+        // re-open reader ctx) was dead (split_brain_mode hardcoded false) and
+        // has been removed (REQ-AXO-901870).
+        self.sync_reader_epoch_to_commit();
+        self.reader_state
+            .refresh_inflight
+            .store(false, Ordering::Release);
+        Ok(())
     }
 
     pub fn reader_snapshot_age_ms(&self) -> u64 {
@@ -686,57 +577,6 @@ impl GraphStore {
             ),
             Some(_) => RuntimeFreshnessContract::fresh(stale_after_ms),
         }
-    }
-
-    fn publish_ist_reader_replica(&self) -> Result<()> {
-        let Some(live_db_path) = self
-            .db_path
-            .as_ref()
-            .and_then(|path| path.parent().map(|parent| parent.join("ist.db")))
-        else {
-            return Ok(());
-        };
-        if !live_db_path.exists() {
-            return Ok(());
-        }
-        let Some(replica_path) = live_db_path
-            .parent()
-            .map(|parent| parent.join("ist-reader.db"))
-        else {
-            return Ok(());
-        };
-        let temp_path = replica_path
-            .parent()
-            .map(|parent| parent.join("ist-reader.publish.tmp.db"))
-            .ok_or_else(|| anyhow!("Failed to derive IST reader temp replica path"))?;
-        let temp_wal_path = temp_path.with_extension("db.wal");
-        let temp_shm_path = temp_path.with_extension("db.shm");
-        let replica_wal_path = replica_path.with_extension("db.wal");
-        let replica_shm_path = replica_path.with_extension("db.shm");
-
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            let writer_guard = self
-                .pool
-                .writer_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if !exec_fn(*writer_guard, CString::new("CHECKPOINT;")?.as_ptr()) {
-                return Err(anyhow!(
-                    "Failed to checkpoint IST before publishing reader replica"
-                ));
-            }
-        }
-
-        let _ = remove_path_if_exists(&temp_path);
-        let _ = remove_path_if_exists(&temp_wal_path);
-        let _ = remove_path_if_exists(&temp_shm_path);
-        std::fs::copy(&live_db_path, &temp_path)?;
-        let _ = remove_path_if_exists(&replica_path);
-        let _ = remove_path_if_exists(&replica_wal_path);
-        let _ = remove_path_if_exists(&replica_shm_path);
-        std::fs::rename(&temp_path, &replica_path)?;
-        Ok(())
     }
 
     pub(crate) fn sync_reader_epoch_to_commit(&self) {
@@ -2023,64 +1863,6 @@ mod graph_bootstrap_tests {
         assert!(
             reader_db.exists(),
             "reader replica should exist without SOLL"
-        );
-    }
-
-    #[test]
-    fn test_indexer_publishes_ist_reader_replica_for_brain_reads() {
-        let temp = tempdir().unwrap();
-        let db_root = temp.path().join("graph_v2");
-        std::fs::create_dir_all(&db_root).unwrap();
-        let db_root_str = db_root.to_string_lossy().to_string();
-
-        let indexer = GraphStore::new(&db_root_str).unwrap();
-        indexer
-            .execute(
-                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
-                 VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
-            )
-            .unwrap();
-        indexer.mark_writer_commit_visible();
-        indexer.refresh_reader_snapshot().unwrap();
-
-        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
-        assert!(reader_db.exists(), "reader replica should exist");
-
-        let brain = GraphStore::new_brain_reader_soll_writer(&db_root_str).unwrap();
-        let raw = brain
-            .query_json_on_reader("SELECT count(*) FROM ist.IndexedFile")
-            .unwrap();
-        assert!(raw.contains("1"), "{raw}");
-        assert!(matches!(
-            brain.reader_snapshot_freshness_contract().state,
-            crate::runtime_truth_contract::RuntimeFreshnessState::Fresh
-        ));
-    }
-
-    #[test]
-    fn test_reader_replica_publish_reuses_path_when_duckdb_temp_dir_exists() {
-        let temp = tempdir().unwrap();
-        let db_root = temp.path().join("graph_v2");
-        std::fs::create_dir_all(&db_root).unwrap();
-        let db_root_str = db_root.to_string_lossy().to_string();
-
-        let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
-        indexer
-            .execute(
-                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
-                 VALUES ('/tmp/demo.txt', 'hash-demo', 1)",
-            )
-            .unwrap();
-        let conflicting_temp_dir = db_root.join("ist-reader.db.tmp");
-        std::fs::create_dir_all(&conflicting_temp_dir).unwrap();
-
-        indexer.refresh_reader_snapshot().unwrap();
-
-        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
-        assert!(reader_db.exists(), "reader replica should exist");
-        assert!(
-            conflicting_temp_dir.is_dir(),
-            "legacy duckdb temp directory should not block replica publication"
         );
     }
 
