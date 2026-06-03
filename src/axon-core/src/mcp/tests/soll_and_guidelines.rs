@@ -2853,11 +2853,11 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_global}', 'trigger_global_scan', 'function', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_server}', '{sym_trigger}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_server}', '{sym_trigger}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_pool}', '{sym_global}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_pool}', '{sym_global}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2900,7 +2900,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym}', 'opaque_worker', 'function', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file}', '{sym}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file}', '{sym}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
@@ -2954,11 +2954,11 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', 'worker_beta', 'function', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a}', '{sym_a}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a}', '{sym_a}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b}', '{sym_b}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b}', '{sym_b}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
@@ -3022,11 +3022,11 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_truth}', 'truth_probe', 'function', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_path_only}', '{sym_path}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_path_only}', '{sym_path}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_truth}', '{sym_truth}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_truth}', '{sym_truth}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
@@ -3092,11 +3092,11 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_audit}', 'audit_section', 'section', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_config}', '{sym_runtime}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_config}', '{sym_runtime}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_doc}', '{sym_audit}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_doc}', '{sym_audit}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
@@ -3156,7 +3156,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_audit}', 'audit_section', 'section', true, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_doc}', '{sym_audit}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_doc}', '{sym_audit}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
@@ -3215,7 +3215,7 @@ fn test_axon_query_underscore_fragment_matches_underscore_symbol() {
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file}', '{sym}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file}', '{sym}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3357,23 +3357,23 @@ fn test_vcr2_impact_before_change_on_public_api() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', '{name_b}', 'function', false, true, false, '{code}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_api}', '{sym_parse}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_api}', '{sym_parse}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a}', '{sym_a}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a}', '{sym_a}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b}', '{sym_b}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b}', '{sym_b}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('{sym_a}', '{sym_parse}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_a}', '{sym_parse}', 'CALLS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('{sym_b}', '{sym_parse}', '{code}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_b}', '{sym_parse}', 'CALLS', '{code}', 0)"))
         .unwrap();
 
     let impact_req = JsonRpcRequest {
@@ -3516,28 +3516,28 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
 
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a_api}', '{sym_a_parse}', '{code_a}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a_api}', '{sym_a_parse}', 'CONTAINS', '{code_a}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a_consumer}', '{sym_a_alpha}', '{code_a}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a_consumer}', '{sym_a_alpha}', 'CONTAINS', '{code_a}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b_api}', '{sym_b_parse}', '{code_b}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b_api}', '{sym_b_parse}', 'CONTAINS', '{code_b}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b_consumer}', '{sym_b_beta}', '{code_b}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b_consumer}', '{sym_b_beta}', 'CONTAINS', '{code_b}', 0)"))
         .unwrap();
 
     server
         .graph_store
-        .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('{sym_a_alpha}', '{sym_a_parse}', '{code_a}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_a_alpha}', '{sym_a_parse}', 'CALLS', '{code_a}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('{sym_b_beta}', '{sym_b_parse}', '{code_b}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_b_beta}', '{sym_b_parse}', 'CALLS', '{code_b}', 0)"))
         .unwrap();
 
     let impact_req = JsonRpcRequest {
@@ -3594,11 +3594,11 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', '{name_parse}', 'function', true, true, false, '{code_b}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a}', '{sym_a}', '{code_a}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a}', '{sym_a}', 'CONTAINS', '{code_a}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b}', '{sym_b}', '{code_b}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b}', '{sym_b}', 'CONTAINS', '{code_b}', 0)"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3649,11 +3649,11 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_b}', '{name_parse}', 'module', false, true, false, '{code_b}')")).unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_a}', '{sym_a}', '{code_a}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_a}', '{sym_a}', 'CONTAINS', '{code_a}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute(&format!("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{file_b}', '{sym_b}', '{code_b}')"))
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file_b}', '{sym_b}', 'CONTAINS', '{code_b}', 0)"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -7875,13 +7875,13 @@ fn test_axon_impact_traces_through_soll_architecture() {
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('payment::process', 'process', 'function', 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'payment::process', 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/payment.rs', 'payment::process', 'CONTAINS', 'BKS', 0)").unwrap();
 
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('api::checkout', 'checkout', 'function', 'BKS')").unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('api::checkout', 'payment::process', 'BKS')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('api::checkout', 'payment::process', 'CALLS', 'BKS', 0)",
         )
         .unwrap();
 

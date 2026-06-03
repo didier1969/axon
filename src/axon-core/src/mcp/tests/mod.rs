@@ -225,7 +225,70 @@ fn ensure_template_once(pg_port: &str) {
             .join("db");
         apply_sql_dir(pg_port, &template, &db_dir.join("ddl"));
         apply_sql_dir(pg_port, &template, &db_dir.join("seed"));
+        apply_test_autoseed_triggers(pg_port, &template);
     });
+}
+
+/// REQ-AXO-91560 / REQ-AXO-901721 — install BEFORE INSERT auto-seed triggers
+/// on the IST tables **in the test template only**, so raw-SQL fixtures that
+/// insert `Symbol` / `Chunk` / `Edge` rows no longer have to hand-seed the FK
+/// parents (`ist.Project`, `ist.IndexedFile`) that production guarantees via
+/// the A3 writer (REQ-AXO-901860 made `project_code` a NOT NULL FK and
+/// `Chunk.file_path` a FK to `IndexedFile`). Production DDL is untouched: the
+/// triggers live solely in `axon_test_template`, and every `createdb -T` clone
+/// inherits them. Idempotent (`CREATE OR REPLACE` + `DROP TRIGGER IF EXISTS`).
+///
+/// This is the root-cause fix for the whole class of `Writer Error: INSERT
+/// INTO ist.Chunk/Symbol ... FK` test failures: the previous partial fix only
+/// seeded `{var}`-templated insert sites, leaving literal-id fixtures
+/// (`'BKS'`, `'src/payment.rs'`, …) broken. A trigger covers every site —
+/// present and future — with zero per-test boilerplate.
+fn apply_test_autoseed_triggers(pg_port: &str, dbname: &str) {
+    const SQL: &str = "\
+CREATE OR REPLACE FUNCTION ist.test_autoseed_project() RETURNS TRIGGER AS $$\n\
+BEGIN\n\
+    INSERT INTO ist.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    RETURN NEW;\n\
+END;\n\
+$$ LANGUAGE plpgsql;\n\
+CREATE OR REPLACE FUNCTION ist.test_autoseed_chunk() RETURNS TRIGGER AS $$\n\
+BEGIN\n\
+    INSERT INTO ist.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    IF NEW.file_path IS NOT NULL THEN\n\
+        INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms)\n\
+        VALUES (NEW.file_path, NEW.project_code, 0) ON CONFLICT (path) DO NOTHING;\n\
+    END IF;\n\
+    RETURN NEW;\n\
+END;\n\
+$$ LANGUAGE plpgsql;\n\
+DROP TRIGGER IF EXISTS trg_test_autoseed_symbol ON ist.Symbol;\n\
+CREATE TRIGGER trg_test_autoseed_symbol BEFORE INSERT ON ist.Symbol\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_project();\n\
+DROP TRIGGER IF EXISTS trg_test_autoseed_edge ON ist.Edge;\n\
+CREATE TRIGGER trg_test_autoseed_edge BEFORE INSERT ON ist.Edge\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_project();\n\
+DROP TRIGGER IF EXISTS trg_test_autoseed_chunk ON ist.Chunk;\n\
+CREATE TRIGGER trg_test_autoseed_chunk BEFORE INSERT ON ist.Chunk\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_chunk();\n";
+
+    let mut child = match std::process::Command::new("psql")
+        .args([
+            "-h", "127.0.0.1", "-p", pg_port, "-U", "axon", "-d", dbname,
+            "-X", "-q", "-v", "ON_ERROR_STOP=1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        let _ = stdin.write_all(SQL.as_bytes());
+    }
+    let _ = child.wait();
 }
 
 /// Apply every `NN_*.sql` file in `dir` (lexical order) to `dbname` via

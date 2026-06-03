@@ -19,7 +19,7 @@ fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'BKS', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/payment.rs', 'bks::checkout', 'CONTAINS', 'BKS', 0)").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-why', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout orchestrates payment capture and settlement', 'hash-why-checkout', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'current', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-WHY', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
@@ -116,7 +116,7 @@ fn test_why_surfaces_missing_governing_intent_without_laundering_inference_into_
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/refund.rs', 'bks::refund', 'BKS')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/refund.rs', 'bks::refund', 'CONTAINS', 'BKS', 0)")
         .unwrap();
     server
         .graph_store
@@ -170,7 +170,7 @@ fn test_why_uses_concept_links_to_recover_governing_requirement() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/dashboard/lib/axon_dashboard/application.ex', 'axon::dashboard_surface', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/dashboard/lib/axon_dashboard/application.ex', 'axon::dashboard_surface', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
@@ -238,7 +238,7 @@ fn test_why_marks_script_artifacts_as_correlated_weak_support() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('scripts/refund_probe.rs', 'bks::refund_probe', 'BKS')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('scripts/refund_probe.rs', 'bks::refund_probe', 'CONTAINS', 'BKS', 0)")
         .unwrap();
     server
         .graph_store
@@ -294,12 +294,12 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{\"goal\":\"Vision first\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'planned', '{\"priority\":\"P1\"}')").unwrap();
@@ -404,12 +404,12 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
@@ -440,7 +440,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
         .unwrap();
 
     let second = server
@@ -493,12 +493,12 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
@@ -529,7 +529,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
         .unwrap();
 
     let second = server
@@ -637,11 +637,11 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.rs', 'axo::iface', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/api.rs', 'axo::iface', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/impl.rs', 'axo::svc', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/impl.rs', 'axo::svc', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
@@ -1150,16 +1150,16 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'planned', '{\"priority\":\"P2\"}')").unwrap();
 
@@ -1315,75 +1315,75 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::source', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/source.rs', 'axo::source', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::local_helper', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/source.rs', 'axo::local_helper', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::entry', 'AXO')",
-        )
-        .unwrap();
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::bridge', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/source.rs', 'axo::entry', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::sink', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/source.rs', 'axo::bridge', 'CONTAINS', 'AXO', 0)",
         )
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/foreign.rs', 'axo::foreign_a', 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/foreign.rs', 'axo::foreign_b', 'AXO')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/interface.rs', 'axo::iface', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/source.rs', 'axo::sink', 'CONTAINS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/interface.rs', 'axo::iface_impl', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/foreign.rs', 'axo::foreign_a', 'CONTAINS', 'AXO', 0)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/foreign.rs', 'axo::foreign_b', 'CONTAINS', 'AXO', 0)")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/interface.rs', 'axo::iface', 'CONTAINS', 'AXO', 0)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/interface.rs', 'axo::iface_impl', 'CONTAINS', 'AXO', 0)")
         .unwrap();
 
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::local_helper', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::source', 'axo::local_helper', 'CALLS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::foreign_a', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::source', 'axo::foreign_a', 'CALLS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::foreign_b', 'AXO')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::source', 'axo::foreign_b', 'CALLS', 'AXO', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::entry', 'axo::bridge', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::entry', 'axo::bridge', 'CALLS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::bridge', 'axo::sink', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::bridge', 'axo::sink', 'CALLS', 'AXO', 0)")
         .unwrap();
 
     let response = server
@@ -2089,16 +2089,16 @@ fn test_axon_architectural_drift() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('ui/app.js', 'prj::fetchData', 'PRJ')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('ui/app.js', 'prj::fetchData', 'CONTAINS', 'PRJ', 0)",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('db/repo.rs', 'prj::executeSQL', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('db/repo.rs', 'prj::executeSQL', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::fetchData', 'prj::executeSQL', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::fetchData', 'prj::executeSQL', 'CALLS', 'PRJ', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2147,7 +2147,7 @@ fn test_axon_query_with_project() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::auth_func', 'auth_func', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('prj/f1.rs', 'prj::auth_func', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj/f1.rs', 'prj::auth_func', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2198,23 +2198,23 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_b', 'consumer_b', 'function', false, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/core/api.rs', 'axon::parse_batch', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_a', 'axon::parse_batch', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axon::consumer_a', 'axon::parse_batch', 'CALLS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_b', 'axon::parse_batch', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axon::consumer_b', 'axon::parse_batch', 'CALLS', 'AXO', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2287,7 +2287,7 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'api::checkout', 'BKS')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/payment.rs', 'api::checkout', 'CONTAINS', 'BKS', 0)")
         .unwrap();
     server
         .graph_store
@@ -2372,15 +2372,15 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/router.rs', 'axon::trigger_scan', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/runtime/router.rs', 'axon::trigger_scan', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/router.rs', 'axon::worker_loop', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/runtime/router.rs', 'axon::worker_loop', 'CONTAINS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::worker_loop', 'axon::trigger_scan', 'AXO')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axon::worker_loop', 'axon::trigger_scan', 'CALLS', 'AXO', 0)")
         .unwrap();
     server
         .graph_store
@@ -3068,11 +3068,11 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/auth.rs', 'prj::authorize_request', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/access.rs', 'prj::check_token_chain', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
@@ -3129,11 +3129,11 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/auth.rs', 'prj::authorize_request', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/access.rs', 'prj::check_token_chain', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access-current', '1', 1001)").unwrap();
@@ -3190,11 +3190,11 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/auth.rs', 'prj::authorize_request', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/access.rs', 'prj::check_token_chain', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
@@ -3246,16 +3246,16 @@ fn test_axon_audit_taint_analysis() {
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.rs', 'prj::user_input', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/api.rs', 'prj::user_input', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::user_input', 'prj::run_task', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::user_input', 'prj::run_task', 'CALLS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::run_task', 'prj::eval', 'PRJ')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::run_task', 'prj::eval', 'CALLS', 'PRJ', 0)",
         )
         .unwrap();
 
@@ -3295,11 +3295,11 @@ fn test_axon_audit_technical_debt() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::unwrap', 'unwrap', 'method', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/danger.rs', 'prj::risky_func', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/danger.rs', 'prj::risky_func', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::risky_func', 'prj::unwrap', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::risky_func', 'prj::unwrap', 'CALLS', 'PRJ', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3339,7 +3339,7 @@ fn test_axon_audit_technical_debt_comments() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/todo.rs', 'prj::todo1', 'PRJ')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/todo.rs', 'prj::todo1', 'CONTAINS', 'PRJ', 0)",
         )
         .unwrap();
 
@@ -3379,7 +3379,7 @@ fn test_axon_audit_secrets_detection() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/config.rs', 'prj::secret1', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/config.rs', 'prj::secret1', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3425,15 +3425,15 @@ fn test_axon_audit_cross_language_taint() {
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.ex', 'prj::elixir_func', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/api.ex', 'prj::elixir_func', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS_NIF (source_id, target_id, project_code) VALUES ('prj::elixir_func', 'prj::rust_nif', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::elixir_func', 'prj::rust_nif', 'CALLS_NIF', 'PRJ', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::rust_nif', 'prj::unsafe_block', 'PRJ')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::rust_nif', 'prj::unsafe_block', 'CALLS', 'PRJ', 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3477,7 +3477,7 @@ fn test_axon_health_god_objects() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/god.rs', 'prj::GodClass', 'PRJ')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/god.rs', 'prj::GodClass', 'CONTAINS', 'PRJ', 0)",
         )
         .unwrap();
 
@@ -3485,7 +3485,7 @@ fn test_axon_health_god_objects() {
         server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::dep{}', 'dep{}', 'function', false, true, false, 'PRJ')", i, i)).unwrap();
         server
             .graph_store
-            .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::dep{}', 'prj::GodClass', 'PRJ')", i))
+            .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::dep{}', 'prj::GodClass', 'CALLS', 'PRJ', 0)", i))
             .unwrap();
     }
 
@@ -3530,16 +3530,16 @@ fn test_axon_audit_respects_project_scope() {
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA::safe_entry', 'PJA')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('apps/pja/lib/input.rs', 'PJA::safe_entry', 'CONTAINS', 'PJA', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pjb/lib/unsafe.rs', 'PJB::beta_entry', 'PJB')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('apps/pjb/lib/unsafe.rs', 'PJB::beta_entry', 'CONTAINS', 'PJB', 0)")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::beta_entry', 'PJB::eval', 'PJB')",
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('PJB::beta_entry', 'PJB::eval', 'CALLS', 'PJB', 0)",
         )
         .unwrap();
 
@@ -3584,11 +3584,11 @@ fn test_axon_health_respects_project_scope() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::GodClass', 'GodClass', 'class', false, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA::covered', 'PJA')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('apps/pja/lib/covered.rs', 'PJA::covered', 'CONTAINS', 'PJA', 0)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pjb/lib/god.rs', 'PJB::GodClass', 'PJB')")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('apps/pjb/lib/god.rs', 'PJB::GodClass', 'CONTAINS', 'PJB', 0)")
         .unwrap();
 
     for i in 0..6 {
@@ -3599,7 +3599,7 @@ fn test_axon_health_respects_project_scope() {
         server
             .graph_store
             .execute(&format!(
-                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::dep{}', 'PJB::GodClass', 'PJB')",
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('PJB::dep{}', 'PJB::GodClass', 'CALLS', 'PJB', 0)",
                 i
             ))
             .unwrap();
@@ -3643,7 +3643,7 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::checkout', 'checkout', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/payment.rs', 'symbol', 'sym-src/payment.rs', 'AXO', 'src/payment.rs', 'hash-src/payment.rs')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'axo::checkout', 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/payment.rs', 'axo::checkout', 'CONTAINS', 'AXO', 0)").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-layered', 'symbol', 'axo::checkout', 'AXO', 'body', 'checkout orchestrates payment capture', 'hash-checkout-layered', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-264-T', 'Requirement', 'AXO', 'Layered envelope', 'Phase A multi-resolution retrieval test fixture', 'current', '{\"priority\":\"P1\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-LAYERED', 'Requirement', 'REQ-AXO-264-T', 'Symbol', 'checkout', 1.0, 0)").unwrap();
@@ -3736,7 +3736,7 @@ fn test_retrieve_context_legacy_shape_unchanged_after_layered_addition() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::cl', 'cl', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/cl.rs', 'symbol', 'sym-src/cl.rs', 'AXO', 'src/cl.rs', 'hash-src/cl.rs')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/cl.rs', 'axo::cl', 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/cl.rs', 'axo::cl', 'CONTAINS', 'AXO', 0)").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -3832,7 +3832,7 @@ fn test_retrieve_context_layered_surfaces_default_budgets() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::small', 'small', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/small.rs', 'symbol', 'sym-src/small.rs', 'AXO', 'src/small.rs', 'hash-src/small.rs')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/small.rs', 'axo::small', 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/small.rs', 'axo::small', 'CONTAINS', 'AXO', 0)").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -3886,7 +3886,7 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
     server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/big.rs', 'symbol', 'sym-src/big.rs', 'AXO', 'src/big.rs', 'hash-src/big.rs')").unwrap();
     for i in 0..30 {
         server.graph_store.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/big.rs', 'axo::big_{i}', 'AXO')"
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/big.rs', 'axo::big_{i}', 'CONTAINS', 'AXO', 0)"
         )).unwrap();
     }
 
