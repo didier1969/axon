@@ -1797,6 +1797,7 @@ def run_runtime_smoke(
     instance: str,
     resource_sample_interval_ms: int,
     gpu_qualified_runtime: bool = False,
+    reuse_runtime: bool = False,
 ) -> dict[str, Any]:
     t0 = time.time()
     resource_sampler: ResourceSampler | None = None
@@ -1804,25 +1805,35 @@ def run_runtime_smoke(
     smoke_budget_s = 180
 
     try:
-        try:
-            stop_proc = shell(["bash", "scripts/stop.sh"], timeout=30)
-            stop_log = completed_output(stop_proc.stdout) + completed_output(stop_proc.stderr)
-        except subprocess.TimeoutExpired as exc:
-            stop_log = completed_output(exc.stdout) + completed_output(exc.stderr)
-            stop_log += f"\n[qualify] stop.sh timeout after {exc.timeout}s\n"
-        (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
-
         start_timed_out = False
-        try:
-            start_proc = shell(start_command_for_mode(mode), env=env, timeout=smoke_budget_s)
-            start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
-        except subprocess.TimeoutExpired as exc:
-            start_timed_out = True
-            start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
-            start_log += (
-                f"\n[qualify] start timeout after {exc.timeout}s; checking runtime readiness anyway\n"
-            )
-        (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
+        if reuse_runtime:
+            # REQ-AXO-901838 — --reuse-runtime must NEVER stop/restart a
+            # third-party runtime (dev started out-of-band). Observe the
+            # existing runtime only; never own its lifecycle. Mirrors the
+            # contract in qualify_ingestion_run.py (`if not args.reuse_runtime`).
+            stop_log = "[qualify] stop skipped because --reuse-runtime was requested\n"
+            start_log = "[qualify] start skipped because --reuse-runtime was requested\n"
+            (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
+            (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
+        else:
+            try:
+                stop_proc = shell(["bash", "scripts/stop.sh"], timeout=30)
+                stop_log = completed_output(stop_proc.stdout) + completed_output(stop_proc.stderr)
+            except subprocess.TimeoutExpired as exc:
+                stop_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+                stop_log += f"\n[qualify] stop.sh timeout after {exc.timeout}s\n"
+            (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
+
+            try:
+                start_proc = shell(start_command_for_mode(mode), env=env, timeout=smoke_budget_s)
+                start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
+            except subprocess.TimeoutExpired as exc:
+                start_timed_out = True
+                start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+                start_log += (
+                    f"\n[qualify] start timeout after {exc.timeout}s; checking runtime readiness anyway\n"
+                )
+            (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
 
         effective_url = resolve_effective_mcp_url(start_log, url)
         resource_sampler = ResourceSampler(
@@ -2230,6 +2241,7 @@ def run_mode_profile(args: argparse.Namespace, mode: str, suite_run_dir: Path) -
                 instance,
                 args.resource_sample_interval_ms,
                 gpu_qualified_runtime=args.gpu_qualified_runtime,
+                reuse_runtime=args.reuse_runtime,
             )
         elif step_name == "mcp_validate":
             if steps.get("runtime_smoke", {}).get("status") == "fail":
