@@ -2423,6 +2423,13 @@ pub(crate) fn spawn_federation_orchestrator(
 /// projects discovered after the first sweep) is otherwise invisible until
 /// the next process restart.
 fn scope_reconciliation_enabled() -> bool {
+    // REQ-AXO-340 — ON by default: the reconciliation orchestrator is the
+    // safety-net that catches files added outside an inotify-emitting touch
+    // (cold-clones, partial bootstrap failures, late-arriving projects),
+    // which are otherwise invisible until the next restart. Utility-first
+    // truth (PIL-AXO-007) means this gap-closer runs unless explicitly
+    // disabled via AXON_SCOPE_RECONCILE_ENABLED=false. The prior `false`
+    // default contradicted its own contract test (defaults_to_true).
     std::env::var("AXON_SCOPE_RECONCILE_ENABLED")
         .map(|raw| {
             !matches!(
@@ -2430,7 +2437,7 @@ fn scope_reconciliation_enabled() -> bool {
                 "false" | "0" | "off" | "no"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn scope_reconciliation_interval_secs() -> u64 {
