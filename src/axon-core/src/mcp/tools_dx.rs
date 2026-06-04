@@ -1520,16 +1520,34 @@ impl McpServer {
         // Post-MIL-AXO-017: caller/callee counts come from RAM
         // IstGraphView (above). SQL base returns 0/0; warm RAM counts
         // are patched in downstream.
+        // REQ-AXO-901869 A2 — vrai fallback PG callers/callees quand le snapshot
+        // RAM IstGraphView est froid (brain_only / tests / AXON_IST_RAM_ENABLED=0).
+        // Remplace l'ancien `0 AS callers/callees` menteur. Compte les arêtes
+        // CALLS/CALLS_NIF sur `ist.Edge` canonique, en restaurant la compensation
+        // cible-synthétique (`target_id LIKE '%::' || s.name`, REQ-AXO-134) perdue
+        // à la migration AGE→RAM. Le merge en aval préfère toujours les comptes
+        // RAM quand le snapshot est chaud.
+        let edge_counts = "(SELECT count(*) FROM ist.Edge e \
+              WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
+                AND (e.target_id = s.id OR e.target_id LIKE '%::' || s.name) \
+                AND e.project_code = s.project_code) AS callers, \
+             (SELECT count(*) FROM ist.Edge e \
+              WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
+                AND e.source_id = s.id \
+                AND e.project_code = s.project_code) AS callees";
         let query = if project.is_some() {
             format!(
-                "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
+                "SELECT s.name, s.kind, s.tested, {} \
                  FROM Symbol s WHERE s.id = $sym OR s.name = $sym{}",
+                edge_counts,
                 Self::sql_project_filter_for_fields(project, &["s.project_code"])
             )
         } else {
-            "SELECT s.name, s.kind, s.tested, 0 AS callers, 0 AS callees \
-             FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
-                .to_string()
+            format!(
+                "SELECT s.name, s.kind, s.tested, {} \
+                 FROM Symbol s WHERE s.id = $sym OR s.name = $sym",
+                edge_counts
+            )
         };
         let params = json!({"sym": symbol_id});
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
