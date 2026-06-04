@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokenizers::{Encoding, Tokenizer};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[path = "embedder/cpu_query_service.rs"]
 mod cpu_query_service;
@@ -622,32 +622,10 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
 }
 
 
-/// DEC-AXO-072 follow-up: spawn a thread that issues `CHECKPOINT` against
-/// the writer connection every 10s. Prevents WAL accumulation that drove
-/// commit_ms from 132ms to 22s+ in VAL-AXO-034 profiling. The CHECKPOINT
-/// itself takes the writer mutex briefly; cadence chosen to amortize over
-/// many writes without long pauses.
-fn spawn_background_checkpoint_thread(graph_store: Arc<GraphStore>) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(10));
-        let started = Instant::now();
-        match graph_store.execute("CHECKPOINT;") {
-            Ok(()) => {
-                let elapsed_ms = started.elapsed().as_millis();
-                if elapsed_ms > 250 {
-                    info!(
-                        "Background CHECKPOINT took {} ms",
-                        elapsed_ms
-                    );
-                }
-            }
-            Err(e) => {
-                warn!("Background CHECKPOINT failed: {:?}", e);
-            }
-        }
-    });
-    info!("Background CHECKPOINT thread spawned (10s cadence)");
-}
+// REQ-AXO-901872 : background CHECKPOINT thread retiré (résidu DuckDB-era). Le
+// `CHECKPOINT;` forcé toutes les 10s prenait le writer-mutex et affamait le brain
+// MCP (pics latence 5-7s, RCA session 72). PostgreSQL gère les checkpoints
+// nativement — voir devenv.nix (checkpoint_completion_target + max_wal_size).
 
 // REQ-AXO-901653 slice-5d — `spawn_hot_status_cache_workers` deleted.
 // Subsystem hydrated from + flushed to public.FileVectorizationQueue
@@ -685,21 +663,6 @@ impl SemanticWorkerPool {
         let _ = crate::graph_ingestion::async_writer::install_global(Arc::clone(&graph_store));
 
         // REQ-AXO-901653 slice-5d — hot status cache install block deleted.
-
-        // DEC-AXO-072 follow-up VAL-AXO-034: background CHECKPOINT thread
-        // every 10s. Profiling showed commit_ms grows to 22s+ as the WAL
-        // accumulates between checkpoints (default DuckDB threshold doesn't
-        // fire often enough for this workload). Forcing periodic
-        // CHECKPOINTs keeps WAL bounded and per-op cost flat over time.
-        // Disable via AXON_BG_CHECKPOINT_DISABLED=true if it ever causes
-        // issues.
-        if !std::env::var("AXON_BG_CHECKPOINT_DISABLED")
-            .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-            .unwrap_or(false)
-        {
-            spawn_background_checkpoint_thread(Arc::clone(&graph_store));
-        }
 
         let mut query_workers = Vec::new();
         for worker_idx in 0..config.query_workers {

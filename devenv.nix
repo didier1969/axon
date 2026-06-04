@@ -50,9 +50,18 @@ in
     settings = {
       # Axon's hot path benefits from generous shared_buffers; client tunes
       # for their own scale via standard PG ops procedures (CPT-AXO-038).
-      shared_buffers = "512MB";
+      shared_buffers = "1GB";
       # pgvector index build benefits from larger maintenance memory.
       maintenance_work_mem = "256MB";
+      # REQ-AXO-901872 : checkpoints natifs lissés. Remplace le thread
+      # `CHECKPOINT;` 10s DuckDB-era retiré d'embedder.rs, qui prenait le
+      # writer-mutex et affamait le brain MCP (pics 5-7s sur PG partagé).
+      # checkpoint_completion_target étale l'I/O du checkpoint sur l'intervalle ;
+      # max_wal_size élargi espace les checkpoints sous charge d'ingestion.
+      checkpoint_completion_target = "0.9";
+      max_wal_size = "4GB";
+      min_wal_size = "1GB";
+      checkpoint_timeout = "15min";
     };
   };
 

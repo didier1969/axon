@@ -8,7 +8,6 @@ use anyhow::{anyhow, Context, Result};
 use libloading::Library;
 use tracing::{info, warn};
 
-use crate::embedding_contract::DIMENSION;
 use crate::graph::{GraphStore, LatticePool};
 use crate::runtime_truth_contract::RuntimeFreshnessContract;
 

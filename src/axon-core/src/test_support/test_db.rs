@@ -13,7 +13,7 @@
 //! writes into dev and broke isolation — REQ-AXO-901718/720/721 root cause).
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Test-cluster port (devenv PG). Overridden by `PGPORT`.
@@ -23,6 +23,63 @@ pub(crate) fn pg_port() -> String {
 
 fn template_name() -> String {
     std::env::var("AXON_TEST_TEMPLATE").unwrap_or_else(|_| "axon_test_template".to_string())
+}
+
+/// REQ-AXO-901873 — `dropdb --force --if-exists` : termine les connexions
+/// résiduelles puis DROP. Remplace le `dropdb` best-effort qui leakait dès
+/// qu'une connexion subsistait. Renvoie `true` si la base n'existe plus après.
+fn force_dropdb(db_name: &str, pg_port: &str) -> bool {
+    std::process::Command::new("dropdb")
+        .args([
+            "-h", "127.0.0.1",
+            "-p", pg_port,
+            "-U", "axon",
+            "--force",
+            "--if-exists",
+            db_name,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// REQ-AXO-901873 — registre des bases créées par CE process, force-droppées à
+/// la sortie du process via un hook `libc::atexit`. Garantit la suppression
+/// systématique **à la fin du run** même pour les guards parkés en `static`
+/// (qui ne déclenchent jamais `Drop`). Complète le `Drop` per-test (fast-path)
+/// et le pre-run sweep (fallback terminaison anormale).
+fn registered_test_dbs() -> &'static Mutex<Vec<(String, String)>> {
+    static REGISTERED: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
+    REGISTERED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Enregistre `(db_name, pg_port)` pour la réclamation de fin de process et
+/// arme le hook `atexit` une seule fois.
+fn register_for_atexit_cleanup(db_name: &str, pg_port: &str) {
+    static ARMED: OnceLock<()> = OnceLock::new();
+    if let Ok(mut v) = registered_test_dbs().lock() {
+        v.push((db_name.to_string(), pg_port.to_string()));
+    }
+    ARMED.get_or_init(|| {
+        // SAFETY: `drop_registered_test_dbs` est une `extern "C" fn` sans état
+        // capturé ; elle lit le registre process-global. Armée une seule fois.
+        unsafe {
+            libc::atexit(drop_registered_test_dbs);
+        }
+    });
+}
+
+/// Handler `libc::atexit` — s'exécute à la terminaison normale du process.
+/// Force-DROP chaque base `axon_test_*` créée par ce process. Best-effort
+/// (le process sort de toute façon).
+extern "C" fn drop_registered_test_dbs() {
+    let dbs: Vec<(String, String)> = match registered_test_dbs().lock() {
+        Ok(v) => v.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    for (db_name, pg_port) in dbs {
+        let _ = force_dropdb(&db_name, &pg_port);
+    }
 }
 
 /// REQ-AXO-91562 Slice 2 — per-test database isolation via PG template.
@@ -82,6 +139,10 @@ impl TestDb {
             );
         }
 
+        // REQ-AXO-901873 — réclamation systématique à la fin du run (couvre les
+        // guards parkés en `static` qui ne déclenchent jamais `Drop`).
+        register_for_atexit_cleanup(&db_name, &port);
+
         TestDb { db_name, pg_port: port }
     }
 
@@ -92,15 +153,16 @@ impl TestDb {
 
 impl Drop for TestDb {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("dropdb")
-            .args([
-                "-h", "127.0.0.1",
-                "-p", &self.pg_port,
-                "-U", "axon",
-                "--if-exists",
-                &self.db_name,
-            ])
-            .output();
+        // REQ-AXO-901873 — Drop fiable : `dropdb --force` termine les connexions
+        // résiduelles puis DROP (l'ancien best-effort leakait dès qu'une
+        // connexion subsistait). Erreur surfacée ; le hook `atexit` reprend en
+        // filet de sécurité si ce Drop échoue.
+        if !force_dropdb(&self.db_name, &self.pg_port) {
+            eprintln!(
+                "WARN REQ-AXO-901873: dropdb --force a échoué pour {} (le hook atexit retentera)",
+                self.db_name
+            );
+        }
     }
 }
 
