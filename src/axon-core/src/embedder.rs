@@ -2991,8 +2991,14 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_provider_request_for_query_lane_defaults_to_cpu_when_global_cuda_is_requested(
-    ) {
+    fn test_effective_provider_request_for_query_lane_uses_canonical_provider_not_forced_cpu() {
+        // ec917e64 — the brain query lane no longer forces CPU when the
+        // global provider is CUDA; both ORT sessions cohabit via CUDA
+        // time-sharing, so the query lane returns the canonical provider
+        // for the mode (like the bulk lanes). The old assertion (== "cpu")
+        // encoded the removed legacy safeguard and failed deterministically.
+        // Asserting equality with the canonical request keeps this
+        // hardware-independent (RuntimeProfile::detect() varies by host).
         let _guard = lock_env_guard();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
@@ -3001,13 +3007,21 @@ mod tests {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER_INIT_ERROR");
         }
 
+        let canonical = crate::runtime_mode::canonical_embedding_provider_request_for_mode(
+            crate::runtime_mode::AxonRuntimeMode::from_env(),
+            crate::runtime_profile::RuntimeProfile::detect().gpu_present,
+        )
+        .to_ascii_lowercase();
         let provider = super::effective_provider_request_for_lane("query");
 
         unsafe {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER");
         }
 
-        assert_eq!(provider, "cpu");
+        assert_eq!(
+            provider, canonical,
+            "query lane must use the canonical provider, not the removed legacy CPU force (ec917e64)"
+        );
     }
 
     #[test]
