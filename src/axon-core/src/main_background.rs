@@ -1060,15 +1060,6 @@ mod governor_tests {
     }
 }
 
-fn reader_refresh_interval_ms() -> u64 {
-    let base_ms = std::env::var("AXON_READER_REFRESH_INTERVAL_MS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|v| *v >= 250)
-        .unwrap_or(5_000);
-    quiescent_scaled_interval_ms(base_ms, 250, 60_000)
-}
-
 fn optimizer_loop_interval_ms() -> u64 {
     let base_ms = std::env::var("AXON_OPT_LOOP_INTERVAL_MS")
         .ok()
@@ -1181,32 +1172,6 @@ fn should_attempt_memory_reclaim(
     process_memory.rss_anon_bytes >= min_anon_bytes
 }
 
-pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
-    std::thread::spawn(move || {
-        let sleep_ms = reader_refresh_interval_ms();
-        info!(
-            "Reader snapshot refresher enabled (interval={}ms).",
-            sleep_ms
-        );
-        loop {
-            let signaled = store.wait_for_reader_refresh_signal(Duration::from_millis(sleep_ms));
-            match store.refresh_reader_snapshot_if_needed() {
-                Ok(refreshed) => {
-                    if signaled || refreshed {
-                        service_guard::record_background_runtime_wakeup(
-                            service_guard::BackgroundWakeDetail::ReaderRefresh,
-                            0,
-                            0,
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!("Reader snapshot refresh failed: {}", err);
-                }
-            }
-        }
-    });
-}
 
 
 pub(crate) fn runtime_telemetry_snapshot(

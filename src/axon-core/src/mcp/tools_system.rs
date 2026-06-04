@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 use super::format::{format_standard_contract, format_table_from_json};
 use super::tools_system_debug;
 use super::McpServer;
-use crate::graph_query::ReadFreshness;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
@@ -159,23 +158,21 @@ impl McpServer {
     pub(crate) fn axon_schema_overview(&self, _args: &Value) -> Option<Value> {
         let tables = self
             .graph_store
-            .query_json_on_reader_with_freshness(
+            .query_json(
                 "SELECT table_schema, table_name \
                  FROM information_schema.tables \
                  WHERE table_schema IN ('main', 'soll') \
                  ORDER BY table_schema, table_name",
-                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
         let columns = self
             .graph_store
-            .query_json_on_reader_with_freshness(
+            .query_json(
                 "SELECT table_schema, table_name, COUNT(*) \
                  FROM information_schema.columns \
                  WHERE table_schema IN ('main', 'soll') \
                  GROUP BY 1,2 \
                  ORDER BY 1,2",
-                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
 

@@ -36,9 +36,9 @@
 //!      subquery. Tests that exercise that branch must seed BOTH forms via
 //!      [`CallFixture::canonical`] and [`CallFixture::synthetic`].
 //!
-//! - **Reader snapshot freshness.** [`seed_ist`] calls
-//!   [`GraphStore::refresh_reader_snapshot`] after the batch so subsequent
-//!   reads see all inserted rows.
+//! - **Read-after-write.** [`seed_ist`] writes through the PG writer pool ;
+//!   subsequent reads observe all inserted rows immediately under MVCC
+//!   (REQ-AXO-901870 retired the DuckDB reader-replica + its refresh step).
 
 use std::sync::Arc;
 
@@ -308,9 +308,9 @@ impl IstSeed {
     }
 }
 
-/// Seed all fixtures in the bundle into `store`. Calls
-/// [`GraphStore::refresh_reader_snapshot`] after the writes so subsequent
-/// reader queries observe them.
+/// Seed all fixtures in the bundle into `store`. Writes go through the PG
+/// writer pool; subsequent reads observe them immediately under MVCC
+/// (REQ-AXO-901870 retired the DuckDB reader-replica + its refresh step).
 pub fn seed_ist(store: &GraphStore, seed: &IstSeed) -> Result<()> {
     for fixture in &seed.symbols {
         store.execute(&fixture.insert_sql())?;
@@ -324,7 +324,6 @@ pub fn seed_ist(store: &GraphStore, seed: &IstSeed) -> Result<()> {
     for fixture in &seed.edges {
         store.execute(&fixture.insert_sql())?;
     }
-    let _ = store.refresh_reader_snapshot();
     Ok(())
 }
 

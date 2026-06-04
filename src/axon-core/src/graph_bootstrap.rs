@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
@@ -69,20 +68,6 @@ pub fn canonical_ist_db_path(db_root: &str) -> Option<PathBuf> {
     let mut path = PathBuf::from(db_root);
     path.push("ist.db");
     Some(path)
-}
-
-pub fn canonical_ist_reader_db_path(db_root: &str) -> Option<PathBuf> {
-    if db_root == ":memory:" {
-        return None;
-    }
-
-    let mut path = PathBuf::from(db_root);
-    path.push("ist-reader.db");
-    Some(path)
-}
-
-fn reader_db_exists(db_path: &Option<PathBuf>) -> bool {
-    db_path.as_ref().is_some_and(|path| path.exists())
 }
 
 #[allow(dead_code)]
@@ -164,55 +149,25 @@ impl GraphStore {
         let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib) }?;
         let init_fn = symbols.init_fn;
         let _close_fn = symbols.close_fn;
-        let is_memory = db_root == ":memory:";
         // PostgreSQL's MVCC handles reader/writer concurrency natively;
-        // split-brain file-isolation is obsolete with the PG-only
-        // backend.
-        let split_brain_mode = false;
+        // the DuckDB-era split-brain file-isolation + reader replica are
+        // retired (REQ-AXO-901870). Every read shares the single writer
+        // connection pool.
         info!(
-            "GraphStore init modes: db_root={}, split_brain_mode={}, soll_access_mode={:?}",
-            db_root, split_brain_mode, soll_access_mode
+            "GraphStore init modes: db_root={}, soll_access_mode={:?}",
+            db_root, soll_access_mode
         );
 
-        // Under PostgreSQL the "DB path" is a DATABASE_URL passed
-        // verbatim to pg_init_db_compat. SOLL + per-project IST live
-        // inside the same database via schema namespacing
-        // (CPT-AXO-039). DEC-AXO-901594 Slice 1 : caller can override
-        // the env-var resolution to target a per-test database.
-        let pg_database_url: Option<String> = Some(
-            resolve_pg_database_url_with_override(database_url_override).with_context(|| {
+        // Under PostgreSQL the "DB path" is a DATABASE_URL passed verbatim
+        // to pg_init_db_compat. SOLL + per-project IST live inside the same
+        // database via schema namespacing (CPT-AXO-039). DEC-AXO-901594
+        // Slice 1 : caller can override env-var resolution for per-test DBs.
+        let pg_database_url = resolve_pg_database_url_with_override(database_url_override)
+            .with_context(|| {
                 "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
                  AXON_DEV_DATABASE_URL, or DATABASE_URL"
-            })?,
-        );
-        let _ = soll_access_mode; // kept for future PG-side write gating
-
-        let live_ist_path: Option<PathBuf> = None;
-        let reader_db_path = if split_brain_mode {
-            canonical_ist_reader_db_path(db_root)
-        } else {
-            live_ist_path.clone()
-        };
-        let db_path_str = match (&pg_database_url, &reader_db_path) {
-            (Some(url), _) => url.clone(),
-            (None, Some(path)) => path.to_string_lossy().to_string(),
-            (None, None) => ":memory:".to_string(),
-        };
-        let db_path = reader_db_path.clone();
-        let writer_db_path = if let Some(url) = pg_database_url.as_ref() {
-            url.clone()
-        } else if split_brain_mode {
-            ":memory:".to_string()
-        } else if let Some(path) = live_ist_path.as_ref() {
-            path.to_string_lossy().to_string()
-        } else {
-            ":memory:".to_string()
-        };
-        let writer_c_path = CString::new(writer_db_path)?;
-        let reader_c_path = CString::new(db_path_str.clone())?;
-        // Suppress the unused-let lint; reader_c_path is consumed when
-        // the duckdb path opens the read-only context further below.
-        let _ = &reader_c_path;
+            })?;
+        let writer_c_path = CString::new(pg_database_url)?;
 
         unsafe {
             let writer_ptr = init_fn(writer_c_path.as_ptr(), false);
@@ -224,23 +179,14 @@ impl GraphStore {
                 _lib: lib.clone(),
                 symbols,
                 writer_ctx: Mutex::new(writer_ptr),
-                reader_ctx: Mutex::new(std::ptr::null_mut()),
             });
             let store = Self {
                 pool: pool.clone(),
-                db_path,
-                reader_only_ist_mode: split_brain_mode,
                 soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
                 soll_read_only_mode: matches!(
                     soll_access_mode,
                     SollAccessMode::ReadOnlyOrEmptySchema
                 ),
-                recent_write_epoch_ms: AtomicU64::new(0),
-                last_reader_refresh_epoch_ms: AtomicU64::new(Self::current_epoch_ms()),
-                reader_refresh_failures_total: AtomicU64::new(0),
-                reader_state: crate::graph::ReaderSnapshotState::new(Self::current_epoch_ms()),
-                reader_refresh_wait: Mutex::new(1),
-                reader_refresh_notify: std::sync::Condvar::new(),
             };
 
             // MIL-AXO-015 P3 slice 3c: bootstrap the PG global schema
@@ -252,346 +198,23 @@ impl GraphStore {
                 "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
             );
 
-            // PG runtime compatibility / per-project IST recovery are
-            // owned by separate sub-phases (P3 slices 3d-3e). The boot
-            // path stays linear ; no DuckDB-shaped init_schema /
-            // additive-schema / recover / backfill chain.
-
-            let reader_db_available = reader_db_exists(&store.db_path);
-            let _reader_ptr = if is_memory || !reader_db_available {
-                if !is_memory && !reader_db_available {
-                    warn!(
-                        "GraphStore startup: reader database is not materialized yet; using writer as temporary reader until the first successful reader refresh."
-                    );
-                }
-                if split_brain_mode {
-                    std::ptr::null_mut()
-                } else {
-                    writer_ptr
-                }
-            } else {
-                let ptr = init_fn(reader_c_path.as_ptr(), true);
-                if ptr.is_null() {
-                    return Err(anyhow!("Failed to init PostgreSQL reader"));
-                }
-                ptr
-            };
-            info!("GraphStore startup: reader init complete.");
-
-            #[cfg(test)]
-            {
-                let mut reader_guard = store
-                    .pool
-                    .reader_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                *reader_guard = if store.reader_only_ist_mode {
-                    _reader_ptr
-                } else {
-                    writer_ptr
-                };
-            }
-            #[cfg(not(test))]
-            {
-                let mut reader_guard = store
-                    .pool
-                    .reader_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                *reader_guard = _reader_ptr;
-            }
-
-            // Under PG the reader_ctx points at the same connection
-            // pool as the writer (db_path is None, MVCC handles
-            // concurrency). No DuckDB SOLL ATTACH dance needed.
-            info!("GraphStore startup: reader session setup complete.");
-            store.sync_reader_epoch_to_commit();
-            if !split_brain_mode && !is_memory {
-                store.refresh_reader_snapshot()?;
-                info!("GraphStore startup: initial IST reader replica published.");
-            }
-
             Ok(store)
         }
     }
 
-    pub fn refresh_reader_snapshot(&self) -> Result<()> {
-        // PG mode (MIL-AXO-015): db_path is always None — reads share the
-        // writer pool under MVCC, so there is no DuckDB-file reader replica to
-        // publish. The legacy split-brain refresh path (publish replica +
-        // re-open reader ctx) was dead (split_brain_mode hardcoded false) and
-        // has been removed (REQ-AXO-901870).
-        self.sync_reader_epoch_to_commit();
-        self.reader_state
-            .refresh_inflight
-            .store(false, Ordering::Release);
-        Ok(())
-    }
-
-    pub fn reader_snapshot_age_ms(&self) -> u64 {
-        if self.reader_only_ist_mode {
-            let Some(db_path) = self.db_path.as_ref() else {
-                return u64::MAX;
-            };
-            let Ok(metadata) = std::fs::metadata(db_path) else {
-                return u64::MAX;
-            };
-            let Ok(modified) = metadata.modified() else {
-                return u64::MAX;
-            };
-            let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
-                return u64::MAX;
-            };
-            return age.as_millis() as u64;
-        }
-
-        let ts = self.last_reader_refresh_epoch_ms.load(Ordering::Relaxed);
-        if ts == 0 {
-            return u64::MAX;
-        }
-        Self::current_epoch_ms().saturating_sub(ts)
-    }
-
-    pub fn reader_refresh_failures_total(&self) -> u64 {
-        self.reader_refresh_failures_total.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn mark_writer_commit_visible(&self) {
-        let now_ms = Self::current_epoch_ms();
-        self.recent_write_epoch_ms.store(now_ms, Ordering::Relaxed);
-        self.reader_state
-            .commit_epoch
-            .fetch_add(1, Ordering::AcqRel);
-    }
-
-    pub(crate) fn request_reader_refresh_up_to(&self, target_epoch: u64) {
-        let target_epoch = self.bump_refresh_requested_epoch(target_epoch);
-
-        if self
-            .reader_state
-            .refresh_inflight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.reader_state
-                .last_refresh_started_ms
-                .store(Self::current_epoch_ms(), Ordering::Relaxed);
-            let mut wake_target = self
-                .reader_refresh_wait
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            *wake_target = (*wake_target).max(target_epoch);
-            self.reader_refresh_notify.notify_one();
-        } else {
-            self.reader_state
-                .refresh_coalesced_total
-                .fetch_add(1, Ordering::Relaxed);
-            let mut wake_target = self
-                .reader_refresh_wait
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            *wake_target = (*wake_target).max(target_epoch);
-            self.reader_refresh_notify.notify_one();
-        }
-    }
-
-    fn bump_refresh_requested_epoch(&self, target_epoch: u64) -> u64 {
-        let target_epoch = target_epoch.max(self.reader_state.commit_epoch.load(Ordering::Acquire));
-        let mut requested = self
-            .reader_state
-            .refresh_requested_epoch
-            .load(Ordering::Acquire);
-        while target_epoch > requested {
-            match self.reader_state.refresh_requested_epoch.compare_exchange(
-                requested,
-                target_epoch,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return target_epoch,
-                Err(actual) => requested = actual,
-            }
-        }
-        requested
-    }
-
-    pub fn refresh_reader_snapshot_if_needed(&self) -> Result<bool> {
-        let mut refreshed = false;
-        for _ in 0..4 {
-            let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
-            let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Acquire);
-            let requested_epoch = self
-                .reader_state
-                .refresh_requested_epoch
-                .load(Ordering::Acquire);
-            let target_epoch = commit_epoch.max(requested_epoch);
-            if self.reader_only_ist_mode && reader_db_exists(&self.db_path) {
-                self.refresh_reader_snapshot()?;
-                return Ok(true);
-            }
-            if target_epoch > reader_epoch {
-                self.request_reader_refresh_up_to(target_epoch);
-            }
-
-            if !self.reader_state.refresh_inflight.load(Ordering::Acquire) {
-                return Ok(refreshed);
-            }
-
-            self.refresh_reader_snapshot()?;
-            refreshed = true;
-        }
-
-        Ok(refreshed)
-    }
-
-    pub fn wait_for_reader_refresh_signal(&self, timeout: std::time::Duration) -> bool {
-        let guard = self
-            .reader_refresh_wait
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let observed = *guard;
-        let result = self
-            .reader_refresh_notify
-            .wait_timeout_while(guard, timeout, |target| *target == observed);
-        let (guard, _) = result.unwrap_or_else(|poison| poison.into_inner());
-        *guard != observed
-    }
-
-    pub(crate) fn reader_snapshot_diagnostics(&self) -> crate::graph::ReaderSnapshotDiagnostics {
-        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Relaxed);
-        let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Relaxed);
-        crate::graph::ReaderSnapshotDiagnostics {
-            commit_epoch,
-            reader_epoch,
-            reader_epoch_lag: commit_epoch.saturating_sub(reader_epoch),
-            refresh_inflight: self.reader_state.refresh_inflight.load(Ordering::Relaxed),
-            refresh_requested_epoch: self
-                .reader_state
-                .refresh_requested_epoch
-                .load(Ordering::Relaxed),
-            last_refresh_started_ms: self
-                .reader_state
-                .last_refresh_started_ms
-                .load(Ordering::Relaxed),
-            last_refresh_completed_ms: self
-                .reader_state
-                .last_refresh_completed_ms
-                .load(Ordering::Relaxed),
-            refresh_coalesced_total: self
-                .reader_state
-                .refresh_coalesced_total
-                .load(Ordering::Relaxed),
-            reads_on_reader_total: self
-                .reader_state
-                .reads_on_reader_total
-                .load(Ordering::Relaxed),
-            reads_on_writer_total: self
-                .reader_state
-                .reads_on_writer_total
-                .load(Ordering::Relaxed),
-            fresh_required_fallback_writer_total: self
-                .reader_state
-                .fresh_required_fallback_writer_total
-                .load(Ordering::Relaxed),
-            reader_refresh_failures_total: self.reader_refresh_failures_total(),
-        }
-    }
-
-    pub(crate) fn reader_snapshot_reader_available(&self) -> bool {
-        let guard = self
-            .pool
-            .reader_ctx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        !(*guard).is_null()
-    }
-
-    pub(crate) fn reader_snapshot_is_writer_alias(&self) -> bool {
-        let reader_guard = self
-            .pool
-            .reader_ctx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let writer_guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        !(*reader_guard).is_null() && *reader_guard == *writer_guard
-    }
-
-    pub(crate) fn reader_snapshot_freshness_contract(&self) -> RuntimeFreshnessContract {
-        let diagnostics = self.reader_snapshot_diagnostics();
+    /// REQ-AXO-901870 — the read path is the single PG writer connection
+    /// pool (MVCC-consistent per statement). With the DuckDB-era reader
+    /// replica retired there is no reader/writer epoch lag to track, so the
+    /// IST snapshot read path is invariantly fresh. The orthogonal
+    /// indexer-vs-source freshness signal (modified_files_since, CPT-AXO-029)
+    /// is owned by the indexer_feed contract, not this read-path contract.
+    pub(crate) fn ist_snapshot_freshness_contract(&self) -> RuntimeFreshnessContract {
         let stale_after_ms = std::env::var("AXON_IST_SNAPSHOT_STALE_AFTER_MS")
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .unwrap_or(30_000)
             .max(1);
-        let observed_age_ms = match self.reader_snapshot_age_ms() {
-            u64::MAX => None,
-            age => Some(age),
-        };
-
-        if !self.reader_snapshot_reader_available() {
-            return RuntimeFreshnessContract::degraded(
-                observed_age_ms,
-                stale_after_ms,
-                "ist_reader_unavailable",
-            );
-        }
-
-        if self.reader_snapshot_is_writer_alias() {
-            return RuntimeFreshnessContract::degraded(
-                observed_age_ms,
-                stale_after_ms,
-                "ist_reader_aliases_writer_direct_path",
-            );
-        }
-
-        if diagnostics.refresh_inflight {
-            return RuntimeFreshnessContract::degraded(
-                observed_age_ms,
-                stale_after_ms,
-                "ist_reader_refresh_inflight",
-            );
-        }
-
-        if diagnostics.reader_refresh_failures_total > 0 {
-            return RuntimeFreshnessContract::degraded(
-                observed_age_ms,
-                stale_after_ms,
-                "ist_reader_refresh_failures_observed",
-            );
-        }
-
-        match observed_age_ms {
-            None => RuntimeFreshnessContract::unknown(
-                stale_after_ms,
-                "ist_snapshot_missing_refresh_timestamp",
-            ),
-            Some(age) if age > stale_after_ms => RuntimeFreshnessContract::stale(
-                age,
-                stale_after_ms,
-                "ist_snapshot_age_exceeded_threshold",
-            ),
-            Some(_) => RuntimeFreshnessContract::fresh(stale_after_ms),
-        }
-    }
-
-    pub(crate) fn sync_reader_epoch_to_commit(&self) {
-        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
-        let now_ms = Self::current_epoch_ms();
-        self.reader_state
-            .reader_epoch
-            .store(commit_epoch, Ordering::Release);
-        self.reader_state
-            .refresh_requested_epoch
-            .store(commit_epoch, Ordering::Release);
-        self.reader_state
-            .last_refresh_completed_ms
-            .store(now_ms, Ordering::Relaxed);
-        self.last_reader_refresh_epoch_ms
-            .store(now_ms, Ordering::Relaxed);
+        RuntimeFreshnessContract::fresh(stale_after_ms)
     }
 
     /// `axon-plugin-postgres` cdylib discovery. Searches the standard
@@ -1743,15 +1366,8 @@ impl GraphStore {
 
 #[cfg(test)]
 mod graph_bootstrap_tests {
-    use super::{
-        canonical_ist_reader_db_path, reader_db_exists, startup_vector_backfill_limit, GraphStore,
-        STARTUP_SEMANTIC_BACKFILL_FLOOR,
-    };
-    use crate::embedding_contract::{
-        CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME, MODEL_VERSION,
-    };
+    use super::{startup_vector_backfill_limit, GraphStore, STARTUP_SEMANTIC_BACKFILL_FLOOR};
     use crate::tests::test_helpers::create_test_db;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -1854,12 +1470,9 @@ mod graph_bootstrap_tests {
                  VALUES ('/tmp/indexer.txt', 'hash-indexer', 1)",
             )
             .unwrap();
-        indexer.refresh_reader_snapshot().unwrap();
-        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
-        assert!(
-            reader_db.exists(),
-            "reader replica should exist without SOLL"
-        );
+        // REQ-AXO-901870 — brain + indexer coexist on the shared PG writer
+        // pool (MVCC handles concurrency); the DuckDB reader-replica file
+        // assertion is retired with the split-brain machinery.
     }
 
     #[test]
@@ -1941,14 +1554,6 @@ mod graph_bootstrap_tests {
             startup_vector_backfill_limit(512, 512),
             STARTUP_SEMANTIC_BACKFILL_FLOOR
         );
-    }
-
-    #[test]
-    fn reader_db_exists_only_when_physical_db_path_is_present() {
-        assert!(!reader_db_exists(&None));
-        assert!(!reader_db_exists(&Some(PathBuf::from(
-            "/tmp/axon-missing-reader-db-test.db"
-        ))));
     }
 
     // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): two projects coexist in the

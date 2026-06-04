@@ -28,9 +28,7 @@ impl McpServer {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| ".".to_string())
             });
-        let ist_snapshot = self.graph_store.reader_snapshot_freshness_contract();
-        let reader_snapshot_diagnostics = self.graph_store.reader_snapshot_diagnostics();
-        let reader_alias_direct = self.graph_store.reader_snapshot_is_writer_alias();
+        let ist_snapshot = self.graph_store.ist_snapshot_freshness_contract();
         let shadow_role = current_runtime_shadow_role();
         let mut peer_runtime_version = json!({
             "available": false,
@@ -150,6 +148,12 @@ impl McpServer {
                 "lane_parameters": peer_lane_parameters,
             },
             "peer_runtime_version": peer_runtime_version,
+            // REQ-AXO-901870 — the DuckDB split-brain reader-replica is
+            // retired. The IST read path is the single PG writer connection
+            // pool (MVCC-consistent per statement), so there is no
+            // reader/writer epoch lag to report — the read-path snapshot is
+            // invariantly fresh. The orthogonal indexer-vs-source freshness
+            // signal lives in `indexer_feed` above (CPT-AXO-029).
             "ist_snapshot": json!({
                 "state": ist_snapshot.state,
                 "stale": ist_snapshot.stale,
@@ -157,27 +161,9 @@ impl McpServer {
                 "stale_after_ms": ist_snapshot.stale_after_ms,
                 "degraded_reason": ist_snapshot.degraded_reason,
                 "unsafe_read": !matches!(ist_snapshot.state, RuntimeFreshnessState::Fresh),
-                "computed_by": "GraphStore::reader_snapshot_freshness_contract",
-                "trust_boundary": if reader_alias_direct {
-                    "graph_store.writer_alias_direct_read"
-                } else {
-                    "graph_store.reader_snapshot_diagnostics"
-                },
-                "read_path": if reader_alias_direct {
-                    "writer_alias_direct"
-                } else {
-                    "reader_snapshot"
-                },
-                "diagnostics": {
-                    "commit_epoch": reader_snapshot_diagnostics.commit_epoch,
-                    "reader_epoch": reader_snapshot_diagnostics.reader_epoch,
-                    "reader_epoch_lag": reader_snapshot_diagnostics.reader_epoch_lag,
-                    "refresh_inflight": reader_snapshot_diagnostics.refresh_inflight,
-                    "refresh_requested_epoch": reader_snapshot_diagnostics.refresh_requested_epoch,
-                    "last_refresh_started_ms": reader_snapshot_diagnostics.last_refresh_started_ms,
-                    "last_refresh_completed_ms": reader_snapshot_diagnostics.last_refresh_completed_ms,
-                    "reader_refresh_failures_total": reader_snapshot_diagnostics.reader_refresh_failures_total,
-                }
+                "computed_by": "GraphStore::ist_snapshot_freshness_contract",
+                "trust_boundary": "graph_store.pg_shared_writer_pool",
+                "read_path": "pg_shared_writer_pool_mvcc",
             }),
             "compatibility_shim": status.compatibility_shim,
             "compatibility_reason": status.compatibility_reason,

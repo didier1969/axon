@@ -1,19 +1,10 @@
 use std::borrow::Cow;
 use std::ffi::CString;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::graph::GraphStore;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadFreshness {
-    StaleOk,
-    FreshPreferred,
-    FreshRequired,
-}
 
 impl GraphStore {
     /// Post-MIL-AXO-017 identity passthrough. The historical DuckDB->PG
@@ -26,13 +17,6 @@ impl GraphStore {
 }
 
 impl GraphStore {
-    pub(crate) fn current_epoch_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-
     fn query_json_on_writer(&self, query: &str) -> Result<String> {
         // REQ-AXO-254: under PG, the rewriter must run on writer-routed
         // reads too — `query_on_ctx` is the raw FFI call. Without this
@@ -63,29 +47,6 @@ impl GraphStore {
                 CString::new(normalized.as_ref())?.as_ptr(),
             ))
         }
-    }
-
-    // REQ-AXO-901870 — the DuckDB split-brain reader-replica is retired.
-    // Under PostgreSQL every read goes through the single writer connection
-    // pool; MVCC gives each statement a consistent snapshot, so there is no
-    // separate reader context to route to. These two entry points are kept
-    // only as the names `tools_system` / `tools_system_debug` call; the
-    // `_freshness` hint is now inert (every read is writer-routed and
-    // MVCC-consistent).
-    pub(crate) fn query_json_on_reader_with_freshness(
-        &self,
-        query: &str,
-        _freshness: ReadFreshness,
-    ) -> Result<String> {
-        self.query_json_on_writer(query)
-    }
-
-    pub(crate) fn query_count_on_reader_with_freshness(
-        &self,
-        query: &str,
-        _freshness: ReadFreshness,
-    ) -> Result<i64> {
-        self.query_count_on_writer(query)
     }
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
@@ -201,9 +162,6 @@ impl GraphStore {
             if !exec_fn(*guard, CString::new(normalized.as_ref())?.as_ptr()) {
                 return Err(anyhow!("Writer Error: {}", normalized.as_ref()));
             }
-        }
-        if !self.reader_only_ist_mode {
-            self.mark_writer_commit_visible();
         }
         Ok(())
     }
@@ -386,9 +344,6 @@ impl GraphStore {
                     queries.len()
                 ));
             }
-        }
-        if !self.reader_only_ist_mode {
-            self.mark_writer_commit_visible();
         }
         Ok(())
     }

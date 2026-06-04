@@ -1968,9 +1968,11 @@ mod tests {
     }
 
     #[test]
-    fn canonical_count_reads_writer_truth_when_reader_snapshot_is_stale() {
+    fn canonical_count_reads_writer_truth() {
+        // REQ-AXO-901870 — reader-replica retired ; canonical_count reads the
+        // single PG writer pool (MVCC). Was previously gated on a stale reader
+        // snapshot that no longer exists.
         let store = create_test_db().unwrap();
-        store.refresh_reader_snapshot().unwrap();
         store
             .execute(&format!(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \

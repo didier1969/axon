@@ -10,7 +10,6 @@ use crate::embedder::{
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
 };
-use crate::graph_query::ReadFreshness;
 use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer::{
     collect_host_snapshot, collect_operator_policy_snapshot, collect_recent_analytics_window,
@@ -131,15 +130,14 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
             .unwrap_or(0)
     };
     let snapshot_count = |query: &str| -> i64 {
-        server
-            .graph_store
-            .query_count_on_reader_with_freshness(query, ReadFreshness::StaleOk)
-            .unwrap_or(0)
+        // REQ-AXO-901870 — reader replica retired ; reads go to the writer
+        // pool (MVCC). Kept as a distinct closure for call-site readability.
+        server.graph_store.query_count(query).unwrap_or(0)
     };
     let snapshot_json = |query: &str| -> String {
         server
             .graph_store
-            .query_json_on_reader_with_freshness(query, ReadFreshness::StaleOk)
+            .query_json(query)
             .unwrap_or_else(|_| "[]".to_string())
     };
 
@@ -184,9 +182,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 /
     // REQ-AXO-289 / slice-5d. Canonical pipeline_v2 writes Chunk +
     // ChunkEmbedding directly.
-    let reader_snapshot_age_ms = server.graph_store.reader_snapshot_age_ms();
-    let reader_refresh_failures_total = server.graph_store.reader_refresh_failures_total();
-    let reader_snapshot = server.graph_store.reader_snapshot_diagnostics();
     let canonical_file_count = if graph_runtime_enabled || vector_runtime_enabled {
         canonical_count("SELECT count(*) FROM ist.IndexedFile")
     } else {
@@ -749,22 +744,9 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
             .and_then(|value| value.as_f64())
             .unwrap_or(0.0),
     );
-    if reader_snapshot_age_ms == u64::MAX {
-        evidence.push_str("\n**Reader Snapshot:** unavailable (memory mode or not initialized)\n");
-    } else {
-        evidence.push_str(&format!(
-            "\n**Reader Snapshot:** age={} ms, commit_epoch={}, reader_epoch={}, lag={}, refresh_inflight={}, refresh_failures_total={}, reads_on_reader_total={}, reads_on_writer_total={}, refresh_coalesced_total={}\n",
-            reader_snapshot_age_ms,
-            reader_snapshot.commit_epoch,
-            reader_snapshot.reader_epoch,
-            reader_snapshot.reader_epoch_lag,
-            reader_snapshot.refresh_inflight,
-            reader_refresh_failures_total,
-            reader_snapshot.reads_on_reader_total,
-            reader_snapshot.reads_on_writer_total,
-            reader_snapshot.refresh_coalesced_total
-        ));
-    }
+    // REQ-AXO-901870 — the reader-replica diagnostics block (commit/reader
+    // epoch lag, refresh counters) is retired: reads share the single PG
+    // writer pool, so there is no replica state to surface here.
     evidence.push_str(&format!(
         "**Vector Lane:** state={}, transition_at_ms={}, last_success_at_ms={}, last_fault_at_ms={}, restarts_total={}\n",
         vector_runtime.vector_lane_state.as_str(),
@@ -1029,7 +1011,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
                     "throughput_files_per_hour": row.get(3).and_then(|value| value.as_f64())
                 }))
             },
-            "reader_snapshot": serde_json::to_value(&reader_snapshot).unwrap_or_else(|_| json!({})),
             "vector_lane_state_record": serde_json::to_value(&vector_lane_state_record).unwrap_or_else(|_| json!(null)),
             "latest_vector_worker_fault": serde_json::to_value(&latest_vector_worker_fault).unwrap_or_else(|_| json!(null))
         }

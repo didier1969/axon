@@ -92,8 +92,6 @@ impl McpServer {
             now_ms.saturating_sub(vector_runtime.vector_lane_last_success_at_ms);
         let vector_lane_last_fault_age_ms =
             now_ms.saturating_sub(vector_runtime.vector_lane_last_fault_at_ms);
-        let reader_refresh_interval_ms =
-            Self::env_interval_ms("AXON_READER_REFRESH_INTERVAL_MS", 5_000, 250);
         let shadow_optimizer_enabled = crate::main_background::shadow_optimizer_enabled();
         let optimizer_loop_interval_ms =
             Self::env_interval_ms("AXON_OPT_LOOP_INTERVAL_MS", 15_000, 1);
@@ -442,7 +440,6 @@ impl McpServer {
                 }
             },
             "loop_intervals_ms": {
-                "reader_refresh": reader_refresh_interval_ms,
                 "optimizer_loop": if shadow_optimizer_enabled { json!(optimizer_loop_interval_ms) } else { Value::Null },
                 "runtime_trace": runtime_trace_interval_ms,
                 "ingress_promoter_poll": watcher_promoter_poll_interval_ms

@@ -965,7 +965,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     } else {
         info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
     }
-    main_background::spawn_reader_snapshot_refresher(graph_store.clone());
 
     // REQ-AXO-901658 — wire the `ist_mutated` LISTEN/NOTIFY consumer that
     // was DEFINED (REQ-AXO-91487) but never spawned. The PG triggers in
