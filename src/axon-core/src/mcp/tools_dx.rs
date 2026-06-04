@@ -285,12 +285,13 @@ impl McpServer {
          OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
     }
 
+    // Content-substance match only (file-name matching is
+    // chunk_path_match_expression). Operates on the raw `c.content` column.
     fn chunk_search_predicate() -> &'static str {
         "lower(c.content) LIKE '%' || $normalized || '%' \
          OR lower(replace(replace(replace(c.content, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
          OR lower(c.content) LIKE '%' || $wildcard || '%' \
-         OR lower(replace(replace(replace(replace(c.content, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
-         OR lower(c.file_path) LIKE '%' || $wildcard || '%'"
+         OR lower(replace(replace(replace(replace(c.content, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
     }
 
     fn chunk_docstring_match_expression() -> &'static str {
@@ -304,9 +305,24 @@ impl McpServer {
          AND position($normalized in lower(c.content)) > position('\n\n' in c.content)"
     }
 
+    // REQ-AXO-901875 — a chunk's file matches when the raw `c.file_path`
+    // matches OR the canonical `ist.Edge` CONTAINS relation points a
+    // matching file at the chunk's symbol. Content-chunks carry NULL
+    // file_path, so without the CONTAINS arm a symbol whose FILE NAME
+    // matches the query (e.g. `..._overlay.rs`) but whose content does not
+    // was invisible. The CONTAINS arm is an indexed EXISTS probe (on
+    // target_id), evaluated only for rows the content predicate did not
+    // already accept. `$wildcard` %-separates tokens so it matches
+    // underscore-separated file names (REQ-AXO-088). Same URI-resolution
+    // family as REQ-AXO-901869 A3.
     fn chunk_path_match_expression() -> &'static str {
         "lower(c.file_path) LIKE '%' || $wildcard || '%' \
-         OR lower(c.file_path) LIKE '%' || $normalized || '%'"
+         OR lower(c.file_path) LIKE '%' || $normalized || '%' \
+         OR EXISTS (SELECT 1 FROM ist.Edge ce_path \
+                    WHERE ce_path.target_id = c.source_id \
+                      AND ce_path.relation_type = 'CONTAINS' \
+                      AND (lower(ce_path.source_id) LIKE '%' || $wildcard || '%' \
+                           OR lower(ce_path.source_id) LIKE '%' || $normalized || '%'))"
     }
 
     fn classify_query_intent(query_text: &str) -> QueryIntent {
@@ -1000,13 +1016,13 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN c.file_path \
+                               WHEN {path_match} THEN COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
                     JOIN Symbol s ON s.id = c.source_id \
 \
-                    WHERE {predicate} \
+                    WHERE ({predicate}) OR ({path_match}) \
                  ) \
                  SELECT name, kind, uri, match_reason, evidence \
                  FROM chunk_matches \
@@ -1039,13 +1055,13 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN c.file_path \
+                               WHEN {path_match} THEN COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
                     JOIN Symbol s ON s.id = c.source_id \
 \
-                    WHERE c.project_code = $proj AND ({predicate}) \
+                    WHERE c.project_code = $proj AND (({predicate}) OR ({path_match})) \
                  ) \
                  SELECT name, kind, uri, match_reason, evidence \
                  FROM chunk_matches \
