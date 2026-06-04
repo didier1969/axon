@@ -9,7 +9,7 @@ use crate::code_chunker::build_symbol_chunks;
 use crate::graph::GraphStore;
 
 
-pub mod async_writer;
+pub mod rows;
 mod file_ingress;
 mod sql_helpers;
 mod types;
@@ -742,11 +742,11 @@ impl GraphStore {
         // `INSERT … SELECT … ON CONFLICT DO UPDATE`. Default OFF
         // preserves the legacy per-row INSERT path bit-for-bit.
         if crate::postgres::bulk_writer::bulk_writer_enabled() {
-            let rows: Vec<crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow> =
+            let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> =
                 updates
                     .iter()
                     .map(|(chunk_id, source_hash, vector)| {
-                        crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow {
+                        crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
                             chunk_id: chunk_id.clone(),
                             source_hash: source_hash.clone(),
                             embedding: vector.clone(),
@@ -1044,7 +1044,7 @@ impl GraphStore {
         symbols: &[crate::parser::Symbol],
         relations: &[crate::parser::Relation],
     ) -> Result<Vec<String>> {
-        use crate::graph_ingestion::async_writer::{
+        use crate::graph_ingestion::rows::{
             ChunkRow, RelationRow, SymbolRow,
         };
         use std::collections::HashSet;
@@ -1178,13 +1178,11 @@ impl GraphStore {
 
     /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph_v2`].
     ///
-    /// Aggregates Symbol/Chunk/relation rows across `files` into a single
-    /// [`WriteAccumulator`], renders them in one shot, appends N
-    /// IndexedFile UPSERT statements, and dispatches the whole payload
-    /// through `execute_batch` — one `BEGIN/COMMIT` for the entire batch
-    /// instead of one per file. Empirically removes the lock-contention
-    /// cliff measured 2026-05-12 (A3=2 → 57 ch/s, A3=6 → 22 ch/s in
-    /// NoOp).
+    /// Aggregates Symbol/Chunk/relation [`rows`] across `files` into one
+    /// [`crate::postgres::bulk_writer::PgBulkBatch`] flushed in a single
+    /// `BEGIN/COMMIT` (one transaction for the whole batch instead of one
+    /// per file). Empirically removes the lock-contention cliff measured
+    /// 2026-05-12 (A3=2 → 57 ch/s, A3=6 → 22 ch/s in NoOp).
     ///
     /// Idempotent: every INSERT inherits the existing
     /// `ON CONFLICT DO UPDATE` / `DO NOTHING` semantics.
@@ -1200,7 +1198,7 @@ impl GraphStore {
         files: &[crate::pipeline_v2::types::ParsedFile],
         project_code: &str,
     ) -> Result<Vec<Vec<(String, String, String)>>> {
-        use crate::graph_ingestion::async_writer::{
+        use crate::graph_ingestion::rows::{
             ChunkRow, RelationRow, SymbolRow,
         };
         use std::collections::HashSet;

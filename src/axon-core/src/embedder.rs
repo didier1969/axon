@@ -654,13 +654,11 @@ impl SemanticWorkerPool {
         // workarounds, redundant under the post-MIL-AXO-015 PG +
         // pgvector stack.
 
-        // REQ-AXO-193 direction E (E.2): install async-writer dispatcher
-        // singleton. Disabled by default; producers fall through to the
-        // legacy synchronous path. Activated via
-        // AXON_ASYNC_WRITER_ENABLED=true. E.3 will route producer SQL
-        // through this channel; until then the dispatcher accepts diffs
-        // but render_bulk_queries returns empty (no DB writes occur).
-        let _ = crate::graph_ingestion::async_writer::install_global(Arc::clone(&graph_store));
+        // REQ-AXO-901881 W1 — the REQ-AXO-193 async-writer dispatcher
+        // (install_global) was DuckDB-era dead machinery: never wired in
+        // production (it only flushed RawQueries) and could still spawn a
+        // useless writer thread under AXON_ASYNC_WRITER_ENABLED. Retired with
+        // the async_writer module; the live write path is bulk_writer.
 
         // REQ-AXO-901653 slice-5d — hot status cache install block deleted.
 

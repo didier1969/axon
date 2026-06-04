@@ -35,7 +35,7 @@ use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::NoTls;
 
-use crate::graph_ingestion::async_writer::{
+use crate::graph_ingestion::rows::{
     ChunkEmbeddingPersistRow, ChunkRow, RelationRow, SymbolRow,
 };
 
@@ -43,10 +43,10 @@ use crate::graph_ingestion::async_writer::{
 /// payloads without needing access to the `pub(crate)` async_writer
 /// module. Production callers (e.g. `update_chunk_embeddings`) still
 /// reach the type through `crate::graph_ingestion::async_writer`.
-pub use crate::graph_ingestion::async_writer::ChunkEmbeddingPersistRow as BulkWriterChunkEmbeddingRow;
-pub use crate::graph_ingestion::async_writer::ChunkRow as BulkWriterChunkRow;
-pub use crate::graph_ingestion::async_writer::RelationRow as BulkWriterRelationRow;
-pub use crate::graph_ingestion::async_writer::SymbolRow as BulkWriterSymbolRow;
+pub use crate::graph_ingestion::rows::ChunkEmbeddingPersistRow as BulkWriterChunkEmbeddingRow;
+pub use crate::graph_ingestion::rows::ChunkRow as BulkWriterChunkRow;
+pub use crate::graph_ingestion::rows::RelationRow as BulkWriterRelationRow;
+pub use crate::graph_ingestion::rows::SymbolRow as BulkWriterSymbolRow;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static POOL: OnceLock<Pool> = OnceLock::new();

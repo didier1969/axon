@@ -223,7 +223,7 @@ fn run() -> anyhow::Result<()> {
 fn bench_pgvector(
     args: &Args,
 ) -> anyhow::Result<axon_core::bench_pipeline_stages::WriterBench> {
-    use axon_core::graph_ingestion::async_writer::ChunkEmbeddingPersistRow;
+    use axon_core::graph_ingestion::rows::ChunkEmbeddingPersistRow;
     use axon_core::postgres::bulk_writer::flush_chunk_embeddings;
 
     let project_code = args.project_code.clone();

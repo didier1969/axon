@@ -27,7 +27,6 @@ set +a
 export AXON_DEV_DATABASE_URL="${AXON_DEV_DATABASE_URL:-${AXON_LIVE_DATABASE_URL}}"
 
 # Wave 5 overrides — write-path optimisations for AC4 of REQ-AXO-252.
-export AXON_ASYNC_WRITER_ENABLED=true
 export AXON_BULK_WRITER_ENABLED=true
 export AXON_PARQUET_EMBEDDING_STORE_ENABLED=true
 # REQ-AXO-205 / MIL-AXO-015 indexer-gate: bypass the PG opt-in smoke gate
@@ -36,7 +35,6 @@ export AXON_INDEXER_PG_OPT_IN=1
 
 echo "==[ Wave 5 env ]=="
 echo "  AXON_INDEXER_PG_OPT_IN          = ${AXON_INDEXER_PG_OPT_IN}"
-echo "  AXON_ASYNC_WRITER_ENABLED       = ${AXON_ASYNC_WRITER_ENABLED}"
 echo "  AXON_BULK_WRITER_ENABLED        = ${AXON_BULK_WRITER_ENABLED}"
 echo "  AXON_PARQUET_EMBEDDING_STORE_ENABLED = ${AXON_PARQUET_EMBEDDING_STORE_ENABLED}"
 echo "  AXON_DEV_DATABASE_URL           = (set)"
