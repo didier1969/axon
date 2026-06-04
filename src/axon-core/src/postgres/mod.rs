@@ -66,6 +66,39 @@ pub fn database_url_for(instance: AxonInstance) -> Result<String> {
     })
 }
 
+/// REQ-AXO-901881 W2 / REQ-AXO-315 (#17) — THE canonical PG connection-URL
+/// resolver. The single place that maps the instance (canonical
+/// `AXON_INSTANCE`, alias `AXON_INSTANCE_KIND` per REQ-AXO-901657) to
+/// `AXON_{DEV,LIVE}_DATABASE_URL`, with a `DATABASE_URL` fallback. An
+/// optional `override_url` short-circuits env resolution (per-test DBs,
+/// DEC-AXO-901594). This replaces the 4 divergent resolvers
+/// (graph_bootstrap / bulk_writer / pipeline_v2_runtime each rolled their
+/// own) whose drift produced the REQ-AXO-315 dev→live leak class.
+pub fn resolve_database_url(override_url: Option<&str>) -> Result<String> {
+    if let Some(url) = override_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
+        .to_lowercase();
+    let primary = match kind.as_str() {
+        "dev" => "AXON_DEV_DATABASE_URL",
+        _ => "AXON_LIVE_DATABASE_URL",
+    };
+    for key in [primary, "DATABASE_URL"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.trim().is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    anyhow::bail!(
+        "no PostgreSQL connection URL configured (set {primary} or DATABASE_URL; AXON_INSTANCE={kind})"
+    )
+}
+
 /// Build a connection pool against the given URL. Honors
 /// `PG_MAX_CONNECTIONS` and `PG_ACQUIRE_TIMEOUT_MS` env overrides.
 pub async fn build_pool(database_url: &str) -> Result<Pool> {

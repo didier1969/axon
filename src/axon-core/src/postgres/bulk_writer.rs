@@ -75,32 +75,11 @@ fn runtime() -> Result<&'static Runtime> {
 }
 
 fn resolve_database_url() -> Result<String> {
-    // REQ-AXO-NNN — honor AXON_INSTANCE_KIND for DB selection. Prior
-    // bug: the static priority list put AXON_LIVE_DATABASE_URL first
-    // regardless of instance. On a dev indexer that inherits both env
-    // vars from the runtime-config (live + dev URLs are both exported
-    // by the scripts/lib/axon-env-vars.sh layer), bulk_writer's pool
-    // would silently connect to axon_live and dev writes leaked into
-    // production. Detection symptom: axon_dev rows stay at 0 while
-    // axon_live grows under a dev-mode indexer.
-    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE,
-    // alias = AXON_INSTANCE_KIND (warn-once when only the alias is set).
-    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
-        .to_lowercase();
-    let primary = match kind.as_str() {
-        "dev" => "AXON_DEV_DATABASE_URL",
-        _ => "AXON_LIVE_DATABASE_URL",
-    };
-    for key in [primary, "DATABASE_URL"] {
-        if let Ok(v) = std::env::var(key) {
-            if !v.trim().is_empty() {
-                return Ok(v);
-            }
-        }
-    }
-    Err(anyhow!(
-        "bulk_writer requires {primary} or DATABASE_URL (AXON_INSTANCE={kind})"
-    ))
+    // REQ-AXO-901881 W2 (#17) — delegate to THE canonical resolver. This was
+    // one of 4 divergent copies (its own comment documents the REQ-AXO-315
+    // dev→live leak that the drift caused); resolution now lives only in
+    // postgres::resolve_database_url.
+    crate::postgres::resolve_database_url(None)
 }
 
 fn pool() -> Result<&'static Pool> {

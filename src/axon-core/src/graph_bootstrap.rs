@@ -23,31 +23,10 @@ const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
 ///      `AXON_LIVE_DATABASE_URL`)
 ///   3. `DATABASE_URL` fallback
 fn resolve_pg_database_url_with_override(override_url: Option<&str>) -> Result<String> {
-    if let Some(url) = override_url {
-        let trimmed = url.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE,
-    // alias = AXON_INSTANCE_KIND (warn-once when only the alias is set).
-    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
-        .to_lowercase();
-    let primary = match kind.as_str() {
-        "dev" => "AXON_DEV_DATABASE_URL",
-        _ => "AXON_LIVE_DATABASE_URL",
-    };
-    for var in [primary, "DATABASE_URL"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.trim().is_empty() {
-                return Ok(v);
-            }
-        }
-    }
-    Err(anyhow!(
-        "no PostgreSQL connection URL configured (set {primary} or DATABASE_URL; \
-         AXON_INSTANCE={kind})"
-    ))
+    // REQ-AXO-901881 W2 (#17) — delegate to THE canonical resolver. This was
+    // one of 4 divergent copies whose drift produced the REQ-AXO-315 dev→live
+    // leak; resolution now lives only in postgres::resolve_database_url.
+    crate::postgres::resolve_database_url(override_url)
 }
 
 pub fn canonical_soll_db_path(db_root: &str) -> Option<PathBuf> {

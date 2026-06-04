@@ -154,28 +154,18 @@ fn demand_pull_b_batch_from_env() -> usize {
 }
 
 fn resolve_database_url_for_listener() -> String {
-    use crate::postgres::{database_url_for, AxonInstance};
-    // REQ-AXO-315 / REQ-AXO-901657 (proof #7) — the dev->live leak fix
-    // patched only 2 of 4 URL resolvers; this 4th one still read the bare
-    // alias `AXON_INSTANCE_KIND` (NOT the canonical `AXON_INSTANCE`), so a
-    // dev process that sets only the canonical var fell through to Live and
-    // leaked its writes into axon_live. Read via the canonical alias-aware
-    // helper, and make the fallback instance-aware so even a missing DB-URL
-    // cannot route a dev process to the live database.
-    let instance = if crate::env_alias::read_with_alias_or(
-        "AXON_INSTANCE",
-        "AXON_INSTANCE_KIND",
-        "live",
-    )
-    .eq_ignore_ascii_case("dev")
-    {
-        AxonInstance::Dev
-    } else {
-        AxonInstance::Live
-    };
-    database_url_for(instance).unwrap_or_else(|_| match instance {
-        AxonInstance::Dev => "postgres://axon@127.0.0.1:44144/axon_dev".to_string(),
-        AxonInstance::Live => "postgres://axon@127.0.0.1:44144/axon_live".to_string(),
+    // REQ-AXO-901881 W2 (#7/#17) — resolve via THE canonical resolver
+    // (postgres::resolve_database_url, alias-aware), with an instance-aware
+    // fallback that never routes a dev process to the live DB even if the
+    // URL is unset. Was the 4th divergent resolver (the REQ-AXO-315 leak).
+    crate::postgres::resolve_database_url(None).unwrap_or_else(|_| {
+        if crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
+            .eq_ignore_ascii_case("dev")
+        {
+            "postgres://axon@127.0.0.1:44144/axon_dev".to_string()
+        } else {
+            "postgres://axon@127.0.0.1:44144/axon_live".to_string()
+        }
     })
 }
 

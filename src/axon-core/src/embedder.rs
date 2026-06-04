@@ -633,7 +633,11 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
 // via the in-memory IstGraphView + Chunk/ChunkEmbedding rows.
 
 impl SemanticWorkerPool {
-    pub fn new(graph_store: Arc<GraphStore>, _queue_store: Arc<QueueStore>) -> Self {
+    // REQ-AXO-901881 W1 — `graph_store` became unused once the dead
+    // async_writer `install_global` (its only consumer) was removed; both
+    // store params are now vestigial (the pool configures from env). Param
+    // removal + call-site cleanup is deferred to a later wave.
+    pub fn new(_graph_store: Arc<GraphStore>, _queue_store: Arc<QueueStore>) -> Self {
         let config = embedding_lane_config_from_env();
         info!(
             "Semantic Factory: spawning graph/vector semantic workers (query_support_workers={}, vector_workers={}, graph_workers={}, chunk_batch_size={}, file_batch_size={}, graph_batch_size={})",
