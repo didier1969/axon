@@ -756,7 +756,7 @@ pub fn spawn_periodic_sweep_worker(
                 &watch_root,
                 &cfg,
                 known,
-                /* force_cpu_ok = */ false,
+                /* cpu_override = */ None,
             );
             match outcome {
                 PeriodicSweepTickOutcome::Ran {
@@ -790,9 +790,16 @@ fn periodic_sweep_tick(
     watch_root: &str,
     cfg: &PeriodicSweepConfig,
     known: HashSet<String>,
-    force_cpu_ok: bool,
+    cpu_override: Option<bool>,
 ) -> PeriodicSweepTickOutcome {
-    if !force_cpu_ok && !cpu_below_threshold(cfg.cpu_threshold_pct) {
+    // REQ-AXO-901877 — `cpu_override` makes the CPU gate deterministically
+    // testable in both directions: Some(true) forces "below threshold"
+    // (proceed), Some(false) forces "above threshold" (skip), None samples the
+    // real host CPU — the production path. The previous `force_cpu_ok: bool`
+    // could only force "proceed", leaving the skip branch testable only when
+    // the real CPU happened to be high (machine-dependent flake).
+    let cpu_below = cpu_override.unwrap_or_else(|| cpu_below_threshold(cfg.cpu_threshold_pct));
+    if !cpu_below {
         record_periodic_sweep_skipped_high_cpu();
         return PeriodicSweepTickOutcome::SkippedHighCpu;
     }
@@ -855,9 +862,9 @@ pub fn periodic_sweep_tick_for_tests(
     watch_root: &str,
     cfg: &PeriodicSweepConfig,
     known: HashSet<String>,
-    force_cpu_ok: bool,
+    cpu_override: Option<bool>,
 ) -> PeriodicSweepTickOutcome {
-    periodic_sweep_tick(ingress_buffer, watch_root, cfg, known, force_cpu_ok)
+    periodic_sweep_tick(ingress_buffer, watch_root, cfg, known, cpu_override)
 }
 
 /// REQ-AXO-901677 — pull a `HashSet<path>` of every row currently in

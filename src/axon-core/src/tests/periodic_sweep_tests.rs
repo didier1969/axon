@@ -131,7 +131,7 @@ mod tests {
             root.to_string_lossy().as_ref(),
             &cfg,
             std::collections::HashSet::new(),
-            /* force_cpu_ok = */ true,
+            /* cpu_override = */ Some(true),
         );
 
         assert!(
@@ -197,7 +197,7 @@ mod tests {
             root.to_string_lossy().as_ref(),
             &cfg,
             std::collections::HashSet::new(),
-            /* force_cpu_ok = */ false,
+            /* cpu_override = */ Some(false),
         );
         assert!(
             matches!(outcome, PeriodicSweepTickOutcome::SkippedHighCpu),
@@ -237,7 +237,7 @@ mod tests {
             root.to_string_lossy().as_ref(),
             &cfg,
             known,
-            /* force_cpu_ok = */ true,
+            /* cpu_override = */ Some(true),
         );
 
         if let PeriodicSweepTickOutcome::Ran {

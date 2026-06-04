@@ -218,7 +218,16 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
     EmbeddingLaneSizing {
         query_workers,
         vector_workers: vector_workers.max(1),
-        graph_workers,
+        // REQ-AXO-901877 — honor the canonical AXON_GRAPH_EMBEDDINGS_ENABLED
+        // flag here too: a recommended graph-lane capacity is meaningless when
+        // graph embeddings are disabled. Keeps this profile-based sizing
+        // consistent with the env-driven EmbeddingLaneConfig (embedder.rs),
+        // so disabling the flag zeroes the graph lane at every layer.
+        graph_workers: if crate::embedder::graph_embeddings_enabled_from_env() {
+            graph_workers
+        } else {
+            0
+        },
         chunk_batch_size,
         file_vectorization_batch_size,
         graph_batch_size,
