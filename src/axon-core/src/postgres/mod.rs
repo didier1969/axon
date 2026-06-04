@@ -23,6 +23,7 @@
 
 pub mod bulk_writer;
 pub mod ddl;
+pub mod native;
 pub mod seed;
 pub mod vector;
 

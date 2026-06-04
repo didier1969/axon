@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use libloading::Library;
 use tracing::{info, warn};
 
 use crate::graph::{GraphStore, LatticePool};
@@ -123,62 +121,45 @@ impl GraphStore {
         soll_access_mode: SollAccessMode,
         database_url_override: Option<&str>,
     ) -> Result<Self> {
-        let plugin_path = Self::find_plugin_path()?;
-        let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
-        let symbols = unsafe { crate::graph::PluginSymbols::resolve(&lib) }?;
-        let init_fn = symbols.init_fn;
-        let _close_fn = symbols.close_fn;
-        // PostgreSQL's MVCC handles reader/writer concurrency natively;
-        // the DuckDB-era split-brain file-isolation + reader replica are
-        // retired (REQ-AXO-901870). Every read shares the single writer
-        // connection pool.
+        // PostgreSQL's MVCC handles reader/writer concurrency natively; the
+        // DuckDB-era split-brain + reader replica are retired (REQ-AXO-901870)
+        // and the FFI cdylib plugin is retired too (REQ-AXO-901881 W2) — the
+        // store now owns a native in-process deadpool pool.
         info!(
             "GraphStore init modes: db_root={}, soll_access_mode={:?}",
             db_root, soll_access_mode
         );
 
-        // Under PostgreSQL the "DB path" is a DATABASE_URL passed verbatim
-        // to pg_init_db_compat. SOLL + per-project IST live inside the same
-        // database via schema namespacing (CPT-AXO-039). DEC-AXO-901594
-        // Slice 1 : caller can override env-var resolution for per-test DBs.
+        // Under PostgreSQL the "DB path" is a DATABASE_URL. SOLL + per-project
+        // IST live in the same database via schema namespacing (CPT-AXO-039).
+        // DEC-AXO-901594 : caller can override env resolution for per-test DBs.
         let pg_database_url = resolve_pg_database_url_with_override(database_url_override)
             .with_context(|| {
                 "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
                  AXON_DEV_DATABASE_URL, or DATABASE_URL"
             })?;
-        let writer_c_path = CString::new(pg_database_url)?;
 
-        unsafe {
-            let writer_ptr = init_fn(writer_c_path.as_ptr(), false);
-            if writer_ptr.is_null() {
-                return Err(anyhow!("Failed to init PostgreSQL writer"));
-            }
+        // REQ-AXO-901881 W2 — native deadpool pool (was the FFI cdylib loaded
+        // via libloading + pg_init_db_compat). schema = None matches the
+        // plugin's pg_init_db_compat (null search_path; SOLL/IST reads use
+        // fully-qualified soll.X / ist.X names).
+        let native = crate::postgres::native::NativePgCtx::connect(&pg_database_url, None)
+            .context("native PostgreSQL pool init failed")?;
+        let store = Self {
+            pool: Arc::new(LatticePool { native }),
+            soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
+            soll_read_only_mode: matches!(soll_access_mode, SollAccessMode::ReadOnlyOrEmptySchema),
+        };
 
-            let pool = Arc::new(LatticePool {
-                _lib: lib.clone(),
-                symbols,
-                writer_ctx: Mutex::new(writer_ptr),
-            });
-            let store = Self {
-                pool: pool.clone(),
-                soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
-                soll_read_only_mode: matches!(
-                    soll_access_mode,
-                    SollAccessMode::ReadOnlyOrEmptySchema
-                ),
-            };
+        // MIL-AXO-015 P3 slice 3c: bootstrap the PG global schema (extensions
+        // + soll layer) via the canonical DDL generator. Per-project IST
+        // schemas are deferred to axon_init_project (P5).
+        store.bootstrap_global_pg_schema()?;
+        info!(
+            "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
+        );
 
-            // MIL-AXO-015 P3 slice 3c: bootstrap the PG global schema
-            // (extensions + soll layer) via the canonical DDL generator.
-            // Per-project IST schemas are deferred to axon_init_project
-            // (P5). PG dialect lives in `crate::postgres::ddl`.
-            store.bootstrap_global_pg_schema()?;
-            info!(
-                "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
-            );
-
-            Ok(store)
-        }
+        Ok(store)
     }
 
     /// REQ-AXO-901870 — the read path is the single PG writer connection
@@ -194,37 +175,6 @@ impl GraphStore {
             .unwrap_or(30_000)
             .max(1);
         RuntimeFreshnessContract::fresh(stale_after_ms)
-    }
-
-    /// `axon-plugin-postgres` cdylib discovery. Searches the standard
-    /// cargo target directories under the workspace root + cwd.
-    fn find_plugin_path() -> Result<String> {
-        const CRATE_DIR: &str = "src/axon-plugin-postgres";
-        const SO: &str = "libaxon_plugin_postgres.so";
-
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow!("Unable to resolve repository root from CARGO_MANIFEST_DIR"))?
-            .to_path_buf();
-
-        let mut candidates = vec![
-            repo_root.join(format!("{CRATE_DIR}/target/release/{SO}")),
-            repo_root.join(format!("{CRATE_DIR}/target/debug/{SO}")),
-        ];
-
-        if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join(format!("{CRATE_DIR}/target/release/{SO}")));
-            candidates.push(cwd.join(format!("{CRATE_DIR}/target/debug/{SO}")));
-        }
-
-        for path in candidates {
-            if path.exists() {
-                return Ok(path.to_string_lossy().to_string());
-            }
-        }
-        Err(anyhow!("Plugin not found (expected {})", SO))
     }
 
     /// MIL-AXO-015 P3 slice 3c: PostgreSQL global schema bootstrap.

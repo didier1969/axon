@@ -1,6 +1,4 @@
-use libloading::Library;
-use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingFile {
@@ -12,66 +10,16 @@ pub struct PendingFile {
     pub last_deferred_at_ms: Option<i64>,
 }
 
-// FFI Types
-pub(crate) type InitDbFunc =
-    unsafe extern "C" fn(path: *const std::os::raw::c_char, read_only: bool) -> *mut c_void;
-pub(crate) type ExecFunc =
-    unsafe extern "C" fn(ctx: *mut c_void, query: *const std::os::raw::c_char) -> bool;
-pub(crate) type QueryJsonFunc = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    query: *const std::os::raw::c_char,
-) -> *mut std::os::raw::c_char;
-pub(crate) type QueryCountFunc =
-    unsafe extern "C" fn(ctx: *mut c_void, query: *const std::os::raw::c_char) -> i64;
-pub(crate) type FreeStrFunc = unsafe extern "C" fn(ptr: *mut std::os::raw::c_char);
-pub(crate) type CloseDbFunc = unsafe extern "C" fn(ctx: *mut c_void);
-
-/// MIL-AXO-015 P3 slice 3a: cached FFI fn pointers for the loaded
-/// `axon-plugin-postgres` cdylib. Resolved once at `LatticePool`
-/// construction; all subsequent hot-path call sites read directly
-/// from these fields rather than hitting `Library::get` again per call.
-#[derive(Copy, Clone)]
-pub(crate) struct PluginSymbols {
-    pub(crate) init_fn: InitDbFunc,
-    pub(crate) close_fn: CloseDbFunc,
-    pub(crate) exec_fn: ExecFunc,
-    pub(crate) query_count_fn: QueryCountFunc,
-    pub(crate) query_json_fn: QueryJsonFunc,
-    pub(crate) free_str_fn: FreeStrFunc,
-}
-
-impl PluginSymbols {
-    /// Resolve the pg_* C symbols. `init_fn` is the `pg_init_db_compat`
-    /// shim defined in axon-plugin-postgres; the first argument is
-    /// reinterpreted as a `DATABASE_URL`; the `read_only` flag is
-    /// ignored (PG handles concurrency server-side).
-    ///
-    /// # Safety
-    ///
-    /// `lib` must remain alive for the lifetime of the returned
-    /// `PluginSymbols` because the cached fn pointers reference
-    /// addresses inside the loaded image. `LatticePool` enforces this
-    /// by owning the `Arc<Library>` alongside the symbols.
-    pub(crate) unsafe fn resolve(lib: &Library) -> anyhow::Result<Self> {
-        Ok(Self {
-            init_fn: *lib.get::<InitDbFunc>(b"pg_init_db_compat\0")?,
-            close_fn: *lib.get::<CloseDbFunc>(b"pg_close_db\0")?,
-            exec_fn: *lib.get::<ExecFunc>(b"pg_execute\0")?,
-            query_count_fn: *lib.get::<QueryCountFunc>(b"pg_query_count\0")?,
-            query_json_fn: *lib.get::<QueryJsonFunc>(b"pg_query_json\0")?,
-            free_str_fn: *lib.get::<FreeStrFunc>(b"pg_free_string\0")?,
-        })
-    }
-}
-
+/// REQ-AXO-901881 W2 / REQ-AXO-901880 — the store's PG connection layer.
+/// Formerly an FFI cdylib (`axon-plugin-postgres`) loaded via `libloading`
+/// and called through a `*mut c_void` writer ctx + a single mutex; now a
+/// native in-process `deadpool_postgres` pool ([`NativePgCtx`]) — one fewer
+/// connection stack, no C-ABI marshalling, no writer-mutex serialization,
+/// no per-store tokio runtime. `NativePgCtx` is auto `Send + Sync`
+/// (`Pool` + `Option<String>`), so no `unsafe impl` is needed.
 pub(crate) struct LatticePool {
-    pub(crate) _lib: Arc<Library>,
-    pub(crate) symbols: PluginSymbols,
-    pub(crate) writer_ctx: Mutex<*mut c_void>,
+    pub(crate) native: crate::postgres::native::NativePgCtx,
 }
-
-unsafe impl Send for LatticePool {}
-unsafe impl Sync for LatticePool {}
 
 impl GraphStore {
     /// REQ-AXO-271 slice 2d : under PG canonical (post-MIL-AXO-017 / AGE
@@ -96,15 +44,7 @@ pub struct GraphStore {
     pub(crate) soll_attached: bool,
     pub(crate) soll_read_only_mode: bool,
 }
-
-impl Drop for LatticePool {
-    fn drop(&mut self) {
-        unsafe {
-            let close_fn = self.symbols.close_fn;
-            let writer_ctx = *self.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
-            if !writer_ctx.is_null() {
-                close_fn(writer_ctx);
-            }
-        }
-    }
-}
+// REQ-AXO-901881 W2 — no manual Drop: the native deadpool pool releases its
+// connections on drop, and the runtime is the process-global native_runtime
+// (never dropped here), eliminating the FFI close_fn + the per-store
+// runtime-drop hazard.

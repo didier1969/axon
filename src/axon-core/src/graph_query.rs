@@ -1,52 +1,17 @@
-use std::borrow::Cow;
-use std::ffi::CString;
-
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::graph::GraphStore;
 
 impl GraphStore {
-    /// Post-MIL-AXO-017 identity passthrough. The historical DuckDB->PG
-    /// compat rewriter (`rewrite_duckdb_json_helpers_for_pg`) was removed:
-    /// all SQL sources now emit PG-native syntax directly. This method is
-    /// kept as a seam so call-sites don't need a mechanical rename.
-    fn normalize_attached_soll_query<'a>(&self, query: &'a str) -> Cow<'a, str> {
-        Cow::Borrowed(query)
-    }
-}
-
-impl GraphStore {
     fn query_json_on_writer(&self, query: &str) -> Result<String> {
-        // REQ-AXO-254: under PG, the rewriter must run on writer-routed
-        // reads too — `query_on_ctx` is the raw FFI call. Without this
-        // path, queries that hit the writer (read-only SQL gateway,
-        // SOLL-targeted reads, OptimizerDecisionLog probes, etc.) skip
-        // the DuckDB→PG translations and emit unqualified table names
-        // that PG rejects.
-        let normalized = self.normalize_attached_soll_query(query);
-        let writer = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        self.query_on_ctx(normalized.as_ref(), *writer)
+        // REQ-AXO-901881 W2 — native deadpool read (was the FFI writer ctx +
+        // the DuckDB-era `normalize_attached_soll_query` identity seam, #5).
+        self.query_native(query)
     }
 
     fn query_count_on_writer(&self, query: &str) -> Result<i64> {
-        let normalized = self.normalize_attached_soll_query(query);
-        let writer = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            let count_fn = self.pool.symbols.query_count_fn;
-            Ok(count_fn(
-                *writer,
-                CString::new(normalized.as_ref())?.as_ptr(),
-            ))
-        }
+        Ok(self.pool.native.run_query_count(query))
     }
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
@@ -151,19 +116,12 @@ impl GraphStore {
     }
 
     pub fn execute(&self, query: &str) -> Result<()> {
-        let normalized = self.normalize_attached_soll_query(query);
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            if !exec_fn(*guard, CString::new(normalized.as_ref())?.as_ptr()) {
-                return Err(anyhow!("Writer Error: {}", normalized.as_ref()));
-            }
+        // REQ-AXO-901881 W2 — native deadpool execute (was the FFI exec_fn).
+        if self.pool.native.run_execute(query) {
+            Ok(())
+        } else {
+            Err(anyhow!("Writer Error: {query}"))
         }
-        Ok(())
     }
 
     pub fn execute_param(&self, query: &str, params: &serde_json::Value) -> Result<()> {
@@ -285,137 +243,77 @@ impl GraphStore {
         if queries.is_empty() {
             return Ok(());
         }
-
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-
-        // REQ-AXO-244 / FFI connection-pinning fix: under the PG plugin
-        // each `pg_execute` call gets a fresh connection from the
-        // deadpool pool, which breaks the BEGIN/…/COMMIT pairing —
-        // BEGIN ends up on connection A, COMMIT on connection D, and
-        // connection A stays "idle in transaction" indefinitely
-        // holding row locks. The fix joins the entire batch into a
-        // single `BEGIN; <q1>; <q2>; …; COMMIT;` string and dispatches
-        // it via one `pg_execute` call so the whole sequence runs on
-        // one pinned connection. tokio_postgres' `batch_execute` is
-        // happy with a multi-statement string and DuckDB's plugin
-        // batch_execute behaves identically — same shape on both
-        // backends, so the join is unconditional.
+        // REQ-AXO-244 — join the batch into one `BEGIN; …; COMMIT;` string so
+        // the whole sequence runs on ONE connection: native `batch_execute`
+        // pins a single pooled connection per call, so the BEGIN/COMMIT
+        // pairing holds (no "idle in transaction" leak). batch_execute aborts
+        // the transaction on any statement error, so no explicit ROLLBACK is
+        // needed — the connection returns to the pool already rolled back.
         let mut combined = String::with_capacity(
             queries.iter().map(|q| q.len() + 2).sum::<usize>() + 32,
         );
         combined.push_str("BEGIN;\n");
         for q in queries {
-            let normalized = self.normalize_attached_soll_query(q);
-            combined.push_str(normalized.as_ref());
-            // Many of our queries already end with `;`. Add a guard
-            // separator if not — the parser is forgiving with extra
-            // semicolons but rejects two adjacent statements without
-            // one.
-            if !normalized.as_ref().trim_end().ends_with(';') {
+            combined.push_str(q);
+            if !q.trim_end().ends_with(';') {
                 combined.push(';');
             }
             combined.push('\n');
         }
         combined.push_str("COMMIT;");
 
-
-        unsafe {
-            let exec_fn = self.pool.symbols.exec_fn;
-            let c_query = match CString::new(combined) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Err(anyhow!("Batch Writer Error (CString): {:?}", e));
-                }
-            };
-            if !exec_fn(*guard, c_query.as_ptr()) {
-                // Note: we don't issue an explicit ROLLBACK here. The
-                // joined batch failed inside the pg_execute call, and
-                // `batch_execute` already aborts the transaction on
-                // any statement error. No further state cleanup needed
-                // — the connection returns to the pool with the
-                // implicit rollback already in effect (and DuckDB's
-                // batch_execute behaves the same way).
-                return Err(anyhow!(
-                    "Batch Writer Error on batch (size={})",
-                    queries.len()
-                ));
-            }
+        if self.pool.native.run_execute(&combined) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Batch Writer Error on batch (size={})",
+                queries.len()
+            ))
         }
-        Ok(())
     }
 
-    pub(crate) fn query_on_ctx(&self, query: &str, ctx: *mut std::ffi::c_void) -> Result<String> {
-        let normalized = self.normalize_attached_soll_query(query);
-        unsafe {
-            let query_fn = self.pool.symbols.query_json_fn;
-            let free_fn = self.pool.symbols.free_str_fn;
-            let ptr = query_fn(ctx, CString::new(normalized.as_ref())?.as_ptr());
-            if ptr.is_null() {
-                return Ok("[]".to_string());
-            }
-            let res = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            free_fn(ptr);
-            // REQ-AXO-129 — detect plugin error envelope. Legitimate
-            // results are always a JSON array (`[`); error envelopes
-            // are always a JSON object (`{`) carrying
-            // `_axon_plugin_error`. This unwraps the silent-[] trap:
-            // column-not-found / table-not-found / Prepare errors
-            // now surface as `Err` instead of an indistinguishable
-            // empty result.
-            //
-            // Surface the rich `pg_error.message/code/hint` populated by
-            // `plugin_db_error_envelope`: the bare `_axon_plugin_error`
-            // text is just `tokio_postgres::Error::Display` ("db error")
-            // which hides the actual `column "X" does not exist` /
-            // SQLSTATE / hint that LLM callers need to self-correct.
-            if res.starts_with('{') {
-                if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
-                    if let Some(message) = envelope
-                        .get("_axon_plugin_error")
-                        .and_then(|v| v.as_str())
-                    {
-                        let pg_msg = envelope
-                            .pointer("/pg_error/message")
-                            .and_then(|v| v.as_str());
-                        let pg_code = envelope
-                            .pointer("/pg_error/code")
-                            .and_then(|v| v.as_str());
-                        let pg_hint = envelope
-                            .pointer("/pg_error/hint")
-                            .and_then(|v| v.as_str());
-                        let mut detail = String::new();
-                        if let Some(m) = pg_msg {
-                            detail.push_str(m);
-                        }
-                        if let Some(c) = pg_code {
-                            if !detail.is_empty() {
-                                detail.push(' ');
-                            }
-                            detail.push_str(&format!("[SQLSTATE {c}]"));
-                        }
-                        if let Some(h) = pg_hint {
-                            if !detail.is_empty() {
-                                detail.push_str(" — ");
-                            }
-                            detail.push_str(&format!("hint: {h}"));
-                        }
-                        if detail.is_empty() {
-                            return Err(anyhow::anyhow!(
-                                "Graph plugin error: {message}"
-                            ));
-                        }
-                        return Err(anyhow::anyhow!(
-                            "Graph plugin error: {message} — {detail}"
-                        ));
+    /// REQ-AXO-901881 W2 — native query dispatcher (was `query_on_ctx`, the
+    /// FFI `query_json_fn` + CStr marshalling + writer ctx). `run_query_json`
+    /// returns the rendered JSON array on success, or the REQ-AXO-129 envelope
+    /// string (leading `{`) on error; the envelope→Err detection below is
+    /// unchanged (kept byte-identical so the contract + the "Graph plugin
+    /// error" message callers/tests match on are preserved).
+    pub(crate) fn query_native(&self, query: &str) -> Result<String> {
+        let res = self.pool.native.run_query_json(query);
+        // REQ-AXO-129 — legitimate results are a JSON array (`[`); error
+        // envelopes are a JSON object (`{`) carrying `_axon_plugin_error`.
+        // Surface the rich pg_error.message/code/hint so LLM callers see the
+        // real `column "X" does not exist` / SQLSTATE / hint, not a silent [].
+        if res.starts_with('{') {
+            if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
+                if let Some(message) = envelope.get("_axon_plugin_error").and_then(|v| v.as_str()) {
+                    let pg_msg = envelope.pointer("/pg_error/message").and_then(|v| v.as_str());
+                    let pg_code = envelope.pointer("/pg_error/code").and_then(|v| v.as_str());
+                    let pg_hint = envelope.pointer("/pg_error/hint").and_then(|v| v.as_str());
+                    let mut detail = String::new();
+                    if let Some(m) = pg_msg {
+                        detail.push_str(m);
                     }
+                    if let Some(c) = pg_code {
+                        if !detail.is_empty() {
+                            detail.push(' ');
+                        }
+                        detail.push_str(&format!("[SQLSTATE {c}]"));
+                    }
+                    if let Some(h) = pg_hint {
+                        if !detail.is_empty() {
+                            detail.push_str(" — ");
+                        }
+                        detail.push_str(&format!("hint: {h}"));
+                    }
+                    if detail.is_empty() {
+                        return Err(anyhow::anyhow!("Graph plugin error: {message}"));
+                    }
+                    return Err(anyhow::anyhow!("Graph plugin error: {message} — {detail}"));
                 }
             }
-            Ok(res)
         }
+        Ok(res)
     }
 
     fn expand_named_params(query: &str, params: &serde_json::Value) -> Result<String> {
@@ -521,17 +419,6 @@ mod expand_params_tests;
 #[cfg(test)]
 mod tests {
     use crate::graph::GraphStore;
-    use tempfile::tempdir;
-
-    #[test]
-    fn normalize_attached_soll_query_is_identity_passthrough() {
-        let tempdir = tempdir().unwrap();
-        let store = GraphStore::new(tempdir.path().to_str().unwrap()).unwrap();
-
-        let input = "SELECT * FROM soll.Node WHERE id = 'DEC-PRO-001'";
-        let normalized = store.normalize_attached_soll_query(input);
-        assert_eq!(normalized.as_ref(), input);
-    }
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
