@@ -2064,7 +2064,7 @@ impl McpServer {
 
         let query = if let Some(cosine_expr) = cosine_expr.as_ref() {
             format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, ''), c.content, \
+                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
@@ -2083,7 +2083,7 @@ impl McpServer {
             )
         } else {
             format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, ''), c.content, \
+                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
@@ -2242,7 +2242,7 @@ impl McpServer {
         let query = format!(
             "WITH q AS (SELECT websearch_to_tsquery('english', '{q}') AS tsq) \
              SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), \
-                    COALESCE(c.file_path, ''), c.content, \
+                    COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
                     COALESCE(c.chunk_part_index, 1), \
                     COALESCE(c.chunk_part_count, 1), \
                     COALESCE(c.chunk_path, '1/1'), \
@@ -2708,13 +2708,29 @@ impl McpServer {
             }
             if !anchor.project_code.is_empty() && ram_view.is_warm(&anchor.project_code) {
                 let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) { 10 } else { 5 };
-                if let Some(ids) = ram_view.forward_at_radius(
-                    &anchor.project_code,
-                    &anchor.id,
-                    ram_radius,
-                    cap_per_anchor,
-                    &[],
-                ) {
+                // REQ-AXO-901869 A3 — for the Impact route the relevant
+                // neighbours are the *callers* (who breaks if the anchor
+                // changes), i.e. reverse adjacency. Other routes want
+                // forward dependencies (callees). The PG fallback below
+                // (`query_graph_projection`) UNIONs both directions.
+                let ram_ids = if matches!(route, RetrievalRoute::Impact) {
+                    ram_view.reverse_at_radius(
+                        &anchor.project_code,
+                        &anchor.id,
+                        ram_radius,
+                        cap_per_anchor,
+                        &[],
+                    )
+                } else {
+                    ram_view.forward_at_radius(
+                        &anchor.project_code,
+                        &anchor.id,
+                        ram_radius,
+                        cap_per_anchor,
+                        &[],
+                    )
+                };
+                if let Some(ids) = ram_ids {
                     for target_id in ids {
                         if target_id == anchor.id {
                             continue;

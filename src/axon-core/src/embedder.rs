@@ -202,7 +202,7 @@ pub(super) fn gpu_bootstrap_vector_worker_cap(
 /// (or `0`/`no`/`off`) forces `graph_workers=0`, overriding any explicit
 /// `AXON_GRAPH_WORKERS`. Without this gate the disable flag was silently
 /// ignored and operators kept getting graph workers they asked to turn off.
-fn graph_embeddings_enabled_from_env() -> bool {
+pub(crate) fn graph_embeddings_enabled_from_env() -> bool {
     std::env::var("AXON_GRAPH_EMBEDDINGS_ENABLED")
         .ok()
         .map(|value| {

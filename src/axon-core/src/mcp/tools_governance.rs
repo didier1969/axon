@@ -354,6 +354,17 @@ impl McpServer {
     }
 
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
+        // REQ-AXO-901869 A3 / REQ-AXO-901634 — honour the canonical
+        // graph-embedding disable flag. When the lane is turned off the
+        // `GraphEmbedding` table is not maintained, so any rows still
+        // present are stale ; surfacing them as "Similar Graph
+        // Neighborhoods" would be a lie. Emit an explicit disabled note
+        // instead of querying.
+        if !crate::embedder::graph_embeddings_enabled_from_env() {
+            return Some(
+                "\n\n### Similar Graph Neighborhoods\n\n**Status:** graph-embedding derivation is temporarily disabled (`AXON_GRAPH_EMBEDDINGS_ENABLED=false`); neighbourhood similarity is not computed. Structural clones above remain canonical.".to_string(),
+            );
+        }
         let anchor_res = self
             .graph_store
             .query_json_param(

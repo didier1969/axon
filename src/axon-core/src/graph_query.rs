@@ -334,26 +334,56 @@ impl GraphStore {
         Ok(())
     }
 
+    /// REQ-AXO-901869 A3 — local neighbourhood projection around an
+    /// anchor symbol, read live from canonical `ist.Edge` via the graph
+    /// SQL functions (`ist.impact` forward + `ist.callers_of` reverse).
+    ///
+    /// Replaces the dead read of `ist.GraphProjection`, which was never
+    /// populated after the AGE→PG migration (`refresh_symbol_projection`
+    /// became a no-op, REQ-AXO-271 slice 2) — so every "Derived Local
+    /// Projection" / `structural_neighbors` section silently rendered
+    /// empty. We UNION both directions so blast-radius callers AND
+    /// dependency callees appear; this is an explicitly non-canonical
+    /// derived view (PIL-AXO-009) — the warm path is the RAM
+    /// `IstGraphView`, this PG read is the cold fallback. Output keeps
+    /// the 6-column shape callers parse: (target_type, target_id,
+    /// edge_kind, distance, label, uri).
     pub fn query_graph_projection(
         &self,
         anchor_type: &str,
         anchor_id: &str,
         radius: u64,
     ) -> Result<String> {
-        let query = "SELECT gp.target_type, gp.target_id, gp.edge_kind, gp.distance, \
-                            COALESCE(s.name, gp.target_id) AS label, \
-                            COALESCE(ch.file_path, '') AS uri \
-                     FROM GraphProjection gp \
-                     LEFT JOIN Symbol s ON gp.target_type = 'symbol' AND s.id = gp.target_id \
-                     LEFT JOIN Chunk ch ON gp.target_type = 'symbol' AND ch.source_id = gp.target_id AND ch.source_type = 'symbol' \
-                     WHERE gp.anchor_type = $anchor_type AND gp.anchor_id = $anchor_id AND gp.radius = $radius \
-                     ORDER BY gp.distance ASC, gp.edge_kind ASC, label ASC";
+        if anchor_type != "symbol" {
+            // File-level projection is not modelled in ist.Edge node-space
+            // (edges connect symbols + file CONTAINS) ; nothing to derive.
+            return Ok("[]".to_string());
+        }
+        let depth = radius.clamp(1, 10) as i64;
+        let query = "WITH neigh AS ( \
+                         SELECT target_id AS node_id, distance, relation_type \
+                         FROM ist.impact($anchor_id, $depth::INT, '') \
+                         UNION \
+                         SELECT source_id AS node_id, distance, relation_type \
+                         FROM ist.callers_of($anchor_id, $depth::INT, '') \
+                     ) \
+                     SELECT 'symbol' AS target_type, \
+                            n.node_id AS target_id, \
+                            n.relation_type AS edge_kind, \
+                            MIN(n.distance) AS distance, \
+                            COALESCE(s.name, n.node_id) AS label, \
+                            COALESCE(MIN(ch.file_path), '') AS uri \
+                     FROM neigh n \
+                     LEFT JOIN ist.Symbol s ON s.id = n.node_id \
+                     LEFT JOIN ist.Chunk ch ON ch.source_id = n.node_id AND ch.source_type = 'symbol' \
+                     WHERE n.node_id <> $anchor_id \
+                     GROUP BY n.node_id, n.relation_type, s.name \
+                     ORDER BY distance ASC, edge_kind ASC, label ASC";
         self.query_json_param(
             query,
             &serde_json::json!({
-                "anchor_type": anchor_type,
                 "anchor_id": anchor_id,
-                "radius": radius as i64,
+                "depth": depth,
             }),
         )
     }

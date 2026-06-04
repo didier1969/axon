@@ -112,7 +112,7 @@ impl McpServer {
         // REQ-AXO-91512 — RAM-first via IstGraphView (PIL-AXO-9002,
         // feedback_trimodal_use_ram_graph_not_pg). When the cache is
         // warm, the reverse-traversal runs entirely in RAM ; the PG
-        // path (`impact_callers_via_public_edge` → REQ-AXO-296 SQL fn)
+        // path (`impact_callers_via_ist_edge` → REQ-AXO-296 SQL fn)
         // is the degraded fallback for cold cache or unscoped queries.
         // Inferred `bridge_name` edges are a PG-text-matching artifact
         // not represented in the IST snapshot ; when RAM serves the
@@ -135,7 +135,7 @@ impl McpServer {
         } else {
             surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
-            self.impact_callers_via_public_edge(&target_id, project, depth)
+            self.impact_callers_via_ist_edge(&target_id, project, depth)
                 .map(Ok)
                 .unwrap_or_else(|| Ok("[]".to_string()))
         };
@@ -915,7 +915,7 @@ impl McpServer {
     /// or AGE quirks we haven't covered yet.
     /// MIL-AXO-017 slice 5 (REQ-AXO-299) — query `ist.callers_of`
     /// REQ-AXO-91512 — RAM-first counterpart of
-    /// `impact_callers_via_public_edge`. Performs the reverse traversal
+    /// `impact_callers_via_ist_edge`. Performs the reverse traversal
     /// in the in-memory IST snapshot (PIL-AXO-9002), classifies each
     /// caller's direct edge to the target via
     /// `IstGraphView::direct_edge_relation`, and materialises the
@@ -1005,14 +1005,18 @@ impl McpServer {
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// SQL function (REQ-AXO-296) for reverse-traversal callers. Joins
-    /// with `ist.Symbol` + `ist.Chunk` to surface the 5-column
-    /// shape `axon_impact` expects (caller_id, edge_type, origin, name,
-    /// kind), keeping the JSON contract identical to the AGE-based
-    /// `impact_callers_via_age` helper. Returns `None` on empty / error
-    /// so the caller falls through to AGE for diagnosis during the
-    /// transition.
-    fn impact_callers_via_public_edge(
+    /// PG fallback (REQ-AXO-296 / REQ-AXO-901869 A3) for `axon_impact`'s
+    /// reverse-traversal callers. Used ONLY when the canonical RAM
+    /// `IstGraphView` snapshot is cold (brain_only boot, RAM disabled,
+    /// tests). The warm/prod path is `build_impact_rows_from_ram`
+    /// (PIL-AXO-9002 — the in-memory graph is canonical; PG is the
+    /// degraded fallback, not the source of truth). Wraps
+    /// `ist.callers_of` (WITH RECURSIVE on `ist.Edge`) and joins
+    /// `ist.Symbol` + `ist.Chunk` to surface the 5-column row shape
+    /// `axon_impact` parses: (caller_id, edge_type, origin, name, kind).
+    /// Returns `None` on empty / error so the caller degrades to
+    /// `axon_impact_without_calls`.
+    fn impact_callers_via_ist_edge(
         &self,
         target_id: &str,
         project: Option<&str>,
@@ -1020,38 +1024,41 @@ impl McpServer {
     ) -> Option<String> {
         let depth_clamped = depth.clamp(1, 10) as i32;
         let project_code_param = project.unwrap_or("");
-        // Uses Axon's positional `?` placeholders (`expand_named_params`
-        // inlines escaped string literals before dispatch). The graph
-        // SQL function `ist.callers_of` returns (source_id, distance,
-        // relation_type) — we map relation_type to the lowercased
-        // canonical labels (`calls`, `calls_nif`) that `axon_impact`
-        // parses for direct vs nif edge accounting.
+        // REQ-AXO-901869 A3 root cause: the prior SQL used `\`
+        // line-continuations, which strip the next line's leading
+        // whitespace and glued `relation_type` to `WHEN` →
+        // `relation_typeWHEN` → "syntax error at or near THEN" →
+        // every cold-cache impact silently returned `[]`. We now use a
+        // plain multi-line literal (newlines kept) so no two SQL tokens
+        // can ever be welded together. Named params (`$target`/`$proj`)
+        // are inlined as escaped literals by `expand_named_params`.
         let sql = format!(
-            "WITH callers AS (\
-                 SELECT source_id, distance, relation_type FROM callers_of(?, {depth_clamped}::INT, ?)\
-             ),\
-             enriched AS (\
-                 SELECT c.source_id AS caller_id,\
-                        CASE c.relation_type\
-                            WHEN 'CALLS'     THEN 'calls'\
-                            WHEN 'CALLS_NIF' THEN 'calls_nif'\
-                            ELSE lower(c.relation_type)\
-                        END AS edge_type,\
-                        COALESCE(s.name, '-') AS name,\
-                        COALESCE(s.kind, '-') AS kind,\
-                        COALESCE(MIN(ch.file_path), '-') AS origin\
-                 FROM callers c\
-                 LEFT JOIN ist.Symbol s ON s.id = c.source_id\
-                 LEFT JOIN ist.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'\
-                 GROUP BY c.source_id, c.relation_type, s.name, s.kind\
-             )\
+            "WITH callers AS (
+                 SELECT source_id, distance, relation_type
+                 FROM ist.callers_of($target, {depth_clamped}::INT, $proj)
+             ),
+             enriched AS (
+                 SELECT c.source_id AS caller_id,
+                        CASE c.relation_type
+                            WHEN 'CALLS' THEN 'calls'
+                            WHEN 'CALLS_NIF' THEN 'calls_nif'
+                            ELSE lower(c.relation_type)
+                        END AS edge_type,
+                        COALESCE(s.name, '-') AS name,
+                        COALESCE(s.kind, '-') AS kind,
+                        COALESCE(MIN(ch.file_path), '-') AS origin
+                 FROM callers c
+                 LEFT JOIN ist.Symbol s ON s.id = c.source_id
+                 LEFT JOIN ist.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'
+                 GROUP BY c.source_id, c.relation_type, s.name, s.kind
+             )
              SELECT caller_id, edge_type, origin, name, kind FROM enriched"
         );
-        let params = serde_json::json!([target_id, project_code_param]);
+        let params = serde_json::json!({ "target": target_id, "proj": project_code_param });
         let raw = match self.graph_store.query_json_param(&sql, &params) {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("impact_callers_via_public_edge: SQL query failed: {}", e);
+                log::warn!("impact_callers_via_ist_edge: SQL query failed: {}", e);
                 return None;
             }
         };

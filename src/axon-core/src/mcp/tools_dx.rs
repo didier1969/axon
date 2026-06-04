@@ -631,7 +631,7 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, ch.file_path AS uri, {cosine_expr} as score \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, {cosine_expr} as score \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} \
                                 OR {cosine_expr} < 0.5 \
@@ -643,11 +643,11 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, ch.file_path AS uri, {cosine_expr} as score \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, {cosine_expr} as score \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
-                             WHERE ch.project_code = $proj AND ( {} \
+                             WHERE s.project_code = $proj AND ( {} \
                                 OR {cosine_expr} < 0.5 \
-                             ) \
+                             ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) \
                              ORDER BY score ASC LIMIT {}",
                             base_predicate, query_limit
                         ),
@@ -660,7 +660,7 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, ch.file_path AS uri \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} LIMIT {}",
                             base_predicate, query_limit
@@ -670,9 +670,9 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, ch.file_path AS uri \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
-                             WHERE ch.project_code = $proj AND ( {} ) LIMIT {}",
+                             WHERE s.project_code = $proj AND ( {} ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) LIMIT {}",
                             base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
@@ -682,7 +682,7 @@ impl McpServer {
         } else if project == "*" {
             (
                 format!(
-                    "SELECT s.name, s.kind, ch.file_path AS uri \
+                    "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
                      FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                      WHERE {} \
                      LIMIT {}",
@@ -693,9 +693,9 @@ impl McpServer {
         } else {
             (
                 format!(
-                    "SELECT s.name, s.kind, ch.file_path AS uri \
+                    "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
                      FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
-                     WHERE ch.project_code = $proj AND ( {} ) LIMIT {}",
+                     WHERE s.project_code = $proj AND ( {} ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) LIMIT {}",
                     base_predicate, query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
@@ -986,7 +986,7 @@ impl McpServer {
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, c.file_path AS uri, \
+                    SELECT s.name, s.kind, COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1025,7 +1025,7 @@ impl McpServer {
         } else {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, c.file_path AS uri, \
+                    SELECT s.name, s.kind, COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1127,13 +1127,13 @@ impl McpServer {
         let degraded_files = self.degraded_file_count((project != "*").then_some(project));
         let degraded_note = self.degraded_truth_note(degraded_files);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
-        // Post-MIL-AXO-017: legacy CONTAINS table is retired; symbol->file
-        // mapping lives in Chunk.file_path. contains_count is invariantly 0.
+        // Post-MIL-AXO-017: symbol→file mapping is the `ist.Edge`
+        // CONTAINS relation (file CONTAINS symbol), resolved inline in
+        // the primary `axon_query` SELECT (REQ-AXO-901869 A3). This
+        // last-resort fallback is reached only when even the symbol
+        // name predicate produced no row, so there is no containment to
+        // report here.
         let contains_count: i64 = 0;
-        println!(
-            "axon_query_without_contains: contains_count={} in DB {:?}",
-            contains_count, self.graph_store.db_path
-        );
         if contains_count > 0 {
             let diagnostic = Self::query_diagnostic_block(
                 query_intent,
@@ -2005,9 +2005,17 @@ impl McpServer {
         } else {
             surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
+            // REQ-AXO-901869 A3 — `ist.callers_of` RETURNS (source_id,
+            // distance, relation_type) : the prior `SELECT caller_id`
+            // referenced a non-existent column (SQL error → silently no
+            // consumers). The 3rd arg is `p_project_code TEXT DEFAULT ''`
+            // — passing `NULL` made `e.project_code = NULL` NULL-out
+            // every row. Use the empty-string unscoped sentinel (or the
+            // scoped code) and the real `source_id` column.
             let safe_target = target_id.replace('\'', "''");
+            let proj_param = project.unwrap_or("").replace('\'', "''");
             let sql = format!(
-                "SELECT caller_id FROM ist.callers_of('{safe_target}', 1, NULL)"
+                "SELECT source_id FROM ist.callers_of('{safe_target}', 1, '{proj_param}')"
             );
             self.graph_store
                 .query_json(&sql)
