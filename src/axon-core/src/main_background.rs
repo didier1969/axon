@@ -2558,7 +2558,7 @@ mod tests {
 
     #[test]
     fn test_scope_reconciliation_enabled_defaults_to_true() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("AXON_SCOPE_RECONCILE_ENABLED");
         }
@@ -2567,7 +2567,7 @@ mod tests {
 
     #[test]
     fn test_scope_reconciliation_enabled_respects_false_env() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for value in ["false", "FALSE", "0", "off", "no"] {
             unsafe {
                 std::env::set_var("AXON_SCOPE_RECONCILE_ENABLED", value);
@@ -2584,7 +2584,7 @@ mod tests {
 
     #[test]
     fn test_scope_reconciliation_interval_defaults_and_clamps() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap();
+        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS");
         }

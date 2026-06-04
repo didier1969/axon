@@ -268,6 +268,19 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    // REQ-AXO-901877 — see stage_b1: the GraphStore fixture + sync store
+    // methods drive the PG plugin via an internal `block_on`, so the
+    // single-shot B3 tests stay sync (`#[test]`) and drive only the async
+    // `b3_persist_embedding` (itself `spawn_blocking`-based) through a local
+    // current-thread runtime, avoiding the runtime-within-a-runtime panic.
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
     fn sym(name: &str) -> Symbol {
         Symbol {
             name: name.to_string(),
@@ -287,8 +300,8 @@ mod tests {
 
     /// Seed a Chunk row via A3, then have B3 persist a no-op embedding
     /// for it. ChunkEmbedding row must exist after the UPSERT.
-    #[tokio::test]
-    async fn b3_persists_chunk_embedding_after_a3_seeded_the_chunk_row() {
+    #[test]
+    fn b3_persists_chunk_embedding_after_a3_seeded_the_chunk_row() {
         use crate::embedding_contract::DIMENSION;
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
@@ -318,9 +331,7 @@ mod tests {
             embedding,
         };
 
-        let receipt = b3_persist_embedding(payload, store.clone())
-            .await
-            .unwrap();
+        let receipt = run_async(b3_persist_embedding(payload, store.clone())).unwrap();
         assert_eq!(receipt.chunk_id, cid);
         assert!(receipt.embedded_at_ms > 0);
 
@@ -332,8 +343,8 @@ mod tests {
         assert_eq!(n, 1, "B3 must persist exactly one ChunkEmbedding row");
     }
 
-    #[tokio::test]
-    async fn b3_is_idempotent_on_repeated_persist_for_same_chunk_id() {
+    #[test]
+    fn b3_is_idempotent_on_repeated_persist_for_same_chunk_id() {
         use crate::embedding_contract::DIMENSION;
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
@@ -361,12 +372,8 @@ mod tests {
             }
         };
 
-        b3_persist_embedding(mk_payload(), store.clone())
-            .await
-            .unwrap();
-        b3_persist_embedding(mk_payload(), store.clone())
-            .await
-            .unwrap();
+        run_async(b3_persist_embedding(mk_payload(), store.clone())).unwrap();
+        run_async(b3_persist_embedding(mk_payload(), store.clone())).unwrap();
 
         let n = store
             .query_count(&format!(
@@ -378,8 +385,8 @@ mod tests {
 
     /// REQ-AXO-901777 — B3 with wrong embedding dimension propagates
     /// the PG vector constraint error (not a panic or silent corruption).
-    #[tokio::test]
-    async fn b3_wrong_dimension_embedding_returns_error() {
+    #[test]
+    fn b3_wrong_dimension_embedding_returns_error() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let body = "fn b3_dim_test() {}\n";
         let chunk_ids = store
@@ -403,7 +410,7 @@ mod tests {
             embedding: bad_embedding,
         };
 
-        let result = b3_persist_embedding(payload, store).await;
+        let result = run_async(b3_persist_embedding(payload, store));
         assert!(
             result.is_err(),
             "wrong dimension must surface as a PG error, not silent success"

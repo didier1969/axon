@@ -97,6 +97,21 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    // REQ-AXO-901877 — the GraphStore test fixture (`create_test_db`) and the
+    // sync store methods (`upsert_graph_v2`, `query_count`) drive the PG plugin
+    // via an internal `block_on`, so they must run OUTSIDE a tokio runtime.
+    // These tests therefore stay sync (`#[test]`) and drive only the genuinely
+    // async stage fn (which internally uses `spawn_blocking`) through a local
+    // current-thread runtime — avoiding the "runtime within a runtime" panic
+    // that `#[tokio::test]` triggered at fixture construction.
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
     fn sym(name: &str) -> Symbol {
         Symbol {
             name: name.to_string(),
@@ -116,8 +131,8 @@ mod tests {
 
     /// Seed Chunk rows via A3's canonical path, then verify B1 can
     /// SELECT them back with content intact.
-    #[tokio::test]
-    async fn b1_fetches_chunk_content_after_a3_upsert() {
+    #[test]
+    fn b1_fetches_chunk_content_after_a3_upsert() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let body = "fn marker_for_b1_fetch_test() { let x = 1; }\n";
 
@@ -135,8 +150,7 @@ mod tests {
         assert!(!chunk_ids.is_empty(), "A3 must emit at least one chunk_id");
 
         let cid = chunk_ids[0].clone();
-        let fetched = b1_fetch_for_embedding(cid.clone(), store.clone())
-            .await
+        let fetched = run_async(b1_fetch_for_embedding(cid.clone(), store.clone()))
             .unwrap()
             .expect("Chunk row must exist after A3 UPSERT");
 
@@ -151,17 +165,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn b1_returns_none_for_missing_chunk_id() {
+    #[test]
+    fn b1_returns_none_for_missing_chunk_id() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let res = b1_fetch_for_embedding("AXO::nonexistent::path::sym::chunk".to_string(), store)
-            .await
-            .unwrap();
+        let res = run_async(b1_fetch_for_embedding(
+            "AXO::nonexistent::path::sym::chunk".to_string(),
+            store,
+        ))
+        .unwrap();
         assert!(res.is_none(), "B1 must return None for unknown chunk_id");
     }
 
-    #[tokio::test]
-    async fn a3_returns_chunk_ids_that_b1_can_round_trip() {
+    #[test]
+    fn a3_returns_chunk_ids_that_b1_can_round_trip() {
         // Session-19 contract: A3 returns Vec<String> chunk_ids; every
         // returned id must be addressable by B1 from PG. This locks the
         // try_send fan-out contract A3 → B1 inbox.
@@ -186,8 +202,7 @@ mod tests {
         );
 
         for cid in chunk_ids {
-            let fetched = b1_fetch_for_embedding(cid.clone(), store.clone())
-                .await
+            let fetched = run_async(b1_fetch_for_embedding(cid.clone(), store.clone()))
                 .unwrap()
                 .unwrap_or_else(|| panic!("chunk_id {cid} from A3 must round-trip via B1"));
             assert_eq!(fetched.chunk_id, cid);

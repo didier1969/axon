@@ -2019,10 +2019,13 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             .as_array()
             .is_some()
     );
+    // REQ-AXO-901870 — the `reader_refresh` loop-interval was removed with
+    // the reader-replica refresher; assert the surviving optimizer_loop key.
     assert!(
-        data["runtime_authority"]["quiescent_state"]["loop_intervals_ms"]["reader_refresh"]
-            .as_u64()
-            .is_some()
+        data["runtime_authority"]["quiescent_state"]["loop_intervals_ms"]["optimizer_loop"]
+            .is_u64()
+            || data["runtime_authority"]["quiescent_state"]["loop_intervals_ms"]["optimizer_loop"]
+                .is_null()
     );
     assert!(
         data["runtime_authority"]["quiescent_state"]["wake_activity"]["wakeups_last_60s"]
