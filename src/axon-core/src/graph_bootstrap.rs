@@ -911,19 +911,40 @@ impl GraphStore {
         Ok(())
     }
 
+    /// REQ-AXO-901876 — PG replacement for the DuckDB/SQLite
+    /// `pragma_table_info` (which does not exist in PostgreSQL —
+    /// SQLSTATE 42883). Returns the column names of `target` from
+    /// `information_schema.columns`. `target` may be `schema.table` or a
+    /// bare `table`; PostgreSQL folds unquoted identifiers to lowercase,
+    /// so both the lookup and the returned names are lowercase (callers
+    /// compare case-insensitively).
+    fn table_column_names(&self, target: &str) -> Result<Vec<String>> {
+        let where_clause = match target.split_once('.') {
+            Some((schema, table)) => format!(
+                "table_schema = '{}' AND table_name = '{}'",
+                schema.to_lowercase().replace('\'', "''"),
+                table.to_lowercase().replace('\'', "''"),
+            ),
+            None => format!("table_name = '{}'", target.to_lowercase().replace('\'', "''")),
+        };
+        let raw = self.query_json(&format!(
+            "SELECT column_name FROM information_schema.columns WHERE {where_clause}"
+        ))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|mut row| (!row.is_empty()).then(|| row.remove(0)))
+            .collect())
+    }
+
     fn normalize_soll_registry(&self) -> Result<()> {
-        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.Registry')")?;
-        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let has_project_code = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_code"))
-                .unwrap_or(false)
-        });
-        let has_project_slug = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_slug"))
-                .unwrap_or(false)
-        });
+        let columns = self.table_column_names("soll.Registry")?;
+        let has_project_code = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_code"));
+        let has_project_slug = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code {
             return Err(anyhow!(
@@ -970,18 +991,13 @@ impl GraphStore {
     }
 
     fn normalize_revision_preview_schema(&self) -> Result<()> {
-        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.RevisionPreview')")?;
-        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let has_project_code = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_code"))
-                .unwrap_or(false)
-        });
-        let has_project_slug = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_slug"))
-                .unwrap_or(false)
-        });
+        let columns = self.table_column_names("soll.RevisionPreview")?;
+        let has_project_code = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_code"));
+        let has_project_slug = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code {
             return Err(anyhow!(
@@ -1047,28 +1063,19 @@ impl GraphStore {
     }
 
     fn normalize_project_code_registry_schema(&self) -> Result<()> {
-        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.ProjectCodeRegistry')")?;
-        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let has_project_code = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_code"))
-                .unwrap_or(false)
-        });
-        let has_project_name = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_name"))
-                .unwrap_or(false)
-        });
-        let has_project_path = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_path"))
-                .unwrap_or(false)
-        });
-        let has_legacy_slug = columns.iter().any(|row| {
-            row.get(1)
-                .map(|value| value.eq_ignore_ascii_case("project_slug"))
-                .unwrap_or(false)
-        });
+        let columns = self.table_column_names("soll.ProjectCodeRegistry")?;
+        let has_project_code = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_code"));
+        let has_project_name = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_name"));
+        let has_project_path = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_path"));
+        let has_legacy_slug = columns
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code || !has_project_name || !has_project_path {
             return Err(anyhow!(
@@ -1705,13 +1712,8 @@ impl GraphStore {
 
     fn list_project_code_registry_columns(&self) -> Result<std::collections::HashSet<String>> {
         for target in ["soll.ProjectCodeRegistry", "ProjectCodeRegistry"] {
-            let raw =
-                self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            let columns: std::collections::HashSet<String> = rows
-                .into_iter()
-                .filter_map(|row| row.into_iter().next())
-                .collect();
+            let columns: std::collections::HashSet<String> =
+                self.table_column_names(target)?.into_iter().collect();
             if !columns.is_empty() {
                 return Ok(columns);
             }
@@ -1721,13 +1723,8 @@ impl GraphStore {
 
     fn list_soll_node_columns(&self) -> Result<std::collections::HashSet<String>> {
         for target in ["soll.Node", "Node"] {
-            let raw =
-                self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
-            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-            let columns: std::collections::HashSet<String> = rows
-                .into_iter()
-                .filter_map(|row| row.into_iter().next())
-                .collect();
+            let columns: std::collections::HashSet<String> =
+                self.table_column_names(target)?.into_iter().collect();
             if !columns.is_empty() {
                 return Ok(columns);
             }
