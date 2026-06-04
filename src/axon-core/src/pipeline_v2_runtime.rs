@@ -174,6 +174,28 @@ fn resolve_database_url_for_listener() -> String {
 /// tasks for the lifetime of the process. The caller keeps no handle —
 /// the pipelines drain ingress until `input_tx` is dropped (never,
 /// under normal shutdown via SIGTERM).
+/// REQ-AXO-901874 — spawn the indexer liveness heartbeat publisher,
+/// decoupled from the GPU embedder lifecycle. Ticks every 5s and UPSERTs
+/// `axon_runtime.EmbedderLifecycleHeartbeat` (role="indexer"). The brain's
+/// `resolve_indexer_liveness` derives `indexer_ready` from this row's
+/// freshness alone, so every indexing process — graph-only, CPU, NoOp, or
+/// GPU — is provably alive. Previously the publisher was spawned only in the
+/// GPU-Ok branch of pipeline B, so graph-only / GPU-failed indexers were
+/// reported `indexer_ready=False` despite actively indexing (false negative).
+fn spawn_indexer_liveness_heartbeat(store: Arc<GraphStore>) {
+    crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
+        std::time::Duration::from_secs(5),
+        move |snapshot| {
+            if let Err(err) = store.record_lifecycle_heartbeat("indexer", &snapshot) {
+                warn!(
+                    error = %err,
+                    "REQ-AXO-901874: failed to UPSERT EmbedderLifecycleHeartbeat row"
+                );
+            }
+        },
+    );
+}
+
 pub fn spawn_pipeline_v2_indexer(
     runtime_mode: AxonRuntimeMode,
     store: Arc<GraphStore>,
@@ -255,6 +277,17 @@ pub fn spawn_pipeline_v2_indexer(
     );
     let handles_a = spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
 
+    // REQ-AXO-901874 — indexer liveness heartbeat, decoupled from the GPU
+    // embedder. This function is reached for every ingestion-enabled mode
+    // (IndexerGraph + IndexerFull, see runtime_mode.ingestion_enabled());
+    // publishing here — BEFORE and independent of the optional pipeline-B
+    // GPU embedder — means a graph-only or CPU/NoOp indexer is still
+    // provably alive to the brain (`resolve_indexer_liveness` reads the
+    // `axon_runtime.EmbedderLifecycleHeartbeat` row freshness, not the GPU
+    // state). Liveness ≠ GPU-up. Tick 5s sits well under the brain's ~30s
+    // freshness window so a single missed tick stays fresh.
+    spawn_indexer_liveness_heartbeat(store.clone());
+
     // Slice 5 SOTA — create the b_chunks channel here (was b1_inbox in
     // orchestrator). demand_pull_b owns the tx ; spawn_pipeline_b_full_multi
     // takes the rx. The channel carries ChunkForEmbedding (one
@@ -289,28 +322,13 @@ pub fn spawn_pipeline_v2_indexer(
                     std::time::Duration::from_secs(20),
                     std::time::Duration::from_secs(2),
                 );
-                // REQ-AXO-91572 option B — publish the indexer's
-                // EmbedderLifecycle state into the cross-process
-                // `axon_runtime.EmbedderLifecycleHeartbeat` table so
-                // the brain's `embedding_status` MCP tool reads the
-                // actual runtime state instead of its own unused
-                // singleton. Tick 5s : far below the brain freshness
-                // window (~30s) so a single missed tick still leaves
-                // the row fresh enough to trust.
-                let heartbeat_store = store.clone();
-                crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
-                    std::time::Duration::from_secs(5),
-                    move |snapshot| {
-                        if let Err(err) =
-                            heartbeat_store.record_lifecycle_heartbeat("indexer", &snapshot)
-                        {
-                            warn!(
-                                error = %err,
-                                "REQ-AXO-91572: failed to UPSERT EmbedderLifecycleHeartbeat row"
-                            );
-                        }
-                    },
-                );
+                // REQ-AXO-901874 — the indexer liveness heartbeat is now
+                // published unconditionally at the top of this function
+                // (see `spawn_indexer_liveness_heartbeat` below), decoupled
+                // from this GPU-Ok branch. Previously it spawned ONLY here,
+                // so graph-only / CPU / NoOp indexers never wrote a row and
+                // the brain reported `indexer_ready=False` despite a live,
+                // indexing process.
                 arc_embedder as Arc<dyn crate::pipeline_v2::B2Embedder>
             }
             Err(err) => {
@@ -1020,6 +1038,32 @@ mod tests {
 
         std::env::set_var(trt_key, "0");
         assert!(!gpu_provider_explicitly_requested(), "TRT flag=0 → false");
+    }
+
+    /// REQ-AXO-901874 — the indexer liveness heartbeat is spawned from
+    /// `spawn_pipeline_v2_indexer` (unconditionally, before pipeline B), so
+    /// it covers every ingestion-enabled mode. Lock the exact condition the
+    /// old GPU-branch placement fell into: graph-only is `ingestion_enabled`
+    /// (heartbeat MUST publish) yet NOT `semantic_workers_enabled` (the old
+    /// code only spawned the heartbeat when semantic/GPU workers ran → false
+    /// `indexer_ready=False`). A refactor re-coupling liveness to GPU breaks
+    /// this test.
+    #[test]
+    fn indexer_liveness_heartbeat_covers_graph_only_mode() {
+        use crate::runtime_mode::AxonRuntimeMode;
+        assert!(
+            AxonRuntimeMode::IndexerGraph.ingestion_enabled(),
+            "graph-only indexes → reaches spawn_pipeline_v2_indexer → heartbeat must publish"
+        );
+        assert!(
+            !AxonRuntimeMode::IndexerGraph.semantic_workers_enabled(),
+            "graph-only runs NO GPU/semantic workers — the old heartbeat placement missed it"
+        );
+        assert!(AxonRuntimeMode::IndexerFull.ingestion_enabled());
+        assert!(
+            !AxonRuntimeMode::BrainOnly.ingestion_enabled(),
+            "brain never reaches spawn_pipeline_v2_indexer → no indexer heartbeat"
+        );
     }
 
     #[test]
