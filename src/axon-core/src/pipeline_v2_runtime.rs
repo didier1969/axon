@@ -1029,15 +1029,22 @@ mod tests {
         std::env::set_var(prov_key, "CUDA");
         assert!(gpu_provider_explicitly_requested(), "CUDA (case) → true");
 
+        // REQ-AXO-901737 — `AXON_EMBEDDING_PROVIDER` is the SINGLE canonical
+        // knob; the legacy `AXON_GPU_EMBED_SERVICE_TENSORRT` flag is no longer
+        // consulted by `gpu_provider_explicitly_requested`. With the provider
+        // unset, the legacy flag must be inert regardless of its value. (This
+        // test previously asserted the removed legacy behaviour and failed
+        // deterministically once REQ-AXO-901737 updated the fn but not the
+        // test.)
         std::env::remove_var(prov_key);
         std::env::set_var(trt_key, "1");
-        assert!(gpu_provider_explicitly_requested(), "TRT flag=1 → true");
+        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=1 is inert");
 
         std::env::set_var(trt_key, "true");
-        assert!(gpu_provider_explicitly_requested(), "TRT flag=true → true");
+        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=true is inert");
 
         std::env::set_var(trt_key, "0");
-        assert!(!gpu_provider_explicitly_requested(), "TRT flag=0 → false");
+        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=0 is inert");
     }
 
     /// REQ-AXO-901874 — the indexer liveness heartbeat is spawned from
