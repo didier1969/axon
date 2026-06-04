@@ -415,6 +415,75 @@ impl RuntimeBootProfile {
     }
 }
 
+/// REQ-AXO-901869 A1 — thin `JsonSqlStore` adapter so the brain can
+/// cold-load IST CSR snapshots at boot via `ist_snapshot::load_snapshot`.
+struct BootWarmSqlStore<'a>(&'a GraphStore);
+
+impl crate::ist_snapshot::loader::JsonSqlStore for BootWarmSqlStore<'_> {
+    fn query_json(&self, sql: &str) -> Result<String, String> {
+        self.0.query_json(sql).map_err(|e| e.to_string())
+    }
+}
+
+/// REQ-AXO-901869 A1 — distinct project codes carrying IST symbols, parsed
+/// from the `query_json` 2-D array. Pure, so the parse is unit-tested
+/// without a live GraphStore.
+fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<Vec<serde_json::Value>>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            row.into_iter()
+                .next()
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+        .filter(|code| !code.is_empty())
+        .collect()
+}
+
+/// REQ-AXO-901869 A1 — warm the RAM IST snapshot for every IST-bearing
+/// project at brain boot. Best-effort: no-op when the cache is disabled
+/// (`AXON_IST_RAM_ENABLED`), and per-project failures log + leave the PG
+/// fallback in place (correct post REQ-AXO-901869 A3). Runs on a blocking
+/// thread so it never stalls the async runtime during boot.
+fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
+    if !crate::ist_snapshot::IstSnapshotCache::is_enabled() {
+        info!("REQ-AXO-901869 A1: IST RAM cache disabled — skipping boot warm");
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        let store = BootWarmSqlStore(&graph_store);
+        let raw = match store.0.query_json(
+            "SELECT DISTINCT project_code FROM ist.Symbol \
+             WHERE project_code IS NOT NULL ORDER BY project_code",
+        ) {
+            Ok(raw) => raw,
+            Err(err) => {
+                warn!(error = %err, "REQ-AXO-901869 A1: boot warm project enumeration failed");
+                return;
+            }
+        };
+        for project in parse_boot_warm_project_codes(&raw) {
+            match crate::ist_snapshot::load_snapshot(&store, &project) {
+                Ok((graph, stats)) => {
+                    crate::ist_snapshot::publish_process_snapshot(project.clone(), Arc::new(graph));
+                    info!(
+                        project = %project,
+                        nodes = stats.nodes_loaded,
+                        edges = stats.edges_loaded,
+                        "REQ-AXO-901869 A1: warmed IST snapshot at boot"
+                    );
+                }
+                Err(err) => warn!(
+                    project = %project,
+                    error = %err,
+                    "REQ-AXO-901869 A1: boot warm failed (PG fallback remains)"
+                ),
+            }
+        }
+    });
+}
+
 pub fn run_brain() -> anyhow::Result<()> {
     run(RuntimeBootProfile::brain())
 }
@@ -847,6 +916,16 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         );
     }
 
+    // REQ-AXO-901869 A1 — when this process serves MCP reads (brain), warm
+    // the in-RAM IstGraphView CSR snapshot for every IST-bearing project at
+    // boot, so the first impact / retrieve_context / query calls dispatch to
+    // the canonical RAM graph (PIL-AXO-9002) instead of the degraded PG
+    // fallback. Best-effort + off the async runtime (spawn_blocking); on
+    // failure the PG fallback remains (correct post REQ-AXO-901869 A3).
+    if profile.start_mcp_http {
+        warm_all_ist_snapshots_at_boot(graph_store.clone());
+    }
+
     let projects_root_str = projects_root.to_string();
     let watch_root_str = watch_root.to_string();
     let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
@@ -1007,11 +1086,29 @@ mod tests {
         apply_canonical_ort_thread_defaults_from_openmp,
         apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
         canonical_embedding_provider_request, graph_first_indexer_lane_sizing,
-        RuntimeBootProfile, RuntimeBootRole,
+        parse_boot_warm_project_codes, RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+
+    /// REQ-AXO-901869 A1 — the boot-warm project enumeration tolerates the
+    /// `query_json` 2-D array shape, filters null/empty codes, and degrades
+    /// to empty on malformed input (best-effort: a parse failure must not
+    /// crash boot — the PG fallback stays correct).
+    #[test]
+    fn parse_boot_warm_project_codes_extracts_nonempty_first_column() {
+        assert_eq!(
+            parse_boot_warm_project_codes("[[\"AXO\"],[\"BKS\"]]"),
+            vec!["AXO".to_string(), "BKS".to_string()]
+        );
+        assert_eq!(
+            parse_boot_warm_project_codes("[[null],[\"\"],[\"AXO\"]]"),
+            vec!["AXO".to_string()]
+        );
+        assert!(parse_boot_warm_project_codes("not json").is_empty());
+        assert!(parse_boot_warm_project_codes("[]").is_empty());
+    }
 
     /// REQ-AXO-099 Phase 1 — delegate to the crate-wide
     /// `test_support::env_test_lock` so runtime_boot env-mutating
