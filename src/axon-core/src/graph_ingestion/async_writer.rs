@@ -519,8 +519,16 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let (dispatcher, handle) = spawn(Arc::clone(&sink));
 
+        // REQ-AXO-289 / renderer removal: the async writer flushes ONLY
+        // RawQueries passthrough — typed Symbol/Chunk/Edge rows go through
+        // the COPY BINARY bulk_writer in upsert_graph_v2(_batch), not this
+        // path (see `flush`). Exercise the idle-flush drain with the
+        // payload the writer actually flushes.
         dispatcher
-            .dispatch(WriteDiff::Chunks(vec![sample_chunk("c1"), sample_chunk("c2")]))
+            .dispatch(WriteDiff::RawQueries(vec![
+                "DELETE FROM ist.Chunk WHERE id = 'c1'".to_string(),
+                "DELETE FROM ist.Chunk WHERE id = 'c2'".to_string(),
+            ]))
             .expect("dispatch ok");
 
         assert!(
@@ -535,13 +543,12 @@ mod tests {
         assert_eq!(dispatcher.stats().diffs_dropped(), 0);
         assert_eq!(dispatcher.stats().flush_failures(), 0);
         assert!(dispatcher.stats().flushes() >= 1);
-        // E.7 (REQ-AXO-238): typed Chunks now render to a single bulk
-        // INSERT batch. Sink sees exactly one execute_batch call with
-        // exactly one query (the INSERT for the two chunks).
+        // One idle flush → one execute_batch call carrying the two
+        // RawQueries.
         let batches = sink.batches();
         assert_eq!(batches.len(), 1, "one flush -> one execute_batch call");
-        assert_eq!(batches[0].len(), 1, "two Chunks fit in a single 500-row batch");
-        assert!(batches[0][0].starts_with("INSERT INTO Chunk"));
+        assert_eq!(batches[0].len(), 2, "two RawQueries in a single flush batch");
+        assert!(batches[0][0].starts_with("DELETE FROM ist.Chunk"));
 
         drop(dispatcher);
         handle
@@ -565,13 +572,16 @@ mod tests {
         sink.fail_next.store(3, Ordering::Relaxed);
         let (dispatcher, handle) = spawn(Arc::clone(&sink));
 
-        // E.7 (REQ-AXO-238): typed Chunks now render to a real INSERT
-        // statement, so the sink IS called. With fail_next=3, the next
-        // 3 sink calls fail; subsequent flushes succeed. We wait until
-        // the failure counter has incremented before asserting.
+        // REQ-AXO-289 / renderer removal: the async writer flushes only
+        // RawQueries passthrough, so the sink is exercised by RawQueries
+        // (typed rows take the COPY BINARY bulk_writer path). With
+        // fail_next=3, the next 3 sink calls fail; subsequent flushes
+        // succeed. We wait until the failure counter has incremented.
         for _ in 0..5 {
             dispatcher
-                .dispatch(WriteDiff::Chunks(vec![sample_chunk("c1")]))
+                .dispatch(WriteDiff::RawQueries(vec![
+                    "DELETE FROM ist.Chunk WHERE id = 'c1'".to_string(),
+                ]))
                 .expect("dispatch ok");
         }
         assert!(wait_for(
