@@ -1,13 +1,11 @@
 use std::borrow::Cow;
 use std::ffi::CString;
-use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::graph::GraphStore;
-use crate::runtime_truth_contract::RuntimeFreshnessState;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,12 +13,6 @@ pub(crate) enum ReadFreshness {
     StaleOk,
     FreshPreferred,
     FreshRequired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadRoute {
-    Reader,
-    Writer,
 }
 
 impl GraphStore {
@@ -34,82 +26,11 @@ impl GraphStore {
 }
 
 impl GraphStore {
-    fn reader_only_ist_unavailable_error(&self) -> anyhow::Error {
-        let contract = self.reader_snapshot_freshness_contract();
-        let reason = contract
-            .degraded_reason
-            .as_deref()
-            .unwrap_or("ist_reader_unavailable");
-        anyhow!(
-            "IST reader-only access unavailable in split brain mode: {}",
-            reason
-        )
-    }
-
-    fn reader_refresh_request_debounce_ms() -> u64 {
-        std::env::var("AXON_READER_REFRESH_REQUEST_DEBOUNCE_MS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(1_000)
-            .clamp(50, 60_000)
-    }
-
-    fn reader_refresh_small_lag_epochs() -> u64 {
-        std::env::var("AXON_READER_REFRESH_SMALL_LAG_EPOCHS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(32)
-            .max(1)
-    }
-
-    fn should_request_reader_refresh_for_read(&self, freshness: ReadFreshness, lag: u64) -> bool {
-        if lag == 0 {
-            return false;
-        }
-        if freshness == ReadFreshness::FreshRequired {
-            return true;
-        }
-        let now_ms = Self::current_epoch_ms();
-        let last_refresh_started_ms = self
-            .reader_state
-            .last_refresh_started_ms
-            .load(Ordering::Acquire);
-        let last_refresh_completed_ms = self
-            .reader_state
-            .last_refresh_completed_ms
-            .load(Ordering::Acquire);
-        let last_refresh_ms = last_refresh_started_ms.max(last_refresh_completed_ms);
-        let refresh_age_ms = now_ms.saturating_sub(last_refresh_ms);
-        lag > Self::reader_refresh_small_lag_epochs()
-            || refresh_age_ms >= Self::reader_refresh_request_debounce_ms()
-    }
-
     pub(crate) fn current_epoch_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
-    }
-
-    fn record_reader_read(&self) {
-        self.reader_state
-            .reads_on_reader_total
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_writer_read(&self, freshness: ReadFreshness) {
-        self.reader_state
-            .reads_on_writer_total
-            .fetch_add(1, Ordering::Relaxed);
-        if freshness == ReadFreshness::FreshRequired {
-            self.reader_state
-                .fresh_required_fallback_writer_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn query_targets_attached_soll(query: &str) -> bool {
-        query.to_ascii_lowercase().contains("soll.")
     }
 
     fn query_json_on_writer(&self, query: &str) -> Result<String> {
@@ -144,153 +65,33 @@ impl GraphStore {
         }
     }
 
-    fn select_read_route(&self, query: &str, freshness: ReadFreshness) -> ReadRoute {
-        if Self::query_targets_attached_soll(query) {
-            self.record_writer_read(freshness);
-            return ReadRoute::Writer;
-        }
-
-        if self.db_path.is_none() {
-            self.record_writer_read(freshness);
-            return ReadRoute::Writer;
-        }
-
-        if self.reader_only_ist_mode {
-            self.record_reader_read();
-            return ReadRoute::Reader;
-        }
-
-        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
-        let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Acquire);
-        let lag = commit_epoch.saturating_sub(reader_epoch);
-        let reader_available = self.reader_snapshot_reader_available();
-        let ist_snapshot_contract = self.reader_snapshot_freshness_contract();
-
-        if !reader_available || !matches!(ist_snapshot_contract.state, RuntimeFreshnessState::Fresh)
-        {
-            self.request_reader_refresh_up_to(commit_epoch.max(1));
-            self.record_writer_read(freshness);
-            return ReadRoute::Writer;
-        }
-
-        if lag == 0 {
-            self.record_reader_read();
-            return ReadRoute::Reader;
-        }
-
-        if self.should_request_reader_refresh_for_read(freshness, lag) {
-            self.request_reader_refresh_up_to(commit_epoch);
-        }
-        match freshness {
-            ReadFreshness::StaleOk => {
-                self.record_reader_read();
-                ReadRoute::Reader
-            }
-            ReadFreshness::FreshPreferred => {
-                self.record_reader_read();
-                ReadRoute::Reader
-            }
-            ReadFreshness::FreshRequired => {
-                self.record_writer_read(freshness);
-                ReadRoute::Writer
-            }
-        }
-    }
-
+    // REQ-AXO-901870 — the DuckDB split-brain reader-replica is retired.
+    // Under PostgreSQL every read goes through the single writer connection
+    // pool; MVCC gives each statement a consistent snapshot, so there is no
+    // separate reader context to route to. These two entry points are kept
+    // only as the names `tools_system` / `tools_system_debug` call; the
+    // `_freshness` hint is now inert (every read is writer-routed and
+    // MVCC-consistent).
     pub(crate) fn query_json_on_reader_with_freshness(
         &self,
         query: &str,
-        freshness: ReadFreshness,
+        _freshness: ReadFreshness,
     ) -> Result<String> {
-        // REQ-AXO-254: rewriter must run on the reader-routed read too.
-        // `query_on_ctx` (line 348) calls the raw FFI directly, so the
-        // PG translations must happen before we hand off the SQL string.
-        let normalized = self.normalize_attached_soll_query(query);
-        match self.select_read_route(query, freshness) {
-            ReadRoute::Writer => self.query_json_on_writer(normalized.as_ref()),
-            ReadRoute::Reader => {
-                let guard = self
-                    .pool
-                    .reader_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                if (*guard).is_null() {
-                    drop(guard);
-                    if self.reader_only_ist_mode {
-                        return Err(self.reader_only_ist_unavailable_error());
-                    }
-                    self.record_writer_read(freshness);
-                    return self.query_json_on_writer(normalized.as_ref());
-                }
-                let result = self.query_on_ctx(normalized.as_ref(), *guard);
-                drop(guard);
-                result
-            }
-        }
-    }
-
-    pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
-        self.query_json_on_reader_with_freshness(query, ReadFreshness::FreshPreferred)
+        self.query_json_on_writer(query)
     }
 
     pub(crate) fn query_count_on_reader_with_freshness(
         &self,
         query: &str,
-        freshness: ReadFreshness,
+        _freshness: ReadFreshness,
     ) -> Result<i64> {
-        let normalized = self.normalize_attached_soll_query(query);
-        match self.select_read_route(query, freshness) {
-            ReadRoute::Writer => self.query_count_on_writer(normalized.as_ref()),
-            ReadRoute::Reader => {
-                let guard = self
-                    .pool
-                    .reader_ctx
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                if (*guard).is_null() {
-                    drop(guard);
-                    if self.reader_only_ist_mode {
-                        return Err(self.reader_only_ist_unavailable_error());
-                    }
-                    self.record_writer_read(freshness);
-                    let writer = self
-                        .pool
-                        .writer_ctx
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    return unsafe {
-                        let count_fn = self.pool.symbols.query_count_fn;
-                        Ok(count_fn(
-                            *writer,
-                            CString::new(normalized.as_ref())?.as_ptr(),
-                        ))
-                    };
-                }
-                unsafe {
-                    let count_fn = self.pool.symbols.query_count_fn;
-                    let result = Ok(count_fn(
-                        *guard,
-                        CString::new(normalized.as_ref())?.as_ptr(),
-                    ));
-                    drop(guard);
-                    result
-                }
-            }
-        }
-    }
-
-    pub(crate) fn query_count_on_reader(&self, query: &str) -> Result<i64> {
-        self.query_count_on_reader_with_freshness(query, ReadFreshness::FreshPreferred)
+        self.query_count_on_writer(query)
     }
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
         if is_read_only_sql(query) {
-            if self.reader_only_ist_mode && !Self::query_targets_attached_soll(query) {
-                return self.query_json_on_reader_with_freshness(query, ReadFreshness::StaleOk);
-            }
-            // SQL gateway is the dashboard's canonical truth surface.
-            // Force read-only SQL through writer ctx to avoid reader/writer snapshot oscillation.
-            self.record_writer_read(ReadFreshness::FreshRequired);
+            // SQL gateway is the dashboard's canonical truth surface. Under
+            // PG-canonical every read is writer-routed (single pool, MVCC).
             return self.query_json_on_writer(query);
         }
 
@@ -299,11 +100,11 @@ impl GraphStore {
     }
 
     fn resolve_symbol_anchor_id(&self, symbol: &str) -> Result<Option<String>> {
-        let res = self.query_json_param_with_freshness(
+        let expanded = Self::expand_named_params(
             "SELECT id FROM Symbol WHERE id = $sym OR name = $sym LIMIT 1",
             &serde_json::json!({ "sym": symbol }),
-            ReadFreshness::FreshRequired,
         )?;
+        let res = self.query_json_on_writer(&expanded)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         Ok(rows
             .first()
@@ -413,22 +214,12 @@ impl GraphStore {
     }
 
     pub fn query_json(&self, query: &str) -> Result<String> {
-        self.query_json_on_reader(query)
+        self.query_json_on_writer(query)
     }
 
     pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
         let expanded = Self::expand_named_params(query, params)?;
-        self.query_json_on_reader(&expanded)
-    }
-
-    pub(crate) fn query_json_param_with_freshness(
-        &self,
-        query: &str,
-        params: &serde_json::Value,
-        freshness: ReadFreshness,
-    ) -> Result<String> {
-        let expanded = Self::expand_named_params(query, params)?;
-        self.query_json_on_reader_with_freshness(&expanded, freshness)
+        self.query_json_on_writer(&expanded)
     }
 
     pub fn query_json_writer(&self, query: &str) -> Result<String> {
@@ -458,7 +249,7 @@ impl GraphStore {
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
-        self.query_count_on_reader(query)
+        self.query_count_on_writer(query)
     }
 
     /// REQ-AXO-284 Slice 2 — PG health metrics for the dashboard +
@@ -774,19 +565,8 @@ mod expand_params_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::ReadFreshness;
     use crate::graph::GraphStore;
-    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
-
-    // REQ-AXO-901836 cleanup — post MIL-AXO-015 PG migration the legacy
-    // DuckDB ATTACH-based "distinct reader" fixture is dead code. Reader
-    // snapshot isolation is now provided by PG MVCC, exercised by the
-    // canonical `crate::tests::test_helpers::create_test_db` fixture.
-    fn create_reader_snapshot_test_store() -> GraphStore {
-        crate::tests::test_helpers::create_test_db()
-            .expect("create_test_db must succeed for reader-snapshot tests")
-    }
 
     #[test]
     fn normalize_attached_soll_query_is_identity_passthrough() {
@@ -821,246 +601,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn stale_ok_reader_requests_refresh_without_writer_fallback() {
-        let store = create_reader_snapshot_test_store();
-        let before = store.reader_snapshot_diagnostics();
-        store.reader_state.commit_epoch.store(7, Ordering::Relaxed);
-        store.reader_state.reader_epoch.store(5, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_requested_epoch
-            .store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_inflight
-            .store(false, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_started_ms
-            .store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_completed_ms
-            .store(0, Ordering::Relaxed);
-
-        let _ = store
-            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::StaleOk)
-            .unwrap();
-
-        let snapshot = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            snapshot.reads_on_reader_total - before.reads_on_reader_total,
-            1
-        );
-        assert_eq!(
-            snapshot.reads_on_writer_total - before.reads_on_writer_total,
-            0
-        );
-        assert!(snapshot.refresh_inflight);
-        assert_eq!(snapshot.refresh_requested_epoch, 7);
-    }
-
-    #[test]
-    fn fresh_required_routes_stale_reads_to_writer() {
-        let store = create_reader_snapshot_test_store();
-        let before = store.reader_snapshot_diagnostics();
-        store.reader_state.commit_epoch.store(9, Ordering::Relaxed);
-        store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_requested_epoch
-            .store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_inflight
-            .store(false, Ordering::Relaxed);
-
-        let _ = store
-            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshRequired)
-            .unwrap();
-
-        let snapshot = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            snapshot.reads_on_reader_total - before.reads_on_reader_total,
-            0
-        );
-        assert_eq!(
-            snapshot.reads_on_writer_total - before.reads_on_writer_total,
-            1
-        );
-        assert_eq!(
-            snapshot.fresh_required_fallback_writer_total
-                - before.fresh_required_fallback_writer_total,
-            1
-        );
-        assert!(snapshot.refresh_inflight);
-        assert_eq!(snapshot.refresh_requested_epoch, 9);
-    }
-
-    #[test]
-    fn fresh_preferred_stays_on_reader_and_requests_refresh() {
-        let store = create_reader_snapshot_test_store();
-        let before = store.reader_snapshot_diagnostics();
-        store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
-        store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_requested_epoch
-            .store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_inflight
-            .store(false, Ordering::Relaxed);
-        store.recent_write_epoch_ms.store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_started_ms
-            .store(0, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_completed_ms
-            .store(0, Ordering::Relaxed);
-
-        let _ = store
-            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshPreferred)
-            .unwrap();
-
-        let snapshot = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            snapshot.reads_on_reader_total - before.reads_on_reader_total,
-            1
-        );
-        assert_eq!(
-            snapshot.reads_on_writer_total - before.reads_on_writer_total,
-            0
-        );
-        assert_eq!(snapshot.refresh_requested_epoch, 15);
-    }
-
-    #[test]
-    fn fresh_preferred_small_recent_lag_does_not_request_refresh() {
-        let store = create_reader_snapshot_test_store();
-        let now_ms = crate::graph::GraphStore::current_epoch_ms();
-        let before = store.reader_snapshot_diagnostics();
-        store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
-        store.reader_state.reader_epoch.store(14, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_requested_epoch
-            .store(14, Ordering::Relaxed);
-        store
-            .reader_state
-            .refresh_inflight
-            .store(false, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_started_ms
-            .store(now_ms, Ordering::Relaxed);
-        store
-            .reader_state
-            .last_refresh_completed_ms
-            .store(now_ms, Ordering::Relaxed);
-
-        let _ = store
-            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshPreferred)
-            .unwrap();
-
-        let snapshot = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            snapshot.reads_on_reader_total - before.reads_on_reader_total,
-            1
-        );
-        assert_eq!(
-            snapshot.reads_on_writer_total - before.reads_on_writer_total,
-            0
-        );
-        assert!(!snapshot.refresh_inflight);
-        assert_eq!(snapshot.refresh_requested_epoch, 14);
-    }
-
-    #[test]
-    fn reader_refresh_syncs_epoch_to_commit() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
-        store.reader_state.commit_epoch.store(12, Ordering::Relaxed);
-        store.reader_state.reader_epoch.store(4, Ordering::Relaxed);
-
-        store.refresh_reader_snapshot().unwrap();
-
-        let snapshot = store.reader_snapshot_diagnostics();
-        assert_eq!(snapshot.commit_epoch, 12);
-        assert_eq!(snapshot.reader_epoch, 12);
-        assert_eq!(snapshot.reader_epoch_lag, 0);
-        assert!(!snapshot.refresh_inflight);
-    }
-
-    #[test]
-    fn reader_only_mode_never_falls_back_to_writer_when_reader_is_unavailable() {
-        let tempdir = tempdir().unwrap();
-        let db_root = tempdir.path().to_str().unwrap();
-        drop(GraphStore::new(db_root).unwrap());
-
-        let store = GraphStore::new_brain_reader_soll_writer(db_root).unwrap();
-        let before = store.reader_snapshot_diagnostics();
-
-        let reader_ptr = {
-            let mut reader_guard = store
-                .pool
-                .reader_ctx
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let ptr = *reader_guard;
-            *reader_guard = std::ptr::null_mut();
-            ptr
-        };
-        assert!(!reader_ptr.is_null());
-
-        let err = store
-            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::StaleOk)
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("IST reader-only access unavailable in split brain mode"));
-
-        let after = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            after.reads_on_writer_total - before.reads_on_writer_total,
-            0
-        );
-        assert_eq!(
-            after.fresh_required_fallback_writer_total
-                - before.fresh_required_fallback_writer_total,
-            0
-        );
-    }
-
-    #[test]
-    fn in_memory_store_reads_route_to_writer_without_reader_refresh() {
-        let store = GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap();
-        store.execute("CREATE TABLE Demo (value INTEGER)").unwrap();
-        store
-            .execute("INSERT INTO Demo (value) VALUES (1)")
-            .unwrap();
-        let before = store.reader_snapshot_diagnostics();
-
-        let raw = store.query_json("SELECT value FROM Demo").unwrap();
-
-        assert!(raw.contains('1'));
-        let after = store.reader_snapshot_diagnostics();
-        assert_eq!(
-            after.reads_on_writer_total - before.reads_on_writer_total,
-            1
-        );
-        assert_eq!(
-            after.reads_on_reader_total - before.reads_on_reader_total,
-            0
-        );
-        assert_eq!(
-            after.refresh_requested_epoch - before.refresh_requested_epoch,
-            0
-        );
     }
 
     /// REQ-AXO-129 — `query_on_ctx` must convert plugin error
