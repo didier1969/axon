@@ -52,13 +52,53 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static POOL: OnceLock<Pool> = OnceLock::new();
 static VECTOR_TYPE: OnceLock<Type> = OnceLock::new();
 
-/// `AXON_BULK_WRITER_ENABLED` opt-in. Default OFF preserves the legacy
-/// `upsert_chunk_embedding_sql` path bit-for-bit so the existing test
-/// suite stays green; only PG bench cells flip it on.
-pub fn bulk_writer_enabled() -> bool {
+/// Tri-state override of the adaptive COPY dispatch (REQ-AXO-901881 W3 #34,
+/// VAL-AXO-067). `Some(true)` = force COPY BINARY for every flush (bench /
+/// explicit opt-in); `Some(false)` = force per-row INSERT for every flush;
+/// `None` (unset) = adaptive — COPY only when the batch is large enough to
+/// amortise its fixed setup cost (see [`should_use_bulk_writer`]).
+pub fn bulk_writer_override() -> Option<bool> {
     std::env::var("AXON_BULK_WRITER_ENABLED")
+        .ok()
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+}
+
+/// Back-compat predicate: `true` iff COPY is *force-enabled* via env. The
+/// adaptive default (env unset) reports `false` here, so the live dispatch
+/// MUST use [`should_use_bulk_writer`] which also honours batch size.
+pub fn bulk_writer_enabled() -> bool {
+    matches!(bulk_writer_override(), Some(true))
+}
+
+/// VAL-AXO-067 crossover. COPY BINARY's fixed setup cost (temp staging
+/// table DDL + COPY + `INSERT … SELECT … ON CONFLICT` + cleanup) *regresses*
+/// throughput vs per-row INSERT for the small ~5-row LINGER flushes of
+/// steady-state cruise (measured −18%, peak 78→50 ch/s) but wins by ~an
+/// order of magnitude once the batch amortises it (the deferred one-shot
+/// full-IST load drains 187K embeddings in large batches). The default
+/// sits with a safe margin above the ~50–100-row modelled crossover and
+/// well below the 1024-row proven-win point. Tunable via
+/// `AXON_BULK_WRITER_MIN_ROWS` for bench sweeps.
+pub const BULK_WRITER_MIN_PROFITABLE_ROWS_DEFAULT: usize = 256;
+
+/// Resolve the adaptive COPY threshold (env override → default).
+pub fn bulk_writer_min_profitable_rows() -> usize {
+    std::env::var("AXON_BULK_WRITER_MIN_ROWS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(BULK_WRITER_MIN_PROFITABLE_ROWS_DEFAULT)
+}
+
+/// Adaptive dispatch (REQ-AXO-901881 W3 #34): pick COPY BINARY only when it
+/// pays off. An explicit env override wins; otherwise the decision gates on
+/// `row_count` so steady-state cruise stays on per-row INSERT (no VAL-AXO-067
+/// regression) while bulk loads route through COPY.
+pub fn should_use_bulk_writer(row_count: usize) -> bool {
+    match bulk_writer_override() {
+        Some(forced) => forced,
+        None => row_count >= bulk_writer_min_profitable_rows(),
+    }
 }
 
 fn runtime() -> Result<&'static Runtime> {
@@ -851,6 +891,34 @@ mod tests {
             assert!(bulk_writer_enabled(), "value {v:?} should enable");
         }
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
+    }
+
+    #[test]
+    fn should_use_bulk_writer_is_adaptive_on_batch_size() {
+        // VAL-AXO-067 #34: unset env → gate on row count around the
+        // crossover; explicit env → force either way regardless of size.
+        std::env::remove_var("AXON_BULK_WRITER_ENABLED");
+        std::env::remove_var("AXON_BULK_WRITER_MIN_ROWS");
+        let t = bulk_writer_min_profitable_rows();
+        assert_eq!(t, BULK_WRITER_MIN_PROFITABLE_ROWS_DEFAULT);
+        assert!(!should_use_bulk_writer(t - 1), "small flush stays on INSERT");
+        assert!(should_use_bulk_writer(t), "batch at threshold uses COPY");
+        assert!(should_use_bulk_writer(t + 10_000), "huge batch uses COPY");
+
+        // Force-ON ignores batch size (bench / opt-in).
+        std::env::set_var("AXON_BULK_WRITER_ENABLED", "true");
+        assert!(should_use_bulk_writer(1), "force-on uses COPY even for 1 row");
+        // Force-OFF ignores batch size.
+        std::env::set_var("AXON_BULK_WRITER_ENABLED", "0");
+        assert!(!should_use_bulk_writer(1_000_000), "force-off never uses COPY");
+        std::env::remove_var("AXON_BULK_WRITER_ENABLED");
+
+        // Threshold is tunable for bench sweeps.
+        std::env::set_var("AXON_BULK_WRITER_MIN_ROWS", "8");
+        assert_eq!(bulk_writer_min_profitable_rows(), 8);
+        assert!(should_use_bulk_writer(8));
+        assert!(!should_use_bulk_writer(7));
+        std::env::remove_var("AXON_BULK_WRITER_MIN_ROWS");
     }
 
     #[test]

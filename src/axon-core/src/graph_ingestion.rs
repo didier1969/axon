@@ -736,12 +736,16 @@ impl GraphStore {
             ))?
             .to_string();
 
-        // REQ-AXO-238: when AXON_BULK_WRITER_ENABLED, route the entire
-        // batch through `crate::postgres::bulk_writer` which performs a
-        // single COPY BINARY into a temp staging table followed by
-        // `INSERT … SELECT … ON CONFLICT DO UPDATE`. Default OFF
-        // preserves the legacy per-row INSERT path bit-for-bit.
-        if crate::postgres::bulk_writer::bulk_writer_enabled() {
+        // REQ-AXO-238 + REQ-AXO-901881 W3 #34: route large batches through
+        // `crate::postgres::bulk_writer` (single COPY BINARY into a temp
+        // staging table followed by `INSERT … SELECT … ON CONFLICT DO
+        // UPDATE`). VAL-AXO-067 falsified a blanket default-ON: COPY's fixed
+        // setup cost regresses the small ~5-row LINGER flushes of steady
+        // cruise (−18%) but wins by ~an order of magnitude on the large
+        // batches of the deferred one-shot full-IST load. `should_use_bulk_writer`
+        // gates on `updates.len()` so each flush picks the faster path; an
+        // explicit `AXON_BULK_WRITER_ENABLED` still force-overrides either way.
+        if crate::postgres::bulk_writer::should_use_bulk_writer(updates.len()) {
             let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> =
                 updates
                     .iter()
