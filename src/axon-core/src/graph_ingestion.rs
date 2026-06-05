@@ -892,9 +892,11 @@ impl GraphStore {
     }
 
     /// 9f: detect and remove files that disappeared from the filesystem.
-    /// Call after a complete scanner walk. Any IndexedFile row with
-    /// discovered_ms < scan_start_ms was NOT seen in this walk → stale.
-    /// Returns the paths that were deleted.
+    /// Call after a scanner walk. Rows with discovered_ms < scan_start_ms were
+    /// not re-stamped in this walk — CANDIDATES for staleness, confirmed
+    /// against the filesystem (`Path::exists`) before any deletion so a partial
+    /// walk can never erode live data (REQ-AXO-901884). Returns the paths the
+    /// FS confirmed gone and that were purged.
     ///
     /// REQ-AXO-901831 — the deletion MUST be scoped to the subtree that was
     /// actually walked (`root_prefix`). Reconciliation + federation invoke the
@@ -911,32 +913,47 @@ impl GraphStore {
         root_prefix: &str,
     ) -> Result<Vec<String>> {
         let safe_prefix = root_prefix.replace('\'', "''");
+        // REQ-AXO-901884 — NON-DESTRUCTIVE stale reconciliation. "Not re-stamped
+        // in this walk" (discovered_ms < scan_start_ms) is NOT proof a file is
+        // gone: a partial/interrupted walk — resource pressure, FS-watcher
+        // EMFILE (inotify-instance exhaustion), or a mid-scan error — leaves
+        // REAL files un-restamped. The old code DELETE…RETURNING'd them in one
+        // shot, eroding the index (observed 36K→3.5K files) and firing the
+        // cascade on live data. The filesystem is the source of truth: gather
+        // candidates, then purge ONLY the paths the FS confirms are actually
+        // gone (`Path::exists() == false`). A missed-but-present file costs
+        // freshness (re-stamped next walk), never data.
         let raw = self.query_json_writer(&format!(
-            "DELETE FROM IndexedFile \
+            "SELECT path FROM IndexedFile \
              WHERE discovered_ms > 0 AND discovered_ms < {scan_start_ms} \
-               AND path LIKE '{safe_prefix}/%' \
-             RETURNING path"
+               AND path LIKE '{safe_prefix}/%'"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        let paths: Vec<String> = rows
+        let candidates: Vec<String> = rows
             .into_iter()
             .filter_map(|row| row.first()?.as_str().map(String::from))
             .collect();
-        if !paths.is_empty() {
-            for path in &paths {
-                let safe = path.replace('\'', "''");
-                let _ = self.execute(&format!(
-                    "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
-                        (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
-                     DELETE FROM Chunk WHERE file_path = '{safe}'; \
-                     DELETE FROM Symbol WHERE id IN \
-                        (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
-                     DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
-                        (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS');"
-                ));
+        let mut deleted: Vec<String> = Vec::new();
+        for path in candidates {
+            // Source of truth = disk. Skip anything still present (a partial
+            // walk merely missed it); purge only genuinely-removed files.
+            if std::path::Path::new(&path).exists() {
+                continue;
             }
+            let safe = path.replace('\'', "''");
+            let _ = self.execute(&format!(
+                "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
+                    (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
+                 DELETE FROM Chunk WHERE file_path = '{safe}'; \
+                 DELETE FROM Symbol WHERE id IN \
+                    (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
+                 DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
+                    (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS'); \
+                 DELETE FROM IndexedFile WHERE path = '{safe}';"
+            ));
+            deleted.push(path);
         }
-        Ok(paths)
+        Ok(deleted)
     }
 
     /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).
