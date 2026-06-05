@@ -279,7 +279,7 @@ impl McpServer {
         };
         // DEC-AXO-093 / REQ-AXO-324 — FTS modality (3rd trinity branch
         // alongside graph + vector). The GIN-indexed `content_tsv`
-        // column has been live since MIL-AXO-017 slice 4 / REQ-AXO-292;
+        // column is back-filled by the pgmq tsv_worker (REQ-AXO-901624);
         // before this PR nothing in the MCP layer was actually
         // querying it. We append FTS hits to the candidate pool and
         // let the existing rerank step decide the final order. RRF
@@ -2183,8 +2183,8 @@ impl McpServer {
 
     /// DEC-AXO-093 / REQ-AXO-324 — FTS modality for hybrid retrieval.
     ///
-    /// Queries `ist.Chunk.content_tsv` (GIN-indexed by MIL-AXO-017
-    /// slice 4 / REQ-AXO-292) via `websearch_to_tsquery` so operators
+    /// Queries `ist.Chunk.content_tsv` (GIN-indexed; back-filled by the
+    /// pgmq tsv_worker, REQ-AXO-901624) via `websearch_to_tsquery` so operators
     /// can pass natural-language questions, multi-word phrases, or
     /// boolean operators interchangeably. Ranked by `ts_rank_cd`
     /// which considers proximity + density of matches, not just
@@ -2230,8 +2230,8 @@ impl McpServer {
         // relation_type='CONTAINS'). Filter on `c.project_code` only.
         let project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]);
         // websearch_to_tsquery with the `english` dictionary matches
-        // the DDL's content-body indexing (postgres/ddl.rs:414 builds
-        // content_tsv with `english` for content body, `simple` for
+        // the DDL's content-body indexing (db/ddl/03_ist_schema.sql:128 +
+        // 06_pgmq_tsv_async.sql build content_tsv with `english` for content body, `simple` for
         // path/kind metadata). English stemming normalises
         // `recommendations`/`recommendation`/`recommend` to the same
         // lexeme and removes a handful of natural-language stop-words

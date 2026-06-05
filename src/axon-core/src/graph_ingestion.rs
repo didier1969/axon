@@ -740,9 +740,9 @@ impl GraphStore {
     ///   * `ist.Symbol` (UPSERT, idempotent)
     ///   * AGE Symbol + File vertex enrichment (under PG)
     ///   * `CONTAINS` / `CALLS` / `CALLS_NIF` edges (SQL + AGE dual-write)
-    ///   * `ist.Chunk` — full `content` text stored so the
-    ///     REQ-AXO-292 `content_tsv` GENERATED column populates the
-    ///     GIN FTS index automatically. Lexical retrieval works
+    ///   * `ist.Chunk` — full `content` text stored so the out-of-band
+    ///     pgmq tsv_worker (REQ-AXO-901624) can back-fill `content_tsv`
+    ///     into the GIN FTS index. Lexical retrieval works
     ///     CPU-only, no GPU dependency.
     ///   * `ist.IndexedFile(path, content_hash, last_seen_ms)`
     ///

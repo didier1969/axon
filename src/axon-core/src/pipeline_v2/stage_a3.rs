@@ -410,9 +410,9 @@ mod tests {
 
     #[tokio::test]
     async fn a3_enroll_full_content_text_persists_for_fts() {
-        // REQ-AXO-292: PG FTS attaches to `Chunk.content` via a
-        // GENERATED `content_tsv` column. A3 must persist full content
-        // text so the GIN index has material to tokenise.
+        // REQ-AXO-901624: A3 must persist full `Chunk.content` text so the
+        // out-of-band pgmq tsv_worker can later tokenise it into
+        // `content_tsv` (the GENERATED column was DROPped; FTS is async).
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let marker = "UNIQ_MARKER_TENSORRT_42";
         let body = format!("fn carry() {{ let s = \"{marker}\"; }}\n");

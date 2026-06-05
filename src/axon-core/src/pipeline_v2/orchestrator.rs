@@ -517,8 +517,9 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_a_end_to_end_persists_graph_chunks_and_indexed_file_for_a_rust_fixture() {
-        // Session-19 contract: A persists graph + chunks + FTS in ONE
-        // transaction. Receipt carries chunk_ids ready for B's GPU
+        // Session-19 contract: A persists graph + chunks in ONE transaction
+        // (content_tsv FTS is back-filled out-of-band by the pgmq tsv_worker,
+        // REQ-AXO-901624). Receipt carries chunk_ids ready for B's GPU
         // lane. b1_inbox_rx receives the same chunk_ids via try_send.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("e2e_fixture.rs");

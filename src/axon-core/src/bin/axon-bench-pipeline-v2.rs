@@ -1,6 +1,7 @@
 //! REQ-AXO-289 S6a — End-to-end streaming pipeline v2 bench.
 //!
-//! Drives the full v2 topology (A1 → A2 → A3 atomic graph+chunks+FTS
+//! Drives the full v2 topology (A1 → A2 → A3 atomic graph+chunks; FTS
+//! content_tsv is back-filled out-of-band by the pgmq tsv_worker
 //! → try_send chunk_ids → B1 fetch content → B2 embed → B3 UPSERT
 //! ChunkEmbedding) over a real source tree. Reports files/s, chunks/s,
 //! and per-stage `items_out_total` + `backpressure_blocks_total` to
@@ -16,8 +17,8 @@
 //!
 //! Requires `AXON_DEV_DATABASE_URL` (or `DATABASE_URL`) for GpuB2Embedder
 //! mode. The `--noop` mode uses [`axon_core::pipeline_v2::NoOpEmbedder`]
-//! and a temp DuckDB-backed store — handy for verifying the topology
-//! end-to-end without GPU/PG.
+//! but still writes through real PostgreSQL (DuckDB fully purged,
+//! REQ-AXO-271) — handy for verifying the topology end-to-end without GPU.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
