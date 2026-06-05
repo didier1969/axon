@@ -285,8 +285,8 @@ CREATE INDEX IF NOT EXISTS edge_rev_idx
     ON ist.Edge (target_id, relation_type, source_id);
 CREATE INDEX IF NOT EXISTS edge_proj_idx
     ON ist.Edge (project_code, relation_type);
-CREATE INDEX IF NOT EXISTS edge_metadata_idx
-    ON ist.Edge USING GIN (metadata jsonb_path_ops);
+-- No GIN on ist.Edge.metadata: the column is unpopulated and no query filters
+-- on it (jsonb_path_ops idx_scan=0) — audited + EXPLAIN-proven (REQ-AXO-901881).
 
 CREATE INDEX IF NOT EXISTS file_lifecycle_project_at_idx
     ON ist.FileLifecycleEvent (project_code, at_ms);

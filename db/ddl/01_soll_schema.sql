@@ -212,28 +212,19 @@ END
 $project_code_canonical$;
 
 -- ── Indexes ──────────────────────────────────────────────────────────
-
-CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx
-    ON soll.ProjectCodeRegistry (project_code);
+-- (Index set audited + EXPLAIN-proven, REQ-AXO-901881. No separate unique
+--  index on ProjectCodeRegistry.project_code — it is the PRIMARY KEY, whose
+--  implicit unique index already covers it.)
 
 CREATE INDEX IF NOT EXISTS soll_node_project_idx
     ON soll.Node (project_code, type);
 CREATE INDEX IF NOT EXISTS soll_node_status_idx
     ON soll.Node (status) WHERE status IS NOT NULL;
-CREATE INDEX IF NOT EXISTS soll_node_type_idx
-    ON soll.Node (type);
-
--- Trigram indexes only when pg_trgm is loaded (see 00_extensions.sql).
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
-        CREATE INDEX IF NOT EXISTS soll_node_title_trgm_idx
-            ON soll.Node USING GIN (title gin_trgm_ops);
-        CREATE INDEX IF NOT EXISTS soll_node_description_trgm_idx
-            ON soll.Node USING GIN (description gin_trgm_ops);
-    END IF;
-END
-$$;
+-- No bare soll_node_type_idx: soll_node_project_idx (project_code, type) serves
+-- type filters via its leading prefix / bitmap scan. No title/description
+-- trigram GIN: the only lexical predicate is lower(title|description) LIKE,
+-- which a GIN on the BARE column cannot serve (expression mismatch -> idx_scan=0),
+-- and soll.Node is small enough that the seq-scan fallback wins.
 
 CREATE INDEX IF NOT EXISTS soll_edge_project_source_idx
     ON soll.Edge (project_code, source_id);
