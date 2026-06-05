@@ -3,6 +3,14 @@ use serde_json::Value;
 
 use crate::graph::GraphStore;
 
+/// REQ-AXO-901884 Stage 0 — typed row decoder for the async-native read path.
+/// Each consumer struct impls `from_row` (`row.try_get::<T>(idx)`), and
+/// `GraphStore::query_typed` maps rows to it. Replaces, per call-site as it
+/// migrates, the `query_json` → `Vec<Vec<String>>` → re-parse contract.
+pub trait FromRow: Sized {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self>;
+}
+
 impl GraphStore {
     fn query_json_on_writer(&self, query: &str) -> Result<String> {
         // REQ-AXO-901881 W2 — native deadpool read (was the FFI writer ctx +
@@ -166,6 +174,95 @@ impl GraphStore {
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
         self.query_count_on_writer(query)
+    }
+
+    // ===================================================================
+    // REQ-AXO-901884 Stage 0 — async-native typed read layer (ADDITIVE).
+    // Routes to the NativePgCtx async core (no run_blocking hop, no
+    // Vec<Vec<String>> render) and maps the structured PgError onto the
+    // canonical "Graph plugin error: …" anyhow message. Consumers migrate
+    // to these `.await` methods cluster-by-cluster (stages 1-6); the sync
+    // query_json*/query_count* facade above is deleted once unused.
+    // ===================================================================
+
+    /// Async row read — typed `tokio_postgres::Row`s for `FromRow`/`try_get`.
+    pub async fn query_rows(&self, sql: &str) -> Result<Vec<tokio_postgres::Row>> {
+        self.pool.native.query(sql).await.map_err(Self::pg_to_anyhow)
+    }
+
+    /// Async typed read: rows decoded into `T: FromRow`.
+    pub async fn query_typed<T: FromRow>(&self, sql: &str) -> Result<Vec<T>> {
+        let rows = self.query_rows(sql).await?;
+        rows.iter().map(T::from_row).collect()
+    }
+
+    /// Async scalar count (`SELECT count(*)`): first column of the first row as
+    /// i64, 0 when empty. The query must return a `bigint` first column (native
+    /// type — no `::text` cast needed unlike the legacy render path).
+    pub async fn query_count_async(&self, sql: &str) -> Result<i64> {
+        let rows = self.query_rows(sql).await?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.try_get::<_, i64>(0).ok())
+            .unwrap_or(0))
+    }
+
+    /// Async single scalar of an arbitrary `FromSql` type — first column of the
+    /// first row, `None` when empty. Folds `query_single_i64_writer`,
+    /// `pg_database_size_bytes`, `pg_wal_bytes`, etc.
+    pub async fn query_scalar<T>(&self, sql: &str) -> Result<Option<T>>
+    where
+        T: for<'a> tokio_postgres::types::FromSql<'a>,
+    {
+        let rows = self.query_rows(sql).await?;
+        match rows.first() {
+            Some(row) => Ok(row.try_get::<_, Option<T>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Async ANN (HNSW) typed-row read for the `retrieve_context` semantic lane.
+    pub async fn query_ann_rows(
+        &self,
+        sql: &str,
+        ef_search: u32,
+    ) -> Result<Vec<tokio_postgres::Row>> {
+        self.pool
+            .native
+            .query_ann(sql, ef_search)
+            .await
+            .map_err(Self::pg_to_anyhow)
+    }
+
+    /// Async multi-statement execute (writes / DDL / BEGIN…COMMIT batches).
+    pub async fn execute_async(&self, sql: &str) -> Result<()> {
+        self.pool
+            .native
+            .execute_batch_async(sql)
+            .await
+            .map_err(Self::pg_to_anyhow)
+    }
+
+    /// REQ-AXO-901884 — map the structured native `PgError` onto the canonical
+    /// "Graph plugin error: <message>[ — <detail>]" anyhow message, preserving
+    /// the prefix + SQLSTATE/hint that the sync `decode_native_envelope` form
+    /// (and the callers/tests matching on it) surface today.
+    fn pg_to_anyhow(e: crate::postgres::native::PgError) -> anyhow::Error {
+        let mut detail = String::new();
+        if let Some(code) = &e.detail.code {
+            detail.push_str(&format!("[SQLSTATE {code}]"));
+        }
+        if let Some(hint) = &e.detail.hint {
+            if !detail.is_empty() {
+                detail.push_str(" — ");
+            }
+            detail.push_str(&format!("hint: {hint}"));
+        }
+        if detail.is_empty() {
+            anyhow!("Graph plugin error: {}", e.detail.message)
+        } else {
+            anyhow!("Graph plugin error: {} — {}", e.detail.message, detail)
+        }
     }
 
     /// REQ-AXO-284 Slice 2 — PG health metrics for the dashboard +

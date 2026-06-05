@@ -314,7 +314,151 @@ impl NativePgCtx {
             }
         })
     }
+
+    // ===================================================================
+    // REQ-AXO-901884 Stage 0 — async-native typed core (ADDITIVE).
+    //
+    // These expose the already-async internals DIRECTLY: no `run_blocking`
+    // runtime-hop, no `render_pg_value` → Vec<Vec<String>> stringification.
+    // Callers in async contexts `.await` real `tokio_postgres::Row`s and a
+    // structured `PgError` (SQLSTATE/message/hint). The sync `run_*` +
+    // `render_pg_value` facade above stays byte-identical until every
+    // consumer is migrated off it (stages 1-6), then it is deleted.
+    // ===================================================================
+
+    /// Acquire a pooled connection + apply the per-connection session setup
+    /// (search_path + statement_timeout). Shared by the async core methods.
+    async fn acquire_and_setup(
+        &self,
+        stage: &'static str,
+        sql: &str,
+    ) -> Result<deadpool_postgres::Client, PgError> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| PgError::acquire(stage, sql, e.to_string()))?;
+        apply_session_setup(&conn, &self.schema_search_path)
+            .await
+            .map_err(|e| PgError::from_tokio("set_search_path", sql, &e))?;
+        Ok(conn)
+    }
+
+    /// Async row query. Returns typed `tokio_postgres::Row`s (callers use
+    /// `try_get` / `FromRow`) or a structured `PgError` carrying SQLSTATE.
+    pub async fn query(&self, sql: &str) -> Result<Vec<tokio_postgres::Row>, PgError> {
+        let conn = self.acquire_and_setup("query", sql).await?;
+        conn.query(sql, &[])
+            .await
+            .map_err(|e| PgError::from_tokio("query", sql, &e))
+    }
+
+    /// Async multi-statement execute (BEGIN/…/COMMIT batches, DDL, writes).
+    pub async fn execute_batch_async(&self, sql: &str) -> Result<(), PgError> {
+        let conn = self.acquire_and_setup("execute", sql).await?;
+        conn.batch_execute(sql)
+            .await
+            .map_err(|e| PgError::from_tokio("execute", sql, &e))
+    }
+
+    /// Async ANN (HNSW) read — mirrors `run_ann_query_json` (SET LOCAL
+    /// enable_seqscan=off + hnsw.ef_search inside a tx so pgvector picks
+    /// `chunk_embedding_hnsw_idx` regardless of table size) but returns typed
+    /// rows. `ef_search` clamped to pgvector's accepted `[10, 1000]`.
+    pub async fn query_ann(
+        &self,
+        sql: &str,
+        ef_search: u32,
+    ) -> Result<Vec<tokio_postgres::Row>, PgError> {
+        let ef = ef_search.clamp(10, 1000);
+        let mut conn = self.acquire_and_setup("ann_query", sql).await?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| PgError::from_tokio("ann_begin", sql, &e))?;
+        tx.batch_execute(&format!(
+            "SET LOCAL enable_seqscan = off; SET LOCAL hnsw.ef_search = {ef}"
+        ))
+        .await
+        .map_err(|e| PgError::from_tokio("ann_set_local", sql, &e))?;
+        let rows = tx
+            .query(sql, &[])
+            .await
+            .map_err(|e| PgError::from_tokio("ann_query", sql, &e))?;
+        tx.commit()
+            .await
+            .map_err(|e| PgError::from_tokio("ann_commit", sql, &e))?;
+        Ok(rows)
+    }
 }
+
+/// REQ-AXO-901884 Stage 0 — structured PG error for the async-native core.
+/// Carries the same SQLSTATE / severity / message / detail / hint / position
+/// the REQ-AXO-129 string envelope (`db_error_envelope`) builds, so the
+/// async migration preserves the rich error contract WITHOUT the
+/// `{`-prefixed string marshalling. `GraphStore::pg_to_anyhow` maps it onto
+/// the canonical "Graph plugin error: …" anyhow message callers expect.
+#[derive(Debug, Clone, Default)]
+pub struct PgErrorDetail {
+    pub code: Option<String>,
+    pub severity: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+    pub position: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PgError {
+    pub stage: String,
+    pub sql_excerpt: String,
+    pub detail: PgErrorDetail,
+}
+
+impl PgError {
+    fn acquire(stage: &str, sql: &str, err: String) -> Self {
+        PgError {
+            stage: stage.to_string(),
+            sql_excerpt: sql.chars().take(240).collect(),
+            detail: PgErrorDetail {
+                message: err,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn from_tokio(stage: &str, sql: &str, err: &tokio_postgres::Error) -> Self {
+        let mut detail = PgErrorDetail {
+            message: err.to_string(),
+            ..Default::default()
+        };
+        if let Some(db) = err.as_db_error() {
+            detail.code = Some(db.code().code().to_string());
+            detail.severity = Some(db.severity().to_string());
+            detail.message = db.message().to_string();
+            detail.detail = db.detail().map(|s| s.to_string());
+            detail.hint = db.hint().map(|s| s.to_string());
+            detail.position = db.position().map(|p| format!("{p:?}"));
+        }
+        PgError {
+            stage: stage.to_string(),
+            sql_excerpt: sql.chars().take(240).collect(),
+            detail,
+        }
+    }
+}
+
+impl std::fmt::Display for PgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.detail.message)?;
+        if let Some(code) = &self.detail.code {
+            write!(f, " [SQLSTATE {code}]")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PgError {}
 
 fn query_returns_rows(sql: &str) -> bool {
     let leading = sql.trim_start().to_lowercase();
