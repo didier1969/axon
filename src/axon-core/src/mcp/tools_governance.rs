@@ -462,10 +462,34 @@ impl McpServer {
             .graph_store
             .get_technical_debt(project)
             .unwrap_or_default();
-        let god_objects = self
-            .graph_store
-            .get_god_objects(project)
-            .unwrap_or_default();
+        // REQ-AXO-901884 / feedback_trimodal — RAM-first god-objects
+        // (PIL-AXO-9002): consult the warm per-project CSR before the PG SQL
+        // traversal ; `project="*"` (workspace-wide) bypasses RAM (the cache
+        // is per-project). Mirrors the canonical pattern in
+        // tools_framework_anomalies.rs — RAM hit ⇒ no PG roundtrip.
+        let god_objects = {
+            let ram_view = if project != "*" {
+                Some(crate::ist_snapshot::process_view())
+            } else {
+                None
+            };
+            ram_view
+                .as_ref()
+                .and_then(|view| view.god_objects(project))
+                .map(|pairs| {
+                    pairs
+                        .into_iter()
+                        .map(|(name, count)| {
+                            (name, serde_json::Value::Number((count as i64).into()))
+                        })
+                        .collect::<serde_json::Map<String, serde_json::Value>>()
+                })
+                .unwrap_or_else(|| {
+                    self.graph_store
+                        .get_god_objects(project)
+                        .unwrap_or_default()
+                })
+        };
         let telemetry_score = self.graph_store.get_telemetry_score(project).unwrap_or(100);
         let dead_code = self.graph_store.get_dead_code_count(project).unwrap_or(0);
         let hygiene_score = (100 - (god_objects.len() as i64 * 10) - (dead_code * 2)).max(0);
@@ -711,10 +735,34 @@ impl McpServer {
         }
 
         let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        let god_objects = self
-            .graph_store
-            .get_god_objects(project)
-            .unwrap_or_default();
+        // REQ-AXO-901884 / feedback_trimodal — RAM-first god-objects
+        // (PIL-AXO-9002): consult the warm per-project CSR before the PG SQL
+        // traversal ; `project="*"` (workspace-wide) bypasses RAM (the cache
+        // is per-project). Mirrors the canonical pattern in
+        // tools_framework_anomalies.rs — RAM hit ⇒ no PG roundtrip.
+        let god_objects = {
+            let ram_view = if project != "*" {
+                Some(crate::ist_snapshot::process_view())
+            } else {
+                None
+            };
+            ram_view
+                .as_ref()
+                .and_then(|view| view.god_objects(project))
+                .map(|pairs| {
+                    pairs
+                        .into_iter()
+                        .map(|(name, count)| {
+                            (name, serde_json::Value::Number((count as i64).into()))
+                        })
+                        .collect::<serde_json::Map<String, serde_json::Value>>()
+                })
+                .unwrap_or_else(|| {
+                    self.graph_store
+                        .get_god_objects(project)
+                        .unwrap_or_default()
+                })
+        };
 
         let mut evidence = format!("Coverage {}%. Stability high.", coverage);
         if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {

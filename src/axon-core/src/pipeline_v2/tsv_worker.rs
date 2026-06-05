@@ -124,13 +124,22 @@ pub(crate) fn extract_chunk_ids(rows_json: &str) -> Result<(Vec<String>, Vec<Str
     let mut msg_ids = Vec::with_capacity(arr.len());
     let mut chunk_ids = Vec::with_capacity(arr.len());
     for row in arr {
-        let msg_id = row
-            .get("msg_id")
+        // REQ-AXO-901884 — `query_json_writer` renders rows as POSITIONAL
+        // arrays (`Vec<Vec<String>>` → `[["1","chunk_id"], …]`), NOT objects.
+        // The previous `row.get("msg_id")` / `row.get("chunk_id")` (object-key
+        // access) ALWAYS returned None on the real output → drain silently
+        // updated 0 rows → content_tsv never back-filled. SELECT column order is
+        // (msg_id, chunk_id), so index 0 = msg_id, index 1 = chunk_id.
+        let Some(cols) = row.as_array() else {
+            continue;
+        };
+        let msg_id = cols
+            .first()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let chunk_id = row
-            .get("chunk_id")
+        let chunk_id = cols
+            .get(1)
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -237,10 +246,16 @@ pub fn pgmq_extension_present(store: &GraphStore) -> bool {
     let Ok(parsed) = serde_json::from_str::<Value>(&rows) else {
         return false;
     };
+    // REQ-AXO-901884 — `query_json_writer` rows are POSITIONAL arrays
+    // (`[["1"]]`), NOT objects. The previous `r.get("c")` (object-key access)
+    // ALWAYS returned None on the real output → this fn ALWAYS returned false →
+    // the tsv worker was never spawned → FTS content_tsv never auto-populated.
+    // Read column 0 of the first row.
     parsed
         .as_array()
         .and_then(|a| a.first())
-        .and_then(|r| r.get("c"))
+        .and_then(|r| r.as_array())
+        .and_then(|cols| cols.first())
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<i64>().ok())
         .map(|n| n >= 1)
@@ -262,14 +277,15 @@ const ERROR_BACKOFF_MAX_MS: u64 = 30_000;
 /// flood logs de 20 errors/s qui surviendrait sinon. L'opérateur doit
 /// rebuilder devenv + restart brain pour activer.
 pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<JoinHandle<()>> {
-    if !pgmq_extension_present(&store) {
-        warn!(
-            "pgmq extension absent — tsv worker pool not spawned. \
-             Run `devenv up -d` after adding `exts.pgmq` to devenv.nix \
-             and restart axon-brain to activate REQ-AXO-901624 P4."
-        );
-        return Vec::new();
-    }
+    // REQ-AXO-901884 — DEFER, do NOT one-shot-gate, on pgmq presence. The old
+    // `if !pgmq_extension_present { return Vec::new() }` gate disabled FTS for
+    // the ENTIRE process on a single boot-time false-negative (transient pool
+    // hiccup / DDL-ordering race before pgmq is reachable): content_tsv stayed
+    // empty while tsv_pending grew unbounded (2.7M msgs observed in dev). We now
+    // spawn unconditionally and re-probe pgmq at the top of each loop iteration
+    // with capped backoff — the worker self-heals the moment pgmq is reachable,
+    // logging the wait ONCE per dry spell (no flood). Matches the documented
+    // "defer until the extension shows up" intent on pgmq_extension_present.
     let mut handles = Vec::with_capacity(cfg.concurrency);
     for worker_idx in 0..cfg.concurrency {
         let store = store.clone();
@@ -283,7 +299,37 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                 "tsv worker spawned"
             );
             let mut error_backoff_ms: u64 = cfg.poll_interval_ms;
+            let mut defer_backoff_ms: u64 = cfg.poll_interval_ms;
+            let mut deferred_logged = false;
             loop {
+                // REQ-AXO-901884 — deferred pgmq readiness probe (own backoff,
+                // independent of the drain-failure backoff below). Skip the drain
+                // without error spam until the extension/queue is reachable.
+                {
+                    let s = store.clone();
+                    let present = tokio::task::spawn_blocking(move || pgmq_extension_present(&s))
+                        .await
+                        .unwrap_or(false);
+                    if !present {
+                        if !deferred_logged {
+                            warn!(
+                                worker_idx,
+                                "pgmq not reachable yet — tsv worker deferring (will retry; \
+                                 content_tsv back-fill paused until pgmq is up)"
+                            );
+                            deferred_logged = true;
+                        }
+                        tokio::time::sleep(Duration::from_millis(defer_backoff_ms)).await;
+                        defer_backoff_ms =
+                            (defer_backoff_ms.saturating_mul(2)).min(ERROR_BACKOFF_MAX_MS);
+                        continue;
+                    }
+                    if deferred_logged {
+                        info!(worker_idx, "pgmq now reachable — tsv worker resuming");
+                        deferred_logged = false;
+                    }
+                    defer_backoff_ms = cfg.poll_interval_ms;
+                }
                 let s = store.clone();
                 let qty = cfg.batch_size;
                 let vt = cfg.visibility_timeout_s;
@@ -350,11 +396,13 @@ mod tests {
 
     #[test]
     fn extract_chunk_ids_parses_pgmq_read_output() {
-        // Review-fix : SQL retourne désormais (msg_id, chunk_id) directement
-        // via `message->>'chunk_id'`, plus de double-parsing.
+        // REQ-AXO-901884 — fixture mirrors the REAL `query_json_writer` output:
+        // POSITIONAL arrays `[[msg_id, chunk_id], …]`, NOT objects. The prior
+        // object-shaped fixture passed against object-key access while the real
+        // array-shaped output silently parsed to nothing (FTS never ran).
         let rows_json = r#"[
-            {"msg_id":"1","chunk_id":"AXO:file.rs:fn:1-10:abc"},
-            {"msg_id":"2","chunk_id":"AXO:file.rs:fn:11-20:def"}
+            ["1","AXO:file.rs:fn:1-10:abc"],
+            ["2","AXO:file.rs:fn:11-20:def"]
         ]"#;
         let (msg_ids, chunk_ids) = extract_chunk_ids(rows_json).unwrap();
         assert_eq!(msg_ids, vec!["1", "2"]);
@@ -366,10 +414,12 @@ mod tests {
 
     #[test]
     fn extract_chunk_ids_drops_rows_missing_chunk_id() {
+        // Positional-array shape (REQ-AXO-901884): [msg_id, chunk_id]. Row 1 has
+        // a null chunk_id, row 3 omits the column — both dropped.
         let rows_json = r#"[
-            {"msg_id":"1","chunk_id":null},
-            {"msg_id":"2","chunk_id":"ok"},
-            {"msg_id":"3"}
+            ["1",null],
+            ["2","ok"],
+            ["3"]
         ]"#;
         let (msg_ids, chunk_ids) = extract_chunk_ids(rows_json).unwrap();
         assert_eq!(msg_ids, vec!["2"]);

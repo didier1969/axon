@@ -61,8 +61,63 @@ impl McpServer {
         _symbol: &str,
         anchor: &str,
         depth: u64,
+        project: Option<&str>,
     ) -> Option<String> {
         let radius = depth.clamp(1, 2);
+        let columns = ["Target Type", "Target ID", "Link Type", "Distance", "Label", "URI"];
+
+        // REQ-AXO-901884 / feedback_trimodal_use_ram_graph_not_pg — RAM-first
+        // (PIL-AXO-9002): when the per-project CSR is warm, derive the local
+        // neighborhood (forward ∪ reverse reach) from the in-memory graph. The
+        // PG `query_graph_projection` (ist.impact + ist.callers_of SQL) is the
+        // degraded cold/unscoped fallback ONLY. RAM rows carry target_id as
+        // label + empty uri — name/file enrichment is a PG-only join — matching
+        // the structural_neighbors RAM contract (tools_context.rs, edge_kind
+        // "ram_csr").
+        if let Some(p) = project {
+            let view = process_view();
+            if view.is_warm(p) {
+                let cap = 200usize;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut ids: Vec<String> = Vec::new();
+                for reach in [
+                    view.forward_at_radius(p, anchor, radius as u32, cap, &[]),
+                    view.reverse_at_radius(p, anchor, radius as u32, cap, &[]),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for id in reach {
+                        if id != anchor && seen.insert(id.clone()) {
+                            ids.push(id);
+                        }
+                    }
+                }
+                if ids.len() <= 1 {
+                    return None;
+                }
+                let json_rows: Vec<Vec<Value>> = ids
+                    .into_iter()
+                    .map(|id| {
+                        vec![
+                            Value::String("symbol".to_string()),
+                            Value::String(id.clone()),
+                            Value::String("ram_csr".to_string()),
+                            Value::Number(0.into()),
+                            Value::String(id),
+                            Value::String(String::new()),
+                        ]
+                    })
+                    .collect();
+                let projection_res = serde_json::to_string(&json_rows).ok()?;
+                return Some(format!(
+                    "\n\n### Derived Local Projection\n\n**Status:** derived neighborhood view (RAM CSR), useful for local context; does not replace the canonical `CALLS` truth.\n\n{}",
+                    format_table_from_json(&projection_res, &columns)
+                ));
+            }
+        }
+
+        // Cold cache OR unscoped (project=None) → canonical PG fallback.
         let anchor_id = self
             .graph_store
             .refresh_symbol_projection(anchor, radius)
@@ -78,10 +133,7 @@ impl McpServer {
 
         Some(format!(
             "\n\n### Derived Local Projection\n\n**Status:** derived neighborhood view, useful for local context; does not replace the canonical `CALLS` truth.\n\n{}",
-            format_table_from_json(
-                &projection_res,
-                &["Target Type", "Target ID", "Link Type", "Distance", "Label", "URI"]
-            )
+            format_table_from_json(&projection_res, &columns)
         ))
     }
 
@@ -292,7 +344,7 @@ impl McpServer {
                 ));
                 evidence.push_str(&table);
                 if let Some(section) =
-                    self.build_local_projection_section(symbol, &target_id, depth)
+                    self.build_local_projection_section(symbol, &target_id, depth, project)
                 {
                     evidence.push_str(&section);
                 }
