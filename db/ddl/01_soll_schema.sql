@@ -1,20 +1,37 @@
--- Axon canonical schema — SOLL intent layer.
--- Cross-project graph: Node + Edge + Revision + Evidence + audit jobs.
--- Multi-tenant via `project_code` columns ('^[A-Z][A-Z0-9]{2}$').
+-- ════════════════════════════════════════════════════════════════════
+-- Axon canonical schema — SOLL intent layer (single source of truth).
+-- Cross-project intent graph: Node + Edge + Revision + Evidence + audit jobs.
+-- Multi-tenant via `project_code` ('^[A-Z][A-Z0-9]{2}$').
 -- Canonical ID format `TYPE-PROJ-N` enforced by trigger + CHECK (DEC-AXO-085).
--- Idempotent: safe to re-run on every startup.
 --
--- Ordering invariant: CREATE TABLE → ALTER (additive columns +
--- constraints) → CREATE INDEX → CREATE FUNCTION → CREATE TRIGGER. The
--- post-CREATE ALTER block is what lets fresh `psql -v ON_ERROR_STOP=1`
--- bootstrap and live in-place upgrades both succeed.
+-- DEFINE-ONCE: every column/constraint/index lives in (or directly next to)
+-- its CREATE TABLE. NO post-CREATE additive ALTER, NO DROP, NO RENAME, NO
+-- DO $migrate$ block, NO `project_slug` anywhere. This file fully replaces
+-- BOTH the previous ALTER-laden .sql AND the hand-rolled VARCHAR-typed
+-- ensure_additive_soll_schema() in graph_bootstrap.rs (which was a
+-- type-degraded, incomplete mirror — never an authority for any column).
+--
+-- Idempotent: CREATE ... IF NOT EXISTS / CREATE OR REPLACE throughout, safe
+-- to re-run on every startup. Bootstrap executes each statement separately;
+-- CREATE EXTENSION lives in 00_extensions.sql (loaded first).
+--
+-- CHECK constraints are still added post-CREATE via guarded DO blocks and
+-- marked NOT VALID — this is DELIBERATE (so a bootstrap replay / live in-place
+-- upgrade never re-validates pre-existing rows) and is NOT migration cruft.
+-- The trigram GIN indexes are likewise guarded on pg_extension because
+-- pg_trgm is optional on minimal installs.
+-- ════════════════════════════════════════════════════════════════════
 
 CREATE SCHEMA IF NOT EXISTS soll;
 
--- ── Tables ───────────────────────────────────────────────────────────
+-- ── Tables (ordered so soft-FK dependencies resolve) ──────────────────
 
--- Project registry. Lives in `soll` (not `public`) to colocate with
--- consumer code paths (axon_init_project / soll_validate / axon_commit_work).
+-- Project registry — the soft-FK target for every per-project table's
+-- project_code (normalize_* guards verify membership here). Lives in `soll`
+-- (not `public`) by design, REQ-AXO-247. Define-once: project_name,
+-- project_path, session_pointer_json (REQ-AXO-143) and registered_at_ms are
+-- all inline (previously bolted on via ALTER in both the .sql and the Rust
+-- path; session_pointer_json + registered_at_ms were the divergent ones).
 CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
     project_code         TEXT PRIMARY KEY,
     project_name         TEXT,
@@ -24,26 +41,29 @@ CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
 );
 
 -- Per-project canonical-ID counter. One row per project_code; counters
--- bumped atomically by `soll.allocate_node_id`.
+-- bumped atomically by soll.allocate_node_id (VIS/PIL/REQ/CPT/DEC/MIL/VAL/
+-- STK/GUI/SKI/PRT) and directly by storage.rs for PRV/REV. ALL 15 columns
+-- are load-bearing — storage.rs INSERTs the full column list.
 CREATE TABLE IF NOT EXISTS soll.Registry (
-    project_code TEXT PRIMARY KEY DEFAULT 'AXON_GLOBAL',
+    project_code TEXT   PRIMARY KEY DEFAULT 'AXON_GLOBAL',
     id           TEXT   NOT NULL DEFAULT 'AXON_GLOBAL',
-    last_vis     BIGINT NOT NULL DEFAULT 0,
-    last_pil     BIGINT NOT NULL DEFAULT 0,
-    last_req     BIGINT NOT NULL DEFAULT 0,
-    last_cpt     BIGINT NOT NULL DEFAULT 0,
-    last_dec     BIGINT NOT NULL DEFAULT 0,
-    last_mil     BIGINT NOT NULL DEFAULT 0,
-    last_val     BIGINT NOT NULL DEFAULT 0,
-    last_stk     BIGINT NOT NULL DEFAULT 0,
-    last_gui     BIGINT NOT NULL DEFAULT 0,
-    last_ski     BIGINT NOT NULL DEFAULT 0,
-    last_prt     BIGINT NOT NULL DEFAULT 0,
-    last_prv     BIGINT NOT NULL DEFAULT 0,
-    last_rev     BIGINT NOT NULL DEFAULT 0
+    last_vis     BIGINT NOT NULL DEFAULT 0,  -- Vision
+    last_pil     BIGINT NOT NULL DEFAULT 0,  -- Pillar
+    last_req     BIGINT NOT NULL DEFAULT 0,  -- Requirement
+    last_cpt     BIGINT NOT NULL DEFAULT 0,  -- Concept
+    last_dec     BIGINT NOT NULL DEFAULT 0,  -- Decision
+    last_mil     BIGINT NOT NULL DEFAULT 0,  -- Milestone
+    last_val     BIGINT NOT NULL DEFAULT 0,  -- Validation
+    last_stk     BIGINT NOT NULL DEFAULT 0,  -- Stakeholder
+    last_gui     BIGINT NOT NULL DEFAULT 0,  -- Guideline
+    last_ski     BIGINT NOT NULL DEFAULT 0,  -- Skill          (REQ-AXO-91578)
+    last_prt     BIGINT NOT NULL DEFAULT 0,  -- PromptTemplate  (REQ-AXO-91579)
+    last_prv     BIGINT NOT NULL DEFAULT 0,  -- RevisionPreview (storage.rs direct alloc)
+    last_rev     BIGINT NOT NULL DEFAULT 0   -- Revision        (storage.rs direct alloc)
 );
 
--- Intent graph: nodes.
+-- Intent graph: nodes. metadata is JSONB (consumers query
+-- metadata->>'logical_key' — hard JSONB requirement, storage.rs:187).
 CREATE TABLE IF NOT EXISTS soll.Node (
     id           TEXT PRIMARY KEY,
     type         TEXT NOT NULL,
@@ -54,8 +74,10 @@ CREATE TABLE IF NOT EXISTS soll.Node (
     metadata     JSONB
 );
 
--- Intent graph: edges. Composite PK so the same source/target pair may
--- carry multiple typed relations (REFINES, SUPERSEDES, …).
+-- Intent graph: edges. Composite PK lets the same source/target pair carry
+-- multiple typed relations (REFINES, SUPERSEDES, INHERITS_FROM, …) and drives
+-- ON CONFLICT (source_id, target_id, relation_type) DO NOTHING in consumers.
+-- project_code is inline here (was create-then-ALTER in the Rust path).
 CREATE TABLE IF NOT EXISTS soll.Edge (
     source_id     TEXT NOT NULL,
     target_id     TEXT NOT NULL,
@@ -65,8 +87,8 @@ CREATE TABLE IF NOT EXISTS soll.Edge (
     PRIMARY KEY (source_id, target_id, relation_type)
 );
 
--- Revision audit trail. Each `Revision` groups N `RevisionChange` rows
--- (one per touched SOLL entity) so soll_rollback_revision is atomic.
+-- Revision audit trail. Each Revision groups N RevisionChange rows (one per
+-- touched SOLL entity) so soll_rollback_revision is atomic.
 CREATE TABLE IF NOT EXISTS soll.Revision (
     revision_id  TEXT PRIMARY KEY,
     project_code TEXT NOT NULL DEFAULT '',
@@ -78,6 +100,8 @@ CREATE TABLE IF NOT EXISTS soll.Revision (
     committed_at BIGINT
 );
 
+-- Per-entity change log within a revision (no PK by design — N rows per
+-- revision_id). before_json/after_json are JSONB.
 CREATE TABLE IF NOT EXISTS soll.RevisionChange (
     revision_id  TEXT NOT NULL,
     entity_type  TEXT NOT NULL,
@@ -89,6 +113,7 @@ CREATE TABLE IF NOT EXISTS soll.RevisionChange (
     created_at   BIGINT
 );
 
+-- Staged (uncommitted) revision payloads. payload is JSONB.
 CREATE TABLE IF NOT EXISTS soll.RevisionPreview (
     preview_id   TEXT PRIMARY KEY,
     author       TEXT,
@@ -98,6 +123,8 @@ CREATE TABLE IF NOT EXISTS soll.RevisionPreview (
 );
 
 -- Evidence artifacts (commit shas, file paths, dashboards, metrics).
+-- artifact_status / artifact_checked_at (REQ-AXO-320 sweeper) are inline
+-- here — they were DDL-only columns the Rust path NEVER created.
 CREATE TABLE IF NOT EXISTS soll.Traceability (
     id                  TEXT PRIMARY KEY,
     soll_entity_type    TEXT NOT NULL,
@@ -112,6 +139,9 @@ CREATE TABLE IF NOT EXISTS soll.Traceability (
 );
 
 -- Async job state for MCP tools (axon_commit_work, soll_apply_plan, …).
+-- *_json columns are JSONB. project_code is the sole nullable project_code
+-- in the schema (its CHECK allows NULL). Defined inline (was create-then-
+-- ALTER in the Rust path).
 CREATE TABLE IF NOT EXISTS soll.McpJob (
     job_id            TEXT PRIMARY KEY,
     tool_name         TEXT,
@@ -126,40 +156,9 @@ CREATE TABLE IF NOT EXISTS soll.McpJob (
     project_code      TEXT
 );
 
--- ── Additive column migrations (live DBs created before columns existed) ──
+-- ── CHECK constraints (post-CREATE, NOT VALID — deliberate, not cruft) ────
 
-ALTER TABLE soll.ProjectCodeRegistry DROP COLUMN IF EXISTS project_slug;
-ALTER TABLE soll.ProjectCodeRegistry ADD  COLUMN IF NOT EXISTS session_pointer_json TEXT;
-
--- Pre-2026-04 schemas named the column `project_slug`; rename to
--- `project_code` on both Registry and RevisionPreview where applicable.
-DO $migrate$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema='soll' AND table_name='registry' AND column_name='project_slug'
-    ) THEN
-        EXECUTE 'ALTER TABLE soll.Registry RENAME COLUMN project_slug TO project_code';
-    END IF;
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema='soll' AND table_name='revisionpreview' AND column_name='project_slug'
-    ) THEN
-        EXECUTE 'ALTER TABLE soll.RevisionPreview RENAME COLUMN project_slug TO project_code';
-    END IF;
-END
-$migrate$;
-
-ALTER TABLE soll.Registry     ADD COLUMN IF NOT EXISTS last_ski BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE soll.Registry     ADD COLUMN IF NOT EXISTS last_prt BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE soll.Traceability ADD COLUMN IF NOT EXISTS artifact_status     TEXT;
-ALTER TABLE soll.Traceability ADD COLUMN IF NOT EXISTS artifact_checked_at TIMESTAMPTZ;
-
--- ── Constraints (post-CREATE TABLE so fresh apply succeeds) ──────────
-
--- Canonical ID shape `TYPE-PROJ-N` (DEC-AXO-085). NOT VALID so existing
--- rows are not re-checked when bootstrap replays.
-ALTER TABLE soll.Node DROP CONSTRAINT IF EXISTS soll_node_canonical_id_range;
+-- Canonical ID shape `TYPE-PROJ-N` (DEC-AXO-085).
 DO $canonical_id$
 BEGIN
     IF NOT EXISTS (
@@ -176,7 +175,7 @@ BEGIN
 END
 $canonical_id$;
 
--- project_code shape invariant across SOLL tables.
+-- project_code shape invariant across SOLL tables. McpJob allows NULL.
 DO $project_code_canonical$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
@@ -268,11 +267,9 @@ CREATE INDEX IF NOT EXISTS soll_mcp_job_project_idx
 
 -- ── Functions ────────────────────────────────────────────────────────
 
--- Atomic per-(type, project_code) canonical-id allocator. Single round
--- trip: bumps the type-specific counter, formats `TYPE-PROJ-N` with
--- 3-digit min width naturally extending past 999, and skips any slot
--- already occupied by a soll.Node (fixture pollution / rejected ids).
--- Bounded at 1000 attempts to fail loud on a saturated counter range.
+-- Atomic per-(type, project_code) canonical-id allocator. Bumps the
+-- type-specific counter, formats `TYPE-PROJ-N` (3-digit min width, natural
+-- past 999), skips slots already occupied in soll.Node, bounded 1000 tries.
 CREATE OR REPLACE FUNCTION soll.allocate_node_id(
     p_type         TEXT,
     p_project_code TEXT

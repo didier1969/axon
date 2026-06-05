@@ -41,7 +41,14 @@ impl GraphStore {
 
 pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
+    // Construction-time SOLL access mode recorded from `SollAccessMode`.
+    // Read only by tests now that the hand-rolled `ensure_additive_soll_schema`
+    // (the former runtime reader of these flags) is retired — the canonical
+    // `01_soll_schema.sql` bootstrap no longer branches on access mode. Kept as
+    // the store's recorded state contract (and `soll_attached` is test-asserted).
+    #[allow(dead_code)]
     pub(crate) soll_attached: bool,
+    #[allow(dead_code)]
     pub(crate) soll_read_only_mode: bool,
 }
 // REQ-AXO-901881 W2 — no manual Drop: the native deadpool pool releases its

@@ -284,145 +284,6 @@ impl GraphStore {
         Ok(())
     }
 
-    fn ensure_additive_soll_schema(&self) -> Result<()> {
-        if !self.soll_attached || self.soll_read_only_mode {
-            return Ok(());
-        }
-
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_ski BIGINT DEFAULT 0, last_prt BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
-        let _ = self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
-        );
-        // REQ-AXO-91578: SKI (Skill) entity counter — additive migration.
-        let _ = self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_ski BIGINT DEFAULT 0",
-        );
-        // REQ-AXO-91579: PRT (PromptTemplate) entity counter — additive migration.
-        let _ = self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prt BIGINT DEFAULT 0",
-        );
-        self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_code VARCHAR PRIMARY KEY, project_name VARCHAR, project_path VARCHAR)")?;
-        self.execute(
-            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_name VARCHAR",
-        )?;
-        self.execute(
-            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_path VARCHAR",
-        )?;
-        // REQ-AXO-143 — per-project session pointer (file|url|soll_node|none).
-        // Stored as serialized JSON object: {kind, value, label?}.
-        // NULL when the project does not declare a session-pointer convention.
-        self.execute(
-            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS session_pointer_json VARCHAR",
-        )?;
-        self.normalize_project_code_registry_schema()?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Edge (source_id VARCHAR, target_id VARCHAR, relation_type VARCHAR, metadata VARCHAR, PRIMARY KEY (source_id, target_id, relation_type))")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.McpJob (job_id VARCHAR PRIMARY KEY, tool_name VARCHAR, status VARCHAR, submitted_at BIGINT, started_at BIGINT, finished_at BIGINT, request_json VARCHAR, reserved_ids_json VARCHAR, result_json VARCHAR, error_text VARCHAR)")?;
-
-        // Performance Indexes
-        self.execute("CREATE INDEX IF NOT EXISTS soll_node_type_idx ON soll.Node(type)")?;
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS soll_node_project_code_idx ON soll.Node(project_code)",
-        )?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_source_idx ON soll.Edge(source_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_target_idx ON soll.Edge(target_id)")?;
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS soll_edge_relation_idx ON soll.Edge(relation_type)",
-        )?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx ON soll.McpJob(status)")?;
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS soll_mcp_job_submitted_idx ON soll.McpJob(submitted_at)",
-        )?;
-
-        self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
-        )?;
-        self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_vis BIGINT DEFAULT 0",
-        )?;
-        self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0",
-        )?;
-        self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prv BIGINT DEFAULT 0",
-        )?;
-        self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_rev BIGINT DEFAULT 0",
-        )?;
-
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_code VARCHAR, payload VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
-
-        // REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): denormalize project_code on
-        // the remaining SOLL tables so per-tenant filtering does not require
-        // joining soll.Node every time.
-        self.execute("ALTER TABLE soll.Edge ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
-        self.execute("ALTER TABLE soll.McpJob ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
-        self.execute("ALTER TABLE soll.Revision ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
-        self.execute(
-            "ALTER TABLE soll.RevisionChange ADD COLUMN IF NOT EXISTS project_code VARCHAR",
-        )?;
-
-        // Backfill is idempotent: edges inherit from the source Node when known,
-        // everything else falls back to 'AXO' since pre-Phase-1 rows predate
-        // multi-tenant scoping (single-project history).
-        self.execute(
-            "UPDATE soll.Edge SET project_code = COALESCE(
-                NULLIF(soll.Edge.project_code, ''),
-                (SELECT n.project_code FROM soll.Node n WHERE n.id = soll.Edge.source_id),
-                'AXO'
-            ) WHERE soll.Edge.project_code IS NULL OR soll.Edge.project_code = ''",
-        )?;
-        // DuckDB upstream issue #15836: UPDATE on a primary-keyed row
-        // internally does DELETE+INSERT. For soll.McpJob's legacy rows that
-        // were committed under different transaction shapes, this corrupts
-        // the PK index — once corrupted, the UPDATE crashes the brain on
-        // every boot AND a plain DELETE fails too ("Failed to delete all
-        // rows from index. Only deleted 0 out of 4 rows."). Skip the
-        // backfill when legacy NULL rows exist; emit a warning so we know
-        // the table still needs migration. Proper fix: CTAS rebuild of
-        // soll.McpJob OR bumping the bundled DuckDB to a version that ships
-        // #15836's patch. Boot stays unblocked either way.
-        let mcp_job_needs_backfill: i64 = self.query_count(
-            "SELECT count(*) FROM soll.McpJob WHERE project_code IS NULL OR project_code = ''",
-        )?;
-        if mcp_job_needs_backfill > 0 {
-            tracing::warn!(
-                count = mcp_job_needs_backfill,
-                reason = "duckdb_15836_workaround",
-                "soll_mcpjob_backfill_skipped: legacy rows with NULL project_code retained to avoid PK-index corruption on UPDATE; CTAS rebuild required for proper migration"
-            );
-        }
-        self.execute("UPDATE soll.Revision SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
-        self.execute("UPDATE soll.RevisionChange SET project_code = 'AXO' WHERE project_code IS NULL OR project_code = ''")?;
-
-        // Composite (project_code, key) indexes for hot SOLL multi-tenant lookups.
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS soll_node_project_id_idx ON soll.Node(project_code, id)",
-        )?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_project_source_idx ON soll.Edge(project_code, source_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_project_target_idx ON soll.Edge(project_code, target_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_project_status_idx ON soll.McpJob(project_code, status)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_revision_project_idx ON soll.Revision(project_code, created_at)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_revision_change_project_idx ON soll.RevisionChange(project_code, revision_id)")?;
-
-        self.normalize_project_code_registry()?;
-        self.normalize_soll_registry()?;
-        self.normalize_revision_preview_schema()?;
-        // DEC-AXO-082 seed half (REQ-AXO-91577) — replaces the legacy
-        // `seed_project_code_registry` + `seed_global_guidelines` Rust
-        // paths. Canonical PRO seed (registry row, Pillars, Concepts,
-        // Decisions, Guidelines, edges) lives in `db/seed/01_global_soll.sql`
-        // and is applied by `scripts/lib/ensure-runtime.sh` in production ;
-        // the Rust path here gives the test harness consistent data via
-        // the same SQL file. Idempotent — INSERT ... ON CONFLICT DO NOTHING.
-        self.apply_canonical_seed_files()?;
-        Ok(())
-    }
-
     /// DEC-AXO-082 seed half (REQ-AXO-91577) — apply canonical SQL seed
     /// files from `db/seed/[0-9][0-9]_*.sql` in lexical order.
     ///
@@ -494,18 +355,10 @@ impl GraphStore {
         let has_project_code = columns
             .iter()
             .any(|value| value.eq_ignore_ascii_case("project_code"));
-        let has_project_slug = columns
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code {
             return Err(anyhow!(
                 "Legacy soll.Registry schema detected: missing canonical project_code column"
-            ));
-        }
-        if has_project_slug {
-            return Err(anyhow!(
-                "Legacy soll.Registry schema detected: forbidden project_slug column still present"
             ));
         }
 
@@ -547,18 +400,10 @@ impl GraphStore {
         let has_project_code = columns
             .iter()
             .any(|value| value.eq_ignore_ascii_case("project_code"));
-        let has_project_slug = columns
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code {
             return Err(anyhow!(
                 "Legacy soll.RevisionPreview schema detected: missing canonical project_code column"
-            ));
-        }
-        if has_project_slug {
-            return Err(anyhow!(
-                "Legacy soll.RevisionPreview schema detected: forbidden project_slug column still present"
             ));
         }
 
@@ -625,18 +470,10 @@ impl GraphStore {
         let has_project_path = columns
             .iter()
             .any(|value| value.eq_ignore_ascii_case("project_path"));
-        let has_legacy_slug = columns
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("project_slug"));
 
         if !has_project_code || !has_project_name || !has_project_path {
             return Err(anyhow!(
                 "Legacy soll.ProjectCodeRegistry schema detected: canonical columns are incomplete"
-            ));
-        }
-        if has_legacy_slug {
-            return Err(anyhow!(
-                "Legacy soll.ProjectCodeRegistry schema detected: forbidden project_slug column still present"
             ));
         }
         Ok(())
@@ -684,31 +521,6 @@ impl GraphStore {
                 )?;
             }
         }
-        Ok(())
-    }
-
-    /// DEC-AXO-082 seed half (REQ-AXO-91577) — retired. The global
-    /// GUI-PRO-* guidelines (and the rest of the PRO methodology surface :
-    /// Pillars, Concepts, Decisions, registry rows, edges) now live in
-    /// `db/seed/01_global_soll.sql`, applied via `apply_canonical_seed_files`
-    /// (or `scripts/lib/ensure-runtime.sh` in production). Signature
-    /// retained for binary-API stability per DEC-AXO-082 consequence ;
-    /// body removed. The hardcoded array of ~17 guidelines that lived here
-    /// drifted over time vs. live SOLL (which carried 33 GUI-PRO entries
-    /// post-soll_manager mutations) — the SQL seed captures the canonical
-    /// state and removes the drift-by-Rust-fork failure mode.
-    fn seed_global_guidelines(&self) -> Result<()> {
-        info!("seed_global_guidelines: retired (DEC-AXO-082 — see db/seed/01_global_soll.sql)");
-        Ok(())
-    }
-
-    /// DEC-AXO-082 seed half (REQ-AXO-91577) — retired. The PRO sentinel
-    /// row now lives in `db/seed/01_global_soll.sql`, applied via
-    /// `apply_canonical_seed_files` (or `scripts/lib/ensure-runtime.sh`
-    /// in production). Signature retained for binary-API stability per
-    /// DEC-AXO-082 consequence.
-    fn seed_project_code_registry(&self) -> Result<()> {
-        info!("seed_project_code_registry: retired (DEC-AXO-082 — see db/seed/01_global_soll.sql)");
         Ok(())
     }
 
@@ -1340,36 +1152,6 @@ mod graph_bootstrap_tests {
     }
 
     #[test]
-    fn test_normalize_soll_registry_rejects_legacy_slug_column() {
-        let store = create_test_db().unwrap();
-        store.execute("DROP TABLE soll.Registry").unwrap();
-        store
-            .execute(
-                "CREATE TABLE soll.Registry (
-                project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL',
-                id VARCHAR DEFAULT 'AXON_GLOBAL',
-                last_req BIGINT DEFAULT 0,
-                last_cpt BIGINT DEFAULT 0,
-                last_dec BIGINT DEFAULT 0,
-                last_mil BIGINT DEFAULT 0,
-                last_val BIGINT DEFAULT 0,
-                last_pil BIGINT DEFAULT 0,
-                last_vis BIGINT DEFAULT 0,
-                last_stk BIGINT DEFAULT 0,
-                last_prv BIGINT DEFAULT 0,
-                last_rev BIGINT DEFAULT 0,
-                last_gui BIGINT DEFAULT 0
-            )",
-            )
-            .unwrap();
-
-        let err = store.normalize_soll_registry().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Legacy soll.Registry schema detected"));
-    }
-
-    #[test]
     fn test_normalize_project_code_registry_schema_accepts_canonical_schema() {
         let store = create_test_db().unwrap();
         store.normalize_project_code_registry_schema().unwrap();
@@ -1405,66 +1187,9 @@ mod graph_bootstrap_tests {
     }
 
     #[test]
-    fn test_normalize_project_code_registry_schema_rejects_legacy_slug_column() {
-        let store = create_test_db().unwrap();
-        store
-            .execute("DROP TABLE soll.ProjectCodeRegistry")
-            .unwrap();
-        store
-            .execute(
-                "CREATE TABLE soll.ProjectCodeRegistry (
-                project_code VARCHAR PRIMARY KEY,
-                project_slug VARCHAR,
-                project_path VARCHAR,
-                project_name VARCHAR
-            )",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO soll.ProjectCodeRegistry (project_code, project_slug, project_path, project_name)
-                 VALUES ('AXO', 'axon', '/home/dstadel/projects/axon', 'Axon')",
-            )
-            .unwrap();
-
-        let err = store.normalize_project_code_registry_schema().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Legacy soll.ProjectCodeRegistry schema detected"));
-    }
-
-    #[test]
     fn test_normalize_revision_preview_schema_accepts_canonical_schema() {
         let store = create_test_db().unwrap();
         store.normalize_revision_preview_schema().unwrap();
-    }
-
-    #[test]
-    fn test_normalize_revision_preview_schema_rejects_legacy_slug_column() {
-        let store = create_test_db().unwrap();
-        store.execute("DROP TABLE soll.RevisionPreview").unwrap();
-        store
-            .execute(
-                "CREATE TABLE soll.RevisionPreview (
-                preview_id VARCHAR PRIMARY KEY,
-                author VARCHAR,
-                project_slug VARCHAR,
-                payload VARCHAR,
-                created_at BIGINT
-            )",
-            )
-            .unwrap();
-        store
-            .execute(
-                "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at)
-                 VALUES ('PRV-HYD-002', 'unknown', 'HydraDB', '{}', 42)",
-            )
-            .unwrap();
-
-        let err = store.normalize_revision_preview_schema().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Legacy soll.RevisionPreview schema detected"));
     }
 
     // REQ-AXO-901653 slice-5c — `test_soft_invalidate_embedding_state_*` deleted ;
