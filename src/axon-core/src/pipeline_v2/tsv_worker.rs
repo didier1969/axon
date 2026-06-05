@@ -31,8 +31,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde_json::Value;
+use anyhow::Result;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -105,53 +104,6 @@ pub struct DrainStats {
     pub archived: usize,
 }
 
-/// Parse the JSON array returned by `SELECT msg_id::text,
-/// (message->>'chunk_id') AS chunk_id FROM pgmq.read(...)` into
-/// parallel vectors of (msg_id, chunk_id). Rows that lack a `chunk_id`
-/// extraction (NULL or missing key) are silently dropped — defensive
-/// against future fan-out of the queue to other payload shapes.
-///
-/// Review-fix REQ-AXO-901624 : on prend `message->>'chunk_id'`
-/// directement côté SQL pour bypass le double JSON parsing (le cast
-/// `message::text` → re-parse Rust est fragile vis-à-vis du shape de
-/// sérialisation jsonb retourné par `query_json`).
-pub(crate) fn extract_chunk_ids(rows_json: &str) -> Result<(Vec<String>, Vec<String>)> {
-    let parsed: Value = serde_json::from_str(rows_json)
-        .with_context(|| format!("tsv_worker: pgmq.read returned non-JSON: {rows_json}"))?;
-    let Some(arr) = parsed.as_array() else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let mut msg_ids = Vec::with_capacity(arr.len());
-    let mut chunk_ids = Vec::with_capacity(arr.len());
-    for row in arr {
-        // REQ-AXO-901884 — `query_json_writer` renders rows as POSITIONAL
-        // arrays (`Vec<Vec<String>>` → `[["1","chunk_id"], …]`), NOT objects.
-        // The previous `row.get("msg_id")` / `row.get("chunk_id")` (object-key
-        // access) ALWAYS returned None on the real output → drain silently
-        // updated 0 rows → content_tsv never back-filled. SELECT column order is
-        // (msg_id, chunk_id), so index 0 = msg_id, index 1 = chunk_id.
-        let Some(cols) = row.as_array() else {
-            continue;
-        };
-        let msg_id = cols
-            .first()
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let chunk_id = cols
-            .get(1)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if msg_id.is_empty() || chunk_id.is_empty() {
-            continue;
-        }
-        msg_ids.push(msg_id);
-        chunk_ids.push(chunk_id);
-    }
-    Ok((msg_ids, chunk_ids))
-}
-
 /// Build the UPDATE statement that fills `content_tsv` for the given
 /// chunk_ids. Chunk IDs are escaped SQL-string style (`'` → `''`)
 /// before interpolation. The expression delegates to the
@@ -190,31 +142,50 @@ pub(crate) fn build_archive_sql(msg_ids: &[String]) -> (String, usize) {
     )
 }
 
-/// One drain pass. Reads up to `qty` messages, UPDATEs the
-/// corresponding Chunk rows, archives the messages. Called once per
-/// worker loop iteration. Synchronous : the caller wraps in
-/// `spawn_blocking` because `GraphStore::execute` / `query_json_writer`
-/// are FFI-blocking.
+/// One drain pass. Reads up to `qty` messages, UPDATEs the corresponding
+/// Chunk rows, archives the messages. Called once per worker loop iteration.
 ///
-/// Review-fix REQ-AXO-901624 : on utilise `query_json_writer`
-/// (graph_query.rs:490) parce que `pgmq.read` est sémantiquement une
-/// mutation (incrémente `read_ct` + UPDATE `vt`) ; le reader_ctx
-/// embedded-test backend sert un snapshot stale entre commits writer
-/// et ne devrait jamais voir des lignes pgmq fraîchement enqueued.
-pub fn drain_once(store: &GraphStore, qty: usize, vt_s: u32) -> Result<DrainStats> {
+/// REQ-AXO-901884 stage 1 — fully async on the native core (`query_rows` /
+/// `execute_async`); the worker `.await`s it directly (no `spawn_blocking`).
+/// `pgmq.read` is semantically a mutation (bumps `read_ct` + the visibility
+/// timeout), so it stays writer-routed via the single canonical pool.
+pub async fn drain_once(store: &GraphStore, qty: usize, vt_s: u32) -> Result<DrainStats> {
     let mut stats = DrainStats::default();
     let read_sql = format!(
         "SELECT msg_id::text AS msg_id, (message->>'chunk_id') AS chunk_id \
          FROM pgmq.read('tsv_pending', {vt_s}, {qty})"
     );
-    let rows = store.query_json_writer(&read_sql)?;
-    let (msg_ids, chunk_ids) = extract_chunk_ids(&rows)?;
+    // REQ-AXO-901884 stage 1 — async-native drain: typed `tokio_postgres::Row`s
+    // straight from the core (no run_blocking hop, no Vec<Vec<String>> render +
+    // re-parse — which is exactly the object-vs-array trap that left FTS dead).
+    // pgmq.read column order is (msg_id::text, chunk_id::text); a NULL chunk_id
+    // is dropped.
+    let rows = store.query_rows(&read_sql).await?;
+    let mut msg_ids = Vec::with_capacity(rows.len());
+    let mut chunk_ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let msg_id: String = row
+            .try_get::<_, Option<String>>(0)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let chunk_id: String = row
+            .try_get::<_, Option<String>>(1)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if msg_id.is_empty() || chunk_id.is_empty() {
+            continue;
+        }
+        msg_ids.push(msg_id);
+        chunk_ids.push(chunk_id);
+    }
     stats.fetched = msg_ids.len();
     if msg_ids.is_empty() {
         return Ok(stats);
     }
 
-    store.execute(&build_update_sql(&chunk_ids))?;
+    store.execute_async(&build_update_sql(&chunk_ids)).await?;
     stats.updated = chunk_ids.len();
 
     let (archive_sql, parsed_count) = build_archive_sql(&msg_ids);
@@ -226,7 +197,7 @@ pub fn drain_once(store: &GraphStore, qty: usize, vt_s: u32) -> Result<DrainStat
         );
     }
     if parsed_count > 0 {
-        store.execute(&archive_sql)?;
+        store.execute_async(&archive_sql).await?;
     }
     stats.archived = parsed_count;
 
@@ -238,26 +209,13 @@ pub fn drain_once(store: &GraphStore, qty: usize, vt_s: u32) -> Result<DrainStat
 /// rebuilt with `exts.pgmq`), spawning workers would just flood the
 /// logs with "relation pgmq.tsv_pending does not exist" errors at
 /// `poll_interval_ms` cadence. Defer until the extension shows up.
-pub fn pgmq_extension_present(store: &GraphStore) -> bool {
-    let sql = "SELECT count(*)::text AS c FROM pg_extension WHERE extname = 'pgmq'";
-    let Ok(rows) = store.query_json_writer(sql) else {
-        return false;
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&rows) else {
-        return false;
-    };
-    // REQ-AXO-901884 — `query_json_writer` rows are POSITIONAL arrays
-    // (`[["1"]]`), NOT objects. The previous `r.get("c")` (object-key access)
-    // ALWAYS returned None on the real output → this fn ALWAYS returned false →
-    // the tsv worker was never spawned → FTS content_tsv never auto-populated.
-    // Read column 0 of the first row.
-    parsed
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|r| r.as_array())
-        .and_then(|cols| cols.first())
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<i64>().ok())
+pub async fn pgmq_extension_present(store: &GraphStore) -> bool {
+    // REQ-AXO-901884 stage 1 — async-native + typed: `query_count_async` reads
+    // the native bigint count directly (no ::text cast, no JSON render/parse —
+    // which is what silently returned a false-negative and kept FTS dead).
+    store
+        .query_count_async("SELECT count(*) FROM pg_extension WHERE extname = 'pgmq'")
+        .await
         .map(|n| n >= 1)
         .unwrap_or(false)
 }
@@ -306,10 +264,7 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                 // independent of the drain-failure backoff below). Skip the drain
                 // without error spam until the extension/queue is reachable.
                 {
-                    let s = store.clone();
-                    let present = tokio::task::spawn_blocking(move || pgmq_extension_present(&s))
-                        .await
-                        .unwrap_or(false);
+                    let present = pgmq_extension_present(&store).await;
                     if !present {
                         if !deferred_logged {
                             warn!(
@@ -330,13 +285,12 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                     }
                     defer_backoff_ms = cfg.poll_interval_ms;
                 }
-                let s = store.clone();
                 let qty = cfg.batch_size;
                 let vt = cfg.visibility_timeout_s;
-                let drain_join =
-                    tokio::task::spawn_blocking(move || drain_once(&s, qty, vt)).await;
-                match drain_join {
-                    Ok(Ok(stats)) => {
+                // REQ-AXO-901884 stage 1 — drain directly on the async core (no
+                // spawn_blocking hop; the join-error arm is gone with it).
+                match drain_once(&store, qty, vt).await {
+                    Ok(stats) => {
                         error_backoff_ms = cfg.poll_interval_ms;
                         if stats.fetched == 0 {
                             tokio::time::sleep(Duration::from_millis(cfg.poll_interval_ms))
@@ -351,23 +305,12 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                             );
                         }
                     }
-                    Ok(Err(err)) => {
+                    Err(err) => {
                         warn!(
                             worker_idx,
                             error = ?err,
                             backoff_ms = error_backoff_ms,
                             "tsv worker drain failed"
-                        );
-                        tokio::time::sleep(Duration::from_millis(error_backoff_ms)).await;
-                        error_backoff_ms = (error_backoff_ms.saturating_mul(2))
-                            .min(ERROR_BACKOFF_MAX_MS);
-                    }
-                    Err(join_err) => {
-                        warn!(
-                            worker_idx,
-                            error = ?join_err,
-                            backoff_ms = error_backoff_ms,
-                            "tsv worker spawn_blocking joined with error"
                         );
                         tokio::time::sleep(Duration::from_millis(error_backoff_ms)).await;
                         error_backoff_ms = (error_backoff_ms.saturating_mul(2))
@@ -392,45 +335,6 @@ mod tests {
         assert_eq!(cfg.batch_size, 256);
         assert_eq!(cfg.visibility_timeout_s, 30);
         assert_eq!(cfg.poll_interval_ms, 100);
-    }
-
-    #[test]
-    fn extract_chunk_ids_parses_pgmq_read_output() {
-        // REQ-AXO-901884 — fixture mirrors the REAL `query_json_writer` output:
-        // POSITIONAL arrays `[[msg_id, chunk_id], …]`, NOT objects. The prior
-        // object-shaped fixture passed against object-key access while the real
-        // array-shaped output silently parsed to nothing (FTS never ran).
-        let rows_json = r#"[
-            ["1","AXO:file.rs:fn:1-10:abc"],
-            ["2","AXO:file.rs:fn:11-20:def"]
-        ]"#;
-        let (msg_ids, chunk_ids) = extract_chunk_ids(rows_json).unwrap();
-        assert_eq!(msg_ids, vec!["1", "2"]);
-        assert_eq!(
-            chunk_ids,
-            vec!["AXO:file.rs:fn:1-10:abc", "AXO:file.rs:fn:11-20:def"]
-        );
-    }
-
-    #[test]
-    fn extract_chunk_ids_drops_rows_missing_chunk_id() {
-        // Positional-array shape (REQ-AXO-901884): [msg_id, chunk_id]. Row 1 has
-        // a null chunk_id, row 3 omits the column — both dropped.
-        let rows_json = r#"[
-            ["1",null],
-            ["2","ok"],
-            ["3"]
-        ]"#;
-        let (msg_ids, chunk_ids) = extract_chunk_ids(rows_json).unwrap();
-        assert_eq!(msg_ids, vec!["2"]);
-        assert_eq!(chunk_ids, vec!["ok"]);
-    }
-
-    #[test]
-    fn extract_chunk_ids_handles_empty_array() {
-        let (msg_ids, chunk_ids) = extract_chunk_ids("[]").unwrap();
-        assert!(msg_ids.is_empty());
-        assert!(chunk_ids.is_empty());
     }
 
     #[test]
