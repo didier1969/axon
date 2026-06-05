@@ -24,8 +24,10 @@ use tokio_postgres::NoTls;
 /// A single shared runtime (vs one per `NativePgCtx`) avoids the
 /// drop-a-runtime-inside-a-runtime panic when a per-test `GraphStore` is
 /// dropped on a `#[tokio::test]` thread, and shrinks the runtime sprawl the
-/// audit flagged (proof #21). Calls always originate from sync `fn main` or
-/// `spawn_blocking` threads, so `block_on` here never nests inside a worker.
+/// audit flagged (proof #21). Callers reach it ONLY through `run_blocking`
+/// (REQ-AXO-901884), which spawns onto this runtime + waits on a channel when
+/// the caller is already inside a tokio runtime — so we never nest `block_on`
+/// (the boot path runs inside `run_indexer`/`run_brain`'s runtime).
 fn native_runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -36,6 +38,40 @@ fn native_runtime() -> &'static Runtime {
             .build()
             .expect("axon native PG runtime build failed")
     })
+}
+
+/// Drive a native PG future to completion from ANY calling context
+/// (REQ-AXO-901884 — async-native PG migration, stage 0: nesting-safe shim).
+///
+/// `native_runtime().block_on(fut)` PANICS ("Cannot start a runtime from
+/// within a runtime") when the current thread is already a tokio runtime
+/// worker — which is exactly the case on the indexer/brain boot path
+/// (`run_indexer`/`run_brain` run `boot()` via `block_on`, and `boot()`
+/// constructs the GraphStore), as well as any MCP / pipeline async task that
+/// reaches a sync GraphStore method directly. To stay correct from sync
+/// `fn main`, from `spawn_blocking`, AND from inside an async runtime, we
+/// spawn the future onto the process-global native runtime (its own worker
+/// threads) and wait on a std channel — we NEVER call `block_on` on the
+/// current thread. The temporary throughput cost (a runtime hop + channel)
+/// disappears once the call-sites become fully async (later stages).
+fn run_blocking<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Already inside a tokio runtime → block_on would nest + panic.
+        // Run on the native runtime's workers, block the current thread on a
+        // std channel (allowed: not a runtime `block_on`).
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        native_runtime().spawn(async move {
+            let _ = tx.send(fut.await);
+        });
+        rx.recv()
+            .expect("axon native PG runtime task dropped before returning a result")
+    } else {
+        native_runtime().block_on(fut)
+    }
 }
 
 /// Per-store native PG context: a deadpool connection pool + the optional
@@ -60,22 +96,21 @@ impl NativePgCtx {
             })?),
         };
 
-        let pool = native_runtime()
-            .block_on(async {
-                let mut cfg = deadpool_postgres::Config::new();
-                cfg.url = Some(database_url.to_string());
-                cfg.manager = Some(deadpool_postgres::ManagerConfig {
-                    recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-                });
-                cfg.create_pool(Some(DpRuntime::Tokio1), NoTls)
-            })
-            .map_err(|e| anyhow::anyhow!("pool creation failed: {e}"))?;
+        let url = database_url.to_string();
+        let pool = run_blocking(async move {
+            let mut cfg = deadpool_postgres::Config::new();
+            cfg.url = Some(url);
+            cfg.manager = Some(deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            });
+            cfg.create_pool(Some(DpRuntime::Tokio1), NoTls)
+        })
+        .map_err(|e| anyhow::anyhow!("pool creation failed: {e}"))?;
 
         // Probe one connection so misconfigured URLs fail fast at boot.
-        let _probe = native_runtime()
-            .block_on(async { pool.get().await })
+        let pool_probe = pool.clone();
+        run_blocking(async move { pool_probe.get().await.map(|_| ()) })
             .map_err(|e| anyhow::anyhow!("probe connection failed: {e}"))?;
-        drop(_probe);
 
         Ok(NativePgCtx {
             pool,
@@ -88,21 +123,24 @@ impl NativePgCtx {
     /// so `query_on_ctx` converts it to `Err`. Non-row statements return `[]`.
     pub fn run_query_json(&self, sql: &str) -> String {
         let returns_rows = query_returns_rows(sql);
-        native_runtime().block_on(async {
-            let conn = match self.pool.get().await {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let sql = sql.to_string();
+        run_blocking(async move {
+            let conn = match pool.get().await {
                 Ok(c) => c,
-                Err(e) => return error_envelope("acquire", sql, &e.to_string()),
+                Err(e) => return error_envelope("acquire", &sql, &e.to_string()),
             };
-            if let Err(e) = apply_session_setup(&conn, &self.schema_search_path).await {
-                return db_error_envelope("set_search_path", sql, &e);
+            if let Err(e) = apply_session_setup(&conn, &schema).await {
+                return db_error_envelope("set_search_path", &sql, &e);
             }
             if !returns_rows {
-                return match conn.batch_execute(sql).await {
+                return match conn.batch_execute(&sql).await {
                     Ok(_) => "[]".to_string(),
-                    Err(e) => db_error_envelope("execute", sql, &e),
+                    Err(e) => db_error_envelope("execute", &sql, &e),
                 };
             }
-            match conn.query(sql, &[]).await {
+            match conn.query(&sql, &[]).await {
                 Ok(rows) => {
                     let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
                     for row in &rows {
@@ -114,7 +152,7 @@ impl NativePgCtx {
                     }
                     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
                 }
-                Err(e) => db_error_envelope("query", sql, &e),
+                Err(e) => db_error_envelope("query", &sql, &e),
             }
         })
     }
@@ -138,17 +176,20 @@ impl NativePgCtx {
     /// `ef_search` is clamped to `[10, 1000]` (pgvector's accepted range).
     pub fn run_ann_query_json(&self, sql: &str, ef_search: u32) -> String {
         let ef = ef_search.clamp(10, 1000);
-        native_runtime().block_on(async {
-            let mut conn = match self.pool.get().await {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let sql = sql.to_string();
+        run_blocking(async move {
+            let mut conn = match pool.get().await {
                 Ok(c) => c,
-                Err(e) => return error_envelope("acquire", sql, &e.to_string()),
+                Err(e) => return error_envelope("acquire", &sql, &e.to_string()),
             };
-            if let Err(e) = apply_session_setup(&conn, &self.schema_search_path).await {
-                return db_error_envelope("set_search_path", sql, &e);
+            if let Err(e) = apply_session_setup(&conn, &schema).await {
+                return db_error_envelope("set_search_path", &sql, &e);
             }
             let tx = match conn.transaction().await {
                 Ok(tx) => tx,
-                Err(e) => return db_error_envelope("ann_begin", sql, &e),
+                Err(e) => return db_error_envelope("ann_begin", &sql, &e),
             };
             // SET LOCAL only takes effect inside a transaction; it reverts at
             // COMMIT/ROLLBACK. ef_search is a literal in [10,1000] (no inject).
@@ -158,9 +199,9 @@ impl NativePgCtx {
                 ))
                 .await
             {
-                return db_error_envelope("ann_set_local", sql, &e);
+                return db_error_envelope("ann_set_local", &sql, &e);
             }
-            let rendered = match tx.query(sql, &[]).await {
+            let rendered = match tx.query(&sql, &[]).await {
                 Ok(rows) => {
                     let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
                     for row in &rows {
@@ -172,10 +213,10 @@ impl NativePgCtx {
                     }
                     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
                 }
-                Err(e) => return db_error_envelope("ann_query", sql, &e),
+                Err(e) => return db_error_envelope("ann_query", &sql, &e),
             };
             if let Err(e) = tx.commit().await {
-                return db_error_envelope("ann_commit", sql, &e);
+                return db_error_envelope("ann_commit", &sql, &e);
             }
             rendered
         })
@@ -185,18 +226,18 @@ impl NativePgCtx {
     /// `pg_query_count`: returns the first column of the first row as i64,
     /// or 0 on any error / empty result.
     pub fn run_query_count(&self, sql: &str) -> i64 {
-        native_runtime().block_on(async {
-            let conn = match self.pool.get().await {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let sql = sql.to_string();
+        run_blocking(async move {
+            let conn = match pool.get().await {
                 Ok(c) => c,
                 Err(_) => return 0,
             };
-            if apply_session_setup(&conn, &self.schema_search_path)
-                .await
-                .is_err()
-            {
+            if apply_session_setup(&conn, &schema).await.is_err() {
                 return 0;
             }
-            match conn.query_opt(sql, &[]).await {
+            match conn.query_opt(&sql, &[]).await {
                 Ok(Some(row)) => row.try_get::<_, i64>(0).unwrap_or(0),
                 _ => 0,
             }
@@ -221,15 +262,19 @@ impl NativePgCtx {
         if rows.is_empty() {
             return Ok(());
         }
-        native_runtime().block_on(async {
-            let mut client = self.pool.get().await.map_err(|e| {
+        let pool = self.pool.clone();
+        let project_code = project_code.to_string();
+        let model_id = model_id.to_string();
+        let rows = rows.to_vec();
+        run_blocking(async move {
+            let mut client = pool.get().await.map_err(|e| {
                 anyhow::anyhow!("flush_chunk_embeddings_copy: native pool acquire failed: {e}")
             })?;
             crate::postgres::bulk_writer::flush_chunk_embeddings_async(
                 &mut client,
-                project_code,
-                model_id,
-                rows,
+                &project_code,
+                &model_id,
+                &rows,
                 embedded_at_ms,
             )
             .await
@@ -239,19 +284,22 @@ impl NativePgCtx {
     /// Execute a (possibly multi-statement) SQL string. Mirrors the plugin's
     /// `pg_execute`: returns `true` on success, `false` on any error.
     pub fn run_execute(&self, sql: &str) -> bool {
-        native_runtime().block_on(async {
-            let conn = match self.pool.get().await {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let sql = sql.to_string();
+        run_blocking(async move {
+            let conn = match pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("native pg execute: pool acquire failed: {e}");
                     return false;
                 }
             };
-            if let Err(e) = apply_session_setup(&conn, &self.schema_search_path).await {
+            if let Err(e) = apply_session_setup(&conn, &schema).await {
                 tracing::warn!("native pg execute: set search_path failed: {e}");
                 return false;
             }
-            match conn.batch_execute(sql).await {
+            match conn.batch_execute(&sql).await {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::warn!("native pg execute: {e} | {sql}");
