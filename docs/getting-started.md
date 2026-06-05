@@ -5,8 +5,8 @@ Ce document décrit le **workflow source checkout canonique** du dépôt Axon.
 Pour l’instant, la vérité opératoire est:
 - **Rust** est le runtime canonique
 - **Elixir/Phoenix** sert la visualisation et les diagnostics
-- **Canard DB** (`DuckDB`) est le backend embarqué nominal
-- **HydraDB** n’est pas dans le chemin nominal quotidien
+- **PostgreSQL 17 + pgvector** est le backend canonique (HNSW, BGE-Large 1024d, `pgmq`, FTS `tsvector`) ; IST dans le schéma `ist.*`, SOLL dans `soll.*`
+- DuckDB/Canard, AGE, KuzuDB, Titan, HydraDB et le plugin FFI sont tous retirés/purgés
 - les documents sous `docs/archive/` sont historiques, pas normatifs
 
 Avant de plonger dans les archives, lire d’abord:

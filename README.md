@@ -16,28 +16,28 @@ Si tu reprends le projet, lis dans cet ordre :
 
 ## Réalité actuelle
 
-Au 2026-04-01, la vérité prouvée est la suivante :
+Au 2026-06-05, la vérité prouvée est la suivante :
 
 - **Rust** est l’autorité de runtime, d’ingestion, de delta, de `IST`, de `MCP` et de `SQL`
 - **Elixir/Phoenix** sert la visualisation, la télémétrie opérateur et les projections de lecture
-- le backend nominal du chemin courant est **Canard DB** (`DuckDB` embarquée)
-- **KuzuDB** fait partie de l’historique du projet, pas du chemin quotidien actuel
+- le backend canonique est **PostgreSQL 17 + pgvector** (HNSW, embeddings BGE-Large 1024d), `pgmq` pour les files de travail asynchrones, et FTS via colonne `tsvector` (`content_tsv`)
+- l’`IST` vit dans le schéma `ist.*` ; `SOLL` vit dans le schéma `soll.*`
+- **DuckDB/Canard, AGE, KuzuDB, Titan, HydraDB et le plugin FFI sont tous retirés/purgés** — aucune rétrocompatibilité
 
 Le point important est celui-ci :
 
 - le dashboard **n’est pas** l’autorité canonique d’ingestion
 - il observe et rend la vérité produite par le runtime Rust
-- le runtime Rust n’utilise plus de classe canonique `Titan`; il admet le travail selon un budget mémoire dynamique
-- une dette de migration Elixir subsiste encore côté `Watcher`, mais elle ne remet pas en cause le socle exécutable actuel
+- le runtime Rust admet le travail selon un budget mémoire dynamique
 
 ## Ce qu’Axon fait réellement
 
 - scanne un univers de projets et priorise le projet actif
-- applique `Axon Ignore`, les capabilities de parsing, puis écrit dans `IST`
+- applique les règles d’ignore, les capabilities de parsing, puis écrit dans `IST` (schéma `ist.*`)
 - estime le coût d’ingestion par `parser class + size bucket + confiance observée`
 - admet un lot de fichiers qui tient dans le budget mémoire courant au lieu de dépendre d’un seuil fixe par taille
-- refuse explicitement un fichier `oversized_for_current_budget` s’il ne peut pas tenir même seul dans l’enveloppe runtime
-- indexe la structure du code dans une base **Canard DB** embarquée
+- refuse explicitement un fichier trop volumineux s’il ne peut pas tenir même seul dans l’enveloppe runtime
+- indexe la structure du code dans **PostgreSQL 17** (schéma `ist.*`, edges canoniques en RAM `IstGraphView`, persistés via `ist.edge`)
 - expose la vérité runtime via:
   - `MCP`
   - `SQL`
@@ -51,13 +51,12 @@ Le point important est celui-ci :
 
 ## Architecture actuelle
 
-- **Runtime canonique:** Rust + Canard DB (`DuckDB`)
+- **Runtime canonique:** Rust + PostgreSQL 17 + pgvector (HNSW, BGE-Large 1024d), `pgmq`, FTS `tsvector`
 - **Surface opérateur:** Phoenix/LiveView
 - **Environnement local officiel:** Nix + Devenv
 - **Gouvernance et Isolation (SOTA):** Le système implémente une stratégie **Dual-Track** absolue.
-  - La **Production** tourne sur la branche `main` (Ports: `44129` pour MCP, `44127` pour Dashboard) et gère la base de données réelle (`.axon/`).
-  - Le **Développement IA** doit impérativement se faire dans un **Git Worktree** isolé (ex: `.worktrees/dev/feat-x`) pour garantir un *Zero Blast Radius*. Le système d'amorçage décale dynamiquement les ports (`44139`, `44137`) et clone la base de données (`.axon-dev/`) pour permettre aux LLMs de prototyper sans aucun risque de corrompre la production ou de bloquer ses I/O.
-- **HydraDB:** détachée du workflow quotidien actuel
+  - La **Production** (`live`) tourne sur les ports `44129` (MCP/SQL) et `44127` (Dashboard) sur la base réelle (`.axon/`).
+  - Le **Développement** (`dev`) tourne sur les ports `44139` (MCP/SQL) et `44137` (Dashboard) sur une base clonée (`.axon-dev/`) pour permettre aux LLMs de prototyper sans aucun risque de corrompre la production.
 
 ## Workflow canonique
 
@@ -74,16 +73,24 @@ Bootstrap initial ou après dérive importante:
 ./scripts/setup.sh
 ```
 
-Démarrage quotidien:
+Démarrage quotidien (façade 4-verbes canonique, orchestrée par process-compose):
 
 ```bash
-./scripts/start.sh
+./scripts/axon --instance dev start full      # dev + vectorisation
+./scripts/axon --instance live start          # production
 ```
 
 Arrêt propre:
 
 ```bash
-./scripts/stop.sh
+./scripts/axon --instance live stop
+./scripts/axon --instance dev stop
+```
+
+Statut:
+
+```bash
+./scripts/axon --instance live status
 ```
 
 ## Ce que font les scripts
@@ -94,25 +101,19 @@ Arrêt propre:
   - compile le dashboard Elixir
   - exécute les validations principales
 
-- `start.sh`
-  - vérifie l’environnement Devenv
-  - auto-répare le binaire `release` si nécessaire
-  - démarre Axon dans `tmux`
-  - attend le dashboard et le runtime
-  - vérifie la surface SQL live quand le core est prêt
-
-- `stop.sh`
-  - arrête uniquement les processus Axon
-  - ferme la session `tmux`
-  - nettoie sockets, locks et WAL locaux
+- `./scripts/axon {start|stop|status|qualify}` (alias `axon-live` / `axon-dev`)
+  - surface 4-verbes canonique (DEC-AXO-060), orchestrée par **process-compose**
+  - `start`: vérifie l’environnement, sélectionne l’instance `live`/`dev`, démarre brain + indexer + dashboard
+  - `stop`: arrête uniquement les processus Axon (par PID/superviseur, jamais de `pkill` large)
+  - `status`: vérité runtime, fraîcheur IST, prochaine action
 
 ## Vérification minimale après démarrage
 
-Une fois `./scripts/start.sh` terminé, les surfaces attendues sont celles affichées par le script.
+Une fois `./scripts/axon ... start` terminé, les surfaces attendues sont celles affichées par le script.
 
 Les ports sont stables par défaut, mais l’adresse annoncée peut dépendre du bind courant de l’environnement local.
 
-Par défaut:
+Par défaut (`live`):
 
 - dashboard: `http://127.0.0.1:44127/cockpit`
 - SQL: `http://127.0.0.1:44129/sql`
@@ -123,7 +124,7 @@ Exemple de vérification SQL:
 ```bash
 curl -sS -X POST http://127.0.0.1:44129/sql \
   -H "content-type: application/json" \
-  --data '{"query":"SELECT count(*) FROM File"}'
+  --data '{"query":"SELECT count(*) FROM ist.indexed_file"}'
 ```
 
 ## Notes d’état
@@ -132,7 +133,5 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
 - `SOLL` reste protégée et exportable/restaurable
 - le chemin live des nouveaux exports `SOLL` est `docs/vision/`
 - les snapshots historiques déplacés vivent dans `docs/archive/soll-exports/`
-- Python reste présent surtout pour les bridges Datalog/TypeQL et quelques outillages encore tolérés
-- HydraDB ne fait plus partie du chemin nominal journalier
 - les docs archivées dans `docs/archive/` ne doivent pas être lues comme contrat courant
-- `Titan` ne fait plus partie du contrat d’ingestion courant; la règle canonique est le budget mémoire Rust
+- la règle d’admission canonique est le budget mémoire Rust dynamique

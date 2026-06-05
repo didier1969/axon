@@ -153,10 +153,8 @@ axon_apply_runtime_role_layout() {
 
     if [[ "${AXON_INSTANCE_KIND:-live}" == "dev" ]]; then
         run_root_base="$project_root/.axon-dev"
-        TMUX_SESSION="axon-dev-$role_name"
     else
         run_root_base="$project_root/.axon"
-        TMUX_SESSION="axon-$role_name"
     fi
 
     if [[ -n "$runtime_executable_name" ]]; then
@@ -172,6 +170,6 @@ axon_apply_runtime_role_layout() {
     AXON_MCP_SOCK="/tmp/axon-${AXON_INSTANCE_KIND}-${role_name}-mcp.sock"
     AXON_RUNTIME_IDENTITY="${AXON_RUNTIME_IDENTITY}-${role_name}"
 
-    export TMUX_SESSION AXON_RUN_ROOT AXON_PID_FILE AXON_RUNTIME_STATE_FILE
+    export AXON_RUN_ROOT AXON_PID_FILE AXON_RUNTIME_STATE_FILE
     export AXON_TELEMETRY_SOCK AXON_MCP_SOCK AXON_RUNTIME_IDENTITY
 }

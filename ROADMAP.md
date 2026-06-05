@@ -1,6 +1,6 @@
 # Roadmap Axon
 
-Ce document décrit la **suite rationnelle après livraison** à partir de l’état vérifié au `2026-04-01`.
+Ce document décrit la **suite rationnelle après livraison** à partir de l’état vérifié au `2026-06-05`.
 
 Il ne remplace pas `STATE.md`, qui porte la photographie de vérité exécutable.
 Le plan maître livré est [docs/plans/2026-04-01-axon-delivery-plan.md](/home/dstadel/projects/axon/docs/plans/2026-04-01-axon-delivery-plan.md).
@@ -27,4 +27,4 @@ Le plan maître livré est [docs/plans/2026-04-01-axon-delivery-plan.md](/home/d
 
 - les docs sous `docs/archive/` sont historiques
 - les anciens jalons `v1.0` et `v2` ne sont plus la roadmap canonique
-- les références historiques à `KuzuDB` décrivent des étapes passées; le backend nominal courant est **Canard DB** (`DuckDB`)
+- les références historiques à `KuzuDB`, `DuckDB`/Canard, `AGE` ou `HydraDB` décrivent des étapes passées et retirées ; le backend canonique est **PostgreSQL 17 + pgvector** (IST en `ist.*`, SOLL en `soll.*`)

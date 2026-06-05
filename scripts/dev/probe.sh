@@ -18,7 +18,7 @@
 # and will be deleted once existing CI invocations stop passing it.
 #
 # Output: dev-probe-<tag>-<UTC>.csv with columns
-#   t_seconds,files,chunks_total,chunks_per_sec,ready_queue,
+#   t_seconds,chunks_total,chunks_per_sec,ready_queue,
 #   claim_mode,gpu_mb,zombies,provider
 
 set -euo pipefail
@@ -63,12 +63,6 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-# Locate duckdb once (Nix-store path may move across rebuilds — try $PATH first)
-DUCKDB="$(command -v duckdb 2>/dev/null || true)"
-if [[ -z "$DUCKDB" ]]; then
-    DUCKDB="$(find /nix/store -maxdepth 3 -name duckdb -type f 2>/dev/null | head -1 || true)"
-fi
-
 # Auto-rebuild debug binary if any .rs is newer than the binary
 BIN=".axon/cargo-target/debug/axon-indexer"
 NEEDS_REBUILD=0
@@ -98,12 +92,11 @@ fi
 # Start dev only if not already running with the desired scope
 DEV_PID="$(pgrep -f '[c]argo-target/debug/axon-indexer' | head -1 || true)"
 if [[ -z "$DEV_PID" ]]; then
-    # REQ-AXO-271 slice 6 (2026-05-10): PG is the only supported backend.
-    # AXON_DB_BACKEND=postgres is always set. devenv.nix sets URLs as
-    # `postgres://localhost:44144/axon_{dev,live}` (no user), which PG
-    # rejects because the OS user `dstadel` is not a PG role — the
-    # production stack uses `axon` user. Override the URL here so the
-    # bench connects without depending on devenv-side user injection.
+    # PG is the only supported backend. AXON_DB_BACKEND=postgres is always
+    # set. devenv.nix sets URLs as `postgres://localhost:44144/axon_{dev,live}`
+    # (no user), which PG rejects because the OS user `dstadel` is not a PG
+    # role — the production stack uses `axon` user. Override the URL here so
+    # the bench connects without depending on devenv-side user injection.
     if [[ -z "${AXON_LIVE_DATABASE_URL:-}" && -z "${AXON_DEV_DATABASE_URL:-}" ]]; then
         echo "❌ probe.sh requires AXON_LIVE_DATABASE_URL or AXON_DEV_DATABASE_URL exported (run inside devenv shell)" >&2
         exit 2
@@ -113,12 +106,6 @@ if [[ -z "$DEV_PID" ]]; then
         "AXON_PROJECTS_ROOT=$SCOPE"
         "AXON_DB_BACKEND=postgres"
         "AXON_DEV_DATABASE_URL=postgres://axon@127.0.0.1:44144/axon_dev"
-        # REQ-AXO-271 slice 6 (2026-05-10): PG indexer is gated by
-        # AXON_INDEXER_PG_OPT_IN=1 pending the integration smoke test
-        # (IST count parity vs DuckDB baseline + clean shutdown). Bench
-        # scripts opt in so we can measure the PG indexer end-to-end;
-        # the bench corpus is a fresh ./src scope, not production data.
-        "AXON_INDEXER_PG_OPT_IN=1"
     )
     if [[ -n "$WORKERS" ]]; then
         EXPORTS+=("AXON_VECTOR_WORKERS=$WORKERS")
@@ -156,7 +143,7 @@ fi
 DEV_PID="$(pgrep -f '[c]argo-target/debug/axon-indexer' | head -1)"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="dev-probe-${TAG}-${TS}.csv"
-echo "t_seconds,files,chunks_total,chunks_per_sec,ready_queue,claim_mode,gpu_mb,zombies,provider" > "$OUT"
+echo "t_seconds,chunks_total,chunks_per_sec,ready_queue,claim_mode,gpu_mb,zombies,provider" > "$OUT"
 
 START="$(date +%s)"
 while :; do
@@ -196,16 +183,10 @@ except Exception:
     GPU="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || echo 0)"
     ZOMBIES="$(ps -ef | awk -v p="$DEV_PID" '$3 == p && /<defunct>/' | wc -l | tr -d ' ')"
 
-    FILES=0
-    if [[ -n "$DUCKDB" ]] && [[ -f .axon-dev/graph_v2/ist-reader.db ]]; then
-        FILES="$("$DUCKDB" .axon-dev/graph_v2/ist-reader.db -noheader -csv \
-            'SELECT COUNT(*) FROM main.File' 2>/dev/null | tail -1 || echo 0)"
-    fi
-
     # Split HB into total,rate,queue,claim,provider
     IFS=',' read -r CHUNKS RATE QUEUE CLAIM PROVIDER <<< "$HB"
 
-    echo "$T,$FILES,$CHUNKS,$RATE,$QUEUE,$CLAIM,$GPU,$ZOMBIES,$PROVIDER" >> "$OUT"
+    echo "$T,$CHUNKS,$RATE,$QUEUE,$CLAIM,$GPU,$ZOMBIES,$PROVIDER" >> "$OUT"
     sleep "$SAMPLE_INTERVAL"
 done
 
@@ -218,7 +199,7 @@ echo "   first sample:"
 echo "   $(echo "$SUMMARY" | head -1)"
 echo "   final sample:"
 echo "   $(echo "$SUMMARY" | tail -1)"
-echo "   columns: t_seconds,files,chunks_total,chunks_per_sec,ready_queue,claim_mode,gpu_mb,zombies,provider"
+echo "   columns: t_seconds,chunks_total,chunks_per_sec,ready_queue,claim_mode,gpu_mb,zombies,provider"
 
 if [[ "$NO_STOP" != "1" ]]; then
     ./scripts/axon-dev stop --hard >/dev/null 2>&1 || true

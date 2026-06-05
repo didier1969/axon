@@ -8,7 +8,7 @@ Le système Axon transforme une base de code brute en un graphe de connaissance 
 ---
 
 ## 2. Le Graphe comme Source de Vérité (SSOT)
-KuzuDB devient le pivot central. Il n'est plus seulement le réceptacle des résultats, mais le gestionnaire d'état de l'ingestion.
+PostgreSQL 17 (schéma `ist.*`) est le pivot central. Le graphe IST est canonique en RAM via `IstGraphView` (snapshot CSR, PIL-AXO-9002), persisté dans `ist.edge`. PG n'est pas seulement le réceptacle des résultats, mais aussi le gestionnaire d'état de l'ingestion.
 
 ### Ontologie des Nœuds `File`
 Dès la phase de scan, chaque fichier est représenté par un nœud avec un cycle de vie d'état complet :
@@ -16,7 +16,7 @@ Dès la phase de scan, chaque fichier est représenté par un nœud avec un cycl
 - **`indexing`** : Verrouillé par un Agent Elixir spécifique.
 - **`indexed`** : Parsing AST et embeddings AI terminés.
 - **`error`** : Échec après $N$ tentatives.
-- **`titan_ignored`** : Fichier trop volumineux (>1MB), traité en mode "structure seule".
+- **`structure_only`** : Fichier trop volumineux pour l'enveloppe runtime, admis en mode "structure seule".
 
 **Propriétés Étendues :**
 - `path`: STRING (Primary Key)
@@ -30,26 +30,27 @@ Dès la phase de scan, chaque fichier est représenté par un nœud avec un cycl
 ## 3. Gestion Spécifique des Flux (Traffic Shaping)
 
 ### Priorisation Intelligente
-Le `Kuzu.Guardian` utilise les propriétés du graphe pour arbitrer le travail :
+Le superviseur d'ingestion utilise les propriétés du graphe pour arbitrer le travail :
 1. **Fichiers Hot (Priorité > 80) :** Fichiers requis par une tâche LLM active.
 2. **Backlog Normal :** Trié par `priority` décroissante.
-3. **Requête Cypher de Pull :**
-   ```cypher
-   MATCH (f:File {status: 'pending'}) 
-   RETURN f.path ORDER BY f.priority DESC LIMIT $slots
+3. **Requête de Pull (SQL sur `ist.file`) :**
+   ```sql
+   SELECT path FROM ist.file
+   WHERE status = 'pending'
+   ORDER BY priority DESC LIMIT $slots
    ```
 
-### Le Protocole "Titan" (Gros fichiers)
+### Gestion des gros fichiers (mode dégradé)
 Les fichiers volumineux sont identifiés dès le scan initial par Rust.
-- **Filtrage Kuzu :** Les fichiers > 1MB reçoivent une priorité basse ou le statut `titan_ignored` pour préserver les ressources CPU/RAM.
-- **Visibilité LLM :** Même si un fichier est trop gros pour être parsé en profondeur, son existence reste enregistrée dans KuzuDB. Le LLM peut ainsi informer l'utilisateur : *"Je vois le fichier X, mais il est trop volumineux pour une analyse sémantique complète."*
+- **Filtrage par budget :** Les fichiers dépassant l'enveloppe runtime reçoivent une priorité basse ou le statut `structure_only` (commit structurel sans matérialisation des `Chunk`) pour préserver CPU/RAM.
+- **Visibilité LLM :** Même si un fichier est trop gros pour être parsé en profondeur, son existence reste enregistrée dans `ist.*`. Le LLM peut ainsi informer l'utilisateur : *"Je vois le fichier X, mais il est trop volumineux pour une analyse sémantique complète."*
 
 ---
 
 ## 4. Orchestration Control/Data Plane
 
 ### Niveau Elixir (Control Plane) : Le Guardian
-Le `Kuzu.Guardian` est le chef d'orchestre. Il surveille la disponibilité des cœurs CPU et "tire" le travail de KuzuDB.
+Le superviseur d'ingestion est le chef d'orchestre. Il surveille la disponibilité des cœurs CPU et "tire" le travail depuis PostgreSQL (`ist.*`).
 - **Trémie Active (Buffer ETS) :** Le Guardian maintient une trémie de **100 fichiers** (taille optimisée pour la réactivité) en RAM. Cette taille réduite garantit que les fichiers urgents (Hot Path) ne sont pas bloqués par un backlog trop important déjà chargé en mémoire vive.
 
 ### Niveau Rust (Data Plane) : L'Arène CPU
@@ -68,40 +69,40 @@ Le système ne subit plus la charge, il l'orchestre selon une logique de fenêtr
 ### Calcul de la "Trémie" (ETS Buffer)
 La taille optimale du buffer en mémoire vive Elixir est calculée par le Guardian :
 - **Formule :** `Taille_Buffer = (Débit_Actuel_Files/sec) * Latence_Cible_Urgence`.
-- **Objectif :** Garantir qu'un fichier urgent entrant dans KuzuDB sera traité dans un délai déterministe (ex: 10 secondes).
+- **Objectif :** Garantir qu'un fichier urgent entrant dans `ist.*` sera traité dans un délai déterministe (ex: 10 secondes).
 - **Mécanisme Watermark :**
     - *High-Water Mark :* Cible calculée (ex: 200).
     - *Low-Water Mark :* 50% de la cible (ex: 100).
-    - *Action :* Dès que l'ETS descend au seuil bas, le Guardian tire un nouveau lot de 100 fichiers de KuzuDB.
+    - *Action :* Dès que l'ETS descend au seuil bas, le Guardian tire un nouveau lot de 100 fichiers depuis PostgreSQL.
 
 ---
 
 ## 6. Observabilité Mission-Critical : Axon.Watcher.Tracer
 Le système s'appuie sur la bibliothèque **`Axon.Watcher.Tracer`** déjà intégrée pour mesurer la performance à chaque étape clé (T0: Discovery -> T4: Commit).
-- **Points de Mesure :** Micro-latences sur l'envoi socket, le parsing AST, et le commit KuzuDB.
+- **Points de Mesure :** Micro-latences sur l'envoi socket, le parsing AST, et le commit PostgreSQL.
 - **Métriques P99 :** Calcul en temps réel des percentiles pour détecter les anomalies de performance par cœur CPU.
 - **Circuit Breaker :** Si le Tracer détecte une saturation au niveau de l'Actor Writer (T4), il peut ordonner au Guardian de suspendre momentanément le dispatch.
 
 ---
 
 ## 6. Écosystème MCP (Model Context Protocol)
-Le serveur MCP offre une fenêtre de lecture prioritaire sur le graphe, protégée de la charge d'ingestion par le mode **MVCC Snapshot Isolation**.
+Le serveur MCP offre une fenêtre de lecture prioritaire sur le graphe, protégée de la charge d'ingestion par le **MVCC PostgreSQL** et le snapshot CSR en RAM (`IstGraphView`).
 
 ### Flux de Requête LLM
 1. **Demande :** L'agent IA (ex: Claude/Gemini) envoie une requête MCP (ex: `axon_query`).
 2. **Priorité :** Le proxy MCP achemine la demande via un canal dédié à latence ultra-faible.
-3. **Vérité :** Rust interroge KuzuDB en lecture seule. Même si 14 cœurs écrivent, le LLM obtient une vue cohérente et instantanée.
+3. **Vérité :** Rust lit le `IstGraphView` en RAM (PG en fallback). Même si plusieurs cœurs écrivent, le LLM obtient une vue cohérente et instantanée.
 
 ---
 
 ## 7. Méthodologie MBSE & Traçabilité (Digital Thread)
-Axon v3.0 implémente une approche **Model-Based Systems Engineering (MBSE)**. Le graphe KuzuDB n'est pas un simple index, c'est le **Modèle Central** du système.
+Axon v3.0 implémente une approche **Model-Based Systems Engineering (MBSE)**. Le graphe IST (PostgreSQL, schéma `ist.*`) n'est pas un simple index, c'est le **Modèle Central** du système.
 
 ### Le Fil Numérique (Digital Thread)
 Nous assurons une **Traçabilité Bidirectionnelle** intégrale entre l'intention et la réalité physique :
 1.  **Problem Space (Conceptuel) :** Nœuds `Requirement` et `Concept`. C'est la partie **SOLL** décrivant le *Ce qui doit être*.
     - *Généalogie du Concept :* Les concepts sont versionnés via la relation `SUPERSEDES`. Toute évolution de la vision conserve l'archive de la décision précédente pour analyse historique.
-    - *Adressage Sémantique Projet-Aware :* Pour maintenir des séquences courtes et lisibles, les identifiants sont préfixés par le type et le slug du projet (Format : `[TYPE(3)]-[PROJ(3)]-[NUM(3)]`). Ex: `REQ-AXO-001` (Requirement Axon), `CPT-HYD-012` (Concept HydraDB).
+    - *Adressage Sémantique Projet-Aware :* Pour maintenir des séquences courtes et lisibles, les identifiants sont préfixés par le type et le slug du projet (Format : `[TYPE(3)]-[PROJ(3)]-[NUM(3)]`). Ex: `REQ-AXO-001` (Requirement Axon), `CPT-AXO-054` (Concept Axon).
 2.  **Solution Space (Technique) :** Nœuds `TechnicalSpec` et `Implementation`.
 3.  **Physical Space (Code) :** Nœuds `File` et `Symbol` (AST). C'est la partie **IST** décrivant le *Ce qui est*.
 4.  **Verification Space (Qualité) :** Nœuds `Test` certifiant que l'implémentation (IST) satisfait le requirement initial (SOLL).
@@ -117,8 +118,8 @@ L'infrastructure Axon est bâtie sur un socle technologique de classe industriel
   - **Système de Production (La Forteresse) :** L'environnement "Live" de référence (racine du projet, ports `44129`/`44127`). Pour l'Agent IA, ce système est strictement **Read-Only** (le "Juge Officiel").
   - **Système de Développement (Le Laboratoire) :** L'environnement d'isolation asymétrique pour TDD (Git Worktree, ports `44139`/`44137`). Clone la base de prod localement pour expérimenter sans Blast Radius. Validation locale avant promotion.
 - **Control Plane (Orchestration) :** Elixir 1.18+ / OTP 27. Interface Read-Only (Dashboard) et télémétrie.
-- **Data Plane (Calcul) :** Rust 1.80+ / Tokio. Parsing haute performance via Tree-sitter et inférence AI via FastEmbed (ONNX). Autorité canonique.
-- **Stockage Unifié :** DuckDB (Canard DB). Isolation physique SOLL/IST via `ATTACH DATABASE`. Support du MVCC pour des lectures concurrentes.
+- **Data Plane (Calcul) :** Rust 1.80+ / Tokio. Parsing haute performance via Tree-sitter et inférence AI via ONNX Runtime (CUDA/TensorRT EP, BGE-Large 1024d). Autorité canonique.
+- **Stockage Canonique :** PostgreSQL 17 + pgvector (HNSW). Isolation logique SOLL/IST via schémas (`soll.*` / `ist.*`). FTS via colonne `tsvector` (`content_tsv`) peuplée out-of-band par un worker `pgmq` async. Files de travail asynchrones via `pgmq`. MVCC natif pour lectures concurrentes multi-writer.
 - **Protocole d'Échange :** MCP (Model Context Protocol) via JSON-RPC sur HTTP/SSE.
 
 ### Environnement de Développement (Reproducibilité)

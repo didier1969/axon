@@ -182,7 +182,6 @@ axon_resolve_instance() {
 
     if [[ "$AXON_INSTANCE_KIND" == "dev" ]]; then
         export AXON_ENV="dev"
-        export TMUX_SESSION="axon-dev"
         export ELIXIR_NODE_NAME="axon_dev_nexus"
         export PHX_PORT="44137"
         export AXON_BRAIN_PORT="44139"
@@ -193,7 +192,6 @@ axon_resolve_instance() {
         export AXON_MUTATION_POLICY="advisory_mutable"
     else
         export AXON_ENV="prod"
-        export TMUX_SESSION="axon"
         export ELIXIR_NODE_NAME="axon_nexus"
         export PHX_PORT="44127"
         export AXON_BRAIN_PORT="44129"

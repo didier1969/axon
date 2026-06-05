@@ -43,7 +43,7 @@ echo "Toolchain origins:"
 # Every entry here is invoked by scripts/start.sh, scripts/stop.sh, scripts/release/*,
 # or scripts/lib/*.sh. Missing tool on a fresh client = silent or noisy script failure.
 required_tools=(
-  python uv cargo rustc mix elixir tmux nc curl
+  python uv cargo rustc mix elixir nc curl
   jq rg ss flock epmd psql sha256sum realpath
   awk sed grep ip git tr head tail
 )

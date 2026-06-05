@@ -21,15 +21,15 @@ unless the caller explicitly requested it.
 
 | Field | Source | Pipeline_v2 semantic |
 |---|---|---|
-| `indexed_file_count` | `SELECT count(*) FROM public.IndexedFile` | All files the watcher has seen + ingested |
-| `chunk_count` | `SELECT count(*) FROM public.Chunk` | Symbols / lifted blocks emitted by code_chunker |
-| `chunk_embedding_count` | `SELECT count(*) FROM public.ChunkEmbedding` | Vector-ready chunks |
-| `graph_ready_file_count` | `SELECT count(DISTINCT file_path) FROM public.Chunk` | Files whose Symbols are extracted |
-| `vector_ready_file_count` | `SELECT count(DISTINCT c.file_path) FROM public.Chunk c JOIN public.ChunkEmbedding e ON e.chunk_id = c.id` | Files whose Chunks are embedded |
+| `indexed_file_count` | `SELECT count(*) FROM ist.indexed_file` | All files the watcher has seen + ingested |
+| `chunk_count` | `SELECT count(*) FROM ist.chunk` | Symbols / lifted blocks emitted by code_chunker |
+| `chunk_embedding_count` | `SELECT count(*) FROM ist.chunk_embedding` | Vector-ready chunks |
+| `graph_ready_file_count` | `SELECT count(DISTINCT file_path) FROM ist.chunk` | Files whose Symbols are extracted |
+| `vector_ready_file_count` | `SELECT count(DISTINCT c.file_path) FROM ist.chunk c JOIN ist.chunk_embedding e ON e.chunk_id = c.id` | Files whose Chunks are embedded |
 
 ### Status enum (retired)
 
-The legacy `public.File.status` enum (`pending`, `indexing`,
+The legacy `ist.file.status` enum (`pending`, `indexing`,
 `indexed`, `indexed_degraded`, `skipped`, `deleted`,
 `oversized_for_current_budget`) is **gone**. Pipeline_v2 has no per-file
 status row : writes are in-line, failures surface via tracing logs +
@@ -59,7 +59,7 @@ Real back-pressure surface is **`runtime_truth_feed`** + per-stage
 |---|---|---|
 | `ist_projection_freshness` | `runtime_authority::reader_snapshot_freshness_contract` | `fresh` (indexer publishing) / `degraded` (brain-only or stale reader) |
 | `trust_boundary` | derived | `canonical` (freshness=fresh) / `degraded` (stale or indexer absent) |
-| `staleness.last_publish_ts_ms` | `MAX(last_seen_ms) FROM public.IndexedFile` | Latest pipeline_v2 ingestion timestamp |
+| `staleness.last_publish_ts_ms` | `MAX(last_seen_ms) FROM ist.indexed_file` | Latest pipeline_v2 ingestion timestamp |
 
 CPT-AXO-029 documents the IST freshness gate. Brain-only mode = degraded
 by construction (no live indexer).
@@ -87,8 +87,8 @@ those counters are always `0`. Migrate to :
 ## Validation gates
 
 - `mcp__axon__truth_check` covers the IndexedFile / Symbol / Chunk
-  invariants. CALLS / CONTAINS / CALLS_NIF surfaces are AGE-canonical
-  (post Stop A) but still queryable via SQL on legacy projects.
+  invariants. CALLS / CONTAINS / CALLS_NIF edges are canonical in the RAM
+  `IstGraphView` (CSR snapshot, PIL-AXO-9002), persisted in `ist.edge`.
 - `mcp__axon__anomalies` flags structural drift (god objects, cycles,
   orphans) — independent of the KPI contract.
 

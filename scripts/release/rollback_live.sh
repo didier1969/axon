@@ -193,7 +193,12 @@ PY
   elif ! assert_live_stopped; then
     restart_failed=1
   else
-    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start brain --fast; then
+    # REQ-AXO-901782 : the post-check (check_live_runtime_version.py) enforces
+    # indexer_ready=true via runtime_authority_contract("brain"), so a
+    # brain_only restart (`start brain --fast`) makes the post-check impossible
+    # to pass (no indexer heartbeat → 150s timeout → false postcheck_failed).
+    # Mirror promote_live.sh:497 — the canonical live profile is `start full`.
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start full; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces 12*5s=60s legacy fixed-sleep loop.

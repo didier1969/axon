@@ -279,9 +279,11 @@ old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo
 run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live
 new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
-if [[ "$old_md5" == "$new_md5" ]]; then
-  promote_log "   ⚠️ WARNING: binary md5 unchanged after promote — copy may have failed"
-fi
+# NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
+# (same HEAD → byte-identical candidate) is idempotent and expected. Promotion
+# correctness is proven by promote-live's internal runtime-identity match +
+# step-6 qualify-mcp, not by an old-vs-new binary diff. (clean-win: removed the
+# false "md5 unchanged → copy may have failed" warning.)
 
 # --- Step 6: qualify ---
 if [[ "$SKIP_QUALIFY" -ne 1 ]]; then

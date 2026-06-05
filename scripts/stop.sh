@@ -139,7 +139,7 @@ Options:
   --role    Scope the stop to one Axon role only. `--role brain` keeps the
             indexer running (and vice versa); default is `all` when no role
             is set via env or CLI. (REQ-AXO-209)
-  --hard    Force a broader kill pass (patterns + pkill fallback, still best-effort).
+  --hard    Force a broader teardown via axonctl (supervisor-tree reap + port-free verify, still best-effort).
   --verify  Audit-only mode: verify Axon not running without killing anything.
 EOF
             exit 0

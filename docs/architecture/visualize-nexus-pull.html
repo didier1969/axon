@@ -709,8 +709,8 @@ graph TD
   subgraph PA["pipeline A — graphe + chunks + FTS (CPU, autoritatif)"]
     A1["A1 · Préparation<br/>tokio::fs read<br/>SHA-256 + mtime + size<br/>→ PreparedFile"]
     A2["A2 · Transformation<br/>tree-sitter parse<br/>spawn_blocking<br/>→ ParsedFile (Symbols + Relations)"]
-    A3["A3 · Enregistrement atomique<br/>upsert_graph_v2 SINGLE TX :<br/>• Symbol + AGE vertex<br/>• CONTAINS/CALLS/CALLS_NIF (SQL+AGE)<br/>• Chunk (content intégral)<br/>• File vertex + IndexedFile<br/>→ EnrolledFile + chunk_ids"]
-    FTS["public.Chunk.content_tsv<br/>GENERATED ALWAYS AS STORED<br/>(GIN auto-index, REQ-AXO-292)"]
+    A3["A3 · Enregistrement atomique<br/>upsert_graph_v2 SINGLE TX :<br/>• Symbol (ist.symbol)<br/>• CONTAINS/CALLS/CALLS_NIF (ist.edge + IstGraphView RAM)<br/>• Chunk (content intégral)<br/>• ist.file + ist.indexed_file<br/>→ EnrolledFile + chunk_ids + pgmq enqueue"]
+    FTS["ist.chunk.content_tsv<br/>peuplé OUT-OF-BAND par tsv_worker<br/>(worker pgmq async, GIN index, REQ-AXO-292)"]
   end
 
   subgraph PB["pipeline B — embedding GPU (enrichissement)"]
@@ -724,7 +724,7 @@ graph TD
   FILT --> A1
   A1 -->|blocking send.await<br/>cap 1024| A2
   A2 -->|cap 1024| A3
-  A3 -.->|colonne GENERATED<br/>auto-recompute| FTS
+  A3 -.->|pgmq enqueue<br/>tsv_worker async| FTS
   A3 -.->|try_send NON-BLOQUANT<br/>cap 10 000 chunk_ids<br/>drop silently si plein| B1
   B1 -->|cap 512| B2
   B2 -->|cap 512| B3
@@ -757,7 +757,7 @@ graph TD
       </div>
       <div class="legend-item">
         <div class="legend-swatch" style="background:var(--plum-soft); border-color:var(--plum)"></div>
-        Side-effect PG natif (GENERATED column)
+        FTS PG async (tsv_worker via pgmq)
       </div>
     </div>
   </section>
@@ -807,12 +807,12 @@ graph TD
             <td><code>ParsedFile</code></td>
             <td class="ops">
               <code>upsert_graph_v2</code> en <strong>UNE transaction</strong> :
-              Symbol UPSERT · <strong>Chunk UPSERT</strong> (content intégral → FTS auto) ·
-              CONTAINS/CALLS/CALLS_NIF (SQL + AGE) · AGE Symbol+File vertex · IndexedFile UPSERT ·
-              <em>fan-out chunk_ids via try_send vers B1</em>
+              Symbol UPSERT · <strong>Chunk UPSERT</strong> (content intégral) ·
+              CONTAINS/CALLS/CALLS_NIF (<code>ist.edge</code> + <code>IstGraphView</code> RAM) · IndexedFile UPSERT ·
+              <em>pgmq enqueue (FTS) + fan-out chunk_ids via try_send vers B1</em>
             </td>
             <td><code>EnrolledFile</code><br><small>+ Vec&lt;chunk_id&gt;</small></td>
-            <td><code>Symbol</code> · <code>Chunk</code> (+ <code>content_tsv</code> GIN auto, REQ-AXO-292) · <code>IndexedFile</code> · AGE edges/vertices</td>
+            <td><code>ist.symbol</code> · <code>ist.chunk</code> (<code>content_tsv</code> peuplé async par tsv_worker, GIN, REQ-AXO-292) · <code>ist.indexed_file</code> · <code>ist.edge</code></td>
             <td class="workers">2<br><small>/ 1</small></td>
           </tr>
           <tr>
@@ -859,7 +859,7 @@ graph TD
       <div class="prop" data-accent="blue">
         <h3><span class="idx">P1</span>CPU stack autoritatif (SOTA hybrid)</h3>
         <p>
-          Le stack lexical + structural (graphe AGE + Chunk + content_tsv FTS) est entièrement persisté par A en CPU. <strong>Aucune dépendance GPU pour rechercher.</strong> Un déploiement sans GPU (laptop, edge, CI) a <code>code_search</code> mode lexical + <code>query</code>/<code>impact</code> fonctionnels.
+          Le stack lexical + structural (graphe <code>ist.edge</code> + <code>IstGraphView</code> RAM + Chunk + content_tsv FTS) est entièrement persisté par A en CPU. <strong>Aucune dépendance GPU pour rechercher.</strong> Un déploiement sans GPU (laptop, edge, CI) a <code>code_search</code> mode lexical + <code>query</code>/<code>impact</code> fonctionnels.
         </p>
         <p>
           B (GPU) = enrichissement <em>optionnel</em> qui ajoute la couche vector. Pattern SOTA : la couche coûteuse + fragile ajoute, ne remplace pas.
@@ -879,15 +879,15 @@ graph TD
           A2 parse une fois. A3 dérive Symbol + Chunk de la <strong>même extraction</strong>, persiste tout dans UNE transaction PG. Pas de dual-parse, pas de race entre lanes — la cohérence est garantie au niveau du moteur PG.
         </p>
         <p>
-          B1 ne re-parse PAS : il SELECTe <code>content</code> dans <code>public.Chunk</code> à partir du <code>chunk_id</code> reçu d'A3. Lane B est ainsi totalement découplée du tree-sitter.
+          B1 ne re-parse PAS : il SELECTe <code>content</code> dans <code>ist.chunk</code> à partir du <code>chunk_id</code> reçu d'A3. Lane B est ainsi totalement découplée du tree-sitter.
         </p>
       </div>
 
       <div class="prop" data-accent="plum">
-        <h3><span class="idx">P4</span>FTS gratuit, instantané (REQ-AXO-292)</h3>
+        <h3><span class="idx">P4</span>FTS async découplée (REQ-AXO-292)</h3>
         <p>
-          PG FTS lexical = colonne <code>content_tsv</code> <code>GENERATED ALWAYS AS … STORED</code> sur <code>public.Chunk</code>.
-          Dès que A3 commit sa transaction, PG calcule le tsvector et l'index GIN se met à jour <strong>dans la même transaction</strong>. La FTS est utilisable au commit, sans attendre B.
+          PG FTS lexical = colonne <code>content_tsv</code> sur <code>ist.chunk</code>, peuplée <strong>out-of-band</strong> par <code>tsv_worker</code> — un worker <code>pgmq</code> async, <strong>pas</strong> une colonne GENERATED synchrone.
+          A3 commit le chunk + enqueue un message pgmq ; <code>tsv_worker</code> draine la file, calcule le tsvector et maintient l'index GIN, sans bloquer la transaction d'ingestion ni attendre B.
         </p>
       </div>
 
@@ -949,9 +949,9 @@ graph TD
     </div>
 
     <div class="callout">
-      <strong>Mode <code>indexer_graph</code> (sans GPU).</strong> A persiste graphe + chunks + FTS. <code>code_search</code> mode lexical est immédiatement fonctionnel via la colonne GENERATED <code>content_tsv</code>. Toutes les queries MCP <code>query</code>/<code>inspect</code>/<code>impact</code>/<code>retrieve_context</code> tournent. La couche vector est juste vide — <code>code_search</code> en mode <code>hybrid</code> tombera back sur lexical seul jusqu'à ce que B tourne.
+      <strong>Mode <code>indexer_graph</code> (sans GPU).</strong> A persiste graphe + chunks + FTS. <code>code_search</code> mode lexical devient fonctionnel dès que <code>tsv_worker</code> a drainé la file pgmq et peuplé <code>content_tsv</code>. Toutes les queries MCP <code>query</code>/<code>inspect</code>/<code>impact</code>/<code>retrieve_context</code> tournent. La couche vector est juste vide — <code>code_search</code> en mode <code>hybrid</code> tombera back sur lexical seul jusqu'à ce que B tourne.
       <br><br>
-      <strong>Mode <code>indexer_vector</code>.</strong> A est inactif ; B1 lit les chunks depuis PG via cold-start poll : <code>SELECT id FROM Chunk LEFT JOIN ChunkEmbedding WHERE NULL LIMIT 256</code>. Rattrape tous les chunks non-embeddés. Même chemin si <code>indexer_full</code> démarre après un long brain-only.
+      <strong>Mode <code>indexer_vector</code>.</strong> A est inactif ; B1 lit les chunks depuis PG via cold-start poll : <code>SELECT id FROM ist.chunk LEFT JOIN ist.chunk_embedding WHERE NULL LIMIT 256</code>. Rattrape tous les chunks non-embeddés. Même chemin si <code>indexer_full</code> démarre après un long brain-only.
     </div>
   </section>
 
@@ -985,7 +985,7 @@ graph TD
         <li>channels.rs<span> mpsc cap defaults</span></li>
         <li>indexed_file_cache.rs<span> arc-swap watcher filter</span></li>
         <li>types.rs<span> PreparedFile + ParsedFile pivot types</span></li>
-        <li>graph_ingestion.rs::upsert_graph_v2<span> single-tx PG write (Symbol + Chunk + AGE + IndexedFile)</span></li>
+        <li>graph_ingestion.rs::upsert_graph_v2<span> single-tx PG write (Symbol + Chunk + ist.edge + IndexedFile)</span></li>
         <li>graph_ingestion.rs::fetch_chunk_for_embedding<span> B1 SELECT helper</span></li>
       </ul>
     </div>

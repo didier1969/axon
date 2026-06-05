@@ -2,7 +2,7 @@
 
 ## Snapshot vérifié
 
-Date de référence: `2026-04-01`
+Date de référence: `2026-06-05`
 
 Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 
@@ -11,8 +11,8 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 - environnement officiel: `devenv shell`
 - core Rust: tests verts
 - dashboard Elixir: tests verts
-- runtime canonique: `scripts/start-v2.sh` monte correctement dashboard, SQL et MCP
-- backend nominal courant: **Canard DB** (`DuckDB`)
+- runtime canonique: `./scripts/axon {start|stop|status|qualify}` (process-compose) monte dashboard, SQL et MCP
+- backend canonique: **PostgreSQL 17 + pgvector** (HNSW, BGE-Large 1024d), `pgmq`, FTS `tsvector` ; IST dans le schéma `ist.*`, SOLL dans `soll.*` ; AGE/DuckDB/KuzuDB purgés
 
 ## Validation fraîche connue
 
@@ -22,11 +22,11 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
   - `31` tests passés
   - `0` échec
-- `bash scripts/start-v2.sh`
+- `./scripts/axon --instance dev start`
   - dashboard prêt
   - SQL prêt
   - MCP prêt
-- `bash scripts/stop-v2.sh`
+- `./scripts/axon --instance dev stop`
   - arrêt propre
 - `curl -sS -X POST http://127.0.0.1:44129/mcp ... axon_query`
   - réponse valide en runtime réel
@@ -55,8 +55,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue, du mode runtime, des refus `oversized` et des entrées en mode dégradé
   - affichage de la pression hôte observée (`HOST_CPU`, `HOST_RAM`, `HOST_IO_WAIT`) et d’un état hôte dérivé du runtime Rust, sans reprendre l’autorité de scheduling
 
-Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
-Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
+Les gros fichiers sont traités par budget, packing et refus explicite quand ils dépassent l’enveloppe runtime, pas par un seuil métier fixe.
 Les gros fichiers différés accumulent aussi maintenant une dette de fairness persistante (`defer_count`) afin d’éviter leur affamement derrière des vagues infinies de petits fichiers.
 Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
 Si l’enveloppe `full` ne passe pas mais qu’une enveloppe `structure_only` passe encore, Axon admet désormais le fichier en mode dégradé au lieu de le refuser immédiatement.
@@ -109,5 +108,5 @@ Les travaux ultérieurs relèvent désormais d’améliorations produit, pas de 
 
 - lire `README.md` et `docs/getting-started.md` avant toute autre doc
 - traiter `docs/archive/` comme historique
-- traiter les anciens récits `KuzuDB`, Triple-Pod, HydraDB ou `v1/v2` comme contexte de migration, pas comme contrat courant
-- traiter `.devenv` transitoire, `src/axon-core/target/`, `src/dashboard/priv/native/*.so` et `.codex` comme artefacts locaux ignorés, pas comme source canonique
+- les technologies retirées (`DuckDB`/Canard, `AGE`, `KuzuDB`, `Titan`, `HydraDB`, plugin FFI) ne sont plus le contrat courant ; le socle canonique est PostgreSQL 17 + pgvector
+- traiter `.devenv` transitoire, `.axon/cargo-target/` et `.codex` comme artefacts locaux ignorés, pas comme source canonique

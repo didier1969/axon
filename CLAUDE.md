@@ -42,8 +42,7 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Structural risks | `anomalies` |
 | SOLL intent | `soll_query_context` |
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
-| Hybrid retrieval (FTS+vector+graph RRF) | `retrieve_context_v2` (MIL-AXO-017 slice 4 / REQ-AXO-298) |
-| Lexical / text search | `code_search` (REQ-AXO-292 backlog, largely subsumed by `retrieve_context_v2`) |
+| Hybrid retrieval (FTS+vector+graph) | `retrieve_context` / `retrieve_context_layered` |
 
 ## Pipeline v2 bench
 ```
