@@ -100,8 +100,14 @@ impl NativePgCtx {
         let pool = run_blocking(async move {
             let mut cfg = deadpool_postgres::Config::new();
             cfg.url = Some(url);
+            // REQ-AXO-901884 stage 0.1 — Verified (not Fast) recycling: deadpool
+            // runs a check query before handing back a pooled conn, so a
+            // connection left in an aborted transaction (SQLSTATE 25P02, e.g. a
+            // failed unqualified-table write) is DISCARDED + recreated instead of
+            // poisoning every later borrower. Fast skipped the check, so one
+            // aborted tx cascaded into a pool-wide 25P02 stall mid-indexation.
             cfg.manager = Some(deadpool_postgres::ManagerConfig {
-                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+                recycling_method: deadpool_postgres::RecyclingMethod::Verified,
             });
             cfg.create_pool(Some(DpRuntime::Tokio1), NoTls)
         })
