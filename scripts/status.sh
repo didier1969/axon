@@ -12,6 +12,8 @@ source "$ROOT_DIR/scripts/lib/axon-resource-policy.sh"
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$ROOT_DIR/scripts/lib/axon-role-layout.sh"
 source "$ROOT_DIR/scripts/lib/axon-version.sh"
+# shellcheck source=scripts/lib/axon-supervisor.sh
+source "$ROOT_DIR/scripts/lib/axon-supervisor.sh"
 axon_load_worktree_env "$ROOT_DIR"
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
@@ -66,6 +68,22 @@ if [[ -z "$JSON_OUTPUT" ]] || ! python3 -c "import json,sys; json.loads(sys.stdi
   printf "ERROR   axonctl status returned invalid JSON:\n%s\n" "$JSON_OUTPUT" >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# REQ-AXO-901735 — dead-brain detection: a process-compose supervisor that is
+# up (answers its /live management endpoint) while the canonical brain port is
+# NOT listening means the brain process died and the supervisor failed to bring
+# it back. Surface this explicitly so the operator/LLM doesn't read a partial
+# "supervisor alive" signal as healthy.
+AXON_DEAD_BRAIN="0"
+_STATUS_PC_PORT="$(axon_pc_port_for_instance "$AXON_INSTANCE_KIND")"
+if axon_supervisor_healthy "$_STATUS_PC_PORT" && ! axon_brain_healthy "$AXON_BRAIN_PORT"; then
+  if axon_port_is_free "$AXON_BRAIN_PORT"; then
+    AXON_DEAD_BRAIN="1"
+  fi
+fi
+export AXON_DEAD_BRAIN AXON_BRAIN_PORT
+export AXON_PC_PORT="$_STATUS_PC_PORT"
 
 # ---------------------------------------------------------------------------
 # Format human-readable output from JSON
@@ -164,6 +182,20 @@ if run_root:
         # Heartbeat absent or malformed: silent — the process-state lines
         # above already convey liveness; this surface is additive.
         pass
+
+# REQ-AXO-901735 — dead-brain condition computed in shell (supervisor up but
+# canonical brain port not listening). This is a runtime failure the supervisor
+# did not self-heal; surface it as FAIL and force a non-healthy exit code.
+dead_brain = os.environ.get("AXON_DEAD_BRAIN", "0") == "1"
+if dead_brain:
+    brain_port = os.environ.get("AXON_BRAIN_PORT", "?")
+    pc_port = os.environ.get("AXON_PC_PORT", "?")
+    print(
+        f"FAIL    dead brain: process-compose supervisor up on :{pc_port} but "
+        f"brain port :{brain_port} not listening — the brain died and was not "
+        f"restarted. Recover: ./scripts/axon stop --hard && ./scripts/axon start"
+    )
+    overall = "degraded"
 
 print()
 print(f"STATUS  {overall.upper()}")

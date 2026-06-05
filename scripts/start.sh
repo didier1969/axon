@@ -31,6 +31,10 @@ source "$PROJECT_ROOT/scripts/lib/axon-ort-runtime.sh"
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 # shellcheck source=scripts/lib/ensure-runtime.sh
 source "$PROJECT_ROOT/scripts/lib/ensure-runtime.sh"
+# shellcheck source=scripts/lib/axon-os-limits.sh
+source "$PROJECT_ROOT/scripts/lib/axon-os-limits.sh"
+# shellcheck source=scripts/lib/axon-supervisor.sh
+source "$PROJECT_ROOT/scripts/lib/axon-supervisor.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
@@ -118,6 +122,14 @@ fi
 
 # --- Preflight ---
 
+# 0. OS-limit provisioning (REQ-AXO-901735) — best-effort, never fatal.
+# Raises THIS shell's fd soft limit toward the hard max so every
+# process-compose child (brain/indexer/dashboard) inherits the higher
+# ulimit -n, and tries to raise inotify instance/watch limits (root-only).
+# Without this the indexer's FS watcher hits EMFILE on inotify_init() on a
+# large multi-project host and starts WITHOUT a watcher (silent IST staleness).
+axon_ensure_os_limits || true
+
 # 1. Nix daemon
 if ! nix store info >/dev/null 2>&1; then
     echo "⚠️  Nix daemon not responding, attempting start..."
@@ -144,10 +156,26 @@ if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
     echo "❌ PG bootstrap failed."; exit 1
 fi
 
-# 5. Already running check
-if nc -z -w 3 localhost "$AXON_BRAIN_PORT" 2>/dev/null; then
-    echo "ℹ️  Already running on :$AXON_BRAIN_PORT. Stop first."
-    exit 0
+# 5. Already running check — distinguish a HEALTHY instance from a stale orphan.
+# REQ-AXO-901735: a previous stop that left an orphan process-compose supervisor
+# (or a leftover axon-brain) holding $AXON_BRAIN_PORT must NOT block a fresh
+# start. Abort ONLY when a healthy brain is actually serving /readyz; otherwise
+# reap the repo-scoped orphan by PID and proceed.
+if ! axon_port_is_free "$AXON_BRAIN_PORT"; then
+    if axon_brain_healthy "$AXON_BRAIN_PORT"; then
+        echo "ℹ️  Healthy Axon already serving on :$AXON_BRAIN_PORT. Stop first."
+        exit 0
+    fi
+    echo "⚠️  Port :$AXON_BRAIN_PORT held by a stale Axon orphan (not serving /readyz). Reclaiming..."
+    _early_pc_bin="$(command -v process-compose 2>/dev/null || true)"
+    if ! axon_reap_supervisor_tree \
+            "$PROJECT_ROOT" "$AXON_INSTANCE_KIND" "$AXON_BRAIN_PORT" \
+            "${_early_pc_bin:-}" "${ELIXIR_NODE_NAME:-}"; then
+        echo "❌ Could not reclaim :$AXON_BRAIN_PORT from the stale orphan. Run: ./scripts/axon --instance $AXON_INSTANCE_KIND stop --hard"
+        exit 1
+    fi
+    unset _early_pc_bin
+    echo "✅ Reclaimed :$AXON_BRAIN_PORT from stale orphan; proceeding with start."
 fi
 
 # --- Resolve binaries ---
@@ -263,9 +291,8 @@ fi
 PC_YAML="$PROJECT_ROOT/process-compose.${AXON_INSTANCE_KIND}.yaml"
 [[ -f "$PC_YAML" ]] || { echo "❌ Missing: $PC_YAML"; exit 1; }
 
-case "$AXON_INSTANCE_KIND" in
-    live) PC_PORT=8080 ;; dev) PC_PORT=8081 ;; *) PC_PORT=8080 ;;
-esac
+# REQ-AXO-901735 — single source of truth for the PC management port.
+PC_PORT="$(axon_pc_port_for_instance "$AXON_INSTANCE_KIND")"
 
 # Resolve process-compose binary from devenv
 PC_BIN="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
@@ -281,17 +308,30 @@ echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 # before launching. A stale daemon from a previous run that didn't fully
 # release its port causes the new `process-compose up -D` to fail silently
 # (detached mode swallows the bind error and the parent returns 0).
-if curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
+if axon_supervisor_healthy "$PC_PORT"; then
     echo "⚠️  Stale process-compose daemon on :${PC_PORT}. Sending down..."
     "$PC_BIN" down -p "$PC_PORT" 2>/dev/null || true
     for ((w=1; w<=10; w++)); do
-        curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1 || break
+        axon_supervisor_healthy "$PC_PORT" || break
         sleep 0.5
     done
-    if curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 2>&1; then
-        echo "❌ Cannot reclaim process-compose port :${PC_PORT}. Kill it manually."
-        exit 1
+fi
+# REQ-AXO-901735 — also reap a WEDGED orphan supervisor: holds :${PC_PORT}
+# (visible in ss) but no longer answers /live, so the `down` above is a no-op.
+# Reaping is PID-anchored + scoped to THIS repo's instance config.
+if ! axon_port_is_free "$PC_PORT"; then
+    _pc_orphans="$(axon_pc_supervisor_pids "$PROJECT_ROOT" "$AXON_INSTANCE_KIND")"
+    _pc_port_pids="$(axon_port_listener_pids "$PC_PORT")"
+    if [[ -n "$_pc_orphans" || -n "$_pc_port_pids" ]]; then
+        echo "⚠️  Wedged orphan supervisor on :${PC_PORT} (pids: ${_pc_orphans//$'\n'/ } ${_pc_port_pids//$'\n'/ }). Reaping by PID..."
+        # shellcheck disable=SC2086
+        axon_kill_pids_graceful $_pc_orphans $_pc_port_pids
     fi
+    unset _pc_orphans _pc_port_pids
+fi
+if axon_supervisor_healthy "$PC_PORT" || ! axon_port_is_free "$PC_PORT"; then
+    echo "❌ Cannot reclaim process-compose port :${PC_PORT}. Kill it manually (ss -ltnp | grep ${PC_PORT})."
+    exit 1
 fi
 
 "$PC_BIN" up -f "$PC_YAML" -p "$PC_PORT" -t=false -D --ordered-shutdown --disable-dotenv "${PC_PROCESSES[@]}"

@@ -20,6 +20,8 @@ unset _SAVED_INSTANCE_KIND
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/socket-lifecycle.sh
 source "$PROJECT_ROOT/scripts/lib/socket-lifecycle.sh"
+# shellcheck source=scripts/lib/axon-supervisor.sh
+source "$PROJECT_ROOT/scripts/lib/axon-supervisor.sh"
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
 
@@ -424,16 +426,16 @@ echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
 # REQ-AXO-901735 — stop process-compose daemon if running for this instance.
 # Process-compose manages restart policies; killing children without stopping
 # the supervisor causes immediate respawn.
-case "${AXON_INSTANCE_KIND:-live}" in
-    live) _PC_PORT=8080 ;;
-    dev)  _PC_PORT=8081 ;;
-    *)    _PC_PORT=8080 ;;
-esac
-if curl -sf --connect-timeout 3 "http://localhost:${_PC_PORT}/live" >/dev/null 2>&1; then
-    _PC_BIN="$(command -v process-compose 2>/dev/null || true)"
-    if [[ -z "$_PC_BIN" ]]; then
-        _PC_BIN="$(devenv shell --no-reload --no-tui -- bash -c 'which process-compose' 2>/dev/null | tail -1 || true)"
-    fi
+# REQ-AXO-901735 — single source of truth for the PC management port.
+_PC_PORT="$(axon_pc_port_for_instance "${AXON_INSTANCE_KIND:-live}")"
+# Resolve the process-compose binary up front (cheap PATH lookup, devenv
+# fallback). Needed both for the healthy-daemon `down` below AND the final
+# orphan supervisor-tree reap (REQ-AXO-901735).
+_PC_BIN="$(command -v process-compose 2>/dev/null || true)"
+if [[ -z "$_PC_BIN" ]]; then
+    _PC_BIN="$(devenv shell --no-reload --no-tui -- bash -c 'which process-compose' 2>/dev/null | tail -1 || true)"
+fi
+if axon_supervisor_healthy "$_PC_PORT"; then
     if [[ -x "${_PC_BIN:-}" ]]; then
         if [[ "$STOP_ROLE" == "all" ]]; then
             echo "   Stopping process-compose on :${_PC_PORT}..."
@@ -460,7 +462,6 @@ if curl -sf --connect-timeout 3 "http://localhost:${_PC_PORT}/live" >/dev/null 2
         fi
     fi
 fi
-unset _PC_PORT _PC_BIN
 
 if [ "$VERIFY_ONLY" = "1" ]; then
     PATTERNS=(
@@ -533,6 +534,23 @@ if [[ -x "$AXONCTL_BIN" ]]; then
         axon_cleanup_role_state "$AXON_INSTANCE_KIND" "$STOP_ROLE" "$_AXON_RUN_ROOT_BASE"
     fi
     axon_cleanup_legacy_instance_paths "$AXON_INSTANCE_KIND"
+
+    # REQ-AXO-901735 : reap orphan process-compose SUPERVISOR + repo children.
+    # axonctl stop is PID-file anchored ; a supervisor whose PID-file is
+    # stale/absent (orphaned from a previous run, or out of sync with
+    # process-compose) survives and would RESPAWN the brain/indexer via its
+    # restart policy. For a full ('all') stop we reap the supervisor tree
+    # scoped to THIS repo's instance config + canonical brain port, then verify
+    # the brain port is freed (SIGKILL escalation by PID if still bound).
+    if [[ "$STOP_ROLE" == "all" ]]; then
+        if ! axon_reap_supervisor_tree \
+                "$PROJECT_ROOT" "$AXON_INSTANCE_KIND" "$AXON_BRAIN_PORT" \
+                "${_PC_BIN:-}" "${ELIXIR_NODE_NAME:-}"; then
+            echo "❌ Stop incomplet : port brain :${AXON_BRAIN_PORT} encore occupé après reap superviseur." >&2
+            echo "   Re-essayez avec --hard, ou kill manuel par PID (ss -ltnp | grep ${AXON_BRAIN_PORT})." >&2
+            exit 1
+        fi
+    fi
 
     # REQ-AXO-901857 : sweep résiduel final. axonctl stop est ancré PID-file ;
     # un brain dont le PID-file est stale/absent (lancé hors superviseur, ou

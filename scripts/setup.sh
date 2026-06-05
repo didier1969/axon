@@ -8,6 +8,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 # shellcheck source=scripts/lib/axon-version.sh
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
+# shellcheck source=scripts/lib/axon-os-limits.sh
+source "$PROJECT_ROOT/scripts/lib/axon-os-limits.sh"
 
 ARTIFACT_ONLY=0
 WITH_TENSORRT=0
@@ -127,6 +129,14 @@ EOF
     fi
     exit 0
 fi
+
+# 0. OS-limit provisioning (REQ-AXO-901735) — idempotent, best-effort.
+# Raises this shell's fd soft limit and tries to raise inotify instance/watch
+# limits (root-only). On a large multi-project host the indexer's FS watcher
+# otherwise hits EMFILE on inotify_init() and starts WITHOUT a watcher. Never
+# fails the bootstrap; prints the exact sudo command(s) when root is required.
+echo "🔧 Provisioning OS limits (fd + inotify)..."
+axon_ensure_os_limits || true
 
 # 1. Environment Check (Devenv)
 if ! command -v devenv &> /dev/null; then
