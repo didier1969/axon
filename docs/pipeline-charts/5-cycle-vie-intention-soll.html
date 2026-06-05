@@ -1,0 +1,187 @@
+<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cycle de vie de l'intention — SOLL : capture → lien → score → plan → application à la livraison</title>
+<style>
+:root{--bg:#f6f8fa;--panel:#ffffff;--panel2:#f0f3f6;--line:#d0d7de;--txt:#1f2328;--muted:#57606a;--accent:#0969da;--accent2:#1a7f37}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px;color:#0d1117}
+.sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;color:#0d1117}
+h2 .dot{width:10px;height:10px;border-radius:50%}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#bc4c00} .delta .dot{background:#cf222e}
+.targets .dot{background:var(--accent)} .layers .dot{background:#8250df} .facts .dot{background:#6e7781}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#24292f;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.mermaid{display:flex;justify-content:center}
+details{margin:0 0 8px;color:var(--muted);font-size:12px}
+details pre{background:#f6f8fa;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#57606a;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
+tr:hover td{background:#f6f8fa}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#1f2328}
+.critbar{position:relative;height:18px;background:#eaeef2;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+.critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#1f2328}
+.ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.facts li{margin:5px 0;color:#24292f}
+.facts code{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#0a3069}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
+.layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#24292f}
+.foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>Cycle de vie de l'intention — SOLL : capture → lien → score → plan → application à la livraison</h1>
+<p class="sub">DOC-5-INTENT-SOLL · Axon · idéal vs actuel vs delta · 2026-06-05 (post-session 73)</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2><div class="summary">Le nord-vrai du SOLL est la CONTINUITÉ D&#x27;INTENTION (PIL-AXO-003) : SOLL est la couche de vérité intentionnelle canonique de TOUT projet équipé d&#x27;Axon — pas seulement d&#x27;Axon lui-même. Dans l&#x27;idéal, l&#x27;intention — Vision → Piliers → Concepts → Décisions → Exigences → Validations → Stakeholders → Guidelines (les 9 types d&#x27;entités canoniques) — est CAPTURÉE à l&#x27;instant de l&#x27;observation (au moment où une friction, une décision ou une contrainte apparaît), LIÉE causalement au Concept ou au Pilier qui la gouverne, SCORÉE par impact descendant (combien d&#x27;aval dépend d&#x27;elle), PLANIFIÉE en vagues d&#x27;unblockers (ordre topologique de déblocage), puis APPLIQUÉE automatiquement au point de livraison (les guidelines pertinentes sont injectées au pre-flight, pas relues de mémoire). Cette intention SURVIT aux sessions, aux humains et aux releases. Cinq principes SOTA la structurent : (1) EVENT-SOURCING — <code>soll.Revision</code> est un journal d&#x27;intention immuable et rejouable (PIL-AXO-9004) : tout état SOLL dérivé (work_plan, validations, autodoc) n&#x27;est qu&#x27;une PROJECTION du journal, le rollback se fait par revision, l&#x27;audit est natif ; (2) <code>why-primary, how-inferred</code> — l&#x27;intention (le pourquoi) gouverne et le code (le comment) s&#x27;en infère, asymétrie directrice de tout Axon (VIS-AXO-001) ; (3) un GRAPHE D&#x27;INTENTION typé (9 types d&#x27;entités) requêtable et FUSIONNÉ à l&#x27;IST, de sorte que le why gouvernant est récupéré AVEC le code qu&#x27;il justifie ; (4) une BOUCLE AGENT-NATIVE fermée : observe la friction → log SOLL → link au gouvernant → re-plan → exécute la wave-1 → applique les guidelines à la livraison → commit ; (5) un ONBOARDING DÉTERMINISTE : un nouvel agent hérite l&#x27;intention ET la méthodologie sans ré-explication humaine. SOLL n&#x27;est donc pas un tracker de tickets : c&#x27;est la mémoire causale event-sourced qui rend l&#x27;intention persistante et rejouable, la moitié-produit indissociable de l&#x27;IST.</div>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    OBS[&quot;Observation\nfriction / decision / contrainte\nau moment ou le fait se produit&quot;]
+    OBS -- &quot;capture immediate&quot; --&gt; SM
+
+    SM[&quot;soll_manager\nREQ / DEC / CPT / VAL ...\n9 types d_entites canoniques&quot;]
+    SM -- &quot;action=link\ncausal&quot; --&gt; LINK
+
+    LINK{{&quot;Lien au gouvernant\nConcept / Pilier\nwhy-primary&quot;}}
+    LINK --&gt; PLAN
+
+    PLAN[&quot;soll_work_plan\nscore impact descendant\nvagues d_unblockers&quot;]
+    PLAN -- &quot;wave-1&quot; --&gt; EXEC[&quot;Execution\ndev / refactor&quot;]
+
+    EXEC --&gt; PF[&quot;axon_pre_flight_check\nguidelines appliquees\nau point de livraison&quot;]
+    PF --&gt; CW[&quot;axon_commit_work&quot;]
+
+    CW -- &quot;append-only\nimmuable&quot; --&gt; REV
+
+    subgraph CANON[&quot;Substrat event-sourced&quot;]
+        REV[(&quot;soll.Revision\njournal d_intention immuable\nrejouable / rollback / audit&quot;)]
+    end
+
+    REV -. &quot;projection rejouable&quot; .-&gt; PROJ1[&quot;Autodoc HTML\nsoll_generate_docs&quot;]
+    REV -. &quot;projection rejouable&quot; .-&gt; PROJ2[&quot;work_plan / validations&quot;]
+    REV -. &quot;replay depuis offset&quot; .-&gt; PROJ3[&quot;Onboarding agent deterministe&quot;]
+
+    REV --&gt; LOOP[&quot;re-plan&quot;]
+    LOOP -.-&gt; PLAN
+
+    IST[&quot;IST code (le comment)&quot;] -. &quot;why fuse au quoi\na la recuperation&quot; .-&gt; REV
+    VIS[&quot;VIS-AXO-001\nmemoire ET methodologie&quot;] -.-&gt; SM</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart LR
+    OBS[&quot;Observation\nfriction / decision / contrainte\nau moment ou le fait se produit&quot;]
+    OBS -- &quot;capture immediate&quot; --&gt; SM
+
+    SM[&quot;soll_manager\nREQ / DEC / CPT / VAL ...\n9 types d_entites canoniques&quot;]
+    SM -- &quot;action=link\ncausal&quot; --&gt; LINK
+
+    LINK{{&quot;Lien au gouvernant\nConcept / Pilier\nwhy-primary&quot;}}
+    LINK --&gt; PLAN
+
+    PLAN[&quot;soll_work_plan\nscore impact descendant\nvagues d_unblockers&quot;]
+    PLAN -- &quot;wave-1&quot; --&gt; EXEC[&quot;Execution\ndev / refactor&quot;]
+
+    EXEC --&gt; PF[&quot;axon_pre_flight_check\nguidelines appliquees\nau point de livraison&quot;]
+    PF --&gt; CW[&quot;axon_commit_work&quot;]
+
+    CW -- &quot;append-only\nimmuable&quot; --&gt; REV
+
+    subgraph CANON[&quot;Substrat event-sourced&quot;]
+        REV[(&quot;soll.Revision\njournal d_intention immuable\nrejouable / rollback / audit&quot;)]
+    end
+
+    REV -. &quot;projection rejouable&quot; .-&gt; PROJ1[&quot;Autodoc HTML\nsoll_generate_docs&quot;]
+    REV -. &quot;projection rejouable&quot; .-&gt; PROJ2[&quot;work_plan / validations&quot;]
+    REV -. &quot;replay depuis offset&quot; .-&gt; PROJ3[&quot;Onboarding agent deterministe&quot;]
+
+    REV --&gt; LOOP[&quot;re-plan&quot;]
+    LOOP -.-&gt; PLAN
+
+    IST[&quot;IST code (le comment)&quot;] -. &quot;why fuse au quoi\na la recuperation&quot; .-&gt; REV
+    VIS[&quot;VIS-AXO-001\nmemoire ET methodologie&quot;] -.-&gt; SM</pre></details>
+<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c'est l'idéal (pas un tracker de tickets) :</strong> Ce n&#x27;est pas un tracker de tickets — c&#x27;est la MÉMOIRE CAUSALE EVENT-SOURCED qui rend l&#x27;intention persistante et rejouable, la moitié-produit indissociable de l&#x27;IST. Un tracker stocke un état (ouvert/fermé) qu&#x27;on interroge ; SOLL stocke un JOURNAL D&#x27;INTENTION immuable (<code>soll.Revision</code>, PIL-AXO-9004) dont tout le reste — work_plan, validations, autodoc — n&#x27;est qu&#x27;une projection jetable et régénérable. Cinq sauts structurels qu&#x27;un tracker ne franchit pas : (1) Event sourcing — l&#x27;intention n&#x27;est jamais « écrasée », elle est versionnée et rejouable, ce qui donne le rollback par revision, le time-travel, l&#x27;audit post-mortem et la régénération à coût nul de toute surface dérivée ; un nouvel agent rejoue depuis l&#x27;offset zéro et hérite l&#x27;état exact de l&#x27;intention. (2) <code>why-primary, how-inferred</code> — l&#x27;intention gouverne le code et non l&#x27;inverse : asymétrie why→how (élagage) vs how→why (lossy), raison d&#x27;être d&#x27;Axon (VIS-AXO-001). (3) Graphe d&#x27;intention typé (9 types) FUSIONNÉ à l&#x27;IST — au moment de la récupération, le why gouvernant remonte AVEC le code qu&#x27;il justifie, ce qu&#x27;aucun tracker hors-bande ne peut faire. (4) Boucle agent-native fermée — observe → log → link → re-plan → applique guidelines à la livraison → commit : la méthodologie est exécutée par l&#x27;agent, pas relue par un humain. (5) Onboarding déterministe — l&#x27;intention ET la méthodologie s&#x27;héritent (CPT-AXO-020), supprimant la ré-explication. SOLL est ainsi la mémoire ET la méthodologie de VIS-AXO-001 : la couche intentionnelle canonique de tout projet équipé d&#x27;Axon, pas seulement d&#x27;Axon.</div><div class="chips" style="margin-top:2px"><span class="chip">PIL-AXO-003 Continuité d_intention : SOLL survit aux sessions, humains et releases</span><span class="chip">PIL-AXO-9004 Substrat event-sourced : soll.Revision journal immuable, tout état dérivé est une projection rejouable</span><span class="chip">VIS-AXO-001 why fusionné au quoi : la mémoire ET la méthodologie, moitié-produit indissociable de l_IST</span><span class="chip">CPT-AXO-019 protocole « documente » : friction observée → entité SOLL canonique</span><span class="chip">CPT-AXO-020 boucle agent-native 6-phase : observe → log → link → re-plan → exécute → commit</span><span class="chip">DEC-AXO-085 format d_IDs canonique TYPE-PROJ-N</span><span class="chip">9 types d_entités canoniques : Vision · Pilier · Concept · Décision · Exigence · Validation · Stakeholder · Guideline (+ Revision journal)</span><span class="chip">Capture à l_observation : l_intention est saisie au moment où le fait se produit, jamais reconstruite après coup</span><span class="chip">Lien causal au gouvernant (Concept / Pilier) : aucune intention orpheline, why-primary</span><span class="chip">Score impact descendant + vagues d_unblockers : planification dérivée du graphe, pas d_un backlog plat</span><span class="chip">Application automatique à la livraison : guidelines injectées au pre-flight, pas relues de mémoire</span><span class="chip">Onboarding déterministe : un nouvel agent hérite intention + méthodologie sans ré-explication</span></div><h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">La surface SOLL livrée couvre déjà l&#x27;essentiel du cycle. LECTURE : <code>soll_query_context</code> (récupération d&#x27;intention par contexte) + <code>soll_work_plan</code> (ordre topologique d&#x27;unblockers scoré par impact descendant ET décroissance temporelle) + <code>soll_validate</code> (vérification de cohérence). ÉCRITURE : <code>soll_manager</code> (CRUD + <code>action=link</code> causal) / <code>infer_soll_mutation</code> (proposition de mutation) / <code>entrench_nuance</code> (consolidation) / <code>soll_apply_plan</code> — les mutations Cypher INSERT/UPDATE directes sont INTERDITES, l&#x27;accès est read-only par spec, toute écriture passe par les outils. LIVRAISON : <code>axon_pre_flight_check</code> → <code>axon_commit_work</code> applique les guidelines pertinentes au point de livraison. JOURNAL : <code>soll.Revision</code> est en place, le rollback se fait via <code>soll_rollback_revision</code>. Le DDL SOLL est canonique, typé et unifié (REQ-AXO-901881, colonne <code>title</code> — pas <code>label</code>). L&#x27;autodoc HTML par projet existe (<code>soll_generate_docs</code> → docs/derived/soll/). Le modèle est TWO-SIDED : namespace PRO (méthodologie cross-tenant livrée au client pour SES projets) vs AXO (architecture interne d&#x27;Axon). GAPS actuels : le refresh des surfaces dérivées (autodoc notamment) est À-LA-DEMANDE, pas automatique post-mutation (REQ-AXO-309) — risque de dérive silencieuse vs le journal ; et si <code>soll.Revision</code> est bien un journal en place, la couverture event-sourced COMPLÈTE — où TOUTE projection (work_plan, validations, autodoc, onboarding) est 100% rejouable depuis le seul journal — reste partielle : PIL-AXO-9004 est une cible vers laquelle l&#x27;existant converge, pas un état pleinement atteint.</div>
+    <div class="diagram"><pre class="mermaid">flowchart TD
+  OBS[Observation friction decision contrainte]
+  SM[soll_manager CRUD + action=link causal]:::ok
+  INF[infer_soll_mutation proposition]:::ok
+  ENT[entrench_nuance consolidation]:::ok
+  OBS --&gt; SM
+  OBS -.-&gt; INF
+  INF -.-&gt; SM
+  SM --&gt; LINK[lien causal Concept Pilier]:::ok
+  CYPHER[Mutations Cypher INSERT UPDATE directes INTERDITES read-only par spec]:::dead
+  CYPHER -. interdit .-&gt; SM
+  LINK --&gt; WP[soll_work_plan score impact descendant + decroissance temporelle vagues unblockers]:::ok
+  WP --&gt; VAL[soll_validate coherence]:::ok
+  WP --&gt; EXEC[Execution dev refactor]
+  EXEC --&gt; PF[axon_pre_flight_check applique guidelines]:::ok
+  PF --&gt; CW[axon_commit_work]:::ok
+  CW --&gt; REV[(soll.Revision journal rollback via soll_rollback_revision)]:::ok
+  REV --&gt; AUTODOC[soll_generate_docs autodoc HTML docs derived soll]:::partial
+  REV -. projections 100pct rejouables event-sourcing complet CIBLE .-&gt; ESFULL[PIL-AXO-9004 couverture partielle]:::gap
+  AUTODOC -. refresh A-LA-DEMANDE pas auto post-mutation REQ-AXO-309 .-&gt; DRIFT[Derive silencieuse possible]:::gap
+  PRO[namespace PRO methodologie cross-tenant livree au client]:::ok
+  AXO[namespace AXO architecture interne Axon]:::ok
+  PRO -.-&gt; SM
+  AXO -.-&gt; SM
+  classDef ok fill:#d4f7d4,stroke:#1a7f37;
+  classDef partial fill:#fff3cd,stroke:#bc8a00;
+  classDef gap fill:#ffd5d5,stroke:#c0392b;
+  classDef dead fill:#e2e6ea,stroke:#6e7781,stroke-dasharray:4 3;</pre></div>
+    <details><summary>source Mermaid (actuel)</summary><pre>flowchart TD
+  OBS[Observation friction decision contrainte]
+  SM[soll_manager CRUD + action=link causal]:::ok
+  INF[infer_soll_mutation proposition]:::ok
+  ENT[entrench_nuance consolidation]:::ok
+  OBS --&gt; SM
+  OBS -.-&gt; INF
+  INF -.-&gt; SM
+  SM --&gt; LINK[lien causal Concept Pilier]:::ok
+  CYPHER[Mutations Cypher INSERT UPDATE directes INTERDITES read-only par spec]:::dead
+  CYPHER -. interdit .-&gt; SM
+  LINK --&gt; WP[soll_work_plan score impact descendant + decroissance temporelle vagues unblockers]:::ok
+  WP --&gt; VAL[soll_validate coherence]:::ok
+  WP --&gt; EXEC[Execution dev refactor]
+  EXEC --&gt; PF[axon_pre_flight_check applique guidelines]:::ok
+  PF --&gt; CW[axon_commit_work]:::ok
+  CW --&gt; REV[(soll.Revision journal rollback via soll_rollback_revision)]:::ok
+  REV --&gt; AUTODOC[soll_generate_docs autodoc HTML docs derived soll]:::partial
+  REV -. projections 100pct rejouables event-sourcing complet CIBLE .-&gt; ESFULL[PIL-AXO-9004 couverture partielle]:::gap
+  AUTODOC -. refresh A-LA-DEMANDE pas auto post-mutation REQ-AXO-309 .-&gt; DRIFT[Derive silencieuse possible]:::gap
+  PRO[namespace PRO methodologie cross-tenant livree au client]:::ok
+  AXO[namespace AXO architecture interne Axon]:::ok
+  PRO -.-&gt; SM
+  AXO -.-&gt; SM
+  classDef ok fill:#d4f7d4,stroke:#1a7f37;
+  classDef partial fill:#fff3cd,stroke:#bc8a00;
+  classDef gap fill:#ffd5d5,stroke:#c0392b;
+  classDef dead fill:#e2e6ea,stroke:#6e7781,stroke-dasharray:4 3;</pre></details>
+<h2 class="delta"><span class="dot"></span>3 · Delta & criticité (%)</h2><table><thead><tr><th>Élément</th><th>Idéal</th><th>Actuel</th><th>Importance</th><th>Criticité</th><th>Évidence</th></tr></thead><tbody>
+      <tr>
+        <td><strong>Refresh automatique des projections SOLL dérivées</strong></td>
+        <td>Toute mutation SOLL régénère automatiquement les surfaces dérivées (autodoc HTML, work_plan matérialisé, validations) sans dérive silencieuse — projection fire-and-forget post-mutation</td>
+        <td>L&#x27;autodoc (<code>soll_generate_docs</code>) et les surfaces dérivées sont rafraîchies À-LA-DEMANDE uniquement ; aucun hook post-mutation ne les régénère, d&#x27;où une dérive possible vs le journal</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:55%;background:#f1c40f"></div><span class="critnum">55%</span></div></td>
+        <td class="ev">soll_generate_docs (docs/derived/soll/) ; REQ-AXO-309 (planned) acceptance : manifest dérivé &lt; 1 min après mutation</td>
+      </tr>
+      <tr>
+        <td><strong>Event-sourcing généralisé : projections 100% rejouables au-delà de soll.Revision</strong></td>
+        <td>TOUTE projection (work_plan, validations, autodoc, onboarding) est 100% rejouable depuis le seul journal <code>soll.Revision</code> ; aucun état SOLL dérivé n&#x27;existe hors d&#x27;une projection du log (PIL-AXO-9004 pleinement atteint)</td>
+        <td><code>soll.Revision</code> est un journal en place + rollback via <code>soll_rollback_revision</code>, mais la couverture event-sourced complète (chaque surface entièrement dérivée/rejouable depuis le seul log) reste partielle — PIL-AXO-9004 est une cible vers laquelle l&#x27;existant converge</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:50%;background:#f1c40f"></div><span class="critnum">50%</span></div></td>
+        <td class="ev">soll.Revision + soll_rollback_revision ; PIL-AXO-9004 (substrat event-sourced, cible) ; DDL canonique typé REQ-AXO-901881 (colonne title)</td>
+      </tr>
+      <tr>
+        <td><strong>Fusion systématique du why gouvernant à la récupération</strong></td>
+        <td>À chaque récupération de code (IST), le why gouvernant SOLL (Concept/Pilier/Décision) remonte AVEC le code qu&#x27;il justifie — graphe d&#x27;intention typé fusionné à l&#x27;IST, <code>why-primary, how-inferred</code> appliqué au point de récupération</td>
+        <td>Le graphe d&#x27;intention typé (9 types) et l&#x27;IST coexistent et la fusion est amorcée (cf. retrieval hybride), mais la remontée systématique du why gouvernant À LA RÉCUPÉRATION du code n&#x27;est pas encore garantie pour toute surface — voir aussi DOC-4 (récupération fusionnée)</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:65%;background:#e67e22"></div><span class="critnum">65%</span></div></td>
+        <td class="ev">VIS-AXO-001 (why fusionné au quoi) ; PIL-AXO-003 (continuité d_intention) ; soll_query_context + retrieve_context ; cf. DOC-4 (récupération fusionnée why→code)</td>
+      </tr></tbody></table><h2 class="facts"><span class="dot"></span>Faits vérifiés (MCP / code)</h2><ul class="facts"><li><strong>Surface SOLL — lecture</strong> : <code>soll_query_context</code> (récupération d&#x27;intention par contexte), <code>soll_work_plan</code> (ordre topologique d&#x27;unblockers scoré par impact descendant + décroissance temporelle) et <code>soll_validate</code> (cohérence) sont livrés et opérationnels.</li><li><strong>Surface SOLL — écriture</strong> : <code>soll_manager</code> (CRUD + <code>action=link</code> causal), <code>infer_soll_mutation</code>, <code>entrench_nuance</code> et <code>soll_apply_plan</code> ; les mutations Cypher INSERT/UPDATE directes sont INTERDITES (read-only par spec) — toute écriture transite par les outils.</li><li><strong>Surface SOLL — livraison</strong> : <code>axon_pre_flight_check</code> → <code>axon_commit_work</code> applique les guidelines pertinentes au point de livraison (les guidelines sont injectées, pas relues de mémoire).</li><li><strong>9 types d&#x27;entités canoniques</strong> : Vision · Pilier · Concept · Décision · Exigence · Validation · Stakeholder · Guideline — le graphe d&#x27;intention typé est requêtable et destiné à fusionner avec l&#x27;IST.</li><li><strong>Journal Revision</strong> : <code>soll.Revision</code> est un journal d&#x27;intention en place ; le rollback se fait via <code>soll_rollback_revision</code> (jamais de suppression de nœud SOLL).</li><li><strong>DDL canonique typé</strong> : le DDL SOLL est unifié et typé (REQ-AXO-901881) ; la colonne canonique est <code>title</code> (et non <code>label</code> — <code>SELECT label</code> casse en PG 42703).</li><li><strong>Autodoc par projet</strong> : <code>soll_generate_docs</code> produit l&#x27;autodoc HTML par projet (docs/derived/soll/) — surface dérivée non-canonique reconstructible depuis le journal.</li><li><strong>Modèle two-sided PRO / AXO</strong> : namespace PRO = méthodologie cross-tenant livrée au client pour SES projets ; namespace AXO = architecture interne d&#x27;Axon. Test : « le client reçoit-il cette règle ? » oui→PRO, non→AXO.</li><li><strong>Gap refresh dérivé</strong> : le rafraîchissement des surfaces dérivées (autodoc en tête) est à-la-demande, pas automatique post-mutation (REQ-AXO-309) — risque de dérive silencieuse vs le journal.</li><li><strong>Gap event-sourcing complet</strong> : <code>soll.Revision</code> existe, mais la couverture event-sourced totale (toute projection rejouable depuis le seul journal) reste partielle — PIL-AXO-9004 est une cible, pas un état pleinement atteint.</li></ul><div class="foot">Créé 2026-06-05 (post-session 73). Cycle de vie de l&#x27;intention SOLL : capture à l&#x27;observation → lien causal au gouvernant → score d&#x27;impact descendant → plan en vagues d&#x27;unblockers → application des guidelines à la livraison → journal Revision immuable rejouable. Mermaid 11 (CDN). Diagrammes : si un rendu échoue, la source Mermaid est dans le &lt;details&gt; sous chaque schéma.</div></div>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+</script></body></html>

@@ -1,0 +1,195 @@
+<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lignée release & promotion : artefact hash-pinné → qualify → swap atomique → vérif identité runtime → control-plane déclaratif</title>
+<style>
+:root{--bg:#f6f8fa;--panel:#ffffff;--panel2:#f0f3f6;--line:#d0d7de;--txt:#1f2328;--muted:#57606a;--accent:#0969da;--accent2:#1a7f37}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 22px 80px}
+h1{font-size:25px;margin:0 0 4px;letter-spacing:.2px;color:#0d1117}
+.sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+h2{font-size:19px;margin:38px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;color:#0d1117}
+h2 .dot{width:10px;height:10px;border-radius:50%}
+.ideal .dot{background:var(--accent2)} .actuel .dot{background:#bc4c00} .delta .dot{background:#cf222e}
+.targets .dot{background:var(--accent)} .layers .dot{background:#8250df} .facts .dot{background:#6e7781}
+.summary{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:13px 16px;margin:0 0 16px;color:#24292f;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;margin:0 0 6px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.mermaid{display:flex;justify-content:center}
+details{margin:0 0 8px;color:var(--muted);font-size:12px}
+details pre{background:#f6f8fa;border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;color:#57606a;font-size:12px}
+table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;background:var(--panel2)}
+tr:hover td{background:#f6f8fa}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:700;color:#1f2328}
+.critbar{position:relative;height:18px;background:#eaeef2;border-radius:9px;overflow:hidden;min-width:120px;border:1px solid var(--line)}
+.critfill{position:absolute;left:0;top:0;bottom:0;border-radius:9px}
+.critnum{position:relative;z-index:2;font-size:11px;font-weight:700;padding:0 8px;line-height:18px;color:#1f2328}
+.ev{color:var(--muted);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.facts li{margin:5px 0;color:#24292f}
+.facts code{background:#f0f3f6;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#0a3069}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px;box-shadow:0 1px 2px rgba(31,35,40,.06)}
+.layer h3{margin:0 0 4px;font-size:16px;color:var(--accent)}
+.layer .scope{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 9px;font-size:12px;color:#24292f}
+.foot{margin-top:46px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>Lignée release & promotion : artefact hash-pinné → qualify → swap atomique → vérif identité runtime → control-plane déclaratif</h1>
+<p class="sub">DOC-6-RELEASE · Axon · idéal vs actuel vs delta · 2026-06-05 (post-session 73)</p><h2 class="ideal"><span class="dot"></span>1 · Flux idéal SOTA (le nord-vrai, premiers principes)</h2><div class="summary">Le nord-vrai de la release est la LIGNÉE DE RELEASE QUALIFIÉE (PIL-AXO-005) généralisée vers un CONTROL-PLANE DÉCLARATIF multi-environnement (PIL-AXO-9005). La promotion vers live n&#x27;est jamais inférée d&#x27;un push git : elle est EXPLICITE, artefact-driven, versionnée et vérifiée contre l&#x27;identité réelle du runtime en cours. Cinq principes structurels. (1) On ne promeut QUE du hash-vérifiable : artefacts reproductibles épinglés par empreinte SHA-256 (GUI-PRO-006, builds déterministes), identiques partout — promotable même en air-gap parce que l&#x27;identité de l&#x27;artefact ne dépend pas d&#x27;un réseau ni d&#x27;un horodatage de build. (2) Séquence qualifiée stricte : un manifeste épingle le candidat → le candidat est QUALIFIÉ avant tout swap (preflight + qualify-mcp couvrant quality ET latency) → swap ATOMIQUE des binaires → on VÉRIFIE que le runtime réellement en cours == l&#x27;identité du manifeste (pas une supposition, une mesure) → qualify final post-swap. (3) Zéro-downtime et fail-closed : si le HEAD bouge pendant la séquence, on n&#x27;applique rien (la promotion devient un instantané cohérent ou n&#x27;a pas lieu). (4) Rollback par manifeste historique : on revient à un état déjà-qualifié connu, jamais via git revert (qui re-construirait du non-qualifié). (5) CIBLE control-plane déclaratif (PIL-AXO-9005) : chaque environnement — tenant × stage × région — est DÉCRIT en IaC ; un réconciliateur compare en continu l&#x27;état désiré (manifeste IaC) à l&#x27;état observé (runtime mesuré) ; toute dérive IaC↔runtime devient une anomalie de PREMIÈRE classe (détectée, alertée, réconciliée) et non un drift silencieux ; la topologie est self-describing — un seul appel rend une carte vivante de tous les environnements et de leur identité courante (MIL-AXO-027 slice-8).</div>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    subgraph SUPPLY[&quot;Supply-chain reproductible&quot;]
+        SRC[&quot;Source qualifie\nHEAD fige&quot;]
+        BLD[&quot;Build deterministe\nSHA-256 hash-pin&quot;]
+        SRC --&gt; BLD
+    end
+
+    BLD -- &quot;artefact hash-verifiable\nidentique partout (air-gap)&quot; --&gt; MAN
+
+    MAN[&quot;Manifeste\nepingle le candidat\ndesired state&quot;]
+
+    MAN --&gt; QUAL{{&quot;Qualify candidat\npreflight\n+ qualify-mcp quality+latency&quot;}}
+    QUAL -- &quot;fail-closed si HEAD bouge&quot; --&gt; ABORT[&quot;Abort\nrien applique&quot;]
+    QUAL -- &quot;qualifie&quot; --&gt; SWAP[&quot;Swap ATOMIQUE binaires\nzero-downtime&quot;]
+
+    SWAP --&gt; VERIF{&quot;Runtime en cours\n== identite manifeste ?&quot;}
+    VERIF -- &quot;non&quot; --&gt; RB
+    VERIF -- &quot;oui&quot; --&gt; FINAL[&quot;Qualify final\npost-swap&quot;]
+    FINAL --&gt; PROMOTED[(&quot;Etat promu\ndeja-qualifie&quot;)]
+
+    RB[&quot;Rollback par\nmanifeste historique\n(jamais git revert)&quot;]
+    PROMOTED -. &quot;rollback&quot; .-&gt; RB
+    RB --&gt; SWAP
+
+    subgraph CP[&quot;Control-plane declaratif (cible PIL-9005)&quot;]
+        IAC[&quot;IaC: tenant x stage x region\ndesired state&quot;]
+        RECON{{&quot;Reconciliateur\ndesired vs observed&quot;}}
+        OBS[&quot;Runtime observe\nidentite mesuree&quot;]
+        IAC --&gt; RECON
+        OBS --&gt; RECON
+        RECON -- &quot;derive IaC vs runtime\n= anomalie 1ere classe&quot; --&gt; DRIFT[&quot;Drift detecte\nalerte + reconcilie&quot;]
+    end
+
+    MAN -. &quot;projete par env&quot; .-&gt; IAC
+    PROMOTED -. &quot;identite courante&quot; .-&gt; OBS
+    RECON -. &quot;un appel = carte vivante&quot; .-&gt; TOPO[&quot;Topologie self-describing\nMIL-027 slice-8&quot;]</pre></div>
+    <details><summary>source Mermaid (idéal)</summary><pre>flowchart LR
+    subgraph SUPPLY[&quot;Supply-chain reproductible&quot;]
+        SRC[&quot;Source qualifie\nHEAD fige&quot;]
+        BLD[&quot;Build deterministe\nSHA-256 hash-pin&quot;]
+        SRC --&gt; BLD
+    end
+
+    BLD -- &quot;artefact hash-verifiable\nidentique partout (air-gap)&quot; --&gt; MAN
+
+    MAN[&quot;Manifeste\nepingle le candidat\ndesired state&quot;]
+
+    MAN --&gt; QUAL{{&quot;Qualify candidat\npreflight\n+ qualify-mcp quality+latency&quot;}}
+    QUAL -- &quot;fail-closed si HEAD bouge&quot; --&gt; ABORT[&quot;Abort\nrien applique&quot;]
+    QUAL -- &quot;qualifie&quot; --&gt; SWAP[&quot;Swap ATOMIQUE binaires\nzero-downtime&quot;]
+
+    SWAP --&gt; VERIF{&quot;Runtime en cours\n== identite manifeste ?&quot;}
+    VERIF -- &quot;non&quot; --&gt; RB
+    VERIF -- &quot;oui&quot; --&gt; FINAL[&quot;Qualify final\npost-swap&quot;]
+    FINAL --&gt; PROMOTED[(&quot;Etat promu\ndeja-qualifie&quot;)]
+
+    RB[&quot;Rollback par\nmanifeste historique\n(jamais git revert)&quot;]
+    PROMOTED -. &quot;rollback&quot; .-&gt; RB
+    RB --&gt; SWAP
+
+    subgraph CP[&quot;Control-plane declaratif (cible PIL-9005)&quot;]
+        IAC[&quot;IaC: tenant x stage x region\ndesired state&quot;]
+        RECON{{&quot;Reconciliateur\ndesired vs observed&quot;}}
+        OBS[&quot;Runtime observe\nidentite mesuree&quot;]
+        IAC --&gt; RECON
+        OBS --&gt; RECON
+        RECON -- &quot;derive IaC vs runtime\n= anomalie 1ere classe&quot; --&gt; DRIFT[&quot;Drift detecte\nalerte + reconcilie&quot;]
+    end
+
+    MAN -. &quot;projete par env&quot; .-&gt; IAC
+    PROMOTED -. &quot;identite courante&quot; .-&gt; OBS
+    RECON -. &quot;un appel = carte vivante&quot; .-&gt; TOPO[&quot;Topologie self-describing\nMIL-027 slice-8&quot;]</pre></details>
+<div class="summary" style="border-left-color:#1a7f37"><strong>Pourquoi c'est l'idéal (pas un script de déploiement amélioré) :</strong> Ce n&#x27;est pas une version plus propre de promote_live_safe.sh ; c&#x27;est le pattern Kubernetes/GitOps — RÉCONCILIATION desired-vs-observed + SUPPLY-CHAIN reproductible — appliqué à la connaissance structurelle. La distinction de fond avec un meilleur script : un script, aussi soigné soit-il, reste IMPÉRATIF (« fais ces étapes »), single-host, et croit sa propre sortie ; l&#x27;idéal est DÉCLARATIF (« voici l&#x27;état désiré de chaque environnement ») et VÉRIFIE l&#x27;identité réelle du runtime au lieu de la supposer. Quatre sauts qu&#x27;un script ne peut pas franchir en se nettoyant. (1) On ne place que des artefacts HASH-VÉRIFIABLES (SHA-256, GUI-PRO-006) : l&#x27;identité d&#x27;une release est son empreinte reproductible, pas un numéro de build ni un horodatage ; identique partout, promotable en air-gap, comparable bit-à-bit — c&#x27;est la base supply-chain SLSA/GitOps. (2) La promotion est EXPLICITE et artefact-driven, jamais inférée d&#x27;un push git : un manifeste épingle le candidat, et c&#x27;est le manifeste — pas l&#x27;historique git — qui est la source de vérité de ce qui doit tourner. (3) On VÉRIFIE que le runtime en cours == l&#x27;identité du manifeste : la promotion n&#x27;est « réussie » que si la mesure le confirme, ce qui supprime la classe entière de bugs « j&#x27;ai copié le binaire donc c&#x27;est bon » et de faux succès/échecs de finalisation. (4) Toute DÉRIVE IaC↔runtime est une anomalie de première classe : dans un control-plane déclaratif, l&#x27;écart entre désiré et observé est détecté et réconcilié en continu (GUI-PRO-012, IaC/GitOps), au lieu de dériver silencieusement entre deux promotions manuelles — et la topologie est self-describing (un appel = carte vivante de tenant × stage × région, MIL-AXO-027 slice-8) plutôt que reconstruite à la main host par host.</div><div class="chips" style="margin-top:2px"><span class="chip">PIL-AXO-005 Lignée de release qualifiée (promotion explicite, artefact-driven, vérifiée contre l_identité runtime)</span><span class="chip">PIL-AXO-9005 Control-plane déclaratif multi-environnement (desired-vs-observed réconcilié, dérive = anomalie 1ère classe)</span><span class="chip">GUI-PRO-006 Builds déterministes hash-pinnés SHA-256 (on ne promeut que du hash-vérifiable, identique partout, air-gap)</span><span class="chip">GUI-PRO-012 IaC / GitOps (chaque environnement décrit déclarativement, réconciliation continue)</span><span class="chip">DEC-AXO-060 Surface 4 verbes canoniques (start/stop/status/qualify) — la qualify est dans la lignée, pas hors d_elle</span><span class="chip">MIL-AXO-027 slice-8 Topologie self-describing (un appel = carte vivante des environnements et de leur identité courante)</span><span class="chip">Séquence qualifiée : manifeste épingle → qualify candidat (preflight + quality + latency) → swap atomique → vérif identité runtime → qualify final</span><span class="chip">Zéro-downtime + fail-closed : si HEAD bouge pendant la séquence, rien n_est appliqué (instantané cohérent ou abort)</span><span class="chip">Rollback par manifeste historique (état déjà-qualifié connu) — jamais git revert, qui re-construirait du non-qualifié</span><span class="chip">Séparation d_artefact dev / live : ce qui est qualifié est ce qui est promu, traçable à l_empreinte près</span><span class="chip">Pattern Kubernetes/GitOps appliqué à la connaissance structurelle : reconciliation + supply-chain reproductible, pas un script impératif</span></div><h2 class="actuel"><span class="dot"></span>2 · Flux actuel (tel qu'il est)</h2><div class="summary">Le chemin de promotion canonique EXISTE et fonctionne : <code>scripts/release/promote_live_safe.sh --project AXO</code> exécute en one-shot la lignée — rebuild du candidat → release-preflight → création d&#x27;un manifeste épinglé → swap des binaires dans <code>bin/</code> + restart live → match de l&#x27;identité runtime MCP contre le manifeste → qualify-mcp final (quality + latency) avant de DÉCLARER la promotion. L&#x27;état est matérialisé déclarativement dans un manifeste <code>.axon/live-release/current.json</code> (build_id, generation-id, state=promoted) avec un historique versionné sous <code>.axon/live-release/history/</code>. Le rollback est par manifeste : <code>scripts/release/rollback_live.sh</code> restaure un manifeste historique (jamais git revert). Les binaires live sont TOUJOURS installés par la pipeline dans <code>bin/</code> — jamais <code>cargo build --release</code> manuel — et qualify-mcp valide quality+latency avant de déclarer la promotion saine. C&#x27;est déjà la lignée qualifiée single-host de PIL-AXO-005. GAPS actuels. (1) SMELLS de script trompeurs : le step-7 « finalize » de promote_live_safe ÉCHOUE faussement sur un check « no pid file » et émet un faux warning « binary md5 unchanged after promote » alors que la promotion est en fait RÉUSSIE (manifeste promu, qualify-mcp ok, binaire en place, runtime sain) — le script ment sur son propre succès/échec, exactement la classe de bug que l&#x27;idéal supprime en vérifiant l&#x27;identité réelle au lieu de la deviner. (2) La CIBLE control-plane déclaratif + topologie self-describing multi-tenant (PIL-AXO-9005, MIL-AXO-027 slice-8) n&#x27;est PAS atteinte : aujourd&#x27;hui = promotion scriptée single-host, pas de réconciliation desired-vs-observed continue, pas de détection de dérive IaC↔runtime de première classe, pas de carte vivante un-appel des environnements tenant × stage × région. (3) Séparation d&#x27;artefact aplatie : l&#x27;artefact dev EST l&#x27;artefact live promu (même binaire release) — il n&#x27;y a pas de frontière d&#x27;artefact distincte entre ce qui est testé en dev et ce qui est promu en live.</div>
+    <div class="diagram"><pre class="mermaid">flowchart TD
+  CMD[promote_live_safe.sh --project AXO one-shot]
+  REBUILD[1 Rebuild candidat release]:::fixed
+  PREFLIGHT[2 release-preflight]:::fixed
+  MANIFEST[3 Cree manifeste epingle .axon/live-release/current.json build_id generation-id state=promoted]:::fixed
+  SWAP[4 Swap binaires bin/ + restart live]:::fixed
+  MATCH[5 Match identite runtime MCP vs manifeste]:::fixed
+  QUALIFY[6 qualify-mcp final quality + latency]:::fixed
+  FINALIZE[7 finalize: faux-echec no pid file + faux warning binary md5 unchanged]:::gap
+  CMD --&gt; REBUILD --&gt; PREFLIGHT --&gt; MANIFEST --&gt; SWAP --&gt; MATCH --&gt; QUALIFY --&gt; FINALIZE
+  HIST[(.axon/live-release/history/ manifestes historiques)]:::fixed
+  MANIFEST --&gt; HIST
+  ROLLBACK[rollback_live.sh restaure manifeste historique jamais git revert]:::fixed
+  HIST -. rollback par manifeste .-&gt; ROLLBACK
+  ROLLBACK --&gt; SWAP
+  DEVART[Artefact dev = artefact live promu meme binaire release separation aplatie]:::gap
+  DEVART -. pas de frontiere d artefact .-&gt; REBUILD
+  CP[CIBLE control-plane declaratif multi-tenant PIL-9005 NON ATTEINTE promotion scriptee single-host]:::gap
+  DRIFT[CIBLE drift detection IaC vs runtime 1ere classe NON FAITE]:::gap
+  TOPO[CIBLE topologie self-describing un-appel tenant x stage x region MIL-027 slice-8 NON FAITE]:::gap
+  classDef gap fill:#ffd5d5,stroke:#c0392b;
+  classDef fixed fill:#d4f7d4,stroke:#1a7f37;
+  classDef dead fill:#e2e6ea,stroke:#6e7781,stroke-dasharray:4 3;</pre></div>
+    <details><summary>source Mermaid (actuel)</summary><pre>flowchart TD
+  CMD[promote_live_safe.sh --project AXO one-shot]
+  REBUILD[1 Rebuild candidat release]:::fixed
+  PREFLIGHT[2 release-preflight]:::fixed
+  MANIFEST[3 Cree manifeste epingle .axon/live-release/current.json build_id generation-id state=promoted]:::fixed
+  SWAP[4 Swap binaires bin/ + restart live]:::fixed
+  MATCH[5 Match identite runtime MCP vs manifeste]:::fixed
+  QUALIFY[6 qualify-mcp final quality + latency]:::fixed
+  FINALIZE[7 finalize: faux-echec no pid file + faux warning binary md5 unchanged]:::gap
+  CMD --&gt; REBUILD --&gt; PREFLIGHT --&gt; MANIFEST --&gt; SWAP --&gt; MATCH --&gt; QUALIFY --&gt; FINALIZE
+  HIST[(.axon/live-release/history/ manifestes historiques)]:::fixed
+  MANIFEST --&gt; HIST
+  ROLLBACK[rollback_live.sh restaure manifeste historique jamais git revert]:::fixed
+  HIST -. rollback par manifeste .-&gt; ROLLBACK
+  ROLLBACK --&gt; SWAP
+  DEVART[Artefact dev = artefact live promu meme binaire release separation aplatie]:::gap
+  DEVART -. pas de frontiere d artefact .-&gt; REBUILD
+  CP[CIBLE control-plane declaratif multi-tenant PIL-9005 NON ATTEINTE promotion scriptee single-host]:::gap
+  DRIFT[CIBLE drift detection IaC vs runtime 1ere classe NON FAITE]:::gap
+  TOPO[CIBLE topologie self-describing un-appel tenant x stage x region MIL-027 slice-8 NON FAITE]:::gap
+  classDef gap fill:#ffd5d5,stroke:#c0392b;
+  classDef fixed fill:#d4f7d4,stroke:#1a7f37;
+  classDef dead fill:#e2e6ea,stroke:#6e7781,stroke-dasharray:4 3;</pre></details>
+<h2 class="delta"><span class="dot"></span>3 · Delta & criticité (%)</h2><table><thead><tr><th>Élément</th><th>Idéal</th><th>Actuel</th><th>Importance</th><th>Criticité</th><th>Évidence</th></tr></thead><tbody>
+      <tr>
+        <td><strong>finalize false-fail + faux warning md5</strong></td>
+        <td>Le script ne déclare un succès/échec QUE depuis une mesure d&#x27;identité runtime vérifiée ; pas de check « no pid file » ni de comparaison md5 brute pour juger la promotion ; la sortie est contract-honest</td>
+        <td>Le step-7 finalize échoue faussement sur un check « no pid file » et émet un faux warning « binary md5 unchanged after promote » alors que la promotion est RÉUSSIE (manifeste promu, qualify-mcp ok, binaire en place, runtime sain) — le script ment sur son propre résultat</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:75%;background:#e67e22"></div><span class="critnum">75%</span></div></td>
+        <td class="ev">scripts/release/promote_live_safe.sh (step-7 finalize) ; smell observé cette session (faux-fail + faux warning malgré promotion réussie)</td>
+      </tr>
+      <tr>
+        <td><strong>Control-plane déclaratif multi-environnement</strong></td>
+        <td>Chaque env (tenant × stage × région) décrit en IaC ; réconciliation continue desired-vs-observed ; promotion = convergence vers l&#x27;état désiré déclaré, pas un script impératif single-host</td>
+        <td>Promotion scriptée single-host (promote_live_safe.sh) ; manifeste current.json déclaratif mais pas de réconciliation continue ni de modèle multi-tenant/multi-région — CIBLE PIL-AXO-9005 non atteinte</td>
+        <td><span class="badge" style="background:#e67e22">high</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:70%;background:#e67e22"></div><span class="critnum">70%</span></div></td>
+        <td class="ev">PIL-AXO-9005 (control-plane déclaratif, cible) ; scripts/release/promote_live_safe.sh (single-host actuel)</td>
+      </tr>
+      <tr>
+        <td><strong>Drift detection IaC↔runtime de première classe</strong></td>
+        <td>L&#x27;écart entre état désiré (IaC) et état observé (runtime mesuré) est détecté, alerté et réconcilié en continu — la dérive est une anomalie de première classe</td>
+        <td>Pas de détection de dérive continue ; le match d&#x27;identité ne se fait qu&#x27;au moment de la promotion (step-5), pas en surveillance permanente entre deux promotions</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:55%;background:#f1c40f"></div><span class="critnum">55%</span></div></td>
+        <td class="ev">PIL-AXO-9005 (dérive = anomalie 1ère classe) ; scripts/release/promote_live_safe.sh (match identité ponctuel step-5 uniquement)</td>
+      </tr>
+      <tr>
+        <td><strong>Topologie self-describing un-appel</strong></td>
+        <td>Un seul appel rend une carte vivante de tous les environnements (tenant × stage × région) et de leur identité courante — topologie auto-descriptive</td>
+        <td>État live lisible via le manifeste current.json + historique, mais pas de carte vivante multi-environnement en un appel ; reconstruction manuelle host par host</td>
+        <td><span class="badge" style="background:#f1c40f">medium</span></td>
+        <td><div class="critbar"><div class="critfill" style="width:50%;background:#f1c40f"></div><span class="critnum">50%</span></div></td>
+        <td class="ev">MIL-AXO-027 slice-8 (self-describing topology) ; .axon/live-release/current.json + .axon/live-release/history/ (état single-host actuel)</td>
+      </tr></tbody></table><h2 class="facts"><span class="dot"></span>Faits vérifiés (code / SOLL)</h2><ul class="facts"><li>Le chemin de promotion canonique est <code>scripts/release/promote_live_safe.sh --project AXO</code> : one-shot rebuild candidat → release-preflight → création d&#x27;un manifeste épinglé → swap des binaires dans <code>bin/</code> + restart live → match de l&#x27;identité runtime MCP contre le manifeste → qualify-mcp final (quality + latency) avant de déclarer la promotion.</li><li>L&#x27;état de release est matérialisé dans un manifeste <code>.axon/live-release/current.json</code> (build_id, generation-id, state=promoted) avec un historique versionné sous <code>.axon/live-release/history/</code>.</li><li>Le rollback est par manifeste : <code>scripts/release/rollback_live.sh</code> restaure un manifeste historique déjà-qualifié — jamais via <code>git revert</code> (qui re-construirait du non-qualifié).</li><li>Les binaires live sont TOUJOURS installés par la pipeline dans <code>bin/</code>, jamais par <code>cargo build --release</code> manuel suivi d&#x27;une copie ; qualify-mcp valide quality+latency avant que la promotion soit déclarée saine.</li><li><strong style="color:#cf222e">SMELL observé cette session</strong> — le step-7 « finalize » de promote_live_safe ÉCHOUE faussement sur un check « no pid file » et émet un faux warning « binary md5 unchanged after promote » alors que la promotion est en réalité RÉUSSIE : manifeste promu, qualify-mcp ok, binaire en place, runtime sain. Le script ment sur son propre succès/échec — c&#x27;est exactement la classe de bug que l&#x27;idéal supprime en jugeant sur l&#x27;identité runtime vérifiée plutôt que sur des proxies (pid file, md5 brut).</li><li>La CIBLE control-plane déclaratif multi-tenant (PIL-AXO-9005) et la topologie self-describing un-appel (MIL-AXO-027 slice-8) ne sont PAS atteintes : aujourd&#x27;hui la promotion est scriptée et single-host, sans réconciliation continue desired-vs-observed, sans détection de dérive IaC↔runtime de première classe, sans carte vivante des environnements tenant × stage × région.</li><li>La séparation d&#x27;artefact dev/live est aplatie : l&#x27;artefact dev est l&#x27;artefact live promu (même binaire release), il n&#x27;existe pas de frontière d&#x27;artefact distincte entre ce qui est testé en dev et ce qui est promu en live.</li><li>La promotion est déjà EXPLICITE et artefact-driven (manifeste épinglé), conforme à PIL-AXO-005 : elle n&#x27;est jamais inférée d&#x27;un push git — c&#x27;est l&#x27;acquis solide sur lequel la généralisation déclarative (PIL-AXO-9005) doit s&#x27;appuyer.</li></ul><div class="foot">Créé 2026-06-05 (post-session 73). Mermaid 11 (CDN). Lignée release canonique = PIL-AXO-005 ; cible control-plane déclaratif = PIL-AXO-9005 + MIL-AXO-027 slice-8. Évidence : scripts/release/promote_live_safe.sh (steps 5-7), scripts/release/rollback_live.sh, .axon/live-release/current.json + history/. Diagrammes : si un rendu échoue, la source Mermaid est dans le &lt;details&gt; sous chaque schéma.</div></div>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true,htmlLabels:true}});
+</script></body></html>
