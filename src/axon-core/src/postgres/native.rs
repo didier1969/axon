@@ -141,6 +141,39 @@ impl NativePgCtx {
         })
     }
 
+    /// REQ-AXO-901881 W3 #33/#34 — bulk COPY BINARY chunk-embedding flush on
+    /// THIS store's pool (per-instance / per-test DB). The live B3 writer
+    /// (`upsert_chunk_embedding_v2_batch`) routes large batches here so the
+    /// embedding upsert lands in the same database the GraphStore reads from —
+    /// NOT bulk_writer's global env-resolved pool (also closes the embedding
+    /// half of the linchpin REQ-AXO-901877). The COPY path is fully
+    /// schema-qualified (ist.ChunkEmbedding + schema-qualified vector +
+    /// session-local temp), so no `search_path` setup is required.
+    pub fn flush_chunk_embeddings_copy(
+        &self,
+        project_code: &str,
+        model_id: &str,
+        rows: &[crate::graph_ingestion::rows::ChunkEmbeddingPersistRow],
+        embedded_at_ms: i64,
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        native_runtime().block_on(async {
+            let mut client = self.pool.get().await.map_err(|e| {
+                anyhow::anyhow!("flush_chunk_embeddings_copy: native pool acquire failed: {e}")
+            })?;
+            crate::postgres::bulk_writer::flush_chunk_embeddings_async(
+                &mut client,
+                project_code,
+                model_id,
+                rows,
+                embedded_at_ms,
+            )
+            .await
+        })
+    }
+
     /// Execute a (possibly multi-statement) SQL string. Mirrors the plugin's
     /// `pg_execute`: returns `true` on success, `false` on any error.
     pub fn run_execute(&self, sql: &str) -> bool {

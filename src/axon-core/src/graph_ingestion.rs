@@ -690,99 +690,6 @@ impl GraphStore {
         self.execute_batch(&queries)
     }
 
-    pub fn update_chunk_embeddings(
-        &self,
-        model_id: &str,
-        updates: &[(String, String, Vec<f32>)],
-    ) -> Result<()> {
-        if updates.is_empty() {
-            return Ok(());
-        }
-
-        let now_ms = chrono::Utc::now().timestamp_millis();
-
-        // MIL-AXO-015 P4 slice 4c: under the PostgreSQL backend, route
-        // each row through `crate::postgres::vector::upsert_chunk_embedding_sql`
-        // which emits the pgvector `'[…]'::vector(N)` text form +
-        // `INSERT … ON CONFLICT (chunk_id, model_id) DO UPDATE`.
-        //
-        // The per-project schema namespacing (CPT-AXO-039) requires a
-        // project_code; the indexer's vector_worker_loop currently
-        // calls this method without one. Until P9 threads project_code
-        // through the worker call sites, we resolve it from the first
-        // chunk_id's project prefix (chunk_ids always start with the
-        // project_code per the indexer's id-generation contract). For
-        // single-project deployments this is exact; for multi-project
-        // batches this method MUST be called once per project_code by
-        // the worker, which is already the indexer's natural batching
-        // boundary.
-        // REQ-AXO-271 slice 2j : PG canonical only (post-MIL-AXO-017).
-        // The DuckDB `INSERT OR REPLACE INTO ChunkEmbedding ... CAST AS
-        // FLOAT[N]` arm is dead syntax + the hourly rollup it triggered
-        // is DuckDB-shaped (`refresh_hourly_vectorization_rollup` left
-        // for a follow-up if a PG equivalent is ever needed).
-        //
-        // Every chunk row carries `project_code` (CPT-AXO-039 supersedure)
-        // so we infer it from the chunk_id prefix and inline it into the
-        // upsert statement. Multi-project batches are handled
-        // per-project upstream by the indexer's natural batching boundary.
-        let project_code = updates
-            .first()
-            .and_then(|(chunk_id, _, _)| chunk_id.split('-').next())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!(
-                "update_chunk_embeddings cannot infer project_code \
-                 from empty/malformed chunk_id"
-            ))?
-            .to_string();
-
-        // REQ-AXO-238 + REQ-AXO-901881 W3 #34: route large batches through
-        // `crate::postgres::bulk_writer` (single COPY BINARY into a temp
-        // staging table followed by `INSERT … SELECT … ON CONFLICT DO
-        // UPDATE`). VAL-AXO-067 falsified a blanket default-ON: COPY's fixed
-        // setup cost regresses the small ~5-row LINGER flushes of steady
-        // cruise (−18%) but wins by ~an order of magnitude on the large
-        // batches of the deferred one-shot full-IST load. `should_use_bulk_writer`
-        // gates on `updates.len()` so each flush picks the faster path; an
-        // explicit `AXON_BULK_WRITER_ENABLED` still force-overrides either way.
-        if crate::postgres::bulk_writer::should_use_bulk_writer(updates.len()) {
-            let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> =
-                updates
-                    .iter()
-                    .map(|(chunk_id, source_hash, vector)| {
-                        crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
-                            chunk_id: chunk_id.clone(),
-                            source_hash: source_hash.clone(),
-                            embedding: vector.clone(),
-                        }
-                    })
-                    .collect();
-            crate::postgres::bulk_writer::flush_chunk_embeddings(
-                &project_code,
-                model_id,
-                &rows,
-                now_ms,
-            )
-            .map_err(|e| anyhow!("bulk_writer flush failed: {}", e))?;
-            return Ok(());
-        }
-
-        let mut queries = Vec::with_capacity(updates.len());
-        for (chunk_id, source_hash, vector) in updates {
-            let sql = crate::postgres::vector::upsert_chunk_embedding_sql(
-                chunk_id,
-                model_id,
-                &project_code,
-                source_hash,
-                vector,
-                now_ms,
-            )
-            .map_err(|e| anyhow!("pgvector upsert SQL build failed: {}", e))?;
-            queries.push(sql);
-        }
-        self.execute_batch(&queries)
-    }
-
     // MIL-AXO-017 slice 6B Phase C: dual_write_vertices_age / dual_write_relation_edges_age
     // helpers removed ; AGE retired entirely.
 }
@@ -1471,6 +1378,46 @@ impl GraphStore {
         let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
         let safe_project = Self::escape_sql(project_code);
         let safe_model_id = Self::escape_sql(model_id);
+
+        // REQ-AXO-901881 W3 #33/#34 — adaptive dispatch on the REAL B3 write
+        // path (this fn IS the live pipeline-v2 embedding writer, driven by
+        // stage_b3::spawn_b3_batched_worker). For large batches (the deferred
+        // one-shot full-IST load) route the embedding upsert through COPY
+        // BINARY on THIS store's native pool — per-instance, so the bulk write
+        // lands in the same DB the store reads from (also closes the embedding
+        // half of the linchpin REQ-AXO-901877); for the small flushes of steady
+        // cruise keep the per-row text-literal INSERT that VAL-AXO-067 proved
+        // faster at that scale. All items in a B3 batch share one embedded_at_ms
+        // (stage_b3.rs). The embed_status UPDATE runs either way (idempotent on
+        // chunk_id; retried flushes converge).
+        if crate::postgres::bulk_writer::should_use_bulk_writer(items.len()) {
+            let embedded_at_ms = items.first().map(|(_, _, _, ts)| *ts).unwrap_or(0);
+            let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> = items
+                .iter()
+                .map(|(chunk_id, source_hash, embedding, _ts)| {
+                    crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
+                        chunk_id: chunk_id.clone(),
+                        source_hash: source_hash.clone(),
+                        embedding: embedding.clone(),
+                    }
+                })
+                .collect();
+            self.pool
+                .native
+                .flush_chunk_embeddings_copy(project_code, model_id, &rows, embedded_at_ms)
+                .map_err(|e| anyhow!("upsert_chunk_embedding_v2_batch COPY flush failed: {e}"))?;
+            let chunk_ids_in: Vec<String> = items
+                .iter()
+                .map(|(cid, _, _, _)| format!("'{}'", Self::escape_sql(cid)))
+                .collect();
+            if !chunk_ids_in.is_empty() {
+                self.execute(&format!(
+                    "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({});",
+                    chunk_ids_in.join(", ")
+                ))?;
+            }
+            return Ok(());
+        }
 
         // REQ-AXO-271 slice 2l : PG canonical only.
         let mut queries: Vec<String> = Vec::with_capacity(items.len());

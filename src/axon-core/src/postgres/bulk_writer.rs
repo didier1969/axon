@@ -40,9 +40,9 @@ use crate::graph_ingestion::rows::{
 };
 
 /// Re-export so external integration tests can construct flush
-/// payloads without needing access to the `pub(crate)` async_writer
-/// module. Production callers (e.g. `update_chunk_embeddings`) still
-/// reach the type through `crate::graph_ingestion::async_writer`.
+/// payloads. The carrier lives in `crate::graph_ingestion::rows`; the
+/// production embedding writer (`upsert_chunk_embedding_v2_batch`) builds
+/// it and flushes via `NativePgCtx::flush_chunk_embeddings_copy`.
 pub use crate::graph_ingestion::rows::ChunkEmbeddingPersistRow as BulkWriterChunkEmbeddingRow;
 pub use crate::graph_ingestion::rows::ChunkRow as BulkWriterChunkRow;
 pub use crate::graph_ingestion::rows::RelationRow as BulkWriterRelationRow;
@@ -162,9 +162,11 @@ async fn vector_type(client: &mut deadpool_postgres::Client) -> Result<Type> {
     Ok(t)
 }
 
-/// Sync entrypoint called by `update_chunk_embeddings` under PG when
-/// `AXON_BULK_WRITER_ENABLED=true`. Idempotent on chunk_id+model_id
-/// via `ON CONFLICT … DO UPDATE` so retried flushes converge.
+/// Sync entrypoint over this module's own global pool — used by the
+/// standalone `axon-bench-writer` binary (which sets its own DB URL). The
+/// production pipeline routes through `NativePgCtx::flush_chunk_embeddings_copy`
+/// (this module's `flush_chunk_embeddings_async` on the store's own pool).
+/// Idempotent on chunk_id+model_id via `ON CONFLICT … DO UPDATE`.
 pub fn flush_chunk_embeddings(
     project_code: &str,
     model_id: &str,
@@ -186,7 +188,7 @@ pub fn flush_chunk_embeddings(
     })
 }
 
-async fn flush_chunk_embeddings_async(
+pub(crate) async fn flush_chunk_embeddings_async(
     client: &mut deadpool_postgres::Client,
     project_code: &str,
     model_id: &str,
@@ -874,41 +876,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bulk_writer_disabled_by_default() {
-        // Sanity gate: env var unset == OFF. Other tests may set the
-        // env, so this only asserts the contract for unset / falsey.
+    fn bulk_writer_env_override_and_adaptive_dispatch() {
+        // ONE test owns AXON_BULK_WRITER_ENABLED / AXON_BULK_WRITER_MIN_ROWS.
+        // Rust runs tests in parallel threads sharing the process env, so
+        // splitting these into separate #[test]s races — a sibling's set_var
+        // clobbers this one's assertion mid-run (observed flake on
+        // bulk_writer_truthy_values_enable). Kept serial in a single test.
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
+        std::env::remove_var("AXON_BULK_WRITER_MIN_ROWS");
+
+        // Back-compat predicate: unset == OFF, falsey == OFF.
         assert!(!bulk_writer_enabled());
         std::env::set_var("AXON_BULK_WRITER_ENABLED", "0");
         assert!(!bulk_writer_enabled());
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
-    }
 
-    #[test]
-    fn bulk_writer_truthy_values_enable() {
+        // Truthy values force-enable.
         for v in ["1", "true", "TRUE", "yes", "on"] {
             std::env::set_var("AXON_BULK_WRITER_ENABLED", v);
             assert!(bulk_writer_enabled(), "value {v:?} should enable");
         }
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
-    }
 
-    #[test]
-    fn should_use_bulk_writer_is_adaptive_on_batch_size() {
-        // VAL-AXO-067 #34: unset env → gate on row count around the
-        // crossover; explicit env → force either way regardless of size.
-        std::env::remove_var("AXON_BULK_WRITER_ENABLED");
-        std::env::remove_var("AXON_BULK_WRITER_MIN_ROWS");
+        // Adaptive (env unset): gate on row count around the VAL-AXO-067 crossover.
         let t = bulk_writer_min_profitable_rows();
         assert_eq!(t, BULK_WRITER_MIN_PROFITABLE_ROWS_DEFAULT);
         assert!(!should_use_bulk_writer(t - 1), "small flush stays on INSERT");
         assert!(should_use_bulk_writer(t), "batch at threshold uses COPY");
         assert!(should_use_bulk_writer(t + 10_000), "huge batch uses COPY");
 
-        // Force-ON ignores batch size (bench / opt-in).
+        // Explicit override wins over batch size, both directions.
         std::env::set_var("AXON_BULK_WRITER_ENABLED", "true");
         assert!(should_use_bulk_writer(1), "force-on uses COPY even for 1 row");
-        // Force-OFF ignores batch size.
         std::env::set_var("AXON_BULK_WRITER_ENABLED", "0");
         assert!(!should_use_bulk_writer(1_000_000), "force-off never uses COPY");
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
