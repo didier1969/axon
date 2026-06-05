@@ -514,6 +514,23 @@ impl McpServer {
         let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
         let runtime_pending_empty = runtime_pending == 0;
 
+        // REQ-AXO-91572 option B / REQ-AXO-901854 — the indexer UPSERTs its
+        // real lifecycle state to PG every ~5 s; a fresh row means the brain
+        // is paired with a live indexer. Fetched here so pipeline_status can
+        // distinguish a truly orphaned brain_only from one whose indexer is
+        // draining, and reused below for the lifecycle phase telemetry.
+        const HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        let indexer_heartbeat = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten()
+            .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
+
         // Slice 3 SOTA — single source of truth for pipeline status +
         // blocked_reason. Same function dashboard_state.rs uses so the
         // operator sees identical strings across MCP + dashboard.
@@ -522,6 +539,7 @@ impl McpServer {
             runtime_pending_empty,
             pending_chunks,
             None,
+            indexer_heartbeat.is_some(),
         );
 
         // REQ-AXO-901816 (MIL-AXO-029 slice 6 P0) — pipeline A
@@ -572,25 +590,11 @@ impl McpServer {
             (to_json(snap_a), to_json(snap_b))
         };
 
-        // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces
-        // the sleep/wake state machine so operators see when the GPU
-        // session is parked vs ready, and how often it has flipped.
-        // REQ-AXO-91572 option B : when running as the brain (MCP
-        // server, no embedder), the local singleton is fresh-from-boot
-        // and uninformative. Try the cross-process heartbeat table
-        // first — the indexer UPSERTs its real state every 5 s. Stale
-        // rows (> 30 s) fall back to the local singleton.
-        const HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-            .unwrap_or(0);
-        let indexer_heartbeat = self
-            .graph_store
-            .latest_lifecycle_heartbeat("indexer")
-            .ok()
-            .flatten()
-            .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
+        // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces the
+        // sleep/wake state machine so operators see when the GPU session is
+        // parked vs ready. Reuses `indexer_heartbeat` fetched above (the
+        // indexer UPSERTs its real state every ~5 s); stale rows (> 30 s)
+        // fall back to the brain-local singleton.
         let lifecycle_source = if indexer_heartbeat.is_some() {
             "indexer_heartbeat"
         } else {

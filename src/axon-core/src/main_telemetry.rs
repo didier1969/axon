@@ -256,6 +256,11 @@ fn write_runtime_heartbeat_export(
     }
 }
 
+/// REQ-AXO-901854 — an indexer PG lifecycle heartbeat younger than this is
+/// treated as "indexer paired & alive" (it UPSERTs every ~5 s). Shared by the
+/// runtime-truth pairing signal and the dashboard Pipeline-B compute verdict.
+const PEER_HEARTBEAT_FRESH_MS: i64 = 30_000;
+
 pub(crate) fn spawn_runtime_telemetry(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
@@ -270,8 +275,24 @@ pub(crate) fn spawn_runtime_telemetry(
             let snapshot =
                 main_background::runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
             let runtime_mode = AxonRuntimeMode::from_env();
+            // REQ-AXO-901854 — pairing + runtime truth sourced from the
+            // indexer's fresh PG lifecycle heartbeat (canonical; replaces the
+            // runtime-heartbeat.json file bridge). Fetched once per tick and
+            // reused below for the dashboard Pipeline-B compute verdict.
+            let now_ms_tick: u64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let indexer_peer_hb = store
+                .latest_lifecycle_heartbeat("indexer")
+                .ok()
+                .flatten()
+                .filter(|row| (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS);
+            let indexer_paired = indexer_peer_hb.is_some();
             let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
                 service_guard::record_runtime_truth_bridge_dispatch(None)
+            } else if let Some(ref hb) = indexer_peer_hb {
+                service_guard::runtime_truth_feed_from_peer_heartbeat(hb.heartbeat_ms.max(0) as u64)
             } else {
                 service_guard::current_runtime_truth_feed()
             };
@@ -400,10 +421,7 @@ pub(crate) fn spawn_runtime_telemetry(
             // architecture replacing dashboard's polling triple).
             // PG functions are TTL-cached server-side ; warm-path cost
             // ~18 ms vs ~200 ms cold. Failures degrade gracefully.
-            let dashboard_ts_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let dashboard_ts_ms = now_ms_tick;
             let dashboard_install_generation = std::env::var("AXON_INSTALL_GENERATION")
                 .unwrap_or_else(|_| "workspace".to_string());
             let dashboard_instance_kind = std::env::var("AXON_INSTANCE_KIND")
@@ -416,11 +434,9 @@ pub(crate) fn spawn_runtime_telemetry(
             // and publishes the verdict). The brain does no nvidia-smi here.
             // Brain = CPU and Pipeline A = CPU are rendered as constants
             // dashboard-side (architectural invariants).
-            let dashboard_heartbeat = store
-                .latest_lifecycle_heartbeat("indexer")
-                .ok()
-                .flatten()
-                .filter(|row| (dashboard_ts_ms as i64 - row.heartbeat_ms).max(0) <= 30_000);
+            // Reuse the peer heartbeat already fetched at the top of the tick
+            // (REQ-AXO-901854) — no second PG round-trip per tick.
+            let dashboard_heartbeat = indexer_peer_hb.as_ref();
             let dashboard_compute = dashboard_heartbeat
                 .as_ref()
                 .and_then(|row| row.compute.as_deref())
@@ -476,6 +492,7 @@ pub(crate) fn spawn_runtime_telemetry(
                     service_pressure: dashboard_service_pressure.as_str(),
                     scheduler_state: dashboard_claim_mode.as_str(),
                     runtime_idle: snapshot.queue_depth == 0 && snapshot.exhaustion_ratio < 0.1,
+                    indexer_paired,
                 },
             );
         }

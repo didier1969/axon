@@ -1904,6 +1904,24 @@ pub fn current_runtime_truth_feed() -> RuntimeTruthFeed {
     runtime_truth_feed_at(now_ms())
 }
 
+/// REQ-AXO-901854 — build a runtime-truth feed sourced from a paired
+/// peer's PG lifecycle heartbeat (canonical, replaces the
+/// `runtime-heartbeat.json` file bridge). A `brain_only` brain has no
+/// runtime truth of its own (it never `record_runtime_truth_bridge_dispatch`s),
+/// so it reflects the truth of the indexer it is paired with: a fresh peer
+/// heartbeat ⇒ runtime truth present and good (no degraded_reason).
+pub fn runtime_truth_feed_from_peer_heartbeat(peer_heartbeat_ms: u64) -> RuntimeTruthFeed {
+    let now = now_ms();
+    let stale_after_ms = RUNTIME_TRUTH_STALE_AFTER_MS.load(Ordering::Relaxed).max(1);
+    RuntimeTruthFeed::from_observed_times(
+        now,
+        Some(peer_heartbeat_ms),
+        Some(peer_heartbeat_ms),
+        stale_after_ms,
+        None::<String>,
+    )
+}
+
 pub fn current_runtime_truth_snapshot() -> RuntimeTruthFeed {
     let stale_after_ms = RUNTIME_TRUTH_STALE_AFTER_MS.load(Ordering::Relaxed).max(1);
     let last_good_payload_at_ms =

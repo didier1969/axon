@@ -95,6 +95,11 @@ pub(crate) struct LiveMetrics<'a> {
     pub service_pressure: &'a str,
     pub scheduler_state: &'a str,
     pub runtime_idle: bool,
+    /// REQ-AXO-901854 — a fresh indexer PG lifecycle heartbeat was
+    /// observed this tick (the brain is paired with a live indexer).
+    /// Distinguishes a truly orphaned `brain_only` from one whose
+    /// paired indexer is draining the backlog.
+    pub indexer_paired: bool,
 }
 
 // SQL gateway returns single-cell scalar queries as `[[<value>]]` — outer
@@ -211,6 +216,7 @@ pub(crate) fn compute_pipeline_status(
     runtime_idle: bool,
     pending_chunks: i64,
     embedder_init_error: Option<&str>,
+    indexer_paired: bool,
 ) -> (&'static str, Option<&'static str>) {
     let pending_gt_zero = pending_chunks > 0;
 
@@ -220,9 +226,15 @@ pub(crate) fn compute_pipeline_status(
         return ("indexer_idle_blocked", Some("gpu_unavailable"));
     }
 
-    // brain_only + pending = 17K orphans without indexer paired (the
-    // canonical operator pain point session 63 — AXO 17 252 chunks).
+    // brain_only + pending: distinguish a TRULY orphaned brain (no indexer
+    // paired — the session-63 pain point, AXO 17 252 chunks stuck) from one
+    // paired with a live indexer that is draining the backlog. Pairing is
+    // detected via the indexer's fresh PG lifecycle heartbeat (REQ-AXO-901854),
+    // not the retired runtime-heartbeat.json file bridge.
     if runtime_mode == "brain_only" && pending_gt_zero {
+        if indexer_paired {
+            return ("indexer_active", None);
+        }
         return ("indexer_idle_blocked", Some("no_indexer_paired"));
     }
 
@@ -267,6 +279,7 @@ pub(crate) fn compose_dashboard_state_v1(
         live.runtime_idle,
         pending_chunks,
         live.embedder_init_error,
+        live.indexer_paired,
     );
     json!({
         "event": "dashboard_state_v1",
@@ -359,36 +372,46 @@ mod tests {
     #[test]
     fn pipeline_status_reports_blocked_when_brain_only_and_pending_gt_zero() {
         // The canonical operator pain point session 63 : 17 252 chunks
-        // pending on AXO with brain_only and no indexer paired.
-        let (status, reason) = compute_pipeline_status("brain_only", true, 17_252, None);
+        // pending on AXO with brain_only and NO indexer paired.
+        let (status, reason) = compute_pipeline_status("brain_only", true, 17_252, None, false);
         assert_eq!(status, "indexer_idle_blocked");
         assert_eq!(reason, Some("no_indexer_paired"));
     }
 
     #[test]
+    fn pipeline_status_brain_only_with_pending_but_indexer_paired_is_active() {
+        // REQ-AXO-901854 — brain_only paired with a live indexer (fresh PG
+        // heartbeat) draining the backlog must NOT show the false
+        // no_indexer_paired banner.
+        let (status, reason) = compute_pipeline_status("brain_only", true, 17_252, None, true);
+        assert_eq!(status, "indexer_active");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
     fn pipeline_status_brain_only_with_no_pending_is_trivial_idle() {
-        let (status, reason) = compute_pipeline_status("brain_only", true, 0, None);
+        let (status, reason) = compute_pipeline_status("brain_only", true, 0, None, false);
         assert_eq!(status, "brain_only");
         assert_eq!(reason, None);
     }
 
     #[test]
     fn pipeline_status_indexer_active_when_runtime_not_idle() {
-        let (status, reason) = compute_pipeline_status("indexer_full", false, 1_000, None);
+        let (status, reason) = compute_pipeline_status("indexer_full", false, 1_000, None, false);
         assert_eq!(status, "indexer_active");
         assert_eq!(reason, None);
     }
 
     #[test]
     fn pipeline_status_indexer_idle_done_when_pending_zero() {
-        let (status, reason) = compute_pipeline_status("indexer_full", true, 0, None);
+        let (status, reason) = compute_pipeline_status("indexer_full", true, 0, None, false);
         assert_eq!(status, "indexer_idle_done");
         assert_eq!(reason, None);
     }
 
     #[test]
     fn pipeline_status_indexer_idle_blocked_when_idle_with_pending() {
-        let (status, reason) = compute_pipeline_status("indexer_full", true, 17_252, None);
+        let (status, reason) = compute_pipeline_status("indexer_full", true, 17_252, None, false);
         assert_eq!(status, "indexer_idle_blocked");
         assert_eq!(reason, Some("demand_pull_b_stalled"));
     }
@@ -396,7 +419,7 @@ mod tests {
     #[test]
     fn pipeline_status_gpu_unavailable_wins_over_other_diagnoses() {
         let (status, reason) =
-            compute_pipeline_status("indexer_full", false, 500, Some("CUDA error 35"));
+            compute_pipeline_status("indexer_full", false, 500, Some("CUDA error 35"), false);
         assert_eq!(status, "indexer_idle_blocked");
         assert_eq!(reason, Some("gpu_unavailable"));
     }
@@ -485,6 +508,7 @@ mod tests {
             service_pressure: "healthy",
             scheduler_state: "fast",
             runtime_idle: true,
+            indexer_paired: false,
         };
 
         let event = compose_dashboard_state_v1(&live, pg_state, lifecycle, 1_987_358, 23_894);
@@ -552,6 +576,7 @@ mod tests {
             service_pressure: "",
             scheduler_state: "",
             runtime_idle: false,
+            indexer_paired: false,
         };
         let event = compose_dashboard_state_v1(&live, Value::Null, json!({}), -1, -1);
         assert!(event.get("totals").is_some());
