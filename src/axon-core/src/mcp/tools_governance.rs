@@ -45,25 +45,30 @@ impl McpServer {
     }
 
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
-        // REQ-AXO-901653 slice-5c — public.File retired ; canonical file
-        // surface is now ist.IndexedFile + ist.Chunk via project_code
-        // on Chunk (IndexedFile has no project_code by design — pipeline_v2
-        // resolves project_code at Chunk write time). status/pending/indexing
-        // concepts don't exist in pipeline_v2 (writes are in-line) ; the
-        // counts collapse to 0 / known.
-        let chunk_filter = Self::project_filter(project, "project_code");
-        let symbol_filter = Self::project_filter(project, "project_code");
+        // Canonical projection (REQ-AXO-901865): diagnose_indexing reads the
+        // SAME ist.project_telemetry view as the dashboard + embedding_status,
+        // so its file/symbol counts reconcile exactly (byte-for-byte). Coverage
+        // is REAL — `known` = files_chunked (enrolled files with >=1 chunk).
+        // IndexedFile DOES carry project_code ; the old "no project_code by
+        // design" note and the status pending/indexing machine were retired
+        // (REQ-AXO-289 / REQ-AXO-901860), so those concepts collapse to 0.
+        let where_project = if project == "*" {
+            String::new()
+        } else {
+            format!(" WHERE project_code = '{}'", project.replace('\'', "''"))
+        };
         let known = self.sql_scalar(&format!(
-            "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE {}",
-            chunk_filter
+            "SELECT COALESCE(SUM(files_chunked), 0) FROM ist.project_telemetry{}",
+            where_project
         ));
-        let global_known = self.sql_scalar("SELECT count(*) FROM ist.IndexedFile");
+        let global_known =
+            self.sql_scalar("SELECT COALESCE(SUM(files_total), 0) FROM ist.project_telemetry");
         let pending = 0i64;
         let indexing = 0i64;
         let completed = known;
         let symbols = self.sql_scalar(&format!(
-            "SELECT count(*) FROM Symbol WHERE {}",
-            symbol_filter
+            "SELECT COALESCE(SUM(symbols), 0) FROM ist.project_telemetry{}",
+            where_project
         ));
         // Post-MIL-AXO-017: edge counts from canonical ist.Edge table.
         let calls_direct = self.sql_scalar(&format!(
@@ -332,16 +337,19 @@ impl McpServer {
     }
 
     fn file_count_for_project(&self, project: &str) -> i64 {
-        // REQ-AXO-901653 slice-5c — IndexedFile is the canonical file
-        // surface ; Chunk carries project_code (IndexedFile is global).
-        let query = if project == "*" {
-            "SELECT count(*) FROM ist.IndexedFile".to_string()
+        // Canonical projection (REQ-AXO-901865) — enrolled file count from the
+        // single ist.project_telemetry view, consistent for global + scoped.
+        // The old path mixed semantics (global = IndexedFile count, scoped =
+        // chunk-distinct file_path) ; both now read files_total from the view.
+        let where_project = if project == "*" {
+            String::new()
         } else {
-            format!(
-                "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = '{}'",
-                project.replace('\'', "''")
-            )
+            format!(" WHERE project_code = '{}'", project.replace('\'', "''"))
         };
+        let query = format!(
+            "SELECT COALESCE(SUM(files_total), 0) FROM ist.project_telemetry{}",
+            where_project
+        );
 
         self.graph_store
             .execute_raw_sql_gateway(&query)

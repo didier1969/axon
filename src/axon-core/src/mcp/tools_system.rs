@@ -359,6 +359,14 @@ impl McpServer {
             format!(" WHERE project_code = '{}'", safe)
         };
 
+        // ── Canonical projection: ist.project_telemetry (the ONE source,
+        // identical to the dashboard composite — REQ-AXO-901865). No more
+        // ad-hoc per-table scalar counts / bespoke per-project rollup ; MCP
+        // `embedding_status` and the dashboard now read the same view, so
+        // their numbers cannot diverge. Coverage is REAL (files_chunked),
+        // never the retired status column. ────────────────────────────────
+        // Retained for the pipeline-A discovered-stock query below (the
+        // work-queue `status='discovered'` count — NOT a metrics count).
         let scalar = |query: &str| -> i64 {
             self.graph_store
                 .execute_raw_sql_gateway(query)
@@ -368,22 +376,45 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
-        let total_chunks = scalar(&format!("SELECT count(*) FROM ist.Chunk{}", where_project));
-        let embedded_chunks = scalar(&format!(
-            "SELECT count(*) FROM ist.ChunkEmbedding{}",
-            where_project
-        ));
-        let symbols = scalar(&format!(
-            "SELECT count(*) FROM ist.Symbol{}",
-            where_project
-        ));
-        let indexed_files = scalar(&format!(
-            "SELECT count(*) FROM ist.IndexedFile{}",
-            where_project
-        ));
-        // Edge + Project tables don't carry project_code → always global.
-        let edges = scalar("SELECT count(*) FROM ist.Edge");
-        let projects = scalar("SELECT count(*) FROM ist.Project");
+        let view_rows: Vec<Vec<Value>> = self
+            .graph_store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT project_code, files_total, files_chunked, symbols, \
+                        chunks_total, chunks_embedded, chunks_pending, edges \
+                 FROM ist.project_telemetry{} ORDER BY chunks_total DESC",
+                where_project
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        // The SQL gateway returns numeric columns as JSON strings, so accept
+        // both number and string-encoded integers (a bare as_i64() silently
+        // yields 0 on "869").
+        let col_i64 = |row: &[Value], idx: usize| -> i64 {
+            row.get(idx)
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                })
+                .unwrap_or(0)
+        };
+        let mut indexed_files = 0i64;
+        let mut files_chunked = 0i64;
+        let mut total_chunks = 0i64;
+        let mut embedded_chunks = 0i64;
+        let mut symbols = 0i64;
+        let mut edges = 0i64;
+        for row in &view_rows {
+            indexed_files += col_i64(row, 1);
+            files_chunked += col_i64(row, 2);
+            symbols += col_i64(row, 3);
+            total_chunks += col_i64(row, 4);
+            embedded_chunks += col_i64(row, 5);
+            edges += col_i64(row, 7);
+        }
+        let projects = view_rows.len() as i64;
+        // pending = chunks − embedded (matches dashboard_totals exactly).
         let pending_chunks = (total_chunks - embedded_chunks).max(0);
         let coverage_pct = if total_chunks > 0 {
             (embedded_chunks as f64 / total_chunks as f64) * 100.0
@@ -391,53 +422,38 @@ impl McpServer {
             0.0
         };
 
-        // ── Filesystem counters (cached 60s) ──────────────────────
+        // ── Filesystem scan counters (separate source — FS walk, not the
+        // IST funnel ; refreshed off-runtime). Surfaced as a diagnostic. ──
         let (disk_files, eligible_files) = cached_fs_counters();
 
-        // ── Per-project breakdown ─────────────────────────────────
-        // Only computed for global view (project == "*"); individual
-        // project queries already scope the main counts above.
+        // ── Per-project breakdown (global view only) — projected from the
+        // same canonical view, so it reconciles with the totals above. ──
         let per_project_breakdown: Value = if project == "*" {
-            let breakdown_sql = "\
-                SELECT c.project_code, \
-                       count(*) AS chunks, \
-                       (SELECT count(*) FROM ist.ChunkEmbedding ce WHERE ce.chunk_id IN (SELECT id FROM ist.Chunk c2 WHERE c2.project_code = c.project_code)) AS embeddings, \
-                       (SELECT count(*) FROM ist.IndexedFile f WHERE f.project_code = c.project_code) AS indexed_files \
-                FROM ist.Chunk c \
-                GROUP BY c.project_code \
-                ORDER BY chunks DESC";
-            match self.graph_store.execute_raw_sql_gateway(breakdown_sql) {
-                Ok(raw) => {
-                    // Result is [[project_code, chunks, embeddings, indexed_files], ...]
-                    if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(&raw) {
-                        let arr: Vec<Value> = rows
-                            .iter()
-                            .filter_map(|row| {
-                                let code = row.first()?.as_str()?;
-                                let ch = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
-                                let emb = row.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
-                                let idx = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
-                                let cov = if ch > 0 {
-                                    (emb as f64 / ch as f64) * 100.0
-                                } else {
-                                    0.0
-                                };
-                                Some(json!({
-                                    "project_code": code,
-                                    "indexed_files": idx,
-                                    "chunks": ch,
-                                    "embeddings": emb,
-                                    "coverage_pct": (cov * 100.0).round() / 100.0,
-                                }))
-                            })
-                            .collect();
-                        json!(arr)
+            let arr: Vec<Value> = view_rows
+                .iter()
+                .filter_map(|row| {
+                    let code = row.first()?.as_str()?;
+                    let ft = col_i64(row, 1);
+                    let fc = col_i64(row, 2);
+                    let ch = col_i64(row, 4);
+                    let emb = col_i64(row, 5);
+                    let cov = if ch > 0 {
+                        (emb as f64 / ch as f64) * 100.0
                     } else {
-                        json!([])
-                    }
-                }
-                Err(_) => json!([]),
-            }
+                        0.0
+                    };
+                    Some(json!({
+                        "project_code": code,
+                        "files_total": ft,
+                        "files_chunked": fc,
+                        "indexed_files": ft,
+                        "chunks": ch,
+                        "embeddings": emb,
+                        "coverage_pct": (cov * 100.0).round() / 100.0,
+                    }))
+                })
+                .collect();
+            json!(arr)
         } else {
             json!([])
         };
@@ -692,6 +708,7 @@ impl McpServer {
              | ChunkEmbedding | {embedded_chunks:>12} |\n\
              | Edge           | {edges:>12} |\n\
              | IndexedFile    | {indexed_files:>12} |\n\
+             | ↳ chunked      | {files_chunked:>12} |\n\
              | Project        | {projects:>12} |\n\n\
              **Embedding coverage** : {embedded_chunks} / {total_chunks} = {coverage_pct:.2}%  (pending = {pending_chunks})\n\
              **Runtime pending set** : {runtime_pending} (in-memory ; syncé via NOTIFY + reconcile)\n\
@@ -751,6 +768,7 @@ impl McpServer {
                 "coverage_pct": coverage_pct,
                 "edges": edges,
                 "indexed_files": indexed_files,
+                "files_chunked": files_chunked,
                 "projects": projects,
                 "per_project": per_project_breakdown,
                 "pipeline_a": {
