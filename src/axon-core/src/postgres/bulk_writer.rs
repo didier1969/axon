@@ -307,11 +307,21 @@ pub(crate) async fn flush_chunk_embeddings_async(
         .await
         .context("bulk_writer copy_in finish")?;
 
+    // REQ-AXO-901884 — JOIN ist.Chunk so a chunk_id deleted by re-index churn
+    // between the demand-pull SELECT and this merge is skipped (no FK 23503 ->
+    // no tx abort -> no pooled-conn poison), instead of aborting the whole batch.
+    // DISTINCT ON (chunk_id, model_id) collapses any duplicate staging rows so
+    // the merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000);
+    // last embedded_at_ms wins (rows for one chunk are identical anyway). Keeps
+    // the COPY path self-defending regardless of caller-side dedup.
     tx.batch_execute(
         "INSERT INTO ist.ChunkEmbedding \
             (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
-         SELECT chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms \
-         FROM _bulk_chunk_embedding_stage \
+         SELECT DISTINCT ON (s.chunk_id, s.model_id) \
+                s.chunk_id, s.model_id, s.project_code, s.source_hash, s.embedding, s.embedded_at_ms \
+         FROM _bulk_chunk_embedding_stage s \
+         JOIN ist.Chunk c ON c.id = s.chunk_id \
+         ORDER BY s.chunk_id, s.model_id, s.embedded_at_ms DESC \
          ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
             project_code = EXCLUDED.project_code, \
             source_hash = EXCLUDED.source_hash, \
@@ -648,11 +658,17 @@ async fn copy_symbols_in_tx(
         .await
         .context("bulk_writer Symbol copy_in finish (batch)")?;
 
+    // REQ-AXO-901884 — DISTINCT ON (id) collapses duplicate staging rows so the
+    // merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000); an
+    // A3 batch can carry the same symbol id more than once. Rows for one id are
+    // identical, so any winner is correct.
     tx.batch_execute(
         "INSERT INTO ist.Symbol \
             (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
-         SELECT id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding \
+         SELECT DISTINCT ON (id) \
+                id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding \
          FROM _bulk_symbol_stage \
+         ORDER BY id \
          ON CONFLICT (id) DO UPDATE SET \
             name = EXCLUDED.name, \
             kind = EXCLUDED.kind, \
@@ -727,11 +743,17 @@ async fn copy_chunks_in_tx(
         .await
         .context("bulk_writer Chunk copy_in finish (batch)")?;
 
+    // REQ-AXO-901884 — DISTINCT ON (id) collapses duplicate staging rows so the
+    // merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000).
+    // Confirmed in dev: A3 batches carry the same chunk id more than once
+    // ("bulk_writer Chunk stage merge" 21000). Rows for one id are identical.
     tx.batch_execute(
         "INSERT INTO ist.Chunk \
             (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count) \
-         SELECT id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count \
+         SELECT DISTINCT ON (id) \
+                id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path, token_count \
          FROM _bulk_chunk_stage \
+         ORDER BY id \
          ON CONFLICT (id) DO UPDATE SET \
             source_type = EXCLUDED.source_type, \
             source_id = EXCLUDED.source_id, \
@@ -853,10 +875,15 @@ async fn copy_indexed_files_in_tx(
     // those files reached A3 first and their chunks then failed the
     // chunk_file_path FK. ON CONFLICT keeps an existing row's project_code
     // (DO UPDATE doesn't touch it) so a scanner-discovered file is unaffected.
+    // REQ-AXO-901884 — DISTINCT ON (s.path) collapses duplicate staging rows so
+    // the merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000)
+    // when a batch re-sees the same path. Keep the latest by last_seen_ms.
     let merge_sql = "INSERT INTO indexedfile \
              (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
-         SELECT s.path, $1, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
+         SELECT DISTINCT ON (s.path) \
+                s.path, $1, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
              FROM _bulk_indexedfile_stage s \
+         ORDER BY s.path, s.last_seen_ms DESC \
          ON CONFLICT (path) DO UPDATE SET \
              content_hash    = EXCLUDED.content_hash, \
              last_seen_ms    = EXCLUDED.last_seen_ms, \

@@ -1379,6 +1379,31 @@ impl GraphStore {
         let safe_project = Self::escape_sql(project_code);
         let safe_model_id = Self::escape_sql(model_id);
 
+        // REQ-AXO-901884 — dedup the batch by chunk_id (last-wins) BEFORE writing.
+        // A single set-based `INSERT ... ON CONFLICT (chunk_id, model_id) DO UPDATE`
+        // (text path) — and the COPY-staging merge — cannot affect the same
+        // conflict target twice in one command (SQLSTATE 21000 "ON CONFLICT DO
+        // UPDATE command cannot affect row a second time"). B3 batches can carry
+        // the same chunk_id twice (demand-pull / cold-start-poll overlap, retried
+        // flushes); since identical content yields an identical embedding,
+        // last-wins is idempotent with the DO UPDATE. The legacy per-row INSERT
+        // loop was immune (separate statements); the set-based form is not.
+        let deduped: Vec<&(String, String, Vec<f32>, i64)> = {
+            let mut seen: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::with_capacity(items.len());
+            let mut out: Vec<&(String, String, Vec<f32>, i64)> = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                match seen.get(it.0.as_str()) {
+                    Some(&pos) => out[pos] = it,
+                    None => {
+                        seen.insert(it.0.as_str(), out.len());
+                        out.push(it);
+                    }
+                }
+            }
+            out
+        };
+
         // REQ-AXO-901881 W3 #33/#34 — adaptive dispatch on the REAL B3 write
         // path (this fn IS the live pipeline-v2 embedding writer, driven by
         // stage_b3::spawn_b3_batched_worker). For large batches (the deferred
@@ -1390,29 +1415,27 @@ impl GraphStore {
         // faster at that scale. All items in a B3 batch share one embedded_at_ms
         // (stage_b3.rs). The embed_status UPDATE runs either way (idempotent on
         // chunk_id; retried flushes converge).
-        if crate::postgres::bulk_writer::should_use_bulk_writer(items.len()) {
-            let embedded_at_ms = items.first().map(|(_, _, _, ts)| *ts).unwrap_or(0);
-            let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> = items
+        if crate::postgres::bulk_writer::should_use_bulk_writer(deduped.len()) {
+            let embedded_at_ms = deduped.first().map(|it| it.3).unwrap_or(0);
+            let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> = deduped
                 .iter()
-                .map(|(chunk_id, source_hash, embedding, _ts)| {
-                    crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
-                        chunk_id: chunk_id.clone(),
-                        source_hash: source_hash.clone(),
-                        embedding: embedding.clone(),
-                    }
+                .map(|it| crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
+                    chunk_id: it.0.clone(),
+                    source_hash: it.1.clone(),
+                    embedding: it.2.clone(),
                 })
                 .collect();
             self.pool
                 .native
                 .flush_chunk_embeddings_copy(project_code, model_id, &rows, embedded_at_ms)
                 .map_err(|e| anyhow!("upsert_chunk_embedding_v2_batch COPY flush failed: {e}"))?;
-            let chunk_ids_in: Vec<String> = items
+            let chunk_ids_in: Vec<String> = deduped
                 .iter()
-                .map(|(cid, _, _, _)| format!("'{}'", Self::escape_sql(cid)))
+                .map(|it| format!("'{}'", Self::escape_sql(&it.0)))
                 .collect();
             if !chunk_ids_in.is_empty() {
                 self.execute(&format!(
-                    "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({});",
+                    "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({}) AND embed_status = 'pending';",
                     chunk_ids_in.join(", ")
                 ))?;
             }
@@ -1420,38 +1443,53 @@ impl GraphStore {
         }
 
         // REQ-AXO-271 slice 2l : PG canonical only.
-        let mut queries: Vec<String> = Vec::with_capacity(items.len());
-        for (chunk_id, source_hash, embedding, embedded_at_ms) in items {
-            let safe_chunk_id = Self::escape_sql(chunk_id);
-            let safe_source_hash = Self::escape_sql(source_hash);
-            let embedding_literal = crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+        // REQ-AXO-901884 — single set-based INSERT ... SELECT ... JOIN ist.Chunk
+        // so a chunk_id deleted by re-index churn between the demand-pull SELECT
+        // and this INSERT is dropped by the JOIN BEFORE the FK is evaluated (no
+        // 23503 -> no tx abort -> no pooled-conn poison cascade). The casts
+        // (::vector / ::bigint) pin the VALUES column types (a bare VALUES list
+        // types every column as text).
+        let mut values_rows: Vec<String> = Vec::with_capacity(deduped.len());
+        for it in &deduped {
+            let safe_chunk_id = Self::escape_sql(&it.0);
+            let safe_source_hash = Self::escape_sql(&it.1);
+            let embedding_literal = crate::postgres::vector::vector_literal(&it.2).map_err(|e| {
                 anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
             })?;
-            let sql = format!(
-                "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
-                 VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
-                 ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
-                     source_hash = EXCLUDED.source_hash, \
-                     embedding = EXCLUDED.embedding, \
-                     project_code = EXCLUDED.project_code, \
-                     embedded_at_ms = EXCLUDED.embedded_at_ms;",
+            values_rows.push(format!(
+                "('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts})",
                 cid = safe_chunk_id,
                 mid = safe_model_id,
                 pc = safe_project,
                 sh = safe_source_hash,
                 emb = embedding_literal,
-                ts = embedded_at_ms,
-            );
-            queries.push(sql);
+                ts = it.3,
+            ));
         }
+        let mut queries: Vec<String> = Vec::with_capacity(2);
+        queries.push(format!(
+            "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+             SELECT v.chunk_id, v.model_id, v.project_code, v.source_hash, v.embedding::vector, v.embedded_at_ms::bigint \
+             FROM (VALUES {rows}) \
+                  AS v(chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+             JOIN Chunk c ON c.id = v.chunk_id \
+             ON CONFLICT (chunk_id, model_id) DO UPDATE SET \
+                 source_hash = EXCLUDED.source_hash, \
+                 embedding = EXCLUDED.embedding, \
+                 project_code = EXCLUDED.project_code, \
+                 embedded_at_ms = EXCLUDED.embedded_at_ms;",
+            rows = values_rows.join(", "),
+        ));
         // W3: batch-update embed_status after all embeddings are persisted.
-        let chunk_ids_in: Vec<String> = items
+        // `AND embed_status = 'pending'` guards against stamping a chunk that a
+        // concurrent re-index deleted or reset to pending (stale-vector race).
+        let chunk_ids_in: Vec<String> = deduped
             .iter()
-            .map(|(cid, _, _, _)| format!("'{}'", Self::escape_sql(cid)))
+            .map(|it| format!("'{}'", Self::escape_sql(&it.0)))
             .collect();
         if !chunk_ids_in.is_empty() {
             queries.push(format!(
-                "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({});",
+                "UPDATE Chunk SET embed_status = 'embedded' WHERE id IN ({}) AND embed_status = 'pending';",
                 chunk_ids_in.join(", ")
             ));
         }
