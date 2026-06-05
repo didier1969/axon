@@ -245,7 +245,11 @@ pub fn spawn_pipeline_v2_indexer(
         match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
             Ok(code) => code,
             Err(err) => {
-                warn!(?path, error = %err, "pipeline_v2: project_code resolution failed, falling back to UNK");
+                // Unresolved project → "UNK" sentinel, which is a DROP marker,
+                // NOT a bucket: scanner::persist_discovery_batch and
+                // graph_ingestion both skip "UNK", so the file is enrolled
+                // nowhere (REQ-AXO-901860 — UNK retired, no garbage bucket).
+                warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel, not enrolled)");
                 "UNK".to_string()
             }
         }

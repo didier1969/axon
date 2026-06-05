@@ -53,43 +53,28 @@ BEGIN
         RETURN cached;
     END IF;
 
-    -- ── recompute ────────────────────────────────────────────────────
-    -- Schema note: chunk, chunkembedding, symbol, edge all carry
-    -- project_code. IndexedFile does NOT (REQ-AXO-289 streaming v2 keys
-    -- it by path only ; project is derived from path elsewhere). Per-
-    -- project file counts are therefore NOT available from PG — only
-    -- chunks/embedded/symbols/edges per project. Total file count is
-    -- exposed in `dashboard_totals` from a global indexedfile count.
-    WITH per_project AS (
-        SELECT
-            p.project_code,
-            COALESCE(s.symbols,  0) AS symbols,
-            COALESCE(e.edges,    0) AS edges,
-            COALESCE(c.chunks,   0) AS chunks,
-            COALESCE(ce.embedded, 0) AS embedded
-        FROM (
-            SELECT DISTINCT project_code FROM ist.symbol
-            UNION SELECT DISTINCT project_code FROM ist.chunk
-            UNION SELECT DISTINCT project_code FROM ist.edge
-        ) p
-        LEFT JOIN (SELECT project_code, COUNT(*) AS symbols  FROM ist.symbol         GROUP BY 1) s  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS edges    FROM ist.edge           GROUP BY 1) e  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS chunks   FROM ist.chunk          GROUP BY 1) c  USING (project_code)
-        LEFT JOIN (SELECT project_code, COUNT(*) AS embedded FROM ist.chunkembedding GROUP BY 1) ce USING (project_code)
-    )
+    -- ── recompute: project the canonical ist.project_telemetry view ──
+    -- Single source of truth (REQ-AXO-901865): totals + per_project + MCP
+    -- tools all project THIS view, so they can never diverge. Per-project
+    -- file counts ARE available (IndexedFile.project_code exists — the old
+    -- "not available from PG" note was stale residue). `files_chunked` =
+    -- real A-pipeline coverage (files with >=1 chunk), NOT the retired
+    -- status column (REQ-AXO-289).
     SELECT COALESCE(
         jsonb_agg(jsonb_build_object(
-            'project_code', project_code,
-            'symbols',      symbols,
-            'edges',        edges,
-            'chunks',       chunks,
-            'embedded',     embedded,
-            'coverage_pct', CASE WHEN chunks > 0 THEN LEAST(100.0::numeric, (embedded::numeric * 100.0 / chunks)::numeric(8,2)) ELSE 0::numeric END
-        ) ORDER BY chunks DESC),
+            'project_code',  project_code,
+            'files_total',   files_total,
+            'files_chunked', files_chunked,
+            'symbols',       symbols,
+            'edges',         edges,
+            'chunks',        chunks_total,
+            'embedded',      chunks_embedded,
+            'coverage_pct',  CASE WHEN chunks_total > 0 THEN LEAST(100.0::numeric, ROUND(chunks_embedded::numeric * 100.0 / chunks_total::numeric, 2)) ELSE 0::numeric END
+        ) ORDER BY chunks_total DESC),
         '[]'::jsonb
     )
     INTO cached
-    FROM per_project;
+    FROM ist.project_telemetry;
 
     INSERT INTO axon_runtime.dashboard_cache(cache_key, data, computed_at)
     VALUES ('per_project_counts', cached, clock_timestamp())
@@ -127,16 +112,16 @@ BEGIN
     -- compute totals — single source of truth ; rounding consistent.
     pp := axon_runtime.dashboard_per_project_counts(ttl_secs);
 
-    -- Slice 7 dashboard fix — funnel sémantique correct :
-    --   files          = TOTAL enrolled in IndexedFile (discovered + indexed)
-    --   files_indexed  = ONLY status='indexed' (Pipeline A done : graphé)
-    --   files_inflight = ONLY status='discovered' (queued for A, pas encore graphé)
-    -- Le compteur historique `files` est conservé pour compat dashboard.
+    -- Canonical funnel (REQ-AXO-901865) — every sum projects the SAME
+    -- ist.project_telemetry rows (via pp), so totals and per_project can
+    -- never diverge, and the funnel is monotone by construction:
+    --   files         = enrolled in IndexedFile (per-project sum)
+    --   files_chunked = enrolled files with >=1 chunk (real A-pipeline
+    --                   coverage ; the retired status column is gone).
     SELECT jsonb_build_object(
         'projects',        jsonb_array_length(pp),
-        'files',           (SELECT COUNT(*) FROM ist.indexedfile)::bigint,
-        'files_indexed',   (SELECT COUNT(*) FROM ist.indexedfile WHERE status='indexed')::bigint,
-        'files_inflight',  (SELECT COUNT(*) FROM ist.indexedfile WHERE status='discovered')::bigint,
+        'files',           COALESCE((SELECT SUM((p->>'files_total')::bigint)   FROM jsonb_array_elements(pp) p), 0),
+        'files_chunked',   COALESCE((SELECT SUM((p->>'files_chunked')::bigint) FROM jsonb_array_elements(pp) p), 0),
         'symbols',         COALESCE((SELECT SUM((p->>'symbols')::bigint)  FROM jsonb_array_elements(pp) p), 0),
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),

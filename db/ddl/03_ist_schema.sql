@@ -322,20 +322,32 @@ CREATE OR REPLACE TRIGGER trg_chunk_notify_pending
     FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_chunk_pending();
 
 -- ── Canonical per-project telemetry view (the ONE source) ────────────
--- REQ-AXO-901854/901859: dashboard + MCP read THIS, not in-memory
--- counters / dashboard_cache / scattered rollups. files_total −
--- (indexed+discovered+failed+skipped) cannot diverge silently; symbols /
--- chunks / embedded are canonical per project.
-CREATE OR REPLACE VIEW ist.project_telemetry AS
+-- The single projection that dashboard + MCP tools read — NOT in-memory
+-- counters, NOT scattered ad-hoc rollups, NOT the filesystem walk.
+--
+-- Coverage is measured by REALITY, not by a status column: REQ-AXO-289
+-- retired the discovered/indexing/indexed state machine (the only persisted
+-- trace is IndexedFile(path, content_hash, last_seen_ms)), so the old
+-- `status='indexed'` filter reported a meaningless near-zero count while
+-- the pipeline had actually produced chunks for ~11k files. The honest,
+-- monotone funnel is therefore:
+--   files_total   = enrolled in IndexedFile
+--   files_chunked = enrolled files that produced >=1 chunk (real A-pipeline
+--                   coverage ; the remainder = non-code/config files +
+--                   files attributed to unresolved projects)
+-- files_total >= files_chunked always holds (chunked is a subset).
+-- DROP+CREATE (not CREATE OR REPLACE): the column set changed (dropped the
+-- retired status-derived columns), which CREATE OR REPLACE VIEW forbids.
+-- CASCADE is safe — the dashboard_state functions query this view by name
+-- at call time (no hard catalog dependency), so they are not dropped.
+DROP VIEW IF EXISTS ist.project_telemetry CASCADE;
+CREATE VIEW ist.project_telemetry AS
 SELECT
     p.code AS project_code,
     p.name,
     p.root_path,
     COALESCE(f.files_total, 0)      AS files_total,
-    COALESCE(f.files_discovered, 0) AS files_discovered,
-    COALESCE(f.files_indexed, 0)    AS files_indexed,
-    COALESCE(f.files_failed, 0)     AS files_failed,
-    COALESCE(f.files_skipped, 0)    AS files_skipped,
+    COALESCE(f.files_chunked, 0)    AS files_chunked,
     COALESCE(s.symbols, 0)          AS symbols,
     COALESCE(c.chunks_total, 0)     AS chunks_total,
     COALESCE(c.chunks_embedded, 0)  AS chunks_embedded,
@@ -343,13 +355,12 @@ SELECT
     COALESCE(e.edges, 0)            AS edges
 FROM ist.Project p
 LEFT JOIN (
-    SELECT project_code,
-           count(*)                                       AS files_total,
-           count(*) FILTER (WHERE status = 'discovered')  AS files_discovered,
-           count(*) FILTER (WHERE status = 'indexed')     AS files_indexed,
-           count(*) FILTER (WHERE status = 'failed')      AS files_failed,
-           count(*) FILTER (WHERE status = 'skipped')     AS files_skipped
-    FROM ist.IndexedFile GROUP BY project_code
+    SELECT i.project_code,
+           count(*)                                          AS files_total,
+           count(*) FILTER (WHERE ch.file_path IS NOT NULL)  AS files_chunked
+    FROM ist.IndexedFile i
+    LEFT JOIN (SELECT DISTINCT file_path FROM ist.Chunk) ch ON ch.file_path = i.path
+    GROUP BY i.project_code
 ) f ON f.project_code = p.code
 LEFT JOIN (
     SELECT project_code, count(*) AS symbols FROM ist.Symbol GROUP BY project_code

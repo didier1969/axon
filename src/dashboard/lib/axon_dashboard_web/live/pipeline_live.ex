@@ -100,25 +100,31 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           </section>
         <% end %>
 
-        <%!-- INDEXATION FUNNEL --%>
+        <%!-- INDEXATION FUNNEL — canonical IST projection (ist.project_telemetry,
+             REQ-AXO-901865). Single source, monotone by construction. The FS
+             scan (disk/eligible) is a SEPARATE diagnostic shown in the header,
+             NOT a funnel stage — it comes from the filesystem walk, a different
+             source than the IST, so mixing it broke monotonicity. Coverage is
+             REAL (files with chunks), not the retired status column (REQ-289). --%>
         <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
-          <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Indexation Funnel</div>
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Indexation Funnel</div>
+            <div class="font-mono text-[10px] text-slate-500">
+              FS scan: <span class="text-slate-400 tabular-nums">{fs_val(@dashboard_state, :disk_files)}</span> on disk ·
+              <span class="text-slate-400 tabular-nums">{fs_val(@dashboard_state, :eligible_files)}</span> eligible
+            </div>
+          </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-sm text-slate-200">
             <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Disk</span>
-              <strong class="tabular-nums">{fs_val(@dashboard_state, :disk_files)}</strong>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Enrolled</span>
+              <strong class="tabular-nums">{totals_field(@dashboard_state, :files, 0) |> full_int()}</strong>
             </span>
             <span class="text-slate-600">&rarr;</span>
             <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Eligible</span>
-              <strong class="tabular-nums">{fs_val(@dashboard_state, :eligible_files)}</strong>
-            </span>
-            <span class="text-slate-600">&rarr;</span>
-            <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Indexed (A done)</span>
-              <strong class="tabular-nums">{totals_field(@dashboard_state, :files_indexed, 0) |> full_int()}</strong>
-              <%= if (in_flight = totals_field(@dashboard_state, :files_inflight, 0)) > 0 do %>
-                <span class="text-amber-300/70 ml-1">(+{full_int(in_flight)} en queue)</span>
+              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Chunked</span>
+              <strong class="tabular-nums">{totals_field(@dashboard_state, :files_chunked, 0) |> full_int()}</strong>
+              <%= if (unchunked = totals_field(@dashboard_state, :files, 0) - totals_field(@dashboard_state, :files_chunked, 0)) > 0 do %>
+                <span class="text-slate-500 ml-1">(&minus;{full_int(unchunked)} non-code/unresolved)</span>
               <% end %>
             </span>
             <span class="text-slate-600">&rarr;</span>
@@ -139,12 +145,10 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           </div>
         </section>
 
-        <%!-- CORPUS (REQ-AXO-901850) — métriques HORS-funnel uniquement.
-             Disk/Eligible/Indexed/Chunks/Embeddings + coverage% vivent dans
-             le funnel ci-dessus ; les répéter en tuiles créait des doublons
-             (et 'Indexed Files'=files ≈ indexed+queue contredisait le funnel
-             'Indexed'=files_indexed). On ne garde ici que ce que le funnel
-             ne montre pas. --%>
+        <%!-- CORPUS — métriques HORS-funnel uniquement. Enrolled/Chunked/
+             Chunks/Embeddings + coverage% vivent dans le funnel canonique
+             ci-dessus (source unique ist.project_telemetry) ; on ne garde ici
+             que ce que le funnel ne montre pas. --%>
         <section class="col-span-12 grid grid-cols-2 md:grid-cols-3 gap-3">
           <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
           <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
@@ -350,6 +354,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               <thead class="bg-slate-950/40 text-[10px] uppercase tracking-wider text-slate-500">
                 <tr>
                   <th class="px-4 py-2 text-left">Project</th>
+                  <th class="px-4 py-2 text-right">Files (chunked/enrolled)</th>
                   <th class="px-4 py-2 text-right">Symbols</th>
                   <th class="px-4 py-2 text-right">Chunks</th>
                   <th class="px-4 py-2 text-right">Embeddings</th>
@@ -362,6 +367,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
                     <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border border-cyan-500/30 bg-cyan-500/5 text-cyan-200">
                       {entry.project_code}
                     </span>
+                  </td>
+                  <td class="px-4 py-2 text-right tabular-nums">
+                    <span class="text-slate-100">{full_int(entry.files_chunked)}</span><span class="text-slate-600">/{full_int(entry.files_total)}</span>
                   </td>
                   <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.symbols)}</td>
                   <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.chunks)}</td>

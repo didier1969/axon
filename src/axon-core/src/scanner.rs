@@ -583,6 +583,16 @@ fn persist_discovery_batch(
     let mut projects: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut values = Vec::with_capacity(batch.len());
     for (path, project, size, mtime) in batch {
+        // REQ-AXO-901860 — NEVER enrol the "UNK" sentinel (unresolved project).
+        // project_code is a NOT NULL FK to ist.Project; enrolling UNK both
+        // resurrects the garbage bucket the canonical project/path resolution
+        // retired AND creates an "UNK" ist.Project row (the `INSERT INTO Project
+        // … ON CONFLICT DO NOTHING` below would mint it). Files that don't
+        // resolve to a registered project are dropped here, mirroring
+        // graph_ingestion's UNK skip — no UNK Project, no UNK IndexedFile, ever.
+        if project == "UNK" {
+            continue;
+        }
         let safe_path = path.replace('\'', "''");
         let safe_project = project.replace('\'', "''");
         projects.insert(project.as_str());
@@ -591,6 +601,10 @@ fn persist_discovery_batch(
         values.push(format!(
             "('{safe_path}', '{safe_project}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
         ));
+    }
+    if values.is_empty() {
+        // Entire batch resolved to UNK / unresolved — nothing canonical to enrol.
+        return Ok(());
     }
     let proj_values: Vec<String> = projects
         .iter()

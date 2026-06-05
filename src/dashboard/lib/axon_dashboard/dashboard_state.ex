@@ -283,8 +283,7 @@ defmodule AxonDashboard.DashboardState do
     @moduledoc "PG aggregate totals across all projects."
     @type t :: %__MODULE__{
             files: non_neg_integer(),
-            files_indexed: non_neg_integer(),
-            files_inflight: non_neg_integer(),
+            files_chunked: non_neg_integer(),
             symbols: non_neg_integer(),
             edges: non_neg_integer(),
             chunks: non_neg_integer(),
@@ -295,8 +294,7 @@ defmodule AxonDashboard.DashboardState do
             coverage_pct: float()
           }
     defstruct files: 0,
-              files_indexed: 0,
-              files_inflight: 0,
+              files_chunked: 0,
               symbols: 0,
               edges: 0,
               chunks: 0,
@@ -311,8 +309,7 @@ defmodule AxonDashboard.DashboardState do
     def from_map(%{} = m) do
       %__MODULE__{
         files: i(m, "files"),
-        files_indexed: i(m, "files_indexed"),
-        files_inflight: i(m, "files_inflight"),
+        files_chunked: i(m, "files_chunked"),
         symbols: i(m, "symbols"),
         edges: i(m, "edges"),
         chunks: i(m, "chunks"),
@@ -345,14 +342,19 @@ defmodule AxonDashboard.DashboardState do
     @moduledoc "Per-project breakdown row (used with Phoenix.LiveView.stream/3)."
     @type t :: %__MODULE__{
             project_code: String.t(),
+            files_total: non_neg_integer(),
+            files_chunked: non_neg_integer(),
             chunks: non_neg_integer(),
             embedded: non_neg_integer(),
             symbols: non_neg_integer(),
             edges: non_neg_integer(),
             coverage_pct: float()
           }
-    @derive {Jason.Encoder, only: [:project_code, :chunks, :embedded, :symbols, :edges, :coverage_pct]}
+    @derive {Jason.Encoder,
+             only: [:project_code, :files_total, :files_chunked, :chunks, :embedded, :symbols, :edges, :coverage_pct]}
     defstruct project_code: "?",
+              files_total: 0,
+              files_chunked: 0,
               chunks: 0,
               embedded: 0,
               symbols: 0,
@@ -364,6 +366,8 @@ defmodule AxonDashboard.DashboardState do
     def from_map(%{} = m) do
       %__MODULE__{
         project_code: Map.get(m, "project_code", "?"),
+        files_total: i(m, "files_total"),
+        files_chunked: i(m, "files_chunked"),
         chunks: i(m, "chunks"),
         embedded: i(m, "embedded"),
         symbols: i(m, "symbols"),
