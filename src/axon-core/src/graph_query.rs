@@ -279,11 +279,25 @@ impl GraphStore {
     /// unchanged (kept byte-identical so the contract + the "Graph plugin
     /// error" message callers/tests match on are preserved).
     pub(crate) fn query_native(&self, query: &str) -> Result<String> {
-        let res = self.pool.native.run_query_json(query);
-        // REQ-AXO-129 — legitimate results are a JSON array (`[`); error
-        // envelopes are a JSON object (`{`) carrying `_axon_plugin_error`.
-        // Surface the rich pg_error.message/code/hint so LLM callers see the
-        // real `column "X" does not exist` / SQLSTATE / hint, not a silent [].
+        Self::decode_native_envelope(self.pool.native.run_query_json(query))
+    }
+
+    /// REQ-AXO-901883 — ANN (HNSW) semantic read for `retrieve_context` /
+    /// `retrieve_context_v2`. Routes the ANN-CTE SELECT through
+    /// `run_ann_query_json`, which scopes `SET LOCAL enable_seqscan=off` +
+    /// `hnsw.ef_search` to a transaction so pgvector picks
+    /// `chunk_embedding_hnsw_idx` regardless of table size. The
+    /// success/error envelope contract is identical to `query_native`.
+    pub(crate) fn query_ann_json(&self, query: &str, ef_search: u32) -> Result<String> {
+        Self::decode_native_envelope(self.pool.native.run_ann_query_json(query, ef_search))
+    }
+
+    /// REQ-AXO-129 envelope decoder shared by the native read paths.
+    /// Legitimate results are a JSON array (`[`); error envelopes are a JSON
+    /// object (`{`) carrying `_axon_plugin_error`. Surfaces the rich
+    /// pg_error.message/code/hint so LLM callers see the real
+    /// `column "X" does not exist` / SQLSTATE / hint, not a silent [].
+    fn decode_native_envelope(res: String) -> Result<String> {
         if res.starts_with('{') {
             if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
                 if let Some(message) = envelope.get("_axon_plugin_error").and_then(|v| v.as_str()) {

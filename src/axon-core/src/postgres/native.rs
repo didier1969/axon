@@ -119,6 +119,68 @@ impl NativePgCtx {
         })
     }
 
+    /// REQ-AXO-901883 — ANN (HNSW) read path for the `retrieve_context` /
+    /// `retrieve_context_v2` semantic lane.
+    ///
+    /// pgvector only chooses `chunk_embedding_hnsw_idx` for a clean
+    /// `ORDER BY embedding <=> $q LIMIT k`. On a small `ist.ChunkEmbedding`
+    /// (few thousand rows) the planner's cost model still prefers a
+    /// `Seq Scan + Sort` because the HNSW first-tuple cost is high relative
+    /// to a full scan of a small table. The semantic lane needs the index
+    /// regardless of table size (recall@k stability + O(log n) scaling), so
+    /// this runs the ANN SELECT inside an explicit transaction with
+    /// `SET LOCAL enable_seqscan = off` + `SET LOCAL hnsw.ef_search`. The
+    /// GUCs are transaction-scoped (`LOCAL`), so they never leak to the
+    /// pooled connection's other consumers, and the search-path / timeout
+    /// session setup is applied exactly as `run_query_json` does so the
+    /// returned JSON / error-envelope contract is byte-identical.
+    ///
+    /// `ef_search` is clamped to `[10, 1000]` (pgvector's accepted range).
+    pub fn run_ann_query_json(&self, sql: &str, ef_search: u32) -> String {
+        let ef = ef_search.clamp(10, 1000);
+        native_runtime().block_on(async {
+            let mut conn = match self.pool.get().await {
+                Ok(c) => c,
+                Err(e) => return error_envelope("acquire", sql, &e.to_string()),
+            };
+            if let Err(e) = apply_session_setup(&conn, &self.schema_search_path).await {
+                return db_error_envelope("set_search_path", sql, &e);
+            }
+            let tx = match conn.transaction().await {
+                Ok(tx) => tx,
+                Err(e) => return db_error_envelope("ann_begin", sql, &e),
+            };
+            // SET LOCAL only takes effect inside a transaction; it reverts at
+            // COMMIT/ROLLBACK. ef_search is a literal in [10,1000] (no inject).
+            if let Err(e) = tx
+                .batch_execute(&format!(
+                    "SET LOCAL enable_seqscan = off; SET LOCAL hnsw.ef_search = {ef}"
+                ))
+                .await
+            {
+                return db_error_envelope("ann_set_local", sql, &e);
+            }
+            let rendered = match tx.query(sql, &[]).await {
+                Ok(rows) => {
+                    let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        let mut rendered = Vec::with_capacity(row.len());
+                        for col in 0..row.len() {
+                            rendered.push(render_pg_value(row, col));
+                        }
+                        out.push(rendered);
+                    }
+                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+                }
+                Err(e) => return db_error_envelope("ann_query", sql, &e),
+            };
+            if let Err(e) = tx.commit().await {
+                return db_error_envelope("ann_commit", sql, &e);
+            }
+            rendered
+        })
+    }
+
     /// `SELECT count(*)`-style scalar count. Mirrors the plugin's
     /// `pg_query_count`: returns the first column of the first row as i64,
     /// or 0 on any error / empty result.

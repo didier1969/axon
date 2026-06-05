@@ -1867,6 +1867,119 @@ impl McpServer {
         candidate.exact_match || candidate.lexical_hits > 0
     }
 
+    /// REQ-AXO-901883 — build the SOTA ANN-first hybrid SELECT for the semantic
+    /// chunk lane so pgvector chooses `chunk_embedding_hnsw_idx`.
+    ///
+    /// The old single OR-hybrid pass (Chunk JOIN ChunkEmbedding,
+    /// `WHERE (lexical OR path OR entry OR cosine < 0.55) ORDER BY cosine LIMIT k`)
+    /// forced a Seq Scan + exact-distance Sort over `ist.ChunkEmbedding` — pgvector
+    /// never selects HNSW for that shape. We split it into:
+    ///   `ann`  — a clean `ORDER BY embedding <=> q LIMIT ann_pool` on
+    ///            `ist.ChunkEmbedding` (the HNSW path; this query is run through
+    ///            `GraphStore::query_ann_json`, which scopes
+    ///            `SET LOCAL enable_seqscan = off` + `SET LOCAL hnsw.ef_search`).
+    ///            `model_id` is deliberately NOT filtered inside the `ORDER BY`
+    ///            (single model today → moot, and a `WHERE` there can defeat HNSW
+    ///            post-filtering); it is enforced on the outer `sem` join.
+    ///   `sem`  — the ANN candidates that pass the cosine threshold, joined to
+    ///            `ist.Chunk`, project-filtered at the outer join.
+    ///   `lex`  — the non-vector arm (entry_anchor / same_file / file_path /
+    ///            lexical), preserved verbatim with a NULL distance.
+    /// The two arms are UNIONed, deduped (`ROW_NUMBER` per id), source-tag
+    /// prioritised (the original CASE), then ordered anchored-first / ascending
+    /// distance and limited — so the hybrid composition + source-tag CASE survive.
+    ///
+    /// `project_filter` is the identical substring on the `sem` and `lex`
+    /// `c.project_code` predicates so the repo-root fallback's
+    /// `query.replace(project_filter, "")` strips every occurrence.
+    ///
+    /// NB: inside the `ann` CTE the embedding table is aliased `ce`, so the
+    /// distance projection references `ce.embedding` — exactly what `cosine_expr`
+    /// holds (`(ce.embedding <=> lit)`). The `a` alias exists ONLY in `sem`, where
+    /// the already-computed `a.dist` is read, never recomputed (the alias bug that
+    /// broke the first cut: a `ce.embedding -> a.embedding` rewrite leaked into the
+    /// `ann` projection, where `a` does not exist → `missing FROM-clause entry`).
+    #[allow(clippy::too_many_arguments)]
+    fn build_semantic_chunk_query(
+        cosine_expr: &str,
+        qvec_literal: &str,
+        ann_pool: usize,
+        project_filter: &str,
+        entry_id_match: &str,
+        entry_uri_match: &str,
+        lexical_predicate: &str,
+        lexical_uri_match: &str,
+        path_match: &str,
+        limit: usize,
+    ) -> String {
+        format!(
+            "WITH ann AS ( \
+                 SELECT ce.chunk_id, ce.embedding, ({cosine_expr}) AS dist \
+                 FROM ist.ChunkEmbedding ce \
+                 ORDER BY ce.embedding <=> {qvec} \
+                 LIMIT {ann_pool} \
+             ), \
+             sem AS ( \
+                 SELECT c.id, c.source_id, c.project_code, c.content, c.content_hash, \
+                        c.file_path, c.chunk_part_index, c.chunk_part_count, c.chunk_path, \
+                        a.dist AS dist \
+                 FROM ann a \
+                 JOIN ist.ChunkEmbedding ce2 ON ce2.chunk_id = a.chunk_id AND ce2.model_id = '{model_id}' \
+                 JOIN ist.Chunk c ON c.id = a.chunk_id AND ce2.source_hash = c.content_hash \
+                 WHERE a.dist < 0.55{project_filter} \
+             ), \
+             lex AS ( \
+                 SELECT c.id, c.source_id, c.project_code, c.content, c.content_hash, \
+                        c.file_path, c.chunk_part_index, c.chunk_part_count, c.chunk_path, \
+                        NULL::float8 AS dist \
+                 FROM ist.Chunk c \
+                 WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match})){project_filter} \
+             ), \
+             merged AS ( \
+                 SELECT * FROM sem \
+                 UNION \
+                 SELECT * FROM lex \
+             ), \
+             ranked AS ( \
+                 SELECT m.*, \
+                        CASE \
+                            WHEN ({entry_id_match_m}) THEN 0 \
+                            WHEN ({entry_uri_match_m}) THEN 1 \
+                            WHEN ({path_match_m}) THEN 2 \
+                            WHEN ({lexical_predicate_m}) AND m.dist IS NOT NULL THEN 3 \
+                            WHEN m.dist IS NOT NULL THEN 4 \
+                            ELSE 5 \
+                        END AS src_rank, \
+                        ROW_NUMBER() OVER (PARTITION BY m.id ORDER BY m.dist ASC NULLS LAST) AS rn \
+                 FROM merged m \
+             ) \
+             SELECT r.id, r.source_id, COALESCE(r.project_code, 'unknown'), \
+                    COALESCE(r.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = r.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = r.project_code ORDER BY ce.source_id LIMIT 1), ''), \
+                    r.content, COALESCE(r.chunk_part_index, 1), COALESCE(r.chunk_part_count, 1), COALESCE(r.chunk_path, '1/1'), \
+                    CASE r.src_rank \
+                        WHEN 0 THEN 'entry_anchor' \
+                        WHEN 1 THEN 'same_file' \
+                        WHEN 2 THEN 'file_path' \
+                        WHEN 3 THEN 'lexical+semantic' \
+                        WHEN 4 THEN 'semantic' \
+                        ELSE 'lexical' \
+                    END, \
+                    r.dist \
+             FROM ranked r \
+             WHERE r.rn = 1 \
+             ORDER BY r.src_rank ASC, r.dist ASC NULLS LAST \
+             LIMIT {limit}",
+            qvec = qvec_literal,
+            cosine_expr = cosine_expr,
+            ann_pool = ann_pool,
+            model_id = CHUNK_MODEL_ID,
+            entry_id_match_m = entry_id_match.replace("c.source_id", "m.source_id"),
+            entry_uri_match_m = entry_uri_match.replace("c.file_path", "m.file_path"),
+            path_match_m = path_match.replace("c.file_path", "m.file_path"),
+            lexical_predicate_m = lexical_predicate.replace("c.content", "m.content"),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn find_chunk_candidates(
         &self,
@@ -2047,9 +2160,12 @@ impl McpServer {
         let project_filter =
             Self::sql_project_filter_for_fields(project, &["c.project_code"]);
 
-        let cosine_expr = if let Some(embedding) = semantic.as_ref() {
+        // REQ-AXO-901883 — keep the raw `'[..]'::vector` literal (`qvec_literal`)
+        // for the ANN `ORDER BY embedding <=> qvec` so pgvector can match the
+        // HNSW index; `cosine_expr` wraps it as the distance projection.
+        let (cosine_expr, qvec_literal) = if let Some(embedding) = semantic.as_ref() {
             match crate::postgres::vector::vector_literal(embedding) {
-                Ok(lit) => Some(format!("(ce.embedding <=> {lit})")),
+                Ok(lit) => (Some(format!("(ce.embedding <=> {lit})")), Some(lit)),
                 Err(err) => {
                     excluded_because.push(format!(
                         "pg_semantic_vector_literal_error:{}",
@@ -2059,27 +2175,25 @@ impl McpServer {
                 }
             }
         } else {
-            None
+            (None, None)
         };
+        // ANN candidate pool = a few × the final limit so the lexical/anchor
+        // arm + the cosine-threshold filter still leave enough semantic hits.
+        let ann_pool = (limit.max(1) * 5).clamp(40, 400);
+        let qvec_literal = qvec_literal.unwrap_or_default();
 
         let query = if let Some(cosine_expr) = cosine_expr.as_ref() {
-            format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
-                        COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
-                        CASE \
-                            WHEN ({entry_id_match}) THEN 'entry_anchor' \
-                            WHEN ({entry_uri_match}) THEN 'same_file' \
-                            WHEN ({path_match}) THEN 'file_path' \
-                            WHEN ({lexical_predicate}) THEN 'lexical+semantic' \
-                        ELSE 'semantic' \
-                        END, \
-                        {cosine_expr} \
-                 FROM Chunk c \
-                 JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{model_id}' AND ce.source_hash = c.content_hash \
-                 WHERE (({entry_id_match}) OR ({entry_uri_match}) OR ({lexical_predicate}) OR ({lexical_uri_match}) OR ({path_match}) OR {cosine_expr} < 0.55){project_filter} \
-                 ORDER BY {cosine_expr} ASC \
-                 LIMIT {limit}",
-                model_id = CHUNK_MODEL_ID,
+            Self::build_semantic_chunk_query(
+                cosine_expr,
+                &qvec_literal,
+                ann_pool,
+                &project_filter,
+                &entry_id_match,
+                &entry_uri_match,
+                &lexical_predicate,
+                &lexical_uri_match,
+                &path_match,
+                limit,
             )
         } else {
             format!(
@@ -2098,27 +2212,39 @@ impl McpServer {
             )
         };
 
-        let raw = self
-            .graph_store
-            .query_json(&query)
-            .unwrap_or_else(|_| "[]".to_string());
+        // REQ-AXO-901883 — the semantic (ANN) branch must run through
+        // `query_ann_json` (transaction-scoped SET LOCAL enable_seqscan=off +
+        // hnsw.ef_search) so pgvector picks `chunk_embedding_hnsw_idx`; the
+        // pure-lexical branch keeps the plain reader. ef_search ≈ ann_pool but
+        // never below the pgvector floor.
+        let is_semantic = cosine_expr.is_some();
+        let ef_search = ann_pool.max(40) as u32;
+        let run = |sql: &str| -> String {
+            if is_semantic {
+                self.graph_store
+                    .query_ann_json(sql, ef_search)
+                    .unwrap_or_else(|_| "[]".to_string())
+            } else {
+                self.graph_store
+                    .query_json(sql)
+                    .unwrap_or_else(|_| "[]".to_string())
+            }
+        };
+        let raw = run(&query);
         let mut rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         if rows.is_empty() {
-            // Repo-root fallback: drop project_code filter, post-filter
-            // by repo_root prefix.
+            // Repo-root fallback: drop project_code filter (every occurrence —
+            // the ANN composition references it in both the `sem` and `lex`
+            // CTEs), post-filter by repo_root prefix.
             if let Some(repo_root) = Self::project_repo_root(project) {
-                let fallback_query = query.replacen(
+                let fallback_query = query.replace(
                     &Self::sql_project_filter_for_fields(
                         project,
                         &["c.project_code"],
                     ),
                     "",
-                    1,
                 );
-                let fallback_raw = self
-                    .graph_store
-                    .query_json(&fallback_query)
-                    .unwrap_or_else(|_| "[]".to_string());
+                let fallback_raw = run(&fallback_query);
                 let fallback_rows: Vec<Vec<Value>> =
                     serde_json::from_str(&fallback_raw).unwrap_or_default();
                 rows = fallback_rows
@@ -2144,7 +2270,11 @@ impl McpServer {
                 let chunk_part_count = Self::parse_usize_value(row.get(6)?).unwrap_or(1).max(1);
                 let chunk_path = row.get(7)?.as_str().unwrap_or("1/1").to_string();
                 let match_reason = row.get(8)?.as_str()?.to_string();
-                let semantic_distance = row.get(9).and_then(|value| value.as_f64());
+                // REQ-AXO-901883 — the native reader renders FLOAT8 as a string
+                // (`render_pg_value`); a bare `as_f64()` would drop every cosine
+                // distance. `parse_f64_value` accepts the string form + the
+                // `"null"` sentinel.
+                let semantic_distance = row.get(9).and_then(Self::parse_f64_value);
                 let lexical_hits = terms
                     .iter()
                     .filter(|term| {
@@ -4114,6 +4244,27 @@ impl McpServer {
             .or_else(|| value.as_str().and_then(|raw| raw.parse::<usize>().ok()))
     }
 
+    /// REQ-AXO-901883 — the native PG reader (`render_pg_value`) renders every
+    /// column as a JSON string (rows are serialised `Vec<Vec<String>>`), so a
+    /// `FLOAT8` cosine distance arrives as `"0.1778"`, not a JSON number, and a
+    /// SQL `NULL` arrives as the literal string `"null"`. A bare `Value::as_f64`
+    /// therefore returns `None` for a perfectly good distance — silently dropping
+    /// the semantic top-k's `semantic_distance`. This mirrors `parse_usize_value`:
+    /// accept a JSON number, or a numeric string, and treat the `"null"` sentinel
+    /// (and an empty string) as absent.
+    fn parse_f64_value(value: &Value) -> Option<f64> {
+        value.as_f64().or_else(|| {
+            value.as_str().and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                    None
+                } else {
+                    trimmed.parse::<f64>().ok()
+                }
+            })
+        })
+    }
+
     fn can_reuse_uri_for_multipart(
         candidate: &ChunkCandidate,
         seen_uris: &HashSet<String>,
@@ -4306,5 +4457,296 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "multipart_late_chunk_penalty"));
+    }
+
+    /// REQ-AXO-901883 — the semantic-lane SQL hits the HNSW index (criterion 1).
+    ///
+    /// This is the *structural* half of the regression guard, split out from the
+    /// *composition* half (`semantic_chunk_query_preserves_hybrid_composition`)
+    /// deliberately: HNSW is an APPROXIMATE index, so asserting that a
+    /// freshly-seeded outlier vector is reachable by the greedy graph traversal
+    /// over a shared dev table holding thousands of unrelated vectors is
+    /// structurally flaky (the first cut of this test failed exactly there). The
+    /// two acceptance concerns are therefore decoupled:
+    ///   - index USE (here) is proven via `EXPLAIN` on the production-built query
+    ///     run through the production `query_ann_json` executor — fully
+    ///     deterministic, independent of recall;
+    ///   - composition/parse correctness is proven separately with a
+    ///     deterministic EXACT-search variant where the seeded near chunk is
+    ///     guaranteed to surface (see the sibling test).
+    ///
+    /// We build the EXACT production query via `build_semantic_chunk_query`,
+    /// prefix it with `EXPLAIN (FORMAT TEXT)`, and run it through the same
+    /// `query_ann_json` path the lane uses (the `SET LOCAL enable_seqscan=off +
+    /// hnsw.ef_search` wrapper is load-bearing — without it pgvector's cost model
+    /// picks a Seq Scan + Sort on the few-thousand-row table). Each EXPLAIN line
+    /// comes back as a one-cell JSON row; we assert the ANN stage plan contains
+    /// `chunk_embedding_hnsw_idx` and NOT a `Seq Scan` over the embedding ORDER BY.
+    #[test]
+    fn semantic_chunk_query_uses_hnsw_index() {
+        fn unit_vector_literal(axis: usize) -> String {
+            let mut values = vec![0.0_f32; crate::embedding_contract::DIMENSION];
+            values[axis] = 1.0;
+            crate::postgres::vector::vector_literal(&values).unwrap()
+        }
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+
+        let code = crate::tests::test_helpers::unique_test_project_code();
+        let qvec_literal = unit_vector_literal(0);
+        let cosine_expr = format!("(ce.embedding <=> {qvec_literal})");
+        let project_filter =
+            McpServer::sql_project_filter_for_fields(Some(&code), &["c.project_code"]);
+
+        // The exact production-built ANN-CTE query (same builder, same args shape
+        // as the lane). EXPLAIN never touches rows, so this is index-state-only —
+        // no recall dependency, no seeding required.
+        let query = McpServer::build_semantic_chunk_query(
+            &cosine_expr,
+            &qvec_literal,
+            40,
+            &project_filter,
+            "1=0",
+            "1=0",
+            "1=0",
+            "1=0",
+            "1=0",
+            10,
+        );
+        let explain_sql = format!("EXPLAIN (FORMAT TEXT) {query}");
+
+        // Production executor: the SET LOCAL enable_seqscan=off / hnsw.ef_search
+        // wrapper. Without that wrapper pgvector picks Seq Scan + Sort at this
+        // table size — so running EXPLAIN through THIS path proves the wrapper is
+        // what flips the plan to the HNSW index (acceptance criterion 1).
+        let raw = server
+            .graph_store
+            .query_ann_json(&explain_sql, 64)
+            .expect("EXPLAIN on the ANN query must execute");
+        let rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&raw).expect("EXPLAIN result must be a JSON row array");
+        let plan = rows
+            .iter()
+            .filter_map(|row| row.first().and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            plan.contains("chunk_embedding_hnsw_idx"),
+            "ANN stage must use the HNSW index, not Seq Scan + Sort. Plan:\n{plan}"
+        );
+        // The ANN distance ORDER BY must not fall back to a Seq Scan over the
+        // embedding column. (A Seq Scan elsewhere — e.g. on a tiny constant
+        // subquery — is fine; what must not appear is a seq-scan-then-sort on
+        // ist.ChunkEmbedding for the <=> ordering, which the HNSW line replaces.)
+        assert!(
+            !plan.contains("Sort Key: (ce.embedding <=>"),
+            "ANN distance ordering must be served by the HNSW index, not an explicit Sort. Plan:\n{plan}"
+        );
+    }
+
+    /// REQ-AXO-901883 — the semantic lane preserves hybrid composition + parses
+    /// the distance correctly (criterion 2), proven DETERMINISTICALLY.
+    ///
+    /// Companion to `semantic_chunk_query_uses_hnsw_index`. Because HNSW is
+    /// approximate (see that test's docs), this assertion CANNOT depend on the
+    /// freshly-seeded outlier being recalled from the production global ANN pool
+    /// over the polluted shared dev table. So it exercises the IDENTICAL CTE
+    /// shape but with the ANN sub-pool scoped to this test's project and run
+    /// through the plain reader (exact distance scan, no HNSW): the two seeded
+    /// rows ARE the entire candidate pool, so the near chunk is guaranteed to
+    /// surface. This still exercises the same merge / dedup / source-tag CASE /
+    /// `parse_f64_value` rendering that the production lane relies on, so it
+    /// catches the regressions the first cut targeted:
+    ///   - the alias bug (`missing FROM-clause entry for table "a"`) → Err;
+    ///   - the FLOAT8-as-string distance drop → near chunk would have None dist;
+    ///   - a broken UNION / source-tag CASE → wrong tag or missing arm.
+    /// It asserts:
+    ///   1. the SQL executes (no REQ-AXO-129 error envelope);
+    ///   2. the near chunk surfaces tagged `semantic` with a real sub-0.55 dist;
+    ///   3. the far chunk surfaces tagged `lexical` with NULL dist (hybrid arm).
+    #[test]
+    fn semantic_chunk_query_preserves_hybrid_composition() {
+        // 1024-d unit vector on `axis`; everything else 0.0. Cosine distance
+        // between two distinct axes is 1.0 (> 0.55 threshold) and an axis with
+        // itself is 0.0 (< threshold) → deterministic near/far without an embedder.
+        fn unit_vector_literal(axis: usize) -> String {
+            let mut values = vec![0.0_f32; crate::embedding_contract::DIMENSION];
+            values[axis] = 1.0;
+            crate::postgres::vector::vector_literal(&values).unwrap()
+        }
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+        let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
+
+        // `--lib` tests run in parallel against the SAME shared dev PG instance
+        // (see test_helpers docs), so hardcoded ids collide with sibling tests
+        // and with rows left by prior runs. Allocate a per-invocation project +
+        // derive every fixture id from it for full isolation, and scope the
+        // query's project_filter to it so leftover/foreign rows can't leak in.
+        let code = crate::tests::test_helpers::unique_test_project_code();
+        let near_id = format!("chunk-near-{code}");
+        let far_id = format!("chunk-far-{code}");
+        let near_path = format!("src/near-{code}.rs");
+        let far_path = format!("src/far-{code}.rs");
+        let near_hash = format!("hash-near-{code}");
+        let far_hash = format!("hash-far-{code}");
+
+        // Seed the IST FK targets (Project, then IndexedFile) the Chunk rows
+        // reference — same shape as `seed_ist_path` in the soll_and_guidelines
+        // module. The Chunk/Embedding FKs point at `ist.Project`.
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+            ))
+            .unwrap();
+        // `unique_test_project_code` recycles codes per-process and the shared
+        // dev DB persists rows across runs, so defensively drop any leftover
+        // fixtures for THIS code first (FK cascade clears Chunk + ChunkEmbedding).
+        for path in [&near_path, &far_path] {
+            let _ = server.graph_store.execute(&format!(
+                "DELETE FROM ist.IndexedFile WHERE path = '{path}'"
+            ));
+        }
+        let _ = server.graph_store.execute(&format!(
+            "DELETE FROM ist.Chunk WHERE id IN ('{near_id}', '{far_id}')"
+        ));
+        for path in [&near_path, &far_path] {
+            server
+                .graph_store
+                .execute(&format!(
+                    "INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms) \
+                     VALUES ('{path}', '{code}', 0) ON CONFLICT (path) DO NOTHING"
+                ))
+                .unwrap();
+        }
+
+        // NEAR chunk: embedding aligned with the query vector → distance 0 →
+        // passes the cosine threshold → must surface as `semantic`.
+        // (Column shape mirrors the proven content-bearing insert in the
+        // soll_and_guidelines test module: kind=function + start/end lines.)
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('{near_id}', 'symbol', 'sym-{near_id}', '{code}', '{near_path}', 'function', 'totally unrelated body text', '{near_hash}', 1, 5)"
+            ))
+            .unwrap();
+        // FAR chunk: orthogonal embedding → distance 1.0 → fails the cosine
+        // threshold; but its content carries the lexical term → surfaces as `lexical`.
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('{far_id}', 'symbol', 'sym-{far_id}', '{code}', '{far_path}', 'function', 'this body mentions widgetlexeme-{code} explicitly', '{far_hash}', 1, 5)"
+            ))
+            .unwrap();
+
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+                 VALUES ('{near_id}', '{model_id}', '{code}', '{near_hash}', {emb}, 0)",
+                emb = unit_vector_literal(0)
+            ))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+                 VALUES ('{far_id}', '{model_id}', '{code}', '{far_hash}', {emb}, 0)",
+                emb = unit_vector_literal(1)
+            ))
+            .unwrap();
+
+        let qvec_literal = unit_vector_literal(0);
+        let cosine_expr = format!("(ce.embedding <=> {qvec_literal})");
+        let project_filter =
+            McpServer::sql_project_filter_for_fields(Some(&code), &["c.project_code"]);
+        // Lexical arm: a per-invocation term matches only THIS test's FAR chunk.
+        // `c.content` is lowercased by the predicate, so the pattern must be too
+        // (the project code is uppercase).
+        let lexical_predicate = format!(
+            "lower(c.content) LIKE '%widgetlexeme-{lc}%'",
+            lc = code.to_ascii_lowercase()
+        );
+
+        let production_query = McpServer::build_semantic_chunk_query(
+            &cosine_expr,
+            &qvec_literal,
+            40,
+            &project_filter,
+            "1=0",                 // entry_id_match (none)
+            "1=0",                 // entry_uri_match (none)
+            &lexical_predicate,    // lexical_predicate
+            "1=0",                 // lexical_uri_match (none)
+            "1=0",                 // path_match (none)
+            10,
+        );
+
+        // Deterministic composition variant of the IDENTICAL CTE shape: scope the
+        // ANN sub-pool to THIS test's project so the two seeded rows are the whole
+        // candidate set (HNSW recall of the freshly-seeded outlier over the shared
+        // dev table is NOT guaranteed — that concern is covered structurally by
+        // `semantic_chunk_query_uses_hnsw_index` via EXPLAIN). The only edit is the
+        // ANN CTE's FROM clause; everything downstream (sem/lex UNION, dedup,
+        // source-tag CASE, distance projection/parse) is byte-identical to prod.
+        let ann_from = "FROM ist.ChunkEmbedding ce ";
+        let ann_from_scoped =
+            format!("FROM ist.ChunkEmbedding ce WHERE ce.project_code = '{code}' ");
+        assert!(
+            production_query.contains(ann_from),
+            "ANN CTE FROM clause shape changed; update the composition test scoping"
+        );
+        let query = production_query.replacen(ann_from, &ann_from_scoped, 1);
+
+        // Plain reader = exact distance scan (no HNSW), fully deterministic. A
+        // parse/bind error (the alias bug) returns the REQ-AXO-129 error envelope
+        // → `Err`, which still fails here.
+        let raw = server
+            .graph_store
+            .query_json(&query)
+            .expect("semantic composition query must execute (no SQL parse/bind error)");
+        let rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&raw).expect("query result must be a JSON row array");
+
+        // Composition: both arms surfaced.
+        let semantic_row = rows
+            .iter()
+            .find(|row| row.first().and_then(|v| v.as_str()) == Some(near_id.as_str()))
+            .expect("near chunk must surface via the semantic arm");
+        assert_eq!(
+            semantic_row.get(8).and_then(|v| v.as_str()),
+            Some("semantic"),
+            "near chunk must be tagged `semantic`: {semantic_row:?}"
+        );
+        // The native reader renders FLOAT8 as a string; `parse_f64_value` is the
+        // exact production parse, so the test asserts the value the lane delivers.
+        let near_dist = semantic_row
+            .get(9)
+            .and_then(McpServer::parse_f64_value)
+            .expect("near chunk must carry a parseable cosine distance");
+        assert!(
+            (0.0..0.55).contains(&near_dist),
+            "near chunk distance must be under the 0.55 threshold: {near_dist} in {semantic_row:?}"
+        );
+
+        let lexical_row = rows
+            .iter()
+            .find(|row| row.first().and_then(|v| v.as_str()) == Some(far_id.as_str()))
+            .expect("far chunk must surface via the lexical arm (hybrid composition)");
+        assert_eq!(
+            lexical_row.get(8).and_then(|v| v.as_str()),
+            Some("lexical"),
+            "far chunk must be tagged `lexical` (excluded from semantic arm by threshold): {lexical_row:?}"
+        );
+        // NULL renders as the literal string `"null"` → `parse_f64_value` is None.
+        assert!(
+            lexical_row.get(9).and_then(McpServer::parse_f64_value).is_none(),
+            "lexical-arm row must have an absent (NULL) distance: {lexical_row:?}"
+        );
     }
 }
