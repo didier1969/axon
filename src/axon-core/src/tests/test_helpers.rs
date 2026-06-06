@@ -72,7 +72,14 @@ pub fn create_test_db() -> Result<GraphStore> {
         .unwrap()
         .as_nanos();
     let db_path = format!("/tmp/axon_test_db_{}_{}_{}", pid, now, count);
-    let store = GraphStore::new(&db_path)?;
+    // REQ-AXO-901882 — harness guard: never resolve to the production
+    // axon_live/axon_dev SOLL. `GraphStore::new` would fall through to
+    // `resolve_database_url(None)` (defaults `AXON_INSTANCE=live`); route via
+    // an explicit URL to a process-shared disposable clone of
+    // `axon_test_template` instead. Per-test isolation of these sites is the
+    // follow-up REQ-AXO-901877.
+    let url = crate::test_support::test_db::shared_test_db_url();
+    let store = GraphStore::new_with_database(&db_path, &url)?;
     let _ = store.sync_project_registry_entry(
         "BKS",
         Some("BookingSystem"),
