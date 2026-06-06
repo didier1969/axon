@@ -348,10 +348,10 @@ SELECT
     p.root_path,
     COALESCE(f.files_total, 0)      AS files_total,
     COALESCE(f.files_chunked, 0)    AS files_chunked,
-    -- REQ-AXO-901890 — files that finished parsing (status='indexed'). The
-    -- dashboard funnel needs this to split "Indexed = Chunked + No symbols"
-    -- from "Remaining = To process - Indexed". files_total counts ALL enrolled
-    -- (status discovered + indexed); files_indexed is the processed subset.
+    -- REQ-AXO-901890 — files A-processed (parser ran, content_hash set). The
+    -- dashboard funnel splits "Indexed = Chunked + No symbols" from
+    -- "Remaining = To process - Indexed". files_total counts ALL enrolled
+    -- (discovered+parsed); files_indexed is the parsed subset.
     COALESCE(f.files_indexed, 0)    AS files_indexed,
     COALESCE(s.symbols, 0)          AS symbols,
     COALESCE(c.chunks_total, 0)     AS chunks_total,
@@ -364,7 +364,12 @@ LEFT JOIN (
     SELECT i.project_code,
            count(*)                                          AS files_total,
            count(*) FILTER (WHERE ch.file_path IS NOT NULL)  AS files_chunked,
-           count(*) FILTER (WHERE i.status = 'indexed')      AS files_indexed
+           -- REQ-AXO-901890 — "Indexed" = A-processed (parser ran). The marker
+           -- is a populated content_hash (A3 sets it on parse), NOT status
+           -- (='indexed' is a late embedding-completion flag, lags chunking:
+           -- empirically 59 'indexed' vs 10k chunked). content_hash set ⊇
+           -- chunked, so Indexed = Chunked + No symbols holds.
+           count(*) FILTER (WHERE i.content_hash IS NOT NULL AND i.content_hash <> '') AS files_indexed
     FROM ist.IndexedFile i
     LEFT JOIN (SELECT DISTINCT file_path FROM ist.Chunk) ch ON ch.file_path = i.path
     GROUP BY i.project_code
