@@ -100,63 +100,62 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           </section>
         <% end %>
 
-        <%!-- INDEXATION FUNNEL — canonical IST projection (ist.project_telemetry,
-             REQ-AXO-901865). Single source, monotone by construction. The FS
-             scan (disk/eligible) is a SEPARATE diagnostic shown in the header,
-             NOT a funnel stage — it comes from the filesystem walk, a different
-             source than the IST, so mixing it broke monotonicity. Coverage is
-             REAL (files with chunks), not the retired status column (REQ-289). --%>
-        <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm px-5 py-3">
-          <div class="flex items-center justify-between mb-2">
-            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Indexation Funnel</div>
-            <div class="font-mono text-[10px] text-slate-500">
-              FS scan: <span class="text-slate-400 tabular-nums">{fs_val(@dashboard_state, :disk_files)}</span> on disk ·
-              <span class="text-slate-400 tabular-nums">{fs_val(@dashboard_state, :eligible_files)}</span> eligible
+        <%!-- INDEXATION FUNNEL — boxes canoniques séparés (ist.project_telemetry,
+             REQ-AXO-901865). Source unique PG, monotone par construction. Deux
+             tiers : Fichiers (Enrolled → Chunkés → À traiter) + Contenu. Les % en
+             sub matérialisent le rétrécissement de l'entonnoir ; invariants :
+             Chunkés + À traiter = Enrolled · Pending + Embeddings = Chunks.
+             FS scan / Eligible / Non-chunkable différés : compteurs FS-walk
+             globaux non-canoniques (REQ-AXO-901749 per-projet + 901831 gap). --%>
+        <section class="col-span-12 space-y-3">
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Fichiers</div>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <.kpi
+                label="Enrolled"
+                value={totals_field(@dashboard_state, :files, 0) |> full_int()}
+                sub="fichiers pris dans l'index"
+                tone={:neutral}
+              />
+              <.kpi
+                label="Chunkés"
+                value={totals_field(@dashboard_state, :files_chunked, 0) |> full_int()}
+                sub={"#{full_pct(totals_field(@dashboard_state, :files_chunked, 0), totals_field(@dashboard_state, :files, 0))} des enrolled"}
+                tone={:ok}
+              />
+              <.kpi
+                label="À traiter"
+                value={(totals_field(@dashboard_state, :files, 0) - totals_field(@dashboard_state, :files_chunked, 0)) |> full_int()}
+                sub="enrolled non chunkés"
+                tone={:neutral}
+              />
             </div>
           </div>
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-sm text-slate-200">
-            <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Enrolled</span>
-              <strong class="tabular-nums">{totals_field(@dashboard_state, :files, 0) |> full_int()}</strong>
-            </span>
-            <span class="text-slate-600">&rarr;</span>
-            <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Chunked</span>
-              <strong class="tabular-nums">{totals_field(@dashboard_state, :files_chunked, 0) |> full_int()}</strong>
-              <%= if (unchunked = totals_field(@dashboard_state, :files, 0) - totals_field(@dashboard_state, :files_chunked, 0)) > 0 do %>
-                <span class="text-slate-500 ml-1">(&minus;{full_int(unchunked)} non-code/unresolved)</span>
-              <% end %>
-            </span>
-            <span class="text-slate-600">&rarr;</span>
-            <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Chunks</span>
-              <strong class="tabular-nums">{totals_field(@dashboard_state, :chunks, 0) |> full_int()}</strong>
-            </span>
-            <span class="text-slate-600">&rarr;</span>
-            <span>
-              <span class="text-slate-500 text-[10px] uppercase tracking-wider mr-1">Embeddings</span>
-              <strong class={["tabular-nums", coverage_text_class(totals_field(@dashboard_state, :coverage_pct, 0.0))]}>
-                {totals_field(@dashboard_state, :embedded, 0) |> full_int()}
-              </strong>
-              <span class="text-slate-500 text-[10px] ml-1">
-                ({:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 1)}%)
-              </span>
-            </span>
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Contenu</div>
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
+              <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
+              <.kpi label="Chunks" value={totals_field(@dashboard_state, :chunks, 0) |> full_int()} tone={:neutral} />
+              <.kpi
+                label="Pending"
+                value={totals_field(@dashboard_state, :pending, 0) |> full_int()}
+                tone={pending_tone(@dashboard_state)}
+              />
+              <.kpi
+                label="Embeddings"
+                value={totals_field(@dashboard_state, :embedded, 0) |> full_int()}
+                sub={"#{:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 1)}% couverts"}
+                tone={coverage_tone(@dashboard_state)}
+              />
+              <.kpi
+                label="FTS"
+                value={totals_field(@dashboard_state, :fts, 0) |> full_int()}
+                sub={"#{full_pct(totals_field(@dashboard_state, :fts, 0), totals_field(@dashboard_state, :chunks, 0))} des chunks"}
+                tone={fts_tone(@dashboard_state)}
+              />
+            </div>
           </div>
-        </section>
-
-        <%!-- CORPUS — métriques HORS-funnel uniquement. Enrolled/Chunked/
-             Chunks/Embeddings + coverage% vivent dans le funnel canonique
-             ci-dessus (source unique ist.project_telemetry) ; on ne garde ici
-             que ce que le funnel ne montre pas. --%>
-        <section class="col-span-12 grid grid-cols-2 md:grid-cols-3 gap-3">
-          <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
-          <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
-          <.kpi
-            label="Pending (queue)"
-            value={totals_field(@dashboard_state, :pending, 0) |> full_int()}
-            tone={pending_tone(@dashboard_state)}
-          />
         </section>
 
         <%!-- PIPELINE V2 SVG TOPOLOGY --%>
@@ -507,6 +506,29 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp pending_tone(%DashboardState{totals: %{pending: n}}) when is_number(n) and n < 1000, do: :neutral
   defp pending_tone(_), do: :warn
 
+  # Funnel narrowing % (sub label on the KPI boxes). Guards div/0.
+  defp full_pct(num, den) when is_integer(num) and is_integer(den) and den > 0,
+    do: "#{round(num * 100 / den)}%"
+
+  defp full_pct(_num, _den), do: "0%"
+
+  # Embeddings box tone: green only when fully covered.
+  defp coverage_tone(%DashboardState{totals: %{coverage_pct: p}}) when is_number(p) and p >= 99.9,
+    do: :ok
+
+  defp coverage_tone(_), do: :neutral
+
+  # FTS box tone: green when every chunk is FTS-indexed, warn on a deficit.
+  defp fts_tone(%DashboardState{totals: %{chunks: c, fts: f}})
+       when is_integer(c) and is_integer(f) and c > 0 and f >= c,
+       do: :ok
+
+  defp fts_tone(%DashboardState{totals: %{chunks: c, fts: f}})
+       when is_integer(c) and is_integer(f) and c > 0,
+       do: :warn
+
+  defp fts_tone(_), do: :neutral
+
   defp pressure_class("healthy"), do: "text-emerald-300"
   defp pressure_class("warm"), do: "text-amber-300"
   defp pressure_class("hot"), do: "text-red-300"
@@ -521,14 +543,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp compute_class("GPU"), do: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
   defp compute_class("CPU"), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
   defp compute_class(_), do: "border-slate-700 bg-slate-800/40 text-slate-300"
-
-  defp fs_val(%DashboardState{filesystem: nil}, _key), do: "n/a"
-  defp fs_val(%DashboardState{filesystem: fs}, key) do
-    case Map.get(fs, key) do
-      n when is_integer(n) and n >= 0 -> full_int(n)
-      _ -> "n/a"
-    end
-  end
 
   defp coverage_text_class(pct) when is_number(pct) and pct >= 95.0, do: "text-emerald-300"
   defp coverage_text_class(pct) when is_number(pct) and pct >= 75.0, do: "text-slate-100"

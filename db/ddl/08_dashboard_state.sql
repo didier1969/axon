@@ -69,6 +69,7 @@ BEGIN
             'edges',         edges,
             'chunks',        chunks_total,
             'embedded',      chunks_embedded,
+            'fts',           chunks_fts,
             'coverage_pct',  CASE WHEN chunks_total > 0 THEN LEAST(100.0::numeric, ROUND(chunks_embedded::numeric * 100.0 / chunks_total::numeric, 2)) ELSE 0::numeric END
         ) ORDER BY chunks_total DESC),
         '[]'::jsonb
@@ -126,6 +127,7 @@ BEGIN
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),
         'embedded',        COALESCE((SELECT SUM((p->>'embedded')::bigint) FROM jsonb_array_elements(pp) p), 0),
+        'fts',             COALESCE((SELECT SUM((p->>'fts')::bigint)      FROM jsonb_array_elements(pp) p), 0),
         -- Canonical throughput proof (REQ-AXO-901865 family) : embeddings
         -- written to ist.ChunkEmbedding in the last 60 s. PG-derived from the
         -- actual table, process-independent, survives indexer restarts — the

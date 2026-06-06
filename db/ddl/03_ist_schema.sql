@@ -352,6 +352,7 @@ SELECT
     COALESCE(c.chunks_total, 0)     AS chunks_total,
     COALESCE(c.chunks_embedded, 0)  AS chunks_embedded,
     COALESCE(c.chunks_pending, 0)   AS chunks_pending,
+    COALESCE(c.chunks_fts, 0)       AS chunks_fts,
     COALESCE(e.edges, 0)            AS edges
 FROM ist.Project p
 LEFT JOIN (
@@ -369,7 +370,8 @@ LEFT JOIN (
     SELECT project_code,
            count(*)                                          AS chunks_total,
            count(*) FILTER (WHERE embed_status = 'embedded') AS chunks_embedded,
-           count(*) FILTER (WHERE embed_status = 'pending')  AS chunks_pending
+           count(*) FILTER (WHERE embed_status = 'pending')  AS chunks_pending,
+           count(*) FILTER (WHERE content_tsv IS NOT NULL)   AS chunks_fts
     FROM ist.Chunk GROUP BY project_code
 ) c ON c.project_code = p.code
 LEFT JOIN (
