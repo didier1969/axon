@@ -109,30 +109,42 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
              globaux non-canoniques (REQ-AXO-901749 per-projet + 901831 gap). --%>
         <section class="col-span-12 space-y-3">
           <div>
-            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Fichiers</div>
-            <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Files</div>
+            <%!-- REQ-AXO-901886 — entonnoir 4 valeurs. A3 est atomique (enrôle +
+                 chunke dans la même tx), donc il n'existe pas d'"enrôlé en
+                 attente de chunk" : tout enrôlé est soit Chunké, soit Sans
+                 symbole (0 chunk, terminal). Le vrai backlog = fichiers
+                 découverts sur disque pas encore enrôlés (Restant à traiter).
+                 Invariant : Chunkés + Sans symbole = Enrôlés. --%>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
               <.kpi
                 label="Enrolled"
                 value={totals_field(@dashboard_state, :files, 0) |> full_int()}
-                sub="fichiers pris dans l'index"
+                sub="processed · marker written"
                 tone={:neutral}
               />
               <.kpi
-                label="Chunkés"
+                label="Chunked"
                 value={totals_field(@dashboard_state, :files_chunked, 0) |> full_int()}
-                sub={"#{full_pct(totals_field(@dashboard_state, :files_chunked, 0), totals_field(@dashboard_state, :files, 0))} des enrolled"}
+                sub={"#{full_pct(totals_field(@dashboard_state, :files_chunked, 0), totals_field(@dashboard_state, :files, 0))} · searchable"}
                 tone={:ok}
               />
               <.kpi
-                label="À traiter"
+                label="No symbols"
                 value={(totals_field(@dashboard_state, :files, 0) - totals_field(@dashboard_state, :files_chunked, 0)) |> full_int()}
-                sub="enrolled non chunkés"
+                sub="0 chunks · config/data/parse-fail (done)"
                 tone={:neutral}
+              />
+              <.kpi
+                label="Remaining"
+                value={files_remaining_display(@dashboard_state)}
+                sub="discovered, not yet enrolled (FS scan)"
+                tone={files_remaining_tone(@dashboard_state)}
               />
             </div>
           </div>
           <div>
-            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Contenu</div>
+            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Content</div>
             <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
               <.kpi label="Symbols" value={totals_field(@dashboard_state, :symbols, 0) |> full_int()} tone={:neutral} />
               <.kpi label="Edges" value={totals_field(@dashboard_state, :edges, 0) |> full_int()} tone={:neutral} />
@@ -145,13 +157,13 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               <.kpi
                 label="Embeddings"
                 value={totals_field(@dashboard_state, :embedded, 0) |> full_int()}
-                sub={"#{:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 1)}% couverts"}
+                sub={"#{:erlang.float_to_binary(totals_field(@dashboard_state, :coverage_pct, 0.0) * 1.0, decimals: 1)}% covered"}
                 tone={coverage_tone(@dashboard_state)}
               />
               <.kpi
                 label="FTS"
                 value={totals_field(@dashboard_state, :fts, 0) |> full_int()}
-                sub={"#{full_pct(totals_field(@dashboard_state, :fts, 0), totals_field(@dashboard_state, :chunks, 0))} des chunks"}
+                sub={"#{full_pct(totals_field(@dashboard_state, :fts, 0), totals_field(@dashboard_state, :chunks, 0))} of chunks"}
                 tone={fts_tone(@dashboard_state)}
               />
             </div>
@@ -476,6 +488,40 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
 
   defp totals_field(%DashboardState{totals: nil}, _key, default), do: default
   defp totals_field(%DashboardState{totals: t}, key, default), do: Map.get(t, key, default)
+
+  defp filesystem_field(%DashboardState{filesystem: nil}, _key, default), do: default
+  defp filesystem_field(%DashboardState{filesystem: fs}, key, default), do: Map.get(fs, key, default)
+
+  # REQ-AXO-901886 — "Restant à traiter" = fichiers éligibles découverts sur
+  # disque pas encore enrôlés. eligible_files est un compteur FS-walk global
+  # (TTL 60 s), sentinelle -1 = inconnu. Tant que le walk post-promote n'a pas
+  # purgé les IndexedFile désormais exclus (third_party/.claude/.planning),
+  # eligible < enrolled transitoirement → on plancher à 0. Source canonique
+  # per-projet : REQ-AXO-901831 (gap connu).
+  defp files_remaining(%DashboardState{} = state) do
+    eligible = filesystem_field(state, :eligible_files, -1)
+    enrolled = totals_field(state, :files, 0)
+
+    cond do
+      not is_integer(eligible) or eligible < 0 -> nil
+      true -> max(0, eligible - enrolled)
+    end
+  end
+
+  defp files_remaining_display(state) do
+    case files_remaining(state) do
+      nil -> "—"
+      n -> full_int(n)
+    end
+  end
+
+  defp files_remaining_tone(state) do
+    case files_remaining(state) do
+      nil -> :neutral
+      0 -> :ok
+      _ -> :neutral
+    end
+  end
 
   defp lifecycle_field(%DashboardState{lifecycle: nil}, _key, default), do: default
   defp lifecycle_field(%DashboardState{lifecycle: l}, key, default), do: Map.get(l, key, default) || default
