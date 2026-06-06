@@ -446,6 +446,13 @@ pub struct PgBulkBatch {
     pub contains: Vec<RelationRow>,
     pub calls: Vec<RelationRow>,
     pub calls_nif: Vec<RelationRow>,
+    /// REQ-AXO-901493 — every OTHER parser-emitted, `relation_table`-mapped
+    /// edge kind (IMPLEMENTS / IMPORTS / USES / EXTENDS / READS / DECLARES /
+    /// EXPOSES / TESTS), carried generically as `(relation_type, row)`. The A3
+    /// write path used to match only CALLS/CALLS_NIF and drop the rest
+    /// (`_ => {}`), so the IST graph held 0 of these edge classes. The COPY
+    /// merge (`copy_edges_in_tx`) is already relation-type-generic.
+    pub other_edges: Vec<(String, RelationRow)>,
     pub indexed_files: Vec<(String, String, i64, i64, i64)>,
     /// REQ-AXO-901860 — the single project_code this batch belongs to
     /// (A3 groups by resolved project_code, one group per flush). The
@@ -465,6 +472,7 @@ impl PgBulkBatch {
             && self.contains.is_empty()
             && self.calls.is_empty()
             && self.calls_nif.is_empty()
+            && self.other_edges.is_empty()
             && self.indexed_files.is_empty()
     }
 
@@ -474,6 +482,7 @@ impl PgBulkBatch {
             + self.contains.len()
             + self.calls.len()
             + self.calls_nif.len()
+            + self.other_edges.len()
             + self.indexed_files.len()
     }
 }
@@ -555,7 +564,8 @@ async fn flush_batch_async(
     // REQ-AXO-901747 — unified Edge table (post-MIL-AXO-017).
     let has_edges = !batch.contains.is_empty()
         || !batch.calls.is_empty()
-        || !batch.calls_nif.is_empty();
+        || !batch.calls_nif.is_empty()
+        || !batch.other_edges.is_empty();
     if has_edges {
         let mut edge_rows: Vec<(&str, &RelationRow)> = Vec::new();
         for r in &batch.contains {
@@ -566,6 +576,10 @@ async fn flush_batch_async(
         }
         for r in &batch.calls_nif {
             edge_rows.push(("CALLS_NIF", r));
+        }
+        // REQ-AXO-901493 — generic mapped edges (IMPLEMENTS/IMPORTS/USES/...).
+        for (rel, r) in &batch.other_edges {
+            edge_rows.push((rel.as_str(), r));
         }
         copy_edges_in_tx(&tx, &edge_rows).await?;
     }
@@ -1016,11 +1030,20 @@ mod tests {
                 target_id: "nif_x".to_string(),
                 project_code: "AXO".to_string(),
             }],
+            // REQ-AXO-901493 — generic mapped-edge bucket counts too.
+            other_edges: vec![(
+                "IMPLEMENTS".to_string(),
+                RelationRow {
+                    source_id: "s1".to_string(),
+                    target_id: "Trait".to_string(),
+                    project_code: "AXO".to_string(),
+                },
+            )],
             indexed_files: vec![],
             project_code: "AXO".to_string(),
         };
         assert!(!b.is_empty());
-        assert_eq!(b.row_count(), 4);
+        assert_eq!(b.row_count(), 5);
     }
 
     #[test]

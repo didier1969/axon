@@ -231,6 +231,12 @@ impl GraphStore {
             "declares" => Some("DECLARES"),
             "exposes" => Some("EXPOSES"),
             "implements" => Some("IMPLEMENTS"),
+            // REQ-AXO-901493 — parser-emitted edge kinds that were unmapped
+            // (returned None → dropped before ever reaching the write path).
+            "imports" => Some("IMPORTS"),
+            "uses" => Some("USES"),
+            "extends" => Some("EXTENDS"),
+            "tests" => Some("TESTS"),
             _ => None,
         }
     }
@@ -995,9 +1001,12 @@ impl GraphStore {
         let mut contains_rows: Vec<RelationRow> = Vec::new();
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
+        // REQ-AXO-901493 — generic bucket for every other mapped edge kind.
+        let mut other_edge_rows: Vec<(&'static str, RelationRow)> = Vec::new();
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
+        let mut seen_other: HashSet<(&'static str, RelationRow)> = HashSet::new();
         let mut chunk_ids_emitted: Vec<String> = Vec::new();
 
         let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
@@ -1086,7 +1095,14 @@ impl GraphStore {
                         calls_nif_rows.push(row);
                     }
                 }
-                _ => {}
+                // REQ-AXO-901493 — persist every other mapped edge kind
+                // (IMPLEMENTS/IMPORTS/USES/EXTENDS/READS/DECLARES/EXPOSES/TESTS)
+                // instead of dropping it.
+                other => {
+                    if seen_other.insert((other, row.clone())) {
+                        other_edge_rows.push((other, row));
+                    }
+                }
             }
         }
 
@@ -1097,6 +1113,10 @@ impl GraphStore {
             contains: contains_rows,
             calls: calls_rows,
             calls_nif: calls_nif_rows,
+            other_edges: other_edge_rows
+                .into_iter()
+                .map(|(t, r)| (t.to_string(), r))
+                .collect(),
             indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms, last_seen_ms, content.len() as i64)],
             project_code: project_code.to_string(),
         };
@@ -1165,9 +1185,12 @@ impl GraphStore {
         let mut contains_rows: Vec<RelationRow> = Vec::new();
         let mut calls_rows: Vec<RelationRow> = Vec::new();
         let mut calls_nif_rows: Vec<RelationRow> = Vec::new();
+        // REQ-AXO-901493 — generic bucket for every other mapped edge kind.
+        let mut other_edge_rows: Vec<(&'static str, RelationRow)> = Vec::new();
         let mut seen_symbols: HashSet<(String, String)> = HashSet::new();
         let mut seen_calls: HashSet<RelationRow> = HashSet::new();
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
+        let mut seen_other: HashSet<(&'static str, RelationRow)> = HashSet::new();
         // REQ-AXO-295 Phase 2 — IndexedFile rows accumulated for one
         // multi-row INSERT VALUES (was one INSERT per file).
         let mut indexed_file_rows: Vec<(String, String, i64, i64, i64)> = Vec::with_capacity(files.len());
@@ -1303,7 +1326,13 @@ impl GraphStore {
                             calls_nif_rows.push(row);
                         }
                     }
-                    _ => {}
+                    // REQ-AXO-901493 — persist every other mapped edge kind
+                    // (IMPLEMENTS/IMPORTS/USES/EXTENDS/...) instead of dropping.
+                    other => {
+                        if seen_other.insert((other, row.clone())) {
+                            other_edge_rows.push((other, row));
+                        }
+                    }
                 }
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1322,6 +1351,10 @@ impl GraphStore {
             contains: contains_rows,
             calls: calls_rows,
             calls_nif: calls_nif_rows,
+            other_edges: other_edge_rows
+                .into_iter()
+                .map(|(t, r)| (t.to_string(), r))
+                .collect(),
             indexed_files: indexed_file_rows,
             project_code: project_code.to_string(),
         };
