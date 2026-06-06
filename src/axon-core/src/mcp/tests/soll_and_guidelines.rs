@@ -142,6 +142,68 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_soll_manager_link_cycle_guard_filiation_and_inheritance() {
+    // REQ-AXO-901593 — the cycle pre-check covers BOTH filiation (regression
+    // after the parametrization refactor) and the non-filiation guarded
+    // relations (INHERITS_FROM/USES/...). DEC-AXO-098.
+    let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 0, 2, 0, 0) ON CONFLICT (project_code) DO UPDATE SET last_req = 2"
+        ))
+        .unwrap();
+    for (id, ty) in [
+        (format!("REQ-{code}-001"), "Requirement"),
+        (format!("REQ-{code}-002"), "Requirement"),
+        (format!("GUI-{code}-001"), "Guideline"),
+        (format!("GUI-{code}-002"), "Guideline"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    let link = |src: &str, tgt: &str, rel: &str, rid: i64| -> serde_json::Value {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "link",
+                    "entity": "requirement",
+                    "data": { "source_id": src, "target_id": tgt, "relation_type": rel }
+                }
+            })),
+            id: Some(json!(rid)),
+        };
+        server.handle_request(req).unwrap().result.unwrap()
+    };
+    let is_err = |r: &serde_json::Value| r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let req1 = format!("REQ-{code}-001");
+    let req2 = format!("REQ-{code}-002");
+    // Filiation (regression): REFINES forms a DAG ; the reverse closes a cycle.
+    assert!(!is_err(&link(&req1, &req2, "REFINES", 1)), "first REFINES should succeed: {:?}", link(&req1, &req2, "REFINES", 1));
+    assert!(is_err(&link(&req2, &req1, "REFINES", 2)), "filiation cycle must be blocked");
+
+    let g1 = format!("GUI-{code}-001");
+    let g2 = format!("GUI-{code}-002");
+    // Non-filiation (REQ-AXO-901593 new): INHERITS_FROM is now cycle-guarded.
+    let first = link(&g1, &g2, "INHERITS_FROM", 3);
+    assert!(!is_err(&first), "first INHERITS_FROM should succeed: {first:?}");
+    assert!(
+        is_err(&link(&g2, &g1, "INHERITS_FROM", 4)),
+        "inheritance cycle must be blocked (REQ-AXO-901593)"
+    );
+}
+
+#[test]
 fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // attach_to seeding (Pillar).

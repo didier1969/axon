@@ -982,28 +982,52 @@ impl McpServer {
                     Ok((relation_type, policy)) => {
                         let rel_table = relation_table_name(relation_type).unwrap_or(relation_type);
 
-                        // MIL-AXO-020 slice 4 (REQ-AXO-91544) — cycle pre-check
-                        // on filiation relations. Activates DEC-AXO-098.
-                        const FILIATION: [&str; 6] = [
-                            "SOLVES",
-                            "BELONGS_TO",
-                            "REFINES",
-                            "TARGETS",
-                            "EXPLAINS",
-                            "VERIFIES",
+                        // MIL-AXO-020 slice 4 (REQ-AXO-91544) + REQ-AXO-901593 —
+                        // cycle pre-check on the structural-backbone relations
+                        // (DEC-AXO-098). Filiation is traversed as ONE mixed DAG
+                        // (its 6 relations form a single hierarchy). Each
+                        // non-filiation guarded relation (INHERITS_FROM, USES,
+                        // …) is checked within its OWN type, so a legitimate
+                        // cross-family path (e.g. REFINES + INHERITS_FROM) is not
+                        // mistaken for a cycle. SUPERSEDES (redirect) and
+                        // EPITOMIZES (Pillar→Vision axis) stay exempt.
+                        const FILIATION: [&str; 6] =
+                            ["SOLVES", "BELONGS_TO", "REFINES", "TARGETS", "EXPLAINS", "VERIFIES"];
+                        const NON_FILIATION_GUARDED: [&str; 6] = [
+                            "INHERITS_FROM",
+                            "USES",
+                            "USED_BY",
+                            "EXTENDS",
+                            "COMPLIES_WITH",
+                            "ORIGINATES",
                         ];
-                        if FILIATION.contains(&relation_type) {
-                            let cycle_query = "WITH RECURSIVE ancestors(reachable) AS (SELECT target_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES') UNION SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable WHERE e.relation_type IN ('SOLVES','BELONGS_TO','REFINES','TARGETS','EXPLAINS','VERIFIES')) SELECT COUNT(*) FROM ancestors WHERE reachable = ?";
+                        let cycle_set: Option<Vec<&str>> = if FILIATION.contains(&relation_type) {
+                            Some(FILIATION.to_vec())
+                        } else if NON_FILIATION_GUARDED.contains(&relation_type) {
+                            Some(vec![relation_type])
+                        } else {
+                            None
+                        };
+                        if let Some(set) = cycle_set {
+                            let in_list = set
+                                .iter()
+                                .map(|r| format!("'{}'", r))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let cycle_query = format!(
+                                "WITH RECURSIVE ancestors(reachable) AS (SELECT target_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ({inl}) UNION SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable WHERE e.relation_type IN ({inl})) SELECT COUNT(*) FROM ancestors WHERE reachable = ?",
+                                inl = in_list
+                            );
                             let cycle_hit = self
                                 .graph_store
-                                .query_count_param(cycle_query, &json!([tgt, src]))
+                                .query_count_param(&cycle_query, &json!([tgt, src]))
                                 .unwrap_or(0);
                             if cycle_hit > 0 {
                                 return Some(json!({
                                     "content": [{
                                         "type": "text",
                                         "text": format!(
-                                            "Link `{}` -{}-> `{}` would create a filiation cycle (target already reaches source).",
+                                            "Link `{}` -{}-> `{}` would create a cycle (target already reaches source via the same relation family).",
                                             src, relation_type, tgt
                                         )
                                     }],
@@ -1022,7 +1046,7 @@ impl McpServer {
                                             "source_id": src,
                                             "target_id": tgt,
                                             "relation_type": relation_type,
-                                            "hint": "filiation edges form a DAG ; this link would close a cycle. Use SUPERSEDES if you intended a redirect, or restructure the parent chain.",
+                                            "hint": "guarded structural relations (filiation + INHERITS_FROM/USES/USED_BY/EXTENDS/COMPLIES_WITH/ORIGINATES) must stay acyclic ; this link would close a cycle. Use SUPERSEDES if you intended a redirect, or restructure the chain.",
                                             "follow_up_tools": ["soll_acyclic_audit"],
                                         },
                                         "canonical_source": "DEC-AXO-098",
