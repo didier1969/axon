@@ -110,36 +110,41 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
         <section class="col-span-12 space-y-3">
           <div>
             <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Files</div>
-            <%!-- REQ-AXO-901886 — entonnoir 4 valeurs. A3 est atomique (enrôle +
-                 chunke dans la même tx), donc il n'existe pas d'"enrôlé en
-                 attente de chunk" : tout enrôlé est soit Chunké, soit Sans
-                 symbole (0 chunk, terminal). Le vrai backlog = fichiers
-                 découverts sur disque pas encore enrôlés (Restant à traiter).
-                 Invariant : Chunkés + Sans symbole = Enrôlés. --%>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <%!-- REQ-AXO-901890 — 5-box funnel, status-aware (ist.indexedfile.status).
+                 To process (total) splits into Indexed (processed) + Remaining
+                 (status='discovered', not yet processed). Indexed is a SUBTOTAL =
+                 Chunked + No symbols. All % are of To process. Invariants:
+                 Indexed + Remaining = To process ; Chunked + No symbols = Indexed. --%>
+            <div class="grid grid-cols-5 gap-3">
               <.kpi
-                label="Enrolled"
-                value={totals_field(@dashboard_state, :files, 0) |> full_int()}
-                sub="processed · marker written"
+                label="To process"
+                value={funnel_to_process(@dashboard_state) |> full_int()}
+                sub="total to index"
+                tone={:neutral}
+              />
+              <.kpi
+                label="Indexed"
+                value={funnel_indexed(@dashboard_state) |> full_int()}
+                sub={"#{full_pct(funnel_indexed(@dashboard_state), funnel_to_process(@dashboard_state))} · = Chunked + No symbols"}
                 tone={:neutral}
               />
               <.kpi
                 label="Chunked"
-                value={totals_field(@dashboard_state, :files_chunked, 0) |> full_int()}
-                sub={"#{full_pct(totals_field(@dashboard_state, :files_chunked, 0), totals_field(@dashboard_state, :files, 0))} · searchable"}
+                value={funnel_chunked(@dashboard_state) |> full_int()}
+                sub={"#{full_pct(funnel_chunked(@dashboard_state), funnel_to_process(@dashboard_state))} of total"}
                 tone={:ok}
               />
               <.kpi
                 label="No symbols"
-                value={(totals_field(@dashboard_state, :files, 0) - totals_field(@dashboard_state, :files_chunked, 0)) |> full_int()}
-                sub="0 chunks · config/data/parse-fail (done)"
+                value={funnel_no_symbols(@dashboard_state) |> full_int()}
+                sub={"#{full_pct(funnel_no_symbols(@dashboard_state), funnel_to_process(@dashboard_state))} of total"}
                 tone={:neutral}
               />
               <.kpi
                 label="Remaining"
-                value={files_remaining_display(@dashboard_state)}
-                sub="discovered, not yet enrolled (FS scan)"
-                tone={files_remaining_tone(@dashboard_state)}
+                value={funnel_remaining(@dashboard_state) |> full_int()}
+                sub={"#{full_pct(funnel_remaining(@dashboard_state), funnel_to_process(@dashboard_state))} of total"}
+                tone={funnel_remaining_tone(@dashboard_state)}
               />
             </div>
           </div>
@@ -489,38 +494,20 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   defp totals_field(%DashboardState{totals: nil}, _key, default), do: default
   defp totals_field(%DashboardState{totals: t}, key, default), do: Map.get(t, key, default)
 
-  defp filesystem_field(%DashboardState{filesystem: nil}, _key, default), do: default
-  defp filesystem_field(%DashboardState{filesystem: fs}, key, default), do: Map.get(fs, key, default)
+  # REQ-AXO-901890 — status-aware 5-box funnel helpers. "To process" (files =
+  # all enrolled = the denominator) splits into Indexed (status='indexed', the
+  # processed subtotal) + Remaining (status='discovered', not yet processed).
+  # Indexed = Chunked + No symbols. All percentages are of To process. This
+  # replaces the FS-eligible-based "Remaining" (which was wrong mid-rebuild,
+  # counting in-progress files as "No symbols").
+  defp funnel_to_process(state), do: totals_field(state, :files, 0)
+  defp funnel_indexed(state), do: totals_field(state, :files_indexed, 0)
+  defp funnel_chunked(state), do: totals_field(state, :files_chunked, 0)
+  defp funnel_no_symbols(state), do: max(0, funnel_indexed(state) - funnel_chunked(state))
+  defp funnel_remaining(state), do: max(0, funnel_to_process(state) - funnel_indexed(state))
 
-  # REQ-AXO-901886 — "Restant à traiter" = fichiers éligibles découverts sur
-  # disque pas encore enrôlés. eligible_files est un compteur FS-walk global
-  # (TTL 60 s), sentinelle -1 = inconnu. Tant que le walk post-promote n'a pas
-  # purgé les IndexedFile désormais exclus (third_party/.claude/.planning),
-  # eligible < enrolled transitoirement → on plancher à 0. Source canonique
-  # per-projet : REQ-AXO-901831 (gap connu).
-  defp files_remaining(%DashboardState{} = state) do
-    eligible = filesystem_field(state, :eligible_files, -1)
-    enrolled = totals_field(state, :files, 0)
-
-    cond do
-      not is_integer(eligible) or eligible < 0 -> nil
-      true -> max(0, eligible - enrolled)
-    end
-  end
-
-  defp files_remaining_display(state) do
-    case files_remaining(state) do
-      nil -> "—"
-      n -> full_int(n)
-    end
-  end
-
-  defp files_remaining_tone(state) do
-    case files_remaining(state) do
-      nil -> :neutral
-      0 -> :ok
-      _ -> :neutral
-    end
+  defp funnel_remaining_tone(state) do
+    if funnel_remaining(state) == 0, do: :ok, else: :neutral
   end
 
   defp lifecycle_field(%DashboardState{lifecycle: nil}, _key, default), do: default

@@ -348,6 +348,11 @@ SELECT
     p.root_path,
     COALESCE(f.files_total, 0)      AS files_total,
     COALESCE(f.files_chunked, 0)    AS files_chunked,
+    -- REQ-AXO-901890 — files that finished parsing (status='indexed'). The
+    -- dashboard funnel needs this to split "Indexed = Chunked + No symbols"
+    -- from "Remaining = To process - Indexed". files_total counts ALL enrolled
+    -- (status discovered + indexed); files_indexed is the processed subset.
+    COALESCE(f.files_indexed, 0)    AS files_indexed,
     COALESCE(s.symbols, 0)          AS symbols,
     COALESCE(c.chunks_total, 0)     AS chunks_total,
     COALESCE(c.chunks_embedded, 0)  AS chunks_embedded,
@@ -358,7 +363,8 @@ FROM ist.Project p
 LEFT JOIN (
     SELECT i.project_code,
            count(*)                                          AS files_total,
-           count(*) FILTER (WHERE ch.file_path IS NOT NULL)  AS files_chunked
+           count(*) FILTER (WHERE ch.file_path IS NOT NULL)  AS files_chunked,
+           count(*) FILTER (WHERE i.status = 'indexed')      AS files_indexed
     FROM ist.IndexedFile i
     LEFT JOIN (SELECT DISTINCT file_path FROM ist.Chunk) ch ON ch.file_path = i.path
     GROUP BY i.project_code

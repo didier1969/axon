@@ -284,6 +284,7 @@ defmodule AxonDashboard.DashboardState do
     @type t :: %__MODULE__{
             files: non_neg_integer(),
             files_chunked: non_neg_integer(),
+            files_indexed: non_neg_integer(),
             symbols: non_neg_integer(),
             edges: non_neg_integer(),
             chunks: non_neg_integer(),
@@ -296,6 +297,7 @@ defmodule AxonDashboard.DashboardState do
           }
     defstruct files: 0,
               files_chunked: 0,
+              files_indexed: 0,
               symbols: 0,
               edges: 0,
               chunks: 0,
@@ -312,6 +314,7 @@ defmodule AxonDashboard.DashboardState do
       %__MODULE__{
         files: i(m, "files"),
         files_chunked: i(m, "files_chunked"),
+        files_indexed: i(m, "files_indexed"),
         symbols: i(m, "symbols"),
         edges: i(m, "edges"),
         chunks: i(m, "chunks"),

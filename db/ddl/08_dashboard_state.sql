@@ -65,6 +65,7 @@ BEGIN
             'project_code',  project_code,
             'files_total',   files_total,
             'files_chunked', files_chunked,
+            'files_indexed', files_indexed,
             'symbols',       symbols,
             'edges',         edges,
             'chunks',        chunks_total,
@@ -123,6 +124,9 @@ BEGIN
         'projects',        jsonb_array_length(pp),
         'files',           COALESCE((SELECT SUM((p->>'files_total')::bigint)   FROM jsonb_array_elements(pp) p), 0),
         'files_chunked',   COALESCE((SELECT SUM((p->>'files_chunked')::bigint) FROM jsonb_array_elements(pp) p), 0),
+        -- REQ-AXO-901890 — processed-files subtotal (status='indexed') for the
+        -- 5-box funnel: Indexed = Chunked + No symbols ; Remaining = files - Indexed.
+        'files_indexed',   COALESCE((SELECT SUM((p->>'files_indexed')::bigint) FROM jsonb_array_elements(pp) p), 0),
         'symbols',         COALESCE((SELECT SUM((p->>'symbols')::bigint)  FROM jsonb_array_elements(pp) p), 0),
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),

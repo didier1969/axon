@@ -88,9 +88,19 @@ impl NativePgCtx {
     /// create the deadpool pool and probe one connection so a misconfigured
     /// URL fails fast at boot.
     pub fn connect(database_url: &str, schema: Option<&str>) -> anyhow::Result<Self> {
+        // REQ-AXO-901890 — finish the public→ist migration at the connection
+        // layer: default EVERY connection to the `ist` schema so unqualified
+        // table names (the ~167 INSERT/FROM sites that rely on search_path)
+        // always resolve to `ist.*`, never the dropped `public.*` leftovers.
+        // `build_session_setup_sql` emits `SET search_path TO ist, public`, so
+        // `public` stays on the path for extension types (pgvector `vector`).
+        // Previously `None`/empty meant NO per-session SET, relying on the
+        // ALTER DATABASE default — fragile if that drifts or a pooled conn
+        // predates it (root of public.symbol/chunk/indexedfile getting written
+        // in parallel with ist.* during a rebuild).
         let schema_search_path = match schema {
-            None => None,
-            Some(s) if s.is_empty() => None,
+            None => Some("ist".to_string()),
+            Some(s) if s.is_empty() => Some("ist".to_string()),
             Some(s) => Some(validate_schema_identifier(s).map_err(|reason| {
                 anyhow::anyhow!("rejected schema {s:?}: {reason}")
             })?),

@@ -1557,36 +1557,25 @@ pub(crate) fn spawn_hot_delta_watcher(
 }
 
 /// REQ-AXO-91561 — directory name segments that MUST never be subscribed to
-/// recursively by the FS watcher. Cargo `target/`, Mix `_build/`, NPM
-/// `node_modules/`, etc. emit millions of inotify events during normal
-/// build cycles ; under broad `AXON_WATCH_DIR` (e.g. `$HOME/projects`)
-/// the debouncer buffer + ingress_buffer balloon and the indexer was
-/// OOM-killed at ~24 GB anon-rss on a 31 GB host (3 kernel-level kills
-/// observed 2026-05-17). The gitignore-aware scanner filters these
-/// directories *after* events arrive ; we must filter them BEFORE
-/// subscribing or while routing events.
-pub(crate) const EXCLUDED_BUILD_DIR_SEGMENTS: &[&str] = &[
-    "target",        // Rust
-    "_build",        // Elixir / Mix
-    "node_modules",  // Node / npm / yarn / pnpm
-    "build",         // Generic build output
-    "dist",          // Bundled output
-    "out",           // Generic
-    "vendor",        // Go
-    "__pycache__",   // Python bytecode
-    "coverage",      // Test coverage output
-    "cargo-target",  // Custom Cargo target dirs
-];
-
-/// REQ-AXO-91561 — true when any path segment matches an entry in
-/// `EXCLUDED_BUILD_DIR_SEGMENTS`. Used both at watch-subscription time
-/// (skip recursive watch on these subtrees) and at event-routing time
-/// (drop events whose path crosses one of these segments anywhere).
+/// REQ-AXO-91561 / REQ-AXO-901890 — true when any path segment must be pruned
+/// from the FS watcher. Cargo `target/`, Mix `_build/`, NPM `node_modules/`,
+/// `.axon/cargo-target`, etc. emit millions of inotify events during build
+/// cycles ; under broad `AXON_WATCH_DIR` (e.g. `$HOME/projects`) the debouncer
+/// + ingress_buffer balloon and the indexer was OOM-killed at ~24 GB anon-rss
+/// (3 kernel-level kills 2026-05-17). The gitignore-aware scanner filters these
+/// *after* events arrive ; we filter BEFORE subscribing or while routing.
+///
+/// REQ-AXO-901890 — the segment predicate is now `indexing_policy`'s single
+/// source of truth (`is_watch_pruned_segment`), shared with the scanner's
+/// `DIRECTORY_RULES`, instead of the old divergent `EXCLUDED_BUILD_DIR_SEGMENTS`
+/// const that had drifted (it carried `cargo-target` while DIRECTORY_RULES did
+/// not, and missed `.axon`/`.devenv` that DIRECTORY_RULES + the dotdir check
+/// covered).
 pub(crate) fn path_in_excluded_build_dir(path: &Path) -> bool {
     path.components().any(|comp| {
         comp.as_os_str()
             .to_str()
-            .map(|seg| EXCLUDED_BUILD_DIR_SEGMENTS.contains(&seg))
+            .map(crate::indexing_policy::is_watch_pruned_segment)
             .unwrap_or(false)
     })
 }
@@ -1616,7 +1605,7 @@ fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget>
             continue;
         };
         // REQ-AXO-91561 — exclude hidden + build-artefact dirs from the watch.
-        if name.starts_with('.') || EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
+        if crate::indexing_policy::is_watch_pruned_segment(name) {
             continue;
         }
         clean_children.push(path);
@@ -1634,7 +1623,8 @@ fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget>
 
 /// REQ-AXO-901853 — register the largest build-free subtrees RECURSIVELY (so
 /// newly-created subdirs stay auto-watched) while NEVER descending into an
-/// excluded build dir (`.`-prefixed dirs + `EXCLUDED_BUILD_DIR_SEGMENTS`) at
+/// excluded build dir (pruned via `indexing_policy::is_watch_pruned_segment`,
+/// REQ-AXO-901890 — dotdirs + DIRECTORY_RULES, shared with the scanner) at
 /// any depth.
 ///
 /// Root cause it fixes: a single `RecursiveMode::Recursive` watch on a project
@@ -1663,7 +1653,7 @@ fn collect_pruned_watch_targets(dir: &Path, targets: &mut Vec<WatchTarget>) {
         let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
             continue;
         };
-        if name.starts_with('.') || EXCLUDED_BUILD_DIR_SEGMENTS.contains(&name) {
+        if crate::indexing_policy::is_watch_pruned_segment(name) {
             has_excluded_child = true;
         } else {
             clean_children.push(path);
@@ -2428,7 +2418,7 @@ pub(crate) fn spawn_scope_reconciliation_orchestrator(
 mod tests {
     use super::{
         active_project_hot_targets, bootstrap_salvage_paths,
-        path_in_excluded_build_dir, EXCLUDED_BUILD_DIR_SEGMENTS,
+        path_in_excluded_build_dir,
         federation_orchestration_candidates_from_identities,
         federation_orchestrator_enabled, filter_orchestration_candidates_by_watch_root,
         handle_watcher_events, memory_limit_bytes,
@@ -3016,13 +3006,19 @@ mod tests {
         assert!(kept.is_empty());
     }
 
-    // ── REQ-AXO-91561 — watcher build-dir exclusion ──
+    // ── REQ-AXO-91561 / REQ-AXO-901890 — watcher build-dir exclusion ──
+    // Single source of truth: indexing_policy::is_watch_pruned_segment
+    // (backed by DIRECTORY_RULES), shared with the scanner. Locks that the
+    // canonical artefact dirs AND Axon's own .axon/cargo-target are pruned.
     #[test]
-    fn excluded_build_dir_segments_include_canonical_artefact_dirs() {
-        for seg in ["target", "_build", "node_modules", "build", "dist", "vendor"] {
+    fn watch_pruned_segments_include_canonical_artefact_dirs() {
+        for seg in [
+            "target", "_build", "node_modules", "build", "dist", "out", "vendor",
+            "__pycache__", "coverage", "cargo-target", ".axon", ".git", ".devenv",
+        ] {
             assert!(
-                EXCLUDED_BUILD_DIR_SEGMENTS.contains(&seg),
-                "{seg} must be in the canonical exclusion list"
+                crate::indexing_policy::is_watch_pruned_segment(seg),
+                "{seg} must be pruned from the watcher (DIRECTORY_RULES + dotdir)"
             );
         }
     }

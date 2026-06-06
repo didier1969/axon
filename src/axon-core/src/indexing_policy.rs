@@ -175,6 +175,27 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "agent_planning_state",
         matcher: DirectoryMatcher::Exact(".planning"),
     },
+    // REQ-AXO-901890 — Axon's OWN state + build dirs. The scanner deny-list
+    // (DIRECTORY_RULES) had excluded every OTHER toolchain's build output
+    // (node_modules/_build/target/.next…) but NOT Axon's own `.axon`
+    // (126k files, 111k of them cargo-target). The watcher already pruned
+    // `.axon` via its separate EXCLUDED_BUILD_DIR_SEGMENTS + dotdir check
+    // (REQ-AXO-901853) — but the scanner walk used THIS list, so it kept
+    // walking 126k build artefacts every pass, starving pipeline A.
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::ToolingState,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "axon_state",
+        matcher: DirectoryMatcher::Exact(".axon"),
+    },
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "axon_cargo_target",
+        matcher: DirectoryMatcher::Exact("cargo-target"),
+    },
     DirectoryRule {
         ecosystem: EcosystemId::JavaScript,
         class: ArtifactClass::DependencyStore,
@@ -391,7 +412,30 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "shared_out",
         matcher: DirectoryMatcher::Exact("out"),
     },
+    // REQ-AXO-901890 — test-coverage output. Was only in the watcher's
+    // (now-removed) EXCLUDED_BUILD_DIR_SEGMENTS; added here so DIRECTORY_RULES
+    // is the single source of truth shared by scanner AND watcher pruning.
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::SoftExclude,
+        rule_id: "shared_coverage",
+        matcher: DirectoryMatcher::Exact("coverage"),
+    },
 ];
+
+/// REQ-AXO-901890 — single source of truth for "should the watcher prune this
+/// directory segment at inotify-registration time?". Replaces the watcher's
+/// divergent `EXCLUDED_BUILD_DIR_SEGMENTS` list (which had drifted from
+/// `DIRECTORY_RULES` — e.g. it carried `cargo-target` while DIRECTORY_RULES
+/// did not, and DIRECTORY_RULES carried `.axon`/`.devenv` while the watcher
+/// relied on a generic dotdir check). A segment is pruned when it is a hidden
+/// dir (dot-prefixed: `.git`, `.axon`, `.devenv`, …) OR matches any
+/// `DIRECTORY_RULES` exclusion (Hard or Soft — build output should never be
+/// recursively watched even when index-allowlisted).
+pub fn is_watch_pruned_segment(name: &str) -> bool {
+    name.starts_with('.') || DIRECTORY_RULES.iter().any(|rule| rule.matcher.matches(name))
+}
 
 fn classify_internal(
     root: &Path,
