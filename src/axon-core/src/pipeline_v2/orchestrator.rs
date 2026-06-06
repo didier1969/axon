@@ -1,14 +1,16 @@
 //! Pipeline A + Pipeline B orchestrator (CPT-AXO-054, session 19 topology).
 //!
 //! Wires A1 → A2 → A3 stages through bounded channels and per-stage worker
-//! pools. A3 try_sends the chunk_ids it just persisted to a downstream
-//! `b1_inbox` channel — that's the hand-off slot for pipeline B (the GPU
-//! embedder lane). The cross-pipeline `try_send` is non-blocking per
-//! CPT-AXO-053: graph + chunks + FTS keep their CPU-native cadence
-//! regardless of B's GPU pace.
+//! pools. A3 persists the chunk_ids it produced to PG; the
+//! `trg_chunk_notify_pending` trigger fires `pg_notify` so pipeline B wakes.
+//! There is NO cross-pipeline push channel — `try_send`/`b1_inbox` are RETIRED
+//! (REQ-AXO-901746). graph + chunks + FTS keep their CPU-native cadence
+//! (CPT-AXO-053) regardless of B's GPU pace, decoupled through PG rather than
+//! an in-process push.
 //!
-//! Pipeline B (slice S4a) wires B1 (fetch content from PG by chunk_id).
-//! B2 / B3 land in slice S4b on the same channel topology.
+//! Pipeline B (slice 4/5 SOTA) has NO B1 fetch-by-id worker pool — it was
+//! collapsed into `demand_pull_b`, which SELECTs pending chunks WITH content
+//! and feeds B2 → B3 on the `b_chunks` channel topology.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,12 +50,12 @@ impl Default for PipelineAWorkerCounts {
 }
 
 /// Tunable per-stage worker counts for Pipeline B. Operator-overridable
-/// through env vars `AXON_B1_WORKERS`, `AXON_B2_WORKERS`, `AXON_B3_WORKERS`.
+/// through env vars `AXON_B2_WORKERS`, `AXON_B3_WORKERS`.
 ///
-/// Slice S4a wires B1 only; B2 / B3 fields are reserved for slice S4b.
+/// B1 is retired (REQ-AXO-901746) — demand_pull_b feeds B2 directly, there is
+/// no fetch-by-id worker pool. The dead `AXON_B1_WORKERS` knob is gone.
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineBWorkerCounts {
-    pub b1: usize,
     pub b2: usize,
     pub b3: usize,
 }
@@ -61,7 +63,6 @@ pub struct PipelineBWorkerCounts {
 impl Default for PipelineBWorkerCounts {
     fn default() -> Self {
         Self {
-            b1: 4,
             b2: 1,
             b3: 2,
         }
@@ -71,15 +72,6 @@ impl Default for PipelineBWorkerCounts {
 impl PipelineBWorkerCounts {
     pub fn from_env() -> Self {
         let mut counts = Self::default();
-        if let Ok(v) = std::env::var("AXON_B1_WORKERS").and_then(|raw| {
-            raw.trim()
-                .parse::<usize>()
-                .map_err(|_| std::env::VarError::NotPresent)
-        }) {
-            if v > 0 {
-                counts.b1 = v;
-            }
-        }
         if let Ok(v) = std::env::var("AXON_B2_WORKERS").and_then(|raw| {
             raw.trim()
                 .parse::<usize>()
@@ -402,7 +394,7 @@ pub fn spawn_pipeline_b_full_multi(
     // demand_pull's pull_and_feed_b before try_send.
     let _ = embedding_cache;
     let embedding_cache_for_b3 = None;
-    let _ = counts; // counts.b1 obsolete (no B1 worker)
+    let _ = counts; // PipelineBWorkerCounts unused here — B2 count derives from the embedder vec
 
     // REQ-AXO-901748 — B2 with per-worker embedder sessions. Each
     // embedder in the vec gets its own batched worker + ORT session.
@@ -630,7 +622,6 @@ mod tests {
     #[test]
     fn default_pipeline_b_worker_counts_match_session_19_table() {
         let counts = PipelineBWorkerCounts::default();
-        assert_eq!(counts.b1, 4);
         assert_eq!(counts.b2, 1);
         assert_eq!(counts.b3, 2);
     }
@@ -661,7 +652,6 @@ mod tests {
             a3: 1,
         };
         let counts_b = PipelineBWorkerCounts {
-            b1: 1,
             b2: 1,
             b3: 1,
         };

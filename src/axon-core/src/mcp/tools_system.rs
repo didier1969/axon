@@ -476,7 +476,8 @@ impl McpServer {
         let a3 = env_usize("AXON_A3_WORKERS", 2);
         let a3_batch = env_usize("AXON_A3_BATCH_SIZE", 32);
         let a3_timeout = env_u64("AXON_A3_BATCH_TIMEOUT_MS", 10);
-        let b1 = env_usize("AXON_B1_WORKERS", 4);
+        // B1 retired (REQ-AXO-901746) — no fetch-by-id worker pool ; demand_pull_b
+        // feeds B2 directly. `AXON_B1_WORKERS` is a dead knob, not surfaced.
         let b2 = env_usize("AXON_B2_WORKERS", 1);
         let b3 = env_usize("AXON_B3_WORKERS", 2);
         let b2_batch = env_usize(
@@ -716,11 +717,11 @@ impl McpServer {
              ### Pipeline A — CPU (graph + chunks + FTS)\n\
              - Workers:           a1={a1}  a2={a2}  a3={a3}\n\
              - A3 batch:          {a3_batch} chunks, timeout {a3_timeout} ms\n\n\
-             ### Pipeline B — GPU embedding\n\
-             - Workers:           b1={b1}  b2={b2}  b3={b3}\n\
+             ### Pipeline B — GPU embedding (no B1 pool ; demand_pull_b feeds B2)\n\
+             - Workers:           b2={b2}  b3={b3}\n\
              - B2 batch:          {b2_batch} chunks, timeout {b2_timeout} ms\n\
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
-             - B fed via:        demand_pull_b LISTEN chunk_pending_embed + adaptive 1s/30s poll\n\
+             - B fed via:        demand_pull_b LISTEN chunk_pending_embed + adaptive 200ms→30s backoff\n\
              - NOTIFY channel:    chunk_pending_embed\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
@@ -782,7 +783,6 @@ impl McpServer {
                     "replenish": replenish_a
                 },
                 "pipeline_b": {
-                    "b1": b1,
                     "b2": b2,
                     "b3": b3,
                     "b2_batch_size": b2_batch,
@@ -793,7 +793,7 @@ impl McpServer {
                     // is already exposed as the top-level `pending_chunks` field.
                     "replenish": replenish_b
                 },
-                "notify_channel": "chunk_pending_embed",
+                "notify_channel": crate::pipeline_v2::notify_listener::LISTEN_CHANNEL,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
                 // Slice 3 SOTA — surface pipeline_status + blocked_reason

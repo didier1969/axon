@@ -126,6 +126,15 @@ BEGIN
         'edges',           COALESCE((SELECT SUM((p->>'edges')::bigint)    FROM jsonb_array_elements(pp) p), 0),
         'chunks',          COALESCE((SELECT SUM((p->>'chunks')::bigint)   FROM jsonb_array_elements(pp) p), 0),
         'embedded',        COALESCE((SELECT SUM((p->>'embedded')::bigint) FROM jsonb_array_elements(pp) p), 0),
+        -- Canonical throughput proof (REQ-AXO-901865 family) : embeddings
+        -- written to ist.ChunkEmbedding in the last 60 s. PG-derived from the
+        -- actual table, process-independent, survives indexer restarts — the
+        -- dashboard rate is sourced from THIS, never a brain-local snapshot.
+        'embedded_60s', (
+            SELECT COUNT(*)
+            FROM ist.chunkembedding
+            WHERE embedded_at_ms > (extract(epoch FROM now()) * 1000)::bigint - 60000
+        )::bigint,
         -- REQ-AXO-901807 G2 — visibility on schema drift (orphan
         -- embeddings whose source chunk is gone). When > 0, dashboard
         -- shows a warning ; operator decides when to clean. Cheap
@@ -151,7 +160,12 @@ BEGIN
             ELSE 0
         END,
         'pending',
-        GREATEST(0, (cached->>'chunks')::bigint - (cached->>'embedded')::bigint)
+        GREATEST(0, (cached->>'chunks')::bigint - (cached->>'embedded')::bigint),
+        -- Canonical embedding rate (chunks/s) = embedded_60s / 60. Single
+        -- source of truth for the dashboard "chunks/sec" panel ; honest 0.0
+        -- only when nothing was embedded in the last minute.
+        'embeddings_per_second',
+        ROUND((cached->>'embedded_60s')::numeric / 60.0, 2)
     );
 
     INSERT INTO axon_runtime.dashboard_cache(cache_key, data, computed_at)

@@ -6,8 +6,8 @@ use crate::runtime_truth_contract::RuntimeFreshnessState;
 use serde_json::{json, Value};
 
 use super::runtime_topology_support::{
-    resolve_indexer_liveness, runtime_truth_feed_snapshot, split_peer_runtime_info,
-    split_run_root, split_runtime_state_from_file, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+    resolve_indexer_liveness, runtime_truth_feed_snapshot, split_run_root,
+    split_runtime_state_from_file, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
 };
 use super::McpServer;
 
@@ -46,25 +46,58 @@ impl McpServer {
         let mut peer_lane_parameters = Value::Null;
         let mut brain_ready = runtime_mode.control_plane_enabled();
 
-        // REQ-AXO-901859 — the file/shadow-role peer info is consulted ONLY
-        // for version/telemetry/lane metadata now. Indexer liveness no longer
-        // comes from here.
+        // REQ-AXO-901859 + canonical reconnection — the paired indexer's runtime
+        // truth (liveness, identity, telemetry, lane params) is read from PG: the
+        // SAME canonical sources `embedding_status` and the dashboard trust
+        // (EmbedderLifecycleHeartbeat + runtime_config_snapshot +
+        // embedder_observed_state). The retired runtime-heartbeat.json file bridge
+        // is no longer consulted — one truth, no parallel transport (PIL-AXO-001).
+        let indexer_heartbeat_row = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten();
+
         let split_process_role = AxonProcessRole::from_runtime_shadow_role(&shadow_role)
             .filter(|role| matches!(role, AxonProcessRole::Brain | AxonProcessRole::Indexer));
         match split_process_role {
             Some(AxonProcessRole::Brain) => {
-                if let Some(peer) =
-                    split_peer_runtime_info(&project_root, &instance_kind, "indexer")
-                {
+                // Static identity (release/install/runtime_mode) from the indexer's
+                // boot runtime.env ; build_id from the PG heartbeat (canonical).
+                let identity = split_runtime_state_from_file(
+                    &split_run_root(&project_root, &instance_kind, "indexer").join("runtime.env"),
+                );
+                if indexer_heartbeat_row.is_some() || identity.is_some() {
+                    let get = |k: &str| identity.as_ref().and_then(|m| m.get(k).cloned());
                     peer_runtime_version = json!({
                         "available": true,
-                        "release_version": peer.release_version,
-                        "build_id": peer.build_id,
-                        "install_generation": peer.install_generation,
-                        "runtime_mode": peer.runtime_mode
+                        "release_version": get("AXON_RELEASE_VERSION"),
+                        "build_id": indexer_heartbeat_row
+                            .as_ref()
+                            .and_then(|r| r.build_id.clone())
+                            .or_else(|| get("AXON_BUILD_ID")),
+                        "install_generation": get("AXON_INSTALL_GENERATION"),
+                        "runtime_mode": get("AXON_RUNTIME_MODE")
                     });
-                    peer_runtime_telemetry = peer.runtime_telemetry.unwrap_or(Value::Null);
-                    peer_lane_parameters = peer.lane_parameters.unwrap_or(Value::Null);
+                    // Lane parameters = the indexer's published runtime_config
+                    // snapshot (pipeline_a / pipeline_b), via the canonical composite.
+                    peer_lane_parameters =
+                        crate::dashboard_state::read_dashboard_state_full(&self.graph_store)
+                            .get("runtime_config")
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                    // Telemetry = canonical PG observed state + heartbeat phase.
+                    if let Ok(obs) = self.graph_store.embedder_observed_state() {
+                        peer_runtime_telemetry = json!({
+                            "telemetry_source": "pg_canonical",
+                            "embedded_60s": obs.embedded_60s,
+                            "embedded_total": obs.embedded_total,
+                            "oldest_pending_age_s": obs.oldest_pending_age_s,
+                            "phase": indexer_heartbeat_row.as_ref().map(|r| r.phase.clone()),
+                            "pending_count": indexer_heartbeat_row.as_ref().map(|r| r.pending_count),
+                            "compute": indexer_heartbeat_row.as_ref().and_then(|r| r.compute.clone())
+                        });
+                    }
                 }
             }
             Some(AxonProcessRole::Indexer) => {
@@ -85,15 +118,9 @@ impl McpServer {
         // (PIL-AXO-001). If no fresh heartbeat exists the indexer is not
         // provably alive and we say so loudly rather than infer from launch
         // mode.
-        let indexer_heartbeat_ms = self
-            .graph_store
-            .latest_lifecycle_heartbeat("indexer")
-            .ok()
-            .flatten()
-            .map(|row| row.heartbeat_ms);
         let indexer_liveness = resolve_indexer_liveness(
             Self::now_unix_ms(),
-            indexer_heartbeat_ms,
+            indexer_heartbeat_row.as_ref().map(|row| row.heartbeat_ms),
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );
         let indexer_liveness_source = indexer_liveness.source;

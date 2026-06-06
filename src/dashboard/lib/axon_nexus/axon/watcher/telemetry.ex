@@ -99,17 +99,7 @@ defmodule Axon.Watcher.Telemetry do
       ingress_collapsed_total: Map.get(payload, "ingress_collapsed_total", 0),
       ingress_flush_count: Map.get(payload, "ingress_flush_count", 0),
       ingress_last_flush_duration_ms: Map.get(payload, "ingress_last_flush_duration_ms", 0),
-      ingress_last_promoted_count: Map.get(payload, "ingress_last_promoted_count", 0),
-      projected_indexer_runtime:
-        Map.get(payload, "projected_indexer_runtime", %{
-          "available" => false,
-          "telemetry_source" => "unavailable",
-          "process_role" => "indexer",
-          "freshness_state" => "missing",
-          "observed_age_ms" => nil,
-          "degraded_reason" => nil,
-          "telemetry" => %{}
-        })
+      ingress_last_promoted_count: Map.get(payload, "ingress_last_promoted_count", 0)
     }
 
     :ets.insert(:axon_telemetry, {:runtime_snapshot, runtime_snapshot})
@@ -352,17 +342,7 @@ defmodule Axon.Watcher.Telemetry do
       ingress_collapsed_total: Map.get(runtime, :ingress_collapsed_total, 0),
       ingress_flush_count: Map.get(runtime, :ingress_flush_count, 0),
       ingress_last_flush_duration_ms: Map.get(runtime, :ingress_last_flush_duration_ms, 0),
-      ingress_last_promoted_count: Map.get(runtime, :ingress_last_promoted_count, 0),
-      projected_indexer_runtime:
-        Map.get(runtime, :projected_indexer_runtime, %{
-          "available" => false,
-          "telemetry_source" => "unavailable",
-          "process_role" => "indexer",
-          "freshness_state" => "missing",
-          "observed_age_ms" => nil,
-          "degraded_reason" => nil,
-          "telemetry" => %{}
-        })
+      ingress_last_promoted_count: Map.get(runtime, :ingress_last_promoted_count, 0)
     }
   end
 
@@ -459,16 +439,7 @@ defmodule Axon.Watcher.Telemetry do
          ingress_collapsed_total: 0,
          ingress_flush_count: 0,
          ingress_last_flush_duration_ms: 0,
-         ingress_last_promoted_count: 0,
-         projected_indexer_runtime: %{
-           "available" => false,
-           "telemetry_source" => "unavailable",
-           "process_role" => "indexer",
-           "freshness_state" => "missing",
-           "observed_age_ms" => nil,
-           "degraded_reason" => nil,
-           "telemetry" => %{}
-         }
+         ingress_last_promoted_count: 0
        }}
     )
   end

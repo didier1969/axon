@@ -66,8 +66,13 @@ pub struct DemandPullSnapshot {
 }
 
 
-const BACKOFF_INITIAL_MS: u64 = 200;
-const BACKOFF_MAX_MS: u64 = 30_000;
+/// Adaptive demand-pull backoff floor (active drain cadence) — published to
+/// `runtime_config_snapshot` so the dashboard reports the real value, not a
+/// hardcoded literal. After a productive pull the loop resets to this.
+pub const BACKOFF_INITIAL_MS: u64 = 200;
+/// Adaptive demand-pull backoff ceiling (fully idle cadence). Doubling from
+/// `BACKOFF_INITIAL_MS` caps here. Also surfaced canonically on the dashboard.
+pub const BACKOFF_MAX_MS: u64 = 30_000;
 const SAFETY_POLL_SECS: u64 = 30;
 const IDLE_THRESHOLD: u32 = 5;
 const MAX_RETRY: i32 = 3;

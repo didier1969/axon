@@ -184,8 +184,6 @@ pub enum BridgeEvent {
         graph_workers_active_current: u64,
         graph_worker_heartbeat_at_ms: u64,
         runtime_truth_feed: RuntimeTruthFeed,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        projected_indexer_runtime: Option<serde_json::Value>,
     },
     ScanComplete {
         total_files: usize,
@@ -304,16 +302,6 @@ mod tests {
                 RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS,
                 Some("indexer_feed_degraded"),
             ),
-            projected_indexer_runtime: Some(serde_json::json!({
-                "available": true,
-                "telemetry_source": "indexer_peer_heartbeat",
-                "process_role": "indexer",
-                "freshness_state": "fresh",
-                "observed_age_ms": 125,
-                "telemetry": {
-                    "ingress_buffered_entries": 33
-                }
-            })),
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -395,7 +383,5 @@ mod tests {
         assert!(json.contains("\"graph_workers_active_current\":2"));
         assert!(json.contains("\"runtime_truth_feed\""));
         assert!(json.contains("\"last_good_payload_at_ms\":9400"));
-        assert!(json.contains("\"projected_indexer_runtime\""));
-        assert!(json.contains("\"telemetry_source\":\"indexer_peer_heartbeat\""));
     }
 }

@@ -135,7 +135,7 @@ fn extract_first_cell(raw: &str) -> Value {
 /// as a refresh-on-write index on chunk/chunkembedding, (b) move the
 /// 1 Hz brain push to a separate tokio task so the heavy SP call
 /// doesn't block /readyz, (c) bump TTL further (still ≤ 5 s).
-fn read_dashboard_state_full(store: &Arc<GraphStore>) -> Value {
+pub(crate) fn read_dashboard_state_full(store: &Arc<GraphStore>) -> Value {
     match store.execute_raw_sql_gateway("SELECT axon_runtime.dashboard_state_full(3)") {
         Ok(raw) => {
             let cell = extract_first_cell(&raw);
@@ -269,14 +269,38 @@ pub(crate) fn compose_dashboard_state_v1(
     disk_files: i64,
     eligible_files: i64,
 ) -> Value {
-    let pending_chunks = pg_state
-        .get("totals")
+    let totals = pg_state.get("totals");
+    let pending_chunks = totals
         .and_then(|t| t.get("pending"))
         .and_then(|p| p.as_i64())
         .unwrap_or(0);
+    // Canonical embedding throughput — PG-derived from ist.ChunkEmbedding via
+    // dashboard_totals (embeddings_per_second / embedded / embedded_60s). This
+    // is process-independent and correct for brain_only, where the brain's own
+    // snapshot rate is structurally 0 (it never embeds). Fall back to the local
+    // snapshot only when the composite is unavailable.
+    let embedded_60s = totals
+        .and_then(|t| t.get("embedded_60s"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let canonical_rate = totals
+        .and_then(|t| t.get("embeddings_per_second"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(live.chunk_embeddings_per_second);
+    let canonical_embedded_total = totals
+        .and_then(|t| t.get("embedded"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(live.vector_chunks_embedded_cumulative as i64);
+    // Recent embedding activity (last 60 s) means the pipeline is NOT idle,
+    // regardless of what the local snapshot reports.
+    let effective_idle = if embedded_60s > 0 {
+        false
+    } else {
+        live.runtime_idle
+    };
     let (pipeline_status, blocked_reason) = compute_pipeline_status(
         live.runtime_mode,
-        live.runtime_idle,
+        effective_idle,
         pending_chunks,
         live.embedder_init_error,
         live.indexer_paired,
@@ -290,7 +314,7 @@ pub(crate) fn compose_dashboard_state_v1(
             "runtime_mode": live.runtime_mode,
             "instance_kind": live.instance_kind,
             "degraded_reason": live.degraded_reason,
-            "runtime_idle": live.runtime_idle,
+            "runtime_idle": effective_idle,
             "pipeline_status": pipeline_status,
             "blocked_reason": blocked_reason,
         },
@@ -304,8 +328,8 @@ pub(crate) fn compose_dashboard_state_v1(
             "compute_source": live.embedder_compute_source,
         },
         "telemetry": {
-            "chunk_embeddings_per_second": live.chunk_embeddings_per_second,
-            "vector_chunks_embedded_cumulative": live.vector_chunks_embedded_cumulative,
+            "chunk_embeddings_per_second": canonical_rate,
+            "vector_chunks_embedded_cumulative": canonical_embedded_total,
             "graph_workers_active_current": live.graph_workers_active,
             "graph_workers_started_total": live.graph_workers_started,
             "ingress_buffered_entries": live.ingress_buffered_entries,

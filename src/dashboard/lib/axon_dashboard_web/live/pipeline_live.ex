@@ -7,10 +7,10 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       A1 read+hash → A2 parse-TS → A3 graph-UPSERT (Symbol/Edge/Chunk → PG)
                                               │
                                               ▼  pg_notify('chunk_pending_embed')
-                                       demand_pull_b (LISTEN + 1s/30s adaptive poll)
+                                       demand_pull_b (LISTEN + 200ms→30s adaptive backoff)
                                               │  SELECT-with-content + send().await backpressure
                                               ▼
-                                       b_chunks (mpsc 1024) → B2 embed-GPU → B3 write-emb
+                                       b_chunks (mpsc, INTERNAL_CHANNEL_CAP_DEFAULT) → B2 embed-GPU → B3 write-emb
 
   REQ-AXO-901806 / REQ-AXO-901826 — single source of truth =
   `%AxonDashboard.DashboardState{}` struct broadcast on the dedicated
@@ -184,9 +184,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             style="height: 320px;"
           ></div>
           <div class="px-5 py-3 border-t border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-4 text-[10px] font-mono uppercase tracking-wider text-slate-500">
-            <span>b_chunks cap: <strong class="text-slate-200">1024</strong> (internal mpsc, send().await backpressure)</span>
+            <span>b_chunks cap: <strong class="text-slate-200">{pipeline_field(@dashboard_state, :b_chunks_cap, 0)}</strong> (internal mpsc, send().await backpressure)</span>
             <span>NOTIFY: <strong class="text-slate-200">{rc_field(@dashboard_state, :notify_channel, "n/a")}</strong></span>
-            <span>demand_pull adaptive: <strong class="text-slate-200">1s drain / 30s idle</strong></span>
+            <span>demand_pull adaptive: <strong class="text-slate-200">{rc_field(@dashboard_state, :demand_pull_backoff_initial_ms, 0)}ms → {rc_field(@dashboard_state, :demand_pull_backoff_max_ms, 0)}ms</strong></span>
             <span>idle: <strong class={if runtime_field(@dashboard_state, :runtime_idle, false), do: "text-emerald-300", else: "text-amber-300"}>{runtime_field(@dashboard_state, :runtime_idle, false) |> to_string()}</strong></span>
           </div>
         </section>
@@ -216,7 +216,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
               <% end %>
             </div>
             <div class="mt-3 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-500">
-              <span>embeddings produced since boot: <strong class="text-slate-200">{telemetry_field(@dashboard_state, :vector_chunks_embedded_cumulative, 0) |> full_int()}</strong></span>
+              <span>embeddings (total, canonical): <strong class="text-slate-200">{telemetry_field(@dashboard_state, :vector_chunks_embedded_cumulative, 0) |> full_int()}</strong></span>
               <span>scheduler: <strong class="text-slate-200">{telemetry_field(@dashboard_state, :scheduler, "?")}</strong></span>
               <span>pressure: <strong class={pressure_class(telemetry_field(@dashboard_state, :service_pressure, "?"))}>{telemetry_field(@dashboard_state, :service_pressure, "?")}</strong></span>
             </div>
@@ -331,7 +331,6 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
                 <.stage_row name="A1" tone={:cyan} purpose="read + hash" workers={pipeline_field(@dashboard_state, :a1_workers, 0)} batch="—" />
                 <.stage_row name="A2" tone={:cyan} purpose="parse TS" workers={pipeline_field(@dashboard_state, :a2_workers, 0)} batch="—" />
                 <.stage_row name="A3" tone={:cyan} purpose="graph UPSERT" workers={pipeline_field(@dashboard_state, :a3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :a3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :a3_batch_timeout_ms, 0)} ms"} />
-                <.stage_row name="B1" tone={:emerald} purpose="fetch chunks" workers={pipeline_field(@dashboard_state, :b1_workers, 0)} batch="—" />
                 <.stage_row name="B2" tone={:emerald} purpose="embed GPU" workers={pipeline_field(@dashboard_state, :b2_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
                 <.stage_row name="B3" tone={:emerald} purpose="write embeddings" workers={pipeline_field(@dashboard_state, :b3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
               </tbody>
@@ -606,12 +605,12 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
         %{id: "a1", label: "A1 read+hash", workers: pipeline_field(s, :a1_workers, 0), group: "A"},
         %{id: "a2", label: "A2 parse-TS", workers: pipeline_field(s, :a2_workers, 0), group: "A"},
         %{id: "a3", label: "A3 graph-UPSERT", workers: pipeline_field(s, :a3_workers, 0), group: "A"},
-        %{id: "b1", label: "B1 fetch", workers: pipeline_field(s, :b1_workers, 0), group: "B"},
+        # B1 retired (REQ-AXO-901746) — demand_pull_b feeds B2 directly.
         %{id: "b2", label: "B2 embed-GPU", workers: pipeline_field(s, :b2_workers, 0), group: "B"},
         %{id: "b3", label: "B3 write-emb", workers: pipeline_field(s, :b3_workers, 0), group: "B"}
       ],
       buffer: %{
-        cap: pipeline_field(s, :a3_to_b1_buffer_cap, 0),
+        cap: pipeline_field(s, :b_chunks_cap, 0),
         fill: 0
       },
       rate: telemetry_field(s, :chunk_embeddings_per_second, 0.0),

@@ -24,20 +24,22 @@
 //!       ORT/TensorRT BGE-Large 1024d session for production.
 //!     - [`stage_b3::b3_persist_embedding`] → `upsert_chunk_embedding_v2`.
 //!
-//! A1's output blocking-sends to A2; A3 fan-outs chunk_ids to B1 via
-//! non-blocking `try_send` (cap 10 000). The demand-pull NOTIFY listener
-//! ([`demand_pull::spawn_pipeline_b_demand_pull`]) rattrape any chunk_ids
-//! the try_send buffer dropped, plus chunks from before the v2 cut-over.
+//! A1's output blocking-sends to A2; A2 to A3. A3 persists chunk_ids to PG
+//! and the `trg_chunk_notify_pending` trigger fires `pg_notify`. There is NO
+//! cross-pipeline push channel and NO B1 worker pool (slice 4/5 SOTA,
+//! REQ-AXO-901746) — `try_send` is RETIRED. Pipeline B is fed EXCLUSIVELY by
+//! the demand-pull NOTIFY listener
+//! ([`demand_pull::spawn_pipeline_b_demand_pull`]), which SELECTs pending
+//! chunks (content included) and feeds B2 directly via the internal
+//! `b_chunks` mpsc (cap [`INTERNAL_CHANNEL_CAP_DEFAULT`]).
 //!
 //! # Read-after-write contract (critical, see commit 294e09c)
 //!
-//! B1 fetches chunk content microseconds after A3 commits — the
-//! cross-pipeline try_send hand-off IS the steady-state regime, not a
-//! rare race. Under the legacy embedded test backend the reader ctx
-//! serves a stale snapshot during this window, so B1 MUST read through
-//! the writer ctx (`query_json_writer`). Under PG MVCC the deadpool
-//! makes the distinction invisible; the writer-ctx call works under
-//! every backend.
+//! demand_pull_b SELECTs chunk content microseconds after A3 commits. Under
+//! the legacy embedded test backend the reader ctx serves a stale snapshot
+//! during this window, so the pull MUST read through the writer ctx
+//! (`query_json_writer`). Under PG MVCC the deadpool makes the distinction
+//! invisible; the writer-ctx call works under every backend.
 //!
 //! # Driving the pipeline
 //!

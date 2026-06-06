@@ -303,8 +303,8 @@ pub fn spawn_pipeline_v2_indexer(
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
         info!(
-            "pipeline_v2: spawning pipeline B (b1={} b2={} b3={})",
-            counts_b.b1, counts_b.b2, counts_b.b3
+            "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — demand_pull_b feeds B2)",
+            counts_b.b2, counts_b.b3
         );
         let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> = match GpuB2Embedder::try_new_cuda(
             "indexer-pipeline-v2",

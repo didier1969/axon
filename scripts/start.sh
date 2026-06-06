@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+# REQ-AXO-901735 — fail-loud lifecycle. start.sh runs under `set -e`, so any
+# non-zero command (or a SIGHUP/INT to a backgrounded launch) used to abort the
+# script SILENTLY — the operator saw the last successful echo (e.g. "PG already
+# up") and no reason. This trap converts every abort into an explicit diagnostic
+# naming the stage, line, command and exit code. `_axon_stage` is advanced at
+# each major step below so the message points at the real failure point.
+_axon_stage="boot"
+trap 'rc=$?; echo "❌ start ABORTED — stage=[${_axon_stage}] line=${LINENO} cmd=[${BASH_COMMAND}] exit=${rc}" >&2' ERR
+trap 'rc=$?; [ "$rc" -ne 0 ] && echo "❌ start EXITED non-zero — stage=[${_axon_stage}] exit=${rc}" >&2 || true' EXIT
+
 # Axon start script — rewritten session 55 (2026-05-25).
 # Usage: ./scripts/axon-dev start <mode>
 # Modes: brain | full
@@ -151,6 +161,7 @@ run_devenv() {
 echo "📦 Validating devenv..."
 run_devenv './scripts/validate-devenv.sh'
 
+_axon_stage="pg_bootstrap"
 # 4. PG bootstrap
 if ! ensure_runtime_ready "$AXON_INSTANCE_KIND"; then
     echo "❌ PG bootstrap failed."; exit 1
@@ -220,6 +231,7 @@ else
     fi
 fi
 
+_axon_stage="build"
 # 6. Auto-rebuild (dev only)
 if [[ "$AXON_INSTANCE_KIND" != "live" ]]; then
     if [[ ! -x "$BRAIN_BIN" || ! -x "$INDEXER_BIN" ]]; then
@@ -294,6 +306,7 @@ PC_YAML="$PROJECT_ROOT/process-compose.${AXON_INSTANCE_KIND}.yaml"
 # REQ-AXO-901735 — single source of truth for the PC management port.
 PC_PORT="$(axon_pc_port_for_instance "$AXON_INSTANCE_KIND")"
 
+_axon_stage="resolve_pc_bin"
 # Resolve process-compose binary from devenv
 PC_BIN="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
 [[ -x "${PC_BIN:-}" ]] || { echo "❌ process-compose not found in devenv."; exit 1; }
@@ -334,6 +347,7 @@ if axon_supervisor_healthy "$PC_PORT" || ! axon_port_is_free "$PC_PORT"; then
     exit 1
 fi
 
+_axon_stage="pc_up"
 "$PC_BIN" up -f "$PC_YAML" -p "$PC_PORT" -t=false -D --ordered-shutdown --disable-dotenv "${PC_PROCESSES[@]}"
 
 # Verify process-compose daemon actually started (catches silent -D failures)
@@ -352,6 +366,7 @@ fi
 # Indexer init (GPU model load) continues in background; process-compose
 # monitors it independently via its own readiness_probe.
 BRAIN_TIMEOUT_S=120
+_axon_stage="wait_readyz"
 echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
 for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
     curl -sf --connect-timeout 3 "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {

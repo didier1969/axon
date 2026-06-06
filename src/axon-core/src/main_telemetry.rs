@@ -2,19 +2,14 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, path::PathBuf};
 
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
-use axon_core::embedder::{
-    current_embedding_provider_diagnostics, embedder_provider_fallback_reason,
-    embedding_lane_config_from_env,
-};
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
 use axon_core::runtime_mode::AxonRuntimeMode;
-use axon_core::runtime_topology::{current_runtime_process_role, AxonProcessRole};
+use axon_core::runtime_topology::current_runtime_process_role;
 use axon_core::scanner;
 use axon_core::service_guard;
 // REQ-AXO-901653 slice-5c — `crossbeam_channel::Sender` removed (was only
@@ -35,226 +30,6 @@ fn freshness_state_for_feed(runtime_truth_feed: &axon_core::bridge::RuntimeTruth
     }
 }
 
-fn split_run_root(project_root: &str, instance_kind: &str, role_slug: &str) -> PathBuf {
-    let mut path = PathBuf::from(project_root);
-    if instance_kind == "dev" {
-        path.push(".axon-dev");
-    } else {
-        path.push(".axon");
-    }
-    path.push(format!("run-{role_slug}"));
-    path
-}
-
-fn split_runtime_heartbeat_path(
-    project_root: &str,
-    instance_kind: &str,
-    role_slug: &str,
-) -> PathBuf {
-    split_run_root(project_root, instance_kind, role_slug).join("runtime-heartbeat.json")
-}
-
-fn projected_indexer_runtime_from_heartbeat() -> Option<serde_json::Value> {
-    if !matches!(current_runtime_process_role(), AxonProcessRole::Brain) {
-        return None;
-    }
-
-    // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
-    let instance_kind =
-        crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "dev");
-    let project_root = std::env::var("AXON_PROJECT_ROOT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| ".".to_string())
-        });
-    let heartbeat_path = split_runtime_heartbeat_path(&project_root, &instance_kind, "indexer");
-    let payload = fs::read_to_string(&heartbeat_path).ok()?;
-    let payload: serde_json::Value = serde_json::from_str(&payload).ok()?;
-    let runtime_truth_feed: axon_core::bridge::RuntimeTruthFeed = payload
-        .get("runtime_truth_feed")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())?;
-    let telemetry = payload
-        .get("runtime_telemetry")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    Some(serde_json::json!({
-        "available": !telemetry.is_null(),
-        "telemetry_source": "indexer_peer_heartbeat",
-        "process_role": payload
-            .get("process_role")
-            .and_then(|value| value.as_str())
-            .unwrap_or("indexer"),
-        "runtime_mode": payload
-            .get("runtime_mode")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown"),
-        "runtime_identity": payload
-            .get("runtime_identity")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown-runtime"),
-        "freshness_state": freshness_state_for_feed(&runtime_truth_feed),
-        "observed_age_ms": runtime_truth_feed.observed_age_ms,
-        "degraded_reason": runtime_truth_feed.degraded_reason,
-        "telemetry": telemetry,
-    }))
-}
-
-fn write_runtime_heartbeat_export(
-    runtime_mode: AxonRuntimeMode,
-    runtime_truth_feed: &axon_core::bridge::RuntimeTruthFeed,
-    runtime_snapshot: &main_background::RuntimeTelemetrySnapshot,
-) {
-    let Ok(run_root) = std::env::var("AXON_RUN_ROOT") else {
-        warn!("Runtime heartbeat export skipped because AXON_RUN_ROOT is unset.");
-        return;
-    };
-
-    let release_version = std::env::var("AXON_RELEASE_VERSION")
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let build_id =
-        std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let install_generation =
-        std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
-    let process_role = current_runtime_process_role().as_str();
-    let runtime_identity = std::env::var("AXON_RUNTIME_IDENTITY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "unknown-runtime".to_string());
-    let embedder_provider = current_embedding_provider_diagnostics();
-    // REQ-AXO-901836 — publish the indexer's effective lane parameters so
-    // the brain composer can surface paired indexer's worker counts /
-    // batch sizes instead of always returning its own local (brain_only,
-    // vector_workers=0) values. Source: same `embedding_lane_config_from_env`
-    // call as the indexer's own status reporter, so the heartbeat reflects
-    // exactly what this indexer instance is configured to run.
-    let indexer_lane_config = embedding_lane_config_from_env();
-    let indexer_lane_parameters = serde_json::json!({
-        "vector_workers": indexer_lane_config.vector_workers,
-        "graph_workers": indexer_lane_config.graph_workers,
-        "query_workers": indexer_lane_config.query_workers,
-        "chunk_batch_size": indexer_lane_config.chunk_batch_size,
-        "file_vectorization_batch_size": indexer_lane_config.file_vectorization_batch_size,
-        "graph_batch_size": indexer_lane_config.graph_batch_size,
-    });
-    // REQ-AXO-184 #4 / REQ-AXO-185 #2: surface silent embedder fallback in
-    // heartbeat's degraded_reason so operators see "embedder_provider_fallback"
-    // within one tick instead of after a full probe window.
-    let embedder_fallback_reason = embedder_provider_fallback_reason(
-        &embedder_provider.provider_requested,
-        &embedder_provider.provider_effective,
-        embedder_provider.provider_init_error.as_deref(),
-    );
-    let merged_degraded_reason = match (
-        runtime_truth_feed.degraded_reason.as_deref(),
-        embedder_fallback_reason.as_deref(),
-    ) {
-        (Some(existing), Some(fb)) => Some(format!("{}; {}", existing, fb)),
-        (None, Some(fb)) => Some(fb.to_string()),
-        (Some(existing), None) => Some(existing.to_string()),
-        (None, None) => None,
-    };
-    let payload = serde_json::json!({
-        "process_role": process_role,
-        "runtime_mode": runtime_mode.as_str(),
-        "runtime_identity": runtime_identity,
-        "release_version": release_version,
-        "build_id": build_id,
-        "install_generation": install_generation,
-        "last_heartbeat_at_ms": runtime_truth_feed.last_heartbeat_at_ms,
-        "last_good_payload_at_ms": runtime_truth_feed.last_good_payload_at_ms,
-        "observed_age_ms": runtime_truth_feed.observed_age_ms,
-        "stale_after_ms": runtime_truth_feed.stale_after_ms,
-        "stale": runtime_truth_feed.stale,
-        "degraded_reason": merged_degraded_reason,
-        "runtime_truth_feed": runtime_truth_feed,
-        // DEC-AXO-901626 — the raced `embedder_provider` self-report block is
-        // gone. The effective provider is derived observably by the brain
-        // composer (indexer pid + nvidia-smi). `degraded_reason` above still
-        // flags a GPU→CPU fallback as a fail-loud signal.
-        "lane_parameters": indexer_lane_parameters,
-        "runtime_telemetry": {
-            "ingress_enabled": runtime_snapshot.ingress_enabled,
-            "ingress_buffered_entries": runtime_snapshot.ingress_buffered_entries,
-            "ingress_hot_entries": runtime_snapshot.ingress_hot_entries,
-            "ingress_scan_entries": runtime_snapshot.ingress_scan_entries,
-            "ingress_subtree_hints": runtime_snapshot.ingress_subtree_hints,
-            "ingress_subtree_hint_in_flight": runtime_snapshot.ingress_subtree_hint_in_flight,
-            "ingress_subtree_hint_accepted_total": runtime_snapshot.ingress_subtree_hint_accepted_total,
-            "ingress_subtree_hint_blocked_total": runtime_snapshot.ingress_subtree_hint_blocked_total,
-            "ingress_subtree_hint_suppressed_total": runtime_snapshot.ingress_subtree_hint_suppressed_total,
-            "ingress_flush_count": runtime_snapshot.ingress_flush_count,
-            "ingress_last_flush_duration_ms": runtime_snapshot.ingress_last_flush_duration_ms,
-            "ingress_last_promoted_count": runtime_snapshot.ingress_last_promoted_count,
-            "ingress_promoted_total": runtime_snapshot.ingress_promoted_total,
-            "ingress_last_durably_persisted_count": runtime_snapshot.ingress_last_durably_persisted_count,
-            "ingress_durably_persisted_total": runtime_snapshot.ingress_durably_persisted_total,
-            "ingress_last_excluded_from_pending_count": runtime_snapshot.ingress_last_excluded_from_pending_count,
-            "ingress_excluded_from_pending_total": runtime_snapshot.ingress_excluded_from_pending_total,
-            "pg_database_bytes": runtime_snapshot.pg_database_bytes,
-            "pg_chunkembedding_total_bytes": runtime_snapshot.pg_chunkembedding_total_bytes,
-            "pg_wal_bytes": runtime_snapshot.pg_wal_bytes,
-            "pg_buffer_hit_ratio": runtime_snapshot.pg_buffer_hit_ratio,
-            "vector_chunks_embedded_cumulative": runtime_snapshot.vector_chunks_embedded_cumulative,
-            "chunk_embeddings_per_second": runtime_snapshot.chunk_embeddings_per_second,
-            "chunk_embeddings_rate_window_ms": runtime_snapshot.chunk_embeddings_rate_window_ms,
-            "prepare_inflight_chunks_current": runtime_snapshot.prepare_inflight_chunks_current,
-            "ready_queue_chunks_current": runtime_snapshot.ready_queue_chunks_current,
-            "ready_queue_chunks_small": runtime_snapshot.ready_queue_chunks_small,
-            "ready_queue_chunks_medium": runtime_snapshot.ready_queue_chunks_medium,
-            "ready_queue_chunks_large": runtime_snapshot.ready_queue_chunks_large,
-            "ready_batches_small": runtime_snapshot.ready_batches_small,
-            "ready_batches_medium": runtime_snapshot.ready_batches_medium,
-            "ready_batches_large": runtime_snapshot.ready_batches_large,
-            "mixed_fallback_batches_total": runtime_snapshot.mixed_fallback_batches_total,
-            "homogeneous_batches_total": runtime_snapshot.homogeneous_batches_total,
-            "last_consumed_batch_lane": runtime_snapshot.last_consumed_batch_lane,
-            "active_small_max_tokens": runtime_snapshot.active_small_max_tokens,
-            "active_medium_max_tokens": runtime_snapshot.active_medium_max_tokens,
-            "ready_replenishment_deficit_current": runtime_snapshot.ready_replenishment_deficit_current,
-            "oldest_ready_batch_age_ms_current": runtime_snapshot.oldest_ready_batch_age_ms_current,
-            "graph_workers_started_total": runtime_snapshot.graph_workers_started_total,
-            "graph_workers_active_current": runtime_snapshot.graph_workers_active_current,
-            "graph_worker_heartbeat_at_ms": runtime_snapshot.graph_worker_heartbeat_at_ms,
-            "claim_mode": runtime_snapshot.claim_mode,
-            "service_pressure": runtime_snapshot.service_pressure,
-            "utility_first_scheduler_state": runtime_snapshot.utility_first_scheduler_state,
-            "utility_first_scheduler_reason": runtime_snapshot.utility_first_scheduler_reason,
-            "semantic_underfeed": runtime_snapshot.semantic_underfeed,
-        },
-    });
-    let runtime_heartbeat_path = std::path::Path::new(&run_root).join("runtime-heartbeat.json");
-    if let Err(err) = std::fs::create_dir_all(&run_root) {
-        warn!(
-            "Runtime heartbeat export could not create run root {}: {:?}",
-            run_root, err
-        );
-        return;
-    }
-    let existed_before = runtime_heartbeat_path.exists();
-    if let Err(err) = std::fs::write(
-        &runtime_heartbeat_path,
-        serde_json::to_vec_pretty(&payload).unwrap_or_else(|_| b"{}".to_vec()),
-    ) {
-        warn!(
-            "Runtime heartbeat export write failed for {}: {:?}",
-            runtime_heartbeat_path.display(),
-            err
-        );
-        return;
-    }
-    if !existed_before {
-        info!(
-            "Runtime heartbeat export initialized at {} (mode={}, stale={}).",
-            runtime_heartbeat_path.display(),
-            runtime_mode.as_str(),
-            runtime_truth_feed.stale
-        );
-    }
-}
 
 /// REQ-AXO-901854 — an indexer PG lifecycle heartbeat younger than this is
 /// treated as "indexer paired & alive" (it UPSERTs every ~5 s). Shared by the
@@ -296,13 +71,11 @@ pub(crate) fn spawn_runtime_telemetry(
             } else {
                 service_guard::current_runtime_truth_feed()
             };
-            write_runtime_heartbeat_export(runtime_mode, &runtime_truth_feed, &snapshot);
             let telemetry_source = "local_runtime".to_string();
             let telemetry_process_role = current_runtime_process_role().as_str().to_string();
             let telemetry_freshness_state = freshness_state_for_feed(&runtime_truth_feed);
             let telemetry_observed_age_ms = runtime_truth_feed.observed_age_ms;
             let telemetry_degraded_reason = runtime_truth_feed.degraded_reason.clone();
-            let projected_indexer_runtime = projected_indexer_runtime_from_heartbeat();
             // REQ-AXO-901806 — clone owned strings before they're moved
             // into BridgeEvent so the dashboard composer below can still
             // read them. Cheap (small strings, ~100 bytes total).
@@ -410,7 +183,6 @@ pub(crate) fn spawn_runtime_telemetry(
                 graph_workers_active_current: snapshot.graph_workers_active_current,
                 graph_worker_heartbeat_at_ms: snapshot.graph_worker_heartbeat_at_ms,
                 runtime_truth_feed: runtime_truth_feed.clone(),
-                projected_indexer_runtime,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

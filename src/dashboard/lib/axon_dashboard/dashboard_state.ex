@@ -401,30 +401,29 @@ defmodule AxonDashboard.DashboardState do
             a3_workers: non_neg_integer(),
             a3_batch_size: non_neg_integer(),
             a3_batch_timeout_ms: non_neg_integer(),
-            b1_workers: non_neg_integer(),
             b2_workers: non_neg_integer(),
             b3_workers: non_neg_integer(),
             b2_batch_size: non_neg_integer(),
             b2_batch_timeout_ms: non_neg_integer(),
             b3_batch_size: non_neg_integer(),
             b3_batch_timeout_ms: non_neg_integer(),
-            a3_to_b1_buffer_cap: non_neg_integer(),
-            coldstart_batch_size: non_neg_integer()
+            b_chunks_cap: non_neg_integer()
           }
+    # B1 retired (REQ-AXO-901746) — no fetch-by-id worker pool. The real
+    # A3→B hand-off is the b_chunks mpsc (cap = b_chunks_cap), fed by
+    # demand_pull_b. b1_workers / a3_to_b1_buffer_cap are gone.
     defstruct a1_workers: 0,
               a2_workers: 0,
               a3_workers: 0,
               a3_batch_size: 0,
               a3_batch_timeout_ms: 0,
-              b1_workers: 0,
               b2_workers: 0,
               b3_workers: 0,
               b2_batch_size: 0,
               b2_batch_timeout_ms: 0,
               b3_batch_size: 0,
               b3_batch_timeout_ms: 0,
-              a3_to_b1_buffer_cap: 0,
-              coldstart_batch_size: 0
+              b_chunks_cap: 0
 
     def from_map(nil), do: %__MODULE__{}
     def from_map(%{} = m) do
@@ -436,15 +435,13 @@ defmodule AxonDashboard.DashboardState do
         a3_workers: int(pa, "a3_workers"),
         a3_batch_size: int(pa, "a3_batch_size"),
         a3_batch_timeout_ms: int(pa, "a3_batch_timeout_ms"),
-        b1_workers: int(pb, "b1_workers"),
         b2_workers: int(pb, "b2_workers"),
         b3_workers: int(pb, "b3_workers"),
         b2_batch_size: int(pb, "b2_batch_size"),
         b2_batch_timeout_ms: int(pb, "b2_batch_timeout_ms"),
         b3_batch_size: int(pb, "b3_batch_size"),
         b3_batch_timeout_ms: int(pb, "b3_batch_timeout_ms"),
-        a3_to_b1_buffer_cap: int(pb, "a3_to_b1_buffer_cap"),
-        coldstart_batch_size: int(pb, "coldstart_batch_size")
+        b_chunks_cap: int(pb, "b_chunks_cap")
       }
     end
 
@@ -466,11 +463,15 @@ defmodule AxonDashboard.DashboardState do
             pipeline: PipelineConfig.t(),
             notify_channel: String.t() | nil,
             coldstart_poll_interval_secs: non_neg_integer(),
+            demand_pull_backoff_initial_ms: non_neg_integer(),
+            demand_pull_backoff_max_ms: non_neg_integer(),
             ingress_drain_batch: non_neg_integer()
           }
     defstruct pipeline: %PipelineConfig{},
               notify_channel: nil,
               coldstart_poll_interval_secs: 0,
+              demand_pull_backoff_initial_ms: 0,
+              demand_pull_backoff_max_ms: 0,
               ingress_drain_batch: 0
 
     def from_map(nil), do: %__MODULE__{}
@@ -480,6 +481,8 @@ defmodule AxonDashboard.DashboardState do
         pipeline: PipelineConfig.from_map(m),
         notify_channel: Map.get(m, "notify_channel"),
         coldstart_poll_interval_secs: int(m, "coldstart_poll_interval_secs"),
+        demand_pull_backoff_initial_ms: int(m, "demand_pull_backoff_initial_ms"),
+        demand_pull_backoff_max_ms: int(m, "demand_pull_backoff_max_ms"),
         ingress_drain_batch: int(m, "ingress_drain_batch")
       }
     end

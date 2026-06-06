@@ -236,9 +236,13 @@ const PipelineTopology = {
       <polygon points="${x2 - 8},${y - 4} ${x2 - 2},${y} ${x2 - 8},${y + 4}" fill="rgba(148,163,184,0.45)"/>
     `
 
-    // try_send buffer between A3 and B1
+    // A3 → B hand-off (slice 4/5 SOTA): A3 writes chunks to PG; the
+    // trg_chunk_notify_pending trigger fires pg_notify('chunk_pending_embed');
+    // demand_pull_b LISTENs + adaptively polls and feeds B2 directly via the
+    // b_chunks channel. There is NO try_send and NO B1 stage — the A3→B1 push
+    // channel was eliminated (REQ-AXO-901746); B is fed exclusively by demand_pull.
     const bufX1 = aXs[2] + stageW + 10
-    const bufX2 = bXs[0] - 10
+    const bufX2 = bXs[1] - 10
     const bufW = bufX2 - bufX1
     const bufY = stageY + stageH/2 - 14
     const bufH = 28
@@ -264,13 +268,12 @@ const PipelineTopology = {
       ${stageBox(aXs[0], "a1", "read + hash", "A")}
       ${stageBox(aXs[1], "a2", "parse TS", "A")}
       ${stageBox(aXs[2], "a3", "graph UPSERT", "A")}
-      ${stageBox(bXs[0], "b1", "fetch", "B")}
       ${stageBox(bXs[1], "b2", "embed GPU", "B")}
       ${stageBox(bXs[2], "b3", "write embeddings", "B")}
 
       ${arrow(aXs[0] + stageW, aXs[1], stageY + stageH/2)}
       ${arrow(aXs[1] + stageW, aXs[2], stageY + stageH/2)}
-      ${arrow(bXs[0] + stageW, bXs[1], stageY + stageH/2)}
+      ${arrow(bufX2, bXs[1], stageY + stageH/2)}
       ${arrow(bXs[1] + stageW, bXs[2], stageY + stageH/2)}
 
       <g id="buffer">
@@ -280,10 +283,10 @@ const PipelineTopology = {
           id="buffer-fill" fill="url(#bufGrad)"></rect>
         <text x="${bufX1 + bufW/2}" y="${bufY - 6}" text-anchor="middle"
           fill="#94a3b8" font-family="ui-monospace, monospace" font-size="9" letter-spacing="0.15em">
-          try_send · A3→B1
+          pg_notify → demand_pull_b → B2
         </text>
         <text id="buffer-label" x="${bufX1 + bufW/2}" y="${bufY + bufH + 14}" text-anchor="middle"
-          fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="10">cap —</text>
+          fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="10">b_chunks → B2</text>
       </g>
 
       <g id="rate-badge" transform="translate(${bXs[1] + stageW/2 - 50}, ${stageY + stageH + 24})">
@@ -310,13 +313,19 @@ const PipelineTopology = {
       const el = this.el.querySelector(`#stage-${s.id}-workers`)
       if (el) el.textContent = `${s.workers} workers`
     })
-    // Buffer
+    // b_chunks channel (demand_pull_b → B2). All values are canonical: cap +
+    // fill come from the pushed payload (sourced from runtime_config / live
+    // telemetry) — NO hardcoded literal. Absent ⇒ render "—", never a guess.
+    const buf = state.buffer || {}
+    const bCap = buf.cap || 0
+    const bFill = buf.fill || 0
     const bufLabel = this.el.querySelector("#buffer-label")
     const bufFill = this.el.querySelector("#buffer-fill")
-    if (bufLabel) bufLabel.textContent = `cap ${(state.buffer.cap || 0).toLocaleString()}`
-    if (bufFill && state.buffer.cap > 0) {
-      const w = Math.max(0, Math.min(1, (state.buffer.fill || 0) / state.buffer.cap))
-      const bufX1 = 622 // matches shell
+    if (bufLabel) bufLabel.textContent = bCap > 0
+      ? `b_chunks ${bFill.toLocaleString()}/${bCap.toLocaleString()}`
+      : "b_chunks —"
+    if (bufFill && bCap > 0) {
+      const w = Math.max(0, Math.min(1, bFill / bCap))
       const bufW = 78
       bufFill.setAttribute("width", String(bufW * w))
     }

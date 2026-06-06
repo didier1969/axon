@@ -75,19 +75,37 @@ axon_pc_supervisor_pids() {
     pgrep -f "process-compose.*${cfg}" 2>/dev/null | awk 'NF' | sort -u || true
 }
 
-# axon_repo_runtime_child_pids <project_root> — PIDs of axon-brain / axon-indexer
-# / dashboard BEAM children that belong to THIS repo. Scoped to "${project_root}"
-# so other clones / other projects are never touched. Empty stdout + rc 0 when
-# none. Used as a belt-and-suspenders sweep after the supervisor is down.
+# axon_repo_runtime_child_pids <project_root> <instance_kind> [node_name] — PIDs
+# of axon-brain / axon-indexer / dashboard BEAM children that belong to THIS repo
+# AND THIS instance. Scoped to "${project_root}" so other clones / projects are
+# never touched, AND to the instance's binary location so a `dev` stop NEVER
+# reaps `live` and vice-versa (the bug: a repo-wide bin/+cargo-target match
+# killed the live brain/indexer during a dev stop). Canonical invariant
+# (CLAUDE.md deployment): live runs the promoted RELEASE binaries under bin/
+# ONLY ; dev runs cargo-target builds (debug or release) ONLY. Empty stdout +
+# rc 0 when none. Belt-and-suspenders sweep after the supervisor is down.
 axon_repo_runtime_child_pids() {
     local project_root="${1:?project root required}"
-    local node_name="${2:-}"
+    local instance_kind="${2:?instance kind required}"
+    local node_name="${3:-}"
     local out=""
     local add
-    add="$(pgrep -f "${project_root}/bin/axon-brain( |\$)|${project_root}/bin/axon-indexer( |\$)|${project_root}/.axon[^ ]*/cargo-target/[^ ]*/axon-brain( |\$)|${project_root}/.axon[^ ]*/cargo-target/[^ ]*/axon-indexer( |\$)" 2>/dev/null || true)"
+    local bin_pat
+    case "$instance_kind" in
+        live)
+            # Live = promoted release binaries under bin/ ONLY (never cargo-target).
+            bin_pat="${project_root}/bin/axon-brain( |\$)|${project_root}/bin/axon-indexer( |\$)"
+            ;;
+        *)
+            # Dev = cargo-target builds (debug or release) ONLY (never bin/).
+            bin_pat="${project_root}/.axon[^ ]*/cargo-target/[^ ]*/axon-brain( |\$)|${project_root}/.axon[^ ]*/cargo-target/[^ ]*/axon-indexer( |\$)"
+            ;;
+    esac
+    add="$(pgrep -f "$bin_pat" 2>/dev/null || true)"
     [[ -n "$add" ]] && out="$out
 $add"
     # Dashboard BEAM: matched by Erlang node name (cmdline loses project_root).
+    # The node name is already instance-specific, so this stays scoped.
     if [[ -n "$node_name" ]]; then
         add="$(pgrep -f "beam.smp.*${node_name}" 2>/dev/null || true)"
         [[ -n "$add" ]] && out="$out
@@ -191,7 +209,7 @@ axon_reap_supervisor_tree() {
     #    detached from a dead supervisor (e.g. dev release brain under
     #    .axon/cargo-target, invisible to bin/-anchored matchers).
     local child_pids
-    child_pids="$(axon_repo_runtime_child_pids "$project_root" "$node_name")"
+    child_pids="$(axon_repo_runtime_child_pids "$project_root" "$instance_kind" "$node_name")"
     if [[ -n "$child_pids" ]]; then
         _axon_sup_log "Reaping repo runtime child PID(s): ${child_pids//$'\n'/ }"
         # shellcheck disable=SC2086

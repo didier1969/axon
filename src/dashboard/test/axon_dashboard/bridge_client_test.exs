@@ -89,7 +89,7 @@ defmodule AxonDashboard.BridgeClientTest do
            "rss_anon_bytes" => 5_120,
            "rss_file_bytes" => 1_920,
            "rss_shmem_bytes" => 300,
-           "vector_chunks_embedded_total" => 96,
+           "vector_chunks_embedded_cumulative" => 96,
            "chunk_embeddings_per_second" => 32.0,
            "chunk_embeddings_rate_window_ms" => 5_000,
            "prepare_inflight_chunks_current" => 7,
@@ -106,18 +106,7 @@ defmodule AxonDashboard.BridgeClientTest do
            "active_small_max_tokens" => 80,
            "active_medium_max_tokens" => 160,
            "graph_workers_started_total" => 2,
-           "graph_workers_active_current" => 2,
-           "projected_indexer_runtime" => %{
-             "available" => true,
-             "telemetry_source" => "indexer_peer_heartbeat",
-             "process_role" => "indexer",
-             "freshness_state" => "fresh",
-             "observed_age_ms" => 42,
-             "telemetry" => %{
-               "ingress_buffered_entries" => 88,
-               "chunk_embeddings_per_second" => 40.0
-             }
-           }
+           "graph_workers_active_current" => 2
          }
        }) <> "\n"}
     )
@@ -132,7 +121,7 @@ defmodule AxonDashboard.BridgeClientTest do
     assert stats[:host_state] == "healthy"
     assert stats[:host_guidance_slots] == 6
     assert stats[:rss_anon_bytes] == 5_120
-    assert stats[:vector_chunks_embedded_total] == 96
+    assert stats[:vector_chunks_embedded_cumulative] == 96
     assert stats[:chunk_embeddings_per_second] == 32.0
     assert stats[:prepare_inflight_chunks_current] == 7
     assert stats[:ready_queue_chunks_current] == 19
@@ -148,8 +137,5 @@ defmodule AxonDashboard.BridgeClientTest do
     assert stats[:active_small_max_tokens] == 80
     assert stats[:active_medium_max_tokens] == 160
     assert stats[:graph_workers_active_current] == 2
-    assert get_in(stats, [:projected_indexer_runtime, "telemetry_source"]) == "indexer_peer_heartbeat"
-    assert get_in(stats, [:projected_indexer_runtime, "telemetry", "ingress_buffered_entries"]) == 88
-    assert get_in(stats, [:projected_indexer_runtime, "telemetry", "chunk_embeddings_per_second"]) == 40.0
   end
 end
