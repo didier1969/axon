@@ -303,7 +303,15 @@ if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "
 fi
 
 ensure_head_stable
-bash "$ROOT_DIR/scripts/axon-live" status 2>&1 | tee -a "$PROMOTE_LOG"
+# REQ-AXO-901879 — step 7 is finalize (SOLL export + status DISPLAY).
+# Promotion correctness is already gated by step 5 (atomic binary swap +
+# runtime-identity match) and step 6 (qualify-mcp verdict=ok against the live
+# brain). The legacy pid-file `axon-live status` surface mis-reports OVERALL
+# DOWN on a healthy process-compose runtime — it reads stale
+# `.axon/live-run/*.pid` that the process-compose supervisor no longer writes —
+# so its exit code must NOT fire the ERR trap and spuriously roll back a
+# successful promote. Display-only; `|| true` neutralises the pipefail exit.
+bash "$ROOT_DIR/scripts/axon-live" status 2>&1 | tee -a "$PROMOTE_LOG" || true
 promote_log "   ✅ step 7 (finalize) done"
 
 # --- Final summary ---
