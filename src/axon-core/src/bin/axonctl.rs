@@ -775,6 +775,13 @@ struct StatusReport {
     /// part of its operator contract. When this list is non-empty, `overall`
     /// is downgraded to `degraded` even if the process is alive.
     role_contract_violations: Vec<String>,
+    /// REQ-AXO-901879 — liveness backed by canonical PIL-AXO-001 evidence
+    /// (role-port bound / writer-guard owner alive), not the pid file alone.
+    /// Under the process-compose DAG the role binaries are launched directly
+    /// and never write the legacy pid file, so a pid-file-only check reported a
+    /// false DOWN on a healthy runtime. `liveness_source` names the signal.
+    effective_alive: bool,
+    liveness_source: String,
     overall: String,
 }
 
@@ -932,9 +939,37 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
     let role_contract_violations =
         compute_role_contract_violations(config.role, &sockets, mcp_http_listening);
 
-    let overall = if !alive {
+    // REQ-AXO-901879 — back liveness with canonical PIL-AXO-001 evidence, not
+    // the pid file alone. Under the process-compose DAG the role binaries are
+    // launched directly and never write the legacy run-{role} pid file, so the
+    // pid-file-derived `alive` is a false DOWN on a healthy runtime. A brain
+    // that serves its MCP surface, or an indexer that holds a live writer
+    // guard, IS alive.
+    let mcp_available =
+        mcp_http_listening || sockets.iter().any(|s| s.name == "mcp" && s.exists);
+    let guard_owner_live = writer_guards.iter().any(|g| g.exists && g.owner_alive);
+    let role_liveness_signal = match config.role {
+        RuntimeRole::Brain => mcp_available,
+        RuntimeRole::Indexer => guard_owner_live,
+        RuntimeRole::All => mcp_available || guard_owner_live,
+    };
+    let effective_alive = alive || role_liveness_signal;
+    let liveness_source = if alive {
+        "pid_file"
+    } else if role_liveness_signal {
+        match config.role {
+            RuntimeRole::Brain => "mcp_surface",
+            RuntimeRole::Indexer => "writer_guard",
+            RuntimeRole::All => "mcp_or_guard",
+        }
+    } else {
+        "none"
+    };
+
+    let overall = if !effective_alive {
         "down"
-    } else if !cmdline_matches {
+    } else if alive && !cmdline_matches {
+        // pid file points to a live but non-matching process — real drift.
         "degraded"
     } else if !role_contract_violations.is_empty() {
         "degraded"
@@ -950,6 +985,8 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         sockets,
         writer_guards,
         role_contract_violations,
+        effective_alive,
+        liveness_source: liveness_source.to_string(),
         overall: overall.to_string(),
     };
 
@@ -962,6 +999,8 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         );
         if let Some(pid) = report.process.pid {
             println!("  process: pid={pid} alive={} match={}", report.process.alive, report.process.cmdline_matches);
+        } else if report.effective_alive {
+            println!("  process: live via {} (no pid file)", report.liveness_source);
         } else {
             println!("  process: no pid file");
         }

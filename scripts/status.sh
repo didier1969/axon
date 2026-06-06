@@ -124,6 +124,11 @@ if pid is not None:
         print(f"WARN    process pid={pid} alive (cmdline mismatch — probably reused pid)")
     else:
         print(f"FAIL    process pid={pid} dead (stale pid file points to a process that is not running)")
+elif data.get("effective_alive"):
+    # REQ-AXO-901879 — process-compose launches the role binary directly and
+    # does not write the legacy pid file ; liveness is backed by canonical
+    # evidence (mcp surface / writer guard) per PIL-AXO-001, not the pid file.
+    print(f"OK      process live via {data.get('liveness_source', 'signal')} (no pid file)")
 else:
     print("FAIL    process: no pid file")
 

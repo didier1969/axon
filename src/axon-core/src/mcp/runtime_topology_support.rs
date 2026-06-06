@@ -4,15 +4,6 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-
-fn split_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// REQ-AXO-901859 — canonical freshness window for the indexer lifecycle
 /// heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`). Shared by the
