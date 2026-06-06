@@ -158,6 +158,23 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "cache_generic",
         matcher: DirectoryMatcher::Exact(".cache"),
     },
+    // REQ-AXO-901885 — agent/tooling working state (Claude Code, planning
+    // scratch dirs): config JSON/markdown carrying no project structure.
+    // HardExclude, consistent with .direnv/.devenv/.cache above.
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::ToolingState,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "agent_claude_state",
+        matcher: DirectoryMatcher::Exact(".claude"),
+    },
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::ToolingState,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "agent_planning_state",
+        matcher: DirectoryMatcher::Exact(".planning"),
+    },
     DirectoryRule {
         ecosystem: EcosystemId::JavaScript,
         class: ArtifactClass::DependencyStore,
@@ -339,6 +356,19 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         policy: ExclusionPolicy::SoftExclude,
         rule_id: "shared_vendor",
         matcher: DirectoryMatcher::Exact("vendor"),
+    },
+    // REQ-AXO-901885 — vendored third-party sources (e.g.
+    // duckdb-graph/third_party/CXXGraph) we neither own nor want in the IST.
+    // Parsing+chunking+embedding them is one-time noise, and their
+    // zero-symbol files (generated headers, fixtures) fed the A2 re-parse
+    // loop. SoftExclude (not Hard) keeps the allowlist escape hatch,
+    // consistent with shared_vendor/shared_dist/shared_build.
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::DependencyStore,
+        policy: ExclusionPolicy::SoftExclude,
+        rule_id: "shared_third_party",
+        matcher: DirectoryMatcher::Exact("third_party"),
     },
     DirectoryRule {
         ecosystem: EcosystemId::General,
@@ -549,6 +579,71 @@ mod tests {
             classify_path(
                 root,
                 Path::new("/workspace/proj/src/vendor_adapter.rs"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::Allow
+        );
+    }
+
+    /// REQ-AXO-901885 — vendored third-party trees are SoftExcluded (skipped
+    /// by default, allowlistable), and agent/tooling state dirs (.claude,
+    /// .planning) are HardExcluded. Both keep their zero-symbol files out of
+    /// the A2 re-parse loop that pegged the indexer across the projects tree.
+    #[test]
+    fn test_indexing_policy_excludes_vendored_third_party_and_agent_tooling_state() {
+        let config = test_config();
+        let ecosystems = supported_parser_ecosystems();
+        let root = Path::new("/workspace");
+
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/third_party/CXXGraph/test/main.cpp"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::SoftExcluded {
+                ecosystem: EcosystemId::General,
+                class: ArtifactClass::DependencyStore,
+                rule_id: "shared_third_party",
+            }
+        );
+
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/.claude/settings.local.json"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::HardExcluded {
+                ecosystem: EcosystemId::General,
+                class: ArtifactClass::ToolingState,
+                rule_id: "agent_claude_state",
+            }
+        );
+
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/.planning/config.json"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::HardExcluded {
+                ecosystem: EcosystemId::General,
+                class: ArtifactClass::ToolingState,
+                rule_id: "agent_planning_state",
+            }
+        );
+
+        // A normal source file whose name merely contains "third_party" must
+        // still index — segment match is exact, not substring.
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/src/third_party_adapter.rs"),
                 &config,
                 ecosystems,
             ),

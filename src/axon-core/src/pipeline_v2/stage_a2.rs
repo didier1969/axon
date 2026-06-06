@@ -68,13 +68,19 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         symbols.extend(phantom_syms);
         relations.extend(phantom_rels);
 
-        if symbols.is_empty() && relations.is_empty() {
-            return Err(anyhow::anyhow!(
-                "A2: no parser and no phantom rules for {}",
-                prep.path.display()
-            ));
-        }
-
+        // REQ-AXO-901885 — a parsed file that yields zero symbols AND zero
+        // relations is NOT an error: it is "seen, nothing structural to
+        // extract" (data/config/markup, a code file with only top-level
+        // expressions, generated headers, vendored sources). Returning Err
+        // here meant the file never reached A3, so its
+        // `IndexedFile(content_hash)` marker was never written — and every
+        // subsequent full scanner walk re-discovered it as unseen, re-queued
+        // it, and re-failed, burning CPU in an unbounded re-parse loop
+        // (observed: same ~2.1k files reprocessed ~10×/hour). Generalises the
+        // REQ-AXO-347 empty-file fast-path: emit a valid zero-symbol
+        // ParsedFile so A3 records the marker (zero chunks, because chunks are
+        // built per-symbol in upsert_graph_v2) and the watcher SkipsUnchanged
+        // it on the next walk.
         Ok(ParsedFile {
             path: prep.path,
             content: prep.content,
@@ -136,15 +142,23 @@ mod tests {
         assert!(!parsed.content.is_empty(), "content forwarded for A3 chunking");
     }
 
+    /// REQ-AXO-901885 — a non-empty file whose extension has no parser (and no
+    /// phantom rules) is NOT an error: A2 returns Ok with zero symbols and the
+    /// content preserved, so A3 persists the IndexedFile marker (zero chunks)
+    /// and the scanner stops re-queueing it. Pre-fix this surfaced an
+    /// `A2: no parser and no phantom rules` error that prevented the marker
+    /// write and caused an unbounded re-parse loop.
     #[tokio::test]
-    async fn a2_transform_errors_when_extension_has_no_parser() {
+    async fn a2_transform_marks_unparseable_file_done_with_zero_symbols() {
         let prep = prep_with("/tmp/file.unknownext", "anything goes");
-        let res = a2_transform(prep).await;
-        assert!(res.is_err(), "unsupported extension must surface an error");
-        let msg = format!("{:#}", res.unwrap_err());
-        assert!(
-            msg.contains("no parser"),
-            "error message should reference the missing parser: {msg}"
+        let parsed = a2_transform(prep)
+            .await
+            .expect("no-parser file must be a clean skip, not an error");
+        assert!(parsed.symbols.is_empty(), "no parser => no symbols");
+        assert!(parsed.relations.is_empty(), "no parser => no relations");
+        assert_eq!(
+            parsed.content, "anything goes",
+            "content preserved so A3 writes the IndexedFile marker"
         );
     }
 
