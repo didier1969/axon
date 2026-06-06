@@ -232,3 +232,70 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod wasm_grammar_health_tests {
+    use super::*;
+
+    /// REQ-AXO-901886 — every shipped WASM grammar must load + parse a
+    /// trivial valid snippet into at least one symbol. A grammar whose
+    /// `.wasm` is ABI-incompatible with the tree-sitter runtime fails
+    /// `WasmStore::load_language` silently (parse_with_wasm_safe → None →
+    /// zero symbols), leaving that language effectively unindexed (and,
+    /// pre-REQ-AXO-901885, feeding the A2 re-parse loop).
+    ///
+    /// `KNOWN_BROKEN` pins the grammars currently shipping broken `.wasm`
+    /// (diagnosed 2026-06-06: c / cpp / c-sharp / php yield zero symbols on
+    /// valid input while ruby/kotlin from the same commit work — see
+    /// REQ-AXO-901886). The test enforces TWO directions so it stays green
+    /// today yet self-cleans on fix:
+    ///   1. no healthy grammar may regress to zero symbols;
+    ///   2. a KNOWN_BROKEN grammar that starts producing symbols must be
+    ///      removed from the list (the assert fires to remind us).
+    const KNOWN_BROKEN: &[&str] = &["demo.c", "demo.cpp", "demo.cs", "demo.php"];
+
+    #[test]
+    fn shipped_wasm_grammars_extract_symbols_except_known_broken() {
+        // (file extension, minimal valid snippet expected to yield ≥1 symbol)
+        let cases: &[(&str, &str)] = &[
+            ("demo.rs", "fn main() {}\n"),
+            ("demo.py", "def main():\n    pass\n"),
+            ("demo.ts", "function main(): void {}\n"),
+            ("demo.js", "function main() {}\n"),
+            ("demo.go", "package m\nfunc Main() {}\n"),
+            ("demo.java", "class A { void m() {} }\n"),
+            ("demo.ex", "defmodule A do\n  def f, do: 1\nend\n"),
+            ("demo.rb", "def foo\n  1\nend\n"),
+            ("demo.kt", "fun main() {}\n"),
+            ("demo.c", "int main(void) { return 0; }\n"),
+            ("demo.cpp", "int main() { return 0; }\n"),
+            ("demo.cs", "class A { void M() {} }\n"),
+            ("demo.php", "<?php\nfunction foo() { return 1; }\n"),
+        ];
+
+        let mut regressed: Vec<&str> = Vec::new();
+        let mut unexpectedly_fixed: Vec<&str> = Vec::new();
+        for (file, snippet) in cases {
+            let parser = get_parser_for_file(Path::new(file))
+                .unwrap_or_else(|| panic!("no parser registered for {file}"));
+            let n = parser.parse(snippet).symbols.len();
+            let known_broken = KNOWN_BROKEN.contains(file);
+            match (known_broken, n) {
+                (false, 0) => regressed.push(file),
+                (true, n) if n > 0 => unexpectedly_fixed.push(file),
+                _ => {}
+            }
+        }
+
+        assert!(
+            regressed.is_empty(),
+            "healthy WASM grammar(s) regressed to zero symbols (broken .wasm? \
+             see REQ-AXO-901886): {regressed:?}"
+        );
+        assert!(
+            unexpectedly_fixed.is_empty(),
+            "KNOWN_BROKEN grammar(s) now extract symbols — remove them from \
+             KNOWN_BROKEN (REQ-AXO-901886 fixed for): {unexpectedly_fixed:?}"
+        );
+    }
+}
