@@ -252,7 +252,11 @@ mod wasm_grammar_health_tests {
     ///   1. no healthy grammar may regress to zero symbols;
     ///   2. a KNOWN_BROKEN grammar that starts producing symbols must be
     ///      removed from the list (the assert fires to remind us).
-    const KNOWN_BROKEN: &[&str] = &["demo.c", "demo.cpp", "demo.cs", "demo.php"];
+    // REQ-AXO-901886 fixed 2026-06-06: c/cpp/c-sharp/php .wasm regenerated at
+    // ABI 14 (tree-sitter v0.23.x grammars; c-sharp forced via
+    // `tree-sitter generate --abi 14`) so they load in the 0.23.2 runtime.
+    // Empty = every shipped grammar must extract ≥1 symbol.
+    const KNOWN_BROKEN: &[&str] = &[];
 
     #[test]
     fn shipped_wasm_grammars_extract_symbols_except_known_broken() {
