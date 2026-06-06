@@ -120,29 +120,10 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// REQ-AXO-901814 (MIL-AXO-029 slice 3) — admission-controller-aware
-/// defaults. The reorder point (`s`) and quantity (`Q`) used by
-/// demand_pull share their canonical source of truth with
-/// [`crate::runtime_profile::recommend_admission_controller_profile`]
-/// so a host with more workers gets a larger backlog headroom by
-/// default. Env vars override the derived value when set —
-/// operators tuning bench / debug runs keep full control.
-fn admission_reorder_point() -> usize {
-    let profile = crate::runtime_profile::RuntimeProfile::detect();
-    crate::runtime_profile::recommend_admission_controller_profile(&profile).reorder_point
-}
-
-fn demand_pull_a_threshold_from_env() -> usize {
-    env_usize("AXON_PIPELINE_A_REORDER_POINT", admission_reorder_point())
-}
-
-fn demand_pull_a_batch_from_env() -> usize {
-    // Reorder quantity defaults to the same value as reorder point —
-    // refill the whole stock band at once unless the operator tunes
-    // it down (e.g. to smooth GPU load). Bench (slice 8) may revisit.
-    env_usize("AXON_PIPELINE_A_REORDER_QUANTITY", admission_reorder_point())
-}
-
+// REQ-AXO-901891 — demand_pull A admission-controller helpers (reorder point /
+// quantity, REQ-AXO-901814) removed with the demand_pull A feeder. Pipeline A
+// is now fed by the backpressure bootstrap walk + the drain loop, which pace
+// to A's throughput directly — no reorder-band tuning to do.
 fn demand_pull_b_threshold_from_env() -> usize {
     // Pipeline B (vector embedding) flows more items per file ; keep
     // the 1500 default until bench (slice 8) ties it to a host metric.
@@ -203,35 +184,12 @@ pub fn spawn_pipeline_v2_indexer(
     ingress_buffer: SharedIngressBuffer,
     watch_root: String,
 ) -> Result<()> {
-    // REQ-AXO-901820 — at cold-start, rehabilitate any IndexedFile rows
-    // that were poisoned by retry_count reaching the demand_pull max in
-    // a previous run. Without this, restart + truncate cycles leave
-    // thousands of files permanently stranded (session 62 observed
-    // 12 300 such orphans), and the indexer reports runtime_idle while
-    // PG still has work to do. 1 h cool-off prevents thrashing freshly
-    // failed files in the same session.
-    {
-        const REHAB_COOL_OFF_MS: i64 = 3_600_000; // 1 hour
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        match store.rehabilitate_poisoned_files(REHAB_COOL_OFF_MS, now_ms) {
-            Ok(eligible) => {
-                if eligible > 0 {
-                    info!(
-                        "pipeline_v2 cold-start: {} 'discovered' files \
-                         eligible for re-claim after rehab pass (cool_off=1h)",
-                        eligible
-                    );
-                }
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "pipeline_v2 cold-start: poison-pill rehab failed (non-blocking)"
-                );
-            }
-        }
-    }
-
+    // REQ-AXO-901891 — the demand_pull retry_count poison-pill rehab (REQ-
+    // AXO-901820) is gone: with the SOTA reconciler (backpressure bootstrap +
+    // drain, no demand_pull claim/retry machinery), files are never claimed-
+    // then-poisoned, so there is nothing to rehabilitate. The bootstrap walk
+    // re-feeds every eligible path each boot (idempotent via the dedup cache
+    // below, which skips the A2 parse on unchanged content_hash).
     let caps = PipelineChannelCaps::from_env();
     let counts_a = PipelineAWorkerCounts::from_env();
 
@@ -441,21 +399,16 @@ pub fn spawn_pipeline_v2_indexer(
         }
     });
 
-    // Bootstrap scan: enumerate every eligible file under the watch
-    // root once at boot and feed pipeline A. Re-runs on every restart;
-    // IndexedFile + UPSERT idempotence makes this safe.
+    // Bootstrap reconciliation scan: enumerate every eligible file under the
+    // watch root at boot and feed pipeline A with BACKPRESSURE (REQ-AXO-901891).
+    // Re-runs on every restart; IndexedFile UPSERT + dedup-cache idempotence
+    // make this safe and cheap (unchanged files skip the A2 parse).
     //
-    // REQ-AXO-901649 — use try_send + brief async yield instead of
-    // blocking send().await. The 1024-slot A1 input channel saturates
-    // within ~milliseconds on bootstrap of a 130K-file workspace ;
-    // a blocking send was observed to deadlock the bootstrap task in
-    // production (session 51, live indexer hung 2.5h post-boot with
-    // ingress_buffered_entries=14253 stuck at the exact same value
-    // across consecutive heartbeats). A dropped path is NOT lost :
-    // scope_reconciliation_orchestrator re-walks every 60 s and re-
-    // submits any file whose (path, mtime, size) doesn't match
-    // IndexedFile, so transient back-pressure absorbs naturally
-    // without freezing the pipeline.
+    // The pre-fix "try_send + drop, rely on a 60s reconciliation sweep +
+    // demand_pull re-claim" design (REQ-AXO-901649) was the bricolage that
+    // stranded files: the session-51 "deadlock" it cited was A NOT DRAINING
+    // (a separate stall), not send().await itself — with A1/A2/A3 healthy,
+    // send().await simply paces the walk to A's throughput and never drops.
     let input_tx_bootstrap = handles_a.input_tx.clone();
     let scanner_bootstrap = scanner.clone();
     let watch_root_bootstrap = watch_root.clone();
@@ -466,87 +419,50 @@ pub fn spawn_pipeline_v2_indexer(
             "pipeline_v2 bootstrap: enumerated {} files under {}",
             count, watch_root_bootstrap
         );
+        // REQ-AXO-901891 — backpressure, NEVER drop. send().await paces the
+        // walk to A1's drain rate; a full channel parks THIS task (not the
+        // pipeline — A1/A2/A3 keep draining to PG on their own workers), so
+        // the walk resumes the instant a slot frees. The dedup cache skips
+        // the expensive A2 parse on unchanged content_hash, so re-feeding the
+        // whole tree each boot is cheap and the indexer ALWAYS converges. This
+        // replaces the try_send-drop + 5×100ms-retry dance whose dropped paths
+        // relied on a 60s reconciliation sweep + demand_pull re-claim — the
+        // very machinery that stranded ~18k files at runtime_idle.
         let mut handed = 0usize;
-        let mut dropped = 0usize;
-        // REQ-AXO-901831 — bounded retry before dropping. Pre-fix code
-        // dropped the path on the first Full and relied on the 60 s
-        // reconciliation sweep as safety net ; when reconciliation
-        // skipped a directory (cluster head D4, session 64), the drop
-        // became permanent. 5 × 100 ms = 500 ms absorbs transient A1
-        // saturation while keeping bootstrap non-blocking. Lost paths
-        // (after 5 attempts) still fall through to reconciliation, but
-        // the window where this can happen is now ≤ 500 ms per path
-        // instead of "until something else triggers a re-walk".
-        const BOOTSTRAP_FULL_MAX_ATTEMPTS: u32 = 5;
-        const BOOTSTRAP_FULL_BACKOFF_MS: u64 = 100;
         for path in files {
-            let mut pending = Some(path);
-            let mut attempts: u32 = 0;
-            while let Some(current) = pending.take() {
-                match input_tx_bootstrap.try_send(current) {
-                    Ok(()) => {
-                        handed += 1;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
-                        attempts += 1;
-                        if attempts >= BOOTSTRAP_FULL_MAX_ATTEMPTS {
-                            dropped += 1;
-                        } else {
-                            tokio::time::sleep(Duration::from_millis(
-                                BOOTSTRAP_FULL_BACKOFF_MS,
-                            ))
-                            .await;
-                            pending = Some(returned);
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed / {dropped} dropped");
-                        return;
-                    }
-                }
+            if input_tx_bootstrap.send(path).await.is_err() {
+                warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed");
+                return;
             }
+            handed += 1;
         }
         info!(
-            "pipeline_v2 bootstrap: walk complete (total={}, handed={}, dropped_for_reconciliation={})",
-            count, handed, dropped
+            "pipeline_v2 bootstrap: walk complete (total={}, handed={})",
+            count, handed
         );
     });
 
-    // DEC-AXO-901620: demand-pull A replaces the supply-push cold-start
-    // poll. PG NOTIFY on `file_discovered` wakes the puller; 30s
-    // safety-net poll catches lost notifications.
-    let demand_pull_a_threshold = demand_pull_a_threshold_from_env();
-    let demand_pull_a_batch = demand_pull_a_batch_from_env();
-    let db_url_a = resolve_database_url_for_listener();
-    let _metrics_a = crate::pipeline_v2::demand_pull::spawn_pipeline_a_demand_pull(
-        store.clone(),
-        db_url_a,
-        handles_a.input_tx.clone(),
-        demand_pull_a_threshold,
-        demand_pull_a_batch,
-    );
-    DEMAND_PULL_METRICS_A.store(Arc::into_raw(_metrics_a) as *mut _, std::sync::atomic::Ordering::Release);
+    // REQ-AXO-901891 — demand_pull A (DEC-AXO-901620) is REMOVED. The NOTIFY-
+    // woken, retry_count-claiming feeder was a safety net for try_send-dropped
+    // paths; with the backpressure bootstrap + drain it has no job, and its
+    // claim/retry_count machinery was the source of poison-pill stranding
+    // (REQ-AXO-901820 rehab, the balanced_drain idle-with-stock stall). The
+    // bootstrap walk + the inotify-fed drain are now the sole, reliable feeds.
 
     // Steady-state drain loop: pull file events from the shared
     // ingress_buffer (watcher pushes here on FS notifications) and
     // forward into pipeline A. Subtree hints are completed silently
     // — full subtree re-scans happen via separate scanner sweeps.
     //
-    // REQ-AXO-901649 — three hardening changes vs. pre-fix:
     // 1. Complete subtree hints BEFORE the file send loop so a slow /
-    //    saturated A1 can never starve hint clearing (the in_flight
-    //    counter was observed pinned at 256 = drain limit, with
-    //    blocked_total growing +144K/h as new hints bounced off the
-    //    saturated retry budget).
-    // 2. Replace input_tx.send().await with try_send + bounded yield
-    //    so the drain task can NEVER park indefinitely on a full A1
-    //    channel. Dropped paths are picked up by the next watcher
-    //    event or by scope_reconciliation_orchestrator's 60 s sweep
-    //    (every dropped file remains in the IndexedFile-mismatch set
-    //    until it's actually persisted, so reconciliation will re-
-    //    submit it).
-    // 3. Log a periodic heartbeat ('drain tick: buffered=… in_flight_
-    //    hints=…') at INFO every 25 ticks (~5 s) so any future stall
+    //    saturated A1 can never starve hint clearing.
+    // 2. REQ-AXO-901891 — forward with input_tx.send().await (BACKPRESSURE,
+    //    never drop). A full A1 channel parks this drain task until A frees a
+    //    slot; the in-memory ingress_buffer absorbs new watcher events. The
+    //    pre-fix try_send-drop (REQ-AXO-901649) relied on a 60s reconciliation
+    //    sweep + demand_pull re-claim to recover dropped paths — the bricolage
+    //    that left files stranded at runtime_idle.
+    // 3. Periodic heartbeat at INFO every 25 ticks (~5 s) so any future stall
     //    is visible without re-instrumenting.
     let input_tx_drain = handles_a.input_tx;
     let ingress_for_drain = ingress_buffer.clone();
@@ -590,18 +506,19 @@ pub fn spawn_pipeline_v2_indexer(
                 );
             }
             let mut sent = 0usize;
-            let mut dropped = 0usize;
+            // REQ-AXO-901891 — backpressure, NEVER drop. A full A1 channel
+            // parks this drain task until A frees a slot; the in-memory
+            // ingress_buffer absorbs new watcher events meanwhile. Replaces the
+            // try_send-drop + "reconciliation re-submits it" dance.
             for file_event in batch.files {
                 let path = PathBuf::from(file_event.path);
-                match input_tx_drain.try_send(path) {
-                    Ok(()) => sent += 1,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => dropped += 1,
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        warn!("pipeline_v2 drain: A1 input channel closed; drain task exiting");
-                        return;
-                    }
+                if input_tx_drain.send(path).await.is_err() {
+                    warn!("pipeline_v2 drain: A1 input channel closed; drain task exiting");
+                    return;
                 }
+                sent += 1;
             }
+            let dropped = 0usize; // backpressure ⇒ structurally zero drops
             dropped_since_log = dropped_since_log.saturating_add(dropped as u64);
             // REQ-AXO-901678 — publish drain telemetry every tick so
             // `axon_embedding_status` + `axon_diagnose_indexing` can
