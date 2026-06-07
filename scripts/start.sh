@@ -260,10 +260,11 @@ export AXON_PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$DEFAULT_PROJECTS_ROOT}"
 export AXON_WATCH_DIR="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 # REQ-AXO-901893 — Watchman file source toggle. 1 = Watchman clock/cursor
 # reconciliation (per-repo watch-project, no missed events); 0 = legacy
-# notify/inotify + ingress_buffer + sweeps. Default OFF until the dev gate
-# proves convergence (flipped to 1 in step 5). Propagated to the indexer via
-# process-compose env inheritance.
-export AXON_USE_WATCHMAN="${AXON_USE_WATCHMAN:-0}"
+# notify/inotify + ingress_buffer + sweeps. Default ON — the dev gate validated
+# connect/subscribe/clocks/fresh-instance + live deltas (create+delete) and the
+# legacy-watcher cutover. Set =0 only as an emergency rollback to the (also
+# stall-prone) notify path. Propagated to the indexer via process-compose env.
+export AXON_USE_WATCHMAN="${AXON_USE_WATCHMAN:-1}"
 # Resolve the watchman binary to an ABSOLUTE path so the indexer's Connector
 # (which shells out `<bin> get-sockname`) can find it — the indexer runs OUTSIDE
 # the devenv PATH (process-compose inherits start.sh's non-devenv PATH, same as
