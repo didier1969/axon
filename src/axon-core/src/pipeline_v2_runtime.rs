@@ -10,11 +10,18 @@
 //!    Watchman failure it degrades to an explicit one-shot scanner walk + Blocker.
 //! 3. Spawns the DBQ-A claim feeder ([`crate::pipeline_v2::demand_pull`],
 //!    REQ-AXO-901897): atomically claims 'discovered' / stale-lease 'parsing'
-//!    rows from ist.IndexedFile into the SAME `input_tx`, draining any backlog
+//!    rows from ist.IndexedFile into the SAME `input_tx`, draining the backlog
 //!    by construction. A3's idempotent UPSERTs are the sole persistence path.
+//! 4. Spawns the durable bootstrap + periodic reconciliation walk
+//!    ([`crate::scanner::Scanner::scan`], REQ-AXO-901901): UPSERTs every eligible
+//!    file as status='discovered' so the claim feeder (3) has a backlog to drain.
+//!    This is what actually populates the queue — Watchman's fresh crawl alone
+//!    under-delivers the cold-start bulk (see the boot-walk block below).
 //!
-//! The legacy notify watcher + in-memory `ingress_buffer` FIFO + reconciliation/
-//! periodic sweeps were RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893 RIP).
+//! The legacy notify watcher + in-memory `ingress_buffer` FIFO were RIPPED in the
+//! LEGACY FEED PURGE (REQ-AXO-901893). The bulk-discovery walk is NOT legacy: it
+//! lands directly in the PG work queue (no in-memory buffer) and is the
+//! completeness floor under the always-on Watchman delta feed.
 //!
 //! All spawns are `tokio::spawn` so the function returns once everything
 //! is wired; pipelines run in the background for the lifetime of the process.
@@ -145,12 +152,15 @@ pub fn spawn_pipeline_v2_indexer(
     store: Arc<GraphStore>,
     watch_root: String,
 ) -> Result<()> {
-    // REQ-AXO-901891 — the demand_pull retry_count poison-pill rehab (REQ-
-    // AXO-901820) is gone: with the SOTA reconciler (backpressure bootstrap +
-    // drain, no demand_pull claim/retry machinery), files are never claimed-
-    // then-poisoned, so there is nothing to rehabilitate. The bootstrap walk
-    // re-feeds every eligible path each boot (idempotent via the dedup cache
-    // below, which skips the A2 parse on unchanged content_hash).
+    // REQ-AXO-901901 — discovery has TWO complementary feeds, both landing in
+    // the DBQ-A PG work queue / pipeline-A input (no in-memory buffer):
+    //   * Watchman (live deltas, fast-path) — feeds input_tx directly.
+    //   * Scanner walk (boot + periodic) — UPSERTs status='discovered' for the
+    //     full eligible set; the claim feeder drains it. This is the bulk +
+    //     crash-recovery floor (Watchman's fresh crawl under-delivers cold-start).
+    // Both are idempotent via the dedup cache below (skips the A2 parse on
+    // unchanged content_hash) and A3's ON CONFLICT UPSERTs. The boot walk is
+    // wired at the END of this function, once the claim feeder is live.
     let caps = PipelineChannelCaps::from_env();
     let counts_a = PipelineAWorkerCounts::from_env();
 
@@ -398,6 +408,70 @@ pub fn spawn_pipeline_v2_indexer(
         Arc::into_raw(metrics_a) as *mut _,
         std::sync::atomic::Ordering::Release,
     );
+
+    // REQ-AXO-901901 — DURABLE BOOTSTRAP + PERIODIC RECONCILIATION WALK.
+    //
+    // The LEGACY FEED PURGE (REQ-AXO-901893) removed the bootstrap scanner walk
+    // but left BOTH the comments above AND the DBQ-A design asserting a backlog
+    // "drained by construction" — while nothing populated it. Net effect (live
+    // incident, this session): discovery relied SOLELY on Watchman's fresh
+    // crawl, which under-delivers the cold-start bulk (5.3K of 18K eligible
+    // enrolled, then the pipeline went idle; `ist.IndexedFile(status=discovered)`
+    // stayed empty so the claim feeder had nothing to claim, and the ~12.7K
+    // un-delivered files were never re-offered because the per-root Watchman
+    // clock had already advanced).
+    //
+    // The scanner walk is the AUTHORITATIVE, PG-durable, restart-safe enrollment:
+    // it UPSERTs every eligible file as status='discovered' (idempotent — the
+    // persist_discovery_batch WHERE clause skips unchanged 'parsed' rows at zero
+    // WAL, and delete_stale only purges paths the FS confirms gone, REQ-AXO-901884).
+    // The DBQ-A claim feeder (spawned above) then drains that backlog by
+    // construction. Watchman stays the live-delta fast-path; this walk is the
+    // completeness + crash-recovery floor.
+    //
+    // GUI-PRO-106/107 class-level: a PERIODIC re-walk (not just boot) reconciles
+    // anything Watchman drops at runtime (inotify EMFILE, clock skew, a delta lost
+    // while the indexer was down) for ANY project, present or future — no manual
+    // rescan needed. Cheap when nothing changed (zero WAL). Tunable via
+    // AXON_RECONCILE_SWEEP_SECS (floor 30s, default 900s = 15 min).
+    {
+        let sweep_secs: u64 = std::env::var("AXON_RECONCILE_SWEEP_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v >= 30)
+            .unwrap_or(900);
+        let scanner_for_walk = scanner.clone();
+        let store_for_walk = store.clone();
+        info!(
+            "pipeline_v2: durable bootstrap + reconciliation walk active \
+             (sweep_secs={sweep_secs}) — scanner enrolls status='discovered', \
+             DBQ-A claim feeder drains (REQ-AXO-901901)"
+        );
+        tokio::spawn(async move {
+            loop {
+                let scanner = scanner_for_walk.clone();
+                let store = store_for_walk.clone();
+                let walk = tokio::task::spawn_blocking(move || {
+                    let started = std::time::Instant::now();
+                    scanner.scan(store);
+                    started.elapsed()
+                })
+                .await;
+                match walk {
+                    Ok(elapsed) => info!(
+                        "pipeline_v2: reconciliation walk complete in {:.1}s; \
+                         next sweep in {sweep_secs}s",
+                        elapsed.as_secs_f64()
+                    ),
+                    Err(err) => warn!(
+                        error = %err,
+                        "pipeline_v2: reconciliation walk task panicked; retrying after sweep interval"
+                    ),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)).await;
+            }
+        });
+    }
 
     Ok(())
 }

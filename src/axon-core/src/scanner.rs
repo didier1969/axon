@@ -927,4 +927,127 @@ mod tests {
         assert!(parsed.indexing.subtree_hint_retry_budget >= 1);
     }
 
+    // ───────────────────────────────────────────────────────────────────
+    // REQ-AXO-901901 — durable bootstrap/reconciliation walk regression tests.
+    //
+    // The live stall (this session) was: Watchman's fresh crawl under-delivered
+    // the cold-start bulk (5.3K of 18K eligible), and NOTHING else populated the
+    // DBQ-A 'discovered' queue (the bootstrap scanner walk was removed in the
+    // LEGACY FEED PURGE but the comments still claimed it ran). These lock the
+    // two invariants the wiring fix depends on: scan() ENROLS eligible files as
+    // 'discovered' (drainable by the claim feeder), and the stale reconciliation
+    // it runs at the end of every walk NEVER erodes existing indexed data.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// scan() must UPSERT every eligible source file as status='discovered'
+    /// (discovered_ms>0) — the exact rows the DBQ-A claim feeder drains — while
+    /// pruning build-output directories. Combined with demand_pull's
+    /// `claim_against_real_pg_selects_only_claimable_rows`, this covers the full
+    /// discovery → claim chain the live fix restores.
+    #[tokio::test]
+    async fn scan_enrols_new_eligible_files_as_discovered_and_prunes_build_dirs() {
+        let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/keep_a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.join("src/keep_b.rs"), "fn b() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("target/debug/gen.rs"), "fn g() {}\n").unwrap();
+
+        let root_canon = root.canonicalize().unwrap().to_string_lossy().to_string();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "TST");
+        scanner.scan(store.clone());
+
+        let discovered = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile \
+                 WHERE status='discovered' AND discovered_ms>0 AND path LIKE '{root_canon}/%'"
+            ))
+            .unwrap();
+        assert_eq!(
+            discovered, 2,
+            "scanner walk must enrol exactly the 2 eligible source files as status='discovered'"
+        );
+
+        let in_build = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path LIKE '{root_canon}/target/%'"
+            ))
+            .unwrap();
+        assert_eq!(in_build, 0, "build-dir files must be pruned, never enrolled");
+
+        let _ = store.execute(&format!(
+            "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"
+        ));
+    }
+
+    /// delete_stale_indexed_files (run at the end of every scan()) is the
+    /// reconciliation that the boot/periodic walk performs. It MUST be
+    /// non-destructive: purge only paths the filesystem confirms are gone, never
+    /// the live A3 writeback rows (status='parsed', discovered_ms=0) nor present
+    /// files merely missed by a partial walk. Guards REQ-AXO-901884 against the
+    /// 36K→3.5K erosion regression now that scan() runs on a cadence again.
+    #[tokio::test]
+    async fn delete_stale_preserves_parsed_and_present_rows_purges_only_gone() {
+        let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let root_canon = root.canonicalize().unwrap().to_string_lossy().to_string();
+
+        std::fs::write(root.join("present.rs"), "fn p() {}\n").unwrap();
+        let present = root.join("present.rs").canonicalize().unwrap().to_string_lossy().to_string();
+        std::fs::write(root.join("present2.rs"), "fn p2() {}\n").unwrap();
+        let present2 = root.join("present2.rs").canonicalize().unwrap().to_string_lossy().to_string();
+        let gone = format!("{root_canon}/gone.rs"); // never created on disk
+
+        store
+            .execute("INSERT INTO ist.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
+            .unwrap();
+        // 1. parsed row, discovered_ms=0 (live A3 writeback shape) — excluded from
+        //    the candidate set entirely (discovered_ms>0 filter) → must survive.
+        store
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count) \
+                 VALUES ('{present}', 'TST', 'h', 1, 'parsed', 0, 1, 9, 0) \
+                 ON CONFLICT (path) DO UPDATE SET status='parsed', discovered_ms=0"
+            ))
+            .unwrap();
+        // 2. discovered row, old discovered_ms, file PRESENT on disk → survive.
+        store
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count) \
+                 VALUES ('{present2}', 'TST', 'h', 1, 'discovered', 5, 1, 10, 0) \
+                 ON CONFLICT (path) DO UPDATE SET status='discovered', discovered_ms=5"
+            ))
+            .unwrap();
+        // 3. discovered row, old discovered_ms, file GONE → purge.
+        store
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count) \
+                 VALUES ('{gone}', 'TST', 'h', 1, 'discovered', 5, 1, 10, 0) \
+                 ON CONFLICT (path) DO UPDATE SET status='discovered', discovered_ms=5"
+            ))
+            .unwrap();
+
+        // scan_start far ahead so every candidate qualifies by timestamp; the
+        // FS exists() check is then the sole discriminator.
+        let scan_start = chrono::Utc::now().timestamp_millis() + 1_000_000;
+        let deleted = store.delete_stale_indexed_files(scan_start, &root_canon).unwrap();
+
+        assert!(deleted.contains(&gone), "FS-confirmed-gone file must be purged: {deleted:?}");
+        assert!(!deleted.contains(&present), "parsed row (discovered_ms=0) must never be a stale candidate");
+        assert!(!deleted.contains(&present2), "present file must survive even with an old discovered_ms");
+
+        let survivors = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path IN ('{present}','{present2}')"
+            ))
+            .unwrap();
+        assert_eq!(survivors, 2, "both present files survive the stale reconciliation");
+
+        let _ = store.execute(&format!(
+            "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"
+        ));
+    }
 }
