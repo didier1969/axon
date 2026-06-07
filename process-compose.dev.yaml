@@ -79,6 +79,10 @@ processes:
   axon-indexer:
     command: "${AXON_INDEXER_BIN:-.axon/cargo-target/debug/axon-indexer}"
     working_dir: "."
+    # REQ-AXO-901893 — mirror the indexer's stdout/stderr to a stable file so
+    # Watchman reconciliation (subscriptions, fresh-instance feeds, clock
+    # persistence) is tailable without the process-compose log-buffer lag.
+    log_location: "/tmp/axon-dev-indexer.log"
     environment:
       - "AXON_INSTANCE_KIND=dev"
       - "AXON_INDEXER_HEALTH_PORT=44149"

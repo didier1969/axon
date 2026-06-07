@@ -78,6 +78,12 @@ console-subscriber = { version = "0.4", optional = true }
 walkdir = "2.5"
 ignore = "0.4"
 notify-debouncer-full = "0.7.0"
+# REQ-AXO-901893 — Watchman client (Meta's file-watching daemon). Replaces the
+# hand-rolled notify/inotify + ingress_buffer + reconciliation-sweep stack with
+# clock/cursor-based reconciliation: a `since` query always returns the exact
+# cumulative delta OR falls back safe to a full rebuild (`is_fresh_instance`),
+# so missed FS events are structurally impossible. See watchman_source.rs.
+watchman_client = "0.9"
 tree-sitter = { version = "0.23", features = ["wasm"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

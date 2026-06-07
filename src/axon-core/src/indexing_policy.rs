@@ -437,6 +437,37 @@ pub fn is_watch_pruned_segment(name: &str) -> bool {
     name.starts_with('.') || DIRECTORY_RULES.iter().any(|rule| rule.matcher.matches(name))
 }
 
+/// REQ-AXO-901893 — directory segment names to emit into a `.watchmanconfig`
+/// `ignore_dirs` list. Derived from the SAME `DIRECTORY_RULES` single source of
+/// truth as the scanner deny-list + `is_watch_pruned_segment`, so the three
+/// stay in lockstep (no fourth divergent list — the REQ-AXO-901890 lesson).
+///
+/// VCS metadata (`.git`/`.svn`/`.hg`) is intentionally EXCLUDED: Watchman owns
+/// those via its `ignore_vcs` setting (it relies on the cookie files inside
+/// `.git` to function — listing `.git` in `ignore_dirs` breaks the watch).
+///
+/// Note the semantics gap we accept: `ignore_dirs` is a *root-relative prefix*
+/// match (so `target` only prunes `<root>/target`, not `<root>/sub/target`),
+/// whereas `DIRECTORY_RULES` are *segment* matches at any depth. `ignore_dirs`
+/// is therefore a best-effort inotify-load reduction for the heavy dirs that
+/// sit at a repo root (`.axon`, `node_modules`, `target`, `_build`, …);
+/// per-segment correctness at any depth is enforced downstream by applying
+/// [`is_watch_pruned_segment`] to every component of each returned path.
+pub fn watchman_ignore_dirs() -> Vec<&'static str> {
+    DIRECTORY_RULES
+        .iter()
+        .filter(|rule| {
+            !matches!(
+                rule.matcher,
+                DirectoryMatcher::Exact(".git")
+                    | DirectoryMatcher::Exact(".svn")
+                    | DirectoryMatcher::Exact(".hg")
+            )
+        })
+        .map(|rule| rule.matcher.canonical_segment())
+        .collect()
+}
+
 fn classify_internal(
     root: &Path,
     path: &Path,

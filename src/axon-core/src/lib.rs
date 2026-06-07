@@ -58,6 +58,9 @@ pub mod service_guard;
 pub mod soll_snapshot;
 pub mod vector_control;
 pub mod watcher_probe;
+// REQ-AXO-901893 — Watchman-backed file source (clock/cursor reconciliation),
+// replacing the notify/inotify + ingress_buffer + sweeps stack.
+pub mod watchman_source;
 // REQ-AXO-901653 slice-5c — legacy `pub mod worker;` removed (v1 WorkerPool +
 // writer-actor + DbWriteTask retired). Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054)
 // owns the ingestion path via `pipeline_v2/worker_pool.rs`.

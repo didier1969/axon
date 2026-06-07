@@ -399,6 +399,29 @@ pub fn spawn_pipeline_v2_indexer(
         }
     });
 
+    // REQ-AXO-901893 — Watchman file source (gated). When AXON_USE_WATCHMAN=1,
+    // the Watchman daemon's clock/cursor reconciliation REPLACES the legacy
+    // bootstrap-scan + ingress-drain + periodic-sweep below. Both paths feed the
+    // SAME `input_tx`; exactly one is active per process. Default OFF until the
+    // dev gate (REQ-AXO-901893 step 4) proves convergence; flipped ON + legacy
+    // ripped in steps 5–6.
+    let use_watchman = std::env::var("AXON_USE_WATCHMAN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if use_watchman {
+        info!(
+            "pipeline_v2: AXON_USE_WATCHMAN=1 — Watchman is the file source \
+             (legacy bootstrap-scan / ingress-drain / periodic-sweep disabled)"
+        );
+        crate::watchman_source::spawn_watchman_source(
+            store.clone(),
+            handles_a.input_tx.clone(),
+            scanner.clone(),
+            watch_root.clone(),
+            resolve_database_url_for_listener(),
+        )?;
+    }
+
     // Bootstrap reconciliation scan: enumerate every eligible file under the
     // watch root at boot and feed pipeline A with BACKPRESSURE (REQ-AXO-901891).
     // Re-runs on every restart; IndexedFile UPSERT + dedup-cache idempotence
@@ -409,6 +432,7 @@ pub fn spawn_pipeline_v2_indexer(
     // stranded files: the session-51 "deadlock" it cited was A NOT DRAINING
     // (a separate stall), not send().await itself — with A1/A2/A3 healthy,
     // send().await simply paces the walk to A's throughput and never drops.
+    if !use_watchman {
     let input_tx_bootstrap = handles_a.input_tx.clone();
     let scanner_bootstrap = scanner.clone();
     let watch_root_bootstrap = watch_root.clone();
@@ -441,6 +465,7 @@ pub fn spawn_pipeline_v2_indexer(
             count, handed
         );
     });
+    } // end if !use_watchman (bootstrap scan)
 
     // REQ-AXO-901891 — demand_pull A (DEC-AXO-901620) is REMOVED. The NOTIFY-
     // woken, retry_count-claiming feeder was a safety net for try_send-dropped
@@ -464,6 +489,7 @@ pub fn spawn_pipeline_v2_indexer(
     //    that left files stranded at runtime_idle.
     // 3. Periodic heartbeat at INFO every 25 ticks (~5 s) so any future stall
     //    is visible without re-instrumenting.
+    if !use_watchman {
     let input_tx_drain = handles_a.input_tx;
     let ingress_for_drain = ingress_buffer.clone();
     let drain_batch_cap = caps.ingress_drain_batch;
@@ -552,6 +578,7 @@ pub fn spawn_pipeline_v2_indexer(
             }
         }
     });
+    } // end if !use_watchman (ingress drain loop)
 
     // REQ-AXO-901677 — periodic_sweep_worker. Inotify drop reconciliation
     // safety net. Only spawned in ingestion-enabled modes (IndexerGraph,
@@ -560,7 +587,7 @@ pub fn spawn_pipeline_v2_indexer(
     // hasn't disabled it via `AXON_PERIODIC_SWEEP_HOURS=0`. The handle
     // is intentionally dropped : the task runs for the lifetime of the
     // process, exits only on tokio runtime shutdown.
-    if runtime_mode.ingestion_enabled() {
+    if runtime_mode.ingestion_enabled() && !use_watchman {
         let sweep_cfg = PeriodicSweepConfig::from_env();
         if sweep_cfg.is_enabled() {
             let _handle = spawn_periodic_sweep_worker(

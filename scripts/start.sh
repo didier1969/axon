@@ -256,8 +256,27 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 export ORT_STRATEGY=system
 # Root directory containing all projects to watch/index.
 export AXON_PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$DEFAULT_PROJECTS_ROOT}"
-# Filesystem scope for the inotify watcher. Defaults to all projects.
+# Filesystem scope for the file watcher. Defaults to all projects.
 export AXON_WATCH_DIR="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
+# REQ-AXO-901893 — Watchman file source toggle. 1 = Watchman clock/cursor
+# reconciliation (per-repo watch-project, no missed events); 0 = legacy
+# notify/inotify + ingress_buffer + sweeps. Default OFF until the dev gate
+# proves convergence (flipped to 1 in step 5). Propagated to the indexer via
+# process-compose env inheritance.
+export AXON_USE_WATCHMAN="${AXON_USE_WATCHMAN:-0}"
+# Resolve the watchman binary to an ABSOLUTE path so the indexer's Connector
+# (which shells out `<bin> get-sockname`) can find it — the indexer runs OUTSIDE
+# the devenv PATH (process-compose inherits start.sh's non-devenv PATH, same as
+# the ORT libs which are passed by absolute env path). Prefer the project-local
+# devenv profile symlink (stable, NOT a hardcoded nix-store hash path); fall
+# back to PATH lookup then the bare name.
+if [[ -z "${AXON_WATCHMAN_BIN:-}" ]]; then
+    if [[ -x "$PROJECT_ROOT/.devenv/profile/bin/watchman" ]]; then
+        export AXON_WATCHMAN_BIN="$PROJECT_ROOT/.devenv/profile/bin/watchman"
+    else
+        export AXON_WATCHMAN_BIN="$(command -v watchman 2>/dev/null || echo watchman)"
+    fi
+fi
 # Use COPY BINARY for PG writes instead of INSERT VALUES SQL text.
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
 # Absolute path to this Axon repo root.

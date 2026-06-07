@@ -87,3 +87,8 @@ dev-probe-*.csv
 src/dashboard/axon_nexus.db
 src/dashboard/axon_nexus.db-shm
 src/dashboard/axon_nexus.db-wal
+
+# REQ-AXO-901893 — Watchman per-root reconciliation config. Written by the
+# indexer (watchman_source.rs) into each watched repo root to set `ignore_dirs`
+# (kernel-level build-artifact exclusion). Runtime state, not source.
+.watchmanconfig

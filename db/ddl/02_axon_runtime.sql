@@ -145,6 +145,22 @@ ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
 ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS build_id       TEXT;
 
+-- REQ-AXO-901893: Watchman reconciliation cursor, one row per watched root.
+-- The indexer threads `clock_json` back into the next `since` subscription so
+-- Watchman returns the exact cumulative delta since the last checkpoint (or a
+-- safe full rebuild when `is_fresh = true`). Persisted AFTER a batch is fed to
+-- pipeline A (checkpoint-after-commit): a crash between feed and checkpoint
+-- replays the batch on restart (idempotent via the IndexedFile dedup cache) —
+-- it can never SKIP a delta. Replaces the inotify event stream whose dropped
+-- events were unrecoverable. `clock` is an opaque Watchman clockspec string
+-- (`c:PID:N` / SCM-aware fat clock) — stored verbatim, never parsed.
+CREATE TABLE IF NOT EXISTS axon_runtime.watchman_clock (
+    root        TEXT        PRIMARY KEY,            -- absolute resolved project root
+    clock_json  JSONB       NOT NULL,               -- serialized watchman_client::Clock
+    is_fresh    BOOLEAN     NOT NULL DEFAULT false,  -- last result was a fresh-instance rebuild
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Indexes ──────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx

@@ -461,6 +461,7 @@ async fn pull_and_feed_b(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
     // REQ-AXO-901862 — StallTracker flags a consumer that drains the channel
@@ -528,9 +529,9 @@ mod tests {
 
     #[test]
     fn constants_are_sensible() {
-        assert!(MAX_RETRY >= 2, "must allow at least 2 retries");
-        assert!(MAX_RETRY <= 10, "more than 10 retries is excessive");
-        assert!(CLAIM_TIMEOUT_MS >= 60_000, "claim timeout must be at least 1 min");
+        // REQ-AXO-901891 — MAX_RETRY / CLAIM_TIMEOUT_MS asserts removed with the
+        // pipeline-A claim machinery (retry_count poison-pill / claim window).
+        // demand_pull is now B-side only; the live consts below are what remain.
         assert!(SAFETY_POLL_SECS >= 10, "safety poll must be at least 10s");
         assert!(IDLE_THRESHOLD >= 3, "idle detection needs at least 3 empty pulls");
         // REQ-AXO-901810 G7 — coalesce must be small enough that it

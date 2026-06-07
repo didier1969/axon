@@ -856,20 +856,36 @@ impl GraphStore {
             if std::path::Path::new(&path).exists() {
                 continue;
             }
-            let safe = path.replace('\'', "''");
-            let _ = self.execute(&format!(
-                "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
-                    (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
-                 DELETE FROM Chunk WHERE file_path = '{safe}'; \
-                 DELETE FROM Symbol WHERE id IN \
-                    (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
-                 DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
-                    (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS'); \
-                 DELETE FROM IndexedFile WHERE path = '{safe}';"
-            ));
+            let _ = self.delete_file_cascade(&path);
             deleted.push(path);
         }
         Ok(deleted)
+    }
+
+    /// REQ-AXO-901893 — cascade-delete a single file's entire IST footprint:
+    /// embeddings, chunks, contained symbols, edges (both directions of the
+    /// CONTAINS fan-out), and the IndexedFile row. This is the atomic DELETE
+    /// half of the Watchman feed — `exists=false` events (a genuine deletion,
+    /// or the old side of a rename). Shared with [`delete_stale_indexed_files`]
+    /// so the cascade SQL lives in exactly ONE place (no drift between the
+    /// reconciliation purge and the live delete path).
+    ///
+    /// Unlike `delete_stale_indexed_files`, the caller is responsible for
+    /// confirming the file is genuinely gone — Watchman's `exists=false` IS
+    /// that confirmation (it observed the unlink), so there is no disk re-check
+    /// here.
+    pub fn delete_file_cascade(&self, path: &str) -> Result<()> {
+        let safe = path.replace('\'', "''");
+        self.execute(&format!(
+            "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
+                (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
+             DELETE FROM Chunk WHERE file_path = '{safe}'; \
+             DELETE FROM Symbol WHERE id IN \
+                (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
+             DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
+                (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS'); \
+             DELETE FROM IndexedFile WHERE path = '{safe}';"
+        ))
     }
 
     /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).

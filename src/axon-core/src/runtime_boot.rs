@@ -951,22 +951,33 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         }
         main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
-        main_background::spawn_federation_orchestrator(
-            graph_store.clone(),
-            watch_root_str.clone(),
-            file_ingress_guard.clone(),
-            ingress_buffer.clone(),
-        );
-        // REQ-AXO-340 — periodic scope reconciliation so files added outside
-        // an inotify-emitting touch (cold clones, partial bootstrap failures,
-        // late-arriving projects) reach the ingress buffer without waiting
-        // for the next process restart.
-        main_background::spawn_scope_reconciliation_orchestrator(
-            graph_store.clone(),
-            watch_root_str.clone(),
-            file_ingress_guard.clone(),
-            ingress_buffer.clone(),
-        );
+        // REQ-AXO-901893 — the legacy notify FS watcher (federation orchestrator
+        // → spawn_hot_delta_watcher → notify debouncer) and the periodic scope
+        // reconciliation both PUSH into ingress_buffer, which pipeline_v2_runtime's
+        // drain consumes. When Watchman is the file source, both are replaced
+        // wholesale: gate them off so exactly ONE feed path is live (Watchman →
+        // input_tx directly). Ripped entirely in the step-6 RIP wave.
+        let use_watchman = std::env::var("AXON_USE_WATCHMAN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !use_watchman {
+            main_background::spawn_federation_orchestrator(
+                graph_store.clone(),
+                watch_root_str.clone(),
+                file_ingress_guard.clone(),
+                ingress_buffer.clone(),
+            );
+            // REQ-AXO-340 — periodic scope reconciliation so files added outside
+            // an inotify-emitting touch (cold clones, partial bootstrap failures,
+            // late-arriving projects) reach the ingress buffer without waiting
+            // for the next process restart.
+            main_background::spawn_scope_reconciliation_orchestrator(
+                graph_store.clone(),
+                watch_root_str.clone(),
+                file_ingress_guard.clone(),
+                ingress_buffer.clone(),
+            );
+        }
     } else {
         info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
     }
