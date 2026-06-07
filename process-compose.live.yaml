@@ -97,6 +97,11 @@ processes:
       # REQ-AXO-901835 — explicit per-process sockets (cf. brain block).
       - "AXON_TELEMETRY_SOCK=/tmp/axon-live-indexer-telemetry.sock"
       - "AXON_MCP_SOCK=/tmp/axon-live-indexer-mcp.sock"
+      # REQ-AXO-901895 interim — parallelise the chunk stage (the tokenizer-per-
+      # symbol cost in A3 is the re-index bottleneck) until the cheap-estimate
+      # fix lands. Host has the cores; A3 chunking is CPU-bound + idempotent.
+      - "AXON_A3_WORKERS=16"
+      - "AXON_A2_WORKERS=12"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
