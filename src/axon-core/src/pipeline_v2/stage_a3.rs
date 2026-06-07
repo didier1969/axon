@@ -375,6 +375,93 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    /// REQ-AXO-901897 (DBQ slice 1) — (c) A3 stamps status='parsed' (A-graph
+    /// done), NOT the legacy 'indexed', and releases the claim lease.
+    ///
+    /// Exercises the standalone single-file A3 writer
+    /// `GraphStore::upsert_indexed_file` (the same UPSERT the batch path mirrors
+    /// in bulk_writer::copy_indexed_files_in_tx). This runs on the test store's
+    /// own connection — deterministic, independent of the bulk_writer global
+    /// pool used by the `a3_enroll` batch siblings.
+    #[tokio::test]
+    async fn upsert_indexed_file_advances_claim_to_parsed_and_clears_lease() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        // Pre-seed the row as a claimed 'parsing' file (as the claim feeder
+        // would leave it) so we prove A3's UPSERT advances it to 'parsed' and
+        // releases the lease.
+        store
+            .execute(
+                "INSERT INTO ist.IndexedFile \
+                    (path, project_code, content_hash, last_seen_ms, status, discovered_ms, retry_count, lease_until_ms) \
+                 VALUES ('/tmp/a3_parsed.rs','AXO','',1,'parsing',1,1,999999999999)",
+            )
+            .unwrap();
+
+        store
+            .upsert_indexed_file("/tmp/a3_parsed.rs", "hash-parsed", 1_700_000_000_000)
+            .unwrap();
+
+        let n_parsed = store
+            .query_count(
+                "SELECT count(*) FROM ist.IndexedFile \
+                 WHERE path = '/tmp/a3_parsed.rs' AND status = 'parsed' AND lease_until_ms = 0 \
+                   AND retry_count = 0 AND content_hash = 'hash-parsed'",
+            )
+            .unwrap();
+        assert_eq!(
+            n_parsed, 1,
+            "A3 must advance the row to status='parsed' with lease + retry cleared and the new hash recorded"
+        );
+
+        let n_indexed = store
+            .query_count(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/a3_parsed.rs' AND status = 'indexed'",
+            )
+            .unwrap();
+        assert_eq!(n_indexed, 0, "A3 must NOT write the legacy 'indexed' status");
+    }
+
+    /// REQ-AXO-901897 (DBQ slice 1) — (b) the dedup cache must hydrate ONLY
+    /// from A-DONE rows. `load_all_indexed_files` excludes 'discovered'/'parsing'
+    /// so an unparsed file is absent from the cache → should_index returns true
+    /// → it is parsed (the fix for the ~25k stranded files).
+    #[tokio::test]
+    async fn load_all_indexed_files_excludes_discovered_and_parsing() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .execute(
+                "INSERT INTO ist.IndexedFile \
+                    (path, project_code, content_hash, last_seen_ms, status, discovered_ms) VALUES \
+                    ('/tmp/hyd/discovered.rs','AXO','hd',1,'discovered',1), \
+                    ('/tmp/hyd/parsing.rs','AXO','hp',1,'parsing',1), \
+                    ('/tmp/hyd/parsed.rs','AXO','hP',1,'parsed',1), \
+                    ('/tmp/hyd/ready.rs','AXO','hr',1,'ready',1), \
+                    ('/tmp/hyd/indexed.rs','AXO','hi',1,'indexed',1);",
+            )
+            .unwrap();
+
+        let loaded = store.load_all_indexed_files().unwrap();
+        let hydrated: std::collections::HashSet<String> = loaded
+            .into_iter()
+            .map(|(p, _, _)| p)
+            .filter(|p| p.starts_with("/tmp/hyd/"))
+            .collect();
+
+        assert!(hydrated.contains("/tmp/hyd/parsed.rs"), "A-DONE 'parsed' must hydrate");
+        assert!(hydrated.contains("/tmp/hyd/ready.rs"), "A-DONE 'ready' must hydrate");
+        assert!(hydrated.contains("/tmp/hyd/indexed.rs"), "transitional 'indexed' must hydrate");
+        assert!(
+            !hydrated.contains("/tmp/hyd/discovered.rs"),
+            "'discovered' must NOT hydrate (else should_index=false → stranded forever)"
+        );
+        assert!(
+            !hydrated.contains("/tmp/hyd/parsing.rs"),
+            "'parsing' (in-flight claim) must NOT hydrate"
+        );
+
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd/%'");
+    }
+
     #[tokio::test]
     async fn a3_enroll_persists_symbol_and_chunk_rows() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());

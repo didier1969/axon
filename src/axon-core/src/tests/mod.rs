@@ -13,11 +13,9 @@ pub mod test_helpers;
 pub mod vector_runtime_tests;
 // REQ-AXO-284 Slice 2 — PG health helpers.
 pub mod pg_health_tests;
-// REQ-AXO-901675 — registry NOTIFY end-to-end integration.
+// REQ-AXO-901675 — registry NOTIFY end-to-end integration (DB trigger only;
+// the Rust listener + ingress_buffer feed were ripped in the LEGACY FEED PURGE
+// — REQ-AXO-901893 RIP / REQ-AXO-901899).
 pub mod registry_notify_integration_tests;
-// REQ-AXO-901678 — drain saturation telemetry + tuning end-to-end.
-pub mod drain_overload_tests;
 // REQ-AXO-901676 — public MCP tool `rescan_project(project_code, full=false)`.
 pub mod rescan_project_tests;
-// REQ-AXO-901677 — periodic_sweep_worker for inotify-drop reconciliation.
-pub mod periodic_sweep_tests;

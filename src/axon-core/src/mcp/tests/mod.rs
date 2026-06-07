@@ -7,10 +7,6 @@ use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
 use crate::graph::GraphStore;
-use crate::ingress_buffer::{
-    record_ingress_flush, reset_ingress_metrics_for_tests, IngressBuffer, IngressCause,
-    IngressFileEvent, IngressSource,
-};
 use crate::parser;
 use crate::queue::ProcessingMode;
 use crate::runtime_boot::RuntimeBootProfile;

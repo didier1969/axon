@@ -892,10 +892,14 @@ async fn copy_indexed_files_in_tx(
     // REQ-AXO-901884 — DISTINCT ON (s.path) collapses duplicate staging rows so
     // the merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000)
     // when a batch re-sees the same path. Keep the latest by last_seen_ms.
+    // REQ-AXO-901897 (DBQ slice 1) — A3 batch hot path stamps 'parsed' (A-graph
+    // done), not legacy 'indexed'. 'parsed' is an A-DONE state: it leaves the
+    // claimable index/feeder set and feeds the dedup cache at next boot. The
+    // claim lease is released (lease_until_ms=0).
     let merge_sql = "INSERT INTO indexedfile \
-             (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
+             (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes, lease_until_ms) \
          SELECT DISTINCT ON (s.path) \
-                s.path, $1, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes \
+                s.path, $1, s.content_hash, s.last_seen_ms, 'parsed', s.mtime_ms, s.size_bytes, 0 \
              FROM _bulk_indexedfile_stage s \
          ORDER BY s.path, s.last_seen_ms DESC \
          ON CONFLICT (path) DO UPDATE SET \
@@ -903,9 +907,10 @@ async fn copy_indexed_files_in_tx(
              last_seen_ms    = EXCLUDED.last_seen_ms, \
              mtime_ms        = EXCLUDED.mtime_ms, \
              size_bytes      = EXCLUDED.size_bytes, \
-             status          = 'indexed', \
+             status          = 'parsed', \
              retry_count     = 0, \
-             last_attempt_ms = NULL";
+             last_attempt_ms = NULL, \
+             lease_until_ms  = 0";
     tx.execute(merge_sql, &[&project_code])
         .await
         .context("bulk_writer indexedfile stage merge")?;

@@ -1,25 +1,16 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axon_core::embedder::{
     apply_runtime_embedding_lane_adjustment, current_embedding_provider_diagnostics,
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, embedding_lane_config_from_env,
 };
-use axon_core::file_ingress_guard::{
-    guard_metrics_snapshot, SharedFileIngressGuard,
-};
-use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
-use axon_core::ingress_buffer::{
-    IngressMetricsSnapshot,
-    SharedIngressBuffer,
-};
 use axon_core::optimizer::{
     build_admissible_action_profiles, collect_host_snapshot, collect_operator_policy_snapshot,
     collect_recent_analytics_window, collect_runtime_signals_window, observe_reward,
@@ -27,18 +18,14 @@ use axon_core::optimizer::{
 };
 use axon_core::queue::QueueStore;
 use axon_core::runtime_observability::process_memory_snapshot;
-use axon_core::scanner::Scanner;
 use axon_core::service_guard;
 use axon_core::service_guard::{InteractivePriority, RuntimeQuiescentState, ServicePressure};
 use axon_core::vector_control::{
     current_utility_first_scheduler_diagnostics, current_vector_batch_controller_diagnostics,
     current_vector_drain_state,
 };
-use axon_core::watcher_probe;
-use notify_debouncer_full::notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use serde_json::json;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[path = "main_background/host_pressure.rs"]
 mod host_pressure;
@@ -47,8 +34,8 @@ mod memory_config;
 
 use host_pressure::sample_host_pressure;
 use memory_config::{
-    current_rss_bytes, federation_orchestrator_enabled, memory_limit_bytes,
-    memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, parse_rss_from_statm,
+    current_rss_bytes, memory_limit_bytes, memory_reclaimer_enabled,
+    memory_reclaimer_min_anon_bytes, parse_rss_from_statm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,12 +73,6 @@ impl GovernorLoopState {
     }
 }
 
-#[derive(Debug, Clone)]
-struct WatchTarget {
-    path: PathBuf,
-    recursive: bool,
-}
-
 const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
 const QUIESCENT_INTERVAL_SCALE_PCT_DEFAULT: usize = 400;
 
@@ -123,32 +104,11 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub vectorization_requeued_for_interactive: u64,
     pub vectorization_resumed_after_interactive: u64,
     pub projection_suppressed_due_to_interactive: u64,
-    pub guard_hits: u64,
-    pub guard_misses: u64,
-    pub guard_bypassed_total: u64,
-    pub guard_hydrated_entries: u64,
-    pub guard_hydration_duration_ms: u64,
-    pub ingress_enabled: bool,
-    pub ingress_buffered_entries: usize,
-    pub ingress_hot_entries: usize,
-    pub ingress_scan_entries: usize,
-    pub ingress_subtree_hints: usize,
-    pub ingress_subtree_hint_in_flight: usize,
-    pub ingress_subtree_hint_accepted_total: u64,
-    pub ingress_subtree_hint_blocked_total: u64,
-    pub ingress_subtree_hint_suppressed_total: u64,
-    pub ingress_subtree_hint_productive_total: u64,
-    pub ingress_subtree_hint_unproductive_total: u64,
-    pub ingress_subtree_hint_dropped_total: u64,
-    pub ingress_collapsed_total: u64,
-    pub ingress_flush_count: u64,
-    pub ingress_last_flush_duration_ms: u64,
-    pub ingress_last_promoted_count: u64,
-    pub ingress_promoted_total: u64,
-    pub ingress_last_durably_persisted_count: u64,
-    pub ingress_durably_persisted_total: u64,
-    pub ingress_last_excluded_from_pending_count: u64,
-    pub ingress_excluded_from_pending_total: u64,
+    // REQ-AXO-901893 (LEGACY FEED PURGE) — the FileIngressGuard (`guard_*`) and
+    // in-memory ingress_buffer (`ingress_*`) telemetry fields were ripped with
+    // their backing modules. The Watchman file source feeds pipeline A directly
+    // (no buffer to meter); DBQ-A is the backlog drainer. The dashboard decodes
+    // these via Map.get(.., default) so their absence degrades gracefully to 0.
     pub memory_trim_attempts_total: u64,
     pub memory_trim_successes_total: u64,
     pub cpu_load: f64,
@@ -241,7 +201,7 @@ pub(crate) fn start_memory_watchdog() {
     });
 }
 
-pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: SharedIngressBuffer) {
+pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(memory_reclaimer_poll_interval_ms()));
         service_guard::record_background_runtime_wakeup(
@@ -254,33 +214,11 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
             continue;
         }
 
-        let ingress_metrics = ingress_buffer
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .metrics_snapshot();
         let process_memory = process_memory_snapshot();
         let min_anon_bytes = memory_reclaimer_min_anon_bytes();
 
-        if !should_attempt_memory_reclaim(
-            queue.common_len(),
-            &ingress_metrics,
-            process_memory,
-            min_anon_bytes,
-        ) {
+        if !should_attempt_memory_reclaim(queue.common_len(), process_memory, min_anon_bytes) {
             continue;
-        }
-
-        if ingress_metrics.subtree_hints > 0 {
-            let dropped = ingress_buffer
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .shed_subtree_hints_for_memory_pressure();
-            if dropped > 0 {
-                warn!(
-                    "Memory reclaimer shed {} subtree hint(s) under memory pressure before trim.",
-                    dropped
-                );
-            }
         }
 
         MEMORY_TRIM_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -510,7 +448,6 @@ pub(crate) fn shadow_optimizer_enabled() -> bool {
 pub(crate) fn spawn_runtime_trace_logger(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
-    ingress_buffer: SharedIngressBuffer,
 ) {
     if !runtime_trace_enabled() {
         return;
@@ -531,7 +468,7 @@ pub(crate) fn spawn_runtime_trace_logger(
         }
 
         loop {
-            let telemetry = runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            let telemetry = runtime_telemetry_snapshot(&store, &queue);
             // REQ-AXO-901674 — FVQ/GPQ depths stubbed to 0 (tables dropped
             // slice-5d) ; wake detail signals are vestigial for these axes.
             service_guard::record_background_runtime_wakeup(
@@ -1161,11 +1098,13 @@ fn optimizer_constraint_flags(
 
 fn should_attempt_memory_reclaim(
     queue_len: usize,
-    ingress_metrics: &IngressMetricsSnapshot,
     process_memory: axon_core::runtime_observability::ProcessMemorySnapshot,
     min_anon_bytes: u64,
 ) -> bool {
-    if queue_len > 0 || ingress_metrics.buffered_entries > 0 {
+    // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress_buffer backlog gate was
+    // ripped with the buffer. Reclaim only when the work queue is idle and the
+    // anonymous RSS is above the trim floor.
+    if queue_len > 0 {
         return false;
     }
 
@@ -1177,7 +1116,6 @@ fn should_attempt_memory_reclaim(
 pub(crate) fn runtime_telemetry_snapshot(
     store: &GraphStore,
     queue: &QueueStore,
-    ingress_buffer: &SharedIngressBuffer,
 ) -> RuntimeTelemetrySnapshot {
     let runtime_mode = axon_core::runtime_mode::AxonRuntimeMode::from_env();
     let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
@@ -1193,11 +1131,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         service_pressure,
     );
     let host_pressure = sample_host_pressure();
-    let guard_metrics = guard_metrics_snapshot();
-    let ingress_metrics = ingress_buffer
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .metrics_snapshot();
     let process_memory = process_memory_snapshot();
     // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 / REQ-AXO-289 /
     // slice-5d. Canonical pipeline_v2 path writes Chunk + ChunkEmbedding directly.
@@ -1277,32 +1210,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         vectorization_resumed_after_interactive:
             service_guard::vectorization_resumed_after_interactive_total(),
         projection_suppressed_due_to_interactive: service_guard::projection_suppressed_total(),
-        guard_hits: guard_metrics.hits,
-        guard_misses: guard_metrics.misses,
-        guard_bypassed_total: guard_metrics.bypassed_total,
-        guard_hydrated_entries: guard_metrics.hydrated_entries,
-        guard_hydration_duration_ms: guard_metrics.hydration_duration_ms,
-        ingress_enabled: ingress_metrics.enabled,
-        ingress_buffered_entries: ingress_metrics.buffered_entries,
-        ingress_hot_entries: ingress_metrics.hot_entries,
-        ingress_scan_entries: ingress_metrics.scan_entries,
-        ingress_subtree_hints: ingress_metrics.subtree_hints,
-        ingress_subtree_hint_in_flight: ingress_metrics.subtree_hint_in_flight,
-        ingress_subtree_hint_accepted_total: ingress_metrics.subtree_hint_accepted_total,
-        ingress_subtree_hint_blocked_total: ingress_metrics.subtree_hint_blocked_total,
-        ingress_subtree_hint_suppressed_total: ingress_metrics.subtree_hint_suppressed_total,
-        ingress_subtree_hint_productive_total: ingress_metrics.subtree_hint_productive_total,
-        ingress_subtree_hint_unproductive_total: ingress_metrics.subtree_hint_unproductive_total,
-        ingress_subtree_hint_dropped_total: ingress_metrics.subtree_hint_dropped_total,
-        ingress_collapsed_total: ingress_metrics.collapsed_total,
-        ingress_flush_count: ingress_metrics.flush_count,
-        ingress_last_flush_duration_ms: ingress_metrics.last_flush_duration_ms,
-        ingress_last_promoted_count: ingress_metrics.last_promoted_count,
-        ingress_promoted_total: ingress_metrics.promoted_total,
-        ingress_last_durably_persisted_count: ingress_metrics.last_durably_persisted_count,
-        ingress_durably_persisted_total: ingress_metrics.durably_persisted_total,
-        ingress_last_excluded_from_pending_count: ingress_metrics.last_excluded_from_pending_count,
-        ingress_excluded_from_pending_total: ingress_metrics.excluded_from_pending_total,
         memory_trim_attempts_total: MEMORY_TRIM_ATTEMPTS_TOTAL.load(Ordering::Relaxed),
         memory_trim_successes_total: MEMORY_TRIM_SUCCESSES_TOTAL.load(Ordering::Relaxed),
         cpu_load: host_pressure.cpu_load,
@@ -1365,339 +1272,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         semantic_ready_reserve_target: utility_scheduler.ready_reserve_target,
         utility_first_scheduler_hold_window_ms: utility_scheduler.hold_window_ms,
     }
-}
-
-
-
-fn run_initial_scan(
-    store: Arc<GraphStore>,
-    project_root: String,
-    project_code: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    info!(
-        "🚀 Auto-Ignition: Beginning initial workspace mapping for {}...",
-        project_root
-    );
-    let scanner = axon_core::scanner::Scanner::new(&project_root, &project_code);
-    scanner.scan_with_guard_and_ingress(store, Some(&file_ingress_guard), Some(&ingress_buffer));
-    info!(
-        "✅ Auto-Ignition: Initial mapping sequence complete for {}.",
-        project_root
-    );
-}
-
-pub(crate) fn spawn_hot_delta_watcher(
-    store: Arc<GraphStore>,
-    project_root: String,
-    project_code: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    std::thread::spawn(move || {
-        let watch_root = PathBuf::from(project_root);
-        let watcher_project_code = project_code.clone();
-        let preferred_project_root = Some(watch_root.clone());
-        let watcher_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            info!(
-                "Rust FS watcher preparing targets under {}",
-                watch_root.display()
-            );
-
-            let callback_root = watch_root.clone();
-            let callback_project_code = watcher_project_code.clone();
-            let callback_store = store.clone();
-            let callback_guard = file_ingress_guard.clone();
-            let callback_ingress = ingress_buffer.clone();
-            let callback_active_project_root = preferred_project_root.clone();
-            let rescan_guard = Arc::new(AtomicBool::new(false));
-            let callback_rescan_guard = rescan_guard.clone();
-            let cold_arm_completed_at = Arc::new(Mutex::new(None));
-            let callback_cold_arm_completed_at = cold_arm_completed_at.clone();
-            let watcher_started_at = Instant::now();
-
-            let mut debouncer = match new_debouncer(
-                Duration::from_millis(750),
-                None,
-                move |result: DebounceEventResult| {
-                    handle_watcher_events(
-                        callback_store.clone(),
-                        callback_root.clone(),
-                        callback_project_code.clone(),
-                        callback_guard.clone(),
-                        callback_ingress.clone(),
-                        callback_active_project_root.clone(),
-                        callback_rescan_guard.clone(),
-                        callback_cold_arm_completed_at.clone(),
-                        watcher_started_at,
-                        result,
-                    );
-                },
-            ) {
-                Ok(debouncer) => debouncer,
-                Err(err) => {
-                    error!("Rust FS watcher initialization failed: {}", err);
-                    return;
-                }
-            };
-
-            let mut hot_targets = active_project_hot_targets(preferred_project_root.as_deref());
-            hot_targets.insert(
-                0,
-                WatchTarget {
-                    path: watch_root.clone(),
-                    recursive: false,
-                },
-            );
-            let cold_targets: Vec<WatchTarget> = Vec::new(); // Children are now fully handled by hot_targets since watch_root == preferred_project_root
-
-            let mut armed = 0usize;
-            let hot_started_at = Instant::now();
-            for target in hot_targets {
-                let mode = if target.recursive {
-                    RecursiveMode::Recursive
-                } else {
-                    RecursiveMode::NonRecursive
-                };
-
-                match debouncer.watch(&target.path, mode) {
-                    Ok(_) => {
-                        armed += 1;
-                        info!(
-                            "Rust FS watcher armed hot target {} ({}) after {} ms",
-                            target.path.display(),
-                            if target.recursive {
-                                "recursive"
-                            } else {
-                                "non-recursive"
-                            },
-                            hot_started_at.elapsed().as_millis()
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Rust FS watcher skipped target {}: {}",
-                            target.path.display(),
-                            err
-                        );
-                    }
-                }
-            }
-
-            if armed > 0 {
-                info!(
-                    "Rust FS watcher armed hot set on {} target(s) under {}",
-                    armed,
-                    watch_root.display()
-                );
-            }
-
-            for target in cold_targets {
-                let mode = if target.recursive {
-                    RecursiveMode::Recursive
-                } else {
-                    RecursiveMode::NonRecursive
-                };
-
-                match debouncer.watch(&target.path, mode) {
-                    Ok(_) => {
-                        armed += 1;
-                        debug!(
-                            "Rust FS watcher armed target {} ({})",
-                            target.path.display(),
-                            if target.recursive {
-                                "recursive"
-                            } else {
-                                "non-recursive"
-                            }
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Rust FS watcher skipped target {}: {}",
-                            target.path.display(),
-                            err
-                        );
-                    }
-                }
-            }
-
-            if armed == 0 {
-                error!(
-                    "Rust FS watcher failed to arm any target under {}",
-                    watch_root.display()
-                );
-                return;
-            }
-
-            info!(
-                "Rust FS watcher armed on {} target(s) under {}",
-                armed,
-                watch_root.display()
-            );
-            if let Ok(mut armed_at) = cold_arm_completed_at.lock() {
-                *armed_at = Some(Instant::now());
-            }
-
-            loop {
-                std::thread::sleep(Duration::from_secs(3600));
-            }
-        }));
-
-        if let Err(payload) = watcher_result {
-            let reason = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic payload".to_string());
-            error!("Rust FS watcher thread panicked: {}", reason);
-        }
-    });
-}
-
-/// REQ-AXO-91561 — directory name segments that MUST never be subscribed to
-/// REQ-AXO-91561 / REQ-AXO-901890 — true when any path segment must be pruned
-/// from the FS watcher. Cargo `target/`, Mix `_build/`, NPM `node_modules/`,
-/// `.axon/cargo-target`, etc. emit millions of inotify events during build
-/// cycles ; under broad `AXON_WATCH_DIR` (e.g. `$HOME/projects`) the debouncer
-/// + ingress_buffer balloon and the indexer was OOM-killed at ~24 GB anon-rss
-/// (3 kernel-level kills 2026-05-17). The gitignore-aware scanner filters these
-/// *after* events arrive ; we filter BEFORE subscribing or while routing.
-///
-/// REQ-AXO-901890 — the segment predicate is now `indexing_policy`'s single
-/// source of truth (`is_watch_pruned_segment`), shared with the scanner's
-/// `DIRECTORY_RULES`, instead of the old divergent `EXCLUDED_BUILD_DIR_SEGMENTS`
-/// const that had drifted (it carried `cargo-target` while DIRECTORY_RULES did
-/// not, and missed `.axon`/`.devenv` that DIRECTORY_RULES + the dotdir check
-/// covered).
-pub(crate) fn path_in_excluded_build_dir(path: &Path) -> bool {
-    path.components().any(|comp| {
-        comp.as_os_str()
-            .to_str()
-            .map(crate::indexing_policy::is_watch_pruned_segment)
-            .unwrap_or(false)
-    })
-}
-
-fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
-    let Some(preferred_root) = preferred_root else {
-        return Vec::new();
-    };
-
-    let mut targets = vec![WatchTarget {
-        path: preferred_root.to_path_buf(),
-        recursive: false,
-    }];
-
-    let entries = match std::fs::read_dir(preferred_root) {
-        Ok(entries) => entries,
-        Err(_) => return targets,
-    };
-
-    let mut clean_children: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
-            continue;
-        };
-        // REQ-AXO-91561 — exclude hidden + build-artefact dirs from the watch.
-        if crate::indexing_policy::is_watch_pruned_segment(name) {
-            continue;
-        }
-        clean_children.push(path);
-    }
-
-    clean_children.sort_by_key(|path| project_hot_target_rank(path));
-    // REQ-AXO-901853 — expand each project child into pruned watch targets so
-    // nested build dirs (e.g. <project>/.axon/cargo-target) are excluded at the
-    // inotify-registration layer, not after flooding the event handler.
-    for child in clean_children {
-        collect_pruned_watch_targets(&child, &mut targets);
-    }
-    targets
-}
-
-/// REQ-AXO-901853 — register the largest build-free subtrees RECURSIVELY (so
-/// newly-created subdirs stay auto-watched) while NEVER descending into an
-/// excluded build dir (pruned via `indexing_policy::is_watch_pruned_segment`,
-/// REQ-AXO-901890 — dotdirs + DIRECTORY_RULES, shared with the scanner) at
-/// any depth.
-///
-/// Root cause it fixes: a single `RecursiveMode::Recursive` watch on a project
-/// dir descends into nested build output (`.axon/cargo-target`), and notify has
-/// no per-path exclusion in recursive mode — so build-artefact churn floods the
-/// debouncer (observed: 22 972 inotify watches, ~6-8 `excluded_build_dir`
-/// events/s, 428 % CPU). Pruning at registration removes the flood at its
-/// source (10-lens: back-pressure + robustness + dead-code).
-///
-/// A dir with no excluded child → one recursive watch covers its whole subtree.
-/// A dir WITH an excluded child → non-recursive watch on it + recurse only into
-/// its clean children. Single top-down pass: clean subtrees are never walked
-/// into (the recursive watch handles them), so this is O(dirs above a build
-/// boundary), not O(whole tree).
-fn collect_pruned_watch_targets(dir: &Path, targets: &mut Vec<WatchTarget>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut has_excluded_child = false;
-    let mut clean_children: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
-            continue;
-        };
-        if crate::indexing_policy::is_watch_pruned_segment(name) {
-            has_excluded_child = true;
-        } else {
-            clean_children.push(path);
-        }
-    }
-
-    if has_excluded_child {
-        // Prune: watch this dir's own entries non-recursively, then recurse
-        // into clean children only — never into the excluded ones.
-        targets.push(WatchTarget {
-            path: dir.to_path_buf(),
-            recursive: false,
-        });
-        clean_children.sort();
-        for child in clean_children {
-            collect_pruned_watch_targets(&child, targets);
-        }
-    } else {
-        // Entire subtree is build-free → one recursive watch (auto-watches
-        // future subdirs created under it).
-        targets.push(WatchTarget {
-            path: dir.to_path_buf(),
-            recursive: true,
-        });
-    }
-}
-
-fn project_hot_target_rank(path: &Path) -> (u8, String) {
-    let name = path
-        .file_name()
-        .and_then(|segment| segment.to_str())
-        .unwrap_or_default()
-        .to_string();
-
-    let rank = match name.as_str() {
-        "src" => 0,
-        "lib" => 1,
-        "test" | "tests" => 2,
-        "docs" => 3,
-        "scripts" => 4,
-        _ => 10,
-    };
-
-    (rank, name)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1898,567 +1472,15 @@ fn quiescent_scaled_claim_sleep(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_watcher_events(
-    store: Arc<GraphStore>,
-    watch_root: std::path::PathBuf,
-    project_code: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-    active_project_root: Option<PathBuf>,
-    rescan_guard: Arc<AtomicBool>,
-    cold_arm_completed_at: Arc<Mutex<Option<Instant>>>,
-    watcher_started_at: Instant,
-    result: DebounceEventResult,
-) {
-    match result {
-        Ok(events) => {
-            let mut paths = Vec::new();
-            let mut rescan_requested = false;
-            let mut excluded_paths: u64 = 0;
-
-            for event in events {
-                if event.need_rescan() {
-                    rescan_requested = true;
-                }
-                // REQ-AXO-91561 — drop paths that cross any excluded
-                // build-artefact directory segment (target/, _build/,
-                // node_modules/, …). Nested build dirs inside watched
-                // subtrees are filtered here even when the top-level
-                // subscription couldn't avoid them.
-                for raw_path in event.paths.iter() {
-                    if path_in_excluded_build_dir(raw_path) {
-                        excluded_paths += 1;
-                        continue;
-                    }
-                    paths.push(raw_path.clone());
-                }
-            }
-
-            if excluded_paths > 0 {
-                watcher_probe::record(
-                    "watcher.excluded_build_dir",
-                    None,
-                    format!("excluded={excluded_paths}"),
-                );
-            }
-
-            let cold_arm_completed_at = cold_arm_completed_at.lock().ok().and_then(|guard| *guard);
-
-            if should_suppress_bootstrap_event_storm(
-                paths.len(),
-                watcher_started_at,
-                cold_arm_completed_at,
-            ) {
-                let salvaged = bootstrap_salvage_paths(&paths, active_project_root.as_deref());
-                warn!(
-                    "Rust FS watcher suppressed bootstrap event storm ({} path(s)) under {}",
-                    paths.len(),
-                    watch_root.display()
-                );
-                watcher_probe::record(
-                    "watcher.storm_suppressed",
-                    None,
-                    format!("paths={} salvaged={}", paths.len(), salvaged.len()),
-                );
-                if !salvaged.is_empty() {
-                    match fs_watcher::enqueue_hot_deltas_with_guard(
-                        Some(store.as_ref()),
-                        &watch_root,
-                        &project_code,
-                        salvaged.clone(),
-                        HOT_PRIORITY,
-                        &file_ingress_guard,
-                        &ingress_buffer,
-                    ) {
-                        Ok(staged) if staged > 0 => {
-                            info!(
-                                "Rust FS watcher buffered {} hot delta(s) from bootstrap storm.",
-                                staged
-                            );
-                            watcher_probe::record(
-                                "watcher.storm_salvaged",
-                                None,
-                                format!("buffered={}", staged),
-                            );
-                        }
-                        Ok(_) => {
-                            watcher_probe::record(
-                                "watcher.storm_salvaged_none",
-                                None,
-                                format!("candidates={}", salvaged.len()),
-                            );
-                        }
-                        Err(err) => {
-                            warn!("Rust FS watcher failed to salvage hot delta(s): {}", err);
-                            watcher_probe::record(
-                                "watcher.storm_salvage_failed",
-                                None,
-                                err.to_string(),
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-
-            if !paths.is_empty() {
-                // REQ-AXO-331: per-batch event log is high-volume (84 % of indexer log
-                // bytes under 19-project /home/dstadel/projects watch root). Downgraded
-                // to DEBUG; aggregate counts remain queryable via watcher_probe::recent().
-                debug!(
-                    "Rust FS watcher received {} path event(s) under {}",
-                    paths.len(),
-                    watch_root.display()
-                );
-                watcher_probe::record("watcher.received", None, format!("paths={}", paths.len()));
-            }
-
-            if rescan_requested {
-                if !rescan_guard.swap(true, Ordering::SeqCst) {
-                    watcher_probe::record(
-                        "watcher.rescan_requested",
-                        None,
-                        format!("paths={}", paths.len()),
-                    );
-                    let rescan_store = store.clone();
-                    let rescan_root = watch_root.clone();
-                    let rescan_project_code = project_code.clone();
-                    let rescan_guard_state = file_ingress_guard.clone();
-                    let rescan_ingress = ingress_buffer.clone();
-                    let rescan_guard_release = rescan_guard.clone();
-                    std::thread::spawn(move || {
-                        let _guard_reset = RescanGuardReset::new(rescan_guard_release);
-                        warn!(
-                            "Rust FS watcher requested a safety rescan on {}",
-                            rescan_root.display()
-                        );
-                        watcher_probe::record(
-                            "watcher.rescan_started",
-                            Some(&rescan_root),
-                            "reason=notify_rescan",
-                        );
-                        Scanner::new(rescan_root.to_string_lossy().as_ref(), &rescan_project_code)
-                            .scan_with_guard_and_ingress(
-                                rescan_store,
-                                Some(&rescan_guard_state),
-                                Some(&rescan_ingress),
-                            );
-                        watcher_probe::record(
-                            "watcher.rescan_completed",
-                            Some(&rescan_root),
-                            "status=ok",
-                        );
-                    });
-                } else {
-                    watcher_probe::record("watcher.rescan_skipped", None, "reason=guard_active");
-                }
-            }
-
-            match fs_watcher::enqueue_hot_deltas_with_guard(
-                Some(store.as_ref()),
-                &watch_root,
-                &project_code,
-                paths,
-                HOT_PRIORITY,
-                &file_ingress_guard,
-                &ingress_buffer,
-            ) {
-                Ok(staged) if staged > 0 => {
-                    // REQ-AXO-331: per-batch buffer log downgraded to DEBUG (paired
-                    // with watcher.received). watcher.staged remains INFO inside
-                    // fs_watcher for the actual file-level staging event.
-                    debug!("Rust FS watcher buffered {} hot delta(s).", staged);
-                    watcher_probe::record(
-                        "watcher.buffered_batch",
-                        None,
-                        format!("buffered={}", staged),
-                    );
-                }
-                Ok(_) => {
-                    debug!("Rust FS watcher received event(s) but buffered no hot delta.");
-                    watcher_probe::record(
-                        "watcher.buffered_none",
-                        None,
-                        "reason=no_eligible_delta",
-                    );
-                }
-                Err(err) => {
-                    watcher_probe::record("watcher.buffering_failed", None, err.to_string());
-                    warn!("Rust FS watcher failed to buffer hot delta(s): {}", err)
-                }
-            }
-        }
-        Err(errors) => {
-            for err in errors {
-                watcher_probe::record("watcher.error", None, err.to_string());
-                warn!("Rust FS watcher event error: {}", err);
-            }
-        }
-    }
-}
-
-struct RescanGuardReset {
-    guard: Arc<AtomicBool>,
-}
-
-impl RescanGuardReset {
-    fn new(guard: Arc<AtomicBool>) -> Self {
-        Self { guard }
-    }
-}
-
-impl Drop for RescanGuardReset {
-    fn drop(&mut self) {
-        self.guard.store(false, Ordering::SeqCst);
-    }
-}
-
-fn should_suppress_bootstrap_event_storm(
-    path_count: usize,
-    watcher_started_at: Instant,
-    cold_arm_completed_at: Option<Instant>,
-) -> bool {
-    if watcher_started_at.elapsed() <= Duration::from_secs(120) && path_count >= 5_000 {
-        return true;
-    }
-
-    cold_arm_completed_at
-        .map(|armed_at| armed_at.elapsed() <= Duration::from_secs(30) && path_count >= 1_000)
-        .unwrap_or(false)
-}
-
-fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>) -> Vec<PathBuf> {
-    let Some(active_project_root) = active_project_root else {
-        return Vec::new();
-    };
-
-    paths
-        .iter()
-        .filter_map(|path| {
-            let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            let metadata = std::fs::metadata(&absolute).ok()?;
-            if metadata.is_file() && absolute.starts_with(active_project_root) {
-                Some(absolute)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn federation_orchestration_candidates_from_identities(
-    identities: Vec<axon_core::project_meta::CanonicalProjectIdentity>,
-) -> Vec<(String, String)> {
-    let mut projects: Vec<(String, String)> = identities
-        .into_iter()
-        .filter(|identity| identity.code != "PRO")
-        .filter_map(|identity| {
-            let project_path = identity.project_path.to_string_lossy().trim().to_string();
-            if project_path.is_empty() {
-                None
-            } else {
-                Some((identity.code, project_path))
-            }
-        })
-        .collect();
-    projects.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    projects
-}
-
-// REQ-AXO-901860 — `discover_unbound_top_level_candidates` +
-// `merge_reconciliation_candidates` deleted (à-la-hache): they were the
-// "UNK extension" regression — force-enrolling every meta-less top-level dir
-// under the "UNK" sentinel, which minted an "UNK" ist.Project + ~22k inert
-// IndexedFile rows for unregistered projects, against the canonical
-// project/path resolution that retired UNK. Reconciliation now scans canonical
-// identities only (see the candidate assembly in the reconciliation loop).
-
-/// REQ-AXO-172 — Restrict the federation orchestrator's project sweep
-/// to projects whose canonical path falls under the configured
-/// `AXON_WATCH_DIR`. Without this filter, `discover_project_identities`
-/// finds every project on disk via cwd / cwd-parent / repo-root /
-/// repo-root-parent walking (project_meta.rs:candidate_directories),
-/// so the orchestrator spawns a watcher and initial scan for ALL of
-/// them — making AXON_WATCH_DIR isolation impossible and breaking
-/// DEC-AXO-066 stepwise validation. Empty `watch_root` ⇒ identity
-/// (no filter), preserving the legacy "scan everything" behaviour
-/// for callers that have not opted in.
-pub(crate) fn filter_orchestration_candidates_by_watch_root(
-    candidates: Vec<(String, String)>,
-    watch_root: &str,
-) -> Vec<(String, String)> {
-    if watch_root.trim().is_empty() {
-        return candidates;
-    }
-    let watch_root_path = std::path::Path::new(watch_root);
-    candidates
-        .into_iter()
-        .filter(|(_code, path)| std::path::Path::new(path).starts_with(watch_root_path))
-        .collect()
-}
-
-pub(crate) fn spawn_federation_orchestrator(
-    store: Arc<GraphStore>,
-    watch_root: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    if !federation_orchestrator_enabled() {
-        info!("Fédération : orchestrateur désactivé via AXON_ENABLE_FEDERATION_ORCHESTRATOR.");
-        return;
-    }
-    std::thread::spawn(move || {
-        let mut known_projects = std::collections::HashSet::new();
-        let mut stable_sweeps_without_new_projects: u32 = 0;
-        info!(
-            "Fédération : Démarrage de l'orchestrateur de projets locaux (scope: {}).",
-            if watch_root.is_empty() {
-                "<unrestricted>"
-            } else {
-                watch_root.as_str()
-            }
-        );
-        loop {
-            let base_interval_ms = if stable_sweeps_without_new_projects >= 8 {
-                30_000
-            } else if stable_sweeps_without_new_projects >= 3 {
-                10_000
-            } else {
-                1_000
-            };
-            std::thread::sleep(Duration::from_millis(quiescent_scaled_interval_ms(
-                base_interval_ms,
-                1_000,
-                60_000,
-            )));
-            // REQ-AXO-172 — apply AXON_WATCH_DIR scoping at orchestration time so
-            // a freshly-dropped meta.json under a path outside watch_root never
-            // turns into a per-project scan + watcher.
-            let local_projects = filter_orchestration_candidates_by_watch_root(
-                federation_orchestration_candidates_from_identities(
-                    axon_core::project_meta::discover_project_identities(),
-                ),
-                &watch_root,
-            );
-            let mut newly_discovered = Vec::new();
-            for (project_code, path) in local_projects {
-                if !known_projects.contains(&project_code) {
-                    known_projects.insert(project_code.clone());
-                    newly_discovered.push((project_code, path));
-                }
-            }
-
-            if newly_discovered.is_empty() {
-                stable_sweeps_without_new_projects =
-                    stable_sweeps_without_new_projects.saturating_add(1);
-                continue;
-            }
-
-            stable_sweeps_without_new_projects = 0;
-            service_guard::record_background_runtime_wakeup(
-                service_guard::BackgroundWakeDetail::FederationOrchestrator,
-                0,
-                0,
-            );
-            info!(
-                "Fédération : {} nouveau(x) projet(s) local(aux) détecté(s) et orchestré(s).",
-                newly_discovered.len()
-            );
-            let mut scan_jobs = Vec::new();
-            for (project_code, path) in &newly_discovered {
-                info!(
-                    "Fédération : Nouveau projet local détecté et orchestré: {} ({})",
-                    project_code, path
-                );
-                let scan_store = store.clone();
-                let scan_path = path.clone();
-                let scan_project_code = project_code.clone();
-                let scan_guard = file_ingress_guard.clone();
-                let scan_ingress = ingress_buffer.clone();
-                scan_jobs.push(std::thread::spawn(move || {
-                    run_initial_scan(
-                        scan_store,
-                        scan_path,
-                        scan_project_code,
-                        scan_guard,
-                        scan_ingress,
-                    );
-                }));
-            }
-
-            for scan_job in scan_jobs {
-                if let Err(payload) = scan_job.join() {
-                    let reason = payload
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown panic payload".to_string());
-                    error!("Fédération : initial scan thread panicked: {}", reason);
-                }
-            }
-
-            for (project_code, path) in newly_discovered {
-                spawn_hot_delta_watcher(
-                    store.clone(),
-                    path.clone(),
-                    project_code.clone(),
-                    file_ingress_guard.clone(),
-                    ingress_buffer.clone(),
-                );
-            }
-        }
-    });
-}
-
-/// REQ-AXO-340 — periodic full re-scan of every federation-eligible project
-/// under `AXON_WATCH_DIR`. The diff itself happens inside the canonical
-/// Scanner → FileIngressGuard pipeline (`should_stage` returns
-/// `SkipUnchanged` for files whose `(path, mtime, size)` already match the
-/// guard's hydrated `FileIngressRow` snapshot). Only new or changed files
-/// reach the `IngressBuffer`, so steady-state cost is bounded by
-/// `walk + stat + HashMap lookup` per file. This closes the gap where
-/// federation discovery runs the initial scan exactly once: any file added
-/// outside an inotify-emitting touch (cold-clone, partial bootstrap failure,
-/// projects discovered after the first sweep) is otherwise invisible until
-/// the next process restart.
-fn scope_reconciliation_enabled() -> bool {
-    // REQ-AXO-340 — ON by default: the reconciliation orchestrator is the
-    // safety-net that catches files added outside an inotify-emitting touch
-    // (cold-clones, partial bootstrap failures, late-arriving projects),
-    // which are otherwise invisible until the next restart. Utility-first
-    // truth (PIL-AXO-007) means this gap-closer runs unless explicitly
-    // disabled via AXON_SCOPE_RECONCILE_ENABLED=false. The prior `false`
-    // default contradicted its own contract test (defaults_to_true).
-    std::env::var("AXON_SCOPE_RECONCILE_ENABLED")
-        .map(|raw| {
-            !matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "off" | "no"
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn scope_reconciliation_interval_secs() -> u64 {
-    const DEFAULT_SECS: u64 = 60;
-    const MIN_SECS: u64 = 5;
-    std::env::var("AXON_SCOPE_RECONCILE_INTERVAL_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|secs| *secs >= MIN_SECS)
-        .unwrap_or(DEFAULT_SECS)
-}
-
-pub(crate) fn spawn_scope_reconciliation_orchestrator(
-    store: Arc<GraphStore>,
-    watch_root: String,
-    file_ingress_guard: SharedFileIngressGuard,
-    ingress_buffer: SharedIngressBuffer,
-) {
-    if !scope_reconciliation_enabled() {
-        info!("Reconciliation : orchestrateur désactivé via AXON_SCOPE_RECONCILE_ENABLED.");
-        return;
-    }
-    let interval = Duration::from_secs(scope_reconciliation_interval_secs());
-    info!(
-        "Reconciliation : démarrage (scope: {}, interval: {}s).",
-        if watch_root.is_empty() {
-            "<unrestricted>"
-        } else {
-            watch_root.as_str()
-        },
-        interval.as_secs()
-    );
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(interval);
-            // Reconciliation candidate set = canonical identities ONLY
-            // (.axon/meta.json present OR registered in soll.ProjectCodeRegistry),
-            // filtered by AXON_WATCH_DIR (REQ-AXO-172).
-            //
-            // The former "UNK extension" (force-enrolling every meta-less
-            // top-level dir under the "UNK" sentinel to avoid silently skipping
-            // them) was a REGRESSION against the canonical project/path
-            // resolution (REQ-AXO-901860): it minted an "UNK" ist.Project plus
-            // ~22k inert IndexedFile rows for unregistered projects (0 chunks,
-            // 0 symbols), polluting the telemetry funnel. Unregistered dirs are
-            // now simply not scanned — a directory gets indexed when, and only
-            // when, it is a registered/canonical project.
-            let candidates = filter_orchestration_candidates_by_watch_root(
-                federation_orchestration_candidates_from_identities(
-                    axon_core::project_meta::discover_project_identities(),
-                ),
-                &watch_root,
-            );
-            if candidates.is_empty() {
-                continue;
-            }
-            let pass_start = std::time::Instant::now();
-            let mut scanned = 0usize;
-            for (project_code, project_path) in &candidates {
-                let scanner = Scanner::new(project_path, project_code);
-                scanner.scan_with_guard_and_ingress(
-                    store.clone(),
-                    Some(&file_ingress_guard),
-                    Some(&ingress_buffer),
-                );
-                scanned += 1;
-            }
-            debug!(
-                "Reconciliation : passe terminée — {} projet(s) scanné(s) en {} ms.",
-                scanned,
-                pass_start.elapsed().as_millis()
-            );
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        active_project_hot_targets, bootstrap_salvage_paths,
-        path_in_excluded_build_dir,
-        federation_orchestration_candidates_from_identities,
-        federation_orchestrator_enabled, filter_orchestration_candidates_by_watch_root,
-        handle_watcher_events, memory_limit_bytes,
-        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, optimizer_loop_interval_ms,
-        scope_reconciliation_enabled, scope_reconciliation_interval_secs,
-        should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm,
-        RescanGuardReset,
+        memory_limit_bytes, memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes,
+        optimizer_loop_interval_ms, should_attempt_memory_reclaim,
     };
-    use axon_core::file_ingress_guard::FileIngressGuard;
-    use axon_core::graph::GraphStore;
-    use axon_core::ingress_buffer::{
-        IngressBuffer, IngressSource, SharedIngressBuffer,
-    };
-    use axon_core::watcher_probe;
-    use notify_debouncer_full::notify::event::{Flag, ModifyKind};
-    use notify_debouncer_full::notify::Error;
-    use notify_debouncer_full::notify::{Event, EventKind};
-    use notify_debouncer_full::DebouncedEvent;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-    use tempfile::tempdir;
 
     static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
-    static FLUSH_METRICS_GUARD: Mutex<()> = Mutex::new(());
-    /// REQ-AXO-099 Phase 2 — serializes the watcher_probe-touching
-    /// tests in this module. The probe is a process-global VecDeque;
-    /// without serialization, one test's `clear()` wipes another
-    /// test's recorded events between record and assertion.
-    static WATCHER_PROBE_GUARD: Mutex<()> = Mutex::new(());
-
-    fn test_file_ingress_guard() -> Arc<Mutex<FileIngressGuard>> {
-        Arc::new(Mutex::new(FileIngressGuard::default()))
-    }
-
-    fn test_ingress_buffer() -> SharedIngressBuffer {
-        Arc::new(Mutex::new(IngressBuffer::default()))
-    }
 
     #[test]
     fn test_memory_limit_uses_default_when_env_missing() {
@@ -2477,104 +1499,6 @@ mod tests {
         unsafe {
             std::env::remove_var("AXON_MEMORY_LIMIT_GB");
         }
-    }
-
-    #[test]
-    fn test_federation_orchestrator_enabled_respects_false_env() {
-        unsafe {
-            std::env::set_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR", "false");
-        }
-        assert!(!federation_orchestrator_enabled());
-        unsafe {
-            std::env::remove_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR");
-        }
-    }
-
-    #[test]
-    fn test_scope_reconciliation_enabled_defaults_to_true() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("AXON_SCOPE_RECONCILE_ENABLED");
-        }
-        assert!(scope_reconciliation_enabled());
-    }
-
-    #[test]
-    fn test_scope_reconciliation_enabled_respects_false_env() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        for value in ["false", "FALSE", "0", "off", "no"] {
-            unsafe {
-                std::env::set_var("AXON_SCOPE_RECONCILE_ENABLED", value);
-            }
-            assert!(
-                !scope_reconciliation_enabled(),
-                "value `{value}` should disable reconciliation"
-            );
-        }
-        unsafe {
-            std::env::remove_var("AXON_SCOPE_RECONCILE_ENABLED");
-        }
-    }
-
-    #[test]
-    fn test_scope_reconciliation_interval_defaults_and_clamps() {
-        let _lock = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS");
-        }
-        assert_eq!(scope_reconciliation_interval_secs(), 60);
-
-        unsafe {
-            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "300");
-        }
-        assert_eq!(scope_reconciliation_interval_secs(), 300);
-
-        // Values below the 5s floor fall back to the default.
-        unsafe {
-            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "1");
-        }
-        assert_eq!(scope_reconciliation_interval_secs(), 60);
-
-        unsafe {
-            std::env::set_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS", "not-a-number");
-        }
-        assert_eq!(scope_reconciliation_interval_secs(), 60);
-
-        unsafe {
-            std::env::remove_var("AXON_SCOPE_RECONCILE_INTERVAL_SECS");
-        }
-    }
-
-    #[test]
-    fn test_federation_orchestration_candidates_use_local_canonical_identities() {
-        let candidates = federation_orchestration_candidates_from_identities(vec![
-            axon_core::project_meta::CanonicalProjectIdentity {
-                name: Some("System".to_string()),
-                code: "PRO".to_string(),
-                project_path: std::path::PathBuf::from("/tmp/pro"),
-                meta_path: std::path::PathBuf::from("/tmp/pro/.axon/meta.json"),
-            },
-            axon_core::project_meta::CanonicalProjectIdentity {
-                name: Some("Axon".to_string()),
-                code: "AXO".to_string(),
-                project_path: std::path::PathBuf::from("/tmp/axon"),
-                meta_path: std::path::PathBuf::from("/tmp/axon/.axon/meta.json"),
-            },
-            axon_core::project_meta::CanonicalProjectIdentity {
-                name: Some("BookingSystem".to_string()),
-                code: "BKS".to_string(),
-                project_path: std::path::PathBuf::from("/tmp/booking"),
-                meta_path: std::path::PathBuf::from("/tmp/booking/.axon/meta.json"),
-            },
-        ]);
-
-        assert_eq!(
-            candidates,
-            vec![
-                ("AXO".to_string(), "/tmp/axon".to_string()),
-                ("BKS".to_string(), "/tmp/booking".to_string()),
-            ]
-        );
     }
 
     #[test]
@@ -2641,492 +1565,28 @@ mod tests {
         }
     }
 
+    /// REQ-AXO-901893 (LEGACY FEED PURGE) — the memory reclaimer now gates on
+    /// queue idle + anon RSS floor only (the ingress_buffer backlog gate was
+    /// ripped with the buffer). Reclaim fires when queue is empty AND anon RSS
+    /// is at/above the trim floor; it is suppressed while the queue is non-empty.
     #[test]
-    fn test_memory_reclaimer_can_run_when_only_stalled_subtree_hints_remain() {
-        let ingress = test_ingress_buffer();
-        {
-            let mut locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
-            locked.record_subtree_hint(
-                "/tmp/project/_build_truth_dashboard_ui".to_string(),
-                900,
-                IngressSource::Watcher,
-            );
-        }
-
-        let metrics = ingress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .metrics_snapshot();
-        let process_memory = axon_core::runtime_observability::ProcessMemorySnapshot {
+    fn test_memory_reclaim_gates_on_queue_idle_and_anon_floor() {
+        let mem_over = axon_core::runtime_observability::ProcessMemorySnapshot {
             rss_bytes: 24 * 1024 * 1024 * 1024,
             rss_anon_bytes: 23 * 1024 * 1024 * 1024,
             rss_file_bytes: 64 * 1024 * 1024,
             rss_shmem_bytes: 0,
         };
-
-        assert!(
-            should_attempt_memory_reclaim(0, &metrics, process_memory, 4 * 1024 * 1024 * 1024),
-            "Le reclaim memoire doit rester possible quand seuls des subtree hints stagnants bloquent l'idle parfait"
-        );
-    }
-
-    #[test]
-    fn test_bootstrap_salvage_paths_keeps_only_active_project_candidates() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let project = root.join("proj");
-        std::fs::create_dir_all(project.join("src")).unwrap();
-        let file_path = project.join("src").join("watch.ex");
-        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
-        let outside = root.join("other").join("cold.tmp");
-        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
-        std::fs::write(&outside, "x").unwrap();
-
-        let salvaged = bootstrap_salvage_paths(
-            &[file_path.clone(), outside.clone()],
-            Some(project.as_path()),
-        );
-
-        assert_eq!(salvaged.len(), 1);
-        assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
-    }
-
-    #[test]
-    fn test_bootstrap_salvage_paths_ignores_directories() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let project = root.join("proj");
-        let src_dir = project.join("src");
-        std::fs::create_dir_all(&src_dir).unwrap();
-        let file_path = src_dir.join("watch.ex");
-        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
-
-        let salvaged = bootstrap_salvage_paths(
-            &[src_dir.clone(), file_path.clone()],
-            Some(project.as_path()),
-        );
-
-        assert_eq!(salvaged.len(), 1);
-        assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
-    }
-
-    #[test]
-    fn test_handle_watcher_events_records_staged_none_reason_for_ineligible_delta() {
-        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        watcher_probe::clear();
-
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let project = root.join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-        let file_path = project.join("ignored.png");
-        std::fs::write(&file_path, "not parsable").unwrap();
-
-        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
-        let ingress_buffer = test_ingress_buffer();
-        let event = DebouncedEvent::new(
-            Event {
-                kind: EventKind::Modify(ModifyKind::Data(
-                    notify_debouncer_full::notify::event::DataChange::Any,
-                )),
-                paths: vec![file_path.clone()],
-                attrs: Default::default(),
-            },
-            std::time::Instant::now(),
-        );
-
-        handle_watcher_events(
-            store,
-            root.to_path_buf(),
-            "proj".to_string(),
-            test_file_ingress_guard(),
-            ingress_buffer,
-            Some(project),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(None)),
-            Instant::now(),
-            Ok(vec![event]),
-        );
-
-        let events = watcher_probe::recent();
-        assert!(events.iter().any(|line| line.contains("watcher.filtered")));
-        assert!(events
-            .iter()
-            .any(|line| line.contains("watcher.buffered_none")));
-    }
-
-    #[test]
-    fn test_handle_watcher_events_records_rescan_request() {
-        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        watcher_probe::clear();
-
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let project = root.join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-        let file_path = project.join("watch.ex");
-        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
-
-        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
-        let ingress_buffer = test_ingress_buffer();
-        let event = DebouncedEvent::new(
-            Event {
-                kind: EventKind::Other,
-                paths: vec![file_path],
-                attrs: Default::default(),
-            }
-            .set_flag(Flag::Rescan),
-            std::time::Instant::now(),
-        );
-
-        handle_watcher_events(
-            store,
-            root.to_path_buf(),
-            "proj".to_string(),
-            test_file_ingress_guard(),
-            ingress_buffer,
-            Some(project),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(None)),
-            Instant::now(),
-            Ok(vec![event]),
-        );
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let events = watcher_probe::recent();
-            let requested = events
-                .iter()
-                .any(|line| line.contains("watcher.rescan_requested"));
-            let completed = events
-                .iter()
-                .any(|line| line.contains("watcher.rescan_completed"));
-            if requested && completed {
-                break;
-            }
-            if Instant::now() >= deadline {
-                panic!("watcher rescan checkpoints not observed in time");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[test]
-    fn test_handle_watcher_events_records_rescan_skipped_when_guard_active() {
-        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        watcher_probe::clear();
-
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let project = root.join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-        let file_path = project.join("watch.ex");
-        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
-
-        let store = Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap());
-        let ingress_buffer = test_ingress_buffer();
-        let event = DebouncedEvent::new(
-            Event {
-                kind: EventKind::Other,
-                paths: vec![file_path],
-                attrs: Default::default(),
-            }
-            .set_flag(Flag::Rescan),
-            std::time::Instant::now(),
-        );
-
-        handle_watcher_events(
-            store,
-            root.to_path_buf(),
-            "proj".to_string(),
-            test_file_ingress_guard(),
-            ingress_buffer,
-            Some(project),
-            Arc::new(AtomicBool::new(true)),
-            Arc::new(Mutex::new(None)),
-            Instant::now(),
-            Ok(vec![event]),
-        );
-
-        let events = watcher_probe::recent();
-        assert!(events
-            .iter()
-            .any(|line| line.contains("watcher.rescan_skipped")));
-    }
-
-    #[test]
-    fn test_handle_watcher_events_records_watcher_errors() {
-        let _watcher_guard = WATCHER_PROBE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        watcher_probe::clear();
-
-        handle_watcher_events(
-            Arc::new(GraphStore::new_indexer_ist_writer_without_soll(":memory:").unwrap()),
-            PathBuf::from("/tmp"),
-            "proj".to_string(),
-            test_file_ingress_guard(),
-            test_ingress_buffer(),
-            None,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(None)),
-            Instant::now(),
-            Err(vec![Error::generic("boom")]),
-        );
-
-        let events = watcher_probe::recent();
-        assert!(events.iter().any(|line| line.contains("watcher.error")));
-        assert!(events.iter().any(|line| line.contains("boom")));
-    }
-
-    #[test]
-    fn test_rescan_guard_reset_releases_guard_on_drop() {
-        let guard = Arc::new(AtomicBool::new(true));
-        {
-            let _reset = RescanGuardReset::new(guard.clone());
-            assert!(guard.load(Ordering::SeqCst));
-        }
-        assert!(!guard.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_active_project_hot_targets_expand_visible_child_subtrees() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::create_dir_all(root.join("docs")).unwrap();
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-
-        let targets = active_project_hot_targets(Some(root));
-        let rendered: Vec<(String, bool)> = targets
-            .into_iter()
-            .map(|target| (target.path.to_string_lossy().to_string(), target.recursive))
-            .collect();
-
-        assert_eq!(rendered[0].0, root.to_string_lossy());
-        assert!(!rendered[0].1);
-        assert!(rendered
-            .iter()
-            .any(|(path, recursive)| path.ends_with("/src") && *recursive));
-        assert!(rendered
-            .iter()
-            .any(|(path, recursive)| path.ends_with("/docs") && *recursive));
-        assert!(!rendered.iter().any(|(path, _)| path.ends_with("/.git")));
-    }
-
-    #[test]
-    fn test_bootstrap_event_storm_is_suppressed_early() {
-        let started = Instant::now();
-        assert!(should_suppress_bootstrap_event_storm(6_000, started, None));
-    }
-
-    #[test]
-    fn test_bootstrap_event_storm_is_not_suppressed_late_or_small() {
-        let started = Instant::now() - Duration::from_secs(180);
-        assert!(!should_suppress_bootstrap_event_storm(6_000, started, None));
-        assert!(!should_suppress_bootstrap_event_storm(
-            100,
-            Instant::now(),
-            None
-        ));
-    }
-
-    #[test]
-    fn test_bootstrap_event_storm_is_suppressed_right_after_cold_arm() {
-        let started = Instant::now() - Duration::from_secs(180);
-        let cold_arm_completed_at = Some(Instant::now());
-        assert!(should_suppress_bootstrap_event_storm(
-            2_000,
-            started,
-            cold_arm_completed_at,
-        ));
-    }
-
-    #[test]
-    fn test_bootstrap_event_storm_is_not_suppressed_long_after_cold_arm() {
-        let started = Instant::now() - Duration::from_secs(180);
-        let cold_arm_completed_at = Some(Instant::now() - Duration::from_secs(45));
-        assert!(!should_suppress_bootstrap_event_storm(
-            2_000,
-            started,
-            cold_arm_completed_at,
-        ));
-    }
-
-    #[test]
-    fn filter_orchestration_candidates_by_watch_root_scopes_to_subtree() {
-        // REQ-AXO-172 — restore AXON_WATCH_DIR isolation. Pre-fix, the
-        // federation orchestrator discovered every project via
-        // project_meta::candidate_directories (cwd / cwd-parent /
-        // repo-root / repo-root-parent walking) and spawned a watcher +
-        // initial scan for each — making minimal-corpus testing
-        // (DEC-AXO-066 stepwise validation) impossible.
-        let candidates = vec![
-            ("AXO".to_string(), "/home/dstadel/projects/axon".to_string()),
-            ("FOO".to_string(), "/home/dstadel/projects/foo".to_string()),
-            ("TEST".to_string(), "/tmp/axon-test/sample".to_string()),
-        ];
-
-        // watch_root scoped to /tmp ⇒ only TEST kept
-        let kept = filter_orchestration_candidates_by_watch_root(
-            candidates.clone(),
-            "/tmp/axon-test",
-        );
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].0, "TEST");
-
-        // watch_root = parent ⇒ both AXO and FOO kept (TEST out)
-        let kept = filter_orchestration_candidates_by_watch_root(
-            candidates.clone(),
-            "/home/dstadel/projects",
-        );
-        assert_eq!(kept.len(), 2);
-        let codes: Vec<&str> = kept.iter().map(|(c, _)| c.as_str()).collect();
-        assert!(codes.contains(&"AXO"));
-        assert!(codes.contains(&"FOO"));
-
-        // watch_root = exact project path ⇒ only that one kept
-        let kept = filter_orchestration_candidates_by_watch_root(
-            candidates.clone(),
-            "/home/dstadel/projects/axon",
-        );
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].0, "AXO");
-
-        // Empty watch_root ⇒ identity (legacy "scan everything" preserved
-        // for callers that have not opted in)
-        let kept = filter_orchestration_candidates_by_watch_root(candidates.clone(), "");
-        assert_eq!(kept.len(), 3);
-
-        // Whitespace-only watch_root ⇒ also treated as identity
-        let kept = filter_orchestration_candidates_by_watch_root(candidates.clone(), "   ");
-        assert_eq!(kept.len(), 3);
-
-        // watch_root with no matching projects ⇒ empty result (the
-        // path that breaks DEC-AXO-066 if not honoured)
-        let kept = filter_orchestration_candidates_by_watch_root(candidates, "/var/empty");
-        assert!(kept.is_empty());
-    }
-
-    // ── REQ-AXO-91561 / REQ-AXO-901890 — watcher build-dir exclusion ──
-    // Single source of truth: indexing_policy::is_watch_pruned_segment
-    // (backed by DIRECTORY_RULES), shared with the scanner. Locks that the
-    // canonical artefact dirs AND Axon's own .axon/cargo-target are pruned.
-    #[test]
-    fn watch_pruned_segments_include_canonical_artefact_dirs() {
-        for seg in [
-            "target", "_build", "node_modules", "build", "dist", "out", "vendor",
-            "__pycache__", "coverage", "cargo-target", ".axon", ".git", ".devenv",
-        ] {
-            assert!(
-                crate::indexing_policy::is_watch_pruned_segment(seg),
-                "{seg} must be pruned from the watcher (DIRECTORY_RULES + dotdir)"
-            );
-        }
-    }
-
-    #[test]
-    fn path_in_excluded_build_dir_detects_top_level_segment() {
-        assert!(path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/axon/target/debug/foo.o"
-        )));
-        assert!(path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/Fiscaly/_build/dev/lib"
-        )));
-        assert!(path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/web/node_modules/react/index.js"
-        )));
-    }
-
-    #[test]
-    fn path_in_excluded_build_dir_detects_nested_segment() {
-        // Monorepo subpackage with its own target dir.
-        assert!(path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/axon/crates/x/target/foo"
-        )));
-    }
-
-    #[test]
-    fn path_in_excluded_build_dir_lets_source_paths_through() {
-        assert!(!path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/axon/src/axon-core/src/main_background.rs"
-        )));
-        assert!(!path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/axon/docs/skills/SKILL.md"
-        )));
-        // `target` as a *substring* of a non-excluded segment must NOT
-        // trigger the filter — only exact segment matches.
-        assert!(!path_in_excluded_build_dir(Path::new(
-            "/home/dstadel/projects/axon/src/target_extractor.rs"
-        )));
-    }
-
-    #[test]
-    fn active_project_hot_targets_excludes_build_dirs_at_top_level() {
-        // Build a fake projects root with one source child + one build child.
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("axon")).unwrap();
-        std::fs::create_dir(tmp.path().join("target")).unwrap();
-        std::fs::create_dir(tmp.path().join("_build")).unwrap();
-        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
-        std::fs::create_dir(tmp.path().join(".git")).unwrap();
-
-        let targets = active_project_hot_targets(Some(tmp.path()));
-        let names: Vec<String> = targets
-            .iter()
-            .filter_map(|t| {
-                t.path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-            })
-            .collect();
-
-        // The root itself + only the non-build, non-hidden child.
-        assert!(names.iter().any(|n| n == "axon"));
-        assert!(!names.iter().any(|n| n == "target"));
-        assert!(!names.iter().any(|n| n == "_build"));
-        assert!(!names.iter().any(|n| n == "node_modules"));
-        assert!(!names.iter().any(|n| n == ".git"));
-    }
-
-    #[test]
-    fn active_project_hot_targets_prunes_nested_build_dirs() {
-        // REQ-AXO-901853 — the storm came from build dirs NESTED inside an
-        // otherwise-watched project (e.g. <project>/.axon/cargo-target), which
-        // the top-level filter never saw. Registration must prune them.
-        let tmp = tempfile::tempdir().unwrap();
-        let proj = tmp.path().join("axon");
-        std::fs::create_dir_all(proj.join("src").join("sub")).unwrap();
-        std::fs::create_dir_all(proj.join(".axon").join("cargo-target").join("deps")).unwrap();
-        std::fs::create_dir_all(proj.join("target").join("debug")).unwrap();
-
-        let targets = active_project_hot_targets(Some(tmp.path()));
-
-        // No watch target may cross a build dir (the flood source) — at any depth.
-        for target in &targets {
-            assert!(
-                !path_in_excluded_build_dir(&target.path),
-                "watch target {} crosses an excluded build dir",
-                target.path.display()
-            );
-            assert!(
-                !target.path.to_string_lossy().contains("/.axon"),
-                "watch target {} crosses nested hidden dir .axon",
-                target.path.display()
-            );
-        }
-        // The clean source subtree IS watched recursively (auto-watch new subdirs).
-        assert!(
-            targets
-                .iter()
-                .any(|t| t.path.ends_with("axon/src") && t.recursive),
-            "clean source subtree must be watched recursively"
-        );
-        // The project root has an excluded child → watched non-recursively.
-        assert!(
-            targets
-                .iter()
-                .any(|t| t.path.ends_with("axon") && !t.recursive),
-            "project root with build children must be non-recursive"
-        );
+        let floor = 4 * 1024 * 1024 * 1024;
+        // Idle queue + anon above floor → reclaim.
+        assert!(should_attempt_memory_reclaim(0, mem_over, floor));
+        // Non-empty queue → never reclaim (work in flight).
+        assert!(!should_attempt_memory_reclaim(7, mem_over, floor));
+        // Idle queue but anon below floor → no reclaim (nothing to gain).
+        let mem_under = axon_core::runtime_observability::ProcessMemorySnapshot {
+            rss_anon_bytes: 1024 * 1024,
+            ..mem_over
+        };
+        assert!(!should_attempt_memory_reclaim(0, mem_under, floor));
     }
 }

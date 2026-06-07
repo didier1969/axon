@@ -1,9 +1,5 @@
-use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
 use crate::indexing_policy::{classify_path, classify_subtree_hint_path, PathDisposition};
-use crate::ingress_buffer::{
-    IngressBuffer, IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer,
-};
 use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
 use anyhow::Result;
@@ -51,26 +47,18 @@ impl Scanner {
         }
     }
 
+    /// Full walk under the root, UPSERTing every eligible file into
+    /// ist.IndexedFile with status='discovered'. The DBQ-A claim feeder
+    /// (REQ-AXO-901897) drains those rows into pipeline A. The legacy
+    /// in-memory ingress_buffer + FileIngressGuard push was RIPPED in the
+    /// LEGACY FEED PURGE (REQ-AXO-901893); discovery now lands directly in PG.
     pub fn scan(&self, graph: Arc<GraphStore>) {
-        self.scan_with_guard_and_ingress(graph, None, None);
-    }
-
-    pub fn scan_with_guard(&self, graph: Arc<GraphStore>, guard: Option<&SharedFileIngressGuard>) {
-        self.scan_with_guard_and_ingress(graph, guard, None);
-    }
-
-    pub fn scan_with_guard_and_ingress(
-        &self,
-        graph: Arc<GraphStore>,
-        guard: Option<&SharedFileIngressGuard>,
-        ingress: Option<&SharedIngressBuffer>,
-    ) {
         let scan_start_ms = chrono::Utc::now().timestamp_millis();
         info!(
             "Lattice Engine: Initializing recursive traversal on {:?}",
             self.root
         );
-        let total_files = self.scan_path(graph.clone(), &self.root, guard, ingress);
+        let total_files = self.scan_path(graph.clone(), &self.root);
         info!(
             "🏁 Nexus Scan Complete: {} files mapped to graph store (status: pending).",
             total_files
@@ -91,31 +79,13 @@ impl Scanner {
         }
     }
 
+    /// Subtree walk → ist.IndexedFile status='discovered' (DBQ-A drains).
     pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) -> usize {
-        self.scan_subtree_with_guard_and_ingress(graph, subtree, None, None)
-    }
-
-    pub fn scan_subtree_with_guard(
-        &self,
-        graph: Arc<GraphStore>,
-        subtree: &Path,
-        guard: Option<&SharedFileIngressGuard>,
-    ) -> usize {
-        self.scan_subtree_with_guard_and_ingress(graph, subtree, guard, None)
-    }
-
-    pub fn scan_subtree_with_guard_and_ingress(
-        &self,
-        graph: Arc<GraphStore>,
-        subtree: &Path,
-        guard: Option<&SharedFileIngressGuard>,
-        ingress: Option<&SharedIngressBuffer>,
-    ) -> usize {
         info!(
             "Lattice Engine: Prioritizing hot subtree traversal on {:?}",
             subtree
         );
-        let total_files = self.scan_path(graph, subtree, guard, ingress);
+        let total_files = self.scan_path(graph, subtree);
         info!(
             "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
             total_files, subtree
@@ -434,13 +404,7 @@ impl Scanner {
         }
     }
 
-    fn scan_path(
-        &self,
-        graph: Arc<GraphStore>,
-        start: &Path,
-        guard: Option<&SharedFileIngressGuard>,
-        ingress: Option<&SharedIngressBuffer>,
-    ) -> usize {
+    fn scan_path(&self, graph: Arc<GraphStore>, start: &Path) -> usize {
         let mut batch = Vec::new();
         let mut total_files = 0;
         let walker = self.build_walker_from(start);
@@ -479,21 +443,11 @@ impl Scanner {
                     .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
                     .unwrap_or(0);
 
-                if let Some(shared_guard) = guard {
-                    let decision = shared_guard
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .should_stage(Path::new(&path_str), mtime, size);
-                    if decision == GuardDecision::SkipUnchanged {
-                        continue;
-                    }
-                }
-
                 batch.push((path_str, project_name, size, mtime));
 
                 if batch.len() >= SCANNER_BATCH_SIZE {
                     total_files += batch.len();
-                    if !dispatch_scanner_batch(&graph, &batch, guard, ingress) {
+                    if !dispatch_scanner_batch(&graph, &batch) {
                         error!("Scanner batch dispatch failed");
                     }
                     batch.clear();
@@ -511,7 +465,7 @@ impl Scanner {
 
         if !batch.is_empty() {
             total_files += batch.len();
-            let _ = dispatch_scanner_batch(&graph, &batch, guard, ingress);
+            let _ = dispatch_scanner_batch(&graph, &batch);
         }
 
         total_files
@@ -538,32 +492,19 @@ impl Scanner {
     }
 }
 
-fn dispatch_scanner_batch(
-    graph: &Arc<GraphStore>,
-    batch: &[(String, String, i64, i64)],
-    _guard: Option<&SharedFileIngressGuard>,
-    ingress: Option<&SharedIngressBuffer>,
-) -> bool {
-    // DEC-AXO-901619: durable discovery — batch UPSERT into IndexedFile
-    // with status='discovered' BEFORE pushing to in-memory ingress buffer.
-    // If memory pressure sheds the buffer entry, the file survives in PG
-    // and cold-start poll A will pick it up on next boot.
-    if let Err(e) = persist_discovery_batch(graph, batch) {
-        warn!(
-            "Scanner: durable discovery batch failed ({}), falling through to ingress-only",
-            e
-        );
+fn dispatch_scanner_batch(graph: &Arc<GraphStore>, batch: &[(String, String, i64, i64)]) -> bool {
+    // DEC-AXO-901619: durable discovery — batch UPSERT into ist.IndexedFile
+    // with status='discovered'. The DBQ-A claim feeder (REQ-AXO-901897) atomically
+    // claims those rows into pipeline A. The legacy in-memory ingress_buffer push
+    // was RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893) — PG is the durable
+    // work queue, no separate buffer to keep in sync.
+    match persist_discovery_batch(graph, batch) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!("Scanner: durable discovery batch failed ({e})");
+            false
+        }
     }
-
-    if let Some(shared_ingress) = ingress {
-        let mut locked = shared_ingress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        enqueue_scanner_batch(&mut locked, batch);
-        return true;
-    }
-    error!("dispatch_scanner_batch: no ingress_buffer available — batch dropped");
-    false
 }
 
 /// DEC-AXO-901619 + C1/C2 fixes: persist discovered files in PG with
@@ -669,20 +610,6 @@ fn persist_discovery_batch(
     graph.execute(&sql)
 }
 
-fn enqueue_scanner_batch(buffer: &mut IngressBuffer, batch: &[(String, String, i64, i64)]) {
-    for (path, project, size, mtime) in batch {
-        buffer.record_file(IngressFileEvent::new(
-            path.clone(),
-            project.clone(),
-            *size,
-            *mtime,
-            100,
-            IngressSource::Scan,
-            IngressCause::Discovered,
-        ));
-    }
-}
-
 fn ancestor_chain(root: &Path, path: &Path) -> Vec<PathBuf> {
     let parent = path.parent().unwrap_or(path);
     let mut dirs = Vec::new();
@@ -750,7 +677,6 @@ mod tests {
     use crate::config::IndexingConfig;
     use crate::service_guard;
     use std::path::Path;
-    use std::sync::Arc;
 
     fn test_config() -> IndexingConfig {
         IndexingConfig {

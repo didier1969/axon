@@ -1,38 +1,31 @@
 //! Pipeline-v2 wiring for the live `axon-indexer` binary (REQ-AXO-289 S7).
 //!
-//! This module replaces the legacy `spawn_autonomous_ingestor` +
-//! `spawn_ingress_promoter` pair with a thin bridge that:
+//! Thin bridge that:
 //!
 //! 1. Spawns [`pipeline_v2::spawn_pipeline_a`] (and `spawn_pipeline_b_full`
 //!    when the runtime mode enables semantic workers) with a multi-project
 //!    resolver (DEC-AXO-081).
-//! 2. Performs an initial scan of the watch root via [`Scanner::enumerate_files`]
-//!    and feeds every eligible path into pipeline A's `input_tx`.
-//! 3. Drains the shared `IngressBuffer` periodically and forwards file
-//!    events into the same `input_tx`. The legacy `public.File` state
-//!    machine is bypassed entirely — A3's idempotent UPSERTs are the
-//!    sole persistence path.
+//! 2. Spawns the Watchman file source ([`crate::watchman_source`], REQ-AXO-901893):
+//!    clock/cursor deltas feed pipeline A's `input_tx` directly. On a hard
+//!    Watchman failure it degrades to an explicit one-shot scanner walk + Blocker.
+//! 3. Spawns the DBQ-A claim feeder ([`crate::pipeline_v2::demand_pull`],
+//!    REQ-AXO-901897): atomically claims 'discovered' / stale-lease 'parsing'
+//!    rows from ist.IndexedFile into the SAME `input_tx`, draining any backlog
+//!    by construction. A3's idempotent UPSERTs are the sole persistence path.
+//!
+//! The legacy notify watcher + in-memory `ingress_buffer` FIFO + reconciliation/
+//! periodic sweeps were RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893 RIP).
 //!
 //! All spawns are `tokio::spawn` so the function returns once everything
-//! is wired; pipelines run in the background for the lifetime of the
-//! process.
+//! is wired; pipelines run in the background for the lifetime of the process.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use serde_json::Value;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
-use crate::ingress_buffer::{
-    record_drain_tick, record_periodic_sweep_skipped_high_cpu, record_periodic_sweep_tick,
-    IngressSource, SharedIngressBuffer,
-};
 use crate::pipeline_v2::{
     GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
@@ -40,37 +33,6 @@ use crate::pipeline_v2::{
 use crate::pipeline_v2::orchestrator::spawn_pipeline_a_with_cache;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
-
-const INGRESS_DRAIN_POLL_MS: u64 = 200;
-// REQ-AXO-901678 — `INGRESS_DRAIN_BATCH` is read from
-// `PipelineChannelCaps::from_env` (knob `AXON_INGRESS_DRAIN_BATCH`,
-// default 512). The legacy hardcoded constant (256) was a dead knob :
-// the runtime ignored any env override the operator set. Bench session
-// 54 confirmed A3 drum saturated under multi-project cold-start with
-// 256 cap.
-
-// REQ-AXO-901677 — periodic_sweep_worker defaults.
-//
-// Cadence : every 4 h, the worker re-walks the watch root, recomputes
-// stable content hashes, and pushes deltas (missing-from-IndexedFile or
-// hash-mismatch) into the ingress buffer as low-priority subtree hints.
-// The point is to catch inotify drops (queue overflow on big refactors,
-// container mount changes, silent init failures) that would otherwise
-// remain invisible until service restart.
-//
-// CPU gate : the sweep is opportunistic, not critical-path. If the host
-// is already busy (default threshold = 50%), skip this tick and try
-// again on the next interval. Operator-visible via
-// `periodic_sweep.skipped_high_cpu_total` so chronic skipping is
-// detectable.
-pub const PERIODIC_SWEEP_HOURS_DEFAULT: u64 = 4;
-pub const PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT: u8 = 50;
-/// Subtree hint priority for periodic_sweep enqueues. LOWER than the
-/// registry-driven 100 (REQ-AXO-901675) so an operator-initiated
-/// `axon_init_project` or a fresh inotify event preempts a background
-/// reconciliation walk that is, by definition, catching up rather than
-/// reacting in real time.
-const PERIODIC_SWEEP_HINT_PRIORITY: i64 = 50;
 
 use std::sync::atomic::AtomicPtr;
 use crate::pipeline_v2::demand_pull::DemandPullMetrics;
@@ -181,7 +143,6 @@ fn spawn_indexer_liveness_heartbeat(store: Arc<GraphStore>) {
 pub fn spawn_pipeline_v2_indexer(
     runtime_mode: AxonRuntimeMode,
     store: Arc<GraphStore>,
-    ingress_buffer: SharedIngressBuffer,
     watch_root: String,
 ) -> Result<()> {
     // REQ-AXO-901891 — the demand_pull retry_count poison-pill rehab (REQ-
@@ -399,493 +360,46 @@ pub fn spawn_pipeline_v2_indexer(
         }
     });
 
-    // REQ-AXO-901893 — Watchman file source (gated). When AXON_USE_WATCHMAN=1,
-    // the Watchman daemon's clock/cursor reconciliation REPLACES the legacy
-    // bootstrap-scan + ingress-drain + periodic-sweep below. Both paths feed the
-    // SAME `input_tx`; exactly one is active per process. Default OFF until the
-    // dev gate (REQ-AXO-901893 step 4) proves convergence; flipped ON + legacy
-    // ripped in steps 5–6.
-    let use_watchman = std::env::var("AXON_USE_WATCHMAN")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if use_watchman {
-        info!(
-            "pipeline_v2: AXON_USE_WATCHMAN=1 — Watchman is the file source \
-             (legacy bootstrap-scan / ingress-drain / periodic-sweep disabled)"
-        );
-        crate::watchman_source::spawn_watchman_source(
-            store.clone(),
-            handles_a.input_tx.clone(),
-            scanner.clone(),
-            watch_root.clone(),
-            resolve_database_url_for_listener(),
-        )?;
-    }
+    // REQ-AXO-901893 — Watchman is the file source, unconditionally. The
+    // daemon's clock/cursor reconciliation IS the live feed: a `since:<clock>`
+    // subscription returns the exact cumulative delta (or a fresh-instance full
+    // set), so a missed FS event is structurally impossible. The legacy
+    // bootstrap-scan + ingress-drain + periodic-sweep + notify watcher were
+    // RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893 deferred RIP). On a hard
+    // Watchman connect failure the source degrades to an explicit one-shot
+    // scanner walk (`fallback_scanner_bootstrap`) + a Blocker — never silent.
+    crate::watchman_source::spawn_watchman_source(
+        store.clone(),
+        handles_a.input_tx.clone(),
+        scanner.clone(),
+        watch_root.clone(),
+        resolve_database_url_for_listener(),
+    )?;
 
-    // Bootstrap reconciliation scan: enumerate every eligible file under the
-    // watch root at boot and feed pipeline A with BACKPRESSURE (REQ-AXO-901891).
-    // Re-runs on every restart; IndexedFile UPSERT + dedup-cache idempotence
-    // make this safe and cheap (unchanged files skip the A2 parse).
-    //
-    // The pre-fix "try_send + drop, rely on a 60s reconciliation sweep +
-    // demand_pull re-claim" design (REQ-AXO-901649) was the bricolage that
-    // stranded files: the session-51 "deadlock" it cited was A NOT DRAINING
-    // (a separate stall), not send().await itself — with A1/A2/A3 healthy,
-    // send().await simply paces the walk to A's throughput and never drops.
-    if !use_watchman {
-    let input_tx_bootstrap = handles_a.input_tx.clone();
-    let scanner_bootstrap = scanner.clone();
-    let watch_root_bootstrap = watch_root.clone();
-    tokio::spawn(async move {
-        let files = scanner_bootstrap.enumerate_files();
-        let count = files.len();
-        info!(
-            "pipeline_v2 bootstrap: enumerated {} files under {}",
-            count, watch_root_bootstrap
-        );
-        // REQ-AXO-901891 — backpressure, NEVER drop. send().await paces the
-        // walk to A1's drain rate; a full channel parks THIS task (not the
-        // pipeline — A1/A2/A3 keep draining to PG on their own workers), so
-        // the walk resumes the instant a slot frees. The dedup cache skips
-        // the expensive A2 parse on unchanged content_hash, so re-feeding the
-        // whole tree each boot is cheap and the indexer ALWAYS converges. This
-        // replaces the try_send-drop + 5×100ms-retry dance whose dropped paths
-        // relied on a 60s reconciliation sweep + demand_pull re-claim — the
-        // very machinery that stranded ~18k files at runtime_idle.
-        let mut handed = 0usize;
-        for path in files {
-            if input_tx_bootstrap.send(path).await.is_err() {
-                warn!("pipeline_v2 bootstrap: A1 input channel closed; aborting walk after {handed} handed");
-                return;
-            }
-            handed += 1;
-        }
-        info!(
-            "pipeline_v2 bootstrap: walk complete (total={}, handed={})",
-            count, handed
-        );
-    });
-    } // end if !use_watchman (bootstrap scan)
-
-    // REQ-AXO-901891 — demand_pull A (DEC-AXO-901620) is REMOVED. The NOTIFY-
-    // woken, retry_count-claiming feeder was a safety net for try_send-dropped
-    // paths; with the backpressure bootstrap + drain it has no job, and its
-    // claim/retry_count machinery was the source of poison-pill stranding
-    // (REQ-AXO-901820 rehab, the balanced_drain idle-with-stock stall). The
-    // bootstrap walk + the inotify-fed drain are now the sole, reliable feeds.
-
-    // Steady-state drain loop: pull file events from the shared
-    // ingress_buffer (watcher pushes here on FS notifications) and
-    // forward into pipeline A. Subtree hints are completed silently
-    // — full subtree re-scans happen via separate scanner sweeps.
-    //
-    // 1. Complete subtree hints BEFORE the file send loop so a slow /
-    //    saturated A1 can never starve hint clearing.
-    // 2. REQ-AXO-901891 — forward with input_tx.send().await (BACKPRESSURE,
-    //    never drop). A full A1 channel parks this drain task until A frees a
-    //    slot; the in-memory ingress_buffer absorbs new watcher events. The
-    //    pre-fix try_send-drop (REQ-AXO-901649) relied on a 60s reconciliation
-    //    sweep + demand_pull re-claim to recover dropped paths — the bricolage
-    //    that left files stranded at runtime_idle.
-    // 3. Periodic heartbeat at INFO every 25 ticks (~5 s) so any future stall
-    //    is visible without re-instrumenting.
-    if !use_watchman {
-    let input_tx_drain = handles_a.input_tx;
-    let ingress_for_drain = ingress_buffer.clone();
-    let drain_batch_cap = caps.ingress_drain_batch;
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(INGRESS_DRAIN_POLL_MS));
-        let mut tick_counter: u64 = 0;
-        let mut dropped_since_log: u64 = 0;
-        loop {
-            tick.tick().await;
-            tick_counter = tick_counter.wrapping_add(1);
-            let batch = {
-                let mut guard = ingress_for_drain
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                guard.drain_batch(drain_batch_cap)
-            };
-            // Clear subtree hints FIRST so even a full A1 channel
-            // cannot starve them (defense-in-depth ; the try_send
-            // change below already removes the blocking path).
-            for hint in &batch.subtree_hints {
-                let mut guard = ingress_for_drain
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                guard.complete_subtree_hint(&hint.path);
-            }
-            // REQ-AXO-344 — trace drain throughput so we can correlate
-            // Scanner walks (`Nexus Scan Complete: N`) with A1 ingress.
-            let batch_file_count = batch.files.len();
-            if batch_file_count > 0 {
-                let sample_path = batch
-                    .files
-                    .first()
-                    .map(|f| f.path.clone())
-                    .unwrap_or_default();
-                info!(
-                    target: "pipeline_v2::drain",
-                    "drain: forwarded {} paths to A1 (sample: {})",
-                    batch_file_count,
-                    sample_path
-                );
-            }
-            let mut sent = 0usize;
-            // REQ-AXO-901891 — backpressure, NEVER drop. A full A1 channel
-            // parks this drain task until A frees a slot; the in-memory
-            // ingress_buffer absorbs new watcher events meanwhile. Replaces the
-            // try_send-drop + "reconciliation re-submits it" dance.
-            for file_event in batch.files {
-                let path = PathBuf::from(file_event.path);
-                if input_tx_drain.send(path).await.is_err() {
-                    warn!("pipeline_v2 drain: A1 input channel closed; drain task exiting");
-                    return;
-                }
-                sent += 1;
-            }
-            let dropped = 0usize; // backpressure ⇒ structurally zero drops
-            dropped_since_log = dropped_since_log.saturating_add(dropped as u64);
-            // REQ-AXO-901678 — publish drain telemetry every tick so
-            // `axon_embedding_status` + `axon_diagnose_indexing` can
-            // surface saturation without parsing logs.
-            record_drain_tick(drain_batch_cap, sent as u64, dropped as u64, tick_counter);
-            // Heartbeat every ~5 s (25 ticks * 200 ms) so a future
-            // stall is observable in `journalctl -f` without external
-            // instrumentation. Logs even when buffer is empty so the
-            // absence of the line proves the task died.
-            if tick_counter.is_multiple_of(25) {
-                let snapshot = {
-                    let guard = ingress_for_drain
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    guard.metrics_snapshot()
-                };
-                info!(
-                    target: "pipeline_v2::drain",
-                    "drain heartbeat: tick={} buffered={} hot={} scan={} subtree_in_flight={} last_batch_files={} last_batch_sent={} last_batch_dropped_full={} cumulative_dropped_full={}",
-                    tick_counter,
-                    snapshot.buffered_entries,
-                    snapshot.hot_entries,
-                    snapshot.scan_entries,
-                    snapshot.subtree_hint_in_flight,
-                    batch_file_count,
-                    sent,
-                    dropped,
-                    dropped_since_log,
-                );
-                dropped_since_log = 0;
-            }
-        }
-    });
-    } // end if !use_watchman (ingress drain loop)
-
-    // REQ-AXO-901677 — periodic_sweep_worker. Inotify drop reconciliation
-    // safety net. Only spawned in ingestion-enabled modes (IndexerGraph,
-    // IndexerFull — IndexerVector consumes Chunk rows produced by
-    // pipeline A but does not own scanning) AND only when the operator
-    // hasn't disabled it via `AXON_PERIODIC_SWEEP_HOURS=0`. The handle
-    // is intentionally dropped : the task runs for the lifetime of the
-    // process, exits only on tokio runtime shutdown.
-    if runtime_mode.ingestion_enabled() && !use_watchman {
-        let sweep_cfg = PeriodicSweepConfig::from_env();
-        if sweep_cfg.is_enabled() {
-            let _handle = spawn_periodic_sweep_worker(
-                ingress_buffer.clone(),
-                watch_root.clone(),
-                store.clone(),
-                sweep_cfg,
-            );
-        } else {
-            info!(
-                "periodic_sweep_worker: disabled (AXON_PERIODIC_SWEEP_HOURS=0) — \
-                 inotify drops will not be reconciled in the background"
-            );
-        }
-    }
+    // REQ-AXO-901897 (DBQ slice 1) — pipeline A claim feeder, unconditionally
+    // (canonical, symmetric to demand_pull_b which has no flag). LISTENs
+    // `file_discovered` (+ a periodic reaper tick for stale leases) and
+    // atomically claims 'discovered' / stale-lease 'parsing' rows from
+    // ist.IndexedFile (FOR UPDATE SKIP LOCKED + lease), feeding their paths into
+    // the SAME input_tx Watchman uses. Runs ALONGSIDE the Watchman feed (hybrid:
+    // Watchman = fast-path for new changes, claim = backlog/recovery drainer
+    // that makes any stranded 'discovered' files drain BY CONSTRUCTION).
+    let claim_batch = crate::pipeline_v2::demand_pull::dbq_a_claim_batch();
+    info!(
+        "pipeline_v2: pipeline A DB work-queue claim feeder active \
+         (claim_batch={claim_batch}) alongside the Watchman file source"
+    );
+    let metrics_a = crate::pipeline_v2::demand_pull::spawn_pipeline_a_claim_feeder(
+        resolve_database_url_for_listener(),
+        handles_a.input_tx.clone(),
+        claim_batch,
+    );
+    DEMAND_PULL_METRICS_A.store(
+        Arc::into_raw(metrics_a) as *mut _,
+        std::sync::atomic::Ordering::Release,
+    );
 
     Ok(())
-}
-
-/// REQ-AXO-901677 — periodic_sweep_worker configuration parsed from env.
-///
-/// `hours` = 0 disables the worker entirely (operator opt-out).
-/// `cpu_threshold_pct` = soft skip gate ; when host CPU is above this
-/// percentage at tick time, skip the sweep and try again next interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeriodicSweepConfig {
-    pub hours: u64,
-    pub cpu_threshold_pct: u8,
-}
-
-impl PeriodicSweepConfig {
-    pub fn from_env() -> Self {
-        let hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(PERIODIC_SWEEP_HOURS_DEFAULT);
-        let cpu_threshold_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u8>().ok())
-            .map(|v| v.min(100))
-            .unwrap_or(PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
-        Self {
-            hours,
-            cpu_threshold_pct,
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.hours > 0
-    }
-
-    pub fn interval(&self) -> Duration {
-        // Saturating multiply : `u64::MAX / 3600` is comfortably above
-        // any sane operator setting (a sweep every 5 million years), so
-        // saturation is purely defensive against pathological env input.
-        Duration::from_secs(self.hours.saturating_mul(3600))
-    }
-}
-
-/// REQ-AXO-901677 — outcome of one periodic sweep tick. Exposed pub
-/// to support `periodic_sweep_tick_for_tests`.
-#[derive(Debug, Clone)]
-pub enum PeriodicSweepTickOutcome {
-    /// Sweep ran end-to-end.
-    Ran {
-        files_compared: u64,
-        deltas_found: u64,
-        duration_ms: u64,
-    },
-    /// CPU above threshold ; skipped to honor host pressure budget.
-    SkippedHighCpu,
-}
-
-/// REQ-AXO-901677 — long-running tokio task that re-walks `watch_root`
-/// every `cfg.interval()` and enqueues hash-mismatch / missing-from-
-/// IndexedFile paths as subtree hints. Returns the JoinHandle so the
-/// caller may keep it alive (or drop it to let the task run for the
-/// lifetime of the process — the common case).
-pub fn spawn_periodic_sweep_worker(
-    ingress_buffer: SharedIngressBuffer,
-    watch_root: String,
-    store: Arc<GraphStore>,
-    cfg: PeriodicSweepConfig,
-) -> JoinHandle<()> {
-    info!(
-        watch_root = %watch_root,
-        hours = cfg.hours,
-        cpu_threshold_pct = cfg.cpu_threshold_pct,
-        "periodic_sweep_worker: spawning (REQ-AXO-901677)"
-    );
-    tokio::spawn(async move {
-        let interval = cfg.interval();
-        let mut tick = tokio::time::interval(interval);
-        // Skip the immediate first tick : the bootstrap scan that fires
-        // at spawn already covers the same work ; running a duplicate
-        // walk right away would double-load A1 on cold boot.
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            // Refresh the IndexedFile snapshot from PG on every tick so
-            // hash mutations that landed since the last sweep are taken
-            // into account (no stale closure capture).
-            let known = match load_indexed_file_paths(&store) {
-                Ok(set) => set,
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "periodic_sweep_worker: failed to load IndexedFile snapshot — skipping tick"
-                    );
-                    continue;
-                }
-            };
-            let outcome = periodic_sweep_tick(
-                &ingress_buffer,
-                &watch_root,
-                &cfg,
-                known,
-                /* cpu_override = */ None,
-            );
-            match outcome {
-                PeriodicSweepTickOutcome::Ran {
-                    files_compared,
-                    deltas_found,
-                    duration_ms,
-                } => {
-                    info!(
-                        target: "pipeline_v2::periodic_sweep",
-                        "periodic_sweep tick: files_compared={} deltas_found={} duration_ms={}",
-                        files_compared, deltas_found, duration_ms,
-                    );
-                }
-                PeriodicSweepTickOutcome::SkippedHighCpu => {
-                    info!(
-                        target: "pipeline_v2::periodic_sweep",
-                        "periodic_sweep tick: skipped (host CPU above {}% threshold)",
-                        cfg.cpu_threshold_pct,
-                    );
-                }
-            }
-        }
-    })
-}
-
-/// REQ-AXO-901677 — one-shot version of the worker body. Used by both
-/// the long-running task and by `periodic_sweep_tick_for_tests`. Keeps
-/// the orchestration deterministic.
-fn periodic_sweep_tick(
-    ingress_buffer: &SharedIngressBuffer,
-    watch_root: &str,
-    cfg: &PeriodicSweepConfig,
-    known: HashSet<String>,
-    cpu_override: Option<bool>,
-) -> PeriodicSweepTickOutcome {
-    // REQ-AXO-901877 — `cpu_override` makes the CPU gate deterministically
-    // testable in both directions: Some(true) forces "below threshold"
-    // (proceed), Some(false) forces "above threshold" (skip), None samples the
-    // real host CPU — the production path. The previous `force_cpu_ok: bool`
-    // could only force "proceed", leaving the skip branch testable only when
-    // the real CPU happened to be high (machine-dependent flake).
-    let cpu_below = cpu_override.unwrap_or_else(|| cpu_below_threshold(cfg.cpu_threshold_pct));
-    if !cpu_below {
-        record_periodic_sweep_skipped_high_cpu();
-        return PeriodicSweepTickOutcome::SkippedHighCpu;
-    }
-
-    let started = std::time::Instant::now();
-    // Empty project_code : Scanner defers per-file project resolution
-    // (only the enumerate path is used here, which doesn't need it).
-    let scanner = Scanner::new(watch_root, "");
-    let files = scanner.enumerate_files();
-    let files_compared = files.len() as u64;
-
-    let mut deltas: Vec<String> = Vec::new();
-    for path in &files {
-        let path_str = path.to_string_lossy().to_string();
-        if !known.contains(&path_str) {
-            deltas.push(path_str);
-        }
-        // NOTE : hash-mismatch detection happens implicitly via A3's
-        // existing UPSERT path. We could compute file hashes here to
-        // short-circuit obviously-unchanged paths, but on a 4 h cadence
-        // that would re-read every file on disk every 4 hours — the
-        // exact thing we want to avoid. Sending only the missing-row
-        // set preserves the cheap reconciliation contract.
-    }
-    let deltas_found = deltas.len() as u64;
-
-    if !deltas.is_empty() {
-        let mut guard = ingress_buffer
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        for path in deltas {
-            guard.record_subtree_hint(
-                path,
-                PERIODIC_SWEEP_HINT_PRIORITY,
-                IngressSource::Scan,
-            );
-        }
-    }
-
-    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
-    record_periodic_sweep_tick(now_ms, duration_ms, files_compared, deltas_found);
-
-    PeriodicSweepTickOutcome::Ran {
-        files_compared,
-        deltas_found,
-        duration_ms,
-    }
-}
-
-/// REQ-AXO-901677 — test-only shim exposing one sweep tick to the
-/// integration test suite. Behaves like the production tick but lets
-/// the test inject a `known` set + force the CPU check past so tests
-/// run deterministically regardless of host load.
-pub fn periodic_sweep_tick_for_tests(
-    ingress_buffer: &SharedIngressBuffer,
-    watch_root: &str,
-    cfg: &PeriodicSweepConfig,
-    known: HashSet<String>,
-    cpu_override: Option<bool>,
-) -> PeriodicSweepTickOutcome {
-    periodic_sweep_tick(ingress_buffer, watch_root, cfg, known, cpu_override)
-}
-
-/// REQ-AXO-901677 — pull a `HashSet<path>` of every row currently in
-/// `ist.IndexedFile`. Used by the worker on each tick so changes
-/// since the last sweep are accounted for (no stale closure capture).
-///
-/// Returns an empty set on a fresh DB ; propagates SQL gateway errors
-/// so the caller can log + skip the tick rather than silently treat
-/// every file on disk as a delta (which would re-enqueue the entire
-/// workspace into A1).
-fn load_indexed_file_paths(store: &GraphStore) -> Result<HashSet<String>> {
-    let raw = store
-        .execute_raw_sql_gateway("SELECT path FROM ist.IndexedFile")
-        .map_err(|e| anyhow!("load IndexedFile snapshot: {e}"))?;
-    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-    let mut out = HashSet::with_capacity(rows.len());
-    for row in rows {
-        if let Some(path) = row.into_iter().next().and_then(|v| v.as_str().map(String::from)) {
-            out.insert(path);
-        }
-    }
-    Ok(out)
-}
-
-/// REQ-AXO-901677 — coarse CPU-load gate. Reads /proc/stat (same
-/// approach as `optimizer::read_cpu_and_io_usage_ratios`) but with a
-/// brief inline sample so we don't depend on the optimizer's stateful
-/// global sampler (which is only touched when the optimizer module
-/// is otherwise active).
-///
-/// Returns `true` iff host CPU usage is BELOW `threshold_pct`. On
-/// non-Linux hosts or `/proc/stat` read failure, returns `true` (fail-
-/// open) so the sweep still runs ; the reconciliation safety net
-/// failing closed would silently let inotify drops accumulate.
-fn cpu_below_threshold(threshold_pct: u8) -> bool {
-    let Some(first) = read_proc_stat_busy_total() else {
-        return true;
-    };
-    std::thread::sleep(Duration::from_millis(100));
-    let Some(second) = read_proc_stat_busy_total() else {
-        return true;
-    };
-    let total_delta = second.0.saturating_sub(first.0);
-    if total_delta == 0 {
-        return true;
-    }
-    let idle_delta = second.1.saturating_sub(first.1);
-    let busy_delta = total_delta.saturating_sub(idle_delta);
-    let usage_ratio = (busy_delta as f64) / (total_delta as f64);
-    let threshold_ratio = (threshold_pct as f64) / 100.0;
-    usage_ratio < threshold_ratio
-}
-
-/// REQ-AXO-901677 — minimal /proc/stat reader. Returns `(total, idle)`
-/// jiffies for the aggregate `cpu ` line. Returns `None` on any parse
-/// failure or non-Linux hosts.
-fn read_proc_stat_busy_total() -> Option<(u64, u64)> {
-    let content = std::fs::read_to_string("/proc/stat").ok()?;
-    let line = content.lines().find(|l| l.starts_with("cpu "))?;
-    let mut values = line.split_whitespace().skip(1);
-    let user = values.next()?.parse::<u64>().ok()?;
-    let nice = values.next()?.parse::<u64>().ok()?;
-    let system = values.next()?.parse::<u64>().ok()?;
-    let idle = values.next()?.parse::<u64>().ok()?;
-    let iowait = values.next()?.parse::<u64>().ok()?;
-    let irq = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let softirq = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let steal = values.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    Some((
-        user + nice + system + idle + iowait + irq + softirq + steal,
-        idle,
-    ))
 }
 
 /// REQ-AXO-901630 — returns true iff the operator has explicitly

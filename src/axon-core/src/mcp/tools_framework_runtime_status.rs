@@ -1,5 +1,4 @@
 use crate::embedder::current_embedding_provider_diagnostics;
-use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer;
 use crate::runtime_command_proxy::RuntimeCommandProxy;
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
@@ -117,7 +116,6 @@ impl McpServer {
         let (db_graph_queue_queued, db_graph_queue_inflight): (usize, usize) = (0, 0);
         let graph_queue_depth =
             debug_graph_queue_depth.max(db_graph_queue_queued + db_graph_queue_inflight);
-        let ingress = ingress_metrics_snapshot();
         let persisted_file_pending_depth = if runtime_mode.ingestion_enabled() {
             self.graph_store.count_persisted_file_pending().unwrap_or(0)
         } else {
@@ -225,13 +223,11 @@ impl McpServer {
         let canonical_ingestion_stage_model = self.canonical_ingestion_stage_model_snapshot();
         let admission_controller = Self::admission_controller_snapshot(
             runtime_mode.as_str(),
-            ingress,
             persisted_file_pending_depth,
             graph_wip_depth,
         );
         let canonical_edges = Self::canonical_edge_control_snapshot(
             runtime_mode.as_str(),
-            ingress,
             persisted_file_pending_depth,
             graph_wip_depth,
             graph_ready_depth,
@@ -252,7 +248,7 @@ impl McpServer {
         let priority_contract = Self::priority_contract_snapshot(
             runtime_mode.as_str(),
             semantic_backlog_responsible,
-            ingress.buffered_entries,
+            0,
             structural_graph_backlog_depth,
             graph_queue_depth,
             queued_files as usize + inflight_files as usize,
@@ -616,46 +612,30 @@ impl McpServer {
         } else {
             "status_json"
         };
-        let ingress_buffered_entries = if use_peer_runtime {
-            peer_telemetry
-                .get("ingress_buffered_entries")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize
-        } else {
-            ingress.buffered_entries
-        };
-        let scan_buffered_entries = if use_peer_runtime {
-            peer_telemetry
-                .get("ingress_scan_entries")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize
-        } else {
-            ingress.scan_entries
-        };
-        let watcher_buffered_entries = if use_peer_runtime {
-            peer_telemetry
-                .get("ingress_hot_entries")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize
-        } else {
-            ingress.hot_entries
-        };
-        let subtree_hints = if use_peer_runtime {
-            peer_telemetry
-                .get("ingress_subtree_hints")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize
-        } else {
-            ingress.subtree_hints
-        };
-        let subtree_hint_in_flight = if use_peer_runtime {
-            peer_telemetry
-                .get("ingress_subtree_hint_in_flight")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize
-        } else {
-            ingress.subtree_hint_in_flight
-        };
+        // REQ-AXO-901893 (LEGACY FEED PURGE) — the local ingress_buffer was
+        // ripped, so the non-peer path has nothing to meter (Watchman feeds
+        // pipeline A directly). The peer path still tolerates an older indexer
+        // that emits these fields, defaulting to 0 when absent.
+        let ingress_buffered_entries = peer_telemetry
+            .get("ingress_buffered_entries")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let scan_buffered_entries = peer_telemetry
+            .get("ingress_scan_entries")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let watcher_buffered_entries = peer_telemetry
+            .get("ingress_hot_entries")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let subtree_hints = peer_telemetry
+            .get("ingress_subtree_hints")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let subtree_hint_in_flight = peer_telemetry
+            .get("ingress_subtree_hint_in_flight")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
         let graph_queue_machine = if use_peer_runtime {
             json!({
                 "queued": peer_telemetry.pointer("/graph_projection_queue/queued").and_then(|value| value.as_u64()).unwrap_or(0),
@@ -1020,16 +1000,17 @@ impl McpServer {
                 "vector_ready": vector_ready_depth,
                 "skipped": canonical_ingestion_stage_model.pointer("/explicitly_excluded_from_vectorization/current_count").and_then(|value| value.as_u64()).unwrap_or(0)
             },
+            // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress_buffer was ripped.
+            // These counters are 0 for a current-process indexer (Watchman feeds
+            // pipeline A directly); a peer indexer on an older build may still
+            // populate buffered_entries via its telemetry JSON.
             "ingress": {
                 "buffered_entries": ingress_buffered_entries,
                 "scan_buffered_entries": scan_buffered_entries,
                 "watcher_buffered_entries": watcher_buffered_entries,
                 "subtree_hints": subtree_hints,
                 "subtree_hint_in_flight": subtree_hint_in_flight,
-                "flush_count": admission_controller.get("admission_flush_count").and_then(|value| value.as_u64()).unwrap_or(0),
-                "last_promoted_count": admission_controller.get("admission_last_promoted_count").and_then(|value| value.as_u64()).unwrap_or(0),
-                "last_durably_persisted_count": admission_controller.get("admission_last_durably_persisted_count").and_then(|value| value.as_u64()).unwrap_or(0),
-                "last_excluded_from_pending_count": admission_controller.get("admission_last_excluded_from_pending_count").and_then(|value| value.as_u64()).unwrap_or(0)
+                "notes": "ingress_buffer RIPPED (REQ-AXO-901893); file source = Watchman + DBQ-A"
             },
             "queues": {
                 "graph_projection": graph_queue_machine,

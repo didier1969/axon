@@ -11,8 +11,6 @@ pub mod embedder;
 pub mod embedding_contract;
 pub mod embedding_profile;
 pub mod env_alias;
-pub mod file_ingress_guard;
-pub mod fs_watcher;
 pub mod graph;
 pub mod graph_analytics;
 pub mod graph_bootstrap;
@@ -22,7 +20,6 @@ pub mod graph_query;
 // flush path ; pipeline_v2 owns chunk-state directly).
 pub mod indexer_health_http;
 pub mod indexing_policy;
-pub mod ingress_buffer;
 pub mod ist_snapshot;
 mod main_background;
 mod main_services;
@@ -37,7 +34,6 @@ pub mod pipeline_v2_runtime;
 pub mod postgres;
 pub mod project_meta;
 pub mod queue;
-pub mod registry_notify_listener;
 pub mod runtime_boot;
 pub mod runtime_command_proxy;
 pub mod runtime_config;
@@ -57,9 +53,11 @@ pub mod scanner;
 pub mod service_guard;
 pub mod soll_snapshot;
 pub mod vector_control;
-pub mod watcher_probe;
-// REQ-AXO-901893 — Watchman-backed file source (clock/cursor reconciliation),
-// replacing the notify/inotify + ingress_buffer + sweeps stack.
+// REQ-AXO-901893 — Watchman-backed file source (clock/cursor reconciliation).
+// The legacy notify/inotify watcher + ingress_buffer FIFO + reconciliation/
+// periodic sweeps it replaced were RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893
+// deferred RIP): fs_watcher, ingress_buffer, file_ingress_guard, watcher_probe,
+// registry_notify_listener are gone. Watchman + the DBQ-A claim feeder are the feed.
 pub mod watchman_source;
 // REQ-AXO-901653 slice-5c — legacy `pub mod worker;` removed (v1 WorkerPool +
 // writer-actor + DbWriteTask retired). Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054)

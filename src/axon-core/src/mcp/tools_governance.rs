@@ -217,50 +217,10 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // REQ-AXO-901678 — drain saturation block. Sourced from the
-        // global ingress metrics ; populated by the pipeline_v2 runtime
-        // drain loop. Surfaces A1 back-pressure (`last_batch_dropped_full`
-        // > 0) so the operator can correlate with the cold-start poll
-        // catch-up and tune `AXON_INGRESS_DRAIN_BATCH`. The default cap
-        // shown is the `PipelineChannelCaps` default (512).
-        let drain = crate::ingress_buffer::ingress_metrics_snapshot();
-        let configured_batch_cap = std::env::var("AXON_INGRESS_DRAIN_BATCH")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT);
-        let drain_status = if drain.drain_heartbeat_tick == 0 {
-            "drain loop not running (pipeline_v2 runtime not spawned in this process)"
-        } else if drain.drain_dropped_full_total > 0 || drain.drain_last_batch_dropped_full > 0 {
-            "drops observed — A1 input channel saturated ; raise AXON_INGRESS_DRAIN_BATCH or AXON_PIPELINE_A3_TO_B1_BUFFER_CAP"
-        } else {
-            "no drops — drain healthy"
-        };
-
-        // REQ-AXO-901677 — periodic_sweep block. Inotify-drop
-        // reconciliation safety net. Surfaces the configured cadence +
-        // CPU gate alongside the live tick counters so the operator can
-        // detect (a) worker disabled (`hours=0`), (b) chronic CPU skip,
-        // or (c) stale last-run timestamp (worker died / never ran).
-        let sweep = crate::ingress_buffer::periodic_sweep_metrics_snapshot();
-        let sweep_hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_HOURS_DEFAULT);
-        let sweep_cpu_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
-            .ok()
-            .and_then(|v| v.trim().parse::<u8>().ok())
-            .map(|v| v.min(100))
-            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
-        let sweep_status = if sweep_hours == 0 {
-            "disabled (AXON_PERIODIC_SWEEP_HOURS=0) — inotify drops not reconciled"
-        } else if sweep.last_run_at_ms == 0 && sweep.runs_total == 0 {
-            "configured but not yet observed in this process (first tick pending)"
-        } else if sweep.skipped_high_cpu_total > 0 && sweep.runs_total == 0 {
-            "every tick so far skipped under CPU pressure — raise AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT or schedule work to a quieter window"
-        } else {
-            "running — see counters for last tick outcome"
-        };
-
+        // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress drain + periodic
+        // sweep diagnosis blocks were ripped with the ingress_buffer. Watchman
+        // feeds pipeline A directly; DBQ-A drains the backlog. Use
+        // `pipeline_status` / `stock_a` (discovered backlog) for feed health.
         format!(
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
@@ -274,31 +234,15 @@ impl McpServer {
              **Likely root causes**\n{}\n\n\
              **Top status reasons**\n{}\n\n\
              **Top parser/runtime errors**\n{}\n\n\
-             ### Drain analysis (REQ-AXO-901678)\n\
-             * batch_size: {} (env AXON_INGRESS_DRAIN_BATCH ; configured cap = {})\n\
-             * heartbeat_tick: {}\n\
-             * last_batch_sent: {}\n\
-             * last_batch_dropped_full: {}\n\
-             * dropped_full_total: {}\n\
-             * status: {}\n\n\
-             ### Periodic sweep (REQ-AXO-901677)\n\
-             * cadence: every {} h (env AXON_PERIODIC_SWEEP_HOURS, 0=off)\n\
-             * cpu_skip_threshold_pct: {} (env AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT)\n\
-             * last_run_at_ms: {}\n\
-             * last_duration_ms: {}\n\
-             * last_files_compared: {}\n\
-             * last_deltas_found: {}\n\
-             * runs_total: {}\n\
-             * deltas_total: {}\n\
-             * skipped_high_cpu_total: {}\n\
-             * status: {}\n\n\
+             ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
+             * Watchman clock/cursor deltas feed pipeline A directly (legacy ingress drain + periodic sweep RIPPED)\n\
+             * DBQ-A claim feeder drains the 'discovered' backlog by construction\n\n\
              **Remediation hints**\n\
              * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
-             * if `dropped_full_total` keeps rising, raise `AXON_INGRESS_DRAIN_BATCH` (default 512) or widen `AXON_PIPELINE_A3_TO_B1_BUFFER_CAP` (default 10 000)\n\
-             * if `skipped_high_cpu_total` keeps rising while `runs_total` stays low, raise `AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT` or schedule the work to a quieter window",
+             * if the 'discovered' backlog (stock_a in `pipeline_status`) stays high, check the indexer is running and the Watchman daemon is reachable",
             project,
             known,
             completed,
@@ -310,23 +254,6 @@ impl McpServer {
             cause_lines,
             reason_lines,
             error_lines,
-            drain.drain_batch_size,
-            configured_batch_cap,
-            drain.drain_heartbeat_tick,
-            drain.drain_last_batch_sent,
-            drain.drain_last_batch_dropped_full,
-            drain.drain_dropped_full_total,
-            drain_status,
-            sweep_hours,
-            sweep_cpu_pct,
-            sweep.last_run_at_ms,
-            sweep.last_duration_ms,
-            sweep.last_files_compared,
-            sweep.last_deltas_found,
-            sweep.runs_total,
-            sweep.deltas_total,
-            sweep.skipped_high_cpu_total,
-            sweep_status,
         )
     }
 

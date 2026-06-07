@@ -10,7 +10,6 @@ use crate::graph::GraphStore;
 
 
 pub mod rows;
-mod file_ingress;
 mod sql_helpers;
 mod types;
 mod vector_runtime;
@@ -724,15 +723,20 @@ impl GraphStore {
     ) -> Result<()> {
         let safe_path = Self::escape_sql(path);
         let safe_hash = Self::escape_sql(content_hash);
+        // REQ-AXO-901897 (DBQ slice 1) — A3 stamps 'parsed' (A-graph done), not
+        // the legacy 'indexed'. 'parsed' is an A-DONE state → load_all_indexed_files
+        // hydrates the dedup cache from it, and the claimable index/feeder no
+        // longer see this row. lease_until_ms is cleared (claim released).
         self.execute(&format!(
-            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, retry_count, last_attempt_ms) \
-             VALUES ('{path}', '{hash}', {ts}, 'indexed', 0, NULL) \
+            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, retry_count, last_attempt_ms, lease_until_ms) \
+             VALUES ('{path}', '{hash}', {ts}, 'parsed', 0, NULL, 0) \
              ON CONFLICT (path) DO UPDATE SET \
                  content_hash    = EXCLUDED.content_hash, \
                  last_seen_ms    = EXCLUDED.last_seen_ms, \
-                 status          = 'indexed', \
+                 status          = 'parsed', \
                  retry_count     = 0, \
-                 last_attempt_ms = NULL;",
+                 last_attempt_ms = NULL, \
+                 lease_until_ms  = 0;",
             path = safe_path,
             hash = safe_hash,
             ts = last_seen_ms,
@@ -764,8 +768,17 @@ impl GraphStore {
     /// Load all `(path, content_hash, last_seen_ms)` from `IndexedFile`
     /// for hydrating the dedup cache at boot.
     pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64)>> {
+        // REQ-AXO-901897 (DBQ slice 1) — the dedup cache must hydrate ONLY from
+        // A-DONE rows. should_index is status-BLIND (it only compares hashes),
+        // so a 'discovered'/'parsing' row in the cache would make should_index
+        // return false and the file would be skipped forever — THE bug that
+        // stranded ~25k 'discovered' files. By excluding the not-yet-parsed
+        // states here, a 'discovered'/'parsing' file is absent from the cache →
+        // should_index returns true → it gets parsed. Independent of the DBQ
+        // gate: this correctness fix applies whether or not the claim feeder runs.
         let raw = self.query_json_writer(
-            "SELECT path, content_hash, last_seen_ms FROM IndexedFile"
+            "SELECT path, content_hash, last_seen_ms FROM IndexedFile \
+             WHERE status IN ('parsed', 'ready', 'indexed')"
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
             .unwrap_or_default();

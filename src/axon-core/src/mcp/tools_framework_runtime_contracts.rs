@@ -1,7 +1,6 @@
 use crate::embedder::{
     bootstrap_runtime_tuning_state, current_runtime_tuning_state, embedding_lane_config_from_env,
 };
-use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
 use crate::runtime_profile::{
     canonical_watcher_first_priority_lanes, current_admission_controller_state,
@@ -121,7 +120,6 @@ impl McpServer {
 
     pub(super) fn admission_controller_snapshot(
         runtime_mode: &str,
-        ingress: crate::ingress_buffer::IngressMetricsSnapshot,
         persisted_file_pending_current: usize,
         graph_wip_current: usize,
     ) -> Value {
@@ -129,11 +127,14 @@ impl McpServer {
         let profile = RuntimeProfile::detect();
         let controller_profile = recommend_admission_controller_profile(&profile);
         let pressure = service_guard::current_pressure();
+        // REQ-AXO-901893 (LEGACY FEED PURGE) — buffered/hot/scan ingress counts
+        // are structurally 0 now (the ingress_buffer was ripped). Watchman feeds
+        // pipeline A directly; admission gates on persisted_file_pending + WIP.
         let controller_state = current_admission_controller_state(
             controller_profile,
-            ingress.buffered_entries,
-            ingress.hot_entries,
-            ingress.scan_entries,
+            0,
+            0,
+            0,
             persisted_file_pending_current,
             graph_wip_current,
             !runtime_mode.ingestion_enabled(),
@@ -143,18 +144,7 @@ impl McpServer {
         json!({
             "owner": "admission_controller",
             "control_model_state": "proposed",
-            "buffered_discovery_current": ingress.buffered_entries,
-            "watcher_buffered_current": ingress.hot_entries,
-            "scan_buffered_current": ingress.scan_entries,
             "persisted_file_pending_current": persisted_file_pending_current,
-            "admission_flush_count": ingress.flush_count,
-            "admission_last_flush_duration_ms": ingress.last_flush_duration_ms,
-            "admission_last_promoted_count": ingress.last_promoted_count,
-            "admission_promoted_total": ingress.promoted_total,
-            "admission_last_durably_persisted_count": ingress.last_durably_persisted_count,
-            "admission_durably_persisted_total": ingress.durably_persisted_total,
-            "admission_last_excluded_from_pending_count": ingress.last_excluded_from_pending_count,
-            "admission_excluded_from_pending_total": ingress.excluded_from_pending_total,
             "graph_wip_current": graph_wip_current,
             "admission_wip_current": graph_wip_current,
             "target_band": controller_state.profile.target_band,
@@ -162,27 +152,17 @@ impl McpServer {
             "max_wip": controller_state.profile.max_wip,
             "hold_window_ms": controller_state.profile.hold_window_ms,
             "forced_bulk_fill_threshold": controller_state.profile.forced_bulk_fill_threshold,
-            "admission_completion_surface": "File(status='pending', graph_ready=FALSE, eligible_for_graph=TRUE)",
-            "admission_completion_diagnostics": {
-                "flush_happened": ingress.flush_count > 0,
-                "durable_file_persistence_completed": ingress.last_durably_persisted_count > 0,
-                "persisted_but_excluded_from_pending": ingress.last_excluded_from_pending_count > 0,
-            },
-            "diagnostic_notes": {
-                "durably_persisted_count_semantics": "Counts promoted paths that are durably visible in File after the flush wave, not only newly inserted rows."
-            },
+            "admission_completion_surface": "ist.IndexedFile(status='discovered'/'parsing') drained by Watchman + DBQ-A",
             "blocking_authority": controller_state.blocking_authority,
             "allowed_by_contract": runtime_mode.ingestion_enabled(),
             "allowed_under_current_runtime": controller_state.admission_open,
             "bulk_fill_preferred": controller_state.bulk_fill_preferred,
-            "watcher_hot_priority": ingress.hot_entries > 0,
-            "notes": "Controls the canonical buffered_discovery -> persisted_file_pending handoff."
+            "notes": "Controls the canonical discovered -> graph_ready handoff (Watchman + DBQ-A feed, ingress_buffer RIPPED)."
         })
     }
 
     pub(super) fn canonical_edge_control_snapshot(
         runtime_mode: &str,
-        ingress: crate::ingress_buffer::IngressMetricsSnapshot,
         persisted_file_pending_current: usize,
         graph_wip_current: usize,
         graph_ready_current: usize,
@@ -203,9 +183,9 @@ impl McpServer {
 
         let admission = current_admission_controller_state(
             controller_profile,
-            ingress.buffered_entries,
-            ingress.hot_entries,
-            ingress.scan_entries,
+            0,
+            0,
+            0,
             persisted_file_pending_current,
             graph_wip_current,
             runtime_processing_disabled,
@@ -232,7 +212,7 @@ impl McpServer {
                 "blocking_authority": admission.blocking_authority,
                 "allowed_by_contract": !runtime_processing_disabled,
                 "allowed_under_current_runtime": admission.admission_open,
-                "source_stock_current": ingress.buffered_entries,
+                "source_stock_current": 0,
                 "target_stock_current": persisted_file_pending_current,
                 "wip_current": graph_wip_current,
             },
@@ -303,7 +283,6 @@ impl McpServer {
         let runtime_mode = AxonRuntimeMode::from_env();
         let graph_runtime_enabled = runtime_mode.ingestion_enabled();
         let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
-        let ingress = ingress_metrics_snapshot();
         // REQ-AXO-901653 slice-5c — public.File + FileVectorizationQueue
         // dropped. Pipeline_v2 canonical : IndexedFile = persisted, Chunk =
         // graph-ready, ChunkEmbedding present = vector-ready. Queue depths
@@ -351,38 +330,10 @@ impl McpServer {
                 "recommended_mode_for_current_counts": "full",
                 "notes": "Brief status is cached. Use status(mode=\"full\") when exact current counts matter."
             },
-            "ingress_buffered": {
+            "file_source": {
                 "status": "tracked",
-                "ownership_surface": "ingress_buffer",
-                "current_count": ingress.buffered_entries as u64,
-                "notes": "All buffered ingress entries before canonical File persistence."
-            },
-            "watcher_buffered": {
-                "status": "tracked",
-                "stage_labels": ["buffered", "staged"],
-                "ownership_surface": "ingress_buffer",
-                "current_count": ingress.hot_entries as u64,
-                "notes": "Watcher-originated ingress still buffered before canonical File persistence."
-            },
-            "scan_buffered": {
-                "status": "tracked",
-                "stage_labels": ["buffered", "staged"],
-                "ownership_surface": "ingress_buffer",
-                "current_count": ingress.scan_entries as u64,
-                "notes": "Scan-originated ingress still buffered before canonical File persistence."
-            },
-            "ingress_promotion": {
-                "status": "tracked",
-                "ownership_surface": "ingress_buffer",
-                "flush_count": ingress.flush_count,
-                "last_flush_duration_ms": ingress.last_flush_duration_ms,
-                "last_promoted_count": ingress.last_promoted_count,
-                "promoted_total": ingress.promoted_total,
-                "last_durably_persisted_count": ingress.last_durably_persisted_count,
-                "durably_persisted_total": ingress.durably_persisted_total,
-                "last_excluded_from_pending_count": ingress.last_excluded_from_pending_count,
-                "excluded_from_pending_total": ingress.excluded_from_pending_total,
-                "notes": "Ingress promoter activity over the current runtime lifetime. Durable persistence counts mean promoted paths are durably visible in File after a flush wave, not only newly inserted rows."
+                "ownership_surface": "watchman_source + dbq_a",
+                "notes": "REQ-AXO-901893 (LEGACY FEED PURGE): the ingress_buffer (buffered/watcher/scan/promotion stages) was ripped. Watchman clock/cursor deltas feed pipeline A directly; the DBQ-A claim feeder drains the ist.IndexedFile 'discovered' backlog by construction."
             },
             "persisted_file": {
                 "status": "tracked",

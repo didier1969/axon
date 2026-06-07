@@ -61,13 +61,76 @@ CREATE TABLE IF NOT EXISTS ist.IndexedFile (
     size_bytes      BIGINT NOT NULL DEFAULT 0,
     retry_count     INT    NOT NULL DEFAULT 0,
     last_attempt_ms BIGINT,
+    -- REQ-AXO-901897 (DBQ slice 1) — claim lease. The DB IS the durable A
+    -- work queue: pipeline A claims 'discovered' rows with FOR UPDATE SKIP
+    -- LOCKED + a lease (mirrors demand_pull_b for chunks). lease_until_ms is
+    -- the epoch-ms after which an in-flight 'parsing' claim is reclaimable
+    -- (worker crashed mid-parse). 0 = no active lease.
+    lease_until_ms  BIGINT NOT NULL DEFAULT 0,
     CONSTRAINT indexedfile_status_check
-        CHECK (status IN ('discovered', 'indexed', 'failed', 'skipped'))
+        CHECK (status IN (
+            'discovered', 'parsing', 'parsed', 'ready',
+            'parse_failed', 'skipped', 'deleted', 'indexed'
+        ))
 );
 
-CREATE INDEX IF NOT EXISTS idx_indexedfile_discovered
-    ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash)
-    WHERE status = 'discovered';
+-- REQ-AXO-901897 (DBQ slice 1) — idempotent ALTERs so an EXISTING live table
+-- (30k rows) is migrated forward at the next boot's `apply_canonical_ddl`
+-- (scripts/lib/ensure-runtime.sh runs every db/ddl/NN_*.sql with
+-- ON_ERROR_STOP=1, so each statement below MUST be safe to re-run).
+--
+-- 1. lease_until_ms column — ADD COLUMN IF NOT EXISTS is a PG-catalog-only
+--    metadata change in PG11+ when a non-volatile DEFAULT is given (no table
+--    rewrite, no row-by-row lock on the 30k rows): the default is folded into
+--    the catalog and materialised lazily on read. Non-blocking.
+ALTER TABLE ist.IndexedFile
+    ADD COLUMN IF NOT EXISTS lease_until_ms BIGINT NOT NULL DEFAULT 0;
+
+-- REQ-AXO-901897 hardening — bound the brief ACCESS EXCLUSIVE lock the CONSTRAINT
+-- DROP/ADD below takes, so a live boot's apply_canonical_ddl can't head-of-line
+-- block behind an open connection holding a lock on ist.indexedfile. Fail fast
+-- (3s) rather than stall the boot. Applies to the rest of this psql session.
+SET lock_timeout = '3s';
+
+-- 2. Widen the status CHECK to the full A-lifecycle vocabulary. DROP+ADD the
+--    NAMED constraint inside a DO block guarded on existence so re-running is
+--    a no-op. Adding a CHECK takes a brief ACCESS EXCLUSIVE lock to validate
+--    existing rows once; after step 3 below every legacy value already
+--    satisfies the new set, so validation passes. (On a busy table this is a
+--    short metadata lock, not a rewrite.)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'indexedfile_status_check'
+          AND conrelid = 'ist.indexedfile'::regclass
+    ) THEN
+        ALTER TABLE ist.IndexedFile DROP CONSTRAINT indexedfile_status_check;
+    END IF;
+END $$;
+
+-- 3. Migrate legacy status values to the new vocabulary BEFORE re-adding the
+--    CHECK (idempotent: the UPDATEs match nothing once already migrated).
+--    'indexed'→'ready' would be the eventual target, but 'indexed' is kept
+--    transitional in the CHECK set so a half-rolled-out binary that still
+--    writes 'indexed' does not violate the constraint. We only normalise the
+--    retired 'failed' value (not in the new core set except as legacy).
+UPDATE ist.IndexedFile SET status = 'parse_failed' WHERE status = 'failed';
+
+ALTER TABLE ist.IndexedFile
+    ADD CONSTRAINT indexedfile_status_check
+    CHECK (status IN (
+        'discovered', 'parsing', 'parsed', 'ready',
+        'parse_failed', 'skipped', 'deleted', 'indexed'
+    ));
+
+-- REQ-AXO-901897 — claimable partial index. Replaces the discovered-only
+-- index: the A claimer's hot predicate is `status IN ('discovered','parsing')`
+-- (a stale-lease 'parsing' row is reclaimable), ordered by discovered_ms.
+DROP INDEX IF EXISTS ist.idx_indexedfile_discovered;
+CREATE INDEX IF NOT EXISTS idx_indexedfile_claimable
+    ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash, retry_count, lease_until_ms)
+    WHERE status IN ('discovered', 'parsing');
 CREATE INDEX IF NOT EXISTS idx_indexedfile_project_status
     ON ist.IndexedFile (project_code, status);
 

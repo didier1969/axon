@@ -12,6 +12,7 @@
 //! W2: demand-pull checks channel capacity before pulling, preserving
 //! headroom for real-time watcher events.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -458,6 +459,346 @@ async fn pull_and_feed_b(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// REQ-AXO-901897 (DBQ slice 1) — pipeline A claim feeder (canonical, unconditional;
+// symmetric to demand_pull_b which has no flag — REQ-AXO-901893 legacy purge).
+//
+// The DB (ist.IndexedFile.status) is the durable A work queue. This feeder is
+// a near-exact clone of `spawn_pipeline_b_demand_pull`, swapping the chunk
+// SELECT for an atomic FOR UPDATE SKIP LOCKED claim of 'discovered' (and
+// stale-lease 'parsing') rows. It runs ALONGSIDE the Watchman fast-path feed:
+// Watchman handles live changes, the claim feeder drains the backlog/recovers
+// crashed claims BY CONSTRUCTION. Both feed the SAME pipeline-A input_tx
+// (Sender<PathBuf>) — the very sink Watchman uses.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Default claim lease (ms). A 'parsing' row whose `lease_until_ms` is older
+/// than now is considered abandoned (worker crashed mid-parse) and is
+/// re-claimable. Override via `AXON_DBQ_A_LEASE_MS`.
+pub const DBQ_A_LEASE_MS_DEFAULT: i64 = 60_000;
+/// Max claim attempts before a row is effectively dead-lettered: it stays
+/// 'parsing' with `retry_count >= MAX` and is excluded from the claim set
+/// (a 'parse_failed' sweep is slice 2). Override via `AXON_DBQ_A_MAX_ATTEMPTS`.
+pub const DBQ_A_MAX_ATTEMPTS_DEFAULT: i64 = 3;
+/// Rows claimed per UPDATE…RETURNING. Override via `AXON_DBQ_A_CLAIM_BATCH`.
+pub const DBQ_A_CLAIM_BATCH_DEFAULT: usize = 256;
+
+fn dbq_a_lease_ms() -> i64 {
+    std::env::var("AXON_DBQ_A_LEASE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DBQ_A_LEASE_MS_DEFAULT)
+}
+
+fn dbq_a_max_attempts() -> i64 {
+    std::env::var("AXON_DBQ_A_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DBQ_A_MAX_ATTEMPTS_DEFAULT)
+}
+
+pub fn dbq_a_claim_batch() -> usize {
+    std::env::var("AXON_DBQ_A_CLAIM_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DBQ_A_CLAIM_BATCH_DEFAULT)
+}
+
+/// The atomic claim. Promotes up to `limit` claimable rows to 'parsing' with a
+/// fresh lease, incrementing retry_count, and RETURNs their paths. The inner
+/// SELECT … FOR UPDATE SKIP LOCKED guarantees two concurrent claimers never
+/// take the same row (exactly the contention guard demand_pull_b relies on for
+/// chunks). Stale-lease 'parsing' rows (crashed mid-parse) are reclaimable;
+/// rows at `retry_count >= max_attempts` are excluded → dead-lettered.
+///
+/// Public for the SQL-shape unit test (the query string is the contract).
+pub fn build_claim_sql(now_ms: i64, lease_ms: i64, max_attempts: i64, limit: usize) -> String {
+    format!(
+        "UPDATE ist.IndexedFile \
+            SET status = 'parsing', \
+                lease_until_ms = {now} + {lease}, \
+                retry_count = retry_count + 1, \
+                last_attempt_ms = {now} \
+          WHERE path IN ( \
+              SELECT path FROM ist.IndexedFile \
+               WHERE (status = 'discovered' \
+                      OR (status = 'parsing' AND lease_until_ms < {now})) \
+                 AND retry_count < {max} \
+               ORDER BY discovered_ms \
+               FOR UPDATE SKIP LOCKED \
+               LIMIT {lim}) \
+          RETURNING path",
+        now = now_ms,
+        lease = lease_ms,
+        max = max_attempts,
+        lim = limit,
+    )
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Spawn the demand-pull claim feeder for pipeline A (gated, REQ-AXO-901897).
+///
+/// `input_tx` is pipeline A's sink — the SAME `Sender<PathBuf>` Watchman feeds.
+/// LISTEN `file_discovered` wakes the feeder on new enrolments; a periodic
+/// safety tick reclaims stale-lease 'parsing' rows even if the NOTIFY was lost.
+pub fn spawn_pipeline_a_claim_feeder(
+    database_url: String,
+    input_tx: Sender<PathBuf>,
+    batch_size: usize,
+) -> Arc<DemandPullMetrics> {
+    let metrics = DemandPullMetrics::new();
+    let metrics_clone = metrics.clone();
+    tokio::spawn(async move {
+        let mut backoff_ms = BACKOFF_INITIAL_MS;
+        loop {
+            match demand_pull_a_loop(&database_url, &input_tx, batch_size, &metrics_clone).await {
+                Ok(()) => {
+                    warn!("demand-pull A: LISTEN loop exited cleanly; reconnecting");
+                    backoff_ms = BACKOFF_INITIAL_MS;
+                }
+                Err(err) => {
+                    warn!(
+                        backoff_ms,
+                        error = %err,
+                        "demand-pull A: LISTEN errored; backing off"
+                    );
+                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        }
+    });
+    metrics
+}
+
+async fn demand_pull_a_loop(
+    database_url: &str,
+    input_tx: &Sender<PathBuf>,
+    batch_size: usize,
+    metrics: &Arc<DemandPullMetrics>,
+) -> Result<()> {
+    let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
+        .await
+        .context("demand-pull A: connect failed")?;
+
+    let (notify_tx, mut notify_rx) =
+        tokio::sync::mpsc::channel::<tokio_postgres::Notification>(512);
+
+    let driver = tokio::spawn(async move {
+        let stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+        tokio::pin!(stream);
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(AsyncMessage::Notification(n)) => {
+                    if notify_tx.send(n).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(error = %err, "demand-pull A: stream error");
+                    return;
+                }
+            }
+        }
+    });
+
+    client
+        .batch_execute("LISTEN file_discovered")
+        .await
+        .context("demand-pull A: LISTEN failed")?;
+
+    let lease_ms = dbq_a_lease_ms();
+    let max_attempts = dbq_a_max_attempts();
+    info!(
+        "demand-pull A: active (claim_batch={batch_size}, lease_ms={lease_ms}, \
+         max_attempts={max_attempts}) — DB work queue claimer (REQ-AXO-901897)"
+    );
+
+    let mut consecutive_empty = 0u32;
+    let safety_interval = Duration::from_secs(5);
+
+    // REQ-AXO-901810 G2 — single-shot guard so a NOTIFY burst + the periodic
+    // tick can't run two overlapping claim cycles on the same connection.
+    let in_progress = Arc::new(AtomicBool::new(false));
+
+    let seed = run_claim_cycle_a(
+        &client,
+        input_tx,
+        batch_size,
+        lease_ms,
+        max_attempts,
+        &mut consecutive_empty,
+        metrics,
+        &in_progress,
+    )
+    .await;
+
+    let mut last_had_work = seed.had_work;
+    loop {
+        // When work is flowing, poll briefly; when idle, fall back to the 5 s
+        // reaper cadence that reclaims stale-lease 'parsing' rows.
+        let wait_duration = if last_had_work {
+            Duration::from_millis(BACKOFF_INITIAL_MS)
+        } else {
+            safety_interval
+        };
+
+        let woke_by_notify = tokio::select! {
+            biased;
+            Some(_) = notify_rx.recv() => {
+                // REQ-AXO-901810 G7 — coalesce the inotify burst (git checkout,
+                // mass rename) into one claim cycle instead of N spin rounds.
+                let coalesce_deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(NOTIFY_COALESCE_MS);
+                while tokio::time::Instant::now() < coalesce_deadline {
+                    tokio::select! {
+                        biased;
+                        Some(_) = notify_rx.recv() => {}
+                        _ = tokio::time::sleep_until(coalesce_deadline) => break,
+                    }
+                }
+                while notify_rx.try_recv().is_ok() {}
+                true
+            }
+            _ = tokio::time::sleep(wait_duration) => false,
+        };
+
+        if woke_by_notify {
+            consecutive_empty = 0;
+        }
+
+        let outcome = run_claim_cycle_a(
+            &client,
+            input_tx,
+            batch_size,
+            lease_ms,
+            max_attempts,
+            &mut consecutive_empty,
+            metrics,
+            &in_progress,
+        )
+        .await;
+        last_had_work = outcome.had_work;
+
+        if driver.is_finished() {
+            return Ok(());
+        }
+    }
+}
+
+/// One claim cycle: claim → feed → repeat until a claim returns nothing (the
+/// queue is drained or every remaining row is locked/dead-lettered).
+async fn run_claim_cycle_a(
+    client: &tokio_postgres::Client,
+    input_tx: &Sender<PathBuf>,
+    batch_size: usize,
+    lease_ms: i64,
+    max_attempts: i64,
+    consecutive_empty: &mut u32,
+    metrics: &Arc<DemandPullMetrics>,
+    in_progress: &Arc<AtomicBool>,
+) -> CycleOutcome {
+    if in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return CycleOutcome {
+            had_work: false,
+            head: None,
+            total_fed: 0,
+        };
+    }
+    let mut had_work = false;
+    let mut head: Option<String> = None;
+    let mut total_fed = 0usize;
+    loop {
+        let batch =
+            claim_and_feed_a(client, input_tx, batch_size, lease_ms, max_attempts, consecutive_empty, metrics)
+                .await;
+        if head.is_none() {
+            head = batch.head;
+        }
+        total_fed += batch.fed;
+        if batch.fed == 0 {
+            break;
+        }
+        had_work = true;
+    }
+    in_progress.store(false, Ordering::Release);
+    CycleOutcome {
+        had_work,
+        head,
+        total_fed,
+    }
+}
+
+async fn claim_and_feed_a(
+    client: &tokio_postgres::Client,
+    input_tx: &Sender<PathBuf>,
+    batch_size: usize,
+    lease_ms: i64,
+    max_attempts: i64,
+    consecutive_empty: &mut u32,
+    metrics: &Arc<DemandPullMetrics>,
+) -> PullBatch {
+    // W2 — preserve headroom for real-time Watchman events: skip the claim
+    // when A1's channel is already near-full (the backlog drainer yields to
+    // the live fast-path).
+    if input_tx.capacity() == 0 {
+        metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
+        return PullBatch { fed: 0, head: None };
+    }
+
+    metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
+    let sql = build_claim_sql(now_ms(), lease_ms, max_attempts, batch_size);
+    let rows = match client.query(sql.as_str(), &[]).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!(error = %err, "demand-pull A: claim UPDATE failed");
+            return PullBatch { fed: 0, head: None };
+        }
+    };
+
+    if rows.is_empty() {
+        metrics.empty_pulls_total.fetch_add(1, Ordering::Relaxed);
+        *consecutive_empty = consecutive_empty.saturating_add(1);
+        if *consecutive_empty == IDLE_THRESHOLD {
+            info!("demand-pull A: backlog drained ({IDLE_THRESHOLD} empty claims)");
+        }
+        return PullBatch { fed: 0, head: None };
+    }
+
+    let count = rows.len();
+    let head = rows.first().map(|r| r.get::<_, String>(0));
+    let mut sent = 0usize;
+    for row in rows {
+        let path: String = row.get(0);
+        // BACKPRESSURE, never drop — send().await paces the claim feeder to
+        // A1's drain rate (REQ-AXO-901891 contract). A claimed-but-unfed path
+        // would otherwise sit 'parsing' until its lease expires and gets
+        // reclaimed; backpressure makes that the rare crash case, not steady
+        // state.
+        if input_tx.send(PathBuf::from(path)).await.is_err() {
+            // Receiver dropped (shutdown) — stop feeding.
+            break;
+        }
+        sent += 1;
+    }
+    metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
+    *consecutive_empty = 0;
+    if sent > 0 {
+        info!("demand-pull A: claimed+fed {sent}/{count} files to A1 (DB work queue)");
+    }
+    PullBatch { fed: sent, head }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +948,122 @@ mod tests {
         assert_eq!(in_flight, 0);
         // With threshold=200, in_flight(0) < threshold(200) → should pull.
         assert!(in_flight < 200);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // REQ-AXO-901897 (DBQ slice 1) — pipeline A claim feeder tests.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// (a) The claim SQL is the contract. It must:
+    ///   - claim 'discovered' rows,
+    ///   - claim stale-lease 'parsing' rows (lease_until_ms < now),
+    ///   - exclude retry_count >= MAX (dead-lettered),
+    ///   - use FOR UPDATE SKIP LOCKED (no two claimers take the same row),
+    ///   - promote to 'parsing' + set a fresh lease + bump retry_count,
+    ///   - RETURNING path so the feeder can feed input_tx,
+    ///   - order by discovered_ms (oldest backlog first).
+    #[test]
+    fn claim_sql_shape_covers_the_full_contract() {
+        let now = 1_000_000i64;
+        let lease = 60_000i64;
+        let max = 3i64;
+        let sql = build_claim_sql(now, lease, max, 256);
+
+        // Promotes to 'parsing' and sets the lease + retry bump.
+        assert!(sql.contains("SET status = 'parsing'"), "must promote to parsing");
+        assert!(
+            sql.contains(&format!("lease_until_ms = {now} + {lease}")),
+            "must set a fresh lease = now + lease_ms"
+        );
+        assert!(sql.contains("retry_count = retry_count + 1"), "must bump retry_count");
+        assert!(sql.contains(&format!("last_attempt_ms = {now}")), "must stamp last_attempt_ms");
+
+        // Claim set = discovered OR stale-lease parsing, excluding dead-lettered.
+        assert!(sql.contains("status = 'discovered'"), "claims discovered rows");
+        assert!(
+            sql.contains(&format!("status = 'parsing' AND lease_until_ms < {now}")),
+            "claims stale-lease parsing rows (crash recovery)"
+        );
+        assert!(
+            sql.contains(&format!("retry_count < {max}")),
+            "excludes dead-lettered rows (retry_count >= MAX)"
+        );
+
+        // Concurrency + ordering + return contract.
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "must skip locked rows under concurrency");
+        assert!(sql.contains("ORDER BY discovered_ms"), "oldest backlog first");
+        assert!(sql.contains("LIMIT 256"), "honors the claim batch limit");
+        assert!(sql.trim_end().ends_with("RETURNING path"), "returns claimed paths");
+    }
+
+    #[test]
+    fn claim_consts_and_env_overrides_are_sane() {
+        assert_eq!(DBQ_A_LEASE_MS_DEFAULT, 60_000);
+        assert_eq!(DBQ_A_MAX_ATTEMPTS_DEFAULT, 3);
+        assert_eq!(DBQ_A_CLAIM_BATCH_DEFAULT, 256);
+        // Env-unset resolves to the defaults.
+        std::env::remove_var("AXON_DBQ_A_LEASE_MS");
+        std::env::remove_var("AXON_DBQ_A_MAX_ATTEMPTS");
+        std::env::remove_var("AXON_DBQ_A_CLAIM_BATCH");
+        assert_eq!(dbq_a_lease_ms(), DBQ_A_LEASE_MS_DEFAULT);
+        assert_eq!(dbq_a_max_attempts(), DBQ_A_MAX_ATTEMPTS_DEFAULT);
+        assert_eq!(dbq_a_claim_batch(), DBQ_A_CLAIM_BATCH_DEFAULT);
+    }
+
+    /// (a-real) End-to-end against a real PG clone of the canonical template:
+    /// the claim promotes 'discovered' + stale-'parsing', skips fresh-lease
+    /// 'parsing' and retry-exhausted rows, and is idempotent on re-claim.
+    /// REQ-AXO-901897.
+    #[tokio::test]
+    async fn claim_against_real_pg_selects_only_claimable_rows() {
+        let store = std::sync::Arc::new(
+            crate::tests::test_helpers::create_test_db().unwrap(),
+        );
+        let now = now_ms();
+        // Seed four rows with distinct lifecycle states (all project AXO).
+        // 1. discovered           → claimable
+        // 2. stale-lease parsing  → claimable (crash recovery)
+        // 3. fresh-lease parsing  → NOT claimable (another worker owns it)
+        // 4. discovered, retry=3  → NOT claimable (dead-lettered)
+        let seed = format!(
+            "INSERT INTO ist.IndexedFile \
+                (path, project_code, content_hash, last_seen_ms, status, discovered_ms, retry_count, lease_until_ms) VALUES \
+                ('/tmp/dbq_a/discovered.rs','AXO','',{now},'discovered',1,0,0), \
+                ('/tmp/dbq_a/stale.rs','AXO','',{now},'parsing',2,1,{stale}), \
+                ('/tmp/dbq_a/fresh.rs','AXO','',{now},'parsing',3,1,{fresh}), \
+                ('/tmp/dbq_a/dead.rs','AXO','',{now},'discovered',4,3,0);",
+            now = now,
+            stale = now - 1, // lease already expired
+            fresh = now + 600_000, // lease far in the future
+        );
+        store.execute(&seed).unwrap();
+
+        let sql = build_claim_sql(now, 60_000, 3, 256);
+        let raw = store.query_json_writer(&sql).unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut claimed: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.first()?.as_str().map(str::to_string))
+            .collect();
+        claimed.sort();
+        assert_eq!(
+            claimed,
+            vec!["/tmp/dbq_a/discovered.rs".to_string(), "/tmp/dbq_a/stale.rs".to_string()],
+            "claims discovered + stale-lease parsing; excludes fresh-lease + dead-lettered"
+        );
+
+        // (d) Idempotent re-claim: the two just-claimed rows are now fresh-lease
+        // 'parsing' (this claim used lease 60_000), so a second claim with the
+        // same `now` returns NOTHING — no double-feed.
+        let raw2 = store.query_json_writer(&build_claim_sql(now, 60_000, 3, 256)).unwrap();
+        let rows2: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw2).unwrap_or_default();
+        assert!(
+            rows2.is_empty(),
+            "re-claim with same now must be a no-op (rows hold a fresh lease) — idempotent"
+        );
+
+        // Cleanup (shared template clone is per-process; keep it tidy).
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/dbq_a/%'");
     }
 
 }

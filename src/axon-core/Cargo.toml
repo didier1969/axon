@@ -77,7 +77,6 @@ tokio = { version = "1.36", features = ["full", "net", "tracing"] }
 console-subscriber = { version = "0.4", optional = true }
 walkdir = "2.5"
 ignore = "0.4"
-notify-debouncer-full = "0.7.0"
 # REQ-AXO-901893 — Watchman client (Meta's file-watching daemon). Replaces the
 # hand-rolled notify/inotify + ingress_buffer + reconciliation-sweep stack with
 # clock/cursor-based reconciliation: a `since` query always returns the exact

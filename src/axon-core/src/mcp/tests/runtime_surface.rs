@@ -2491,46 +2491,11 @@ fn test_status_indexer_omits_soll_mcp_job_counts() {
     }
 }
 
-#[test]
-fn test_status_reports_admission_exclusion_diagnostics() {
-    reset_ingress_metrics_for_tests();
-    record_ingress_flush(12, 0, 1, 1);
-
-    let server = create_test_server();
-    let response = server
-        .handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "status",
-                "arguments": { "mode": "full" }
-            })),
-            id: Some(json!(2205)),
-        })
-        .unwrap()
-        .result
-        .unwrap();
-
-    let admission = &response["data"]["runtime_authority"]["admission_controller"];
-    assert_eq!(
-        admission["admission_last_durably_persisted_count"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        admission["admission_last_excluded_from_pending_count"].as_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        admission["admission_completion_diagnostics"]["durable_file_persistence_completed"]
-            .as_bool(),
-        Some(true)
-    );
-    assert_eq!(
-        admission["admission_completion_diagnostics"]["persisted_but_excluded_from_pending"]
-            .as_bool(),
-        Some(true)
-    );
-}
+// REQ-AXO-901893 (LEGACY FEED PURGE) — test_status_reports_admission_exclusion_diagnostics
+// was removed: it asserted the admission_controller's ingress promotion counters
+// (admission_last_durably_persisted_count / admission_completion_diagnostics),
+// which were ripped with the ingress_buffer. Admission now gates on
+// persisted_file_pending + WIP only (Watchman + DBQ-A feed pipeline A directly).
 
 #[test]
 fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {

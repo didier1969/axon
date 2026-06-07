@@ -117,30 +117,10 @@ pub enum BridgeEvent {
         vectorization_requeued_for_interactive: u64,
         vectorization_resumed_after_interactive: u64,
         projection_suppressed_due_to_interactive: u64,
-        guard_hits: u64,
-        guard_misses: u64,
-        guard_bypassed_total: u64,
-        guard_hydrated_entries: u64,
-        guard_hydration_duration_ms: u64,
-        ingress_enabled: bool,
-        ingress_buffered_entries: usize,
-        ingress_subtree_hints: usize,
-        ingress_subtree_hint_in_flight: usize,
-        ingress_subtree_hint_accepted_total: u64,
-        ingress_subtree_hint_blocked_total: u64,
-        ingress_subtree_hint_suppressed_total: u64,
-        ingress_subtree_hint_productive_total: u64,
-        ingress_subtree_hint_unproductive_total: u64,
-        ingress_subtree_hint_dropped_total: u64,
-        ingress_collapsed_total: u64,
-        ingress_flush_count: u64,
-        ingress_last_flush_duration_ms: u64,
-        ingress_last_promoted_count: u64,
-        ingress_promoted_total: u64,
-        ingress_last_durably_persisted_count: u64,
-        ingress_durably_persisted_total: u64,
-        ingress_last_excluded_from_pending_count: u64,
-        ingress_excluded_from_pending_total: u64,
+        // REQ-AXO-901893 (LEGACY FEED PURGE) — guard_* (FileIngressGuard) and
+        // ingress_* (in-memory ingress_buffer) telemetry fields were ripped with
+        // their backing modules. The dashboard decodes via Map.get(.., default),
+        // so dropping them from this event degrades gracefully to 0.
         memory_trim_attempts_total: u64,
         memory_trim_successes_total: u64,
         cpu_load: f64,
@@ -231,30 +211,6 @@ mod tests {
             vectorization_requeued_for_interactive: 7,
             vectorization_resumed_after_interactive: 3,
             projection_suppressed_due_to_interactive: 6,
-            guard_hits: 9,
-            guard_misses: 4,
-            guard_bypassed_total: 2,
-            guard_hydrated_entries: 512,
-            guard_hydration_duration_ms: 18,
-            ingress_enabled: true,
-            ingress_buffered_entries: 12,
-            ingress_subtree_hints: 2,
-            ingress_subtree_hint_in_flight: 1,
-            ingress_subtree_hint_accepted_total: 15,
-            ingress_subtree_hint_blocked_total: 4,
-            ingress_subtree_hint_suppressed_total: 2,
-            ingress_subtree_hint_productive_total: 9,
-            ingress_subtree_hint_unproductive_total: 6,
-            ingress_subtree_hint_dropped_total: 3,
-            ingress_collapsed_total: 19,
-            ingress_flush_count: 5,
-            ingress_last_flush_duration_ms: 44,
-            ingress_last_promoted_count: 8,
-            ingress_promoted_total: 64,
-            ingress_last_durably_persisted_count: 3,
-            ingress_durably_persisted_total: 58,
-            ingress_last_excluded_from_pending_count: 1,
-            ingress_excluded_from_pending_total: 7,
             memory_trim_attempts_total: 11,
             memory_trim_successes_total: 5,
             cpu_load: 61.5,
@@ -333,30 +289,6 @@ mod tests {
         assert!(json.contains("\"vectorization_requeued_for_interactive\":7"));
         assert!(json.contains("\"vectorization_resumed_after_interactive\":3"));
         assert!(json.contains("\"projection_suppressed_due_to_interactive\":6"));
-        assert!(json.contains("\"guard_hits\":9"));
-        assert!(json.contains("\"guard_misses\":4"));
-        assert!(json.contains("\"guard_bypassed_total\":2"));
-        assert!(json.contains("\"guard_hydrated_entries\":512"));
-        assert!(json.contains("\"guard_hydration_duration_ms\":18"));
-        assert!(json.contains("\"ingress_enabled\":true"));
-        assert!(json.contains("\"ingress_buffered_entries\":12"));
-        assert!(json.contains("\"ingress_subtree_hints\":2"));
-        assert!(json.contains("\"ingress_subtree_hint_in_flight\":1"));
-        assert!(json.contains("\"ingress_subtree_hint_accepted_total\":15"));
-        assert!(json.contains("\"ingress_subtree_hint_blocked_total\":4"));
-        assert!(json.contains("\"ingress_subtree_hint_suppressed_total\":2"));
-        assert!(json.contains("\"ingress_subtree_hint_productive_total\":9"));
-        assert!(json.contains("\"ingress_subtree_hint_unproductive_total\":6"));
-        assert!(json.contains("\"ingress_subtree_hint_dropped_total\":3"));
-        assert!(json.contains("\"ingress_collapsed_total\":19"));
-        assert!(json.contains("\"ingress_flush_count\":5"));
-        assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
-        assert!(json.contains("\"ingress_last_promoted_count\":8"));
-        assert!(json.contains("\"ingress_promoted_total\":64"));
-        assert!(json.contains("\"ingress_last_durably_persisted_count\":3"));
-        assert!(json.contains("\"ingress_durably_persisted_total\":58"));
-        assert!(json.contains("\"ingress_last_excluded_from_pending_count\":1"));
-        assert!(json.contains("\"ingress_excluded_from_pending_total\":7"));
         assert!(json.contains("\"memory_trim_attempts_total\":11"));
         assert!(json.contains("\"memory_trim_successes_total\":5"));
         assert!(json.contains("\"cpu_load\":61.5"));

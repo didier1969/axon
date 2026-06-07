@@ -6,7 +6,6 @@ use std::time::Duration;
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
 use axon_core::graph::GraphStore;
-use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
 use axon_core::runtime_mode::AxonRuntimeMode;
 use axon_core::runtime_topology::current_runtime_process_role;
@@ -39,7 +38,6 @@ const PEER_HEARTBEAT_FRESH_MS: i64 = 30_000;
 pub(crate) fn spawn_runtime_telemetry(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
-    ingress_buffer: SharedIngressBuffer,
     results_tx: broadcast::Sender<String>,
 ) {
     tokio::spawn(async move {
@@ -47,8 +45,7 @@ pub(crate) fn spawn_runtime_telemetry(
 
         loop {
             interval.tick().await;
-            let snapshot =
-                main_background::runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            let snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
             let runtime_mode = AxonRuntimeMode::from_env();
             // REQ-AXO-901854 — pairing + runtime truth sourced from the
             // indexer's fresh PG lifecycle heartbeat (canonical; replaces the
@@ -114,34 +111,6 @@ pub(crate) fn spawn_runtime_telemetry(
                     .vectorization_resumed_after_interactive,
                 projection_suppressed_due_to_interactive: snapshot
                     .projection_suppressed_due_to_interactive,
-                guard_hits: snapshot.guard_hits,
-                guard_misses: snapshot.guard_misses,
-                guard_bypassed_total: snapshot.guard_bypassed_total,
-                guard_hydrated_entries: snapshot.guard_hydrated_entries,
-                guard_hydration_duration_ms: snapshot.guard_hydration_duration_ms,
-                ingress_enabled: snapshot.ingress_enabled,
-                ingress_buffered_entries: snapshot.ingress_buffered_entries,
-                ingress_subtree_hints: snapshot.ingress_subtree_hints,
-                ingress_subtree_hint_in_flight: snapshot.ingress_subtree_hint_in_flight,
-                ingress_subtree_hint_accepted_total: snapshot.ingress_subtree_hint_accepted_total,
-                ingress_subtree_hint_blocked_total: snapshot.ingress_subtree_hint_blocked_total,
-                ingress_subtree_hint_suppressed_total: snapshot
-                    .ingress_subtree_hint_suppressed_total,
-                ingress_subtree_hint_productive_total: snapshot
-                    .ingress_subtree_hint_productive_total,
-                ingress_subtree_hint_unproductive_total: snapshot
-                    .ingress_subtree_hint_unproductive_total,
-                ingress_subtree_hint_dropped_total: snapshot.ingress_subtree_hint_dropped_total,
-                ingress_collapsed_total: snapshot.ingress_collapsed_total,
-                ingress_flush_count: snapshot.ingress_flush_count,
-                ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
-                ingress_last_promoted_count: snapshot.ingress_last_promoted_count,
-                ingress_promoted_total: snapshot.ingress_promoted_total,
-                ingress_last_durably_persisted_count: snapshot.ingress_last_durably_persisted_count,
-                ingress_durably_persisted_total: snapshot.ingress_durably_persisted_total,
-                ingress_last_excluded_from_pending_count: snapshot
-                    .ingress_last_excluded_from_pending_count,
-                ingress_excluded_from_pending_total: snapshot.ingress_excluded_from_pending_total,
                 memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
                 memory_trim_successes_total: snapshot.memory_trim_successes_total,
                 cpu_load: snapshot.cpu_load,
@@ -253,8 +222,10 @@ pub(crate) fn spawn_runtime_telemetry(
                     vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,
                     graph_workers_active: snapshot.graph_workers_active_current,
                     graph_workers_started: snapshot.graph_workers_started_total,
-                    ingress_buffered_entries: snapshot.ingress_buffered_entries as u64,
-                    ingress_hot_entries: snapshot.ingress_hot_entries as u64,
+                    // REQ-AXO-901893 (LEGACY FEED PURGE) — ingress_buffer ripped;
+                    // Watchman feeds pipeline A directly so these meter 0.
+                    ingress_buffered_entries: 0,
+                    ingress_hot_entries: 0,
                     ready_queue_chunks_current: snapshot.ready_queue_chunks_current,
                     ready_queue_chunks_small: snapshot.ready_queue_chunks_small,
                     ready_queue_chunks_medium: snapshot.ready_queue_chunks_medium,

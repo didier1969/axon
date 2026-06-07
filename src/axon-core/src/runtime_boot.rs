@@ -2,9 +2,7 @@ use crate::bridge::BridgeEvent;
 use crate::embedder::{
     current_gpu_memory_snapshot, embedding_lane_config_from_env, SemanticWorkerPool,
 };
-use crate::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use crate::graph::GraphStore;
-use crate::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
 use crate::main_background;
 use crate::main_services;
 use crate::main_telemetry;
@@ -20,7 +18,7 @@ use crate::runtime_writer_guard::WriterGuard;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::future::pending;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
@@ -791,18 +789,9 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             .ingestion_memory_budget_gb
             .saturating_mul(1024 * 1024 * 1024),
     ));
-    let hydrated_guard = match FileIngressGuard::hydrate_from_store(&graph_store) {
-        Ok(guard) => guard,
-        Err(err) => {
-            warn!(
-                "File ingress guard hydration failed at startup: {:?}. Falling back to empty in-memory guard (still enabled).",
-                err
-            );
-            FileIngressGuard::default()
-        }
-    };
-    let file_ingress_guard: SharedFileIngressGuard = Arc::new(Mutex::new(hydrated_guard));
-    let ingress_buffer: SharedIngressBuffer = Arc::new(Mutex::new(IngressBuffer::default()));
+    // REQ-AXO-901893 (LEGACY FEED PURGE) — the FileIngressGuard + in-memory
+    // ingress_buffer that the notify watcher / scanner pushed into are gone.
+    // Watchman feeds pipeline A's input_tx directly; DBQ-A drains the backlog.
     let tel_socket_path = std::env::var("AXON_TELEMETRY_SOCK")
         .unwrap_or_else(|_| "/tmp/axon-telemetry.sock".to_string());
     let mcp_socket_path =
@@ -878,7 +867,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     main_telemetry::spawn_runtime_telemetry(
         graph_store.clone(),
         queue_store.clone(),
-        ingress_buffer.clone(),
         results_tx.clone(),
     );
     // Recompute the AXON_WATCH_DIR filesystem counters off-runtime so the
@@ -938,48 +926,21 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     if runtime_mode.ingestion_enabled() {
         // REQ-AXO-289 S7 / DEC-AXO-081 — streaming pipeline v2 replaces
         // the DuckDB-era public.File state machine. spawn_pipeline_v2_indexer
-        // boots A1→A2→A3 (and B1→B2→B3 when semantic workers are
-        // enabled), feeds them from an initial scan + the shared
-        // ingress_buffer, and resolves project_code per file.
+        // boots A1→A2→A3 (and B1→B2→B3 when semantic workers are enabled),
+        // feeds them from the Watchman file source + the DBQ-A claim feeder
+        // (REQ-AXO-901893 / REQ-AXO-901897), and resolves project_code per file.
+        // The legacy notify watcher + federation/scope orchestrators that pushed
+        // into the in-memory ingress_buffer were RIPPED in the LEGACY FEED PURGE.
         if let Err(err) = crate::pipeline_v2_runtime::spawn_pipeline_v2_indexer(
             runtime_mode,
             graph_store.clone(),
-            ingress_buffer.clone(),
             watch_root_str.clone(),
         ) {
             warn!(error = %err, "pipeline_v2_runtime: failed to spawn streaming indexer");
         }
-        main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
-
-        // REQ-AXO-901893 — the legacy notify FS watcher (federation orchestrator
-        // → spawn_hot_delta_watcher → notify debouncer) and the periodic scope
-        // reconciliation both PUSH into ingress_buffer, which pipeline_v2_runtime's
-        // drain consumes. When Watchman is the file source, both are replaced
-        // wholesale: gate them off so exactly ONE feed path is live (Watchman →
-        // input_tx directly). Ripped entirely in the step-6 RIP wave.
-        let use_watchman = std::env::var("AXON_USE_WATCHMAN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if !use_watchman {
-            main_background::spawn_federation_orchestrator(
-                graph_store.clone(),
-                watch_root_str.clone(),
-                file_ingress_guard.clone(),
-                ingress_buffer.clone(),
-            );
-            // REQ-AXO-340 — periodic scope reconciliation so files added outside
-            // an inotify-emitting touch (cold clones, partial bootstrap failures,
-            // late-arriving projects) reach the ingress buffer without waiting
-            // for the next process restart.
-            main_background::spawn_scope_reconciliation_orchestrator(
-                graph_store.clone(),
-                watch_root_str.clone(),
-                file_ingress_guard.clone(),
-                ingress_buffer.clone(),
-            );
-        }
+        main_background::spawn_memory_reclaimer(queue_store.clone());
     } else {
-        info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
+        info!("Scan and autonomous ingestion disabled by runtime mode.");
     }
 
     // REQ-AXO-901658 — wire the `ist_mutated` LISTEN/NOTIFY consumer that
@@ -1010,44 +971,23 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             _ => crate::postgres::AxonInstance::Live,
         },
     ) {
-        Ok(url) => {
-            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(url.clone());
+        Ok(_url) => {
+            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(_url.clone());
             info!("ist_mutated listener spawned (REQ-AXO-901658) — IST cache eviction wired");
-            // REQ-AXO-901675 (PIL-AXO-008) — registry mutation NOTIFY consumer.
-            // axon_init_project (and any other write to soll.ProjectCodeRegistry)
-            // emits pg_notify('axon_registry_changed', ...) via the trigger
-            // installed by `db/ddl/07_registry_notify.sql`. This listener
-            // turns the notification into an `IngressSource::Scan` subtree
-            // hint, so the scanner discovers and indexes the newly registered
-            // project without requiring an indexer restart.
-            //
-            // Gate : only spawned in ingestion-enabled modes (indexer-graph /
-            // indexer-vector / indexer-full / brain+indexer). In `brain_only`
-            // mode the ingress_buffer exists but is never drained — pushing
-            // subtree hints there would waste CPU + leak memory.
-            if runtime_mode.ingestion_enabled() {
-                crate::registry_notify_listener::spawn_registry_change_listener(
-                    url,
-                    ingress_buffer.clone(),
-                );
-                info!(
-                    "axon_registry_changed listener spawned (REQ-AXO-901675) — \
-                     registry mutations now trigger automatic subtree scan"
-                );
-            } else {
-                info!(
-                    "axon_registry_changed listener NOT spawned: ingestion disabled \
-                     in current runtime mode ; the indexer process (separate boot) \
-                     owns this responsibility"
-                );
-            }
+            // REQ-AXO-901893 (LEGACY FEED PURGE) — the axon_registry_changed
+            // listener (REQ-AXO-901675) was RIPPED with ingress_buffer: it
+            // pushed an IngressSource::Scan subtree hint into the in-memory
+            // ingress_buffer, which no longer exists. The PG trigger in
+            // `db/ddl/07_registry_notify.sql` still fires; live new-project
+            // discovery now relies on the next indexer restart (Watchman
+            // resolves all watch_root roots at boot, DBQ-A drains the
+            // 'discovered' backlog by construction). Tracked: REQ-AXO-901899.
         }
         Err(err) => {
             warn!(
                 error = %err,
-                "ist_mutated + axon_registry_changed listeners disabled: PG URL unresolved ; \
-                 IST cache will stay stale across mutations AND new projects from \
-                 axon_init_project will not be indexed without a manual restart"
+                "ist_mutated listener disabled: PG URL unresolved ; \
+                 IST cache will stay stale across mutations"
             );
         }
     }
@@ -1056,7 +996,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     main_background::spawn_runtime_trace_logger(
         graph_store.clone(),
         queue_store.clone(),
-        ingress_buffer.clone(),
     );
 
     if let Some(tel_listener) = tel_listener {

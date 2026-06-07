@@ -10,7 +10,6 @@ use crate::embedder::{
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
 };
-use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer::{
     collect_host_snapshot, collect_operator_policy_snapshot, collect_recent_analytics_window,
     collect_runtime_signals_window,
@@ -212,7 +211,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let pg_chunkembedding_total_bytes = server.graph_store.pg_chunkembedding_total_bytes();
     let pg_wal_bytes = server.graph_store.pg_wal_bytes();
     let pg_buffer_hit_ratio = server.graph_store.pg_buffer_hit_ratio();
-    let ingress = ingress_metrics_snapshot();
     let provider = current_embedding_provider_diagnostics();
     let lane_config = embedding_lane_config_from_env();
     let vector_runtime = service_guard::vector_runtime_metrics();
@@ -459,21 +457,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         {}\
         {}\
         {}\
-        **Ingress Buffer:**\n\
-        *   Enabled: {}\n\
-        *   Buffered entries: {}\n\
-        *   Subtree hints: {}\n\
-        *   Subtree hints in flight: {}\n\
-        *   Subtree hints accepted: {}\n\
-        *   Subtree hints blocked: {}\n\
-        *   Subtree hints suppressed: {}\n\
-        *   Subtree hints productive: {}\n\
-        *   Subtree hints unproductive: {}\n\
-        *   Subtree hints dropped: {}\n\
-        *   Collapsed events: {}\n\
-        *   Flushes: {}\n\
-        *   Last flush: {} ms\n\
-        *   Last promoted batch: {}\n\n\
+        **File source:** Watchman + DBQ-A (ingress_buffer RIPPED — REQ-AXO-901893)\n\n\
         **Embedding Runtime:**\n\
         *   GPU Present Detected : {}\n\
         *   Embedding Provider Requested : {}\n\
@@ -593,20 +577,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         file_stage_section,
         backlog_reason_section,
         vector_queue_status_section,
-        if ingress.enabled { "yes" } else { "no" },
-        ingress.buffered_entries,
-        ingress.subtree_hints,
-        ingress.subtree_hint_in_flight,
-        ingress.subtree_hint_accepted_total,
-        ingress.subtree_hint_blocked_total,
-        ingress.subtree_hint_suppressed_total,
-        ingress.subtree_hint_productive_total,
-        ingress.subtree_hint_unproductive_total,
-        ingress.subtree_hint_dropped_total,
-        ingress.collapsed_total,
-        ingress.flush_count,
-        ingress.last_flush_duration_ms,
-        ingress.last_promoted_count,
         if gpu_present { "yes" } else { "no" },
         provider.provider_requested,
         provider.provider_effective,

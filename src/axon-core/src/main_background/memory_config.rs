@@ -24,18 +24,6 @@ pub(super) fn memory_reclaimer_enabled() -> bool {
         .unwrap_or(true)
 }
 
-pub(super) fn federation_orchestrator_enabled() -> bool {
-    std::env::var("AXON_ENABLE_FEDERATION_ORCHESTRATOR")
-        .ok()
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no"
-            )
-        })
-        .unwrap_or(true)
-}
-
 pub(super) fn memory_reclaimer_min_anon_bytes() -> u64 {
     std::env::var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB")
         .ok()

@@ -500,27 +500,9 @@ impl McpServer {
         // the operator can spot A1 back-pressure without trawling
         // journalctl. Defaults mirror `PipelineChannelCaps` so an
         // unconfigured env still reports the canonical 512.
-        let ingress_drain_batch = env_usize(
-            "AXON_INGRESS_DRAIN_BATCH",
-            crate::pipeline_v2::channels::INGRESS_DRAIN_BATCH_DEFAULT,
-        );
-        let drain_snapshot = crate::ingress_buffer::ingress_metrics_snapshot();
-        // REQ-AXO-901677 — periodic_sweep_worker telemetry. Surface the
-        // configured cadence + CPU gate alongside the live counters so
-        // the operator can spot a worker that's never running (chronic
-        // CPU skip), never enabled (`hours=0`), or whose last sweep is
-        // ancient (`last_run_at_ms` very old). All defaults mirror the
-        // worker constants so a fresh process reads canonical values.
-        let periodic_sweep_hours = std::env::var("AXON_PERIODIC_SWEEP_HOURS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_HOURS_DEFAULT);
-        let periodic_sweep_cpu_threshold_pct = std::env::var("AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u8>().ok())
-            .map(|v| v.min(100))
-            .unwrap_or(crate::pipeline_v2_runtime::PERIODIC_SWEEP_CPU_THRESHOLD_PCT_DEFAULT);
-        let periodic_sweep_snapshot = crate::ingress_buffer::periodic_sweep_metrics_snapshot();
+        // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress drain + periodic
+        // sweep telemetry was ripped with the ingress_buffer. Watchman feeds
+        // pipeline A directly; DBQ-A drains the backlog (stock_a below).
 
         // REQ-AXO-90009 Slice 2 — in-memory pending set heartbeat.
         // `runtime_pending` reflects what THIS process's
@@ -726,34 +708,10 @@ impl McpServer {
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
              - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\n\
-             ### Pipeline drain (ingress → A1)\n\
-             - Drain batch cap:      {ingress_drain_batch} (env AXON_INGRESS_DRAIN_BATCH)\n\
-             - Heartbeat tick:       {drain_heartbeat_tick}\n\
-             - Last batch sent:      {drain_last_batch_sent}\n\
-             - Last batch dropped (A1 full): {drain_last_batch_dropped_full}\n\
-             - Cumulative dropped (A1 full): {drain_dropped_full_total}\n\n\
-             ### Periodic sweep (REQ-AXO-901677)\n\
-             - Interval:             {periodic_sweep_hours} h (env AXON_PERIODIC_SWEEP_HOURS, 0=off)\n\
-             - CPU skip threshold:   {periodic_sweep_cpu_threshold_pct}% (env AXON_PERIODIC_SWEEP_CPU_THRESHOLD_PCT)\n\
-             - Last run at (ms):     {periodic_sweep_last_run_at_ms}\n\
-             - Last duration (ms):   {periodic_sweep_last_duration_ms}\n\
-             - Last files compared:  {periodic_sweep_last_files_compared}\n\
-             - Last deltas found:    {periodic_sweep_last_deltas_found}\n\
-             - Total runs:           {periodic_sweep_runs_total}\n\
-             - Total deltas enqueued: {periodic_sweep_deltas_total}\n\
-             - Skipped (high CPU):   {periodic_sweep_skipped_high_cpu_total}\n\n\
+             ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
+             - Feed: Watchman clock/cursor deltas → pipeline A input_tx (legacy ingress drain + periodic sweep RIPPED)\n\
+             - Backlog drainer: DBQ-A claim feeder (discovered stock below)\n\n\
              Sustained backlog > 0 with NOTIFY listener up = indexer disconnected or B2 starved; run `diagnose_indexing` for triage. Worker counts shown are env-resolved by the responding process (brain or indexer).",
-            drain_heartbeat_tick = drain_snapshot.drain_heartbeat_tick,
-            drain_last_batch_sent = drain_snapshot.drain_last_batch_sent,
-            drain_last_batch_dropped_full = drain_snapshot.drain_last_batch_dropped_full,
-            drain_dropped_full_total = drain_snapshot.drain_dropped_full_total,
-            periodic_sweep_last_run_at_ms = periodic_sweep_snapshot.last_run_at_ms,
-            periodic_sweep_last_duration_ms = periodic_sweep_snapshot.last_duration_ms,
-            periodic_sweep_last_files_compared = periodic_sweep_snapshot.last_files_compared,
-            periodic_sweep_last_deltas_found = periodic_sweep_snapshot.last_deltas_found,
-            periodic_sweep_runs_total = periodic_sweep_snapshot.runs_total,
-            periodic_sweep_deltas_total = periodic_sweep_snapshot.deltas_total,
-            periodic_sweep_skipped_high_cpu_total = periodic_sweep_snapshot.skipped_high_cpu_total,
         );
 
         Some(json!({
@@ -814,35 +772,11 @@ impl McpServer {
                 "compute": observed_compute,
                 "compute_source": observed_compute_source,
                 "indexer_build_id": indexer_build_id,
-                // REQ-AXO-901678 — drain saturation telemetry surface.
-                // `batch_size` and `heartbeat_tick` reflect what the
-                // runtime drain loop ran with on its last tick (0 if the
-                // pipeline-v2 runtime has not started yet — e.g. brain
-                // process answering on its own).
-                "pipeline_drain": {
-                    "batch_size": drain_snapshot.drain_batch_size,
-                    "heartbeat_tick": drain_snapshot.drain_heartbeat_tick,
-                    "last_batch_sent": drain_snapshot.drain_last_batch_sent,
-                    "last_batch_dropped_full": drain_snapshot.drain_last_batch_dropped_full,
-                    "dropped_full_total": drain_snapshot.drain_dropped_full_total,
-                    "configured_batch_cap": ingress_drain_batch,
-                },
-                // REQ-AXO-901677 — periodic_sweep_worker telemetry.
-                // Inotify-drop reconciliation safety net. All counters
-                // are 0 in `brain_only` mode (worker is only spawned in
-                // ingestion-enabled runtimes) or before the first
-                // scheduled tick has fired (default cadence = 4 h).
-                "periodic_sweep": {
-                    "configured_interval_hours": periodic_sweep_hours,
-                    "cpu_threshold_pct": periodic_sweep_cpu_threshold_pct,
-                    "last_run_at_ms": periodic_sweep_snapshot.last_run_at_ms,
-                    "last_duration_ms": periodic_sweep_snapshot.last_duration_ms,
-                    "last_files_compared": periodic_sweep_snapshot.last_files_compared,
-                    "last_deltas_found": periodic_sweep_snapshot.last_deltas_found,
-                    "runs_total": periodic_sweep_snapshot.runs_total,
-                    "deltas_total": periodic_sweep_snapshot.deltas_total,
-                    "skipped_high_cpu_total": periodic_sweep_snapshot.skipped_high_cpu_total,
-                },
+                // REQ-AXO-901893 (LEGACY FEED PURGE) — `pipeline_drain` +
+                // `periodic_sweep` telemetry blocks were ripped with the
+                // ingress_buffer. The Watchman file source feeds pipeline A
+                // directly (no buffer to meter); DBQ-A is the backlog drainer
+                // (see `stock_a` / discovered-backlog above).
             }
         }))
     }
@@ -1001,14 +935,12 @@ impl McpServer {
         // be queued by A1.
         let files_scheduled = self.rescan_enumerate_file_count(&project_path, &project_code);
 
-        // Step 4 — emit NOTIFY on the existing registry channel. The
-        // listener (when ingestion is enabled — see runtime_boot.rs)
-        // converts the payload into an `IngressSource::Scan` subtree
-        // hint with priority 100 via record_subtree_hint, identical to
-        // what axon_init_project triggers. If the indexer is not
-        // running, the NOTIFY is silently dropped (PG semantics) ; the
-        // caller still gets a structured envelope so the operator
-        // sees the work was requested.
+        // Step 4 — REQ-AXO-901893 (LEGACY FEED PURGE): enrol the subtree
+        // directly into the durable work queue. A scanner walk UPSERTs every
+        // eligible file into ist.IndexedFile with status='discovered'; the DBQ-A
+        // claim feeder (REQ-AXO-901897) drains those rows into pipeline A by
+        // construction. This replaces the old pg_notify('axon_registry_changed')
+        // → registry_notify_listener → ingress_buffer hop (both ripped).
         let notify_outcome = self.rescan_emit_subtree_notify(&project_code, &project_path, full);
 
         // Step 5 — projection ETA. Heuristic : ~30 ms/file end-to-end
@@ -1102,36 +1034,29 @@ impl McpServer {
         scanner.enumerate_files().len()
     }
 
-    /// Internal helper — emit `pg_notify('axon_registry_changed', ...)`
-    /// with the same payload shape as `db/ddl/07_registry_notify.sql`
-    /// so the existing listener (`registry_notify_listener.rs`)
-    /// converts it into an `IngressSource::Scan` subtree hint.
-    /// `op` is set to `"rescan"` so operators can distinguish an
-    /// operator-driven rescan from a registry insert/update in
-    /// downstream telemetry. (The listener treats any non-empty
-    /// `project_path` as a scan trigger so the new op string is
-    /// forward-compatible.)
+    /// Internal helper — enrol the project's files into the durable work queue.
+    ///
+    /// REQ-AXO-901893 (LEGACY FEED PURGE): the old path emitted
+    /// `pg_notify('axon_registry_changed', ...)` for `registry_notify_listener.rs`
+    /// to turn into an in-memory ingress subtree hint. Both the listener and the
+    /// ingress_buffer were ripped, so the NOTIFY had no consumer. The tool now
+    /// runs a direct scanner walk that UPSERTs every eligible file into
+    /// ist.IndexedFile with status='discovered'; the DBQ-A claim feeder
+    /// (REQ-AXO-901897) drains those rows into pipeline A by construction — no
+    /// indexer restart, no live watcher dependency. `full` is informational here
+    /// (the walk always re-enrols the whole subtree; the UPSERT is idempotent and
+    /// only flips status back to 'discovered' for files whose mtime/size changed).
     fn rescan_emit_subtree_notify(
         &self,
-        project_code: &str,
+        _project_code: &str,
         project_path: &str,
-        full: bool,
+        _full: bool,
     ) -> String {
-        let payload = json!({
-            "op": "rescan",
-            "project_code": project_code,
-            "project_path": project_path,
-            "full": full,
-        });
-        let payload_str = payload.to_string().replace('\'', "''");
-        let sql = format!(
-            "SELECT pg_notify('axon_registry_changed', '{}')",
-            payload_str
-        );
-        match self.graph_store.execute_raw_sql_gateway(&sql) {
-            Ok(_) => "notified".to_string(),
-            Err(err) => format!("notify_failed: {err}"),
-        }
+        let scanner = crate::scanner::Scanner::new(project_path, _project_code);
+        let graph = self.graph_store.clone();
+        let subtree = std::path::PathBuf::from(project_path);
+        let enrolled = scanner.scan_subtree(graph, &subtree);
+        format!("enrolled:{enrolled}")
     }
 }
 
