@@ -231,6 +231,28 @@ pub fn token_count_for_text(text: &str) -> AnyhowResult<usize> {
     Ok(encoding.len())
 }
 
+/// Exact content-token count for a *fragment* — special tokens EXCLUDED.
+///
+/// Used by the chunker's Knuth-Plass DP to cost individual body lines (and
+/// the fixed per-chunk prefix). Special tokens ([CLS]/[SEP]) are added once
+/// per emitted chunk, not per line, so counting them per fragment would
+/// over-estimate every line by a constant and distort the segmentation.
+/// Per-line / prefix texts are far below the 512-token model window, so the
+/// tokenizer's truncation never bites here.
+///
+/// On tokenizer-load/encode error, falls back to a conservative char/3
+/// heuristic (BGE averages ~3-4 chars/token on source code) so the chunker
+/// stays linear and correct even without the model cache.
+pub fn content_token_count(text: &str) -> usize {
+    match load_runtime_embedding_tokenizer() {
+        Ok(tokenizer) => match tokenizer.encode(text, false) {
+            Ok(encoding) => encoding.len(),
+            Err(_) => text.chars().count().div_ceil(3).max(1),
+        },
+        Err(_) => text.chars().count().div_ceil(3).max(1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
