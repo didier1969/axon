@@ -365,17 +365,6 @@ impl McpServer {
         // `embedding_status` and the dashboard now read the same view, so
         // their numbers cannot diverge. Coverage is REAL (files_chunked),
         // never the retired status column. ────────────────────────────────
-        // Retained for the pipeline-A discovered-stock query below (the
-        // work-queue `status='discovered'` count — NOT a metrics count).
-        let scalar = |query: &str| -> i64 {
-            self.graph_store
-                .execute_raw_sql_gateway(query)
-                .ok()
-                .as_deref()
-                .and_then(tools_system_debug::parse_scalar_count_row)
-                .unwrap_or(0)
-        };
-
         let view_rows: Vec<Vec<Value>> = self
             .graph_store
             .execute_raw_sql_gateway(&format!(
@@ -559,34 +548,25 @@ impl McpServer {
         // — adding one would be over-engineered for this single
         // caller. Both paths use the same retry-count cap (3) so the
         // numbers reconcile across surfaces.
-        let stock_a = if project == "*" {
-            self.graph_store
-                .pipeline_a_discovered_stock(3)
-                .unwrap_or(0) as i64
-        } else {
-            scalar(&format!(
-                "SELECT count(*) FROM ist.indexedfile WHERE status='discovered' AND retry_count<3 AND path LIKE '{}/%'",
-                project.replace('\'', "''")
-            ))
-        };
-        let (replenish_a, replenish_b) = {
-            let snap_a = crate::pipeline_v2_runtime::demand_pull_metrics_a()
-                .map(|m| m.snapshot());
-            let snap_b = crate::pipeline_v2_runtime::demand_pull_metrics_b()
-                .map(|m| m.snapshot());
-            let to_json = |snap: Option<crate::pipeline_v2::demand_pull::DemandPullSnapshot>| {
-                match snap {
-                    Some(s) => json!({
-                        "pulls_total": s.pulls_total,
-                        "items_fed_total": s.items_fed_total,
-                        "empty_pulls_total": s.empty_pulls_total,
-                        "try_send_failures_total": s.try_send_failures_total,
-                        "skipped_above_threshold": s.skipped_above_threshold,
-                    }),
-                    None => json!(null),
-                }
-            };
-            (to_json(snap_a), to_json(snap_b))
+        // PIL-AXO-007 (REQ-AXO-901916) — the pipeline-A claim feeder + the
+        // status='discovered' work queue were retired. Pipeline A is now fed
+        // directly by the scanner/Watchman walk into a bounded in-process
+        // channel, so there is no DB 'discovered' stock and no A feeder metrics.
+        // stock_a=0, replenish_a=null. Pipeline B (demand_pull_b) is unchanged.
+        let stock_a: i64 = 0;
+        let replenish_a = json!(null);
+        let replenish_b = {
+            let snap_b = crate::pipeline_v2_runtime::demand_pull_metrics_b().map(|m| m.snapshot());
+            match snap_b {
+                Some(s) => json!({
+                    "pulls_total": s.pulls_total,
+                    "items_fed_total": s.items_fed_total,
+                    "empty_pulls_total": s.empty_pulls_total,
+                    "try_send_failures_total": s.try_send_failures_total,
+                    "skipped_above_threshold": s.skipped_above_threshold,
+                }),
+                None => json!(null),
+            }
         };
 
         // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces the

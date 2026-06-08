@@ -45,19 +45,8 @@ use crate::scanner::Scanner;
 use std::sync::atomic::AtomicPtr;
 use crate::pipeline_v2::demand_pull::DemandPullMetrics;
 
-static DEMAND_PULL_METRICS_A: AtomicPtr<DemandPullMetrics> =
-    AtomicPtr::new(std::ptr::null_mut());
 static DEMAND_PULL_METRICS_B: AtomicPtr<DemandPullMetrics> =
     AtomicPtr::new(std::ptr::null_mut());
-
-pub fn demand_pull_metrics_a() -> Option<Arc<DemandPullMetrics>> {
-    let ptr = DEMAND_PULL_METRICS_A.load(std::sync::atomic::Ordering::Acquire);
-    if ptr.is_null() { return None; }
-    unsafe {
-        Arc::increment_strong_count(ptr);
-        Some(Arc::from_raw(ptr))
-    }
-}
 
 pub fn demand_pull_metrics_b() -> Option<Arc<DemandPullMetrics>> {
     let ptr = DEMAND_PULL_METRICS_B.load(std::sync::atomic::Ordering::Acquire);
@@ -419,66 +408,19 @@ pub fn spawn_pipeline_v2_indexer(
         resolve_database_url_for_listener(),
     )?;
 
-    // REQ-AXO-901897 (DBQ slice 1) — pipeline A claim feeder, unconditionally
-    // (canonical, symmetric to demand_pull_b which has no flag). LISTENs
-    // `file_discovered` (+ a periodic reaper tick for stale leases) and
-    // atomically claims 'discovered' / stale-lease 'parsing' rows from
-    // ist.IndexedFile (FOR UPDATE SKIP LOCKED + lease), feeding their paths into
-    // the SAME input_tx Watchman uses. Runs ALONGSIDE the Watchman feed (hybrid:
-    // Watchman = fast-path for new changes, claim = backlog/recovery drainer
-    // that makes any stranded 'discovered' files drain BY CONSTRUCTION).
-    // REQ-AXO-901906 — boot reset: any row left 'parsing' by a previous crash
-    // (indexer died mid-file) is reclaimed by promoting it straight back to
-    // 'discovered'. Re-processing is idempotent (A3 UPSERTs on content_hash).
-    // This one-shot sweep replaces the per-file lease/retry/dead-letter
-    // bookkeeping — "crash mid-file ⇒ reprocess at boot, no big deal".
-    match store.execute(
-        "UPDATE ist.IndexedFile SET status='discovered', lease_until_ms=0 WHERE status='parsing'",
-    ) {
-        Ok(()) => info!("pipeline_v2: boot reset — stranded 'parsing' rows reclaimed to 'discovered'"),
-        Err(e) => warn!(error = %e, "pipeline_v2: boot reset of 'parsing' rows failed (non-fatal)"),
-    }
-
-    let claim_batch = crate::pipeline_v2::demand_pull::dbq_a_claim_batch();
-    info!(
-        "pipeline_v2: pipeline A DB work-queue claim feeder active \
-         (claim_batch={claim_batch}) alongside the Watchman file source"
-    );
-    let metrics_a = crate::pipeline_v2::demand_pull::spawn_pipeline_a_claim_feeder(
-        resolve_database_url_for_listener(),
-        handles_a.input_tx.clone(),
-        claim_batch,
-    );
-    DEMAND_PULL_METRICS_A.store(
-        Arc::into_raw(metrics_a) as *mut _,
-        std::sync::atomic::Ordering::Release,
-    );
-
-    // REQ-AXO-901901 — DURABLE BOOTSTRAP + PERIODIC RECONCILIATION WALK.
-    //
-    // The LEGACY FEED PURGE (REQ-AXO-901893) removed the bootstrap scanner walk
-    // but left BOTH the comments above AND the DBQ-A design asserting a backlog
-    // "drained by construction" — while nothing populated it. Net effect (live
-    // incident, this session): discovery relied SOLELY on Watchman's fresh
-    // crawl, which under-delivers the cold-start bulk (5.3K of 18K eligible
-    // enrolled, then the pipeline went idle; `ist.IndexedFile(status=discovered)`
-    // stayed empty so the claim feeder had nothing to claim, and the ~12.7K
-    // un-delivered files were never re-offered because the per-root Watchman
-    // clock had already advanced).
-    //
-    // The scanner walk is the AUTHORITATIVE, PG-durable, restart-safe enrollment:
-    // it UPSERTs every eligible file as status='discovered' (idempotent — the
-    // persist_discovery_batch WHERE clause skips unchanged 'parsed' rows at zero
-    // WAL, and delete_stale only purges paths the FS confirms gone, REQ-AXO-901884).
-    // The DBQ-A claim feeder (spawned above) then drains that backlog by
-    // construction. Watchman stays the live-delta fast-path; this walk is the
-    // completeness + crash-recovery floor.
-    //
-    // GUI-PRO-106/107 class-level: a PERIODIC re-walk (not just boot) reconciles
-    // anything Watchman drops at runtime (inotify EMFILE, clock skew, a delta lost
-    // while the indexer was down) for ANY project, present or future — no manual
-    // rescan needed. Cheap when nothing changed (zero WAL). Tunable via
-    // AXON_RECONCILE_SWEEP_SECS (floor 30s, default 900s = 15 min).
+    // REQ-AXO-901916 (PIL-AXO-007) — DIRECT-STREAMING bootstrap + periodic
+    // reconciliation walk. Replaces the claim-feeder + status='discovered'
+    // machine ENTIRELY: the walk enumerates every eligible file and pushes its
+    // path STRAIGHT into pipeline A's bounded input_tx (backpressure =
+    // send().await), exactly like the Watchman delta feed. A1's level-1
+    // (mtime/size) pre-filter skips unchanged files with zero I/O; A3's
+    // content_hash UPSERT is idempotent — so a re-walk / restart re-processes
+    // only the delta, and a crash mid-parse is reprocessed on the next walk
+    // (no lease/retry bookkeeping needed). After each walk, delete_stale purges
+    // paths the FS confirms gone (last_seen_ms older than this walk + Path::exists
+    // re-check, scoped to the watch root — REQ-AXO-901831/901884). Watchman stays
+    // the live-delta fast-path; this walk is the completeness + recovery floor.
+    // Tunable: AXON_RECONCILE_SWEEP_SECS (floor 30s, default 900s).
     {
         let sweep_secs: u64 = std::env::var("AXON_RECONCILE_SWEEP_SECS")
             .ok()
@@ -487,31 +429,54 @@ pub fn spawn_pipeline_v2_indexer(
             .unwrap_or(900);
         let scanner_for_walk = scanner.clone();
         let store_for_walk = store.clone();
+        let walk_input_tx = handles_a.input_tx.clone();
+        let root_prefix = std::fs::canonicalize(&watch_root)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&watch_root))
+            .to_string_lossy()
+            .into_owned();
         info!(
-            "pipeline_v2: durable bootstrap + reconciliation walk active \
-             (sweep_secs={sweep_secs}) — scanner enrolls status='discovered', \
-             DBQ-A claim feeder drains (REQ-AXO-901901)"
+            "pipeline_v2: direct-streaming bootstrap + reconciliation walk active \
+             (sweep_secs={sweep_secs}) — enumerate → input_tx (PIL-AXO-007)"
         );
         tokio::spawn(async move {
             loop {
+                let walk_start_ms = chrono::Utc::now().timestamp_millis();
+                let started = std::time::Instant::now();
                 let scanner = scanner_for_walk.clone();
-                let store = store_for_walk.clone();
-                let walk = tokio::task::spawn_blocking(move || {
-                    let started = std::time::Instant::now();
-                    scanner.scan(store);
-                    started.elapsed()
+                let files = tokio::task::spawn_blocking(move || scanner.enumerate_files())
+                    .await
+                    .unwrap_or_default();
+                let total = files.len();
+                let mut pushed = 0usize;
+                for path in files {
+                    // Backpressure: send().await paces the walk to A1's drain rate.
+                    if walk_input_tx.send(path).await.is_err() {
+                        return; // pipeline shut down
+                    }
+                    pushed += 1;
+                }
+                info!(
+                    "pipeline_v2: reconciliation walk fed {pushed}/{total} paths to input_tx \
+                     in {:.1}s; next sweep in {sweep_secs}s",
+                    started.elapsed().as_secs_f64()
+                );
+                // Purge files deleted from disk since this walk started. The
+                // Path::exists() re-check inside delete_stale makes it
+                // non-destructive even while A3 is still draining the push above.
+                let store_for_stale = store_for_walk.clone();
+                let prefix = root_prefix.clone();
+                let purge = tokio::task::spawn_blocking(move || {
+                    store_for_stale.delete_stale_indexed_files(walk_start_ms, &prefix)
                 })
                 .await;
-                match walk {
-                    Ok(elapsed) => info!(
-                        "pipeline_v2: reconciliation walk complete in {:.1}s; \
-                         next sweep in {sweep_secs}s",
-                        elapsed.as_secs_f64()
+                match purge {
+                    Ok(Ok(deleted)) if !deleted.is_empty() => info!(
+                        "pipeline_v2: purged {} stale IndexedFile(s) (gone from disk)",
+                        deleted.len()
                     ),
-                    Err(err) => warn!(
-                        error = %err,
-                        "pipeline_v2: reconciliation walk task panicked; retrying after sweep interval"
-                    ),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = %e, "pipeline_v2: delete_stale failed (non-fatal)"),
+                    Err(e) => warn!(error = %e, "pipeline_v2: delete_stale task panicked"),
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)).await;
             }

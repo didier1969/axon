@@ -846,7 +846,7 @@ impl GraphStore {
     ) -> Result<Vec<String>> {
         let safe_prefix = root_prefix.replace('\'', "''");
         // REQ-AXO-901884 — NON-DESTRUCTIVE stale reconciliation. "Not re-stamped
-        // in this walk" (discovered_ms < scan_start_ms) is NOT proof a file is
+        // in this walk" (last_seen_ms < scan_start_ms) is NOT proof a file is
         // gone: a partial/interrupted walk — resource pressure, FS-watcher
         // EMFILE (inotify-instance exhaustion), or a mid-scan error — leaves
         // REAL files un-restamped. The old code DELETE…RETURNING'd them in one
@@ -855,9 +855,11 @@ impl GraphStore {
         // candidates, then purge ONLY the paths the FS confirms are actually
         // gone (`Path::exists() == false`). A missed-but-present file costs
         // freshness (re-stamped next walk), never data.
+        // PIL-AXO-007 — keyed on last_seen_ms (A3 re-stamps it on every UPSERT),
+        // since status='discovered'/discovered_ms were retired with the feeder.
         let raw = self.query_json_writer(&format!(
             "SELECT path FROM IndexedFile \
-             WHERE discovered_ms > 0 AND discovered_ms < {scan_start_ms} \
+             WHERE last_seen_ms < {scan_start_ms} \
                AND path LIKE '{safe_prefix}/%'"
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
