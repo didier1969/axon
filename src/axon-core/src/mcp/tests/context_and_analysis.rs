@@ -3235,6 +3235,12 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
 fn test_axon_audit_taint_analysis() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — audit/health readiness gate (file_count_for_project ->
+    // ist.project_telemetry.files_total) counts ENROLLED files via
+    // ist.Project x ist.IndexedFile. Seed the parent Project + IndexedFile
+    // rows (path = CONTAINS-edge source_id) so the project is indexed.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.rs', 'PRJ', 'hash-src/api.rs', 0), ('src/api_dummy.rs', 'PRJ', 'hash-src/api_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'PRJ', 'src/api.rs', 'hash-src/api.rs')")
@@ -3290,6 +3296,11 @@ fn test_axon_audit_taint_analysis() {
 fn test_axon_audit_technical_debt() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll the project so audit isn't gated as unindexed;
+    // IndexedFile.path must match the CONTAINS-edge source_id for
+    // get_technical_debt's IndexedFile JOIN.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/danger.rs', 'PRJ', 'hash-src/danger.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/danger.rs', 'symbol', 'sym-src/danger.rs', 'PRJ', 'src/danger.rs', 'hash-src/danger.rs')")
@@ -3334,6 +3345,10 @@ fn test_axon_audit_technical_debt() {
 fn test_axon_audit_technical_debt_comments() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll project + IndexedFile (path = CONTAINS source)
+    // so audit isn't gated and the tech-debt IndexedFile JOIN matches.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/todo.rs', 'PRJ', 'hash-src/todo.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/todo.rs', 'symbol', 'sym-src/todo.rs', 'PRJ', 'src/todo.rs', 'hash-src/todo.rs')")
@@ -3375,6 +3390,10 @@ fn test_axon_audit_technical_debt_comments() {
 fn test_axon_audit_secrets_detection() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll project + IndexedFile (path = CONTAINS source)
+    // so audit isn't gated and the secrets tech-debt JOIN matches.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/config.rs', 'PRJ', 'hash-src/config.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/config.rs', 'symbol', 'sym-src/config.rs', 'PRJ', 'src/config.rs', 'hash-src/config.rs')")
@@ -3414,6 +3433,10 @@ fn test_axon_audit_secrets_detection() {
 fn test_axon_audit_cross_language_taint() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll project + IndexedFile rows so audit isn't gated
+    // as unindexed (taint findings derive from Symbol+Edge once past the gate).
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.ex', 'PRJ', 'hash-src/api.ex', 0), ('src/api_dummy.ex', 'PRJ', 'hash-src/api_dummy.ex', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.ex', 'symbol', 'sym-src/api.ex', 'PRJ', 'src/api.ex', 'hash-src/api.ex')")
@@ -3468,6 +3491,10 @@ fn test_axon_audit_cross_language_taint() {
 fn test_axon_health_god_objects() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll project + IndexedFile so health isn't gated as
+    // unindexed; god-objects then surface via get_god_objects (project=*).
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/god.rs', 'PRJ', 'hash-src/god.rs', 0), ('src/god_dummy.rs', 'PRJ', 'hash-src/god_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/god.rs', 'symbol', 'sym-src/god.rs', 'PRJ', 'src/god.rs', 'hash-src/god.rs')")
@@ -3519,6 +3546,11 @@ fn test_axon_health_god_objects() {
 fn test_axon_audit_respects_project_scope() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll both projects + their IndexedFile rows so the
+    // scoped audit (project=PJA) isn't gated as unindexed.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/input.rs', 'PJA', 'hash-apps/pja/lib/input.rs', 0), ('apps/pjb/lib/unsafe.rs', 'PJB', 'hash-apps/pjb/lib/unsafe.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/input.rs', 'symbol', 'sym-apps/pja/lib/input.rs', 'PJA', 'apps/pja/lib/input.rs', 'hash-apps/pja/lib/input.rs')")
@@ -3575,6 +3607,11 @@ fn test_axon_audit_respects_project_scope() {
 fn test_axon_health_respects_project_scope() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
+    // REQ-AXO-901860 — enroll both projects + their IndexedFile rows so the
+    // scoped health (project=PJA) isn't gated as unindexed.
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/covered.rs', 'PJA', 'hash-apps/pja/lib/covered.rs', 0), ('apps/pjb/lib/god.rs', 'PJB', 'hash-apps/pjb/lib/god.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-apps/pja/lib/covered.rs', 'symbol', 'sym-apps/pja/lib/covered.rs', 'PJA', 'apps/pja/lib/covered.rs', 'hash-apps/pja/lib/covered.rs')")

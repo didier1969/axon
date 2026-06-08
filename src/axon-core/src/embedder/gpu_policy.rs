@@ -22,9 +22,14 @@ pub fn current_gpu_memory_pressure_active() -> bool {
 }
 
 pub(super) fn embedding_provider_requested_is_gpu() -> bool {
-    canonical_embedding_provider_request_for_mode(
+    // REQ-AXO-901737: the canonical provider request only ever emits `cpu`
+    // or `tensorrt` (legacy `cuda` is normalised to `tensorrt`). The GPU
+    // request token is therefore `tensorrt`, matching derive_effective_label's
+    // GPU set; we keep `cuda` for defence-in-depth even though it is normalised
+    // away upstream.
+    let canonical = canonical_embedding_provider_request_for_mode(
         AxonRuntimeMode::from_env(),
         RuntimeProfile::detect().gpu_present,
-    )
-    .eq_ignore_ascii_case("cuda")
+    );
+    canonical.eq_ignore_ascii_case("tensorrt") || canonical.eq_ignore_ascii_case("cuda")
 }

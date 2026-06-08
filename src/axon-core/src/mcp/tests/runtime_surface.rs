@@ -2215,15 +2215,21 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .result
         .unwrap();
     let degraded_but_fresh_data = degraded_but_fresh.get("data").unwrap();
+    // REQ-AXO-901859 — indexer_feed derives SOLELY from the PG
+    // EmbedderLifecycleHeartbeat (single source of truth, no bridge/file
+    // fallback). With no heartbeat row present, the canonical liveness
+    // verdict is heartbeat-absent: state == "stale", stale == true ("not
+    // provably alive — say so loudly"). The runtime-truth-bridge feed set
+    // above drives truth_status / degraded_notes, asserted below.
     assert_eq!(
         degraded_but_fresh_data["runtime_authority"]["runtime_state"]["indexer_feed"]["state"]
             .as_str(),
-        Some("degraded")
+        Some("stale")
     );
     assert_eq!(
         degraded_but_fresh_data["runtime_authority"]["runtime_state"]["indexer_feed"]["stale"]
             .as_bool(),
-        Some(false)
+        Some(true)
     );
     assert_eq!(
         degraded_but_fresh_data["runtime_authority"]["runtime_state"]["system_converged"].as_bool(),
@@ -2233,11 +2239,17 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         degraded_but_fresh_data["truth_status"].as_str(),
         Some("degraded")
     );
+    // REQ-AXO-901859 — with the indexer_feed deriving SOLELY from the PG
+    // EmbedderLifecycleHeartbeat and no heartbeat row present, the canonical
+    // degraded note for the feed is `indexer_heartbeat_absent` (the reason
+    // carried through tools_framework_runtime_status::degraded_notes). The
+    // superseded bridge-fed note `indexer_feed_partial_runtime_truth` no
+    // longer exists in the product (single-source-of-truth re-canonicalization).
     assert!(degraded_but_fresh_data["availability"]["degraded_notes"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|value| value.as_str() == Some("indexer_feed_partial_runtime_truth")));
+        .any(|value| value.as_str() == Some("indexer_heartbeat_absent")));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");

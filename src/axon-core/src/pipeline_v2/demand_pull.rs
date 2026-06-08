@@ -1023,6 +1023,10 @@ mod tests {
             crate::tests::test_helpers::create_test_db().unwrap(),
         );
         let now = now_ms();
+        // REQ-AXO-901877 — shared per-process clone: scrub any residual rows we
+        // own (left by a prior panicked run) before seeding so the claim/idempotency
+        // assertions below see only this test's /tmp/dbq_a/ rows.
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/dbq_a/%'");
         // Seed four rows with distinct lifecycle states (all project AXO).
         // 1. discovered           → claimable
         // 2. stale-lease parsing  → claimable (crash recovery)
@@ -1047,6 +1051,10 @@ mod tests {
         let mut claimed: Vec<String> = rows
             .iter()
             .filter_map(|r| r.first()?.as_str().map(str::to_string))
+            // Scope to this test's own prefix: the claim query (correctly) claims
+            // EVERY claimable path, so on the shared clone a sibling row could leak
+            // in. Our invariant is about /tmp/dbq_a/ rows only.
+            .filter(|p| p.starts_with("/tmp/dbq_a/"))
             .collect();
         claimed.sort();
         assert_eq!(
@@ -1060,9 +1068,14 @@ mod tests {
         // same `now` returns NOTHING — no double-feed.
         let raw2 = store.query_json_writer(&build_claim_sql(now, 60_000, 3, 256)).unwrap();
         let rows2: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw2).unwrap_or_default();
+        let reclaimed_own: Vec<String> = rows2
+            .iter()
+            .filter_map(|r| r.first()?.as_str().map(str::to_string))
+            .filter(|p| p.starts_with("/tmp/dbq_a/"))
+            .collect();
         assert!(
-            rows2.is_empty(),
-            "re-claim with same now must be a no-op (rows hold a fresh lease) — idempotent"
+            reclaimed_own.is_empty(),
+            "re-claim with same now must be a no-op for our rows (fresh lease) — idempotent; got {reclaimed_own:?}"
         );
 
         // Cleanup (shared template clone is per-process; keep it tidy).

@@ -273,8 +273,17 @@ impl McpServer {
         } else {
             format!(" WHERE project_code = '{}'", project.replace('\'', "''"))
         };
+        // REQ-AXO-901905 — cast the aggregate to BIGINT. PG `SUM(bigint)`
+        // returns `numeric`, which the SQL-gateway value renderer
+        // (postgres/native.rs render_pg_value) does NOT decode (no decimal
+        // crate) → it emits the sentinel string "<unsupported type numeric>",
+        // which json_to_i64 cannot parse → the count silently collapsed to 0,
+        // so EVERY audit/health call was gated as "unindexed" regardless of
+        // real enrollment. The ::BIGINT cast renders as INT8 (a plain integer)
+        // and counts correctly. (The broader gateway numeric-render gap is
+        // tracked separately for a class-level renderer fix.)
         let query = format!(
-            "SELECT COALESCE(SUM(files_total), 0) FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM ist.project_telemetry{}",
             where_project
         );
 

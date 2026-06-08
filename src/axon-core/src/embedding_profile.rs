@@ -333,6 +333,9 @@ mod tests {
 
     #[test]
     fn runtime_chunk_profile_defaults_from_model_cap() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("AXON_EMBED_MAX_LENGTH");
             std::env::remove_var("AXON_TARGET_CHUNK_TOKENS");

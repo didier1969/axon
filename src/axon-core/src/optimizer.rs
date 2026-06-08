@@ -1973,6 +1973,12 @@ mod tests {
         // single PG writer pool (MVCC). Was previously gated on a stale reader
         // snapshot that no longer exists.
         let store = create_test_db().unwrap();
+        // REQ-AXO-901877 — shared per-process clone: own only this row id and scope
+        // the canonical-count to it. Scrub any residual from a prior panicked run.
+        let _ = store.execute(
+            "DELETE FROM ChunkEmbedding WHERE chunk_id = 'chunk-stale-canonical'",
+        );
+        let _ = store.execute("DELETE FROM Chunk WHERE id = 'chunk-stale-canonical'");
         store
             .execute(&format!(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
@@ -1990,7 +1996,7 @@ mod tests {
         let count = super::canonical_count(
             &store,
             &format!(
-                "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'",
+                "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}' AND chunk_id = 'chunk-stale-canonical'",
                 CHUNK_MODEL_ID
             ),
         );

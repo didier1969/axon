@@ -2427,14 +2427,14 @@ fn test_axon_restore_soll() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Pillar'")
+            .query_count("SELECT count(*) FROM soll.Node WHERE type='Pillar' AND project_code='AXO'")
             .unwrap(),
         1
     );
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Concept'")
+            .query_count("SELECT count(*) FROM soll.Node WHERE type='Concept' AND project_code='AXO'")
             .unwrap(),
         1
     );
@@ -2455,7 +2455,7 @@ fn test_axon_restore_soll() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Decision'")
+            .query_count("SELECT count(*) FROM soll.Node WHERE type='Decision' AND project_code='AXO'")
             .unwrap(),
         1
     );
@@ -3866,7 +3866,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_export",
-            "arguments": {}
+            "arguments": { "project_code": code }
         })),
         id: Some(json!(200)),
     };
@@ -3925,10 +3925,17 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     assert!(restore_text.contains("Decisions: 1"));
     assert!(restore_text.contains("Validations: 1"));
 
+    // The restore path canonicalises the Vision to the singleton
+    // `VIS-AXO-001` under project_code='AXO' (axon_restore_soll,
+    // tools_soll/operations.rs:640) regardless of the export's namespace —
+    // there is exactly ONE canonical SOLL Vision by design (Vision creation is
+    // forbidden outside axon_init_project, see soll_manager contract). So the
+    // restored Vision is asserted under 'AXO', while every other entity
+    // round-trips under the per-test `{code}`.
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Vision' AND project_code='{code}'"))
+            .query_count("SELECT count(*) FROM soll.Node WHERE type='Vision' AND project_code='AXO'")
             .unwrap(),
         1
     );
@@ -5378,37 +5385,43 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
 #[test]
 fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_complete() {
     let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let pil_id = format!("PIL-{code}-001");
+    let req_id = format!("REQ-{code}-001");
+    let dec_id = format!("DEC-{code}-001");
+    let val_id = format!("VAL-{code}-001");
+    let trc_id = format!("TRC-{code}-001");
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Core pillar', '', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pil_id}', 'Pillar', '{code}', 'Core pillar', '', 'current', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Healthy requirement', '', 'current', '{\"acceptance_criteria\":\"done\"}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Healthy requirement', '', 'current', '{{\"acceptance_criteria\":\"done\"}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Healthy decision', '', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_id}', 'Decision', '{code}', 'Healthy decision', '', 'current', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'Healthy validation', '', 'delivered', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{val_id}', 'Validation', '{code}', 'Healthy validation', '', 'delivered', '{{}}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('{req_id}', '{pil_id}', 'BELONGS_TO', '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('{dec_id}', '{req_id}', 'SOLVES', '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('VAL-AXO-001', 'REQ-AXO-001', 'VERIFIES')")
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('{val_id}', '{req_id}', 'VERIFIES', '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-001', 'requirement', 'REQ-AXO-001', 'Symbol', 'healthy_requirement', 1.0, 0)")
+        .execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('{trc_id}', 'requirement', '{req_id}', 'Symbol', 'healthy_requirement', 1.0, 0)"))
         .unwrap();
 
     let result = server
@@ -5417,7 +5430,7 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "anomalies",
-                "arguments": { "project": "AXO", "mode": "brief" }
+                "arguments": { "project": code, "mode": "brief" }
             })),
             id: Some(json!(4113)),
         })

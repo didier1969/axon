@@ -1478,12 +1478,11 @@ mod tests {
         memory_limit_bytes, memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes,
         optimizer_loop_interval_ms, should_attempt_memory_reclaim,
     };
-    use std::sync::Mutex;
-
-    static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
+    use crate::test_support::env_test_lock;
 
     #[test]
     fn test_memory_limit_uses_default_when_env_missing() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("AXON_MEMORY_LIMIT_GB");
         }
@@ -1492,6 +1491,7 @@ mod tests {
 
     #[test]
     fn test_memory_limit_uses_env_when_valid() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_MEMORY_LIMIT_GB", "10");
         }
@@ -1503,7 +1503,13 @@ mod tests {
 
     #[test]
     fn test_optimizer_loop_interval_defaults_to_15_seconds() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // `optimizer_loop_interval_ms` multiplies the base by the quiescent
+        // scale (×4 default), which only applies when the runtime is QUIESCENT.
+        // Prior tests in the same process leave service_guard's global activity
+        // gauges non-zero → non-quiescent → no scale → 15_000 instead of 60_000.
+        // Reset to force a deterministic quiescent verdict.
+        crate::service_guard::reset_for_tests();
         unsafe {
             std::env::remove_var("AXON_OPT_LOOP_INTERVAL_MS");
             std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
@@ -1513,7 +1519,9 @@ mod tests {
 
     #[test]
     fn test_optimizer_loop_interval_respects_env_override() {
-        let _guard = ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // See sibling test: force quiescent so the ×4 scale applies deterministically.
+        crate::service_guard::reset_for_tests();
         unsafe {
             std::env::set_var("AXON_OPT_LOOP_INTERVAL_MS", "30000");
             std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
@@ -1526,6 +1534,7 @@ mod tests {
 
     #[test]
     fn test_shadow_optimizer_disabled_by_default() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("AXON_ENABLE_SHADOW_OPTIMIZER");
         }
@@ -1534,6 +1543,7 @@ mod tests {
 
     #[test]
     fn test_shadow_optimizer_enabled_via_env() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_ENABLE_SHADOW_OPTIMIZER", "true");
         }
@@ -1545,6 +1555,7 @@ mod tests {
 
     #[test]
     fn test_memory_reclaimer_can_be_disabled_with_env() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_ENABLE_MEMORY_RECLAIMER", "false");
         }
@@ -1556,6 +1567,7 @@ mod tests {
 
     #[test]
     fn test_memory_reclaimer_min_anon_bytes_uses_env_override() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB", "2048");
         }

@@ -412,7 +412,7 @@ impl GraphStore {
                 preview_id,
                 COALESCE(author, ''),
                 COALESCE(NULLIF(TRIM(project_code), ''), ''),
-                COALESCE(payload, ''),
+                COALESCE(payload::text, ''),
                 COALESCE(created_at, 0)
              FROM soll.RevisionPreview
              ORDER BY created_at ASC, preview_id ASC",
@@ -1175,11 +1175,28 @@ mod graph_bootstrap_tests {
 
         let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
         assert!(!indexer.soll_attached);
+        // REQ-AXO-901860 — ist.IndexedFile.project_code is a NOT NULL FK to
+        // ist.Project; seed the parent row + an explicit project_code (the
+        // legacy seed omitted both and broke post-901860).
         indexer
             .execute(
-                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms)
-                 VALUES ('/tmp/indexer.txt', 'hash-indexer', 1)",
+                "INSERT INTO ist.Project (code) VALUES ('AXO') ON CONFLICT (code) DO NOTHING",
             )
+            .unwrap();
+        // The production constructors above resolve to the process-shared test
+        // DB (env override), so a hard-coded path collides across the parallel
+        // suite (the row persists once any sibling-ordering inserts it → PK
+        // violation). Derive the path from this test's unique `db_root` tempdir
+        // and make the write idempotent so it exercises the indexer write path
+        // (the point of the test: indexer can write IST while brain holds the
+        // SOLL writer) without depending on shared-DB cleanliness.
+        let indexer_file = format!("{db_root_str}/indexer.txt");
+        indexer
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms)
+                 VALUES ('{indexer_file}', 'AXO', 'hash-indexer', 1)
+                 ON CONFLICT (path) DO NOTHING",
+            ))
             .unwrap();
         // REQ-AXO-901870 — brain + indexer coexist on the shared PG writer
         // pool (MVCC handles concurrency); the DuckDB reader-replica file
@@ -1298,20 +1315,20 @@ mod graph_bootstrap_tests {
         // Composite indexes from REQ-AXO-066 Phase 1 are registered by bootstrap.
         let raw = store
             .query_json(
-                "SELECT index_name FROM duckdb_indexes()
-                 WHERE schema_name = 'main'
-                   AND index_name IN (
-                       'soll_node_project_id_idx',
+                "SELECT indexname FROM pg_indexes
+                 WHERE schemaname IN ('soll', 'ist')
+                   AND indexname IN (
+                       'soll_node_project_idx',
                        'soll_edge_project_source_idx',
                        'soll_edge_project_target_idx',
-                       'soll_mcp_job_project_status_idx',
+                       'soll_mcp_job_project_idx',
                        'soll_revision_project_idx',
                        'soll_revision_change_project_idx',
-                       'symbol_project_id_idx',
-                       'calls_project_source_idx',
-                       'file_project_path_idx'
+                       'symbol_project_kind_idx',
+                       'edge_proj_idx',
+                       'idx_indexedfile_project_status'
                    )
-                 ORDER BY index_name",
+                 ORDER BY indexname",
             )
             .unwrap();
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap();
@@ -1320,15 +1337,15 @@ mod graph_bootstrap_tests {
             .filter_map(|row| row.into_iter().next())
             .collect();
         for expected in [
-            "calls_project_source_idx",
-            "file_project_path_idx",
+            "edge_proj_idx",
+            "idx_indexedfile_project_status",
             "soll_edge_project_source_idx",
             "soll_edge_project_target_idx",
-            "soll_mcp_job_project_status_idx",
-            "soll_node_project_id_idx",
+            "soll_mcp_job_project_idx",
+            "soll_node_project_idx",
             "soll_revision_change_project_idx",
             "soll_revision_project_idx",
-            "symbol_project_id_idx",
+            "symbol_project_kind_idx",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

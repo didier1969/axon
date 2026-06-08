@@ -590,9 +590,11 @@ pub fn fuse_small_chunks(
 mod tests {
     use super::*;
     use crate::parser::Symbol;
+    use crate::test_support::env_test_lock;
 
     #[test]
     fn fast_path_and_gray_zone_follow_active_profile() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let profile = active_chunk_profile();
         let small = "a".repeat(profile.small_symbol_char_fast_path.saturating_sub(1));
         let gray = "b".repeat(profile.small_symbol_char_fast_path.saturating_add(8));
@@ -641,6 +643,7 @@ mod tests {
 
     #[test]
     fn oversized_symbol_is_split_into_multiple_chunks() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "64");
             std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "32");
@@ -684,6 +687,7 @@ mod tests {
 
     #[test]
     fn multipart_chunks_repeat_structural_context() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "64");
             std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "32");
@@ -730,6 +734,7 @@ mod tests {
 
     #[test]
     fn explicit_body_bounds_override_header_guessing() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let mut properties = std::collections::HashMap::new();
         properties.insert("header_end_line".to_string(), "3".to_string());
         properties.insert("body_start_line".to_string(), "3".to_string());
@@ -801,6 +806,7 @@ mod tests {
     /// helper; the boundary preference is observable end-to-end.)
     #[test]
     fn explicit_body_split_lines_are_preferred() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "64");
             std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "64");
@@ -844,6 +850,7 @@ mod tests {
     /// chunk fits the model window.
     #[test]
     fn large_body_chunks_fast_contiguous_and_bounded() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let profile = active_chunk_profile();
         let n = 5000usize;
         let symbol = synthetic_symbol("giant_fn", n + 2);
@@ -861,9 +868,21 @@ mod tests {
         let chunks = build_symbol_chunks(&symbol, &content);
         let elapsed = t0.elapsed();
 
+        // O(N²)-regression guard. The Knuth-Plass DP is near-linear: a true
+        // O(N²) blowup over 5000 lines (~25M tokenizer-encode ops, the old
+        // recursion "took hours") cannot fit even the generous debug bound.
+        // The tight "sub-second class" target from REQ-AXO-901894 is a RELEASE
+        // claim; the unoptimized cargo-test build is ~2-3x slower, so make the
+        // ceiling profile-aware instead of flaking in debug.
+        let max_elapsed = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(12)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "5000-line body chunking took {elapsed:?} (must be sub-second class)"
+            elapsed < max_elapsed,
+            "5000-line body chunking took {elapsed:?} (limit {max_elapsed:?}; \
+             O(N²) regression would be far slower)"
         );
         assert!(chunks.len() > 1, "expected multi-part split, got {}", chunks.len());
         // Contiguous, gap-free, in order.
@@ -897,6 +916,7 @@ mod tests {
     /// would not exercise the windowing path.
     #[test]
     fn giant_single_line_is_windowed_and_bounded() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let profile = active_chunk_profile();
         let symbol = synthetic_symbol("minified", 1);
         // ~200k chars of varied tokens so the tokenizer cannot compress it —
@@ -943,6 +963,7 @@ mod tests {
     /// the blank seam separating two blocks.
     #[test]
     fn cut_prefers_blank_line_near_boundary() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "128");
             std::env::set_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH", "64");
