@@ -600,6 +600,65 @@ pub fn is_minified(content: &str, max_line_bytes: usize) -> bool {
     content.lines().any(|line| line.len() > max_line_bytes)
 }
 
+/// REQ-AXO-901920 — true when a path is a GENERATED file carrying a code
+/// extension (so a parser claims it) but ~nil hand-authored retrieval value:
+/// protobuf/gRPC stubs, framework codegen, minified bundles, source maps,
+/// lockfiles. These slip the directory deny-list (DIRECTORY_RULES, which targets
+/// generated DIRECTORIES) and the single-line minified guard (multi-line
+/// generated content has normal line lengths). Parsing + chunking them is wasted
+/// CPU and embedding noise — and a large multi-line generated file is exactly
+/// the kind of pathological input that can spin tree-sitter / leave a
+/// spawn_blocking orphan (REQ-AXO-901918). Name-based only: deterministic, zero
+/// false positives on hand-written source. Single source of truth (GUI-PRO-013).
+pub fn is_generated_code_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+
+    // Exact generated lockfiles whose extension a parser might claim.
+    const EXACT: &[&str] = &[
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "composer.lock",
+        "cargo.lock",
+        "poetry.lock",
+        "go.sum",
+    ];
+    if EXACT.contains(&lower.as_str()) {
+        return true;
+    }
+
+    // Generated-file suffix signatures (checked on the lowercased file name).
+    const SUFFIXES: &[&str] = &[
+        ".pb.go",
+        ".pb.cc",
+        ".pb.h",
+        "_pb2.py",
+        "_pb2_grpc.py",
+        ".pb.dart",
+        ".pbgrpc.dart",
+        ".g.dart",
+        ".freezed.dart",
+        ".generated.ts",
+        ".generated.js",
+        ".gen.go",
+        ".gen.ts",
+        ".designer.cs",
+        ".g.cs",
+        ".g.i.cs",
+        ".min.js",
+        ".min.css",
+        ".min.mjs",
+        ".bundle.js",
+        ".chunk.js",
+        ".js.map",
+        ".css.map",
+        ".ts.map",
+    ];
+    SUFFIXES.iter().any(|suf| lower.ends_with(suf))
+}
+
 fn classify_internal(
     root: &Path,
     path: &Path,
@@ -1036,6 +1095,46 @@ mod tests {
         let minified = format!("var d={{{}}};", "k:1,".repeat(5000));
         assert!(super::is_minified(&minified, super::MAX_LINE_BYTES_DEFAULT));
         assert_eq!(super::MAX_PARSE_BYTES_DEFAULT, 5 * 1024 * 1024);
+    }
+
+    /// REQ-AXO-901920 — generated code-extension files are flagged by name;
+    /// hand-written source (incl. names that merely CONTAIN a fragment) is not.
+    #[test]
+    fn generated_code_file_detection_is_name_based_and_precise() {
+        use super::is_generated_code_file;
+        for generated in [
+            "/p/api/foo.pb.go",
+            "/p/foo_pb2.py",
+            "/p/foo_pb2_grpc.py",
+            "/p/models.g.dart",
+            "/p/widget.freezed.dart",
+            "/p/schema.generated.ts",
+            "/p/Form.Designer.cs",
+            "/p/vendor/app.min.js",
+            "/p/dist/app.bundle.js",
+            "/p/static/app.js.map",
+            "/p/Cargo.lock",
+            "/p/package-lock.json",
+            "/p/go.sum",
+        ] {
+            assert!(
+                is_generated_code_file(Path::new(generated)),
+                "should flag generated file: {generated}"
+            );
+        }
+        for hand_written in [
+            "/p/src/main.rs",
+            "/p/lib/parser.go",          // not *.pb.go
+            "/p/app/models.py",          // not *_pb2.py
+            "/p/min.js",                 // not *.min.js (no dot-prefix)
+            "/p/generated_helpers.ts",   // not *.generated.ts
+            "/p/cargo_lock_notes.md",
+        ] {
+            assert!(
+                !is_generated_code_file(Path::new(hand_written)),
+                "must NOT flag hand-written source: {hand_written}"
+            );
+        }
     }
 
     /// REQ-AXO-901895 — Playwright/test-runner output trees are SoftExcluded

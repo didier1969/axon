@@ -110,6 +110,29 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         });
     }
 
+    // REQ-AXO-901920 — generated code-extension files (protobuf/gRPC stubs,
+    // framework codegen, minified bundles, source maps, lockfiles) carry a
+    // parser-claimed extension but ~nil hand-authored value; parsing + chunking
+    // them is wasted CPU + embedding noise, and a large generated file is prime
+    // tree-sitter-spin / spawn_blocking-orphan fuel (REQ-AXO-901918). Skip with
+    // the real content hash (edit re-evaluates) and empty content → A2 zero-symbol.
+    if crate::indexing_policy::is_generated_code_file(&path) {
+        let content_hash = sha256_hex(&content);
+        info!(
+            target: "pipeline_v2::a1",
+            "A1 skip: {} reason=generated size={}",
+            path.display(),
+            size_bytes
+        );
+        return Ok(PreparedFile {
+            path,
+            content: String::new(),
+            content_hash,
+            mtime_ms,
+            size_bytes,
+        });
+    }
+
     let content_hash = sha256_hex(&content);
     info!(
         target: "pipeline_v2::a1",
