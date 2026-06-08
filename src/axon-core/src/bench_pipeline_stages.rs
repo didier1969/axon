@@ -125,7 +125,7 @@ pub fn run_graph_projection_bench(
 /// extension is supported by `parser::get_parser_for_file`. Skips
 /// hidden directories (`.git`, `.axon`, `node_modules`, `target`,
 /// etc.) to mirror the watcher policy.
-pub(crate) fn collect_supported_files(
+pub fn collect_supported_files(
     dir: &Path,
     max_files: usize,
 ) -> anyhow::Result<Vec<PathBuf>> {

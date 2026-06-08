@@ -39,6 +39,68 @@ fn estimated_token_count(content: &str) -> usize {
     measured_symbol_token_count(content).unwrap_or_else(|| fallback_estimated_token_count(content))
 }
 
+/// REQ-AXO-901902/901906 — bytes above which the keep-single check refuses the
+/// precise full-content tokenizer encode. `tokenizer.encode` pre-tokenizes the
+/// ENTIRE body before truncation, so its cost scales with body size: on a
+/// whole-file `document_body` symbol (TextParser on a 644 KB `LOG.txt`) the
+/// single keep-single encode spun >90 s — *before* the `chunk_budget_ms`
+/// deadline was even armed, so no downstream defense could interrupt it
+/// (proven by `axon-diag-chunk-spin`). A body past this ceiling is provably
+/// multi-chunk for any sane target (32 KiB ⇒ ~8k tokens ≫ `target_chunk_tokens`),
+/// so we split it via the cheap byte estimate. Encodes up to the ceiling are
+/// sub-10 ms, so exact keep-single behavior is preserved for every real symbol.
+const MAX_PRECISE_ENCODE_BYTES: usize = 32 * 1024;
+
+/// REQ-AXO-901902/901906 — maximum number of emitted chunks for which
+/// `build_symbol_chunks` still computes a precise per-chunk `estimated_token_count`
+/// (full tokenizer encode). Each encode is ~ms; a body fanning out into
+/// thousands of chunks (giant-line fallback on a log, or a huge DP split) would
+/// run thousands of un-budgeted encodes in the emission loop — the spin proven
+/// on a 644 KB `LOG.txt` (~4.5k segments ⇒ >40 s, deadline-uncovered). Past the
+/// cap the bodies are degenerate (data/log/minified) and the byte estimate is
+/// sufficient. ~256 precise encodes stay well under the chunk wall-clock budget.
+const MAX_PRECISE_ENCODE_CHUNKS: usize = 256;
+
+/// Conservative chars-per-token proxy for byte-based chunk sizing on the
+/// degenerate fast path (BGE on source/log text rarely exceeds ~4 chars/token).
+const SAFE_CHARS_PER_TOKEN: usize = 4;
+
+/// REQ-AXO-901902/901906 — body byte length above which `build_symbol_chunks`
+/// abandons the precise code-oriented path entirely (see
+/// [`coarse_byte_window_chunks`]). A body this large cannot fit
+/// `MAX_PRECISE_ENCODE_CHUNKS` model-window chunks, so it is provably degenerate
+/// — a whole-file `document_body` text symbol, a giant log, generated data. The
+/// precise path would touch the tokenizer on huge content at several sites (the
+/// keep-single encode, the per-line DP cost loop, the per-chunk emission) and
+/// collapse `body_budget` to its floor, fanning out into tens of thousands of
+/// micro-chunks. Threshold = `MAX_PRECISE_ENCODE_CHUNKS` × a model window ×
+/// `SAFE_CHARS_PER_TOKEN` (≈ 512 KiB): a body that cannot fit even 256 full
+/// model-window chunks is not worth (or safe for) precise per-symbol chunking.
+/// Real code symbols — even a 5 000-line function — sit below this and keep
+/// precise chunking.
+const DEGENERATE_BODY_BYTES: usize = 512 * 1024;
+
+/// REQ-AXO-901902/901906 — cap on the `repeated_context` prepended to EVERY
+/// emitted chunk. A context larger than this is both useless (it would alone
+/// overflow the model window) and a per-chunk encode hazard: a `document_body`
+/// whose header heuristic swallowed most of the file made the overhead encode
+/// run on hundreds of KB. Real structural headers (a function signature, a class
+/// preamble) are well under this; only a degenerate "header" is truncated.
+const MAX_REPEATED_CONTEXT_CHARS: usize = 8 * 1024;
+
+/// Token estimate for the *single-chunk keep/split* decision that NEVER feeds an
+/// arbitrarily large body to the tokenizer (see [`MAX_PRECISE_ENCODE_BYTES`]).
+/// Past the ceiling we floor the byte estimate at `target_chunk_tokens + 1` so a
+/// token-dense body (`chars/3` can *undershoot* real tokens) is never mis-kept
+/// as a single oversized chunk — past the ceiling the answer is always "split".
+fn single_chunk_token_estimate(profile: EmbeddingChunkProfile, content: &str) -> usize {
+    if content.len() > MAX_PRECISE_ENCODE_BYTES {
+        fallback_estimated_token_count(content).max(profile.target_chunk_tokens + 1)
+    } else {
+        estimated_token_count(content)
+    }
+}
+
 fn parse_property_usize(symbol: &Symbol, key: &str) -> Option<usize> {
     symbol.properties.get(key)?.parse::<usize>().ok()
 }
@@ -345,6 +407,16 @@ fn dp_segment_body(
     dp[0] = 0.0;
 
     for e in 1..=n {
+        // REQ-AXO-901906 — defense-in-depth: the DP itself is checked against
+        // the wall-clock deadline (the per-line cost loop above already is). A
+        // pathological line-cost distribution could otherwise spin the inner
+        // window scan with no bail. Cheap fixed line-windows on overrun.
+        if e % 4096 == 0 && std::time::Instant::now() >= deadline {
+            return (
+                cheap_line_window_segments(body_start, body_end, CHEAP_WINDOW_LINES),
+                true,
+            );
+        }
         // Scan candidate segment starts s from e-1 downward; stop when the
         // window [s, e) exceeds budget (cost is monotone non-decreasing as s
         // shrinks, so the first overflow ends the feasible window).
@@ -435,11 +507,91 @@ fn split_giant_lines(
     segments
 }
 
+/// REQ-AXO-901902/901906 — degenerate-body fast path. Splits `[start, end)` into
+/// at most `MAX_PRECISE_ENCODE_CHUNKS` contiguous, gap-free coarse byte-windows
+/// with byte-based token estimates and NO tokenizer encode, NO Knuth-Plass DP,
+/// NO repeated structural context. Used for bodies past `DEGENERATE_BODY_BYTES`
+/// (whole-file text/log/data symbols) whose per-symbol retrieval value is ~nil
+/// and whose precise chunking spins the tokenizer for minutes.
+fn coarse_byte_window_chunks(
+    symbol: &Symbol,
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    profile: EmbeddingChunkProfile,
+) -> Vec<DerivedCodeChunk> {
+    if start >= end {
+        return Vec::new();
+    }
+    let body_bytes: usize = lines[start..end].iter().map(|l| l.len() + 1).sum();
+    // Target ~one model window of bytes per chunk, but never exceed the cap.
+    let by_window = profile
+        .target_chunk_tokens
+        .saturating_mul(SAFE_CHARS_PER_TOKEN)
+        .max(1);
+    let by_cap = body_bytes.div_ceil(MAX_PRECISE_ENCODE_CHUNKS).max(1);
+    let bytes_per_chunk = by_window.max(by_cap);
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = start;
+    let mut acc = 0usize;
+    for cursor in start..end {
+        acc += lines[cursor].len() + 1;
+        if acc >= bytes_per_chunk {
+            ranges.push((seg_start, cursor + 1));
+            seg_start = cursor + 1;
+            acc = 0;
+        }
+    }
+    if seg_start < end {
+        ranges.push((seg_start, end));
+    }
+    if ranges.is_empty() {
+        ranges.push((start, end));
+    }
+
+    let part_count = ranges.len();
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(i, (s, e))| {
+            let part_index = i + 1;
+            let snippet = lines[s..e].join("\n");
+            let content = format_chunk_content(symbol, "", &snippet, part_index, part_count);
+            DerivedCodeChunk {
+                estimated_tokens: fallback_estimated_token_count(&content),
+                content,
+                part_index,
+                part_count,
+                chunk_path: format!("{}/{}", part_index, part_count),
+                start_line: s + 1,
+                end_line: e,
+            }
+        })
+        .collect()
+}
+
 pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCodeChunk> {
     let profile = active_chunk_profile();
     let lines: Vec<&str> = file_content.lines().collect();
     let start = symbol.start_line.saturating_sub(1).min(lines.len());
     let end = symbol.end_line.min(lines.len()).max(start);
+
+    // REQ-AXO-901902/901906 — DEGENERATE-BODY FAST PATH (root fix). Short-circuit
+    // BEFORE building any large intermediate string (snippet/repeated_context)
+    // or touching the tokenizer. A 644 KB `LOG.txt` `document_body` symbol drove
+    // every precise-path encode site on huge content (>90 s) and collapsed
+    // `body_budget` to its floor (28 769 micro-chunks, then `fuse_small_chunks`
+    // choked). Coarse byte-windows bound BOTH time and fan-out for every parser.
+    let body_byte_len: usize = if start < end {
+        lines[start..end].iter().map(|l| l.len() + 1).sum()
+    } else {
+        0
+    };
+    if body_byte_len > DEGENERATE_BODY_BYTES {
+        return coarse_byte_window_chunks(symbol, &lines, start, end, profile);
+    }
+
     let snippet = if start < end {
         lines[start..end].join("\n")
     } else {
@@ -473,8 +625,21 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
     } else {
         String::new()
     };
+    // REQ-AXO-901902/901906 — bound the repeated context: it is prepended to
+    // EVERY emitted chunk AND fed to the `overhead` token encode below. A header
+    // heuristic that swallowed most of a degenerate body would otherwise run
+    // that encode on hundreds of KB. Truncate on a char boundary; real headers
+    // are far under the cap.
+    let repeated_context = if repeated_context.len() > MAX_REPEATED_CONTEXT_CHARS {
+        repeated_context
+            .chars()
+            .take(MAX_REPEATED_CONTEXT_CHARS)
+            .collect()
+    } else {
+        repeated_context
+    };
     let single_content = format_chunk_content(symbol, "", &snippet, 1, 1);
-    let single_estimated_tokens = estimated_token_count(&single_content);
+    let single_estimated_tokens = single_chunk_token_estimate(profile, &single_content);
     let should_keep_single = if should_accept_symbol_fast_path(profile, &single_content) {
         true
     } else {
@@ -521,6 +686,28 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         );
     }
     let part_count = segments.len().max(1);
+    // REQ-AXO-901902/901906 — the chunk-emission cost is dominated by the
+    // PER-CHUNK `estimated_token_count` (full tokenizer encode). A body that
+    // fans out into thousands of segments (a 644 KB `LOG.txt` with one 8 KB
+    // line trips the giant-line fallback into ~4.5k segments) would run that
+    // many un-budgeted encodes here — `axon-diag-chunk-spin` measured >40 s,
+    // and the DP wall-clock deadline does NOT cover this loop. Past the cap the
+    // precise count adds no value (these are degenerate data/log/minified
+    // bodies), so use the cheap byte estimate for every chunk. Covers the
+    // giant-line path, the DP many-chunk path, and any future fan-out.
+    let use_byte_estimate = bailed || part_count > MAX_PRECISE_ENCODE_CHUNKS;
+    if use_byte_estimate && !bailed {
+        tracing::warn!(
+            target: "pipeline_v2::chunk",
+            symbol = %symbol.name,
+            kind = %symbol.kind,
+            start_line = symbol.start_line,
+            content_bytes = file_content.len(),
+            chunks = part_count,
+            cap = MAX_PRECISE_ENCODE_CHUNKS,
+            "REQ-AXO-901902 chunk fan-out exceeded precise-encode cap — byte-estimating tokens; INVESTIGATE this file/symbol (likely non-code data/log/config)"
+        );
+    }
     segments
         .into_iter()
         .enumerate()
@@ -530,9 +717,9 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
             let content =
                 format_chunk_content(symbol, &repeated_context, &snippet, part_index, part_count);
             DerivedCodeChunk {
-                // On bail, byte-based estimate avoids re-entering the tokenizer
-                // (the very thing that may be spinning) for every emitted chunk.
-                estimated_tokens: if bailed {
+                // Byte-based estimate avoids re-entering the tokenizer (the very
+                // thing that spins) for every emitted chunk on bail OR fan-out.
+                estimated_tokens: if use_byte_estimate {
                     fallback_estimated_token_count(&content)
                 } else {
                     estimated_token_count(&content)
@@ -977,6 +1164,123 @@ mod tests {
                 toks <= profile.model_max_tokens,
                 "chunk exceeds model window: {toks} > {}",
                 profile.model_max_tokens
+            );
+        }
+    }
+
+    /// REQ-AXO-901902/901906 — a whole-file `document_body` symbol (TextParser
+    /// on a large `.txt`/`.log`/`.conf`) must NEVER trigger a full-content
+    /// tokenizer encode at the keep-single check. `axon-diag-chunk-spin` proved
+    /// a 644 KB `LOG.txt` span spun `build_symbol_chunks` >90 s exactly there,
+    /// blowing past the 15 s chunk budget (armed only AFTER that encode). Past
+    /// the gray zone the estimate must be byte-based — and therefore sub-ms.
+    #[test]
+    fn oversized_single_symbol_estimate_skips_tokenizer_and_is_fast() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let profile = active_chunk_profile();
+        // ~1 MB of varied log-like content — far past gray_zone_char_threshold,
+        // so a real tokenizer encode would take seconds; byte estimate is sub-ms.
+        let mut content = String::with_capacity(1_100_000);
+        let mut i = 0u64;
+        while content.len() < 1_000_000 {
+            content.push_str(&format!(
+                "2026-06-08T12:00:{:02} INFO event id={} val={}\n",
+                i % 60,
+                i,
+                i.wrapping_mul(2654435761)
+            ));
+            i += 1;
+        }
+        assert!(
+            content.chars().count() > profile.gray_zone_char_threshold,
+            "test content must exceed the gray zone to exercise the byte-guard"
+        );
+
+        let t0 = std::time::Instant::now();
+        let est = single_chunk_token_estimate(profile, &content);
+        let elapsed = t0.elapsed();
+
+        assert_eq!(
+            est,
+            fallback_estimated_token_count(&content),
+            "past the gray zone the estimate must be byte-based, not a tokenizer encode"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "oversized single-chunk estimate must skip the tokenizer (took {elapsed:?})"
+        );
+    }
+
+    /// REQ-AXO-901902/901906 — end-to-end regression for the EXACT `LOG.txt`
+    /// pathology proven by `axon-diag-chunk-spin`: a ~640 KB whole-file
+    /// `document_body` symbol made of thousands of short lines PLUS one ~8 KB
+    /// line. The giant line trips the giant-line fallback, fanning the body into
+    /// thousands of segments; pre-fix the emission loop ran a precise tokenizer
+    /// encode per segment (~4.5k encodes ⇒ >40 s, NOT covered by the DP
+    /// deadline). The fan-out cap byte-estimates past `MAX_PRECISE_ENCODE_CHUNKS`,
+    /// so this completes in well under a second.
+    #[test]
+    fn log_file_shape_with_giant_line_does_not_encode_storm() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let mut content = String::with_capacity(660_000);
+        let mut i = 0u64;
+        // ~4500 short log lines (p50≈62 chars, like the real LOG.txt).
+        while content.len() < 620_000 {
+            content.push_str(&format!(
+                "2026-06-08T12:00:{:02}.123 INFO trader: order id={} px={} qty={}\n",
+                i % 60,
+                i,
+                i.wrapping_mul(2654435761) % 100000,
+                i % 1000
+            ));
+            i += 1;
+        }
+        // One ~8 KB physical line (a serialized blob / stack dump) — trips the
+        // giant-line fallback exactly as the real file does.
+        let mut giant = String::with_capacity(8200);
+        let mut j = 0u64;
+        while giant.len() < 8100 {
+            giant.push_str(&format!("k{j}=v{};", j.wrapping_mul(40503)));
+            j += 1;
+        }
+        content.push_str(&giant);
+        content.push('\n');
+
+        let line_count = content.lines().count();
+        let symbol = synthetic_symbol("document_body", line_count.max(1));
+
+        let t0 = std::time::Instant::now();
+        let chunks = build_symbol_chunks(&symbol, &content);
+        let elapsed = t0.elapsed();
+
+        // Pre-fix: >40 s. Post-fix (byte estimates past the fan-out cap): sub-s.
+        // Generous ceiling so cargo-test debug timing never flakes, yet a true
+        // per-chunk encode storm (thousands × ms) cannot fit.
+        let ceiling = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(8)
+        } else {
+            std::time::Duration::from_secs(3)
+        };
+        assert!(
+            elapsed < ceiling,
+            "640 KB log-shaped document_body chunking took {elapsed:?} (limit {ceiling:?}; pre-fix encode-storm spun >40 s)"
+        );
+        // Root fix bounds the fan-out: pre-fix this body produced ~28 769
+        // micro-chunks (body_budget floored), then `fuse_small_chunks` choked.
+        assert!(
+            chunks.len() <= MAX_PRECISE_ENCODE_CHUNKS + 1,
+            "degenerate body fan-out must be capped, got {} chunks",
+            chunks.len()
+        );
+        assert!(chunks.len() > 1, "a 640 KB body must still split into multiple chunks");
+        // Contiguous, gap-free coverage.
+        for w in chunks.windows(2) {
+            assert_eq!(
+                w[0].end_line + 1,
+                w[1].start_line,
+                "coarse chunks must be contiguous: {:?} then {:?}",
+                (w[0].start_line, w[0].end_line),
+                (w[1].start_line, w[1].end_line)
             );
         }
     }

@@ -57,6 +57,12 @@ path = "src/bin/axon-bench-ist-snapshot.rs"
 name = "axon-bench-tool-migration"
 path = "src/bin/axon-bench-tool-migration.rs"
 
+# REQ-AXO-901902/901903/901906: CPU chunk-spin culprit finder (watchdog names
+# the wedged file even when the main thread spins in userspace).
+[[bin]]
+name = "axon-diag-chunk-spin"
+path = "src/bin/axon-diag-chunk-spin.rs"
+
 [features]
 default = []
 # REQ-AXO-901608 follow-up — opt-in tokio-console support for async runtime
