@@ -476,10 +476,6 @@ async fn pull_and_feed_b(
 /// than now is considered abandoned (worker crashed mid-parse) and is
 /// re-claimable. Override via `AXON_DBQ_A_LEASE_MS`.
 pub const DBQ_A_LEASE_MS_DEFAULT: i64 = 60_000;
-/// Max claim attempts before a row is effectively dead-lettered: it stays
-/// 'parsing' with `retry_count >= MAX` and is excluded from the claim set
-/// (a 'parse_failed' sweep is slice 2). Override via `AXON_DBQ_A_MAX_ATTEMPTS`.
-pub const DBQ_A_MAX_ATTEMPTS_DEFAULT: i64 = 3;
 /// Rows claimed per UPDATE…RETURNING. Override via `AXON_DBQ_A_CLAIM_BATCH`.
 pub const DBQ_A_CLAIM_BATCH_DEFAULT: usize = 256;
 
@@ -490,13 +486,6 @@ fn dbq_a_lease_ms() -> i64 {
         .unwrap_or(DBQ_A_LEASE_MS_DEFAULT)
 }
 
-fn dbq_a_max_attempts() -> i64 {
-    std::env::var("AXON_DBQ_A_MAX_ATTEMPTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DBQ_A_MAX_ATTEMPTS_DEFAULT)
-}
-
 pub fn dbq_a_claim_batch() -> usize {
     std::env::var("AXON_DBQ_A_CLAIM_BATCH")
         .ok()
@@ -505,32 +494,32 @@ pub fn dbq_a_claim_batch() -> usize {
 }
 
 /// The atomic claim. Promotes up to `limit` claimable rows to 'parsing' with a
-/// fresh lease, incrementing retry_count, and RETURNs their paths. The inner
-/// SELECT … FOR UPDATE SKIP LOCKED guarantees two concurrent claimers never
-/// take the same row (exactly the contention guard demand_pull_b relies on for
-/// chunks). Stale-lease 'parsing' rows (crashed mid-parse) are reclaimable;
-/// rows at `retry_count >= max_attempts` are excluded → dead-lettered.
+/// fresh lease and RETURNs their paths. The inner SELECT … FOR UPDATE SKIP
+/// LOCKED guarantees two concurrent claimers never take the same row (the
+/// contention guard demand_pull_b relies on for chunks). Stale-lease 'parsing'
+/// rows (crashed mid-parse) are reclaimable — no retry cap / dead-letter.
 ///
 /// Public for the SQL-shape unit test (the query string is the contract).
-pub fn build_claim_sql(now_ms: i64, lease_ms: i64, max_attempts: i64, limit: usize) -> String {
+pub fn build_claim_sql(now_ms: i64, lease_ms: i64, limit: usize) -> String {
+    // REQ-AXO-901906 — claim 'discovered' + stale-lease 'parsing' (crash
+    // recovery, mirrors pipeline B re-SELECTing 'pending' chunks). No
+    // retry_count / dead-letter: A2 has a parse timeout so every file reaches a
+    // terminal status, and a clean boot resets any 'parsing' to 'discovered'.
     format!(
         "UPDATE ist.IndexedFile \
             SET status = 'parsing', \
                 lease_until_ms = {now} + {lease}, \
-                retry_count = retry_count + 1, \
                 last_attempt_ms = {now} \
           WHERE path IN ( \
               SELECT path FROM ist.IndexedFile \
                WHERE (status = 'discovered' \
                       OR (status = 'parsing' AND lease_until_ms < {now})) \
-                 AND retry_count < {max} \
                ORDER BY discovered_ms \
                FOR UPDATE SKIP LOCKED \
                LIMIT {lim}) \
           RETURNING path",
         now = now_ms,
         lease = lease_ms,
-        max = max_attempts,
         lim = limit,
     )
 }
@@ -615,10 +604,9 @@ async fn demand_pull_a_loop(
         .context("demand-pull A: LISTEN failed")?;
 
     let lease_ms = dbq_a_lease_ms();
-    let max_attempts = dbq_a_max_attempts();
     info!(
-        "demand-pull A: active (claim_batch={batch_size}, lease_ms={lease_ms}, \
-         max_attempts={max_attempts}) — DB work queue claimer (REQ-AXO-901897)"
+        "demand-pull A: active (claim_batch={batch_size}, lease_ms={lease_ms}) \
+         — DB work queue claimer (REQ-AXO-901897)"
     );
 
     let mut consecutive_empty = 0u32;
@@ -633,7 +621,6 @@ async fn demand_pull_a_loop(
         input_tx,
         batch_size,
         lease_ms,
-        max_attempts,
         &mut consecutive_empty,
         metrics,
         &in_progress,
@@ -679,7 +666,6 @@ async fn demand_pull_a_loop(
             input_tx,
             batch_size,
             lease_ms,
-            max_attempts,
             &mut consecutive_empty,
             metrics,
             &in_progress,
@@ -700,7 +686,6 @@ async fn run_claim_cycle_a(
     input_tx: &Sender<PathBuf>,
     batch_size: usize,
     lease_ms: i64,
-    max_attempts: i64,
     consecutive_empty: &mut u32,
     metrics: &Arc<DemandPullMetrics>,
     in_progress: &Arc<AtomicBool>,
@@ -720,7 +705,7 @@ async fn run_claim_cycle_a(
     let mut total_fed = 0usize;
     loop {
         let batch =
-            claim_and_feed_a(client, input_tx, batch_size, lease_ms, max_attempts, consecutive_empty, metrics)
+            claim_and_feed_a(client, input_tx, batch_size, lease_ms, consecutive_empty, metrics)
                 .await;
         if head.is_none() {
             head = batch.head;
@@ -744,23 +729,20 @@ async fn claim_and_feed_a(
     input_tx: &Sender<PathBuf>,
     batch_size: usize,
     lease_ms: i64,
-    max_attempts: i64,
     consecutive_empty: &mut u32,
     metrics: &Arc<DemandPullMetrics>,
 ) -> PullBatch {
-    // W2 — preserve headroom for real-time Watchman events: skip the claim
-    // when A1's channel is already near-full (the backlog drainer yields to
-    // the live fast-path).
-    // REQ-AXO-901903 — also yield when pipeline-A in-flight content has reached
-    // the memory budget: the backlog drainer must not admit more files until A
-    // drains, else RAM grows unbounded (the OOM that crash-looped the indexer).
-    if input_tx.capacity() == 0 || crate::pipeline_v2::inflight::over_budget() {
+    // REQ-AXO-901906 — yield when A1's channel is full (the backlog drainer
+    // yields to the live Watchman fast-path AND lets backpressure from the
+    // bounded A-content channels propagate). Memory is bounded by those channel
+    // caps + send().await (mirrors pipeline B) — no in-flight byte budget.
+    if input_tx.capacity() == 0 {
         metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
         return PullBatch { fed: 0, head: None };
     }
 
     metrics.pulls_total.fetch_add(1, Ordering::Relaxed);
-    let sql = build_claim_sql(now_ms(), lease_ms, max_attempts, batch_size);
+    let sql = build_claim_sql(now_ms(), lease_ms, batch_size);
     let rows = match client.query(sql.as_str(), &[]).await {
         Ok(rows) => rows,
         Err(err) => {
@@ -959,37 +941,33 @@ mod tests {
 
     /// (a) The claim SQL is the contract. It must:
     ///   - claim 'discovered' rows,
-    ///   - claim stale-lease 'parsing' rows (lease_until_ms < now),
-    ///   - exclude retry_count >= MAX (dead-lettered),
+    ///   - claim stale-lease 'parsing' rows (lease_until_ms < now) — crash recovery,
     ///   - use FOR UPDATE SKIP LOCKED (no two claimers take the same row),
-    ///   - promote to 'parsing' + set a fresh lease + bump retry_count,
+    ///   - promote to 'parsing' + set a fresh lease,
     ///   - RETURNING path so the feeder can feed input_tx,
     ///   - order by discovered_ms (oldest backlog first).
+    /// REQ-AXO-901906 — no retry_count / dead-letter (axed; A2 timeout + boot
+    /// reset guarantee terminal status).
     #[test]
     fn claim_sql_shape_covers_the_full_contract() {
         let now = 1_000_000i64;
         let lease = 60_000i64;
-        let max = 3i64;
-        let sql = build_claim_sql(now, lease, max, 256);
+        let sql = build_claim_sql(now, lease, 256);
 
-        // Promotes to 'parsing' and sets the lease + retry bump.
+        // Promotes to 'parsing' and sets the lease.
         assert!(sql.contains("SET status = 'parsing'"), "must promote to parsing");
         assert!(
             sql.contains(&format!("lease_until_ms = {now} + {lease}")),
             "must set a fresh lease = now + lease_ms"
         );
-        assert!(sql.contains("retry_count = retry_count + 1"), "must bump retry_count");
         assert!(sql.contains(&format!("last_attempt_ms = {now}")), "must stamp last_attempt_ms");
+        assert!(!sql.contains("retry_count"), "REQ-AXO-901906 — no retry_count / dead-letter");
 
-        // Claim set = discovered OR stale-lease parsing, excluding dead-lettered.
+        // Claim set = discovered OR stale-lease parsing.
         assert!(sql.contains("status = 'discovered'"), "claims discovered rows");
         assert!(
             sql.contains(&format!("status = 'parsing' AND lease_until_ms < {now}")),
             "claims stale-lease parsing rows (crash recovery)"
-        );
-        assert!(
-            sql.contains(&format!("retry_count < {max}")),
-            "excludes dead-lettered rows (retry_count >= MAX)"
         );
 
         // Concurrency + ordering + return contract.
@@ -1002,14 +980,11 @@ mod tests {
     #[test]
     fn claim_consts_and_env_overrides_are_sane() {
         assert_eq!(DBQ_A_LEASE_MS_DEFAULT, 60_000);
-        assert_eq!(DBQ_A_MAX_ATTEMPTS_DEFAULT, 3);
         assert_eq!(DBQ_A_CLAIM_BATCH_DEFAULT, 256);
         // Env-unset resolves to the defaults.
         std::env::remove_var("AXON_DBQ_A_LEASE_MS");
-        std::env::remove_var("AXON_DBQ_A_MAX_ATTEMPTS");
         std::env::remove_var("AXON_DBQ_A_CLAIM_BATCH");
         assert_eq!(dbq_a_lease_ms(), DBQ_A_LEASE_MS_DEFAULT);
-        assert_eq!(dbq_a_max_attempts(), DBQ_A_MAX_ATTEMPTS_DEFAULT);
         assert_eq!(dbq_a_claim_batch(), DBQ_A_CLAIM_BATCH_DEFAULT);
     }
 
@@ -1031,7 +1006,7 @@ mod tests {
         // 1. discovered           → claimable
         // 2. stale-lease parsing  → claimable (crash recovery)
         // 3. fresh-lease parsing  → NOT claimable (another worker owns it)
-        // 4. discovered, retry=3  → NOT claimable (dead-lettered)
+        // 4. discovered, retry=3  → claimable (REQ-AXO-901906: no dead-letter)
         let seed = format!(
             "INSERT INTO ist.IndexedFile \
                 (path, project_code, content_hash, last_seen_ms, status, discovered_ms, retry_count, lease_until_ms) VALUES \
@@ -1045,7 +1020,7 @@ mod tests {
         );
         store.execute(&seed).unwrap();
 
-        let sql = build_claim_sql(now, 60_000, 3, 256);
+        let sql = build_claim_sql(now, 60_000, 256);
         let raw = store.query_json_writer(&sql).unwrap();
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut claimed: Vec<String> = rows
@@ -1059,14 +1034,18 @@ mod tests {
         claimed.sort();
         assert_eq!(
             claimed,
-            vec!["/tmp/dbq_a/discovered.rs".to_string(), "/tmp/dbq_a/stale.rs".to_string()],
-            "claims discovered + stale-lease parsing; excludes fresh-lease + dead-lettered"
+            vec![
+                "/tmp/dbq_a/dead.rs".to_string(),
+                "/tmp/dbq_a/discovered.rs".to_string(),
+                "/tmp/dbq_a/stale.rs".to_string(),
+            ],
+            "claims discovered + stale-lease parsing + high-retry (no dead-letter); excludes only fresh-lease"
         );
 
         // (d) Idempotent re-claim: the two just-claimed rows are now fresh-lease
         // 'parsing' (this claim used lease 60_000), so a second claim with the
         // same `now` returns NOTHING — no double-feed.
-        let raw2 = store.query_json_writer(&build_claim_sql(now, 60_000, 3, 256)).unwrap();
+        let raw2 = store.query_json_writer(&build_claim_sql(now, 60_000, 256)).unwrap();
         let rows2: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw2).unwrap_or_default();
         let reclaimed_own: Vec<String> = rows2
             .iter()

@@ -184,9 +184,13 @@ pub fn spawn_pipeline_a_with_cache(
     resolver: super::project_resolver::ProjectCodeResolver,
     dedup_cache: Option<Arc<super::IndexedFileCache>>,
 ) -> PipelineAHandles {
+    // REQ-AXO-901906 — input/output carry tiny payloads (PathBuf / chunk_ids)
+    // so they keep the large `internal` cap; the A1→A2 / A2→A3 channels carry
+    // file CONTENT (≤5 MB/slot) and use the small `a_content` cap — that pairing
+    // (small content channel + send().await) IS the pipeline-A memory bound.
     let (input_tx, input_rx) = mpsc::channel::<PathBuf>(caps.internal);
-    let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.internal);
-    let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.internal);
+    let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.a_content);
+    let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.a_content);
     let (output_tx, output_rx) = mpsc::channel::<EnrolledFile>(caps.internal);
 
     let metrics_a1 = StageMetrics::new("A1");
@@ -218,7 +222,7 @@ pub fn spawn_pipeline_a_with_cache(
     // When a cache is provided, skip the expensive A2 tree-sitter parse
     // for files whose content is unchanged since last indexing.
     let a2_input_rx = if let Some(cache) = dedup_cache {
-        let (filtered_tx, filtered_rx) = mpsc::channel(caps.internal);
+        let (filtered_tx, filtered_rx) = mpsc::channel(caps.a_content);
         tokio::spawn(async move {
             let mut a1_rx = a1_to_a2_rx;
             let mut skipped: u64 = 0;
@@ -287,7 +291,7 @@ pub fn spawn_pipeline_a_with_cache(
         } else {
             let mut worker_txs: Vec<mpsc::Sender<ParsedFile>> = Vec::with_capacity(n_workers);
             for _ in 0..n_workers {
-                let (wtx, wrx) = mpsc::channel::<ParsedFile>(caps.internal);
+                let (wtx, wrx) = mpsc::channel::<ParsedFile>(caps.a_content);
                 worker_txs.push(wtx);
                 super::stage_a3::spawn_a3_batched_worker(
                     wrx,

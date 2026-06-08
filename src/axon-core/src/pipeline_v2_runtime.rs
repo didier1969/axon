@@ -394,6 +394,18 @@ pub fn spawn_pipeline_v2_indexer(
     // the SAME input_tx Watchman uses. Runs ALONGSIDE the Watchman feed (hybrid:
     // Watchman = fast-path for new changes, claim = backlog/recovery drainer
     // that makes any stranded 'discovered' files drain BY CONSTRUCTION).
+    // REQ-AXO-901906 — boot reset: any row left 'parsing' by a previous crash
+    // (indexer died mid-file) is reclaimed by promoting it straight back to
+    // 'discovered'. Re-processing is idempotent (A3 UPSERTs on content_hash).
+    // This one-shot sweep replaces the per-file lease/retry/dead-letter
+    // bookkeeping — "crash mid-file ⇒ reprocess at boot, no big deal".
+    match store.execute(
+        "UPDATE ist.IndexedFile SET status='discovered', lease_until_ms=0 WHERE status='parsing'",
+    ) {
+        Ok(()) => info!("pipeline_v2: boot reset — stranded 'parsing' rows reclaimed to 'discovered'"),
+        Err(e) => warn!(error = %e, "pipeline_v2: boot reset of 'parsing' rows failed (non-fatal)"),
+    }
+
     let claim_batch = crate::pipeline_v2::demand_pull::dbq_a_claim_batch();
     info!(
         "pipeline_v2: pipeline A DB work-queue claim feeder active \

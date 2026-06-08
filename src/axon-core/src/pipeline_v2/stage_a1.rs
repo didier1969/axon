@@ -95,8 +95,6 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
             content_hash,
             mtime_ms,
             size_bytes,
-            // Skipped (empty content) → no RAM in flight, no budget guard.
-            inflight_guard: None,
         });
     }
 
@@ -107,19 +105,14 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         path.display(),
         size_bytes
     );
-    // REQ-AXO-901903 — charge the in-flight budget on ACTUAL content RAM via an
-    // RAII guard; it rides this struct through A2/A3 and releases on drop along
-    // any path (commit, dedup-skip, send-failure, panic).
-    let inflight_guard = Some(crate::pipeline_v2::inflight::InflightGuard::new(
-        content.len() as u64,
-    ));
+    // REQ-AXO-901906 — memory is bounded by the (small) A-content channel caps +
+    // send().await backpressure (mirrors pipeline B); no per-file budget guard.
     Ok(PreparedFile {
         path,
         content,
         content_hash,
         mtime_ms,
         size_bytes,
-        inflight_guard,
     })
 }
 
@@ -135,8 +128,6 @@ fn skipped_prepared(path: PathBuf, size_bytes: u64, mtime_ms: i64, reason: &str)
         content_hash,
         mtime_ms,
         size_bytes,
-        // Skipped before read (empty content) → no RAM in flight, no guard.
-        inflight_guard: None,
     }
 }
 

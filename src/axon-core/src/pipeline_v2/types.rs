@@ -36,12 +36,6 @@ pub struct PreparedFile {
     pub mtime_ms: i64,
     /// Size in bytes of the file as read.
     pub size_bytes: u64,
-    /// REQ-AXO-901903 — RAII in-flight memory budget guard. `Some` for a file
-    /// carrying real content (charged on `content.len()`), `None` for skipped
-    /// files (empty content = no RAM). Releases the budget on drop along
-    /// whatever path this struct dies (A3 commit, dedup-skip, send-failure,
-    /// panic) — see [`crate::pipeline_v2::inflight`].
-    pub inflight_guard: Option<std::sync::Arc<crate::pipeline_v2::inflight::InflightGuard>>,
 }
 
 /// Output of stage A2 — Transformation (tree-sitter parse).
@@ -65,10 +59,4 @@ pub struct ParsedFile {
     /// Relations (CALLS / CALLS_NIF / CONTAINS / etc.) extracted alongside
     /// symbols.
     pub relations: Vec<Relation>,
-    /// REQ-AXO-901903 — RAII in-flight memory budget guard, forwarded from the
-    /// [`PreparedFile`] this was parsed from (or `None` for the timeout-skip
-    /// path, where the original content is still held by the orphaned parse
-    /// task and released when that task finishes). Released on drop —
-    /// typically when A3 finishes persisting the batch.
-    pub inflight_guard: Option<std::sync::Arc<crate::pipeline_v2::inflight::InflightGuard>>,
 }

@@ -210,7 +210,39 @@ impl BodySegment {
 ///  4. GIANT-LINE fallback: a single physical line that alone blows the
 ///     budget (minified/generated) is char-windowed instead.
 ///
+/// REQ-AXO-901906 — wall-clock budget (ms) for chunking ONE symbol body before
+/// the DP bails to cheap fixed line-windows. The DP is normally far under this
+/// (200k lines ≈ 4.5 s), so only a genuine pathology trips it. Override via
+/// `AXON_CHUNK_BUDGET_MS`.
+const CHUNK_BUDGET_MS_DEFAULT: u64 = 15_000;
+fn chunk_budget_ms() -> u64 {
+    std::env::var("AXON_CHUNK_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(CHUNK_BUDGET_MS_DEFAULT)
+}
+/// Lines per chunk in the cheap fixed-window fallback (on budget bail).
+const CHEAP_WINDOW_LINES: usize = 200;
+
+/// Cheap O(N) fixed line-window segmentation (no tokenizer encodes). Contiguous,
+/// gap-free `[body_start, end)` in `window`-line slabs. The defense fallback for
+/// pathological bodies that slipped the upstream directory/minified/size filters.
+fn cheap_line_window_segments(body_start: usize, end: usize, window: usize) -> Vec<BodySegment> {
+    let window = window.max(1);
+    let mut segments = Vec::new();
+    let mut cursor = body_start;
+    while cursor < end {
+        let next = (cursor + window).min(end);
+        segments.push(BodySegment::LineRange { start: cursor, end: next });
+        cursor = next;
+    }
+    segments
+}
+
 /// Returns `BodySegment`s covering `[body_start, body_end)` in order.
+/// Returns `(segments, bailed)` — `bailed` is true when the wall-clock
+/// `deadline` was hit and we fell back to cheap fixed line-windows.
 fn dp_segment_body(
     profile: EmbeddingChunkProfile,
     symbol: &Symbol,
@@ -218,9 +250,10 @@ fn dp_segment_body(
     repeated_context: &str,
     body_start: usize,
     body_end: usize,
-) -> Vec<BodySegment> {
+    deadline: std::time::Instant,
+) -> (Vec<BodySegment>, bool) {
     if body_start >= body_end {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
     let body_lines = &lines[body_start..body_end];
@@ -243,14 +276,25 @@ fn dp_segment_body(
         .iter()
         .any(|line| line.chars().count() > giant_char_threshold);
     if n == 1 || any_giant_line {
-        return split_giant_lines(body_lines, body_start, body_budget, char_per_token);
+        return (
+            split_giant_lines(body_lines, body_start, body_budget, char_per_token),
+            false,
+        );
     }
 
-    // --- Per-line token costs: O(N) encodes (the core fix). ---
-    let line_costs: Vec<usize> = body_lines
-        .iter()
-        .map(|line| content_token_count(line))
-        .collect();
+    // --- Per-line token costs: O(N) encodes (the core fix). The wall-clock
+    // deadline is checked here because this is where the tokenizer time is
+    // spent; on a pathological body we bail to cheap fixed line-windows. ---
+    let mut line_costs: Vec<usize> = Vec::with_capacity(n);
+    for (i, line) in body_lines.iter().enumerate() {
+        if i % 2048 == 0 && std::time::Instant::now() >= deadline {
+            return (
+                cheap_line_window_segments(body_start, body_end, CHEAP_WINDOW_LINES),
+                true,
+            );
+        }
+        line_costs.push(content_token_count(line));
+    }
 
     // Prefix sum P[k] = sum of line_costs[0..k]. body_cost(a,b) ≈
     // (P[b]-P[a]) + (b-a-1) — the trailing term is the ~1 token per
@@ -347,7 +391,7 @@ fn dp_segment_body(
         e = s;
     }
     ranges.reverse();
-    ranges
+    (ranges, false)
 }
 
 /// REQ-AXO-901894 — Char-window fallback for minified / generated lines that
@@ -449,10 +493,32 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         }];
     }
 
-    let mut segments =
-        dp_segment_body(profile, symbol, &lines, &repeated_context, body_start, end);
+    // REQ-AXO-901906 — defense-in-depth TEMPORAL safety. The Knuth-Plass DP is
+    // O(N) and fast (200k lines ≈ 4.5 s release), but an as-yet-unidentified
+    // pathology (a generated/minified file that slipped the directory + minified
+    // + size filters) could spin the per-line tokenizer on the A3 spawn_blocking
+    // thread and stall the whole pipeline. If the wall-clock budget is exceeded
+    // we bail to cheap fixed line-windows with BYTE-BASED token estimates (no
+    // further tokenizer encodes) and LOG it so the offending file can be analysed.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(chunk_budget_ms());
+    let (mut segments, bailed) =
+        dp_segment_body(profile, symbol, &lines, &repeated_context, body_start, end, deadline);
     if segments.is_empty() {
         segments.push(BodySegment::LineRange { start, end });
+    }
+    if bailed {
+        tracing::warn!(
+            target: "pipeline_v2::chunk",
+            symbol = %symbol.name,
+            kind = %symbol.kind,
+            start_line = symbol.start_line,
+            body_lines = end.saturating_sub(body_start),
+            content_bytes = file_content.len(),
+            budget_ms = chunk_budget_ms(),
+            chunks = segments.len(),
+            "REQ-AXO-901906 chunk budget exceeded — bailed to cheap byte-windowed chunking; INVESTIGATE this file/symbol"
+        );
     }
     let part_count = segments.len().max(1);
     segments
@@ -464,7 +530,13 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
             let content =
                 format_chunk_content(symbol, &repeated_context, &snippet, part_index, part_count);
             DerivedCodeChunk {
-                estimated_tokens: estimated_token_count(&content),
+                // On bail, byte-based estimate avoids re-entering the tokenizer
+                // (the very thing that may be spinning) for every emitted chunk.
+                estimated_tokens: if bailed {
+                    fallback_estimated_token_count(&content)
+                } else {
+                    estimated_token_count(&content)
+                },
                 content,
                 part_index,
                 part_count,

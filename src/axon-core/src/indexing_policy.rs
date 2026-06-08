@@ -97,13 +97,23 @@ struct DirectoryRule {
 enum DirectoryMatcher {
     Exact(&'static str),
     Prefix(&'static str),
+    /// REQ-AXO-901906 — match a CHILD segment only when its immediate PARENT
+    /// segment matches too (e.g. `priv/static` — Phoenix compiled assets — so
+    /// we don't exclude the unrelated `priv/repo` Ecto migrations or a generic
+    /// `static` dir). `(parent, child)`.
+    SegmentPair(&'static str, &'static str),
 }
 
 impl DirectoryMatcher {
-    fn matches(&self, segment: &str) -> bool {
+    /// `prev` is the immediate parent segment (None at the path root). Only the
+    /// pair matcher consults it.
+    fn matches(&self, segment: &str, prev: Option<&str>) -> bool {
         match self {
             Self::Exact(value) => segment == *value,
             Self::Prefix(prefix) => segment.starts_with(*prefix),
+            Self::SegmentPair(parent, child) => {
+                segment == *child && prev == Some(*parent)
+            }
         }
     }
 
@@ -111,6 +121,7 @@ impl DirectoryMatcher {
         match self {
             Self::Exact(value) => value,
             Self::Prefix(prefix) => prefix,
+            Self::SegmentPair(_, child) => child,
         }
     }
 }
@@ -315,6 +326,14 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "python_dist_packages",
         matcher: DirectoryMatcher::Exact("dist-packages"),
     },
+    // REQ-AXO-901906 — coverage.py HTML report output. Generated.
+    DirectoryRule {
+        ecosystem: EcosystemId::Python,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "python_htmlcov",
+        matcher: DirectoryMatcher::Exact("htmlcov"),
+    },
     DirectoryRule {
         ecosystem: EcosystemId::Elixir,
         class: ArtifactClass::BuildOutput,
@@ -342,6 +361,26 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         policy: ExclusionPolicy::HardExclude,
         rule_id: "elixir_mix_state",
         matcher: DirectoryMatcher::Exact(".mix"),
+    },
+    // REQ-AXO-901906 — Phoenix compiled frontend assets (esbuild/webpack bundles
+    // app.js/app.css + copied static). NOT source (the source lives in
+    // `assets/`). Pair-matched so `priv/repo` migrations / `priv/gettext` stay
+    // indexed. These minified bundles otherwise reach the chunker and stall A3.
+    DirectoryRule {
+        ecosystem: EcosystemId::Elixir,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "elixir_phoenix_priv_static",
+        matcher: DirectoryMatcher::SegmentPair("priv", "static"),
+    },
+    // REQ-AXO-901906 — ExCoveralls / `mix test --cover` HTML output. Generated.
+    // (`coverage` is already in the General rules; Elixir writes to `cover/`.)
+    DirectoryRule {
+        ecosystem: EcosystemId::Elixir,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::HardExclude,
+        rule_id: "elixir_cover_output",
+        matcher: DirectoryMatcher::Exact("cover"),
     },
     DirectoryRule {
         ecosystem: EcosystemId::Erlang,
@@ -453,7 +492,9 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
 /// `DIRECTORY_RULES` exclusion (Hard or Soft — build output should never be
 /// recursively watched even when index-allowlisted).
 pub fn is_watch_pruned_segment(name: &str) -> bool {
-    name.starts_with('.') || DIRECTORY_RULES.iter().any(|rule| rule.matcher.matches(name))
+    // Single-segment context (no parent) → pair matchers (priv/static) can't be
+    // decided here; they are enforced downstream by `classify_path`.
+    name.starts_with('.') || DIRECTORY_RULES.iter().any(|rule| rule.matcher.matches(name, None))
 }
 
 /// REQ-AXO-901893 — directory segment names to emit into a `.watchmanconfig`
@@ -476,11 +517,15 @@ pub fn watchman_ignore_dirs() -> Vec<&'static str> {
     DIRECTORY_RULES
         .iter()
         .filter(|rule| {
+            // VCS metadata: Watchman owns it. SegmentPair rules (priv/static)
+            // can't be expressed as a root-relative single-segment ignore_dir,
+            // so they are enforced by the per-segment scanner classify instead.
             !matches!(
                 rule.matcher,
                 DirectoryMatcher::Exact(".git")
                     | DirectoryMatcher::Exact(".svn")
                     | DirectoryMatcher::Exact(".hg")
+                    | DirectoryMatcher::SegmentPair(_, _)
             )
         })
         .map(|rule| rule.matcher.canonical_segment())
@@ -560,7 +605,9 @@ fn classify_internal(
         }
     };
 
+    let mut prev_segment: Option<String> = None;
     for segment in relative.iter().filter_map(|part| part.to_str()) {
+        let prev = prev_segment.as_deref();
         if segment_looks_like_embedded_windows_path(segment) {
             return PathDisposition::HardExcluded {
                 ecosystem: EcosystemId::General,
@@ -582,7 +629,7 @@ fn classify_internal(
 
         if let Some(rule) = DIRECTORY_RULES
             .iter()
-            .find(|rule| rule_applies(rule, segment, supported_ecosystems))
+            .find(|rule| rule_applies(rule, segment, prev, supported_ecosystems))
         {
             if matches!(rule.policy, ExclusionPolicy::SoftExclude)
                 && config
@@ -592,6 +639,7 @@ fn classify_internal(
                         allowed == segment || allowed == rule.matcher.canonical_segment()
                     })
             {
+                prev_segment = Some(segment.to_string());
                 continue;
             }
 
@@ -608,6 +656,7 @@ fn classify_internal(
                 },
             };
         }
+        prev_segment = Some(segment.to_string());
     }
 
     PathDisposition::Allow
@@ -627,10 +676,15 @@ fn segment_looks_like_embedded_windows_path(segment: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
-fn rule_applies(rule: &DirectoryRule, segment: &str, supported_ecosystems: &[EcosystemId]) -> bool {
+fn rule_applies(
+    rule: &DirectoryRule,
+    segment: &str,
+    prev: Option<&str>,
+    supported_ecosystems: &[EcosystemId],
+) -> bool {
     let ecosystem_is_active = matches!(rule.ecosystem, EcosystemId::General)
         || supported_ecosystems.contains(&rule.ecosystem);
-    ecosystem_is_active && rule.matcher.matches(segment)
+    ecosystem_is_active && rule.matcher.matches(segment, prev)
 }
 
 #[cfg(test)]
@@ -701,6 +755,55 @@ mod tests {
                 class: ArtifactClass::DependencyStore,
                 rule_id: "javascript_node_modules",
             }
+        );
+    }
+
+    #[test]
+    fn test_indexing_policy_excludes_phoenix_static_and_cover_but_keeps_priv_source() {
+        let config = test_config();
+        let ecosystems = supported_parser_ecosystems();
+        let root = Path::new("/workspace");
+
+        // Phoenix compiled assets — excluded even in a nested umbrella app
+        // (segment-based, unlike the root-anchored .gitignore that missed
+        // `apps/*/priv/static`).
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/apps/web/priv/static/assets/app.js"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::HardExcluded {
+                ecosystem: EcosystemId::Elixir,
+                class: ArtifactClass::BuildOutput,
+                rule_id: "elixir_phoenix_priv_static",
+            }
+        );
+        // ExCoveralls HTML output.
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/apps/web/cover/Elixir.App.html"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::HardExcluded {
+                ecosystem: EcosystemId::Elixir,
+                class: ArtifactClass::BuildOutput,
+                rule_id: "elixir_cover_output",
+            }
+        );
+        // SegmentPair precision: `priv/repo` (Ecto migrations) + `priv/gettext`
+        // are SOURCE and must stay indexed — only `priv/static` is cut.
+        assert_eq!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/priv/repo/migrations/001_init.exs"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::Allow
         );
     }
 

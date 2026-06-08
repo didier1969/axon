@@ -50,8 +50,6 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             size_bytes: prep.size_bytes,
             symbols: Vec::new(),
             relations: Vec::new(),
-            // Forward the budget guard so it releases at A3 (REQ-AXO-901903).
-            inflight_guard: prep.inflight_guard,
         });
     }
     let path_for_skip = prep.path.clone();
@@ -97,17 +95,12 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             size_bytes: prep.size_bytes,
             symbols,
             relations,
-            // Forward the budget guard so it releases at A3 (REQ-AXO-901903).
-            inflight_guard: prep.inflight_guard,
         })
     });
     let parse_budget = Duration::from_millis(crate::indexing_policy::parse_timeout_ms());
     let result = match tokio::time::timeout(parse_budget, parse_fut).await {
         Ok(Ok(parsed_result)) => parsed_result,
         Ok(Err(join_err)) => {
-            // REQ-AXO-901903 — parse task panicked: `prep` (and its RAII budget
-            // guard) is dropped during the panic unwind inside the blocking
-            // task, so the budget is released automatically. Nothing to do here.
             return Err(join_err).context("A2 parse task panicked or was cancelled");
         }
         Err(_elapsed) => {
@@ -131,11 +124,6 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
                 size_bytes: size_for_skip,
                 symbols: Vec::new(),
                 relations: Vec::new(),
-                // The original content + its budget guard are still held by the
-                // orphaned blocking task; they release when it finishes. This
-                // zero-symbol receipt carries no content, so no guard
-                // (REQ-AXO-901903 — keeps the budget tracking real RAM).
-                inflight_guard: None,
             });
         }
     };
@@ -163,7 +151,6 @@ mod tests {
             content_hash: "deadbeef".to_string(),
             mtime_ms: 1_700_000_000_000,
             size_bytes: content.len() as u64,
-            inflight_guard: None,
         }
     }
 

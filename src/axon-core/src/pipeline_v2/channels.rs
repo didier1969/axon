@@ -15,6 +15,15 @@
 /// channel (demand_pull → B2).
 pub const INTERNAL_CHANNEL_CAP_DEFAULT: usize = 1024;
 
+/// REQ-AXO-901906 — capacity for the pipeline-A channels that carry file
+/// CONTENT (`A1→A2`, `A2→A3` hold a `PreparedFile`/`ParsedFile` with up to
+/// `max_parse_bytes` ≈ 5 MB each). This is the canonical pipeline-A memory
+/// bound: `a_content × 5 MB × 2 channels`. Kept small + paired with
+/// `send().await` backpressure (mirrors pipeline B's channel-as-buffer model)
+/// — this replaces the deleted in-flight byte budget. Override via
+/// `AXON_PIPELINE_A_CONTENT_CAP`.
+pub const A_CONTENT_CHANNEL_CAP_DEFAULT: usize = 256;
+
 /// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
 /// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
 /// batch=64-128. At batch=1 the GPU is essentially idle (~10 ch/s vs
@@ -81,6 +90,9 @@ pub const B3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 200;
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineChannelCaps {
     pub internal: usize,
+    /// Capacity of the A content-carrying channels (A1→A2, A2→A3). The
+    /// pipeline-A memory bound (REQ-AXO-901906).
+    pub a_content: usize,
     pub a3_batch_size: usize,
     pub a3_batch_timeout_ms: u64,
     pub b2_batch_size: usize,
@@ -94,6 +106,7 @@ impl Default for PipelineChannelCaps {
     fn default() -> Self {
         Self {
             internal: INTERNAL_CHANNEL_CAP_DEFAULT,
+            a_content: A_CONTENT_CHANNEL_CAP_DEFAULT,
             a3_batch_size: A3_BATCH_SIZE_DEFAULT,
             a3_batch_timeout_ms: A3_BATCH_TIMEOUT_MS_DEFAULT,
             b2_batch_size: B2_BATCH_SIZE_DEFAULT,
@@ -114,6 +127,13 @@ impl PipelineChannelCaps {
             if let Ok(parsed) = raw.trim().parse::<usize>() {
                 if parsed > 0 {
                     caps.internal = parsed;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("AXON_PIPELINE_A_CONTENT_CAP") {
+            if let Ok(parsed) = raw.trim().parse::<usize>() {
+                if parsed > 0 {
+                    caps.a_content = parsed;
                 }
             }
         }

@@ -350,7 +350,6 @@ mod tests {
             size_bytes: content.len() as u64,
             symbols: symbols.into_iter().map(sym).collect(),
             relations: vec![],
-            inflight_guard: None,
         }
     }
 
