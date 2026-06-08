@@ -431,20 +431,57 @@ mod tests {
         spawn_b3_batched_worker(
             in_rx,
             out_tx,
-            store,
+            store.clone(),
             metrics.clone(),
             4,
             Duration::from_millis(50),
         );
 
-        // Send chunks with no corresponding Chunk row in PG — the
-        // upsert will fail because of the FK constraint.
-        for i in 0..2 {
+        // Seed 2 REAL Chunk rows: orphan chunk_ids are now deliberately SKIPPED
+        // (not errored) by the `JOIN ist.Chunk` FK-race guard (REQ-AXO-901884),
+        // so they can no longer drive this test. Instead force a GENUINE write
+        // failure with a WRONG-dimension embedding (mirrors the single-row test
+        // b3_wrong_dimension_embedding_returns_error): the pgvector write rejects
+        // it → the batch errors → B3 records one error per chunk.
+        let mut real_ids = Vec::new();
+        for (i, (file, name)) in [
+            ("/tmp/b3_err0.rs", "b3_err_fn0"),
+            ("/tmp/b3_err1.rs", "b3_err_fn1"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            // upsert_graph_v2 drives the bulk_writer's own runtime via block_on;
+            // calling it directly inside this #[tokio::test] panics ("runtime
+            // within a runtime"), so seed on a blocking thread (no tokio context).
+            let store_seed = store.clone();
+            let file = file.to_string();
+            let name = name.to_string();
+            let ids = tokio::task::spawn_blocking(move || {
+                store_seed
+                    .upsert_graph_v2(
+                        &file,
+                        "AXO",
+                        &format!("fn {name}() {{}}\n"),
+                        &format!("h-b3err-{i}"),
+                        1_700_000_000_020 + i as i64,
+                        &[sym(&name)],
+                        &[],
+                    )
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+            real_ids.push(ids[0].clone());
+        }
+
+        for cid in &real_ids {
             in_tx
                 .send(EmbeddedChunk {
-                    chunk_id: format!("NONEXISTENT::chunk::{i}"),
+                    chunk_id: cid.clone(),
                     source_hash: "h".to_string(),
-                    embedding: vec![0.0_f32; crate::embedding_contract::DIMENSION],
+                    // Wrong dimension (10 != DIMENSION 1024) → PG vector error.
+                    embedding: vec![0.0_f32; 10],
                 })
                 .await
                 .unwrap();
@@ -457,7 +494,7 @@ mod tests {
         let snap = metrics.snapshot();
         assert!(
             snap.errors_total >= 2,
-            "B3 must record errors for chunks that fail PG write (got {})",
+            "B3 must record errors for chunks whose embedding write fails (got {})",
             snap.errors_total
         );
     }

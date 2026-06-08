@@ -75,12 +75,30 @@ pub fn database_url_for(instance: AxonInstance) -> Result<String> {
 /// DEC-AXO-901594). This replaces the 4 divergent resolvers
 /// (graph_bootstrap / bulk_writer / pipeline_v2_runtime each rolled their
 /// own) whose drift produced the REQ-AXO-315 dev→live leak class.
+/// REQ-AXO-901903 — process-wide test override for the env-resolved database
+/// URL. Set ONCE by the test harness (`test_support::test_db`) so EVERY
+/// consumer that resolves the URL from env — notably the `bulk_writer`'s global
+/// pool (the sole A3/B3 COPY write path) — targets the isolated test database
+/// instead of the dev/live DB. Replaces a `std::env::set_var` approach that was
+/// unsound under the parallel test runner (concurrent env mutation data-raced
+/// other env-reading tests). `OnceLock` is race-free; a non-empty explicit
+/// `override_url` argument still wins. Never set in production → zero change.
+static TEST_DB_URL_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the test-only database URL override (idempotent; first writer wins).
+pub fn set_test_db_url_override(url: &str) {
+    let _ = TEST_DB_URL_OVERRIDE.set(url.to_string());
+}
+
 pub fn resolve_database_url(override_url: Option<&str>) -> Result<String> {
     if let Some(url) = override_url {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
             return Ok(trimmed.to_string());
         }
+    }
+    if let Some(test_url) = TEST_DB_URL_OVERRIDE.get() {
+        return Ok(test_url.clone());
     }
     let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
         .to_lowercase();

@@ -113,11 +113,15 @@ mod tests {
     }
 
     fn sym(name: &str) -> Symbol {
+        sym_span(name, 1, 2)
+    }
+
+    fn sym_span(name: &str, start_line: usize, end_line: usize) -> Symbol {
         Symbol {
             name: name.to_string(),
             kind: "function".into(),
-            start_line: 1,
-            end_line: 2,
+            start_line,
+            end_line,
             docstring: None,
             is_entry_point: false,
             is_public: false,
@@ -182,22 +186,41 @@ mod tests {
         // returned id must be addressable by B1 from PG. This locks the
         // try_send fan-out contract A3 → B1 inbox.
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let body = "fn one() {}\nfn two() {}\nfn three() {}\n";
+
+        // Each fn body must clear MIN_FUSE_TOKENS (100) so fuse_small_chunks does
+        // NOT coalesce the three symbols into one chunk (REQ-AXO-901846) — else
+        // we'd get <3 chunk_ids and the fan-out contract wouldn't be exercised.
+        // 14 distinct statements per body ≈ ~200 tokens each.
+        let block = |n: &str| -> String {
+            let lines: Vec<String> = (0..14)
+                .map(|i| format!("    let v_{n}_{i} = {i} + {i} * 3 - 1;"))
+                .collect();
+            format!("fn {n}() {{\n{}\n}}\n", lines.join("\n"))
+        };
+        let body = format!("{}{}{}", block("one"), block("two"), block("three"));
+        // Each block is 16 lines (fn + 14 body + closing brace): one=1..=16,
+        // two=17..=32, three=33..=48 — build_symbol_chunks slices file_content by
+        // these spans, so they must match the concatenation.
+        let symbols = [
+            sym_span("one", 1, 16),
+            sym_span("two", 17, 32),
+            sym_span("three", 33, 48),
+        ];
 
         let chunk_ids = store
             .upsert_graph_v2(
                 "/tmp/b1_roundtrip.rs",
                 "AXO",
-                body,
+                &body,
                 "hash-rt",
                 1_700_000_000_001,
-                &[sym("one"), sym("two"), sym("three")],
+                &symbols,
                 &[],
             )
             .unwrap();
         assert!(
             chunk_ids.len() >= 3,
-            "expected ≥3 chunk_ids from 3 symbols (saw {})",
+            "expected ≥3 chunk_ids from 3 non-fusable symbols (saw {})",
             chunk_ids.len()
         );
 

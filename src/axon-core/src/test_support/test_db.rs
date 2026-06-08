@@ -207,7 +207,23 @@ pub(crate) fn shared_test_db_url() -> String {
             );
         }
         register_for_atexit_cleanup(&db_name, &port);
-        format!("postgres://axon@127.0.0.1:{}/{}", port, db_name)
+        let url = format!("postgres://axon@127.0.0.1:{}/{}", port, db_name);
+
+        // REQ-AXO-901903 (REQ-AXO-901882 gap fix) — the bulk_writer (COPY BINARY,
+        // the sole A3/B3 write path) builds its pool from `resolve_database_url`
+        // (env), NOT from the per-store explicit url. Without this, A3 writes
+        // (`upsert_graph_v2` → `flush_batch`) land in the env-resolved live/dev
+        // DB while the test store reads the isolated test DB → 0 rows, so every
+        // a3_enroll/upsert integration test silently validated nothing. Register
+        // THIS shared test DB as the canonical resolver's test override so the
+        // bulk_writer (and any other env-resolving consumer) targets it. Uses a
+        // race-free `OnceLock` set (NOT `std::env::set_var`, which is unsound
+        // under the parallel test runner — concurrent env mutation corrupted
+        // other env-reading tests). Set before the first `flush_batch` (every
+        // write path goes through a GraphStore built via `create_test_db`, which
+        // calls this function first).
+        crate::postgres::set_test_db_url_override(&url);
+        url
     })
     .clone()
 }

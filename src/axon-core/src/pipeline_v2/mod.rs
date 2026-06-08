@@ -54,6 +54,7 @@ pub mod channels;
 pub mod demand_pull;
 pub mod embedder_gpu;
 pub mod indexed_file_cache;
+pub mod inflight;
 pub mod metrics;
 pub mod orchestrator;
 pub mod project_resolver;

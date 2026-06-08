@@ -589,7 +589,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_a_records_error_metrics_on_unparseable_extension() {
+    async fn pipeline_a_clean_skips_unparseable_extension_without_error() {
+        // REQ-AXO-901885 — a file whose extension has no parser is NOT an error:
+        // A2 emits a valid zero-symbol ParsedFile so A3 writes the IndexedFile
+        // marker (zero chunks) and the scanner stops re-queueing it. Erroring
+        // here was the root of the unbounded re-parse loop REQ-AXO-901885 fixed,
+        // and the Memory Shield (REQ-AXO-901895) relies on the same non-error
+        // zero-symbol skip path. (Was: pipeline_a_records_error_metrics_on_
+        // unparseable_extension, which encoded the retired error-on-no-parser
+        // contract.)
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not_supported.unknownext");
         std::fs::write(&path, "anything").unwrap();
@@ -608,15 +616,22 @@ mod tests {
 
         let snap_a1 = handles.metrics_a1.snapshot();
         let snap_a2 = handles.metrics_a2.snapshot();
+        let snap_a3 = handles.metrics_a3.snapshot();
         assert_eq!(snap_a1.items_out_total, 1, "A1 reads any file regardless of extension");
+        assert_eq!(snap_a1.errors_total, 0, "A1 read of a text file is not an error");
         assert_eq!(
-            snap_a2.errors_total, 1,
-            "A2 must record an error for unsupported extensions",
+            snap_a2.errors_total, 0,
+            "REQ-AXO-901885: no-parser extension is a clean zero-symbol skip, NOT an error",
         );
         assert_eq!(
-            snap_a2.items_out_total, 0,
-            "A2 must NOT forward errored items to A3",
+            snap_a2.items_out_total, 1,
+            "A2 forwards a zero-symbol ParsedFile so A3 can write the IndexedFile marker",
         );
+        assert_eq!(
+            snap_a3.items_out_total, 1,
+            "A3 enrolls the zero-symbol file (marker write, zero chunks)",
+        );
+        assert_eq!(snap_a3.errors_total, 0, "A3 marker write is not an error");
     }
 
     #[test]
@@ -658,46 +673,49 @@ mod tests {
 
         let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
 
-        // Slice 5 SOTA — b_chunks channel + synthetic feeder.
-        let (b_chunks_tx, b_chunks_rx) =
-            mpsc::channel::<ChunkForEmbedding>(caps.internal);
-        let store_for_feeder = store.clone();
-        tokio::spawn(async move {
-            for _ in 0..50 {
-                let store_clone = store_for_feeder.clone();
-                let pulled = tokio::task::spawn_blocking(move || {
-                    store_clone.select_chunks_with_content_needing_embedding(64)
-                })
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default();
-                if pulled.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-                for (chunk_id, content, content_hash) in pulled {
-                    let _ = b_chunks_tx
-                        .send(ChunkForEmbedding {
-                            chunk_id,
-                            content,
-                            content_hash,
-                        })
-                        .await;
-                }
-            }
-        });
-
-        let embedder: Arc<dyn B2Embedder> = Arc::new(NoOpEmbedder);
-        let mut handles_b =
-            spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b_chunks_rx);
-
+        // Send the file into A and await its receipt FIRST, so B's feed can be
+        // scoped to exactly THIS file's chunk_ids. Was: a DB-WIDE
+        // `select_chunks_with_content_needing_embedding(64)` poll-feeder — on
+        // the process-shared test DB it also drained orphan 'pending' chunks
+        // left by sibling A-only tests, so B embedded a foreign chunk and the
+        // `enrolled.chunk_ids.contains(&receipt.chunk_id)` assertion failed.
+        // REQ-AXO-901903 — feed B by id (deterministic, residue-independent).
         handles_a.input_tx.send(path.clone()).await.unwrap();
 
         let enrolled = tokio::time::timeout(Duration::from_secs(5), handles_a.output_rx.recv())
             .await
             .expect("A must produce a receipt within 5 s")
             .expect("A output channel must yield Some(EnrolledFile)");
+
+        // Feed B ONLY this file's chunks (by id), mirroring demand_pull_b's
+        // SELECT-with-content but scoped so the test is independent of any other
+        // test's residue in the shared test DB.
+        let (b_chunks_tx, b_chunks_rx) =
+            mpsc::channel::<ChunkForEmbedding>(caps.internal);
+        let store_for_feeder = store.clone();
+        let feed_ids = enrolled.chunk_ids.clone();
+        tokio::spawn(async move {
+            let pulled = tokio::task::spawn_blocking(move || {
+                store_for_feeder.fetch_chunks_for_embedding_batch(&feed_ids)
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+            for (chunk_id, content, content_hash) in pulled {
+                let _ = b_chunks_tx
+                    .send(ChunkForEmbedding {
+                        chunk_id,
+                        content,
+                        content_hash,
+                    })
+                    .await;
+            }
+        });
+
+        let embedder: Arc<dyn B2Embedder> = Arc::new(NoOpEmbedder);
+        let mut handles_b =
+            spawn_pipeline_b_full(counts_b, caps, store.clone(), embedder, b_chunks_rx);
 
         let expected_chunks = enrolled.chunk_ids.len();
         assert!(expected_chunks >= 1);

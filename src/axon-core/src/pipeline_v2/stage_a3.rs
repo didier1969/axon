@@ -223,6 +223,10 @@ pub fn spawn_a3_batched_worker(
                 let group_len = group_batch.len();
                 let store_clone = store.clone();
                 let pc_for_block = pc_str.clone();
+                // REQ-AXO-901903 — `group_batch` (each ParsedFile's RAII budget
+                // guard) is moved into the blocking task and dropped when it
+                // returns, releasing the in-flight budget on every outcome
+                // (success, error, panic). No manual release needed.
                 let join_result = tokio::task::spawn_blocking(move || {
                     store_clone.upsert_graph_v2_batch(&group_batch, &pc_for_block)
                 })
@@ -346,6 +350,7 @@ mod tests {
             size_bytes: content.len() as u64,
             symbols: symbols.into_iter().map(sym).collect(),
             relations: vec![],
+            inflight_guard: None,
         }
     }
 

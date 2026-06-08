@@ -751,7 +751,10 @@ async fn claim_and_feed_a(
     // W2 — preserve headroom for real-time Watchman events: skip the claim
     // when A1's channel is already near-full (the backlog drainer yields to
     // the live fast-path).
-    if input_tx.capacity() == 0 {
+    // REQ-AXO-901903 — also yield when pipeline-A in-flight content has reached
+    // the memory budget: the backlog drainer must not admit more files until A
+    // drains, else RAM grows unbounded (the OOM that crash-looped the indexer).
+    if input_tx.capacity() == 0 || crate::pipeline_v2::inflight::over_budget() {
         metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
         return PullBatch { fed: 0, head: None };
     }
