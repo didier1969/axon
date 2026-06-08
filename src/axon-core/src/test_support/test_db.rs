@@ -245,15 +245,27 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
     // top-level command. ON_ERROR_STOP=0 keeps one failed drop (e.g. a
     // database that acquired a connection between SELECT and DROP) from
     // aborting the rest.
-    let script = "\\set ON_ERROR_STOP 0\n\
+    // REQ-AXO-901906 — exclude THIS process's own shared test DB. Since
+    // `NativePgCtx::drop` now closes pools eagerly, the process-shared DB
+    // (`axon_test_shared_<pid>`) sits at zero backends *between* tests; without
+    // this guard the mid-run `sweep_reclaims_leaked_test_databases` test (which
+    // re-invokes the real sweep) would DROP the live shared DB, and every
+    // subsequent `create_test_db` — whose URL is memoised in a OnceLock — would
+    // fail to connect ("pool init failed"). Other processes'/prior runs' shared
+    // + per-test DBs (different names) are still reclaimed.
+    let own_shared = format!("axon_test_shared_{}", std::process::id());
+    let script = format!(
+        "\\set ON_ERROR_STOP 0\n\
         SELECT format('DROP DATABASE IF EXISTS %I', d.datname)\n\
         FROM pg_database d\n\
         WHERE d.datname LIKE 'axon\\_test\\_%'\n\
           AND d.datname <> 'axon_test_template'\n\
+          AND d.datname <> '{own_shared}'\n\
           AND NOT EXISTS (\n\
             SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname\n\
           )\n\
-        \\gexec\n";
+        \\gexec\n"
+    );
 
     let mut child = match std::process::Command::new("psql")
         .args([

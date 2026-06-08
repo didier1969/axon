@@ -507,7 +507,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pipeline_a_end_to_end_persists_graph_chunks_and_indexed_file_for_a_rust_fixture() {
         // Session-19 contract: A persists graph + chunks in ONE transaction
         // (content_tsv FTS is back-filled out-of-band by the pgmq tsv_worker,
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(snap_a3.errors_total, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pipeline_a_clean_skips_unparseable_extension_without_error() {
         // REQ-AXO-901885 — a file whose extension has no parser is NOT an error:
         // A2 emits a valid zero-symbol ParsedFile so A3 writes the IndexedFile
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(counts.b3, 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pipelines_a_and_b_full_persist_chunk_embeddings_end_to_end() {
         // Full A → B (demand_pull → B2 → B3) happy path with NoOpEmbedder.
         // After both pipelines drain the fixture, the store must contain:

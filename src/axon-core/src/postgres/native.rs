@@ -82,6 +82,19 @@ pub struct NativePgCtx {
     pub schema_search_path: Option<String>,
 }
 
+impl Drop for NativePgCtx {
+    fn drop(&mut self) {
+        // REQ-AXO-901906 — release this store's pooled connections at drop
+        // instead of letting them linger on the process-global native runtime
+        // until process exit. Without this, every per-test GraphStore leaks its
+        // idle connection(s) for the whole `cargo test` process, accumulating
+        // until PG's max_connections is hit and later tests fail to connect.
+        // `Pool::close` is idempotent + sync; production stores are long-lived
+        // so this only fires on their (rare) teardown.
+        self.pool.close();
+    }
+}
+
 impl NativePgCtx {
     /// Build a native context against `database_url`, optionally pinning a
     /// validated `search_path` schema. Mirrors the plugin's `pg_init_db`:
