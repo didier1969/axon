@@ -57,17 +57,22 @@ impl McpServer {
         } else {
             format!(" WHERE project_code = '{}'", project.replace('\'', "''"))
         };
+        // REQ-AXO-901905 — ::BIGINT cast: SUM(bigint) is promoted to `numeric`
+        // by PG, which the SQL-gateway renders as `<unsupported type numeric>`
+        // → json_to_i64 fails → silent 0. file_count_for_project already got
+        // this fix; diagnose's three SUM()s had been missed (returned `known
+        // files: 0` despite a populated IndexedFile).
         let known = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(files_chunked), 0) FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(files_chunked), 0)::BIGINT FROM ist.project_telemetry{}",
             where_project
         ));
-        let global_known =
-            self.sql_scalar("SELECT COALESCE(SUM(files_total), 0) FROM ist.project_telemetry");
+        let global_known = self
+            .sql_scalar("SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM ist.project_telemetry");
         let pending = 0i64;
         let indexing = 0i64;
         let completed = known;
         let symbols = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(symbols), 0) FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(symbols), 0)::BIGINT FROM ist.project_telemetry{}",
             where_project
         ));
         // Post-MIL-AXO-017: edge counts from canonical ist.Edge table.
