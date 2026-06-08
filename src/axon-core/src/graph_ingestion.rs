@@ -765,9 +765,10 @@ impl GraphStore {
     /// CPU, vector as optional enrichment.
     ///
     /// Idempotent — every INSERT uses `ON CONFLICT DO UPDATE` (Symbol,
-    /// Load all `(path, content_hash, last_seen_ms)` from `IndexedFile`
-    /// for hydrating the dedup cache at boot.
-    pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64)>> {
+    /// Load all `(path, content_hash, last_seen_ms, mtime_ms, size_bytes)` from
+    /// `IndexedFile` for hydrating the dedup cache at boot. mtime/size feed the
+    /// level-1 (no-read) I/O pre-filter; content_hash the level-2 parse skip.
+    pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64, i64, u64)>> {
         // REQ-AXO-901897 (DBQ slice 1) — the dedup cache must hydrate ONLY from
         // A-DONE rows. should_index is status-BLIND (it only compares hashes),
         // so a 'discovered'/'parsing' row in the cache would make should_index
@@ -777,7 +778,7 @@ impl GraphStore {
         // should_index returns true → it gets parsed. Independent of the DBQ
         // gate: this correctness fix applies whether or not the claim feeder runs.
         let raw = self.query_json_writer(
-            "SELECT path, content_hash, last_seen_ms FROM IndexedFile \
+            "SELECT path, content_hash, last_seen_ms, mtime_ms, size_bytes FROM IndexedFile \
              WHERE status IN ('parsed', 'ready', 'indexed')"
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
@@ -788,7 +789,9 @@ impl GraphStore {
                 let path = row.first()?.as_str()?.to_string();
                 let hash = row.get(1)?.as_str()?.to_string();
                 let ts = row.get(2)?.as_i64().unwrap_or(0);
-                Some((path, hash, ts))
+                let mtime = row.get(3)?.as_i64().unwrap_or(0);
+                let size = row.get(4)?.as_i64().unwrap_or(0).max(0) as u64;
+                Some((path, hash, ts, mtime, size))
             })
             .collect())
     }

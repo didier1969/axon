@@ -41,6 +41,11 @@ pub struct EnrolledFile {
     pub symbols_count: usize,
     pub relations_count: usize,
     pub last_seen_ms: i64,
+    /// File mtime (ms) at index time — fed to the dedup cache for the level-1
+    /// (mtime/size) I/O pre-filter on the next walk (PIL-AXO-007).
+    pub mtime_ms: i64,
+    /// File size (bytes) at index time — second half of the level-1 pre-filter.
+    pub size_bytes: u64,
     pub chunk_ids: Vec<String>,
 }
 
@@ -90,6 +95,8 @@ pub async fn a3_enroll(
         symbols_count: parsed.symbols.len(),
         relations_count: parsed.relations.len(),
         last_seen_ms: now_ms,
+        mtime_ms: parsed.mtime_ms,
+        size_bytes: parsed.size_bytes,
         chunk_ids,
     })
 }
@@ -211,13 +218,15 @@ pub fn spawn_a3_batched_worker(
                 // DEEP-008 fix: extract receipt metadata before passing
                 // ownership to spawn_blocking, avoiding a full clone of
                 // the batch content (~1.6 MB per flush).
-                let receipt_meta: Vec<(String, String, usize, usize)> = group_batch
+                let receipt_meta: Vec<(String, String, usize, usize, i64, u64)> = group_batch
                     .iter()
                     .map(|p| (
                         p.path.to_string_lossy().into_owned(),
                         p.content_hash.clone(),
                         p.symbols.len(),
                         p.relations.len(),
+                        p.mtime_ms,
+                        p.size_bytes,
                     ))
                     .collect();
                 let group_len = group_batch.len();
@@ -247,8 +256,10 @@ pub fn spawn_a3_batched_worker(
                             as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
-                        for ((path, content_hash, sym_count, rel_count), chunk_metas) in
-                            receipt_meta.into_iter().zip(chunk_metas_per_file.into_iter())
+                        for (
+                            (path, content_hash, sym_count, rel_count, mtime_ms, size_bytes),
+                            chunk_metas,
+                        ) in receipt_meta.into_iter().zip(chunk_metas_per_file.into_iter())
                         {
                             let state = embedder_state();
                             let mut chunk_ids = Vec::with_capacity(chunk_metas.len());
@@ -268,6 +279,8 @@ pub fn spawn_a3_batched_worker(
                                 symbols_count: sym_count,
                                 relations_count: rel_count,
                                 last_seen_ms: now_ms,
+                                mtime_ms,
+                                size_bytes,
                                 chunk_ids,
                             };
                             metrics.record_finished(per_item_us);
@@ -447,8 +460,8 @@ mod tests {
         let loaded = store.load_all_indexed_files().unwrap();
         let hydrated: std::collections::HashSet<String> = loaded
             .into_iter()
-            .map(|(p, _, _)| p)
-            .filter(|p| p.starts_with("/tmp/hyd/"))
+            .map(|(p, _, _, _, _)| p)
+            .filter(|p: &String| p.starts_with("/tmp/hyd/"))
             .collect();
 
         assert!(hydrated.contains("/tmp/hyd/parsed.rs"), "A-DONE 'parsed' must hydrate");

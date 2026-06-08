@@ -190,9 +190,19 @@ pub fn spawn_pipeline_v2_indexer(
     let dedup_cache = match store.load_all_indexed_files() {
         Ok(rows) => {
             let count = rows.len();
-            let cache = IndexedFileCache::from_iter(rows.into_iter().map(|(path, hash, ts)| {
-                (path, IndexedFileEntry { content_hash: hash, last_seen_ms: ts })
-            }));
+            let cache = IndexedFileCache::from_iter(rows.into_iter().map(
+                |(path, hash, ts, mtime, size)| {
+                    (
+                        path,
+                        IndexedFileEntry {
+                            content_hash: hash,
+                            last_seen_ms: ts,
+                            mtime_ms: mtime,
+                            size_bytes: size,
+                        },
+                    )
+                },
+            ));
             info!("pipeline_v2: dedup cache hydrated with {count} entries from IndexedFile");
             Some(cache)
         }
@@ -365,6 +375,8 @@ pub fn spawn_pipeline_v2_indexer(
                     receipt.path,
                     receipt.content_hash,
                     receipt.last_seen_ms,
+                    receipt.mtime_ms,
+                    receipt.size_bytes,
                 );
             }
         }
