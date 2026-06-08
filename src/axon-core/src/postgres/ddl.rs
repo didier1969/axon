@@ -310,7 +310,19 @@ mod tests {
         assert!(joined.contains("soll.ProjectCodeRegistry"));
         assert!(!joined.contains("public.ProjectCodeRegistry"),
             "PCR should no longer be in public; consumers query soll.*");
-        assert!(joined.contains("soll_project_code_registry_code_idx"));
+        // REQ-AXO-901881 — `soll.ProjectCodeRegistry.project_code` is the PRIMARY
+        // KEY, whose implicit unique index already covers lookups by code. The
+        // canonical DDL (01_soll_schema.sql) deliberately emits NO separate
+        // `soll_project_code_registry_code_idx` (audited + EXPLAIN-proven, see the
+        // "── Indexes ──" comment). Assert the PK contract instead of a redundant
+        // index the schema intentionally omits (the old assertion was stale).
+        // Whitespace-collapsed so a future column re-alignment in the DDL cannot
+        // re-break this on cosmetic spacing.
+        let joined_ws = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            joined_ws.contains("project_code TEXT PRIMARY KEY"),
+            "PCR.project_code must be the PRIMARY KEY (its implicit index covers code lookups)"
+        );
         for tbl in [
             "soll.Registry",
             "soll.Node",

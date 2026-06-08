@@ -119,7 +119,9 @@ mod tests {
             )
             .expect("register project");
 
-        // Seed IndexedFile rows so we can assert the full sweep wipes them.
+        // Seed IndexedFile rows carrying a `stale-hash` so we can assert the
+        // full sweep INVALIDATES the cache (drops that hash + re-enrols the
+        // files as `discovered`), forcing a full re-parse.
         // REQ-AXO-901860 — IndexedFile.project_code is a NOT NULL FK to
         // ist.Project, so the parent row + an explicit project_code are
         // required (the legacy seed omitted both and broke post-901860).
@@ -172,12 +174,30 @@ mod tests {
             .expect("files_scheduled field");
         assert_eq!(files_scheduled as usize, files.len());
 
-        // Post-condition : IndexedFile rows wiped (forces full re-parse
-        // on the next scanner pass).
-        let count_after = read_indexed_count(&store, &project_path);
+        // Post-condition — `full=true` INVALIDATES the IndexedFile cache so
+        // the next pipeline-A pass re-parses every file. Since REQ-AXO-901893
+        // (LEGACY FEED PURGE) the tool no longer leaves the rows deleted: step 2
+        // wipes them (dropping the cached `content_hash`), then step 4 runs a
+        // synchronous scanner walk that re-enrols every on-disk file into the
+        // durable work queue as `status='discovered'` with a blank
+        // `content_hash`. The DBQ-A claim feeder (REQ-AXO-901897) drains those
+        // rows into pipeline A by construction. The observable invalidation
+        // contract is therefore: the seeded `stale-hash` is gone AND the rows
+        // are back as `discovered` (enqueued for re-parse) — NOT row-absence,
+        // which only held under the pre-901893 async-NOTIFY design.
+        let stale_hash_rows = read_count_where(
+            &store,
+            &project_path,
+            "content_hash = 'stale-hash'",
+        );
         assert_eq!(
-            count_after, 0,
-            "full=true must wipe IndexedFile rows under project_path"
+            stale_hash_rows, 0,
+            "full=true must invalidate the cached content_hash (seeded 'stale-hash' must be gone)"
+        );
+        let discovered_rows = read_count_where(&store, &project_path, "status = 'discovered'");
+        assert_eq!(
+            discovered_rows, files.len() as i64,
+            "full=true must re-enrol every file as status='discovered' for re-parse"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -232,11 +252,23 @@ mod tests {
     /// Read the IndexedFile count for rows whose `path` is under the
     /// supplied project_path prefix.
     fn read_indexed_count(store: &crate::graph::GraphStore, project_path: &str) -> i64 {
+        read_count_where(store, project_path, "TRUE")
+    }
+
+    /// Read the IndexedFile count for rows under `project_path` that also
+    /// satisfy `extra_predicate` (a raw SQL boolean expression). Used to
+    /// assert the `full=true` invalidation contract (stale hash cleared +
+    /// rows re-enrolled as `discovered`).
+    fn read_count_where(
+        store: &crate::graph::GraphStore,
+        project_path: &str,
+        extra_predicate: &str,
+    ) -> i64 {
         let escaped = project_path.replace('\'', "''");
         let raw = store
             .execute_raw_sql_gateway(&format!(
-                "SELECT count(*) FROM ist.IndexedFile WHERE path LIKE '{}/%'",
-                escaped
+                "SELECT count(*) FROM ist.IndexedFile WHERE path LIKE '{}/%' AND ({})",
+                escaped, extra_predicate
             ))
             .expect("count indexed");
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
