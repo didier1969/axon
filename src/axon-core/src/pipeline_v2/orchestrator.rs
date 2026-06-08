@@ -210,9 +210,56 @@ pub fn spawn_pipeline_a_with_cache(
         }
     }
 
+    // REQ-AXO-901916 CP2b — level-1 (mtime/size) I/O pre-filter. When a dedup
+    // cache is present, a bare `stat()` BEFORE A1's read skips unchanged files
+    // (mtime AND size match the last index) with ZERO I/O — no read, no sha256,
+    // no parse. Restores the change-detection the scanner did in PG
+    // (persist_discovery_batch) before the PIL-AXO-007 direct flow removed it,
+    // so a re-walk / restart re-reads only the delta, not the whole fleet.
+    let a1_input_rx = if let Some(cache_l1) = dedup_cache.clone() {
+        let (pf_tx, pf_rx) = mpsc::channel::<PathBuf>(caps.internal);
+        tokio::spawn(async move {
+            let mut in_rx = input_rx;
+            let (mut skipped, mut forwarded): (u64, u64) = (0, 0);
+            while let Some(path) = in_rx.recv().await {
+                let needs_read = match tokio::fs::metadata(&path).await {
+                    Ok(md) => {
+                        let (mtime_ms, size_bytes) = super::stage_a1::mtime_size_ms(&md);
+                        cache_l1.should_read(&path.to_string_lossy(), mtime_ms, size_bytes)
+                    }
+                    // stat failed (deleted / perm) → let A1 surface it cleanly.
+                    Err(_) => true,
+                };
+                if needs_read {
+                    if pf_tx.send(path).await.is_err() {
+                        break;
+                    }
+                    forwarded += 1;
+                } else {
+                    skipped += 1;
+                }
+                if (forwarded + skipped) % 1000 == 0 {
+                    tracing::info!(
+                        forwarded, skipped,
+                        "A1 pre-filter (mtime/size): {} files skipped without reading",
+                        skipped
+                    );
+                }
+            }
+            tracing::info!(
+                forwarded, skipped,
+                "A1 pre-filter done: {} files skipped (no read/hash/parse)",
+                skipped
+            );
+        });
+        pf_rx
+    } else {
+        input_rx
+    };
+
     spawn_stage_workers(
         counts.a1,
-        input_rx,
+        a1_input_rx,
         a1_to_a2_tx,
         |path: PathBuf| async move { a1_prepare(path).await },
         metrics_a1.clone(),

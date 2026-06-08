@@ -19,6 +19,19 @@ use tracing::info;
 
 use super::types::PreparedFile;
 
+/// Extract `(mtime_ms, size_bytes)` from filesystem metadata — the level-1
+/// change-detection key shared by A1 and the orchestrator's pre-read filter
+/// (PIL-AXO-007 CP2b). Single source of truth so both compute mtime identically.
+pub fn mtime_size_ms(metadata: &std::fs::Metadata) -> (i64, u64) {
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as i64)
+        .unwrap_or(0);
+    (mtime_ms, metadata.len())
+}
+
 /// Read `path`, compute its content hash, and return the prepared payload.
 ///
 /// This is the closure handed to [`super::spawn_stage_workers`] for stage A1.
@@ -33,13 +46,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         .await
         .with_context(|| format!("A1 metadata failed for {}", path.display()))?;
 
-    let mtime_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as i64)
-        .unwrap_or(0);
-    let size_bytes = metadata.len();
+    let (mtime_ms, size_bytes) = mtime_size_ms(&metadata);
 
     // REQ-AXO-901895 Memory Shield (restored) — oversized files are skipped
     // BEFORE the read (the legacy 5 MB shield's "before read attempts"). Emit
