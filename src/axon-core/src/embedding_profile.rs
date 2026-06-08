@@ -289,10 +289,18 @@ fn content_token_count_uncached(text: &str) -> usize {
 /// REQ-AXO-901895 — max fragment length (bytes) memoized by
 /// [`content_token_count`]. Longer fragments bypass the cache (one-shot giant
 /// lines would only bloat it). Body lines + per-chunk prefixes sit well under.
-const TOKEN_COUNT_CACHE_MAX_KEY_BYTES: usize = 2048;
-/// REQ-AXO-901895 — per-thread memo entry cap; cleared wholesale on overflow
-/// (code-line repetition makes refill cheap, keeps memory flat without an LRU).
-const TOKEN_COUNT_CACHE_MAX_ENTRIES: usize = 200_000;
+const TOKEN_COUNT_CACHE_MAX_KEY_BYTES: usize = 256;
+/// REQ-AXO-901895 / REQ-AXO-901903 — per-thread memo entry cap. CRITICAL: the
+/// chunker runs inside `tokio::task::spawn_blocking`, whose pool grows to
+/// `max_blocking_threads` (512 by default). This cache is `thread_local`, so
+/// total memory = (live blocking threads) × cap × entry-size. A 200k cap
+/// observed-OOM'd the graph indexer (17 GB anon-rss → OOM-kill → crash-loop)
+/// once the wedge fix unblocked full throughput. The dedup win is intra-file
+/// (a symbol's lines re-encoded per enclosing symbol); a file rarely has >4k
+/// unique lines, so a small cap keeps the throughput benefit while bounding
+/// total memory to a few hundred MB regardless of pool size. 4096 × ~150 B ≈
+/// 0.6 MB/thread × 512 ≈ 300 MB worst case.
+const TOKEN_COUNT_CACHE_MAX_ENTRIES: usize = 4_096;
 
 thread_local! {
     static TOKEN_COUNT_CACHE: std::cell::RefCell<std::collections::HashMap<String, usize>> =
