@@ -763,6 +763,14 @@ pub fn fuse_small_chunks(
     if tagged.is_empty() {
         return tagged;
     }
+    // REQ-AXO-901902/901917 — defense: the per-group `estimated_token_count`
+    // below is bounded in CONTENT size (groups flush at `target_tokens`) but NOT
+    // in COUNT. A file that fans out into thousands of fusable chunks (phantom-
+    // heavy source, or a degenerate body before the upstream cap) would run one
+    // encode per group — the second spin site observed on the 644 KB LOG.txt
+    // (28 769 chunks ⇒ `fuse` choked after `build`). Past the cap, byte-estimate
+    // the fused groups too; precise counts add no value at that fan-out.
+    let byte_estimate_fused = tagged.len() > MAX_PRECISE_ENCODE_CHUNKS;
     tagged.sort_by_key(|t| t.chunk.start_line);
 
     let mut result: Vec<TaggedChunk> = Vec::with_capacity(tagged.len());
@@ -810,7 +818,11 @@ pub fn fuse_small_chunks(
             symbol_id: format!("{file_prefix}::fused_L{start_line}_{end_line}_{seq}"),
             symbol_name: "fused_group".to_string(),
             chunk: DerivedCodeChunk {
-                estimated_tokens: estimated_token_count(&combined_content),
+                estimated_tokens: if byte_estimate_fused {
+                    fallback_estimated_token_count(&combined_content)
+                } else {
+                    estimated_token_count(&combined_content)
+                },
                 content: combined_content,
                 part_index: 1,
                 part_count: 1,
