@@ -480,6 +480,19 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "shared_test_results",
         matcher: DirectoryMatcher::Exact("test-results"),
     },
+    // REQ-AXO-901910 — Scheme/Lisp toolchains emit compiled bytecode into a
+    // `compiled/` dir (Racket `.zo`; Guile `.go` — which would otherwise be
+    // mis-routed to the Go parser and produce garbage symbols). Excluding the
+    // dir kills the whole class without an extension-level `.go` rule (which
+    // would wrongly exclude real Go source). Paired with the `.scm`/`.ss`/`.sld`
+    // parser arm so OpenCog/Atomese SOURCE indexes while its build output does not.
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::BuildOutput,
+        policy: ExclusionPolicy::SoftExclude,
+        rule_id: "scheme_compiled_output",
+        matcher: DirectoryMatcher::Exact("compiled"),
+    },
 ];
 
 /// REQ-AXO-901890 — single source of truth for "should the watcher prune this

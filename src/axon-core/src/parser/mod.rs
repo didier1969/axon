@@ -176,6 +176,7 @@ pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod scheme;
 pub mod sql;
 pub mod text;
 pub mod typeql;
@@ -210,6 +211,7 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "py" => Some(Box::new(python::PythonParser::new())),
         "ex" | "exs" => Some(Box::new(elixir::ElixirParser::new())),
         "rs" => Some(Box::new(rust::RustParser::new())),
+        "scm" | "ss" | "sld" | "sls" => Some(Box::new(scheme::SchemeParser::new())),
         "ts" | "tsx" => Some(Box::new(typescript::TypeScriptParser::new())),
         "js" | "jsx" => Some(Box::new(typescript::TypeScriptParser::new())),
         "go" => Some(Box::new(go::GoParser::new())),
@@ -275,6 +277,7 @@ mod wasm_grammar_health_tests {
             ("demo.cpp", "int main() { return 0; }\n"),
             ("demo.cs", "class A { void M() {} }\n"),
             ("demo.php", "<?php\nfunction foo() { return 1; }\n"),
+            ("demo.scm", "(define (foo x) x)\n"),
         ];
 
         let mut regressed: Vec<&str> = Vec::new();
