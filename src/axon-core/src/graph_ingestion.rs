@@ -769,17 +769,16 @@ impl GraphStore {
     /// `IndexedFile` for hydrating the dedup cache at boot. mtime/size feed the
     /// level-1 (no-read) I/O pre-filter; content_hash the level-2 parse skip.
     pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64, i64, u64)>> {
-        // REQ-AXO-901897 (DBQ slice 1) — the dedup cache must hydrate ONLY from
-        // A-DONE rows. should_index is status-BLIND (it only compares hashes),
-        // so a 'discovered'/'parsing' row in the cache would make should_index
-        // return false and the file would be skipped forever — THE bug that
-        // stranded ~25k 'discovered' files. By excluding the not-yet-parsed
-        // states here, a 'discovered'/'parsing' file is absent from the cache →
-        // should_index returns true → it gets parsed. Independent of the DBQ
-        // gate: this correctness fix applies whether or not the claim feeder runs.
+        // PIL-AXO-007 (REQ-AXO-901916) — the dedup cache hydrates from rows that
+        // carry a real content_hash, i.e. A3 actually indexed them. In the
+        // status-free model an IndexedFile row exists ONLY after a successful A3
+        // UPSERT (no pre-created 'discovered' placeholder), so `content_hash <> ''`
+        // is the exact "A-DONE" predicate that replaces the old status filter.
+        // A not-yet-indexed file is simply absent → should_read/should_index
+        // return true → it gets read + parsed.
         let raw = self.query_json_writer(
             "SELECT path, content_hash, last_seen_ms, mtime_ms, size_bytes FROM IndexedFile \
-             WHERE status IN ('parsed', 'ready', 'indexed')"
+             WHERE content_hash <> ''"
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
             .unwrap_or_default();
