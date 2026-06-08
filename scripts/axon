@@ -49,7 +49,7 @@ Examples:
   ./scripts/axon stop --hard
   ./scripts/axon restart --brain-only
   ./scripts/axon status
-  ./scripts/axon --instance dev start --indexer-full --tensorrt
+  ./scripts/axon --instance dev start --indexer-full   # GPU/TensorRT auto-détecté si GPU présent
   ./scripts/axon benchmark-vector-token-matrix --tokens 4096,8192,16384 --duration 20 --interval 5
   ./scripts/axon benchmark-vector-token-matrix --mode warm --tokens 4096,8192,16384 --duration 20 --interval 5 --warmup-timeout 120
   ./scripts/axon qualify --profile demo --mode indexer_graph
@@ -189,8 +189,7 @@ Start mode options:
   --brain-only
   --indexer-graph
   --indexer-vector
-  --indexer-full
-  --tensorrt
+  --indexer-full          (GPU/TensorRT auto-sélectionné quand GPU présent)
   --no-dashboard
   --skip-mcp-tests
   --skip-elixir-prewarm
