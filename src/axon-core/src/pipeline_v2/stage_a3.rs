@@ -438,22 +438,23 @@ mod tests {
         assert_eq!(n_indexed, 0, "A3 must NOT write the legacy 'indexed' status");
     }
 
-    /// REQ-AXO-901897 (DBQ slice 1) — (b) the dedup cache must hydrate ONLY
-    /// from A-DONE rows. `load_all_indexed_files` excludes 'discovered'/'parsing'
-    /// so an unparsed file is absent from the cache → should_index returns true
-    /// → it is parsed (the fix for the ~25k stranded files).
+    /// REQ-AXO-901916 (PIL-007 / CP5a) — the dedup cache hydrates by the
+    /// `content_hash <> ''` "A-DONE" predicate, NOT a status column. The
+    /// claim/lease/status machine was removed (commit 2f881a28); an IndexedFile
+    /// row exists only after a successful A3 UPSERT writes a real content_hash,
+    /// so a not-yet-indexed file is either absent OR carries the DEFAULT empty
+    /// content_hash → it must NOT hydrate (else should_index=false → stranded).
+    /// Insert omits `status` so the test stays valid once CP5 drops that column.
     #[tokio::test]
-    async fn load_all_indexed_files_excludes_discovered_and_parsing() {
+    async fn load_all_indexed_files_hydrates_only_content_hash_rows() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         store
             .execute(
                 "INSERT INTO ist.IndexedFile \
-                    (path, project_code, content_hash, last_seen_ms, status, discovered_ms) VALUES \
-                    ('/tmp/hyd/discovered.rs','AXO','hd',1,'discovered',1), \
-                    ('/tmp/hyd/parsing.rs','AXO','hp',1,'parsing',1), \
-                    ('/tmp/hyd/parsed.rs','AXO','hP',1,'parsed',1), \
-                    ('/tmp/hyd/ready.rs','AXO','hr',1,'ready',1), \
-                    ('/tmp/hyd/indexed.rs','AXO','hi',1,'indexed',1);",
+                    (path, project_code, content_hash, last_seen_ms) VALUES \
+                    ('/tmp/hyd/done_a.rs','AXO','hA',1), \
+                    ('/tmp/hyd/done_b.rs','AXO','hB',1), \
+                    ('/tmp/hyd/pending.rs','AXO','',1);",
             )
             .unwrap();
 
@@ -464,16 +465,17 @@ mod tests {
             .filter(|p: &String| p.starts_with("/tmp/hyd/"))
             .collect();
 
-        assert!(hydrated.contains("/tmp/hyd/parsed.rs"), "A-DONE 'parsed' must hydrate");
-        assert!(hydrated.contains("/tmp/hyd/ready.rs"), "A-DONE 'ready' must hydrate");
-        assert!(hydrated.contains("/tmp/hyd/indexed.rs"), "transitional 'indexed' must hydrate");
         assert!(
-            !hydrated.contains("/tmp/hyd/discovered.rs"),
-            "'discovered' must NOT hydrate (else should_index=false → stranded forever)"
+            hydrated.contains("/tmp/hyd/done_a.rs"),
+            "A-DONE row (content_hash set) must hydrate"
         );
         assert!(
-            !hydrated.contains("/tmp/hyd/parsing.rs"),
-            "'parsing' (in-flight claim) must NOT hydrate"
+            hydrated.contains("/tmp/hyd/done_b.rs"),
+            "A-DONE row (content_hash set) must hydrate"
+        );
+        assert!(
+            !hydrated.contains("/tmp/hyd/pending.rs"),
+            "empty content_hash (not yet A-DONE) must NOT hydrate (else should_index=false → stranded)"
         );
 
         let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd/%'");
