@@ -38,6 +38,11 @@ pub fn mtime_size_ms(metadata: &std::fs::Metadata) -> (i64, u64) {
 /// Errors are surfaced verbatim so the worker pool can record them in
 /// `StageMetrics::errors_total` without crashing the pipeline.
 pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
+    // REQ-AXO-901919 — register as in-flight for the whole stage so the
+    // watchdog can name this file if A1 (metadata/read) ever stalls. Drops on
+    // return OR cancellation.
+    let _in_flight = super::in_flight::InFlightRegistry::global()
+        .enter("A1", path.to_string_lossy().into_owned());
     // REQ-AXO-345 — A1 in/out trace for silent-drop hunt.
     info!(target: "pipeline_v2::a1", "A1 in: {}", path.display());
 

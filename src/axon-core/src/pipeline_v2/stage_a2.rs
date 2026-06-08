@@ -57,6 +57,13 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     let mtime_for_skip = prep.mtime_ms;
     let size_for_skip = prep.size_bytes;
     let parse_fut = tokio::task::spawn_blocking(move || {
+        // REQ-AXO-901919/901918 — register INSIDE the blocking closure so the
+        // entry lives for the ACTUAL parse-thread lifetime. On a per-file parse
+        // timeout the outer future returns a clean skip, but this uncancellable
+        // thread keeps running; the entry persists → the watchdog keeps naming
+        // the file, making the spawn_blocking orphan observable.
+        let _in_flight = super::in_flight::InFlightRegistry::global()
+            .enter("A2", prep.path.to_string_lossy().into_owned());
         let mut symbols;
         let mut relations;
 

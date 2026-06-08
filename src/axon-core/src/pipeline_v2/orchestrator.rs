@@ -197,6 +197,11 @@ pub fn spawn_pipeline_a_with_cache(
     let metrics_a2 = StageMetrics::new("A2");
     let metrics_a3 = StageMetrics::new("A3");
 
+    // REQ-AXO-901919 — in-flight file watchdog: WARNs the moment any A-stage
+    // file exceeds the budget, naming path + stage + age (turns a silent wedge
+    // into a named culprit, without a bespoke diagnostic).
+    super::in_flight::spawn_watchdog();
+
     // REQ-AXO-901624 — P4 Lazy Async TSV Build. Spawn the TsvBuilderWorker
     // pool alongside A1/A2/A3 ; it drains `pgmq.tsv_pending` out of band
     // and back-fills `Chunk.content_tsv`. Handles are intentionally
