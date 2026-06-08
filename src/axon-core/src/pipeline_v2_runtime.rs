@@ -34,7 +34,8 @@ use tracing::{info, warn};
 
 use crate::graph::GraphStore;
 use crate::pipeline_v2::{
-    GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder,
+    GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder, ProjectCodeResolver,
+    ProjectRegistrySnapshot,
     PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
 };
 use crate::pipeline_v2::orchestrator::spawn_pipeline_a_with_cache;
@@ -168,21 +169,41 @@ pub fn spawn_pipeline_v2_indexer(
     // with empty explicit code so it delegates to
     // project_meta::resolve_project_identity_for_path on every call.
     let scanner = Arc::new(Scanner::new(&watch_root, ""));
-    let store_for_resolver = store.clone();
-    let scanner_for_resolver = scanner.clone();
-    let resolver = Arc::new(move |path: &std::path::Path| -> String {
-        match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
-            Ok(code) => code,
-            Err(err) => {
-                // Unresolved project → "UNK" sentinel, which is a DROP marker,
-                // NOT a bucket: scanner::persist_discovery_batch and
-                // graph_ingestion both skip "UNK", so the file is enrolled
-                // nowhere (REQ-AXO-901860 — UNK retired, no garbage bucket).
-                warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel, not enrolled)");
-                "UNK".to_string()
+    // REQ-AXO-901916 CP2c — resolver from a RAM snapshot of the canonical PG
+    // project registry (PIL-AXO-001), hydrated ONCE at boot. Longest-prefix
+    // match in RAM = zero filesystem I/O per file, replacing the old per-A3-call
+    // rescan of every `.axon/meta.json`. Falls back to per-file scanner
+    // resolution ONLY if the registry SELECT fails / is empty (explicit degraded
+    // path). "UNK" stays the DROP sentinel (REQ-AXO-901860): graph_ingestion
+    // skips it, so an unresolved file is enrolled nowhere.
+    let resolver: ProjectCodeResolver =
+        match crate::project_meta::registered_project_identities(&store) {
+            Ok(ids) if !ids.is_empty() => {
+                let n = ids.len();
+                let rows = ids
+                    .into_iter()
+                    .map(|id| (id.code, id.project_path.to_string_lossy().into_owned()));
+                info!("pipeline_v2: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
+                ProjectRegistrySnapshot::from_rows(rows).into_resolver()
             }
-        }
-    });
+            other => {
+                match &other {
+                    Err(e) => warn!(error = %e, "pipeline_v2: registry snapshot hydration failed — per-file scanner fallback"),
+                    Ok(_) => warn!("pipeline_v2: PG project registry empty — per-file scanner fallback"),
+                }
+                let store_for_resolver = store.clone();
+                let scanner_for_resolver = scanner.clone();
+                Arc::new(move |path: &std::path::Path| -> String {
+                    match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
+                        Ok(code) => code,
+                        Err(err) => {
+                            warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel)");
+                            "UNK".to_string()
+                        }
+                    }
+                }) as ProjectCodeResolver
+            }
+        };
 
     // REQ-AXO-901746 — hydrate the content-hash dedup cache from PG at boot.
     // Files whose (path, content_hash) match are skipped between A1 and A2,

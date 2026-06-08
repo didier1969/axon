@@ -90,7 +90,9 @@ pub use stage_b1::{
     ChunkForEmbedding, EmbeddingDedupCache,
 };
 pub use embedder_gpu::GpuB2Embedder;
-pub use project_resolver::{const_resolver, project_code_from_chunk_id, ProjectCodeResolver};
+pub use project_resolver::{
+    const_resolver, project_code_from_chunk_id, ProjectCodeResolver, ProjectRegistrySnapshot,
+};
 pub use stage_b2::{spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::PersistedEmbedding;
 pub use tsv_worker::{spawn_tsv_workers, DrainStats, TsvWorkerConfig};
