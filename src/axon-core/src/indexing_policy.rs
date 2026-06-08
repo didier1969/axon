@@ -422,6 +422,25 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
         rule_id: "shared_coverage",
         matcher: DirectoryMatcher::Exact("coverage"),
     },
+    // REQ-AXO-901895 — Playwright/test runners emit large generated HTML +
+    // bundled JS report trees (`playwright-report/`, `test-results/`, incl.
+    // `trace/assets/*.js` minified bundles ~600 KB). Pure generated test output
+    // with zero source value that fed the pipeline-A wedge. SoftExclude (keeps
+    // the allowlist escape hatch, consistent with coverage/dist/build/out).
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::GeneratedFrameworkOutput,
+        policy: ExclusionPolicy::SoftExclude,
+        rule_id: "shared_playwright_report",
+        matcher: DirectoryMatcher::Exact("playwright-report"),
+    },
+    DirectoryRule {
+        ecosystem: EcosystemId::General,
+        class: ArtifactClass::GeneratedFrameworkOutput,
+        policy: ExclusionPolicy::SoftExclude,
+        rule_id: "shared_test_results",
+        matcher: DirectoryMatcher::Exact("test-results"),
+    },
 ];
 
 /// REQ-AXO-901890 — single source of truth for "should the watcher prune this
@@ -466,6 +485,61 @@ pub fn watchman_ignore_dirs() -> Vec<&'static str> {
         })
         .map(|rule| rule.matcher.canonical_segment())
         .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// REQ-AXO-901895 — Memory Shield (restored). The legacy Elixir/UDS pipeline
+// enforced a hard 5 MB size limit + binary skip + non-code extension skip
+// "before read attempts" (commit 67e39321 "Architected Memory Shield against
+// massive file OOMs"). The streaming pipeline_v2 migration dropped it
+// (REQ-AXO-901653 slice-5c removed the oversized gate on the false premise
+// that channel back-pressure bounds per-file cost — it bounds channel DEPTH,
+// not the CPU cost of parsing/chunking one pathological file). Result: a
+// single 13 MB `app.js` or a 748 KB minified `transformers.js` wedged a
+// pipeline-A worker for hours (head-of-line blocking). These guards restore
+// the shield and add minified-line detection the original lacked.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Hard size ceiling for pipeline-A parsing (bytes). A file larger than this is
+/// skipped before its content is read into RAM (zero-symbol marker → never
+/// re-claimed). Restores the legacy 5 MB Memory Shield. Override via
+/// `AXON_A_MAX_PARSE_BYTES`.
+pub const MAX_PARSE_BYTES_DEFAULT: u64 = 5 * 1024 * 1024;
+/// A single physical line longer than this (bytes) marks the file as
+/// minified/generated (bundled JS, source maps, one-line JSON blobs): tree-sitter
+/// builds a pathological AST and the chunker char-windows it for ~zero retrieval
+/// value. Such files are skipped. Override via `AXON_A_MAX_LINE_BYTES`.
+pub const MAX_LINE_BYTES_DEFAULT: usize = 8 * 1024;
+/// Wall-clock budget for parsing one file (ms). A2 abandons a parse exceeding
+/// this and records a clean zero-symbol skip (safety net for pathology not
+/// caught by the size/minified guards). Override via `AXON_A_PARSE_TIMEOUT_MS`.
+pub const PARSE_TIMEOUT_MS_DEFAULT: u64 = 30_000;
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+pub fn max_parse_bytes() -> u64 {
+    env_u64("AXON_A_MAX_PARSE_BYTES", MAX_PARSE_BYTES_DEFAULT)
+}
+
+pub fn max_line_bytes() -> usize {
+    env_u64("AXON_A_MAX_LINE_BYTES", MAX_LINE_BYTES_DEFAULT as u64) as usize
+}
+
+pub fn parse_timeout_ms() -> u64 {
+    env_u64("AXON_A_PARSE_TIMEOUT_MS", PARSE_TIMEOUT_MS_DEFAULT)
+}
+
+/// True when any single physical line exceeds `max_line_bytes` — the
+/// signature of minified/generated content. O(1) for the giant-single-line
+/// case (`lines()` yields one slice, `len()` is its byte length); short-circuits
+/// on the first over-long line otherwise.
+pub fn is_minified(content: &str, max_line_bytes: usize) -> bool {
+    content.lines().any(|line| line.len() > max_line_bytes)
 }
 
 fn classify_internal(
@@ -835,6 +909,50 @@ mod tests {
                 rule_id: "erlang_ebin",
             }
         );
+    }
+
+    /// REQ-AXO-901895 — Memory Shield guards: minified detection flags a giant
+    /// single line and passes normal multi-line source; the 5 MB default holds.
+    #[test]
+    fn memory_shield_minified_detection_and_size_default() {
+        let normal = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
+        assert!(!super::is_minified(normal, super::MAX_LINE_BYTES_DEFAULT));
+        let minified = format!("var d={{{}}};", "k:1,".repeat(5000));
+        assert!(super::is_minified(&minified, super::MAX_LINE_BYTES_DEFAULT));
+        assert_eq!(super::MAX_PARSE_BYTES_DEFAULT, 5 * 1024 * 1024);
+    }
+
+    /// REQ-AXO-901895 — Playwright/test-runner output trees are SoftExcluded
+    /// (generated HTML + bundled JS reports, zero source value).
+    #[test]
+    fn test_indexing_policy_excludes_playwright_and_test_results_output() {
+        let config = test_config();
+        let ecosystems = supported_parser_ecosystems();
+        let root = Path::new("/workspace");
+        assert!(matches!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/playwright-report/trace/assets/x.js"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::SoftExcluded {
+                rule_id: "shared_playwright_report",
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_path(
+                root,
+                Path::new("/workspace/proj/test-results/run/out.js"),
+                &config,
+                ecosystems,
+            ),
+            PathDisposition::SoftExcluded {
+                rule_id: "shared_test_results",
+                ..
+            }
+        ));
     }
 
     #[test]

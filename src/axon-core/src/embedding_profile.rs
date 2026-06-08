@@ -244,6 +244,39 @@ pub fn token_count_for_text(text: &str) -> AnyhowResult<usize> {
 /// heuristic (BGE averages ~3-4 chars/token on source code) so the chunker
 /// stays linear and correct even without the model cache.
 pub fn content_token_count(text: &str) -> usize {
+    // REQ-AXO-901895 — per-line tokenizer memoization (the chunker throughput
+    // lever). The Knuth-Plass DP costs every body line via this function, and
+    // `build_symbol_chunks` runs per symbol — so a file's lines are re-encoded
+    // once per ENCLOSING symbol (nested fns/classes/macros share spans),
+    // making the HuggingFace `encode` the dominant per-file cost (~1.5 files/s
+    // pre-fix). Source lines repeat heavily within a file (and common lines —
+    // braces, imports — across files), so a thread-local memo collapses the
+    // O(symbols × lines) encodes to O(unique lines). Deterministic: the cache
+    // returns the exact same count, only the recompute is skipped.
+    //
+    // Bypass for long fragments: giant minified lines (which the chunker
+    // char-windows) are one-shot and would just bloat the cache, so only short
+    // fragments (body lines, per-chunk prefixes) are memoized.
+    if text.len() > TOKEN_COUNT_CACHE_MAX_KEY_BYTES {
+        return content_token_count_uncached(text);
+    }
+    if let Some(hit) = TOKEN_COUNT_CACHE.with(|c| c.borrow().get(text).copied()) {
+        return hit;
+    }
+    let count = content_token_count_uncached(text);
+    TOKEN_COUNT_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        // Simple bound: code lines repeat heavily so a periodic clear refills
+        // cheaply and keeps per-thread memory flat (no LRU dependency).
+        if cache.len() >= TOKEN_COUNT_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(text.to_owned(), count);
+    });
+    count
+}
+
+fn content_token_count_uncached(text: &str) -> usize {
     match load_runtime_embedding_tokenizer() {
         Ok(tokenizer) => match tokenizer.encode(text, false) {
             Ok(encoding) => encoding.len(),
@@ -253,9 +286,42 @@ pub fn content_token_count(text: &str) -> usize {
     }
 }
 
+/// REQ-AXO-901895 — max fragment length (bytes) memoized by
+/// [`content_token_count`]. Longer fragments bypass the cache (one-shot giant
+/// lines would only bloat it). Body lines + per-chunk prefixes sit well under.
+const TOKEN_COUNT_CACHE_MAX_KEY_BYTES: usize = 2048;
+/// REQ-AXO-901895 — per-thread memo entry cap; cleared wholesale on overflow
+/// (code-line repetition makes refill cheap, keeps memory flat without an LRU).
+const TOKEN_COUNT_CACHE_MAX_ENTRIES: usize = 200_000;
+
+thread_local! {
+    static TOKEN_COUNT_CACHE: std::cell::RefCell<std::collections::HashMap<String, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::with_capacity(4096));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REQ-AXO-901895 — the per-line memo must return the EXACT same count as
+    /// the uncached encode (determinism), and a repeat call must hit the cache.
+    /// Holds whether or not the tokenizer model is present (both paths share the
+    /// same `_uncached` fallback), so it is hermetic.
+    #[test]
+    fn content_token_count_cache_matches_uncached() {
+        for s in [
+            "fn main() {}",
+            "    let x = 1;",
+            "}",
+            "use std::collections::HashMap;",
+        ] {
+            let first = content_token_count(s);
+            let second = content_token_count(s); // cache hit
+            let uncached = content_token_count_uncached(s);
+            assert_eq!(first, second, "repeat call must be stable for {s:?}");
+            assert_eq!(first, uncached, "cache must equal the uncached count for {s:?}");
+        }
+    }
 
     #[test]
     fn runtime_chunk_profile_defaults_from_model_cap() {

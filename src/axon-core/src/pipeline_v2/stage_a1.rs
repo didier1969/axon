@@ -27,10 +27,8 @@ use super::types::PreparedFile;
 pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     // REQ-AXO-345 — A1 in/out trace for silent-drop hunt.
     info!(target: "pipeline_v2::a1", "A1 in: {}", path.display());
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .with_context(|| format!("A1 read failed for {}", path.display()))?;
 
+    // Metadata FIRST so the size guard fires before reading the file into RAM.
     let metadata = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("A1 metadata failed for {}", path.display()))?;
@@ -41,10 +39,66 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as i64)
         .unwrap_or(0);
-
     let size_bytes = metadata.len();
-    let content_hash = sha256_hex(&content);
 
+    // REQ-AXO-901895 Memory Shield (restored) — oversized files are skipped
+    // BEFORE the read (the legacy 5 MB shield's "before read attempts"). Emit
+    // empty content so A2's empty fast-path yields zero symbols and A3 writes
+    // the 'parsed' marker → the file is never re-claimed and never wedges a
+    // worker. Change detection on rescan is mtime+size (stored at discovery),
+    // so a later shrink/edit re-evaluates it.
+    if size_bytes > crate::indexing_policy::max_parse_bytes() {
+        info!(
+            target: "pipeline_v2::a1",
+            "A1 skip: {} reason=oversized size={}",
+            path.display(),
+            size_bytes
+        );
+        return Ok(skipped_prepared(path, size_bytes, mtime_ms, "oversized"));
+    }
+
+    // Read as UTF-8 text. Binary content surfaces as `InvalidData` — skip it
+    // cleanly (restores the legacy `:skipped_binary`) instead of bubbling an
+    // error that churns the file through retries to the dead-letter cap.
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            info!(
+                target: "pipeline_v2::a1",
+                "A1 skip: {} reason=binary size={}",
+                path.display(),
+                size_bytes
+            );
+            return Ok(skipped_prepared(path, size_bytes, mtime_ms, "binary"));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("A1 read failed for {}", path.display()));
+        }
+    };
+
+    // REQ-AXO-901895 — minified/generated guard: a single over-long physical
+    // line (bundled JS, source maps, one-line JSON) builds a pathological
+    // tree-sitter AST and is char-windowed for ~zero retrieval value. Skip with
+    // the real content hash (edit re-evaluates) but empty content so A2
+    // fast-paths to zero symbols.
+    if crate::indexing_policy::is_minified(&content, crate::indexing_policy::max_line_bytes()) {
+        let content_hash = sha256_hex(&content);
+        info!(
+            target: "pipeline_v2::a1",
+            "A1 skip: {} reason=minified size={}",
+            path.display(),
+            size_bytes
+        );
+        return Ok(PreparedFile {
+            path,
+            content: String::new(),
+            content_hash,
+            mtime_ms,
+            size_bytes,
+        });
+    }
+
+    let content_hash = sha256_hex(&content);
     info!(
         target: "pipeline_v2::a1",
         "A1 out: {} size={}",
@@ -58,6 +112,21 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         mtime_ms,
         size_bytes,
     })
+}
+
+/// REQ-AXO-901895 — a deliberately-skipped file (oversized/binary) we did NOT
+/// read. Emits empty content (→ A2 zero-symbol fast-path → A3 'parsed' marker)
+/// with a hash keyed on size+mtime so a later edit changing either re-evaluates
+/// the file instead of being deduped as "already seen".
+fn skipped_prepared(path: PathBuf, size_bytes: u64, mtime_ms: i64, reason: &str) -> PreparedFile {
+    let content_hash = sha256_hex(&format!("__axon_skip_{reason}__:{size_bytes}:{mtime_ms}"));
+    PreparedFile {
+        path,
+        content: String::new(),
+        content_hash,
+        mtime_ms,
+        size_bytes,
+    }
 }
 
 /// Helper — hex-encoded SHA-256 of an arbitrary byte slice.
@@ -122,6 +191,49 @@ mod tests {
     async fn a1_prepare_fails_cleanly_when_path_does_not_exist() {
         let res = a1_prepare(PathBuf::from("/tmp/does/not/exist/axon-test")).await;
         assert!(res.is_err(), "missing path must surface an error to the worker pool");
+    }
+
+    /// REQ-AXO-901895 Memory Shield — an oversized file (> 5 MB default) is
+    /// skipped with empty content (A2 fast-path → A3 'parsed' marker), so it
+    /// never reaches the parser/chunker and cannot wedge a worker.
+    #[tokio::test]
+    async fn a1_prepare_skips_oversized_file_with_empty_content() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        // 5.6 MB of short lines → over the 5 MB default, not minified ; the
+        // size guard fires before the read either way.
+        file.write_all("x\n".repeat(2_800_000).as_bytes()).unwrap();
+        file.flush().unwrap();
+        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        assert!(prep.content.is_empty(), "oversized file must yield empty content");
+        assert!(prep.size_bytes > 5 * 1024 * 1024);
+        assert_eq!(prep.content_hash.len(), 64);
+    }
+
+    /// REQ-AXO-901895 — a minified/generated file (single physical line over the
+    /// 8 KB default) is skipped with empty content but a real content hash (so a
+    /// later edit re-evaluates it).
+    #[tokio::test]
+    async fn a1_prepare_skips_minified_single_line_with_empty_content() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all("x".repeat(9000).as_bytes()).unwrap(); // one 9 KB line > 8 KB
+        file.flush().unwrap();
+        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        assert!(prep.content.is_empty(), "minified file must yield empty content");
+        assert_eq!(prep.content_hash.len(), 64);
+        assert_eq!(prep.size_bytes, 9000);
+    }
+
+    /// REQ-AXO-901895 — binary content (non-UTF8) is skipped cleanly (restores
+    /// the legacy `:skipped_binary`) instead of bubbling a read error that
+    /// churns the file through retries.
+    #[tokio::test]
+    async fn a1_prepare_skips_binary_file_with_empty_content() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[0xFFu8, 0xFE, 0x00, 0x9F, 0x01, 0x02]).unwrap(); // invalid UTF-8
+        file.flush().unwrap();
+        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        assert!(prep.content.is_empty(), "binary file must yield empty content");
+        assert_eq!(prep.content_hash.len(), 64);
     }
 
     #[test]

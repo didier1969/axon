@@ -11,8 +11,10 @@
 //! actually parallelises across cores; the `tokio::spawn` in
 //! `spawn_stage_workers` just steers items off the channel.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::types::{ParsedFile, PreparedFile};
 
@@ -50,7 +52,11 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             relations: Vec::new(),
         });
     }
-    let result = tokio::task::spawn_blocking(move || {
+    let path_for_skip = prep.path.clone();
+    let hash_for_skip = prep.content_hash.clone();
+    let mtime_for_skip = prep.mtime_ms;
+    let size_for_skip = prep.size_bytes;
+    let parse_fut = tokio::task::spawn_blocking(move || {
         let mut symbols;
         let mut relations;
 
@@ -90,9 +96,34 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             symbols,
             relations,
         })
-    })
-    .await
-    .context("A2 parse task panicked or was cancelled")?;
+    });
+    let parse_budget = Duration::from_millis(crate::indexing_policy::parse_timeout_ms());
+    let result = match tokio::time::timeout(parse_budget, parse_fut).await {
+        Ok(join_result) => join_result.context("A2 parse task panicked or was cancelled")?,
+        Err(_elapsed) => {
+            // REQ-AXO-901895 — parse exceeded the per-file budget (pathology not
+            // caught by the size/minified guards). spawn_blocking can't be
+            // cancelled, so the worker thread runs to completion in the
+            // background (its result discarded) while we record a clean
+            // zero-symbol skip → A3 marks 'parsed', no retry storm, and the
+            // pipeline keeps draining other files.
+            warn!(
+                target: "pipeline_v2::a2",
+                "A2 timeout: {} after {}ms — skipping (zero-symbol)",
+                path_for_log.display(),
+                parse_budget.as_millis()
+            );
+            return Ok(ParsedFile {
+                path: path_for_skip,
+                content: String::new(),
+                content_hash: hash_for_skip,
+                mtime_ms: mtime_for_skip,
+                size_bytes: size_for_skip,
+                symbols: Vec::new(),
+                relations: Vec::new(),
+            });
+        }
+    };
     if let Ok(ref parsed) = result {
         info!(
             target: "pipeline_v2::a2",
