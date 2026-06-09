@@ -10,6 +10,34 @@ use super::tools_framework_support::{
 use super::McpServer;
 
 impl McpServer {
+    /// REQ-AXO-901926 — resolve the CANONICAL current Vision for a project.
+    /// The previous `.first()` over `soll_query_context.visions` surfaced a
+    /// rejected/test Vision (shared-PG test fixtures inject `VIS-*-90x`
+    /// 'Test Vision' nodes — see REQ-AXO-91560 test isolation) and could miss
+    /// the real one entirely under the top-N limit. We select the `current`
+    /// Vision with the most incoming EPITOMIZES edges (the real Vision is
+    /// epitomized by every Pillar; test fixtures have none), tie-broken by id.
+    fn canonical_current_vision(&self, project_code: &str) -> Option<Value> {
+        let pc = project_code.replace('\'', "''");
+        let sql = format!(
+            "SELECT n.id, n.title, n.status, left(n.description, 280) AS body \
+             FROM soll.Node n \
+             WHERE n.type = 'Vision' AND n.status = 'current' AND n.project_code = '{pc}' \
+             ORDER BY (SELECT count(*) FROM soll.Edge e WHERE e.target_id = n.id AND e.relation_type = 'EPITOMIZES') DESC, n.id ASC \
+             LIMIT 1"
+        );
+        let raw = self.graph_store.query_json(&sql).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+        let row = rows.into_iter().next()?;
+        Some(json!({
+            "id": row.first().and_then(Value::as_str).unwrap_or("unknown"),
+            "title": row.get(1).and_then(Value::as_str).unwrap_or("unknown"),
+            "status": row.get(2).and_then(Value::as_str).unwrap_or("current"),
+            "description": row.get(3).and_then(Value::as_str).unwrap_or("unavailable"),
+            "source": "SOLL"
+        }))
+    }
+
     pub(super) fn axon_project_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
         let project_code = args
@@ -34,12 +62,19 @@ impl McpServer {
             .cloned()
             .unwrap_or_else(|| json!({}));
         let conception = self.cached_conception_view(project_code);
-        let vision = soll_data
-            .get("visions")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.first())
-            .and_then(|value| value.as_str())
-            .map(Self::parse_soll_vision_entry)
+        // REQ-AXO-901926 — canonical current Vision first (robust against
+        // rejected/test-fixture visions); fall back to the soll_query_context
+        // list only if the direct lookup yields nothing.
+        let vision = self
+            .canonical_current_vision(project_code)
+            .or_else(|| {
+                soll_data
+                    .get("visions")
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| items.first())
+                    .and_then(|value| value.as_str())
+                    .map(Self::parse_soll_vision_entry)
+            })
             .unwrap_or_else(|| {
                 json!({
                     "id": "unavailable",
