@@ -697,6 +697,56 @@ mod tests {
     }
 
     #[test]
+    fn latency_bench_ram_algorithms_on_large_graph() {
+        // REQ-AXO-901923 — self-measured latency guard at ≈ AXO IST scale
+        // (20k nodes / 40k edges). Proves the RAM algorithms stay far under
+        // the MCP gateway budget. The old petgraph O(V²) PageRank took tens of
+        // seconds here; the sparse CSR impl is single-digit ms. Run with
+        // `--nocapture` to print the measured timings.
+        let count: u32 = 20_000;
+        let mut nodes = Vec::with_capacity(count as usize);
+        let mut edges = Vec::with_capacity(count as usize * 2);
+        for i in 0..count {
+            nodes.push(n(&format!("AXO::s{i}")));
+        }
+        for i in 0..count {
+            // Deterministic ~2 edges/node (no RNG — resume-safe).
+            edges.push(e(
+                &format!("AXO::s{i}"),
+                &format!("AXO::s{}", i.wrapping_mul(7).wrapping_add(1) % count),
+                RelationType::Calls,
+            ));
+            edges.push(e(
+                &format!("AXO::s{i}"),
+                &format!("AXO::s{}", i.wrapping_mul(13).wrapping_add(3) % count),
+                RelationType::Calls,
+            ));
+        }
+        let g = IstGraph::build(nodes, edges);
+
+        // PageRank is the worst-case latency tool (the old petgraph impl was
+        // O(V²·iter)); it is iterative so the deep synthetic chains are safe.
+        let t = std::time::Instant::now();
+        let pr = pagerank_top(&g, 0.85, 50, 10);
+        let pr_ms = t.elapsed().as_millis();
+
+        // Reverse-radius RAM traversal (the primitive behind impact/bidi_trace),
+        // bounded depth so it stays iterative-cheap.
+        let t = std::time::Instant::now();
+        let callers = g.bfs_reverse("AXO::s7", 4, 10_000, &[]);
+        let bfs_ms = t.elapsed().as_millis();
+
+        println!(
+            "LATENCY_BENCH 20k nodes / 40k edges -> pagerank(50it)={pr_ms}ms bfs_reverse(d4)={bfs_ms}ms (pr_top={}, callers={})",
+            pr.len(),
+            callers.len()
+        );
+        assert_eq!(pr.len(), 10);
+        assert!(pr_ms < 5_000, "pagerank latency regressed: {pr_ms}ms");
+        assert!(bfs_ms < 5_000, "bfs_reverse latency regressed: {bfs_ms}ms");
+    }
+
+    #[test]
     fn structural_sccs_detects_two_node_cycle() {
         let nodes = vec![n("a"), n("b"), n("c")];
         let edges = vec![

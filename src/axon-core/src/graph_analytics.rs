@@ -30,40 +30,43 @@ impl GraphStore {
         } else {
             String::new()
         };
+        // REQ-AXO-901923 — target-first walk. The previous query expanded
+        // CALLS forward over the whole edge set (Edge⋈Symbol⋈Edge⋈Symbol on
+        // 390k edges) with the danger filter applied AFTER the 2-hop join.
+        // `unwrap` (ubiquitous in Rust, huge fan-in) made that O(E²) and blew
+        // the MCP gateway timeout. We instead start from the SMALL `dangerous`
+        // set and walk BACKWARD via the index on Edge.target_id, bounded by
+        // `LIMIT` (the score saturates at 5 findings anyway, so a sample is
+        // sufficient and the result stays a cheap streamed index scan).
         let query = format!(
             "
-            WITH dangerous_paths AS (
-                SELECT s1.name, s2.name AS target_name
+            WITH dangerous AS (
+                SELECT id FROM Symbol
+                WHERE is_unsafe = true OR lower(name) IN ('eval', 'unwrap')
+            ),
+            direct AS (
+                SELECT s1.name AS name, s2.name AS target_name
                 FROM ist.Edge c
+                JOIN dangerous d ON d.id = c.target_id
                 JOIN Symbol s1 ON s1.id = c.source_id
                 JOIN Symbol s2 ON s2.id = c.target_id
-                WHERE c.relation_type = 'CALLS'
-                  AND (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
-                UNION ALL
-                SELECT s1.name, s2.name AS target_name
-                FROM ist.Edge c
-                JOIN Symbol s1 ON s1.id = c.source_id
-                JOIN Symbol s2 ON s2.id = c.target_id
-                WHERE c.relation_type = 'CALLS_NIF'
-                  AND (s2.is_nif = true OR s2.is_unsafe = true){scope}
-                UNION ALL
-                SELECT s1.name, s2.name AS target_name
-                FROM Symbol s1
-                JOIN ist.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS'
-                JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN ist.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
+                WHERE (c.relation_type = 'CALLS' OR c.relation_type = 'CALLS_NIF'){scope}
+            ),
+            indirect AS (
+                SELECT s1.name AS name, s2.name AS target_name
+                FROM ist.Edge c2
+                JOIN dangerous d ON d.id = c2.target_id AND c2.relation_type = 'CALLS'
+                JOIN ist.Edge c1 ON c1.target_id = c2.source_id AND c1.relation_type = 'CALLS'
+                JOIN Symbol s1 ON s1.id = c1.source_id
                 JOIN Symbol s2 ON s2.id = c2.target_id
-                WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
-                UNION ALL
-                SELECT s1.name, s2.name AS target_name
-                FROM Symbol s1
-                JOIN ist.Edge c1 ON c1.source_id = s1.id AND c1.relation_type = 'CALLS_NIF'
-                JOIN Symbol mid ON mid.id = c1.target_id
-                JOIN ist.Edge c2 ON c2.source_id = mid.id AND c2.relation_type = 'CALLS'
-                JOIN Symbol s2 ON s2.id = c2.target_id
-                WHERE (s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')){scope}
+                WHERE true{scope}
             )
-            SELECT name, target_name FROM dangerous_paths
+            SELECT name, target_name FROM (
+                SELECT name, target_name FROM direct
+                UNION ALL
+                SELECT name, target_name FROM indirect
+            ) dangerous_paths
+            LIMIT 100
         ",
             scope = scope
         );
