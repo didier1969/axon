@@ -341,10 +341,10 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
         .as_array()
         .is_some_and(|items| !items.is_empty()));
     assert!(data["conception"]["flows"].as_array().is_some());
-    assert_eq!(
-        data["anomalies"]["summary"]["note"].as_str(),
-        Some("Anomalies calculation decoupled to prevent timeout. Use 'anomalies' tool directly.")
-    );
+    // REQ-AXO-901926 — project_status now surfaces the REAL (RAM-first,
+    // TTL-cached) anomalies summary instead of the old decoupled stub, so the
+    // structural counts are no longer forced to 0/0/0.
+    assert!(data["anomalies"]["summary"].is_object());
     assert!(data["soll_context"]["visions"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
@@ -458,8 +458,13 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .unwrap();
     let delta = &second["data"]["delta_vs_previous"];
     assert_eq!(delta["available"].as_bool(), Some(true));
-    assert_eq!(delta["wrapper_count_delta"].as_i64(), Some(0));
-    assert_eq!(delta["orphan_code_count_delta"].as_i64(), Some(0));
+    // REQ-AXO-901926 — counts are recoupled (real, not the 0/0/0 stub), so the
+    // delta now genuinely tracks structural change: one orphan (axo::orphan)
+    // was inserted between the two snapshots.
+    assert!(
+        delta["orphan_code_count_delta"].as_i64().unwrap_or(0) >= 1,
+        "delta must detect the added orphan: {delta:?}"
+    );
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");

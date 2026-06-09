@@ -48,11 +48,15 @@ impl McpServer {
         let status = self.axon_status(&json!({ "mode": mode.unwrap_or("brief") }))?;
         let status_data = status.get("data").cloned().unwrap_or_else(|| json!({}));
 
-        let anomalies_data = json!({
-            "summary": { "note": "Anomalies calculation decoupled to prevent timeout. Use 'anomalies' tool directly." },
-            "findings": [],
-            "recommendations": []
-        });
+        // REQ-AXO-901926 — the anomalies tool is RAM-first (PIL-AXO-9002) +
+        // TTL-cached, so the old "decoupled to prevent timeout" stub (which
+        // forced the structural counts to 0/0/0 even though `anomalies` returns
+        // them instantly) is obsolete. Pull the real summary; fall back to an
+        // empty summary only if the call fails.
+        let anomalies_data = self
+            .axon_anomalies(&json!({ "project": project_code, "mode": "brief" }))
+            .and_then(|resp| resp.get("data").cloned())
+            .unwrap_or_else(|| json!({ "summary": {}, "findings": [], "recommendations": [] }));
         let soll_context = self.axon_soll_query_context(&json!({
             "project_code": project_code,
             "limit": 5
