@@ -60,7 +60,18 @@ impl McpServer {
             .get("sink")
             .and_then(|value| value.as_str())
             .map(str::trim);
-        let project = args.get("project").and_then(|value| value.as_str());
+        // REQ-AXO-901922 — auto-resolve project_code (AXON_PROJECT_ROOT/cwd →
+        // registry, like inspect REQ-AXO-089) so the RAM snapshot is consulted
+        // even when the caller omits `project`. Without this, `project` stayed
+        // None → `ram_attempted` false → unscoped PG fallback returned empty.
+        // `auto_project` must outlive `project` (borrowed via as_deref).
+        let explicit_project = args.get("project").and_then(|value| value.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let project = explicit_project.or(auto_project.as_deref());
         let depth = args
             .get("depth")
             .and_then(|value| value.as_u64())
@@ -114,8 +125,12 @@ impl McpServer {
         // CSR snapshot for structural/graph tools ; PG `ist.path` is
         // only the degraded fallback when the cache is cold or the query
         // is project-unscoped (cache is per-project).
+        // REQ-AXO-901922 — lazy-warm the RAM snapshot (brain start does not
+        // auto-populate it) so the BFS runs in RAM instead of falling to the
+        // PG `ist.path` fallback. `view` reads the cache live per call, so
+        // warming before traversal is sufficient.
+        let ram_attempted = project.map(|p| self.ensure_ram_snapshot_warm(p)).unwrap_or(false);
         let view = process_view();
-        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
         let ram_result = if ram_attempted {
             view.shortest_path(
                 project.unwrap_or_default(),

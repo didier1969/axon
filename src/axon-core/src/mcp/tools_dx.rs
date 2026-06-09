@@ -1779,7 +1779,17 @@ impl McpServer {
     pub(crate) fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
-        let project = args.get("project").and_then(|v| v.as_str());
+        // REQ-AXO-901922 — auto-resolve project_code (like inspect REQ-AXO-089)
+        // so the RAM snapshot is consulted even when the caller omits/cannot
+        // pass `project`. Previously None → `ram_attempted` false → the dead PG
+        // fallback returned a hardcoded-empty trace on every call.
+        let explicit_project = args.get("project").and_then(|v| v.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let project = explicit_project.or(auto_project.as_deref());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(24);
         let scope = project
             .map(|p| format!("project:{}", p))
@@ -1871,7 +1881,10 @@ impl McpServer {
         // path remains as the degraded fallback when the cache is cold or
         // the query is project-unscoped (cache is per-project).
         let view = process_view();
-        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        // REQ-AXO-901922 — lazy-warm the RAM snapshot (brain start does not
+        // auto-populate it). Without this the cold cache forced the dead PG
+        // fallback below (hardcoded empty since CALLS tables were dropped).
+        let ram_attempted = project.map(|p| self.ensure_ram_snapshot_warm(p)).unwrap_or(false);
         let mut surfaces_used: Vec<&'static str> = Vec::new();
         let mut surfaces_degraded: Vec<&'static str> = Vec::new();
 

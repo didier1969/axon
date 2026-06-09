@@ -23,6 +23,32 @@ impl<'a> JsonSqlStore for GraphStoreSqlAdapter<'a> {
 }
 
 impl McpServer {
+    /// REQ-AXO-901922 — lazy-warm the process IST snapshot for `project_code`
+    /// so RAM-first structural tools (path / bidi_trace / impact) never fall
+    /// to a hardcoded-empty result just because the cache was never explicitly
+    /// warmed. Brain start does NOT auto-populate the snapshot (see module
+    /// header: REQ-AXO-91487 LISTEN/NOTIFY sync unshipped), so without this
+    /// every fresh session saw empty traversals until an operator called
+    /// `ist_snapshot_warm` by hand. Returns the TRUE warmth after the attempt
+    /// (honours AXON_IST_RAM_ENABLED via `is_warm`): one-time O(snapshot) load,
+    /// subsequent calls hit the cache. On load error the caller transparently
+    /// falls back to its PG path.
+    pub(crate) fn ensure_ram_snapshot_warm(&self, project_code: &str) -> bool {
+        if project_code.is_empty() {
+            return false;
+        }
+        if crate::ist_snapshot::process_view().is_warm(project_code) {
+            return true;
+        }
+        let adapter = GraphStoreSqlAdapter {
+            inner: &self.graph_store,
+        };
+        if let Ok((graph, _stats)) = load_snapshot(&adapter, project_code) {
+            publish_process_snapshot(project_code.to_string(), Arc::new(graph));
+        }
+        crate::ist_snapshot::process_view().is_warm(project_code)
+    }
+
     pub(crate) fn axon_ist_snapshot_warm(&self, args: &Value) -> Option<Value> {
         let project_arg = args.get("project_code").and_then(|v| v.as_str());
         let resolved = match project_arg {

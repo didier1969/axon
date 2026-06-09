@@ -880,6 +880,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string", "description": "Starting symbol" },
+                        "project": { "type": "string", "description": "Optional project_code (e.g. AXO). Auto-resolved from cwd/AXON_PROJECT_ROOT when omitted; required for the RAM CSR snapshot lookup." },
                         "depth": { "type": "integer", "description": "Maximum depth (default: unlimited for exhaustiveness, but capped by the engine)" }
                     },
                     "required": ["symbol"]
