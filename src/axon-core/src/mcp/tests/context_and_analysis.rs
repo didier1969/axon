@@ -3511,11 +3511,15 @@ fn test_axon_health_god_objects() {
         )
         .unwrap();
 
+    // REQ-AXO-901924 — a god object has high fan-OUT (it orchestrates many
+    // collaborators). GodClass CALLS 20 distinct deps. (Fan-IN — being called
+    // by many — is a popular hub, NOT a god object: now flagged as such would
+    // be a false positive, see god_objects_does_not_flag_high_fan_in_utility.)
     for i in 0..20 {
         server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::dep{}', 'dep{}', 'function', false, true, false, 'PRJ')", i, i)).unwrap();
         server
             .graph_store
-            .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::dep{}', 'prj::GodClass', 'CALLS', 'PRJ', 0)", i))
+            .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::GodClass', 'prj::dep{}', 'CALLS', 'PRJ', 0)", i))
             .unwrap();
     }
 
@@ -3540,6 +3544,56 @@ fn test_axon_health_god_objects() {
         .unwrap();
 
     assert!(content.contains("God Objects detected") || content.contains("GodClass"));
+}
+
+#[test]
+fn test_axon_batch_routes_all_tools_not_just_three() {
+    // REQ-AXO-901925 — batch must route EVERY tool through the canonical
+    // dispatcher and return one result per call. Previously only
+    // query/inspect/impact were handled; status/embedding_status fell to the
+    // `_ => None` arm and the whole batch silently returned `[]`.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "batch",
+            "arguments": {
+                "calls": [
+                    {"tool": "status", "args": {"mode": "brief"}},
+                    {"tool": "embedding_status", "args": {"project": "AXO"}}
+                ]
+            }
+        })),
+        id: Some(json!(42)),
+    };
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let text = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let parsed: Vec<Value> =
+        serde_json::from_str(text).expect("batch must return a JSON array of results");
+    assert_eq!(
+        parsed.len(),
+        2,
+        "one result per call — was [] before REQ-AXO-901925"
+    );
+    assert_eq!(
+        parsed[0].get("name").and_then(|v| v.as_str()),
+        Some("status")
+    );
+    assert_eq!(
+        parsed[1].get("name").and_then(|v| v.as_str()),
+        Some("embedding_status")
+    );
+    assert!(
+        parsed[0].get("result").is_some(),
+        "non-query tool result must be present, not dropped"
+    );
 }
 
 #[test]

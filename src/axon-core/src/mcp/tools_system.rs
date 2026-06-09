@@ -814,23 +814,32 @@ impl McpServer {
         let mut all_results = Vec::new();
 
         for call in calls {
-            let tool_name = call.get("tool")?.as_str()?;
-            let normalized_tool_name = tool_name.strip_prefix("axon_").unwrap_or(tool_name);
-            let tool_args = call.get("args")?;
-
-            let res = match normalized_tool_name {
-                "query" => self.axon_query(tool_args),
-                "inspect" => self.axon_inspect(tool_args),
-                "impact" => self.axon_impact(tool_args),
-                _ => None,
-            };
-
-            if let Some(r) = res {
-                all_results.push(json!({
-                    "name": tool_name,
-                    "result": r
-                }));
+            // REQ-AXO-901925 — resilient per-call: a malformed entry yields a
+            // per-call error instead of aborting the whole batch (the old `?`
+            // short-circuited the entire call). One result per input call.
+            let tool_name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            if tool_name.is_empty() {
+                all_results.push(json!({ "name": "", "error": "missing `tool`" }));
+                continue;
             }
+            let normalized_tool_name = tool_name.strip_prefix("axon_").unwrap_or(tool_name);
+            let tool_args = call.get("args").cloned().unwrap_or_else(|| json!({}));
+
+            // REQ-AXO-901925 — route through the canonical dispatcher so EVERY
+            // tool is reachable from batch, not just query/inspect/impact. The
+            // old hardcoded 3-tool match returned `_ => None`, silently dropping
+            // every other tool and yielding `[]` (e.g. status + embedding_status).
+            let res = self
+                .execute_tool_direct(normalized_tool_name, &tool_args)
+                .unwrap_or_else(|| json!({
+                    "status": "unknown_tool",
+                    "tool": tool_name,
+                    "hint": "tool not recognized by the canonical dispatcher; check `help`"
+                }));
+            all_results.push(json!({
+                "name": tool_name,
+                "result": res
+            }));
         }
 
         Some(

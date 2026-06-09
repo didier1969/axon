@@ -172,9 +172,9 @@ impl GraphStore {
         let escaped = project.replace('\'', "''");
         let query = format!(
             "
-            SELECT s.name, count(*) AS fan_in
+            SELECT s.name, count(DISTINCT c.target_id) AS fan_out
             FROM Symbol s
-            JOIN ist.Edge c ON c.target_id = s.id AND c.relation_type = 'CALLS'
+            JOIN ist.Edge c ON c.source_id = s.id AND c.relation_type = 'CALLS'
             LEFT JOIN ist.Edge rel ON rel.target_id = s.id AND rel.relation_type = 'CONTAINS'
             LEFT JOIN ist.IndexedFile f ON f.path = rel.source_id
             {}
@@ -190,8 +190,8 @@ impl GraphStore {
                     AND lower(f.path) NOT LIKE '%/_build/%'
                 )
             )
-            GROUP BY s.name
-            HAVING count(*) >= 20
+            GROUP BY s.id, s.name
+            HAVING count(DISTINCT c.target_id) >= 20
         ",
             if scoped {
                 format!("WHERE s.project_code = '{}'", escaped)

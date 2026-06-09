@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, RelationType};
 
 const ANALYTICS_LIMIT: usize = 20;
-const GOD_OBJECT_FAN_IN_THRESHOLD: usize = 20;
+const GOD_OBJECT_FAN_OUT_THRESHOLD: usize = 20;
 const FEATURE_ENVY_MIN_TOTAL: usize = 3;
 const FEATURE_ENVY_MIN_FOREIGN: usize = 2;
 const TEST_PATH_FRAGMENTS: &[&str] = &["/tests/", "/test/"];
@@ -200,9 +200,15 @@ pub fn feature_envy_candidates(graph: &IstGraph, project: &str, limit: usize) ->
         .collect()
 }
 
-/// REQ-AXO-901595 — RAM equivalent of `GraphStore::get_god_objects`. Returns
-/// `(symbol_name, fan_in_count)` for callables whose incoming CALLS count
-/// meets `GOD_OBJECT_FAN_IN_THRESHOLD`, excluding minified / vendor paths.
+/// REQ-AXO-901595 / REQ-AXO-901924 — RAM equivalent of
+/// `GraphStore::get_god_objects`. Returns `(symbol_name, fan_out_count)` for
+/// callables whose OUTGOING CALLS count meets `GOD_OBJECT_FAN_OUT_THRESHOLD`,
+/// excluding minified / vendor paths.
+///
+/// A god object/function is one that *does too much* — it orchestrates many
+/// collaborators (high fan-OUT). The previous heuristic counted fan-IN, which
+/// flags widely-*called* tiny utilities (`now_ms`, `build`) — popular hubs, the
+/// exact opposite of a god object (REQ-AXO-901924 false positives).
 pub fn god_objects(graph: &IstGraph, project: &str) -> Vec<(String, usize)> {
     let file_map = build_file_path_map(graph);
     let mut out: Vec<(String, usize)> = Vec::new();
@@ -225,12 +231,17 @@ pub fn god_objects(graph: &IstGraph, project: &str) -> Vec<(String, usize)> {
             continue;
         }
 
-        let fan_in = graph
-            .reverse_neighbors(idx)
-            .filter(|(_, rel)| matches!(rel, RelationType::Calls))
-            .count();
-        if fan_in >= GOD_OBJECT_FAN_IN_THRESHOLD {
-            out.push((name.to_string(), fan_in));
+        // REQ-AXO-901924 — fan-OUT (distinct collaborators this callable
+        // invokes), not fan-in. High fan-out = does-too-much = god object.
+        let mut callees: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (target, rel) in graph.forward_neighbors(idx) {
+            if matches!(rel, RelationType::Calls) {
+                callees.insert(target);
+            }
+        }
+        let fan_out = callees.len();
+        if fan_out >= GOD_OBJECT_FAN_OUT_THRESHOLD {
+            out.push((name.to_string(), fan_out));
         }
     }
 
@@ -476,27 +487,55 @@ mod tests {
     }
 
     #[test]
-    fn god_objects_returns_high_fan_in_callables() {
+    fn god_objects_returns_high_fan_out_callables() {
+        // REQ-AXO-901924 — a god function ORCHESTRATES many collaborators
+        // (high fan-out). `god` calls THRESHOLD distinct callees.
         let mut nodes = vec![
             file("AXO::src/core.rs"),
-            func("AXO::src/core.rs::hub", false),
+            func("AXO::src/core.rs::god", false),
         ];
         let mut edges = vec![edge(
             "AXO::src/core.rs",
-            "AXO::src/core.rs::hub",
+            "AXO::src/core.rs::god",
             RelationType::Contains,
         )];
-        for i in 0..GOD_OBJECT_FAN_IN_THRESHOLD {
-            let caller = format!("AXO::src/core.rs::caller_{i:02}");
-            nodes.push(func(&caller, false));
-            edges.push(edge("AXO::src/core.rs", &caller, RelationType::Contains));
-            edges.push(edge(&caller, "AXO::src/core.rs::hub", RelationType::Calls));
+        for i in 0..GOD_OBJECT_FAN_OUT_THRESHOLD {
+            let callee = format!("AXO::src/core.rs::callee_{i:02}");
+            nodes.push(func(&callee, false));
+            edges.push(edge("AXO::src/core.rs", &callee, RelationType::Contains));
+            edges.push(edge("AXO::src/core.rs::god", &callee, RelationType::Calls));
         }
         let g = IstGraph::build(nodes, edges);
         let gods = god_objects(&g, "AXO");
         assert_eq!(gods.len(), 1);
-        assert_eq!(gods[0].0, "hub");
-        assert_eq!(gods[0].1, GOD_OBJECT_FAN_IN_THRESHOLD);
+        assert_eq!(gods[0].0, "god");
+        assert_eq!(gods[0].1, GOD_OBJECT_FAN_OUT_THRESHOLD);
+    }
+
+    #[test]
+    fn god_objects_does_not_flag_high_fan_in_utility() {
+        // REQ-AXO-901924 regression guard — a widely-CALLED tiny helper
+        // (high fan-IN, e.g. now_ms / build) is a hub, NOT a god object.
+        let mut nodes = vec![
+            file("AXO::src/core.rs"),
+            func("AXO::src/core.rs::now_ms", false),
+        ];
+        let mut edges = vec![edge(
+            "AXO::src/core.rs",
+            "AXO::src/core.rs::now_ms",
+            RelationType::Contains,
+        )];
+        for i in 0..(GOD_OBJECT_FAN_OUT_THRESHOLD + 5) {
+            let caller = format!("AXO::src/core.rs::caller_{i:02}");
+            nodes.push(func(&caller, false));
+            edges.push(edge("AXO::src/core.rs", &caller, RelationType::Contains));
+            edges.push(edge(&caller, "AXO::src/core.rs::now_ms", RelationType::Calls));
+        }
+        let g = IstGraph::build(nodes, edges);
+        assert!(
+            god_objects(&g, "AXO").is_empty(),
+            "high fan-in utility must not be flagged as a god object"
+        );
     }
 
     #[test]
