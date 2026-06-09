@@ -38,18 +38,57 @@ pub fn to_petgraph(graph: &IstGraph) -> (DiGraph<String, u8>, Vec<NodeIndex>) {
 /// by descending score. `damping` is the standard 0.85 used in the original
 /// Brin/Page paper ; `iterations` should be ≥30 for convergence on graphs
 /// up to 1M nodes (petgraph 0.6 does not implement an early-stop).
+/// REQ-AXO-901923 — sparse power-iteration PageRank directly on the CSR
+/// snapshot, O(iterations · (V + E)).
+///
+/// The previous implementation delegated to `petgraph::algo::page_rank`, which
+/// is O(V² · iterations) (it probes edge existence across every node pair per
+/// iteration). On the AXO IST (~22.5k nodes) that is ~25 billion ops over 50
+/// iterations and blew the MCP gateway timeout every call. This native sparse
+/// walk over `forward_neighbors` finishes in milliseconds on the same graph,
+/// with standard dangling-node mass redistribution so the rank vector stays a
+/// proper probability distribution.
 pub fn pagerank_top(
     graph: &IstGraph,
     damping: f32,
     iterations: usize,
     top: usize,
 ) -> Vec<(String, f32)> {
-    if graph.node_count() == 0 {
+    let n = graph.node_count();
+    if n == 0 {
         return Vec::new();
     }
-    let (pg, _) = to_petgraph(graph);
-    let scores = petgraph::algo::page_rank(&pg, damping, iterations);
-    let mut pairs: Vec<(String, f32)> = scores
+    let nf = n as f32;
+
+    // Out-degree per node (distinct forward edges in the CSR).
+    let out_deg: Vec<u32> = (0..n as u32)
+        .map(|u| graph.forward_neighbors(u).count() as u32)
+        .collect();
+
+    let mut rank = vec![1.0f32 / nf; n];
+    let teleport = (1.0 - damping) / nf;
+
+    for _ in 0..iterations {
+        // Mass held by dangling nodes (no out-edges) is redistributed
+        // uniformly so total rank is conserved.
+        let dangling: f32 = (0..n).filter(|&u| out_deg[u] == 0).map(|u| rank[u]).sum();
+        let dangling_share = damping * dangling / nf;
+
+        let mut next = vec![teleport + dangling_share; n];
+        for u in 0..n as u32 {
+            let d = out_deg[u as usize];
+            if d == 0 {
+                continue;
+            }
+            let contribution = damping * rank[u as usize] / d as f32;
+            for (target, _rel) in graph.forward_neighbors(u) {
+                next[target as usize] += contribution;
+            }
+        }
+        rank = next;
+    }
+
+    let mut pairs: Vec<(String, f32)> = rank
         .into_iter()
         .enumerate()
         .map(|(i, s)| (graph.id_of(i as u32).to_string(), s))
