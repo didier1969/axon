@@ -255,8 +255,8 @@ impl GraphStore {
             JOIN ist.IndexedFile f ON f.path = c.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
-              AND s.id NOT IN (SELECT target_id FROM ist.Edge WHERE relation_type = 'CALLS')
-              AND s.id NOT IN (SELECT target_id FROM ist.Edge WHERE relation_type = 'CALLS_NIF')
+              AND NOT EXISTS (SELECT 1 FROM ist.Edge e WHERE e.target_id = s.id AND e.relation_type = 'CALLS')
+              AND NOT EXISTS (SELECT 1 FROM ist.Edge e WHERE e.target_id = s.id AND e.relation_type = 'CALLS_NIF')
               AND f.path NOT LIKE '%/tests/%' AND f.path NOT LIKE '%_test.rs' AND f.path NOT LIKE '%_test.exs'
             {}
             ",
@@ -1147,8 +1147,11 @@ mod migration_guard_tests {
         let body = extract_fn_body(SOURCE, "pub fn get_dead_code_count");
         assert!(!body.contains("skip_legacy_relations"));
         assert!(body.contains("c.relation_type = 'CONTAINS'"));
-        assert!(body.contains("FROM ist.Edge WHERE relation_type = 'CALLS'"));
-        assert!(body.contains("FROM ist.Edge WHERE relation_type = 'CALLS_NIF'"));
+        // REQ-AXO-901923 — anti-join via NOT EXISTS (not NOT IN) for planner
+        // performance; still scoped to the canonical ist.Edge CALLS/CALLS_NIF.
+        assert!(body.contains("NOT EXISTS"));
+        assert!(body.contains("e.relation_type = 'CALLS'"));
+        assert!(body.contains("e.relation_type = 'CALLS_NIF'"));
     }
 
     #[test]
