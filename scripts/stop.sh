@@ -439,7 +439,10 @@ if axon_supervisor_healthy "$_PC_PORT"; then
     if [[ -x "${_PC_BIN:-}" ]]; then
         if [[ "$STOP_ROLE" == "all" ]]; then
             echo "   Stopping process-compose on :${_PC_PORT}..."
-            "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
+            # REQ-AXO-901929 — bound the graceful down: it hangs forever on a
+            # <defunct> managed child (zombie). On hang the orphan-supervisor
+            # reap below (axon_reap_supervisor_tree / SIGKILL-by-PID) cleans up.
+            timeout -k 5 25 "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
             sleep 1
         else
             # REQ-AXO-901794 — role-scoped stop must NOT tear down the whole

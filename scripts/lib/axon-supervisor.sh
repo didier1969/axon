@@ -187,7 +187,14 @@ axon_reap_supervisor_tree() {
     #    too, honouring their shutdown signals). Only if a daemon answers.
     if axon_supervisor_healthy "$pc_port" && [[ -x "${pc_bin:-}" ]]; then
         _axon_sup_log "Stopping process-compose supervisor on :${pc_port}..."
-        "$pc_bin" down -p "$pc_port" 2>/dev/null || true
+        # REQ-AXO-901929 — `process-compose down --ordered-shutdown` hangs
+        # FOREVER when a managed child is <defunct> (zombie): it waits on a
+        # process that will never reap. The bare `|| true` catches a non-zero
+        # exit but NOT a hang, so a single zombie indexer wedged the whole
+        # promote (step 5 restart) and every stop --hard. Bound it: on hang,
+        # timeout kills the client and we fall through to the SIGKILL-by-PID
+        # reap (steps 2-4 below), which tears the supervisor down regardless.
+        timeout -k 5 25 "$pc_bin" down -p "$pc_port" 2>/dev/null || true
         local w
         for ((w = 0; w < 20; w++)); do
             axon_supervisor_healthy "$pc_port" || break

@@ -343,7 +343,9 @@ echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 # (detached mode swallows the bind error and the parent returns 0).
 if axon_supervisor_healthy "$PC_PORT"; then
     echo "⚠️  Stale process-compose daemon on :${PC_PORT}. Sending down..."
-    "$PC_BIN" down -p "$PC_PORT" 2>/dev/null || true
+    # REQ-AXO-901929 — bound the down: it hangs forever on a <defunct> managed
+    # child. On hang/timeout the PID-anchored orphan reap below reclaims the port.
+    timeout -k 5 25 "$PC_BIN" down -p "$PC_PORT" 2>/dev/null || true
     for ((w=1; w<=10; w++)); do
         axon_supervisor_healthy "$PC_PORT" || break
         sleep 0.5
@@ -385,7 +387,12 @@ fi
 # Brain readiness is the gate — MCP is usable as soon as the brain is up.
 # Indexer init (GPU model load) continues in background; process-compose
 # monitors it independently via its own readiness_probe.
-BRAIN_TIMEOUT_S=120
+# REQ-AXO-901929 — boot can legitimately exceed 2 min: the CPU embedder
+# (BGE-Large / ORT init) plus the boot-warm of every project's IST snapshot
+# (REQ-AXO-901869) push first-readyz past the old 120s gate under load, which
+# made promote fail the dev-gate / live-restart on a HEALTHY-but-slow brain.
+# Allow override via AXON_BRAIN_READYZ_TIMEOUT_S.
+BRAIN_TIMEOUT_S="${AXON_BRAIN_READYZ_TIMEOUT_S:-300}"
 _axon_stage="wait_readyz"
 echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
 for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
