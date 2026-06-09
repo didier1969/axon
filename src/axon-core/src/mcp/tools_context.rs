@@ -578,7 +578,19 @@ impl McpServer {
     // dispatched via `retrieve_context_layered`.
     pub(crate) fn axon_retrieve_context_layered(&self, args: &Value) -> Option<Value> {
         let started_at = Instant::now();
-        let inner = self.axon_retrieve_context(args)?;
+        // REQ-AXO-901927 — the layered tool's intent_band (SOLL concepts /
+        // decisions / requirements) is a FIRST-CLASS output. Force the SOLL
+        // join so it is populated even when the planner picks the plain
+        // `hybrid` route and the question carries no "why" language — otherwise
+        // `should_join_soll` defaulted to false and the intent band came back
+        // empty for questions that DO have a governing REQ/Decision. An
+        // explicit caller `include_soll=false` is still respected.
+        let mut soll_args = args.clone();
+        if let Some(obj) = soll_args.as_object_mut() {
+            obj.entry("include_soll".to_string())
+                .or_insert(Value::Bool(true));
+        }
+        let inner = self.axon_retrieve_context(&soll_args)?;
 
         // Propagate input-validation errors verbatim (same shape, isError=true).
         if inner.get("isError").and_then(|value| value.as_bool()) == Some(true) {
