@@ -1,5 +1,19 @@
 use super::*;
 
+/// REQ-AXO-901938 — a copy-pasteable minimal valid evidence artifact built from
+/// the entity's accepted schema, embedded inline in rejection messages so the
+/// LLM corrects the call in a single round-trip instead of guessing field
+/// names/values across retries.
+fn minimal_evidence_example(accepted_schema: &[String]) -> String {
+    let artifact_type = accepted_schema
+        .first()
+        .map(String::as_str)
+        .unwrap_or("document");
+    format!(
+        "{{\"artifact_type\": \"{artifact_type}\", \"artifact_ref\": \"<path-or-id>\", \"note\": \"<optional>\"}}"
+    )
+}
+
 impl McpServer {
     fn normalize_file_artifact_ref(
         &self,
@@ -255,12 +269,23 @@ impl McpServer {
                 "supply at least one artifact object in the `artifacts` array".to_string(),
             ),
             _ => match primary_reason.as_deref() {
-                Some("missing_artifact_ref") => Some(
-                    "each artifact needs an `artifact_ref` (or `path` / `file_path` / `uri` alias)".to_string(),
-                ),
+                // REQ-AXO-901938 — every rejection renders {what's wrong, the
+                // accepted schema, ONE minimal valid example} INLINE so the LLM
+                // corrects in a single round-trip instead of guessing the field
+                // names/values across 2-3 retries (observed: `{kind, ref}` →
+                // reject → `{artifact_type:"commit", artifact_ref}` → reject).
+                Some("missing_artifact_ref") => Some(format!(
+                    "each artifact needs an `artifact_ref` (or `path` / `file_path` / `uri` alias). \
+                     Accepted `artifact_type` for {}: {:?}. Example: {}",
+                    normalized_entity_type,
+                    accepted_schema,
+                    minimal_evidence_example(&accepted_schema)
+                )),
                 Some("artifact_type_not_allowed_for_entity") => Some(format!(
-                    "use one of the accepted_artifact_schema values for {}: {:?}",
-                    normalized_entity_type, accepted_schema
+                    "use one of the accepted `artifact_type` values for {}: {:?}. Example: {}",
+                    normalized_entity_type,
+                    accepted_schema,
+                    minimal_evidence_example(&accepted_schema)
                 )),
                 // REQ-AXO-901619 — surface project root + did-you-mean hint
                 // so the LLM can correct the relative path in one round-trip

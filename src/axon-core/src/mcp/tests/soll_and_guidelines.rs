@@ -5272,6 +5272,15 @@ fn test_soll_attach_evidence_parameter_repair_per_kind_hint_for_missing_artifact
         top_hint.contains("(Symbol)"),
         "top-level hint must mention rejected kind: {top_hint}"
     );
+    // REQ-AXO-901938 — the actionable guidance must inline a copy-pasteable
+    // minimal example so the LLM corrects in one round-trip.
+    let action = data["operator_guidance"]["next_best_actions"][0]
+        .as_str()
+        .expect("next_best_actions[0] string");
+    assert!(
+        action.contains("Example:") && action.contains("artifact_type"),
+        "missing_artifact_ref guidance must inline a minimal example: {action}"
+    );
 }
 
 #[test]
