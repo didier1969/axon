@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
-# Daily backup of the live SOLL+runtime Postgres database (axon_live).
+# Daily backup of the live SOLL + runtime intent schemas (axon_live).
+#
+# SCOPE (GUI-AXO-1025): dumps only the irreplaceable intent schemas
+# (soll ~7 MB, axon_runtime ~3 MB, axon) — NOT the `ist` (12 GB) or `pgmq`
+# (300 MB+) schemas, which are rebuildable from source by the indexer.
+# Before this scoping the script dumped the entire 12 GB DB through gzip -9,
+# which never finished inside the window between brain restarts: the final
+# `mv` (and the daily marker write) never ran, so every devenv enterShell
+# re-triggered a fresh full dump. That piled multi-GB .partial files AND held
+# an AccessShareLock on every table for ~10 min, serializing the boot DDL
+# (ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat) behind it. Scoping to
+# the ~10 MB intent schemas makes the dump complete in seconds, sets the
+# marker, and frees the lock immediately.
 #
 # Idempotent: at most one dump per UTC day. Safe to invoke from cron, the
 # Windows Task Scheduler, devenv shell entry, or by hand. Pass --force to
@@ -77,7 +89,11 @@ echo "[backup_soll] dumping ${DB_URL} -> ${out}"
 # without pipefail : a truncated dump was indistinguishable from a clean
 # one, and the only safety net was the schema-presence grep below.
 set -o pipefail
-"${pg_dump_bin}" --no-owner --no-privileges --format=plain "${DB_URL}" 2>"${tmp}.pgdump.err" | gzip -9 > "${tmp}"
+# Intent schemas only — see SCOPE note in the header. `ist` and `pgmq` are
+# rebuildable and would balloon the dump to 12 GB / never finish.
+"${pg_dump_bin}" --no-owner --no-privileges --format=plain \
+  --schema=soll --schema=axon_runtime --schema=axon \
+  "${DB_URL}" 2>"${tmp}.pgdump.err" | gzip -9 > "${tmp}"
 pipe_rc=("${PIPESTATUS[@]}")
 set +o pipefail
 if [[ "${pipe_rc[0]}" -ne 0 || "${pipe_rc[1]}" -ne 0 ]]; then
