@@ -4929,6 +4929,55 @@ fn test_soll_relation_schema_pair_suggests_reverse_direction_when_pair_is_forbid
 }
 
 #[test]
+fn test_soll_relation_schema_forbidden_pair_inlines_legal_route_in_visible_text() {
+    // REQ-AXO-901907 — for a non-canonical direction the rendered text must
+    // carry the actual attach path (legal inverse + which source kinds can
+    // reach the target), not merely NAME the `data` fields. An LLM optimises
+    // on the visible text and won't drill into the structured envelope.
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "VIS",
+                    "target_type": "PIL"
+                }
+            })),
+            id: Some(json!(901907)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text = response["content"][0]["text"]
+        .as_str()
+        .expect("visible text present");
+    assert!(
+        text.contains("no canonical relation"),
+        "must state the direction is non-canonical, got: {text}"
+    );
+    // the legal inverse must be inlined with its concrete relation type
+    assert!(
+        text.contains("Legal inverse: PIL -[EPITOMIZES]-> VIS"),
+        "must inline the legal inverse route, got: {text}"
+    );
+    // the field NAME must no longer be the only guidance
+    assert!(
+        !text.contains("check `reverse_canonical`"),
+        "must not punt the LLM into `data`, got: {text}"
+    );
+    // recommended incoming source-kinds for the target must be inlined
+    assert!(
+        text.contains("Source kinds that can legally reach PIL:") && text.contains("-["),
+        "must inline the recommended incoming routes, got: {text}"
+    );
+}
+
+#[test]
 fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness() {
     let server = create_test_server();
     server

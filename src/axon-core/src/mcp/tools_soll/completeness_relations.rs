@@ -635,9 +635,60 @@ impl McpServer {
                 "Canonical SOLL relation: {direction} via [{}]",
                 allowed.join(", ")
             ),
-            (Some(direction), _) => format!(
-                "Direction {direction} has no canonical relation (check `reverse_canonical` for the legal inverse, or `recommended_incoming_links_to_target_kind`)"
-            ),
+            (Some(direction), _) => {
+                // REQ-AXO-901907 — inline the actual attach path in the
+                // visible text instead of merely NAMING the `data` fields.
+                // The tool's promise is "discover valid links without trial
+                // and error"; an LLM optimises on the rendered text and won't
+                // drill into the structured envelope, so the legal route must
+                // be in the sentence (progressive-disclosure was inverted).
+                let mut lines = vec![format!("Direction {direction} has no canonical relation.")];
+                if let Some(rev) = data
+                    .get("reverse_canonical")
+                    .filter(|value| !value.is_null())
+                {
+                    if let (Some(sk), Some(tk), Some(rt)) = (
+                        rev.get("source_kind").and_then(Value::as_str),
+                        rev.get("target_kind").and_then(Value::as_str),
+                        rev.get("relation_type").and_then(Value::as_str),
+                    ) {
+                        lines.push(format!("Legal inverse: {sk} -[{rt}]-> {tk}."));
+                    }
+                }
+                let incoming: Vec<String> = data
+                    .get("recommended_incoming_links_to_target_kind")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|entry| {
+                                let sk = entry.get("source_kind").and_then(Value::as_str)?;
+                                let rt = entry
+                                    .get("default_relation")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| {
+                                        entry
+                                            .get("allowed_relations")
+                                            .and_then(Value::as_array)
+                                            .and_then(|a| a.first())
+                                            .and_then(Value::as_str)
+                                    })?;
+                                Some(format!("{sk} -[{rt}]->"))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !incoming.is_empty() {
+                    let target_kind = data
+                        .get("target_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("target");
+                    lines.push(format!(
+                        "Source kinds that can legally reach {target_kind}: {}.",
+                        incoming.join(", ")
+                    ));
+                }
+                lines.join(" ")
+            }
             _ => "Canonical SOLL relation policy resolved — inspect `data` for kind-scoped guidance.".to_string(),
         };
         Some(json!({
