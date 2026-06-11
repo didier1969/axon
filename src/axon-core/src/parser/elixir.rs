@@ -45,6 +45,7 @@ impl ElixirParser {
         result: &mut ExtractionResult,
         module_name: &str,
         pending_attrs: &mut Vec<String>,
+        aliases: &HashMap<String, String>,
     ) {
         let mut child_cursor = node.walk();
         let mut current_attrs = pending_attrs.clone();
@@ -60,6 +61,7 @@ impl ElixirParser {
                         result,
                         module_name,
                         &current_attrs,
+                        aliases,
                     );
                     current_attrs.clear();
                 }
@@ -77,6 +79,7 @@ impl ElixirParser {
                         result,
                         module_name,
                         &mut current_attrs,
+                        aliases,
                     );
                     current_attrs.clear();
                 }
@@ -91,12 +94,18 @@ impl ElixirParser {
         result: &mut ExtractionResult,
         module_name: &str,
         pending_attrs: &[String],
+        aliases: &HashMap<String, String>,
     ) {
         if let Some(identifier) = Self::call_identifier(node, source_bytes) {
             match identifier.as_str() {
-                "defmodule" => {
-                    Self::extract_module(node, source_bytes, content, result, pending_attrs)
-                }
+                "defmodule" => Self::extract_module(
+                    node,
+                    source_bytes,
+                    content,
+                    result,
+                    pending_attrs,
+                    aliases,
+                ),
                 "def" | "defp" => Self::extract_function(
                     node,
                     source_bytes,
@@ -105,6 +114,7 @@ impl ElixirParser {
                     module_name,
                     pending_attrs,
                     identifier.as_str(),
+                    aliases,
                 ),
                 "defmacro" | "defmacrop" => Self::extract_macro(
                     node,
@@ -114,14 +124,15 @@ impl ElixirParser {
                     module_name,
                     pending_attrs,
                     identifier.as_str(),
+                    aliases,
                 ),
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
-                _ => Self::extract_generic_call(node, source_bytes, result, module_name),
+                _ => Self::extract_generic_call(node, source_bytes, result, module_name, aliases),
             }
         } else {
-            Self::extract_generic_call(node, source_bytes, result, module_name);
+            Self::extract_generic_call(node, source_bytes, result, module_name, aliases);
         }
     }
 
@@ -131,6 +142,7 @@ impl ElixirParser {
         content: &str,
         result: &mut ExtractionResult,
         _decorators: &[String],
+        outer_aliases: &HashMap<String, String>,
     ) {
         let args = Self::find_child_by_type(node, "arguments");
         let mut new_module_name = String::new();
@@ -160,6 +172,12 @@ impl ElixirParser {
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+            // REQ-AXO-901953 — a module inherits the enclosing scope's aliases
+            // (lexical) and adds its own; the merged map lets qualified
+            // cross-module calls inside this module resolve to the callee's
+            // canonical Symbol.id rather than a dangling module-short-name.
+            let mut module_aliases = outer_aliases.clone();
+            module_aliases.extend(Self::collect_module_aliases(do_block, source_bytes));
             Self::walk(
                 do_block,
                 source_bytes,
@@ -167,8 +185,52 @@ impl ElixirParser {
                 result,
                 &new_module_name,
                 &mut Vec::new(),
+                &module_aliases,
             );
         }
+    }
+
+    /// REQ-AXO-901953 — map each `alias Fully.Qualified.Module` directive in a
+    /// module body to `short_name -> FQN` (`Module -> Fully.Qualified.Module`)
+    /// so qualified calls (`Module.fun()`) resolve to the callee's canonical
+    /// Symbol.id (`Fully.Qualified.Module.fun`). Multi-aliases (`A.B.{C, D}`)
+    /// and `as:` renames are intentionally skipped: resolving them wrongly is
+    /// worse than leaving the edge unresolved, so we stay partial-but-correct.
+    fn collect_module_aliases<'a>(
+        do_block: Node<'a>,
+        source_bytes: &[u8],
+    ) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+        let mut cursor = do_block.walk();
+        for child in do_block.named_children(&mut cursor) {
+            if child.kind() != "call" {
+                continue;
+            }
+            if Self::call_identifier(child, source_bytes).as_deref() != Some("alias") {
+                continue;
+            }
+            let Some(args) = Self::find_child_by_type(child, "arguments") else {
+                continue;
+            };
+            let args_text = args.utf8_text(source_bytes).unwrap_or("");
+            if args_text.contains('{') || args_text.contains("as:") {
+                continue;
+            }
+            let mut fqn = String::new();
+            let mut arg_cursor = args.walk();
+            for arg in args.named_children(&mut arg_cursor) {
+                if arg.kind() == "alias" {
+                    fqn = arg.utf8_text(source_bytes).unwrap_or("").to_string();
+                    break;
+                }
+            }
+            if !fqn.contains('.') {
+                continue;
+            }
+            let short = fqn.rsplit('.').next().unwrap_or(fqn.as_str()).to_string();
+            aliases.insert(short, fqn);
+        }
+        aliases
     }
 
     fn extract_function<'a>(
@@ -179,6 +241,7 @@ impl ElixirParser {
         module_name: &str,
         _decorators: &[String],
         def_type: &str,
+        aliases: &HashMap<String, String>,
     ) {
         let func_name = match Self::extract_def_name(node, source_bytes) {
             Some(name) => name,
@@ -256,7 +319,7 @@ impl ElixirParser {
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name);
+            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name, aliases);
         }
     }
 
@@ -268,6 +331,7 @@ impl ElixirParser {
         module_name: &str,
         _decorators: &[String],
         def_type: &str,
+        aliases: &HashMap<String, String>,
     ) {
         let macro_name = match Self::extract_def_name(node, source_bytes) {
             Some(name) => name,
@@ -299,7 +363,7 @@ impl ElixirParser {
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name);
+            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name, aliases);
         }
     }
 
@@ -344,6 +408,7 @@ impl ElixirParser {
         source_bytes: &[u8],
         result: &mut ExtractionResult,
         module_name: &str,
+        aliases: &HashMap<String, String>,
     ) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -365,9 +430,9 @@ impl ElixirParser {
                         continue;
                     }
                 }
-                Self::extract_generic_call(child, source_bytes, result, module_name);
+                Self::extract_generic_call(child, source_bytes, result, module_name, aliases);
             } else {
-                Self::extract_calls_from_block(child, source_bytes, result, module_name);
+                Self::extract_calls_from_block(child, source_bytes, result, module_name, aliases);
             }
         }
     }
@@ -377,6 +442,7 @@ impl ElixirParser {
         source_bytes: &[u8],
         result: &mut ExtractionResult,
         caller_name: &str,
+        aliases: &HashMap<String, String>,
     ) {
         if let Some(dot_node) = Self::find_child_by_type(node, "dot") {
             let mut receiver = String::new();
@@ -392,20 +458,34 @@ impl ElixirParser {
             }
 
             if !func_name.is_empty() {
-                let mut target_module = receiver.clone();
+                // REQ-AXO-901953 — resolve the receiver short-name through the
+                // module's alias map to the fully-qualified module, so the
+                // CALLS edge targets the callee's canonical Symbol.id instead
+                // of a dangling short-name that matches nothing in the IST
+                // (the cause of "0 callers" for qualified Elixir calls).
+                let resolved_receiver = aliases
+                    .get(&receiver)
+                    .cloned()
+                    .unwrap_or_else(|| receiver.clone());
                 let mut rel_type = "CALLS".to_string();
 
                 let is_genserver =
                     receiver == "GenServer" && (func_name == "call" || func_name == "cast");
+                // Default target = the callee FUNCTION symbol `Module.func`.
+                let mut target = format!("{resolved_receiver}.{func_name}");
                 if is_genserver {
                     rel_type = "CALLS_OTP".to_string();
-                    // Attempt to extract the target module from the first argument
+                    // OTP boundary: the edge points at the target MODULE taken
+                    // from the first argument (also alias-resolved), not a
+                    // function — keep it module-level.
+                    target = resolved_receiver.clone();
                     if let Some(args_node) = Self::find_child_by_type(node, "arguments") {
                         let mut arg_cursor = args_node.walk();
                         for arg_child in args_node.named_children(&mut arg_cursor) {
                             if arg_child.kind() == "alias" {
-                                target_module =
+                                let server =
                                     arg_child.utf8_text(source_bytes).unwrap_or("").to_string();
+                                target = aliases.get(&server).cloned().unwrap_or(server);
                                 break;
                             }
                         }
@@ -426,7 +506,7 @@ impl ElixirParser {
 
                     result.relations.push(Relation {
                         from: caller_name.to_string(),
-                        to: target_module,
+                        to: target,
                         rel_type,
                         properties: props,
                     });
@@ -570,6 +650,7 @@ impl Parser for ElixirParser {
             &mut result,
             "",
             &mut Vec::new(),
+            &HashMap::new(),
         );
 
         result
@@ -612,6 +693,71 @@ mod tests {
             .any(|rel| rel.from == "Axon.Sample.trigger_scan"
                 && rel.to == "Axon.Sample.parse_batch"
                 && rel.rel_type == "CALLS"));
+    }
+
+    #[test]
+    fn test_elixir_parser_resolves_aliased_cross_module_call_to_canonical_symbol() {
+        // REQ-AXO-901953 — the umbrella controller→context case that returned
+        // "0 callers". `alias FiscalyCore.Governance.LegalSources` then
+        // `LegalSources.list(params)` must emit a CALLS edge whose target is
+        // the callee's canonical Symbol.id, so impact/inspect/bidi_trace
+        // resolve it instead of a dangling module-short-name.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule FiscalyWeb.Api.V1.LegalSourceController do
+          alias FiscalyCore.Governance.LegalSources
+
+          def index(params) do
+            LegalSources.list(params)
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        assert!(
+            result.relations.iter().any(|rel| rel.from
+                == "FiscalyWeb.Api.V1.LegalSourceController.index"
+                && rel.to == "FiscalyCore.Governance.LegalSources.list"
+                && rel.rel_type == "CALLS"),
+            "alias-resolved cross-module CALLS edge missing; got: {:?}",
+            result.relations
+        );
+        // The dangling short-name target must no longer be emitted.
+        assert!(
+            !result
+                .relations
+                .iter()
+                .any(|rel| rel.to == "LegalSources" && rel.rel_type == "CALLS"),
+            "unresolved module-short-name target still emitted: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_qualified_call_targets_function_symbol_not_module() {
+        // REQ-AXO-901953 — a fully-qualified call resolves to the callee
+        // FUNCTION symbol (`Module.func`), not the bare module, so the CALLS
+        // edge matches the indexed function Symbol.id.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule FiscalyCore.Governance.LegalSources do
+          def list(params) do
+            FiscalyCore.Repo.all(params)
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        assert!(
+            result.relations.iter().any(|rel| rel.from
+                == "FiscalyCore.Governance.LegalSources.list"
+                && rel.to == "FiscalyCore.Repo.all"
+                && rel.rel_type == "CALLS"),
+            "qualified call should target the function symbol; got: {:?}",
+            result.relations
+        );
     }
 
     #[test]
