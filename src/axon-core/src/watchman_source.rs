@@ -35,8 +35,9 @@ use anyhow::Result;
 // The `query_result_type!` macro expands to `#[derive(Deserialize)]` +
 // `#[serde(flatten)]`, so both must be in scope at the expansion site.
 use serde::Deserialize;
+use futures_util::stream::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio_postgres::NoTls;
+use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::{info, warn};
 use watchman_client::prelude::*;
 use watchman_client::{Error as WatchmanError, SubscriptionData};
@@ -76,6 +77,33 @@ enum FeedAction {
     /// File no longer exists (deletion, or the old side of a rename) → cascade
     /// delete its IST footprint.
     Delete(PathBuf),
+}
+
+/// PG channel that fires on every `soll.ProjectCodeRegistry` enrolment.
+/// See `db/ddl/07_registry_notify.sql`.
+const REGISTRY_CHANNEL: &str = "axon_registry_changed";
+
+/// REQ-AXO-901899 — decoded `axon_registry_changed` NOTIFY payload. Shape is
+/// pinned by `db/ddl/07_registry_notify.sql`:
+/// `{"op":"insert|update","project_code":"AXO","project_path":"/abs/path"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RegistryNotify {
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    project_code: String,
+    #[serde(default)]
+    project_path: String,
+}
+
+/// Parse a `axon_registry_changed` payload. Returns `None` on malformed JSON or
+/// an empty `project_path` (nothing to watch). Pure — unit-tested without PG.
+fn parse_registry_payload(raw: &str) -> Option<RegistryNotify> {
+    let parsed: RegistryNotify = serde_json::from_str(raw).ok()?;
+    if parsed.project_path.is_empty() {
+        return None;
+    }
+    Some(parsed)
 }
 
 /// Boot the Watchman file source. Returns immediately; a supervisor task runs
@@ -143,45 +171,269 @@ async fn run_supervisor(
         .map(|r| r.path().to_string_lossy().to_string())
         .collect();
     let initial = load_initial_clocks(&database_url, &root_keys).await;
-    tokio::spawn(clock_writer_loop(clock_rx, database_url));
+    tokio::spawn(clock_writer_loop(clock_rx, database_url.clone()));
 
-    // One supervised subscription loop per root.
+    // Set of root keys currently under a subscription loop. Seeded with the boot
+    // roots, then extended by live enrolment (REQ-AXO-901899). Shared so the
+    // discovery listener never double-spawns a root Watchman already collapses
+    // into an enclosing repo we watch.
+    let watched: Arc<tokio::sync::Mutex<HashSet<String>>> =
+        Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
+    // One supervised subscription loop per boot root.
     for root in roots {
         let root_key = root.path().to_string_lossy().to_string();
-        let mut clock = initial.get(&root_key).cloned();
-        let client = client.clone();
-        let input_tx = input_tx.clone();
-        let store = store.clone();
-        let scanner = scanner.clone();
-        let clock_tx = clock_tx.clone();
-        tokio::spawn(async move {
-            let mut backoff = BACKOFF_INITIAL_MS;
-            loop {
-                ensure_watchmanconfig(&root.path());
-                match run_root_subscription(
-                    &client, &root, &mut clock, &input_tx, &store, &scanner, &clock_tx,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        // Clean exit = Canceled or pipeline closed; re-subscribe
-                        // from the in-memory clock (delta) or fresh.
-                        backoff = BACKOFF_INITIAL_MS;
-                    }
-                    Err(err) => {
-                        warn!(
-                            root = %root.path().display(),
-                            error = %err,
-                            backoff_ms = backoff,
-                            "Watchman: subscription errored; backing off then re-subscribing"
-                        );
-                        backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+        watched.lock().await.insert(root_key.clone());
+        let clock = initial.get(&root_key).cloned();
+        spawn_root_subscription(
+            client.clone(),
+            root,
+            clock,
+            input_tx.clone(),
+            store.clone(),
+            scanner.clone(),
+            clock_tx.clone(),
+        );
+    }
+
+    // REQ-AXO-901899 — restore live new-project discovery. The deleted
+    // `registry_notify_listener.rs` pushed a subtree hint into the purged
+    // `ingress_buffer`; here we instead resolve the enrolled project_path into a
+    // Watchman root and spawn its own subscription loop, so a project enrolled
+    // AFTER boot is indexed without an indexer restart.
+    spawn_registry_discovery(
+        database_url,
+        client,
+        input_tx,
+        store,
+        scanner,
+        clock_tx,
+        watched,
+    );
+}
+
+/// Spawn the supervised subscription loop for one resolved root. Runs for the
+/// process lifetime: a clean exit re-subscribes from the in-memory clock (delta);
+/// an error backs off (200ms → 30s) and re-subscribes. Used at boot (one per
+/// `resolve_roots` result) and on live enrolment (REQ-AXO-901899).
+fn spawn_root_subscription(
+    client: Arc<Client>,
+    root: ResolvedRoot,
+    mut clock: Option<Clock>,
+    input_tx: Sender<PathBuf>,
+    store: Arc<GraphStore>,
+    scanner: Arc<Scanner>,
+    clock_tx: Sender<ClockUpdate>,
+) {
+    tokio::spawn(async move {
+        let mut backoff = BACKOFF_INITIAL_MS;
+        loop {
+            ensure_watchmanconfig(&root.path());
+            match run_root_subscription(
+                &client, &root, &mut clock, &input_tx, &store, &scanner, &clock_tx,
+            )
+            .await
+            {
+                Ok(()) => {
+                    // Clean exit = Canceled or pipeline closed; re-subscribe
+                    // from the in-memory clock (delta) or fresh.
+                    backoff = BACKOFF_INITIAL_MS;
+                }
+                Err(err) => {
+                    warn!(
+                        root = %root.path().display(),
+                        error = %err,
+                        backoff_ms = backoff,
+                        "Watchman: subscription errored; backing off then re-subscribing"
+                    );
+                    backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
+        }
+    });
+}
+
+/// REQ-AXO-901899 — live new-project discovery. Holds a dedicated PG connection,
+/// `LISTEN axon_registry_changed`, and on each enrolment payload resolves the
+/// project_path into a Watchman root, spawning a subscription loop for any root
+/// not already watched. Reconnects forever on error (200ms → 30s backoff), like
+/// the IST mutation listener.
+#[allow(clippy::too_many_arguments)]
+fn spawn_registry_discovery(
+    database_url: String,
+    client: Arc<Client>,
+    input_tx: Sender<PathBuf>,
+    store: Arc<GraphStore>,
+    scanner: Arc<Scanner>,
+    clock_tx: Sender<ClockUpdate>,
+    watched: Arc<tokio::sync::Mutex<HashSet<String>>>,
+) {
+    tokio::spawn(async move {
+        let mut backoff = BACKOFF_INITIAL_MS;
+        loop {
+            match registry_discovery_once(
+                &database_url,
+                &client,
+                &input_tx,
+                &store,
+                &scanner,
+                &clock_tx,
+                &watched,
+            )
+            .await
+            {
+                Ok(()) => {
+                    warn!(
+                        channel = REGISTRY_CHANNEL,
+                        "registry discovery loop exited cleanly; reconnecting"
+                    );
+                    backoff = BACKOFF_INITIAL_MS;
+                }
+                Err(err) => {
+                    warn!(
+                        channel = REGISTRY_CHANNEL,
+                        error = %err,
+                        backoff_ms = backoff,
+                        "registry discovery errored; backing off"
+                    );
+                    backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
+        }
+    });
+}
+
+/// One LISTEN session: attach to `axon_registry_changed`, then drain enrolment
+/// notifications until the connection drops. Each payload routes through
+/// [`maybe_watch_new_root`].
+#[allow(clippy::too_many_arguments)]
+async fn registry_discovery_once(
+    database_url: &str,
+    client: &Arc<Client>,
+    input_tx: &Sender<PathBuf>,
+    store: &Arc<GraphStore>,
+    scanner: &Arc<Scanner>,
+    clock_tx: &Sender<ClockUpdate>,
+    watched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+) -> Result<()> {
+    let (conn_client, mut connection) = tokio_postgres::connect(database_url, NoTls)
+        .await
+        .map_err(|e| anyhow::anyhow!("registry discovery LISTEN connect failed: {e}"))?;
+
+    let (notify_tx, mut notify_rx) =
+        tokio::sync::mpsc::channel::<tokio_postgres::Notification>(256);
+
+    let driver = tokio::spawn(async move {
+        let stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+        tokio::pin!(stream);
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(AsyncMessage::Notification(n)) => {
+                    if notify_tx.send(n).await.is_err() {
+                        return;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(backoff)).await;
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(error = %err, "axon_registry_changed stream error");
+                    return;
+                }
             }
-        });
+        }
+    });
+
+    conn_client
+        .batch_execute(&format!("LISTEN {}", REGISTRY_CHANNEL))
+        .await
+        .map_err(|e| anyhow::anyhow!("LISTEN {REGISTRY_CHANNEL} failed: {e}"))?;
+    info!(
+        channel = REGISTRY_CHANNEL,
+        "registry discovery listener attached (REQ-AXO-901899)"
+    );
+
+    while let Some(n) = notify_rx.recv().await {
+        let Some(payload) = parse_registry_payload(&n.payload()) else {
+            continue;
+        };
+        maybe_watch_new_root(
+            &payload, database_url, client, input_tx, store, scanner, clock_tx, watched,
+        )
+        .await;
     }
+
+    drop(conn_client);
+    let _ = driver.await;
+    Ok(())
+}
+
+/// Resolve an enrolled `project_path` to its Watchman root and spawn a
+/// subscription loop if that root is not already watched. Idempotent via the
+/// shared `watched` set: Watchman collapses nested/duplicate paths to the
+/// enclosing repo root, so a re-enrolment (UPDATE) or sub-path is a no-op. A
+/// genuinely new project has no persisted clock → `None` → full initial index by
+/// construction.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_watch_new_root(
+    payload: &RegistryNotify,
+    database_url: &str,
+    client: &Arc<Client>,
+    input_tx: &Sender<PathBuf>,
+    store: &Arc<GraphStore>,
+    scanner: &Arc<Scanner>,
+    clock_tx: &Sender<ClockUpdate>,
+    watched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+) {
+    let dir = PathBuf::from(&payload.project_path);
+    if !dir.is_dir() {
+        warn!(
+            project_path = %payload.project_path,
+            "registry discovery: enrolled path is not a directory; skipping"
+        );
+        return;
+    }
+    ensure_watchmanconfig(&dir);
+    let canonical = match CanonicalPath::canonicalize(&dir) {
+        Ok(c) => c,
+        Err(err) => {
+            warn!(project_path = %payload.project_path, error = %err, "registry discovery: canonicalize failed");
+            return;
+        }
+    };
+    let root = match client.resolve_root(canonical).await {
+        Ok(r) => r,
+        Err(err) => {
+            warn!(project_path = %payload.project_path, error = %err, "registry discovery: resolve_root failed");
+            return;
+        }
+    };
+    let root_key = root.path().to_string_lossy().to_string();
+    {
+        let mut guard = watched.lock().await;
+        if !guard.insert(root_key.clone()) {
+            // Already watched (boot root or an earlier enrolment) — nothing to do.
+            return;
+        }
+    }
+    ensure_watchmanconfig(&root.path());
+    let initial = load_initial_clocks(database_url, std::slice::from_ref(&root_key)).await;
+    let clock = initial.get(&root_key).cloned();
+    info!(
+        op = %payload.op,
+        project_code = %payload.project_code,
+        root = %root.path().display(),
+        "registry discovery: watching newly enrolled project (REQ-AXO-901899)"
+    );
+    spawn_root_subscription(
+        client.clone(),
+        root,
+        clock,
+        input_tx.clone(),
+        store.clone(),
+        scanner.clone(),
+        clock_tx.clone(),
+    );
 }
 
 /// Connect to the Watchman daemon (auto-spawned by the CLI if not running).
@@ -589,6 +841,50 @@ mod tests {
 
     fn rels(items: &[(&str, bool)]) -> Vec<(PathBuf, bool)> {
         items.iter().map(|(p, e)| (PathBuf::from(p), *e)).collect()
+    }
+
+    // REQ-AXO-901899 — `axon_registry_changed` payload parsing. The shape is
+    // pinned by db/ddl/07_registry_notify.sql; these guard the contract.
+
+    #[test]
+    fn registry_payload_insert_is_parsed() {
+        let raw = r#"{"op":"insert","project_code":"AXO","project_path":"/home/u/axon"}"#;
+        let parsed = parse_registry_payload(raw).expect("valid insert payload");
+        assert_eq!(parsed.op, "insert");
+        assert_eq!(parsed.project_code, "AXO");
+        assert_eq!(parsed.project_path, "/home/u/axon");
+    }
+
+    #[test]
+    fn registry_payload_update_is_parsed() {
+        let raw = r#"{"op":"update","project_code":"FSF","project_path":"/srv/fsf"}"#;
+        let parsed = parse_registry_payload(raw).expect("valid update payload");
+        assert_eq!(parsed.op, "update");
+        assert_eq!(parsed.project_path, "/srv/fsf");
+    }
+
+    #[test]
+    fn registry_payload_empty_path_is_rejected() {
+        // An empty project_path carries nothing to watch → None (not a panic).
+        let raw = r#"{"op":"insert","project_code":"AXO","project_path":""}"#;
+        assert!(parse_registry_payload(raw).is_none());
+    }
+
+    #[test]
+    fn registry_payload_malformed_json_is_rejected() {
+        assert!(parse_registry_payload("not json at all").is_none());
+        assert!(parse_registry_payload("{").is_none());
+    }
+
+    #[test]
+    fn registry_payload_missing_fields_default_empty() {
+        // Defensive: a payload missing op/project_code still parses as long as
+        // project_path is present (serde defaults fill the rest).
+        let raw = r#"{"project_path":"/only/path"}"#;
+        let parsed = parse_registry_payload(raw).expect("path-only payload");
+        assert_eq!(parsed.project_path, "/only/path");
+        assert_eq!(parsed.op, "");
+        assert_eq!(parsed.project_code, "");
     }
 
     #[test]
