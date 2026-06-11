@@ -89,6 +89,21 @@ impl McpServer {
                 })
             });
 
+        // REQ-AXO-901948 — canonical Validation count as the authoritative
+        // fallback for coverage. The IST-derived `validation_coverage_score`
+        // can be absent when the project's indexed projection is stale
+        // (`indexed_projections_not_fresh`), but the canonical SOLL still
+        // holds the Validation nodes. project_status must never assert
+        // "unknown"/absence when a canonical read contradicts it — same
+        // contract the Vision line already honours (REQ-AXO-901926).
+        let canonical_validation_count = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type = 'Validation' AND status = 'current' AND project_code = '{}'",
+                project_code.replace('\'', "''")
+            ))
+            .unwrap_or(0);
+
         let anomaly_summary = anomalies_data
             .get("summary")
             .cloned()
@@ -148,7 +163,9 @@ impl McpServer {
             .cloned()
             .unwrap_or(Value::Null);
         let mut proof_gaps = Vec::<Value>::new();
-        if anomaly_summary.get("validation_coverage_score").is_none() {
+        if anomaly_summary.get("validation_coverage_score").is_none()
+            && canonical_validation_count == 0
+        {
             proof_gaps.push(json!("validation_coverage_unknown"));
         }
         if vision
@@ -215,6 +232,19 @@ impl McpServer {
             status_data.clone()
         };
 
+        // REQ-AXO-901948 — render the IST coverage score when present, else
+        // fall back to the canonical Validation count instead of "unknown".
+        let validation_coverage_display = anomaly_summary
+            .get("validation_coverage_score")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| {
+                if canonical_validation_count > 0 {
+                    format!("{canonical_validation_count} (canonical count)")
+                } else {
+                    "unknown".to_string()
+                }
+            });
+
         let evidence = format!(
             "**Vision:** `{}` - {}\n\
 **Vision status:** `{}`\n\
@@ -261,10 +291,7 @@ impl McpServer {
                 .get("orphan_intent_count")
                 .and_then(|value| value.as_i64())
                 .unwrap_or(0),
-            anomaly_summary
-                .get("validation_coverage_score")
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+            validation_coverage_display,
             if degraded_notes.is_empty() {
                 "none".to_string()
             } else {

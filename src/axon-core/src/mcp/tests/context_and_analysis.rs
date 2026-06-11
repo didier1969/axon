@@ -375,6 +375,51 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
 }
 
 #[test]
+fn test_project_status_never_reports_coverage_unknown_when_canonical_validations_exist() {
+    // REQ-AXO-901948 — project_status must not assert "unknown" coverage (nor
+    // emit the `validation_coverage_unknown` proof gap) when canonical SOLL
+    // holds Validation nodes, even if the IST projection hasn't scored them
+    // yet. Same canonical-read contract the Vision line honours (901926).
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Vision body', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-901948', 'Validation', 'AXO', 'Proof', 'Evidence node', 'current', '{\"method\":\"manual\"}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(901948)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    let proof_gaps: Vec<String> = data["truth_cockpit"]["proof_gaps"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !proof_gaps.contains(&"validation_coverage_unknown".to_string()),
+        "canonical Validation nodes exist; coverage must not be flagged unknown, gaps: {proof_gaps:?}"
+    );
+
+    let text = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        !text.contains("**Validation coverage:** unknown"),
+        "coverage must fall back to the canonical count, not 'unknown': {text}"
+    );
+}
+
+#[test]
 fn test_project_status_reports_delta_vs_previous_snapshot() {
     let _guard = env_lock();
     let history_dir = tempdir().unwrap();
