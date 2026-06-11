@@ -586,7 +586,11 @@ impl McpServer {
             .unwrap_or_default();
         let visions = self
             .query_single_column(&format!(
-                "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(description,'')
+                // REQ-AXO-901935 — a list surface renders {id, title, digest},
+                // never the full body. The Vision body (often >1 KB) was dumped
+                // verbatim here on every call; bound it to a digest. The full
+                // Vision is read on demand (cold-start step 5 / `sql`).
+                "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || left(COALESCE(description,''), 200)
                  FROM soll.Node
                  WHERE project_code = '{project}'
                    AND type = 'Vision'

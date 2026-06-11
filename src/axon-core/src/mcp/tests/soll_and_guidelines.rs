@@ -4181,6 +4181,45 @@ fn test_soll_query_context_returns_project_visions_from_source() {
 }
 
 #[test]
+fn test_soll_query_context_bounds_vision_body_to_digest() {
+    // REQ-AXO-901935 — a list surface must render a bounded digest, never the
+    // full Vision body (often >1 KB) on every call.
+    let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let vis_id = format!("VIS-{code}-001");
+    let long_body = "X".repeat(500);
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', 'Big Vision', '{long_body}', 'current', '{{}}')"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_query_context",
+                "arguments": { "project_code": code, "limit": 5 }
+            })),
+            id: Some(json!(901935)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let entry = response["data"]["visions"][0]
+        .as_str()
+        .expect("vision entry");
+    // entry = id|title|status|<digest>
+    let digest = entry.rsplit('|').next().unwrap_or("");
+    assert!(
+        digest.chars().count() <= 200,
+        "vision body must be bounded to a digest in the list surface, got {} chars",
+        digest.chars().count()
+    );
+    assert!(entry.contains(&vis_id) && entry.contains("Big Vision"));
+}
+
+#[test]
 fn test_axon_soll_manager_link_rejects_missing_endpoint() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
