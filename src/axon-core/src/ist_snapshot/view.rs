@@ -217,11 +217,25 @@ mod tests {
 
     #[test]
     fn forward_returns_none_when_disabled_env() {
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
+        // REQ-AXO-901951 — the RAM snapshot is now ON by default (PIL-9002), so
+        // "disabled" is the explicit client opt-out, not absence of the var.
+        std::env::set_var("AXON_IST_RAM_ENABLED", "0");
         let view = IstGraphView::new(warm_cache());
         assert!(view
             .forward_at_radius("AXO", "AXO::a", 1, 10, &[])
             .is_none());
+        std::env::remove_var("AXON_IST_RAM_ENABLED");
+    }
+
+    #[test]
+    fn forward_returns_results_when_default_absent_env() {
+        // REQ-AXO-901951 — absence of the var → enabled (default ON).
+        std::env::remove_var("AXON_IST_RAM_ENABLED");
+        let view = IstGraphView::new(warm_cache());
+        let r = view
+            .forward_at_radius("AXO", "AXO::a", 1, 10, &[RelationType::Calls])
+            .expect("default-on (absent env) + warm cache should return Some");
+        assert_eq!(r, vec!["AXO::b".to_string()]);
     }
 
     #[test]

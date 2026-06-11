@@ -38,14 +38,20 @@ impl IstSnapshotCache {
         }
     }
 
-    /// Activation gate per DEC-AXO-097. `AXON_IST_RAM_ENABLED=1` or `=true`
-    /// flips the cache on ; absence or any other value keeps it off so the
-    /// call-site fallback (PG) remains untouched.
+    /// Activation gate. REQ-AXO-901951 aligns the default with PIL-AXO-9002
+    /// ("IST RAM snapshot défaut ON ; désactivable client" — DEC-AXO-097):
+    /// **absence → enabled**. Only an explicit `0`/`false`/`off`/`no` disables
+    /// it (the client opt-out), in which case the call-site fallback (PG) is
+    /// used. The previous absence-→-off default contradicted the pillar and
+    /// left live with the RAM snapshot dark → slow PG-fallback retrieval.
     pub fn is_enabled() -> bool {
-        matches!(
-            std::env::var("AXON_IST_RAM_ENABLED").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE")
-        )
+        match std::env::var("AXON_IST_RAM_ENABLED") {
+            Ok(value) => !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            Err(_) => true,
+        }
     }
 
     pub fn get(&self, project_code: &str) -> Option<Arc<IstGraph>> {
