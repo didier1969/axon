@@ -55,6 +55,37 @@ fn id_exists_envelope(id: &str, entity_type: &str) -> serde_json::Value {
     })
 }
 
+/// REQ-AXO-901955 — single source of truth for the metadata-routed fields
+/// of `soll_manager`. create and update previously each carried their own
+/// copy of this list ; they drifted, and top-level `tags` was routed by
+/// NEITHER (only when nested under `metadata`), silently dropping a field
+/// the tool contract documents as metadata_routed. Folding every routed
+/// field here kills the class : a new routed field is honoured by create
+/// AND update from one edit (GUI-PRO-013 DRY, GUI-PRO-108 class-level fix).
+/// Keep in sync with the `metadata_routed` list in the soll_manager schema.
+fn apply_metadata_routed_fields(data: &serde_json::Value, meta: &mut serde_json::Value) {
+    const METADATA_ROUTED_FIELDS: &[&str] = &[
+        "goal",
+        "priority",
+        "owner",
+        "acceptance_criteria",
+        "evidence_refs",
+        "rationale",
+        "context",
+        "supersedes_decision_id",
+        "impact_scope",
+        "role",
+        "method",
+        "result",
+        "tags",
+    ];
+    for key in METADATA_ROUTED_FIELDS {
+        if let Some(value) = data.get(*key) {
+            meta[*key] = value.clone();
+        }
+    }
+}
+
 impl McpServer {
     /// REQ-AXO-125 — normalize writer errors so the LLM-visible text
     /// contains only the action kind, category, and a recovery hint —
@@ -530,42 +561,7 @@ impl McpServer {
                     }));
                 }
 
-                if let Some(goal) = data.get("goal") {
-                    meta["goal"] = goal.clone();
-                }
-                if let Some(priority) = data.get("priority") {
-                    meta["priority"] = priority.clone();
-                }
-                if let Some(owner) = data.get("owner") {
-                    meta["owner"] = owner.clone();
-                }
-                if let Some(ac) = data.get("acceptance_criteria") {
-                    meta["acceptance_criteria"] = ac.clone();
-                }
-                if let Some(er) = data.get("evidence_refs") {
-                    meta["evidence_refs"] = er.clone();
-                }
-                if let Some(rat) = data.get("rationale") {
-                    meta["rationale"] = rat.clone();
-                }
-                if let Some(ctx) = data.get("context") {
-                    meta["context"] = ctx.clone();
-                }
-                if let Some(sup) = data.get("supersedes_decision_id") {
-                    meta["supersedes_decision_id"] = sup.clone();
-                }
-                if let Some(imp) = data.get("impact_scope") {
-                    meta["impact_scope"] = imp.clone();
-                }
-                if let Some(role) = data.get("role") {
-                    meta["role"] = role.clone();
-                }
-                if let Some(method) = data.get("method") {
-                    meta["method"] = method.clone();
-                }
-                if let Some(result) = data.get("result") {
-                    meta["result"] = result.clone();
-                }
+                apply_metadata_routed_fields(data, &mut meta);
 
                 meta["updated_at"] = json!(now_unix_ms());
 
@@ -890,42 +886,7 @@ impl McpServer {
                             }
                         }
                     }
-                    if let Some(goal) = data.get("goal") {
-                        meta["goal"] = goal.clone();
-                    }
-                    if let Some(priority) = data.get("priority") {
-                        meta["priority"] = priority.clone();
-                    }
-                    if let Some(owner) = data.get("owner") {
-                        meta["owner"] = owner.clone();
-                    }
-                    if let Some(ac) = data.get("acceptance_criteria") {
-                        meta["acceptance_criteria"] = ac.clone();
-                    }
-                    if let Some(er) = data.get("evidence_refs") {
-                        meta["evidence_refs"] = er.clone();
-                    }
-                    if let Some(rat) = data.get("rationale") {
-                        meta["rationale"] = rat.clone();
-                    }
-                    if let Some(ctx) = data.get("context") {
-                        meta["context"] = ctx.clone();
-                    }
-                    if let Some(sup) = data.get("supersedes_decision_id") {
-                        meta["supersedes_decision_id"] = sup.clone();
-                    }
-                    if let Some(imp) = data.get("impact_scope") {
-                        meta["impact_scope"] = imp.clone();
-                    }
-                    if let Some(role) = data.get("role") {
-                        meta["role"] = role.clone();
-                    }
-                    if let Some(method) = data.get("method") {
-                        meta["method"] = method.clone();
-                    }
-                    if let Some(result) = data.get("result") {
-                        meta["result"] = result.clone();
-                    }
+                    apply_metadata_routed_fields(data, &mut meta);
 
                     meta["updated_at"] = json!(now_unix_ms());
 
@@ -1529,7 +1490,41 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{id_exists_envelope, resolve_create_status};
+    use super::{apply_metadata_routed_fields, id_exists_envelope, resolve_create_status};
+    use serde_json::json;
+
+    // REQ-AXO-901955 — metadata-routed fields are honoured from a single
+    // source for create AND update; top-level `tags` (previously dropped
+    // unless nested under `metadata`) now lands in meta.
+
+    #[test]
+    fn metadata_routed_includes_tags_priority_and_skips_unknown() {
+        let data = json!({
+            "tags": ["a", "b"],
+            "priority": "P1",
+            "rationale": "because",
+            "title": "ignored-canonical-column",
+            "not_a_routed_field": "x"
+        });
+        let mut meta = json!({});
+        apply_metadata_routed_fields(&data, &mut meta);
+        assert_eq!(meta["tags"], json!(["a", "b"]));
+        assert_eq!(meta["priority"], json!("P1"));
+        assert_eq!(meta["rationale"], json!("because"));
+        // canonical columns + unknown keys must NOT be folded into metadata
+        assert!(meta.get("title").is_none());
+        assert!(meta.get("not_a_routed_field").is_none());
+    }
+
+    #[test]
+    fn metadata_routed_preserves_existing_meta_keys() {
+        let data = json!({ "tags": ["new"] });
+        let mut meta = json!({ "phase": "post-code", "tags": ["old"] });
+        apply_metadata_routed_fields(&data, &mut meta);
+        // pre-existing unrelated key survives; supplied field overrides
+        assert_eq!(meta["phase"], json!("post-code"));
+        assert_eq!(meta["tags"], json!(["new"]));
+    }
 
     // REQ-AXO-323 Fault 4 — default status resolution.
 
