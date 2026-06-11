@@ -786,13 +786,14 @@ impl McpServer {
                 }
             }
             Err(e) => {
-                // REQ-AXO-139 binder-error parsing was DuckDB-specific (matched
-                // `Candidate bindings: "X", "Y"` strings emitted by DuckDB).
-                // PG produces a different error format (`column "x" does not
-                // exist` + `HINT:`) ; the DuckDB-format parser was retired with
-                // REQ-AXO-271 slice 7. A PG-equivalent structured repair is
-                // tracked separately (REQ-AXO-91494 surface fixes).
+                // REQ-AXO-901949 — repair-as-data for PG execution errors.
+                // Pre-REQ-AXO-271 the DuckDB binder-error parser was retired and
+                // PG errors fell back to a raw `column "x" does not exist` string
+                // (the exact friction the LLM hit in session 75). We now inline
+                // the *real* columns/tables of the referenced relations so the
+                // agent can emit the corrected query without a second probe.
                 let raw = e.to_string();
+                let repair = self.pg_error_repair(q, &raw);
                 Some(json!({
                     "content": [{ "type": "text", "text": format!("SQL Error: {}", raw) }],
                     "isError": true,
@@ -802,11 +803,67 @@ impl McpServer {
                             "problem_class": "input_invalid",
                             "follow_up_tools": ["schema_overview", "query_examples"],
                         },
-                        "diagnostic_excerpt": raw.chars().take(240).collect::<String>()
+                        "diagnostic_excerpt": raw.chars().take(240).collect::<String>(),
+                        "parameter_repair": repair,
+                        "next_action": { "tool": "schema_overview", "arguments": {} }
                     }
                 }))
             }
         }
+    }
+
+    /// REQ-AXO-901949 — turn an opaque PG execution error into repair-as-data.
+    ///
+    /// Detects undefined-column (42703) / undefined-table (42P01), extracts the
+    /// `schema.table` relations named in the query, and inlines their real
+    /// columns from `information_schema` so the agent self-corrects in one shot
+    /// instead of guessing a second time. Returns `None` for unrelated errors
+    /// (the raw `SQL Error` text already carries those).
+    fn pg_error_repair(&self, sql: &str, raw: &str) -> Option<Value> {
+        use super::tool_contracts::{classify_pg_undefined, extract_sql_relations};
+        let problem_class = classify_pg_undefined(raw)?;
+        let relations = extract_sql_relations(sql);
+
+        let mut tables = Vec::new();
+        for (schema, table) in &relations {
+            let probe = format!(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = '{}' AND lower(table_name) = '{}' \
+                 ORDER BY ordinal_position",
+                schema.replace('\'', "''"),
+                table.replace('\'', "''")
+            );
+            let columns: Vec<String> = self
+                .graph_store
+                .query_json(&probe)
+                .ok()
+                .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+                .and_then(|v| v.as_array().cloned())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| {
+                            r.as_array()
+                                .and_then(|c| c.first())
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            tables.push(json!({
+                "relation": format!("{}.{}", schema, table),
+                "real_columns": columns,
+                "exists": !columns.is_empty()
+            }));
+        }
+
+        Some(json!({
+            "problem_class": problem_class,
+            "referenced_relations": tables,
+            "hint": "Use only `real_columns` for each relation; re-run `sql` with the corrected names. \
+                     `schema_overview` lists every table if a relation is missing.",
+            "follow_up_tools": ["schema_overview", "query_examples"]
+        }))
     }
 
     pub(crate) fn axon_batch(&self, args: &Value) -> Option<Value> {

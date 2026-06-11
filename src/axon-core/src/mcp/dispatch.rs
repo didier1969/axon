@@ -121,6 +121,29 @@ impl McpServer {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "arguments".to_string());
+
+                // REQ-AXO-901949 — repair-as-data: hand the LLM the corrected
+                // call ready to emit, not a prose "compare and fix". Start from
+                // the supplied arguments and stub each missing required field
+                // with a typed placeholder pulled from the (now schemars-derived)
+                // input schema, so a single field-fill round-trip succeeds.
+                let mut corrected_arguments = arguments.as_object().cloned().unwrap_or_default();
+                for field in &missing_required {
+                    let expected_type = schema
+                        .as_ref()
+                        .and_then(|s| s.get("properties"))
+                        .and_then(|p| p.get(field))
+                        .and_then(|f| f.get("type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("value");
+                    corrected_arguments
+                        .entry(field.clone())
+                        .or_insert_with(|| Value::String(format!("<FILL:{expected_type}>")));
+                }
+                let corrected_call = json!({
+                    "tool": normalized_name,
+                    "arguments": corrected_arguments
+                });
                 let parameter_repair = json!({
                     "invalid_field": first_invalid_field,
                     "tool": normalized_name,
@@ -128,11 +151,12 @@ impl McpServer {
                     "required_fields": required_fields,
                     "supplied_arguments": arguments,
                     "input_schema": schema,
+                    "corrected_call": corrected_call,
                     "follow_up_tools": ["help"],
                     "hint": format!(
-                        "compare `supplied_arguments` against `input_schema.required`; \
-                         call `help(tool=\"{}\")` for the contract and retry once the \
-                         missing/invalid fields are filled",
+                        "emit `corrected_call`: it is your arguments with each \
+                         missing required field stubbed `<FILL:type>`. Replace the \
+                         stubs and re-call `{}` — no need to diff the schema yourself",
                         normalized_name
                     ),
                 });
@@ -151,7 +175,7 @@ impl McpServer {
                         "tool": normalized_name,
                         "received_arguments": arguments,
                         "input_schema": schema,
-                        "repair_instruction": "Compare your arguments against input_schema. Fix required fields and types, then retry the same tool.",
+                        "repair_instruction": "Emit `parameter_repair.corrected_call` — it is your arguments with missing required fields stubbed. Fill the stubs and re-call. No schema diffing needed.",
                         "next_action": {
                             "tool": "help",
                             "arguments": { "tool": normalized_name }

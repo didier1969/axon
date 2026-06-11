@@ -8,6 +8,7 @@ use std::thread;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod catalog;
 mod dispatch;
+mod tool_contracts;
 mod format;
 mod guidance;
 mod protocol;

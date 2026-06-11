@@ -171,6 +171,13 @@ refinery = { version = "0.8", features = ["tokio-postgres"] }
 # surface = no prompt-injection vector (arxiv 2601.17549). Cross-language
 # parity (Rust/TS/Python) keeps PRT templates portable across consumers.
 mustache = "0.9"
+# REQ-AXO-901949 (tracer-bullet REQ-AXO-901947): derive MCP tool inputSchema
+# from Rust types — single source of truth, kills the hand-maintained
+# catalog.rs JSON literals + the per-tool repair prose. schemars generates
+# the JSON Schema; the same struct is the contract, the doc, and (slice 2)
+# the validator target. Optimal-for-LLM: the schema the agent sees can never
+# drift from the type the handler reads.
+schemars = "1.0"
 
 [dev-dependencies]
 rand = "0.8"

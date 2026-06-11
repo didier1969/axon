@@ -1001,6 +1001,23 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     tool_available_in_runtime(name) && (include_internal || is_public_tool(name))
                 })
         });
+
+        // REQ-AXO-901949 — single source of truth: for tracer-bullet tools the
+        // advertised inputSchema is derived from the Rust struct (schemars),
+        // never the hand-written literal above. The literal `description` stays
+        // (tool docs); only the schema is overridden so it can never drift from
+        // the type the handler reads. Slice-2 rolls this over the remaining
+        // catalog literals.
+        for tool in tools.iter_mut() {
+            let Some(name) = tool.get("name").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            if let Some(derived) = super::tool_contracts::derived_input_schema(&name) {
+                if let Some(obj) = tool.as_object_mut() {
+                    obj.insert("inputSchema".to_string(), derived);
+                }
+            }
+        }
     }
 
     catalog
