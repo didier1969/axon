@@ -863,6 +863,7 @@ impl GraphStore {
         &self,
         scan_start_ms: i64,
         root_prefix: &str,
+        is_eligible: &dyn Fn(&std::path::Path) -> bool,
     ) -> Result<Vec<String>> {
         let safe_prefix = root_prefix.replace('\'', "''");
         // REQ-AXO-901884 — NON-DESTRUCTIVE stale reconciliation. "Not re-stamped
@@ -889,9 +890,19 @@ impl GraphStore {
             .collect();
         let mut deleted: Vec<String> = Vec::new();
         for path in candidates {
-            // Source of truth = disk. Skip anything still present (a partial
-            // walk merely missed it); purge only genuinely-removed files.
-            if std::path::Path::new(&path).exists() {
+            // Sources of truth = disk + scanner eligibility. Purge a stale
+            // candidate when it is genuinely gone OR present-but-no-longer-
+            // eligible — a directory newly added to `.gitignore` / `.axonignore`
+            // (or an extension dropped from the whitelist) drops its files out of
+            // the eligible set, and the client expects them removed from the
+            // index as if deleted (REQ-AXO-901950, customer clean-view promise).
+            //
+            // Erosion protection preserved (REQ-AXO-901884): a file that exists
+            // AND is still eligible — merely missed by a partial/interrupted walk
+            // — is KEPT (re-stamped next walk), never purged. Only `exists &&
+            // eligible` skips; everything else is genuinely stale.
+            let candidate_path = std::path::Path::new(&path);
+            if candidate_path.exists() && is_eligible(candidate_path) {
                 continue;
             }
             let _ = self.delete_file_cascade(&path);

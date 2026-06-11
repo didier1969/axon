@@ -477,7 +477,13 @@ pub fn spawn_pipeline_v2_indexer(
                 let store_for_stale = store_for_walk.clone();
                 let prefix = root_prefix.clone();
                 let purge = tokio::task::spawn_blocking(move || {
-                    store_for_stale.delete_stale_indexed_files(walk_start_ms, &prefix)
+                    // REQ-AXO-901950 — same eligibility as the discovery walk so
+                    // files newly gitignored/.axonignore'd are purged here too,
+                    // not only the ones removed from disk.
+                    let scanner = crate::scanner::Scanner::new(&prefix, "");
+                    store_for_stale.delete_stale_indexed_files(walk_start_ms, &prefix, &|p| {
+                        scanner.should_process_path(p)
+                    })
                 })
                 .await;
                 match purge {

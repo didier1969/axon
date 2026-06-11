@@ -67,7 +67,12 @@ impl Scanner {
         // REQ-AXO-901831 — scope the purge to THIS walk's subtree so a
         // per-project scan never deletes sibling projects' IndexedFile rows.
         let root_prefix = self.root_canonical.to_string_lossy();
-        match graph.delete_stale_indexed_files(scan_start_ms, root_prefix.as_ref()) {
+        // REQ-AXO-901950 — pass this scanner's eligibility verdict so files that
+        // became gitignored/.axonignore'd since last walk are purged too, not
+        // only the ones physically removed from disk.
+        match graph.delete_stale_indexed_files(scan_start_ms, root_prefix.as_ref(), &|p| {
+            self.should_process_path(p)
+        }) {
             Ok(deleted) if !deleted.is_empty() => {
                 info!(
                     "Lattice Engine: purged {} stale IndexedFile entries (not seen in this walk)",
@@ -1046,8 +1051,10 @@ mod tests {
         // scan_start far ahead so every candidate qualifies by timestamp; the
         // FS exists() check is then the sole discriminator.
         let scan_start = chrono::Utc::now().timestamp_millis() + 1_000_000;
+        // Everything eligible → `exists()` is the sole discriminator (the
+        // original REQ-AXO-901884 contract).
         let deleted = store
-            .delete_stale_indexed_files(scan_start, &root_canon)
+            .delete_stale_indexed_files(scan_start, &root_canon, &|_| true)
             .unwrap();
 
         assert!(
@@ -1071,6 +1078,71 @@ mod tests {
         assert_eq!(
             survivors, 2,
             "both present files survive the stale reconciliation"
+        );
+
+        let _ = store.execute(&format!(
+            "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"
+        ));
+    }
+
+    /// REQ-AXO-901950 — a file still present on disk but no longer eligible
+    /// (its directory was just added to `.gitignore` / `.axonignore`) is purged
+    /// from the index as if deleted; an eligible-but-present file is KEPT
+    /// (erosion guard, REQ-AXO-901884). Both discriminators in one test.
+    #[tokio::test]
+    async fn delete_stale_purges_present_but_ineligible_keeps_eligible() {
+        let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let root_canon = root.canonicalize().unwrap().to_string_lossy().to_string();
+
+        // Both files PRESENT on disk, both with an old discovered_ms (stale
+        // candidates by timestamp).
+        std::fs::write(root.join("keep.rs"), "fn k() {}\n").unwrap();
+        let keep = root
+            .join("keep.rs")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(root.join("now_ignored.rs"), "fn g() {}\n").unwrap();
+        let ignored = root
+            .join("now_ignored.rs")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        store
+            .execute("INSERT INTO ist.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
+            .unwrap();
+        for p in [&keep, &ignored] {
+            store
+                .execute(&format!(
+                    "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count) \
+                     VALUES ('{p}', 'TST', 'h', 1, 'discovered', 5, 1, 10, 0) \
+                     ON CONFLICT (path) DO UPDATE SET status='discovered', discovered_ms=5"
+                ))
+                .unwrap();
+        }
+
+        let scan_start = chrono::Utc::now().timestamp_millis() + 1_000_000;
+        // Eligibility predicate models a freshly-added .gitignore rule excluding
+        // now_ignored.rs. Both files exist on disk → eligibility is the sole
+        // discriminator here.
+        let deleted = store
+            .delete_stale_indexed_files(scan_start, &root_canon, &|p| {
+                !p.to_string_lossy().ends_with("now_ignored.rs")
+            })
+            .unwrap();
+
+        assert!(
+            deleted.contains(&ignored),
+            "present-but-now-ineligible file must be purged: {deleted:?}"
+        );
+        assert!(
+            !deleted.contains(&keep),
+            "present + eligible file must survive (erosion protection): {deleted:?}"
         );
 
         let _ = store.execute(&format!(
