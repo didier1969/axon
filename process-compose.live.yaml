@@ -38,15 +38,10 @@ processes:
     environment:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=live"
-      # Session 75 — the brain MUST warm the RAM IST snapshot at boot
-      # (warm_all_ist_snapshots_at_boot, REQ-AXO-901869) so tri-modal
-      # retrieval (why/retrieve_context/path/impact) reads the RAM CSR graph
-      # instead of the slow PG fallback. The boot-warming + every read path
-      # are gated on AXON_IST_RAM_ENABLED, whose code default is OFF
-      # (cache.rs::is_enabled) — which contradicts PIL-AXO-9002 ("défaut on").
-      # Live never set it → RAM snapshot disabled → heavy MCP tools timed out.
-      # Set it explicitly here; the canonical code-default fix is REQ-AXO-901951.
-      - "AXON_IST_RAM_ENABLED=1"
+      # RAM IST snapshot: no explicit toggle needed — the promoted binary is
+      # default-ON (REQ-AXO-901951, cache.rs::is_enabled). The toggle itself is
+      # being removed entirely in favour of a single RAM source for both graphs
+      # (REQ-AXO-901952). Setting AXON_IST_RAM_ENABLED here would be redundant.
       # REQ-AXO-901821 — explicit identity stops the brain from inheriting
       # whatever AXON_RUNTIME_* the parent shell exported. Each role MUST
       # set its own identity here ; symmetric to process-compose.dev.yaml.
