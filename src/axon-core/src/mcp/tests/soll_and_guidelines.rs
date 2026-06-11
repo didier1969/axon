@@ -4243,6 +4243,70 @@ fn test_axon_soll_manager_create_can_attach_requirement_to_pillar() {
 }
 
 #[test]
+fn test_soll_manager_create_requirement_warns_on_missing_acceptance_criteria() {
+    // REQ-AXO-901942 — proactive inline guard at creation, not a late
+    // soll_validate discovery round-trip.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Pillar', 'Protect structure', '', '{}')")
+        .unwrap();
+
+    // (a) no acceptance_criteria → warned.
+    let bare = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": { "action": "create", "entity": "requirement", "data": {
+                    "project_code": "AXO", "title": "Bare req", "description": "no criteria",
+                    "attach_to": "PIL-AXO-001", "relation_type": "BELONGS_TO"
+                }}
+            })),
+            id: Some(json!(901942)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        bare["data"]["acceptance_criteria_warning"].as_bool(),
+        Some(true)
+    );
+    assert!(
+        bare["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No acceptance_criteria"),
+        "missing-criteria create must warn inline: {:?}",
+        bare["content"]
+    );
+
+    // (b) acceptance_criteria supplied → no warning.
+    let with_ac = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": { "action": "create", "entity": "requirement", "data": {
+                    "project_code": "AXO", "title": "Specced req", "description": "has criteria",
+                    "acceptance_criteria": ["the thing works", "tests are green"],
+                    "attach_to": "PIL-AXO-001", "relation_type": "BELONGS_TO"
+                }}
+            })),
+            id: Some(json!(901943)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        with_ac["data"]["acceptance_criteria_warning"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
 fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_ambiguous() {
     let server = create_test_server();
     server

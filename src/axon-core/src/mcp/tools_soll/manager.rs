@@ -746,10 +746,29 @@ impl McpServer {
                 match insert_res {
                     Ok(()) => {
                         let created_id = formatted_id.clone();
-                        let report = format!(
+                        let mut report = format!(
                             "SOLL entity created: `{}`\nCanonical link applied: `{}` -> `{}` via `{}`",
                             created_id, created_id, attach_to, relation_type
                         );
+                        // REQ-AXO-901942 — proactive inline guard. A Requirement
+                        // with no acceptance_criteria is flagged by soll_validate
+                        // on a LATER pass; warn at creation so the LLM adds the
+                        // criteria in the same flow instead of paying a discovery
+                        // round-trip later.
+                        let missing_acceptance_criteria = entity_type_cap
+                            .eq_ignore_ascii_case("Requirement")
+                            && meta.get("acceptance_criteria").map_or(true, |v| {
+                                v.is_null()
+                                    || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false)
+                                    || v.as_array().map(|a| a.is_empty()).unwrap_or(false)
+                            });
+                        if missing_acceptance_criteria {
+                            report.push_str(
+                                "\n⚠ No acceptance_criteria — this requirement will be flagged by \
+                                 soll_validate. Add it via soll_manager(action=update, \
+                                 data={id, acceptance_criteria:[\"...\"]}).",
+                            );
+                        }
                         let mut response_data = json!({
                             "created_id": created_id,
                             "entity_type": entity_type_cap,
@@ -759,7 +778,8 @@ impl McpServer {
                             "attached": true,
                             "attached_to": attach_to,
                             "applied_relation": relation_type,
-                            "attach_status": "attached"
+                            "attach_status": "attached",
+                            "acceptance_criteria_warning": missing_acceptance_criteria
                         });
 
                         if let (Some(before), Ok(after)) = (
