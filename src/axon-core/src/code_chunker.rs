@@ -61,6 +61,17 @@ const MAX_PRECISE_ENCODE_BYTES: usize = 32 * 1024;
 /// sufficient. ~256 precise encodes stay well under the chunk wall-clock budget.
 const MAX_PRECISE_ENCODE_CHUNKS: usize = 256;
 
+/// REQ-AXO-901921 — hard ceiling on the number of chunks a SINGLE symbol may
+/// emit. A sub-`DEGENERATE_BODY_BYTES` body cannot legitimately exceed
+/// ~`DEGENERATE_BODY_BYTES / (target_chunk_tokens × SAFE_CHARS_PER_TOKEN)` ≈ 333
+/// model-window chunks at full budget; a fan-out beyond this ceiling is proof
+/// that `body_budget` collapsed (degenerate data/log/markdown body), so the
+/// symbol is re-chunked coarsely to bound the COUNT, not just the encode time.
+/// Set at 4× the precise-encode cap so legitimate large code symbols keep their
+/// precise structural boundaries while true collapse (thousands of chunks) is
+/// always caught.
+const MAX_CHUNKS_PER_SYMBOL: usize = 4 * MAX_PRECISE_ENCODE_CHUNKS;
+
 /// Conservative chars-per-token proxy for byte-based chunk sizing on the
 /// degenerate fast path (BGE on source/log text rarely exceeds ~4 chars/token).
 const SAFE_CHARS_PER_TOKEN: usize = 4;
@@ -695,15 +706,38 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         );
     }
     let part_count = segments.len().max(1);
-    // REQ-AXO-901902/901906 — the chunk-emission cost is dominated by the
-    // PER-CHUNK `estimated_token_count` (full tokenizer encode). A body that
-    // fans out into thousands of segments (a 644 KB `LOG.txt` with one 8 KB
-    // line trips the giant-line fallback into ~4.5k segments) would run that
-    // many un-budgeted encodes here — `axon-diag-chunk-spin` measured >40 s,
-    // and the DP wall-clock deadline does NOT cover this loop. Past the cap the
-    // precise count adds no value (these are degenerate data/log/minified
-    // bodies), so use the cheap byte estimate for every chunk. Covers the
-    // giant-line path, the DP many-chunk path, and any future fan-out.
+    // REQ-AXO-901921 — bound the chunk COUNT (not just the encode time). A body
+    // UNDER `DEGENERATE_BODY_BYTES` (so it took the precise path) whose
+    // `body_budget` collapses toward its floor — repeated_context overhead, or
+    // a giant-line fallback with a tiny window — fans out into THOUSANDS of
+    // ~tiny segments. The 901902 cap byte-estimated the encode past
+    // `MAX_PRECISE_ENCODE_CHUNKS` (time bounded) but still EMITTED every
+    // micro-chunk: pure embedding noise (GUI-PRO-107 L8) + wasted B-stage work.
+    // A sub-512 KiB body cannot legitimately exceed ~333 model-window chunks at
+    // full budget, so a fan-out past `MAX_CHUNKS_PER_SYMBOL` is proof of budget
+    // collapse on a low-value data/log/markdown body: re-chunk it coarsely into
+    // bounded (≤ MAX_PRECISE_ENCODE_CHUNKS) model-window byte windows, the same
+    // treatment >512 KiB bodies already get. Threshold sits well above any
+    // legitimate large code symbol so precise structural boundaries are kept
+    // for real code.
+    if part_count > MAX_CHUNKS_PER_SYMBOL {
+        tracing::warn!(
+            target: "pipeline_v2::chunk",
+            symbol = %symbol.name,
+            kind = %symbol.kind,
+            start_line = symbol.start_line,
+            content_bytes = file_content.len(),
+            fan_out = part_count,
+            ceiling = MAX_CHUNKS_PER_SYMBOL,
+            "REQ-AXO-901921 chunk fan-out exceeded per-symbol ceiling — coarse byte-window re-chunk to bound COUNT (budget-collapsed non-code data/log/markdown body)"
+        );
+        return coarse_byte_window_chunks(symbol, &lines, start, end, profile);
+    }
+    // REQ-AXO-901902 — bound the encode TIME for legitimate-but-large bodies in
+    // the `MAX_PRECISE_ENCODE_CHUNKS`..`MAX_CHUNKS_PER_SYMBOL` band: keep their
+    // precise segment boundaries but byte-estimate tokens to avoid an encode
+    // storm (the per-chunk tokenizer encode is the cost, and the DP wall-clock
+    // deadline does NOT cover this loop).
     let use_byte_estimate = bailed || part_count > MAX_PRECISE_ENCODE_CHUNKS;
     if use_byte_estimate && !bailed {
         tracing::warn!(
@@ -1300,6 +1334,79 @@ mod tests {
             "a 640 KB body must still split into multiple chunks"
         );
         // Contiguous, gap-free coverage.
+        for w in chunks.windows(2) {
+            assert_eq!(
+                w[0].end_line + 1,
+                w[1].start_line,
+                "coarse chunks must be contiguous: {:?} then {:?}",
+                (w[0].start_line, w[0].end_line),
+                (w[1].start_line, w[1].end_line)
+            );
+        }
+    }
+
+    /// REQ-AXO-901921 — a body UNDER `DEGENERATE_BODY_BYTES` whose `body_budget`
+    /// collapses (an ~8 KB first line becomes the capped `repeated_context`,
+    /// whose token overhead floors the budget) takes the precise path and,
+    /// pre-fix, windowed into thousands of ~tiny chunks (pure embedding noise).
+    /// The COUNT must now be bounded by the coarse re-chunk fallback.
+    #[test]
+    fn sub_degenerate_body_with_collapsed_budget_is_count_bounded() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // ~8 KB first line → capped repeated_context → overhead floors budget.
+        let mut header = String::with_capacity(8400);
+        let mut j = 0u64;
+        while header.len() < 8200 {
+            header.push_str(&format!("hk{j}=hv{}-", j.wrapping_mul(2654435761)));
+            j += 1;
+        }
+        let mut content = String::with_capacity(420_000);
+        content.push_str(&header);
+        content.push('\n');
+        // ~400 KB of short body rows: UNDER the 512 KiB degenerate threshold,
+        // so it takes the precise path where the floored budget would fan out.
+        let mut i = 0u64;
+        while content.len() < 400_000 {
+            content.push_str(&format!(
+                "body token row {} value {}\n",
+                i,
+                i.wrapping_mul(40503) % 100000
+            ));
+            i += 1;
+        }
+        assert!(
+            content.len() < DEGENERATE_BODY_BYTES,
+            "must stay on the precise (sub-degenerate) path to exercise the collapse"
+        );
+
+        let line_count = content.lines().count();
+        let symbol = synthetic_symbol("document_body", line_count.max(1));
+
+        let t0 = std::time::Instant::now();
+        let chunks = build_symbol_chunks(&symbol, &content);
+        let elapsed = t0.elapsed();
+
+        // Pre-fix this floored-budget body fanned out into thousands of micro
+        // chunks; the coarse fallback now bounds the COUNT.
+        assert!(
+            chunks.len() <= MAX_PRECISE_ENCODE_CHUNKS + 1,
+            "REQ-AXO-901921: a budget-collapsed sub-512KB body must be count-bounded, got {} chunks",
+            chunks.len()
+        );
+        assert!(
+            chunks.len() > 1,
+            "a 400 KB body must still split into multiple chunks"
+        );
+        let ceiling = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(8)
+        } else {
+            std::time::Duration::from_secs(3)
+        };
+        assert!(
+            elapsed < ceiling,
+            "collapsed-budget chunking took {elapsed:?} (limit {ceiling:?})"
+        );
+        // Coarse fallback guarantees contiguous, gap-free coverage.
         for w in chunks.windows(2) {
             assert_eq!(
                 w[0].end_line + 1,
