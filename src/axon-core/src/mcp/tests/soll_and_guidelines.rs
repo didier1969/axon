@@ -142,6 +142,88 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
+    // REQ-AXO-901939 — a non-canonical relation on a pair with EXACTLY ONE
+    // canonical relation is auto-applied (not rejected), and the substitution
+    // is surfaced. A pair with MULTIPLE allowed relations stays a reject.
+    let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 1, 1, 1, 0) ON CONFLICT (project_code) DO UPDATE SET last_pil = 1"
+        ))
+        .unwrap();
+    for (id, ty) in [
+        (format!("PIL-{code}-001"), "Pillar"),
+        (format!("REQ-{code}-001"), "Requirement"),
+        (format!("CPT-{code}-001"), "Concept"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+    let link = |src: String, tgt: String, rel: &str, rid: i64| -> serde_json::Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": { "action": "link", "entity": "requirement",
+                        "data": { "source_id": src, "target_id": tgt, "relation_type": rel } }
+                })),
+                id: Some(json!(rid)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // REQ -> PIL admits exactly BELONGS_TO. Request the wrong REFINES → auto.
+    let r = link(
+        format!("REQ-{code}-001"),
+        format!("PIL-{code}-001"),
+        "REFINES",
+        1,
+    );
+    assert_ne!(r.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(r["data"]["auto_canonized_from"].as_str(), Some("REFINES"));
+    assert!(
+        r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("auto-applied"),
+        "auto-canonize must be noted: {:?}",
+        r["content"]
+    );
+    let edge = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Edge WHERE source_id='REQ-{code}-001' AND target_id='PIL-{code}-001' AND relation_type='BELONGS_TO'"
+        ))
+        .unwrap();
+    assert_eq!(edge, 1, "canonical BELONGS_TO edge must exist");
+
+    // CPT -> REQ admits EXPLAINS or REFINES (ambiguous): a wrong relation
+    // (BELONGS_TO) must still be REJECTED, not silently picked.
+    let amb = link(
+        format!("CPT-{code}-001"),
+        format!("REQ-{code}-001"),
+        "BELONGS_TO",
+        2,
+    );
+    assert_eq!(
+        amb.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "ambiguous pair must reject a non-canonical relation: {amb:?}"
+    );
+}
+
+#[test]
 fn test_soll_manager_link_cycle_guard_filiation_and_inheritance() {
     // REQ-AXO-901593 — the cycle pre-check covers BOTH filiation (regression
     // after the parametrization refactor) and the non-filiation guarded

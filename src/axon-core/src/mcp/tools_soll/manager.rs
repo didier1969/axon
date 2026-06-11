@@ -1180,14 +1180,31 @@ impl McpServer {
 
                         match self.insert_validated_relation(relation_type, src, tgt, policy) {
                             Ok(inserted) => {
+                                // REQ-AXO-901939 — when the requested relation
+                                // was non-canonical but the pair had exactly one
+                                // canonical relation, select_relation_type_for_link
+                                // auto-applied it. Surface the substitution so the
+                                // LLM learns the canonical relation in the same
+                                // round-trip instead of being rejected.
+                                let auto_canonized_from = explicit_rel
+                                    .map(|r| r.to_uppercase())
+                                    .filter(|r| r != relation_type);
+                                let auto_note = auto_canonized_from
+                                    .as_ref()
+                                    .map(|requested| format!(
+                                        " — requested `{}` is not canonical for this pair; auto-applied the unambiguous canonical `{}`",
+                                        requested, relation_type
+                                    ))
+                                    .unwrap_or_default();
                                 let mut payload = json!({
                                     "content": [{ "type": "text", "text": if inserted {
-                                        format!("Link created: `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                        format!("Link created: `{}` -> `{}` (via {}){}", src, tgt, rel_table, auto_note)
                                     } else {
-                                        format!("Link already present: `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                        format!("Link already present: `{}` -> `{}` (via {}){}", src, tgt, rel_table, auto_note)
                                     }}],
                                     "data": {
                                         "project_code": project_code.as_deref().unwrap_or(""),
+                                        "auto_canonized_from": auto_canonized_from,
                                     }
                                 });
                                 if inserted {

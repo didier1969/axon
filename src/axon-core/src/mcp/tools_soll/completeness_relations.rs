@@ -112,7 +112,19 @@ impl McpServer {
 
         let selected = if let Some(relation_type) = explicit_relation_type {
             let normalized = relation_type.to_uppercase();
-            if !policy.allowed.iter().any(|allowed| *allowed == normalized) {
+            if policy.allowed.iter().any(|allowed| *allowed == normalized) {
+                normalized
+            } else if policy.allowed.len() == 1 {
+                // REQ-AXO-901939 — auto-canonize when the direction is
+                // UNAMBIGUOUS: the requested relation is not allowed for this
+                // pair, but the pair admits exactly ONE canonical relation, so
+                // the intent is unambiguous. Apply it instead of forcing a
+                // reject + retry round-trip. The link handler notes the
+                // substitution by comparing the requested vs the returned
+                // relation. Pairs with MULTIPLE allowed relations stay a reject
+                // (genuinely ambiguous — the caller must choose).
+                policy.allowed[0].to_string()
+            } else {
                 return Err(anyhow!(
                     "Relation `{}` forbidden for {} -> {}. Allowed: {}. Default: {}",
                     normalized,
@@ -122,7 +134,6 @@ impl McpServer {
                     policy.default.unwrap_or("none")
                 ));
             }
-            normalized
         } else if let Some(default_relation) = policy.default {
             default_relation.to_string()
         } else {
