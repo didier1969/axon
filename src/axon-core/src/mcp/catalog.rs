@@ -80,18 +80,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             {
                 "name": "soll_manager",
                 "description": "[SOLL] Create/update/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.Revision + soll.RevisionChange) — symmetric to action=link.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["create", "update", "link", "unlink"], "description": "The operation to perform." },
-                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline", "skill", "prompt_template"], "description": "The target entity type." },
-                        "data": {
-                            "type": "object",
-                            "description": "JSON data. \n- create: provide `project_code` + `attach_to` + `relation_type`; the server allocates the canonical id `TYPE-CODE-NNN` via soll.allocate_node_id and returns it in the response.\n- update: canonical `id` required, plus the fields being modified (status/title/description/metadata/...).\n- link: canonical `source_id` + `target_id` + `relation_type` (e.g. REFINES, SOLVES, BELONGS_TO, EPITOMIZES, SUPERSEDES). See `soll_relation_schema` for the canonical pair table.\n- unlink: canonical `source_id` + `target_id` + `relation_type` (all required ; no inference). Optional `force` (bool, default false) — required for protected edges (EPITOMIZES Pillar→Vision). Records soll.Revision + soll.RevisionChange with before_json for audit.\n\nREQ-AXO-91499 — field routing for `action=create` (per-entity):\n- canonical_columns (stored on soll.Node, queryable via SQL): `project_code`, `title`, `description`, `status`, `type` (derived from `entity`).\n- metadata_routed (stored as JSONB in soll.Node.metadata, queryable via `json_extract`): `priority`, `tags`, `owner`, `rationale`, `acceptance_criteria`, `evidence_refs`, `context`, `goal`, `result`, `updated_at` (auto).\n- attach (mandatory unless entity=vision): `attach_to` (canonical parent id) + `relation_type` (canonical edge type, see soll_relation_schema).\n- rejected: `id`, `reserved_id` (DB-allocated only — see MIL-AXO-020).\n- metadata_consumers: `priority` consumed by soll_work_plan (score weight) + soll_validate (severity ranking); `tags` consumed by soll_query_context (filter) + entrench_nuance (target inference); `updated_at` consumed by soll_work_plan (temporal decay)."
-                        }
-                    },
-                    "required": ["action", "entity", "data"]
-                }
+                // REQ-AXO-901949 — inputSchema derived from
+                // tool_contracts::SollManagerInput (single source); the override
+                // pass injects it post-build. The per-action field-routing
+                // guidance lives in this tool's `description` above (DRY — it was
+                // duplicated verbatim in the old `data.description`).
+                "inputSchema": { "$comment": "derived from tool_contracts::SollManagerInput — injected post-build" }
             },
             {
                 "name": "infer_soll_mutation",
@@ -725,15 +719,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             {
                 "name": "query",
                 "description": "[DX] Search symbols by name/kind/path. Returns ranked matches. Use first for code discovery.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string" },
-                        "project": { "type": "string" },
-                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
-                    },
-                    "required": ["query"]
-                }
+                // REQ-AXO-901949 — inputSchema derived from tool_contracts::QueryInput
+                // (single source); the override pass injects it post-build.
+                "inputSchema": { "$comment": "derived from tool_contracts::QueryInput — injected post-build" }
             },
             {
                 "name": "inspect",
@@ -931,13 +919,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             {
                 "name": "sql",
                 "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "sql": { "type": "string" }
-                    },
-                    "required": ["sql"]
-                }
+                // REQ-AXO-901949 — inputSchema derived from tool_contracts::SqlInput
+                // (single source); the override pass injects it post-build.
+                "inputSchema": { "$comment": "derived from tool_contracts::SqlInput — injected post-build" }
             },
             json!({
                 "name": "debug",

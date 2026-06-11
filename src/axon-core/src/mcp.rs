@@ -143,6 +143,10 @@ impl McpServer {
     }
 
     fn default_follow_up_tools_for(normalized_name: &str) -> &'static [&'static str] {
+        // REQ-AXO-901949 — single-source interaction graph for tracer tools.
+        if let Some(routing) = crate::mcp::tool_contracts::tool_routing(normalized_name) {
+            return routing.follow_ups;
+        }
         match normalized_name {
             "help" => &["status", "project_status"],
             "status" => &["project_status", "mcp_surface_diagnostics"],
@@ -241,6 +245,9 @@ impl McpServer {
     }
 
     fn workflow_stage_for(normalized_name: &str) -> &'static str {
+        if let Some(routing) = crate::mcp::tool_contracts::tool_routing(normalized_name) {
+            return routing.stage;
+        }
         match normalized_name {
             "help" => "tool_routing",
             "status" | "mcp_surface_diagnostics" | "health" | "diagnose_indexing" => {
@@ -283,6 +290,9 @@ impl McpServer {
     }
 
     fn primary_goal_for(normalized_name: &str) -> &'static str {
+        if let Some(routing) = crate::mcp::tool_contracts::tool_routing(normalized_name) {
+            return routing.goal;
+        }
         match normalized_name {
             "help" => "choose the smallest useful Axon MCP tool sequence",
             "status" => "establish runtime truth before trusting deeper conclusions",
@@ -324,6 +334,9 @@ impl McpServer {
     }
 
     fn token_efficiency_hint_for(normalized_name: &str) -> &'static str {
+        if let Some(routing) = crate::mcp::tool_contracts::tool_routing(normalized_name) {
+            return routing.token_hint;
+        }
         match normalized_name {
             "help" => "Call `help` once when routing is unclear; then follow the smallest tool chain it recommends.",
             "retrieve_context" | "project_status" | "soll_query_context" => {
@@ -339,6 +352,9 @@ impl McpServer {
     }
 
     fn follow_up_reason_for(tool: &str) -> &'static str {
+        if let Some(routing) = crate::mcp::tool_contracts::tool_routing(tool) {
+            return routing.use_when;
+        }
         match tool {
             "status" => "use when runtime truth may be stale, degraded, or operationally unclear",
             "mcp_surface_diagnostics" => {

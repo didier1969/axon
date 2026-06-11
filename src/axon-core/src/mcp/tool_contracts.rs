@@ -132,6 +132,61 @@ pub(crate) struct SollManagerInput {
 /// Tools currently served by a derived schema (tracer-bullet set).
 pub(crate) const DERIVED_TOOLS: &[&str] = &["sql", "query", "soll_manager"];
 
+/// REQ-AXO-901949 — single-source interaction-graph record for a tool.
+///
+/// The "exchange is a graph" the operator asked for: instead of the same tool's
+/// edges and metadata being scattered across five hand-maintained `match` arms
+/// in mcp.rs (`default_follow_up_tools_for`, `primary_goal_for`,
+/// `workflow_stage_for`, `token_efficiency_hint_for`, `follow_up_reason_for`),
+/// every routing fact for a tool lives here, co-located with its input schema.
+/// The mcp.rs functions delegate to `tool_routing(name)` for the tracer-bullet
+/// set and fall back to their literal arms for the other 64 (slice-2 rollout).
+pub(crate) struct ToolRouting {
+    /// Valid next tools (the graph edges out of this node).
+    pub follow_ups: &'static [&'static str],
+    /// Why an agent would call this tool.
+    pub goal: &'static str,
+    /// Workflow stage this tool belongs to.
+    pub stage: &'static str,
+    /// Token-economy guidance for this tool.
+    pub token_hint: &'static str,
+    /// When a peer tool should route TO this tool (its inbound-edge reason).
+    pub use_when: &'static str,
+}
+
+/// Routing record for a tracer-bullet tool, or `None` for tools still served by
+/// the hand-written mcp.rs match arms. Values mirror the pre-refactor arms
+/// exactly — this is a co-location, not a behaviour change.
+pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
+    Some(match name {
+        "sql" => ToolRouting {
+            follow_ups: &["schema_overview", "query_examples"],
+            goal: "move to the next highest-signal MCP step",
+            stage: "general_mcp_operation",
+            token_hint:
+                "Follow the server-provided next step before composing additional exploratory calls.",
+            use_when: "use when it is the next highest-signal MCP move",
+        },
+        "query" => ToolRouting {
+            follow_ups: &["inspect", "retrieve_context", "impact"],
+            goal: "discover plausible targets with broad recall",
+            stage: "target_discovery",
+            token_hint:
+                "Use `query` to widen recall only when the target anchor is still ambiguous; switch to `inspect` quickly once a candidate exists.",
+            use_when: "use when recall is too narrow and you need broader candidate discovery",
+        },
+        "soll_manager" => ToolRouting {
+            follow_ups: &["soll_validate", "soll_query_context"],
+            goal: "perform an exact SOLL create/update/link operation",
+            stage: "intent_governance",
+            token_hint:
+                "Follow the server-provided next step before composing additional exploratory calls.",
+            use_when: "use when the next step is an exact canonical mutation",
+        },
+        _ => return None,
+    })
+}
+
 /// REQ-AXO-901949 — classify a PG execution error as undefined-column (42703)
 /// or undefined-table/relation (42P01) so `sql` can answer with the real
 /// columns/tables instead of the opaque passthrough string. Returns `None` for
@@ -289,6 +344,29 @@ mod tests {
         // Bare table names (no schema prefix) are not extracted — the repair
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
+    }
+
+    #[test]
+    fn routing_single_source_for_tracer_tools() {
+        // The interaction-graph edges + metadata for each tracer tool live in
+        // exactly one place. Values mirror the pre-refactor mcp.rs arms.
+        let sql = tool_routing("sql").expect("sql routing");
+        assert_eq!(sql.follow_ups, &["schema_overview", "query_examples"]);
+        assert_eq!(sql.stage, "general_mcp_operation");
+
+        let query = tool_routing("query").expect("query routing");
+        assert_eq!(query.follow_ups, &["inspect", "retrieve_context", "impact"]);
+        assert_eq!(query.goal, "discover plausible targets with broad recall");
+        assert_eq!(query.stage, "target_discovery");
+
+        let soll = tool_routing("soll_manager").expect("soll_manager routing");
+        assert_eq!(soll.follow_ups, &["soll_validate", "soll_query_context"]);
+        assert_eq!(soll.stage, "intent_governance");
+
+        // Tools not in the tracer set keep their hand-written arms (no routing
+        // record yet) — slice-2 rollout.
+        assert!(tool_routing("impact").is_none());
+        assert!(tool_routing("status").is_none());
     }
 
     #[test]
