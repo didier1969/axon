@@ -706,7 +706,18 @@ impl SemanticWorkerPool {
             worker_idx
         );
 
-        let Some(mut model) = Self::build_text_embedding_model("query", worker_idx) else {
+        // REQ-AXO-901945 — idle unload (long T_idle). The CPU query model
+        // (~1.3 GB host RAM) is the right architecture (portable per
+        // PIL-AXO-008, no GPU contention per PIL-AXO-007), but it never
+        // released. We keep it warm during active sessions and drop it
+        // only after a long idle window so a bursty interactive session
+        // pays zero reload cost, while a machine left idle for 20 min+
+        // reclaims the RAM. Wake = the next query rebuilds the model
+        // (~1-3 s, BGE files served from the OS page cache). Knob:
+        // AXON_QUERY_EMBED_IDLE_SECS (default 1200 = 20 min). 0 disables.
+        let idle_timeout = query_embed_idle_timeout();
+
+        let Some(model) = Self::build_text_embedding_model("query", worker_idx) else {
             // REQ-AXO-098 — model load failed. Flip the embedder
             // subsystem to Failed so the readiness contract reflects
             // the broken state instead of letting it remain whatever
@@ -724,16 +735,59 @@ impl SemanticWorkerPool {
         // now Ready. Subsequent failures (per-request errors, GPU
         // pressure pauses) are transient and surfaced through
         // batch_embed's existing error path, not through the
-        // subsystem state.
+        // subsystem state. An idle-drop below stays Ready: it wakes
+        // on demand, it is not a failure.
         crate::runtime_readiness::report_subsystem_state(
             crate::runtime_readiness::Subsystem::Embedder,
             crate::runtime_readiness::SubsystemState::Ready,
         );
 
+        let mut slot: Option<TextEmbedding> = Some(model);
         loop {
-            match query_rx.recv() {
-                Ok(request) => serve_query_embedding_request(&mut model, request),
-                Err(_) => return,
+            // When the model is loaded, wait at most `idle_timeout` so an
+            // idle gap drops it. When already dropped, block indefinitely
+            // (no spin) until the next request wakes us.
+            let recv_result = match (slot.is_some(), idle_timeout) {
+                (true, Some(timeout)) => query_rx.recv_timeout(timeout),
+                _ => query_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match recv_result {
+                Ok(request) => {
+                    if slot.is_none() {
+                        info!(
+                            "Semantic Query Worker [{}]: waking — reloading BGE-Large model after idle drop",
+                            worker_idx
+                        );
+                        match Self::build_text_embedding_model("query", worker_idx) {
+                            Some(m) => slot = Some(m),
+                            None => {
+                                // Reload failed on wake — surface it and
+                                // bail so the request reply closes rather
+                                // than hanging on a dead worker.
+                                crate::runtime_readiness::report_subsystem_state(
+                                    crate::runtime_readiness::Subsystem::Embedder,
+                                    crate::runtime_readiness::SubsystemState::Failed {
+                                        reason: "model_reload_on_wake_failed".to_string(),
+                                    },
+                                );
+                                drop(request); // closes reply_rx → caller gets Disconnected
+                                return;
+                            }
+                        }
+                    }
+                    let m = slot.as_mut().expect("model just ensured Some");
+                    serve_query_embedding_request(m, request);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if slot.take().is_some() {
+                        info!(
+                            "Semantic Query Worker [{}]: idle {}s — dropping BGE-Large model (host RAM reclaimed)",
+                            worker_idx,
+                            idle_timeout.map(|d| d.as_secs()).unwrap_or(0)
+                        );
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
             }
         }
     }
@@ -827,6 +881,29 @@ impl SemanticWorkerPool {
 
 
 
+
+/// REQ-AXO-901945 — idle window after which the in-process CPU query
+/// model is dropped to reclaim host RAM. `AXON_QUERY_EMBED_IDLE_SECS`
+/// overrides the default of 1200 s (20 min). A value of `0` disables
+/// idle-drop entirely (model stays resident for the worker's lifetime),
+/// for operators who prefer guaranteed zero reload latency over RAM.
+fn query_embed_idle_timeout() -> Option<Duration> {
+    parse_query_embed_idle_timeout(std::env::var("AXON_QUERY_EMBED_IDLE_SECS").ok())
+}
+
+/// Pure parser for [`query_embed_idle_timeout`] (env-free, unit-testable).
+/// `None`/garbage → default 1200 s ; `"0"` → disabled (`None`).
+fn parse_query_embed_idle_timeout(raw: Option<String>) -> Option<Duration> {
+    const DEFAULT_QUERY_EMBED_IDLE_SECS: u64 = 1200;
+    let secs = raw
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_QUERY_EMBED_IDLE_SECS);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
 
 fn query_embedding_sender_slot() -> &'static Mutex<Option<Sender<QueryEmbeddingRequest>>> {
     QUERY_EMBEDDING_SENDER.get_or_init(|| Mutex::new(None))
@@ -2188,6 +2265,26 @@ mod tests {
     // `service_guard::lock_for_tests` synchronises across modules.
     fn lock_service_guard() -> parking_lot::MutexGuard<'static, ()> {
         crate::service_guard::lock_for_tests()
+    }
+
+    #[test]
+    fn query_embed_idle_timeout_parses_default_disable_and_override() {
+        // REQ-AXO-901945 — default 20 min when unset / unparseable.
+        assert_eq!(
+            super::parse_query_embed_idle_timeout(None),
+            Some(std::time::Duration::from_secs(1200))
+        );
+        assert_eq!(
+            super::parse_query_embed_idle_timeout(Some("garbage".into())),
+            Some(std::time::Duration::from_secs(1200))
+        );
+        // 0 disables idle-drop (model stays resident).
+        assert_eq!(super::parse_query_embed_idle_timeout(Some("0".into())), None);
+        // Explicit override honoured (with whitespace tolerance).
+        assert_eq!(
+            super::parse_query_embed_idle_timeout(Some("  300 ".into())),
+            Some(std::time::Duration::from_secs(300))
+        );
     }
 
     #[test]

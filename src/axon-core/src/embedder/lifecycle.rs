@@ -58,11 +58,27 @@ impl EmbedderRuntimeState {
         Self::default()
     }
 
-    /// Replace the pending set wholesale. Called at boot once the
-    /// orchestrator has fetched the chunks-without-fresh-embedding set
-    /// from PG. Subsequent A3/B3 mark calls converge the set on the
-    /// canonical state from there.
-    #[allow(dead_code)]
+    /// Replace the pending set wholesale with the DB-authoritative truth.
+    ///
+    /// Used at boot AND by the periodic reconcile loop (REQ-AXO-901931).
+    /// The argument is the result of the canonical orphan query
+    /// (`SELECT chunk_id FROM Chunk WHERE NOT EXISTS (matching
+    /// ChunkEmbedding)`) — i.e. the complete set of chunks that genuinely
+    /// still need an embedding. Replacing wholesale (rather than the
+    /// historical additive-only union) is what makes the pending set
+    /// **self-healing**: any chunk_id marked `pending` but never
+    /// `mark_embedded` (dedup-skip on the B lane, unchanged re-chunk,
+    /// dropped handoff, …) is purged on the next reconcile tick instead
+    /// of poisoning `EmbedderLifecycle::should_sleep` forever and pinning
+    /// VRAM at idle.
+    ///
+    /// Safety of wholesale replace: the in-memory set drives ONLY
+    /// `should_sleep` and `retrieve_context` freshness — NOT the embed
+    /// pipeline (demand_pull_b reads pending chunks from PG directly). A
+    /// chunk marked pending by A3 pre-commit but not yet committed when a
+    /// reconcile fires is transiently absent from the freshness envelope
+    /// for at most one reconcile interval; it is still embedded by the B
+    /// lane and reappears in the next orphan query. No embedding is lost.
     pub fn hydrate_from_db_rows<I>(&self, rows: I)
     where
         I: IntoIterator<Item = String>,
@@ -161,6 +177,43 @@ mod tests {
         assert_eq!(
             state.pending_subset(&["fresh-1".into(), "missing".into()]),
             vec!["fresh-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn reconcile_purges_phantom_pending_against_empty_db_truth() {
+        // REQ-AXO-901931 regression — 200 chunks marked pending but never
+        // mark_embedded (dedup-skip / unchanged re-chunk) poison the set.
+        // DB coverage is 100% (orphan query returns empty) → a wholesale
+        // reconcile MUST drain them so should_sleep can fire and VRAM is
+        // released. The historical additive-only reconcile left them
+        // forever, pinning the GPU session at idle.
+        let state = EmbedderRuntimeState::new();
+        for i in 0..200 {
+            state.mark_pending(format!("phantom-{i}"));
+        }
+        assert_eq!(state.pending_count(), 200);
+        assert!(!state.is_empty());
+        // DB says nothing is orphaned → wholesale replace with empty truth.
+        state.hydrate_from_db_rows(Vec::<String>::new());
+        assert_eq!(state.pending_count(), 0);
+        assert!(state.is_empty(), "phantom pending must be purged so should_sleep can fire");
+    }
+
+    #[test]
+    fn reconcile_keeps_genuine_db_pending_and_drops_only_phantoms() {
+        // Mixed case: some entries are genuine DB orphans (must survive),
+        // others are leaked phantoms (must be dropped).
+        let state = EmbedderRuntimeState::new();
+        state.mark_pending("phantom-leaked");
+        state.mark_pending("genuine-1");
+        // DB truth: only genuine-1 and a freshly-discovered genuine-2.
+        state.hydrate_from_db_rows(["genuine-1".to_string(), "genuine-2".to_string()]);
+        assert_eq!(state.pending_count(), 2);
+        assert!(state.pending_subset(&["phantom-leaked".into()]).is_empty());
+        assert_eq!(
+            state.pending_subset(&["genuine-1".into(), "genuine-2".into()]).len(),
+            2
         );
     }
 

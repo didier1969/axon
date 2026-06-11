@@ -101,12 +101,24 @@ async fn listen_state_only(database_url: &str) -> Result<()> {
     ))
 }
 
-/// REQ-AXO-90009 Slice 2 — reconcile loop. Every `interval` (with
-/// jitter), re-hydrate the pending set from PG (`SELECT chunk_id FROM
-/// Chunk WHERE NOT EXISTS (matching ChunkEmbedding row)`) to recover
-/// from NOTIFY drops or LISTEN reconnect gaps. Strictly **additive** :
-/// re-hydration unions with the in-memory set ; never removes (B3 is
-/// the only authority that clears chunk_ids via `mark_embedded`).
+/// REQ-AXO-90009 Slice 2 + REQ-AXO-901931 — reconcile loop. Every
+/// `interval` (with jitter), re-hydrate the pending set from PG
+/// (`SELECT chunk_id FROM Chunk WHERE NOT EXISTS (matching
+/// ChunkEmbedding row)`) to recover from NOTIFY drops or LISTEN
+/// reconnect gaps.
+///
+/// **Wholesale, self-healing** (REQ-AXO-901931): the orphan query IS
+/// the complete DB truth of what needs embedding, so the in-memory set
+/// is *replaced* by it — not additively unioned. The historical
+/// additive-only variant never removed entries, so any chunk marked
+/// `pending` by A3 but never `mark_embedded` (dedup-skip on the B lane,
+/// unchanged re-chunk, dropped handoff) accumulated forever, keeping
+/// `EmbedderLifecycle::should_sleep` false and pinning the GPU session
+/// in VRAM at idle. Wholesale replace drains those phantoms every tick.
+/// This is safe because the in-memory set drives ONLY `should_sleep`
+/// and `retrieve_context` freshness, never the embed pipeline itself —
+/// see `EmbedderRuntimeState::hydrate_from_db_rows` for the full
+/// safety argument.
 ///
 /// Caller passes a closure that returns the orphan chunk_ids. Keeping
 /// the SQL out of this module makes it unit-testable without a live PG
@@ -145,14 +157,17 @@ where
             let result = tokio::task::spawn_blocking(move || (fetch_for_blocking)()).await;
             match result {
                 Ok(Ok(orphans)) => {
+                    // REQ-AXO-901931 — wholesale replace with the DB truth
+                    // (self-healing) instead of additive union, so leaked
+                    // phantom-pending chunk_ids are purged and should_sleep
+                    // can fire at idle.
                     let state = embedder_state();
-                    for cid in &orphans {
-                        state.mark_pending(cid.clone());
-                    }
+                    let orphan_count = orphans.len();
+                    state.hydrate_from_db_rows(orphans);
                     info!(
-                        orphans = orphans.len(),
+                        orphans = orphan_count,
                         pending_count = state.pending_count(),
-                        "pending reconcile tick"
+                        "pending reconcile tick (wholesale)"
                     );
                 }
                 Ok(Err(err)) => {

@@ -151,12 +151,63 @@ pub async fn build_pool(database_url: &str) -> Result<Pool> {
         .with_context(|| format!("failed to acquire initial connection from {database_url}"))?;
     drop(probe);
 
+    // REQ-AXO-901946 — idle connection reaper. deadpool keeps a
+    // connection open after use (up to max_connections); at idle that
+    // pins ~22 PG backends. A periodic `retain` drops connections unused
+    // beyond `max_idle`, freeing backends + ~private RAM. Safe by
+    // construction: `retain` only inspects pool *slots* (idle, checked-in
+    // connections) — in-use connections are checked out and never
+    // touched. The pool re-grows lazily on the next acquire, so there is
+    // no latency regression under load. Long-lived dedicated connections
+    // (e.g. the demand_pull_b LISTEN socket) are not pooled and so are
+    // never reaped.
+    spawn_idle_connection_reaper(pool.clone());
+
     info!(
         max_connections,
         "postgres pool established (acquire_timeout_ms={})",
         acquire_timeout.as_millis()
     );
     Ok(pool)
+}
+
+/// REQ-AXO-901930 / REQ-AXO-901946 — periodic idle-connection reaper.
+/// `AXON_PG_REAPER_INTERVAL_SECS` (default 60) sets the sweep cadence ;
+/// `AXON_PG_CONN_MAX_IDLE_SECS` (default 300) is the idle age beyond
+/// which a checked-in connection is closed. Setting max-idle to `0`
+/// disables reaping (keep every connection warm).
+fn spawn_idle_connection_reaper(pool: Pool) {
+    let interval_secs = std::env::var("AXON_PG_REAPER_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(60);
+    let max_idle_secs = std::env::var("AXON_PG_CONN_MAX_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    if max_idle_secs == 0 {
+        debug!("postgres idle-connection reaper disabled (AXON_PG_CONN_MAX_IDLE_SECS=0)");
+        return;
+    }
+    let interval = Duration::from_secs(interval_secs);
+    let max_idle = Duration::from_secs(max_idle_secs);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let result = pool.retain(|_, metrics| metrics.last_used() < max_idle);
+            if !result.removed.is_empty() {
+                debug!(
+                    removed = result.removed.len(),
+                    retained = result.retained,
+                    max_idle_secs,
+                    "postgres idle-connection reaper closed stale connections"
+                );
+            }
+        }
+    });
 }
 
 /// Smoke-check the connected PostgreSQL: required version + extensions

@@ -225,6 +225,22 @@ pub async fn pgmq_extension_present(store: &GraphStore) -> bool {
 /// "réactif quand l'extension arrive" et "pas de flood logs".
 const ERROR_BACKOFF_MAX_MS: u64 = 30_000;
 
+/// REQ-AXO-901930 — cap on the *idle* poll backoff. When `tsv_pending`
+/// is empty, the worker doubles its sleep from `poll_interval_ms` up to
+/// this ceiling instead of hammering pgmq every `poll_interval_ms`
+/// forever (40 PG round-trips/s across 2 workers at idle = the observed
+/// ~30% indexer CPU spin). 2 s keeps worst-case FTS back-fill latency
+/// after an idle spell bounded while killing the busy-loop. The instant
+/// a drain returns rows the backoff resets to `poll_interval_ms`, so a
+/// real backlog still drains at full speed (no FTS throughput regression).
+const IDLE_BACKOFF_MAX_MS: u64 = 2_000;
+
+/// Next idle-poll backoff: double, capped at [`IDLE_BACKOFF_MAX_MS`].
+/// Pure so the progression is unit-testable (REQ-AXO-901930).
+fn next_idle_backoff_ms(current_ms: u64) -> u64 {
+    current_ms.saturating_mul(2).min(IDLE_BACKOFF_MAX_MS)
+}
+
 /// Spawn `cfg.concurrency` worker tasks. Returns the JoinHandles so the
 /// orchestrator (or tests) can await teardown. Workers loop forever ;
 /// the de-facto shutdown is process kill, matching the cadence of A3
@@ -258,6 +274,9 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
             );
             let mut error_backoff_ms: u64 = cfg.poll_interval_ms;
             let mut defer_backoff_ms: u64 = cfg.poll_interval_ms;
+            // REQ-AXO-901930 — idle poll backoff (resets to poll_interval_ms
+            // on any non-empty drain). Kills the ~30% indexer CPU spin at idle.
+            let mut idle_backoff_ms: u64 = cfg.poll_interval_ms;
             let mut deferred_logged = false;
             loop {
                 // REQ-AXO-901884 — deferred pgmq readiness probe (own backoff,
@@ -293,9 +312,14 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                     Ok(stats) => {
                         error_backoff_ms = cfg.poll_interval_ms;
                         if stats.fetched == 0 {
-                            tokio::time::sleep(Duration::from_millis(cfg.poll_interval_ms))
-                                .await;
+                            // REQ-AXO-901930 — empty queue: back off (capped)
+                            // instead of polling every poll_interval_ms forever.
+                            tokio::time::sleep(Duration::from_millis(idle_backoff_ms)).await;
+                            idle_backoff_ms = next_idle_backoff_ms(idle_backoff_ms);
                         } else {
+                            // Work present → poll fast again so a backlog drains
+                            // at full speed (no FTS throughput regression).
+                            idle_backoff_ms = cfg.poll_interval_ms;
                             debug!(
                                 worker_idx,
                                 fetched = stats.fetched,
@@ -335,6 +359,19 @@ mod tests {
         assert_eq!(cfg.batch_size, 256);
         assert_eq!(cfg.visibility_timeout_s, 30);
         assert_eq!(cfg.poll_interval_ms, 100);
+    }
+
+    #[test]
+    fn idle_backoff_doubles_then_caps() {
+        // REQ-AXO-901930 — from 100ms it should climb 100→200→400→800→1600
+        // and then saturate at the 2s ceiling, never spinning faster again.
+        assert_eq!(next_idle_backoff_ms(100), 200);
+        assert_eq!(next_idle_backoff_ms(200), 400);
+        assert_eq!(next_idle_backoff_ms(800), 1_600);
+        assert_eq!(next_idle_backoff_ms(1_600), IDLE_BACKOFF_MAX_MS);
+        assert_eq!(next_idle_backoff_ms(IDLE_BACKOFF_MAX_MS), IDLE_BACKOFF_MAX_MS);
+        // Overflow-safe.
+        assert_eq!(next_idle_backoff_ms(u64::MAX), IDLE_BACKOFF_MAX_MS);
     }
 
     #[test]
