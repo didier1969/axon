@@ -208,12 +208,18 @@ impl McpServer {
     }
 
     pub(crate) fn axon_schema_overview(&self, _args: &Value) -> Option<Value> {
+        // REQ-AXO-901956 — expose the IST schema (`ist.*`: Symbol / Edge /
+        // IndexedFile / Chunk / ChunkEmbedding), not just SOLL intent. When the
+        // DX tools (impact/inspect/bidi_trace) return hollow results, the `sql`
+        // gateway is the canonical structured fallback for the code graph — but
+        // only if its schema is discoverable here. ('main' was the retired
+        // DuckDB schema, gone post-MIL-AXO-017.)
         let tables = self
             .graph_store
             .query_json(
                 "SELECT table_schema, table_name \
                  FROM information_schema.tables \
-                 WHERE table_schema IN ('main', 'soll') \
+                 WHERE table_schema IN ('ist', 'soll') \
                  ORDER BY table_schema, table_name",
             )
             .unwrap_or_else(|_| "[]".to_string());
@@ -222,7 +228,7 @@ impl McpServer {
             .query_json(
                 "SELECT table_schema, table_name, COUNT(*) \
                  FROM information_schema.columns \
-                 WHERE table_schema IN ('main', 'soll') \
+                 WHERE table_schema IN ('ist', 'soll') \
                  GROUP BY 1,2 \
                  ORDER BY 1,2",
             )
@@ -230,7 +236,7 @@ impl McpServer {
 
         let report = format!(
             "## 🧭 Axon Schema Overview\n\n\
-             **Tables (main + soll):**\n{}\n\n\
+             **Tables (ist + soll):**\n{}\n\n\
              **Column count by table:**\n{}\n",
             format_table_from_json(&tables, &["Schema", "Table"]),
             format_table_from_json(&columns, &["Schema", "Table", "Columns"])

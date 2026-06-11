@@ -420,6 +420,44 @@ fn test_project_status_never_reports_coverage_unknown_when_canonical_validations
 }
 
 #[test]
+fn test_schema_overview_exposes_ist_code_graph_tables() {
+    // REQ-AXO-901956 — the IST code-graph tables must be SQL-discoverable so
+    // `sql` is a usable fallback when impact/inspect/bidi_trace are hollow.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Symbol (id, name, kind, project_code) VALUES ('axo::probe', 'probe_fn', 'function', 'AXO')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "schema_overview",
+                "arguments": {}
+            })),
+            id: Some(json!(901956)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text = response["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("ist + soll"),
+        "schema_overview must advertise the ist schema: {text}"
+    );
+    // the canonical IST code-graph tables must be listed (not just soll.*).
+    // PG folds unquoted identifiers to lowercase, so match case-insensitively.
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("symbol"),
+        "IST symbol table must be discoverable via schema_overview: {text}"
+    );
+}
+
+#[test]
 fn test_project_status_reports_delta_vs_previous_snapshot() {
     let _guard = env_lock();
     let history_dir = tempdir().unwrap();
