@@ -1975,9 +1975,8 @@ mod tests {
         let store = create_test_db().unwrap();
         // REQ-AXO-901877 — shared per-process clone: own only this row id and scope
         // the canonical-count to it. Scrub any residual from a prior panicked run.
-        let _ = store.execute(
-            "DELETE FROM ChunkEmbedding WHERE chunk_id = 'chunk-stale-canonical'",
-        );
+        let _ =
+            store.execute("DELETE FROM ChunkEmbedding WHERE chunk_id = 'chunk-stale-canonical'");
         let _ = store.execute("DELETE FROM Chunk WHERE id = 'chunk-stale-canonical'");
         store
             .execute(&format!(

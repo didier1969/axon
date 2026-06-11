@@ -380,7 +380,10 @@ mod tests {
                 "SELECT count(*) FROM ChunkEmbedding WHERE chunk_id = '{cid}'"
             ))
             .unwrap();
-        assert_eq!(n, 1, "ON CONFLICT must keep exactly one row per (chunk_id, model_id)");
+        assert_eq!(
+            n, 1,
+            "ON CONFLICT must keep exactly one row per (chunk_id, model_id)"
+        );
     }
 
     /// REQ-AXO-901777 — B3 with wrong embedding dimension propagates

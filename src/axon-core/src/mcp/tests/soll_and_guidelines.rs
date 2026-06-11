@@ -184,19 +184,30 @@ fn test_soll_manager_link_cycle_guard_filiation_and_inheritance() {
         };
         server.handle_request(req).unwrap().result.unwrap()
     };
-    let is_err = |r: &serde_json::Value| r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_err =
+        |r: &serde_json::Value| r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let req1 = format!("REQ-{code}-001");
     let req2 = format!("REQ-{code}-002");
     // Filiation (regression): REFINES forms a DAG ; the reverse closes a cycle.
-    assert!(!is_err(&link(&req1, &req2, "REFINES", 1)), "first REFINES should succeed: {:?}", link(&req1, &req2, "REFINES", 1));
-    assert!(is_err(&link(&req2, &req1, "REFINES", 2)), "filiation cycle must be blocked");
+    assert!(
+        !is_err(&link(&req1, &req2, "REFINES", 1)),
+        "first REFINES should succeed: {:?}",
+        link(&req1, &req2, "REFINES", 1)
+    );
+    assert!(
+        is_err(&link(&req2, &req1, "REFINES", 2)),
+        "filiation cycle must be blocked"
+    );
 
     let g1 = format!("GUI-{code}-001");
     let g2 = format!("GUI-{code}-002");
     // Non-filiation (REQ-AXO-901593 new): INHERITS_FROM is now cycle-guarded.
     let first = link(&g1, &g2, "INHERITS_FROM", 3);
-    assert!(!is_err(&first), "first INHERITS_FROM should succeed: {first:?}");
+    assert!(
+        !is_err(&first),
+        "first INHERITS_FROM should succeed: {first:?}"
+    );
     assert!(
         is_err(&link(&g2, &g1, "INHERITS_FROM", 4)),
         "inheritance cycle must be blocked (REQ-AXO-901593)"
@@ -293,7 +304,8 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("BookingSystem") && (content.contains("non canonique") || content.contains("canonical")),
+        content.contains("BookingSystem")
+            && (content.contains("non canonique") || content.contains("canonical")),
         "Error should reject non-canonical project code: {content}"
     );
 }
@@ -354,7 +366,9 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     assert_eq!(
         server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = '{title}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Requirement' AND title = '{title}'"
+            ))
             .unwrap(),
         1
     );
@@ -722,8 +736,7 @@ fn test_soll_apply_plan_rejects_relations_nested_inside_plan() {
         "parameter_repair must categorise the misplacement"
     );
     assert_eq!(
-        result["data"]["parameter_repair"]["items_silently_dropped"]
-            .as_u64(),
+        result["data"]["parameter_repair"]["items_silently_dropped"].as_u64(),
         Some(1),
         "parameter_repair must report how many items were misplaced"
     );
@@ -945,7 +958,9 @@ fn test_entrench_nuance_requires_confirmation_before_write() {
 
     let rows = server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Node WHERE id = '{req_id}'"))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Node WHERE id = '{req_id}'"
+        ))
         .unwrap();
     assert!(!rows.contains("nuances"));
 }
@@ -983,7 +998,9 @@ fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() 
 
     let rows = server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Node WHERE id = '{req_id}'"))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Node WHERE id = '{req_id}'"
+        ))
         .unwrap();
     assert!(rows.contains("Weekly shopping should allow grouped purchases."));
     assert!(rows.contains("nuances"));
@@ -1052,10 +1069,7 @@ fn test_soll_manager_unknown_entity_returns_parameter_repair() {
 
     let repair = data["parameter_repair"].clone();
     assert_eq!(repair["invalid_field"].as_str(), Some("entity"));
-    assert_eq!(
-        repair["supplied_value"].as_str(),
-        Some("wat-not-an-entity")
-    );
+    assert_eq!(repair["supplied_value"].as_str(), Some("wat-not-an-entity"));
     let accepted = repair["accepted_values"]
         .as_array()
         .expect("accepted_values array");
@@ -1067,10 +1081,7 @@ fn test_soll_manager_unknown_entity_returns_parameter_repair() {
         );
     }
     let hint = repair["hint"].as_str().expect("hint string");
-    assert!(
-        hint.contains("entity"),
-        "hint must mention entity: {hint}"
-    );
+    assert!(hint.contains("entity"), "hint must mention entity: {hint}");
 }
 
 #[test]
@@ -1204,7 +1215,10 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     let repair = data["parameter_repair"].clone();
     assert_eq!(repair["invalid_field"].as_str(), Some("target_ids"));
     assert_eq!(repair["stage"].as_str(), Some("cross_project_check"));
-    assert_eq!(repair["expected_project_code"].as_str(), Some(target.as_str()));
+    assert_eq!(
+        repair["expected_project_code"].as_str(),
+        Some(target.as_str())
+    );
     let invalid = repair["invalid_target_ids"]
         .as_array()
         .expect("invalid_target_ids array");
@@ -1490,7 +1504,11 @@ fn test_axon_init_project_warns_when_project_path_does_not_exist_on_disk() {
     let result = response.result.expect("Expected result");
 
     // Registration still succeeds (non-blocking warning)
-    assert_ne!(result["isError"].as_bool(), Some(true), "should succeed: {result}");
+    assert_ne!(
+        result["isError"].as_bool(),
+        Some(true),
+        "should succeed: {result}"
+    );
     assert!(
         result["data"]["project_code"].as_str().is_some(),
         "should still assign a code: {result}"
@@ -1505,7 +1523,11 @@ fn test_axon_init_project_warns_when_project_path_does_not_exist_on_disk() {
     let warnings = result["data"]["warnings"]
         .as_array()
         .expect("warnings array");
-    assert_eq!(warnings.len(), 1, "expected exactly one warning: {warnings:?}");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one warning: {warnings:?}"
+    );
     assert_eq!(
         warnings[0]["kind"].as_str(),
         Some("path_does_not_exist_on_disk")
@@ -1735,9 +1757,7 @@ fn test_axon_soll_query_context_unknown_project_returns_recovery_contract() {
         "follow_up_tools must point to registry/init: {follow_up_strs:?}"
     );
 
-    let content = result["content"][0]["text"]
-        .as_str()
-        .expect("content text");
+    let content = result["content"][0]["text"].as_str().expect("content text");
     assert!(
         content.contains("DEFINITELY_NOT_REGISTERED"),
         "content must echo the rejected code: {content}"
@@ -1788,7 +1808,11 @@ fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
         })
         .unwrap();
     let result = response.result.unwrap();
-    assert_ne!(result["isError"].as_bool(), Some(true), "create guideline should not error: {result}");
+    assert_ne!(
+        result["isError"].as_bool(),
+        Some(true),
+        "create guideline should not error: {result}"
+    );
 
     // Response should expose canonical id (GUI-{project}-NNN) and entity_type
     let data = &result["data"];
@@ -1830,7 +1854,10 @@ fn test_soll_manager_create_unknown_entity_returns_recovery_contract() {
     let result = response.result.unwrap();
     assert_eq!(result["isError"].as_bool(), Some(true));
     let content = result["content"][0]["text"].as_str().expect("content text");
-    assert!(content.contains("Unknown entity"), "content must surface failure: {content}");
+    assert!(
+        content.contains("Unknown entity"),
+        "content must surface failure: {content}"
+    );
     assert!(
         content.contains("guideline") && content.contains("requirement"),
         "content must list accepted entity types: {content}"
@@ -1839,10 +1866,15 @@ fn test_soll_manager_create_unknown_entity_returns_recovery_contract() {
     let data = &result["data"];
     assert_eq!(data["status"].as_str(), Some("input_invalid"));
     assert_eq!(data["rejected_entity"].as_str(), Some("rumour"));
-    let accepted = data["accepted_entities"].as_array().expect("accepted_entities array");
+    let accepted = data["accepted_entities"]
+        .as_array()
+        .expect("accepted_entities array");
     assert!(accepted.iter().any(|v| v.as_str() == Some("guideline")));
     assert!(accepted.iter().any(|v| v.as_str() == Some("requirement")));
-    assert!(data["next_action"].as_str().is_some(), "next_action must be set");
+    assert!(
+        data["next_action"].as_str().is_some(),
+        "next_action must be set"
+    );
     assert_eq!(
         data["operator_guidance"]["problem_class"].as_str(),
         Some("input_invalid")
@@ -1886,12 +1918,12 @@ fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
+    assert!(content.contains("Non-canonical project_code"), "{content}");
+    assert!(content.contains("BookingSystem"), "{content}");
     assert!(
-        content.contains("Non-canonical project_code"),
+        content.contains("3-char uppercase canonical codes"),
         "{content}"
     );
-    assert!(content.contains("BookingSystem"), "{content}");
-    assert!(content.contains("3-char uppercase canonical codes"), "{content}");
 }
 
 #[test]
@@ -1926,10 +1958,7 @@ fn test_axon_init_project_rejects_non_canonical_project_code() {
         .get("isError")
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
-    assert!(
-        content.contains("Non-canonical project_code"),
-        "{content}"
-    );
+    assert!(content.contains("Non-canonical project_code"), "{content}");
     assert!(content.contains("booking-system"), "{content}");
 }
 
@@ -1964,10 +1993,7 @@ fn test_axon_apply_guidelines_rejects_non_canonical_project_code() {
         .get("isError")
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
-    assert!(
-        content.contains("Non-canonical project_code"),
-        "{content}"
-    );
+    assert!(content.contains("Non-canonical project_code"), "{content}");
     assert!(content.contains("axon"), "{content}");
 }
 
@@ -2206,11 +2232,7 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
         })),
         id: Some(json!(125001)),
     };
-    let response = server
-        .handle_request(req)
-        .unwrap()
-        .result
-        .unwrap();
+    let response = server.handle_request(req).unwrap().result.unwrap();
     assert_eq!(
         response.get("isError").and_then(|v| v.as_bool()),
         Some(true),
@@ -2225,7 +2247,9 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
         content.contains("update failed"),
         "content should describe the kind: {content}"
     );
-    let data = response.get("data").expect("normalized error must include data");
+    let data = response
+        .get("data")
+        .expect("normalized error must include data");
     assert_eq!(data["kind"].as_str(), Some("update_failed"));
     assert!(
         data["category"].is_string(),
@@ -2295,7 +2319,9 @@ fn test_axon_export_soll() {
     assert!(export_content.contains(&cpt_id));
 
     let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
-    assert!(export_body.contains("## Entities: Vision") || export_body.contains("## Entities: Vision"));
+    assert!(
+        export_body.contains("## Entities: Vision") || export_body.contains("## Entities: Vision")
+    );
 
     let _ = std::fs::remove_file(export_path);
 }
@@ -2411,11 +2437,7 @@ fn test_axon_restore_soll() {
         .as_str()
         .unwrap();
 
-    assert!(
-        content.contains("SOLL restore complete"),
-        "{}",
-        content
-    );
+    assert!(content.contains("SOLL restore complete"), "{}", content);
     assert!(content.contains("Vision: 1"));
     assert_eq!(
         server
@@ -2427,14 +2449,18 @@ fn test_axon_restore_soll() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Pillar' AND project_code='AXO'")
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE type='Pillar' AND project_code='AXO'"
+            )
             .unwrap(),
         1
     );
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Concept' AND project_code='AXO'")
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE type='Concept' AND project_code='AXO'"
+            )
             .unwrap(),
         1
     );
@@ -2455,7 +2481,9 @@ fn test_axon_restore_soll() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Decision' AND project_code='AXO'")
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE type='Decision' AND project_code='AXO'"
+            )
             .unwrap(),
         1
     );
@@ -2633,8 +2661,14 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
 
     // REQ-AXO-001 has no acceptance_criteria in metadata, so validation
     // now flags it as uncovered even though it has a VERIFIES link.
-    assert!(content.contains("1 minimal coherence violation(s)"), "{content}");
-    assert!(content.contains("Requirements without criteria/evidence"), "{content}");
+    assert!(
+        content.contains("1 minimal coherence violation(s)"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Requirements without criteria/evidence"),
+        "{content}"
+    );
 }
 
 #[test]
@@ -2757,7 +2791,10 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("FSC"), "must echo rejected code: {content}");
+    assert!(
+        content.contains("FSC"),
+        "must echo rejected code: {content}"
+    );
     assert!(
         content.contains("not found in registry"),
         "must surface the registry-miss reason: {content}"
@@ -2766,7 +2803,10 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
         result["data"]["status"].as_str(),
         Some("wrong_project_scope")
     );
-    assert_eq!(result["data"]["rejected_project_code"].as_str(), Some("FSC"));
+    assert_eq!(
+        result["data"]["rejected_project_code"].as_str(),
+        Some("FSC")
+    );
 }
 
 #[test]
@@ -3226,10 +3266,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
         .as_str()
         .unwrap();
 
-    assert!(
-        content.contains(&file_doc),
-        "{content}"
-    );
+    assert!(content.contains(&file_doc), "{content}");
     assert!(content.contains("Result type"), "{content}");
     assert!(content.contains("documentary"), "{content}");
     assert!(content.contains("config_lookup_exact"), "{content}");
@@ -3611,8 +3648,6 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
     assert!(!impact_text.contains(&name_beta), "{}", impact_text);
 }
 
-
-
 #[test]
 fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     // REQ-AXO-91560 — per-test project_code isolation.
@@ -3721,16 +3756,8 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
 
     let expected_function = format!("| {name_parse} | function | true |");
     let expected_module = format!("| {name_parse} | module | false |");
-    assert!(
-        content.contains(&expected_function),
-        "{}",
-        content
-    );
-    assert!(
-        !content.contains(&expected_module),
-        "{}",
-        content
-    );
+    assert!(content.contains(&expected_function), "{}", content);
+    assert!(!content.contains(&expected_module), "{}", content);
 }
 
 #[test]
@@ -3935,49 +3962,63 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     assert_eq!(
         restore_server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE type='Vision' AND project_code='AXO'")
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE type='Vision' AND project_code='AXO'"
+            )
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Pillar' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Pillar' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Concept' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Concept' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Milestone' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Milestone' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Requirement' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Requirement' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Decision' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Decision' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
     assert_eq!(
         restore_server
             .graph_store
-            .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Validation' AND project_code='{code}'"))
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE type='Validation' AND project_code='{code}'"
+            ))
             .unwrap(),
         1
     );
@@ -4232,7 +4273,10 @@ fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_a
     };
 
     let response = server.handle_request(req).unwrap().result.unwrap();
-    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     let data = response.get("data").expect("expected create data");
     assert_eq!(data["status"].as_str(), Some("input_invalid"));
     // The non-canonical status "accepted" is rejected by the canonical-status
@@ -4278,14 +4322,23 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     };
 
     let response = server.handle_request(req).unwrap().result.unwrap();
-    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     let data = response.get("data").expect("expected create data");
     assert_eq!(
         data["operator_guidance"]["problem_class"].as_str(),
         Some("forbidden_relation_for_type")
     );
-    assert_eq!(data["parameter_repair"]["source_type"].as_str(), Some("VAL"));
-    assert_eq!(data["parameter_repair"]["target_type"].as_str(), Some("VIS"));
+    assert_eq!(
+        data["parameter_repair"]["source_type"].as_str(),
+        Some("VAL")
+    );
+    assert_eq!(
+        data["parameter_repair"]["target_type"].as_str(),
+        Some("VIS")
+    );
 }
 
 #[test]
@@ -4460,7 +4513,9 @@ fn test_axon_soll_manager_link_cardinality_conflict_preserves_text_and_data_shap
         "LLM-visible content must NOT contain raw SQL: {content}"
     );
     // Existing relation_guidance shape preserved (flat fields under data).
-    let data = response.get("data").expect("relation_guidance must be attached");
+    let data = response
+        .get("data")
+        .expect("relation_guidance must be attached");
     assert_eq!(data["source_kind"].as_str(), Some("DEC"));
     assert_eq!(data["target_kind"].as_str(), Some("DEC"));
     assert_eq!(data["pair_allowed"].as_bool(), Some(true));
@@ -5094,12 +5149,13 @@ fn test_soll_attach_evidence_rejected_all_returns_recovery_contract() {
     let actions = data["operator_guidance"]["next_best_actions"]
         .as_array()
         .expect("next_best_actions array");
-    assert!(!actions.is_empty(), "next_best_actions must be non-empty when rejected_all");
+    assert!(
+        !actions.is_empty(),
+        "next_best_actions must be non-empty when rejected_all"
+    );
 
     // The LLM-visible content text must surface the failure (not just "Attached 0")
-    let content_text = result["content"][0]["text"]
-        .as_str()
-        .expect("content text");
+    let content_text = result["content"][0]["text"].as_str().expect("content text");
     assert!(
         content_text.contains("0 of 2") && content_text.contains("rejected"),
         "content must surface the rejection: {content_text}"
@@ -5287,23 +5343,44 @@ fn test_soll_verify_requirements_terminal_status_counts_as_done() {
         .result
         .unwrap();
 
-    assert_eq!(result["data"]["summary"]["done"].as_u64(), Some(2),
-        "both terminal-status REQs must count as done: {:?}", result["data"]);
-    assert_eq!(result["data"]["summary"]["partial"].as_u64(), Some(0),
-        "terminal REQs must not be partial: {:?}", result["data"]);
-    assert_eq!(result["data"]["summary"]["missing"].as_u64(), Some(0),
-        "terminal REQs must not be missing: {:?}", result["data"]);
+    assert_eq!(
+        result["data"]["summary"]["done"].as_u64(),
+        Some(2),
+        "both terminal-status REQs must count as done: {:?}",
+        result["data"]
+    );
+    assert_eq!(
+        result["data"]["summary"]["partial"].as_u64(),
+        Some(0),
+        "terminal REQs must not be partial: {:?}",
+        result["data"]
+    );
+    assert_eq!(
+        result["data"]["summary"]["missing"].as_u64(),
+        Some(0),
+        "terminal REQs must not be missing: {:?}",
+        result["data"]
+    );
 
     let details = result["data"]["details"].as_array().expect("details");
-    let entry_501 = details.iter()
+    let entry_501 = details
+        .iter()
         .find(|v| v["id"].as_str() == Some("REQ-AXO-501"))
         .expect("REQ-AXO-501 entry");
-    assert_eq!(entry_501["state"].as_str(), Some("done"),
-        "completed REQ must be `done`: {:?}", entry_501);
-    let missing_501 = entry_501["missing_dimensions"].as_array()
+    assert_eq!(
+        entry_501["state"].as_str(),
+        Some("done"),
+        "completed REQ must be `done`: {:?}",
+        entry_501
+    );
+    let missing_501 = entry_501["missing_dimensions"]
+        .as_array()
         .expect("missing dimensions array");
-    assert!(!missing_501.iter().any(|v| v.as_str() == Some("status")),
-        "completed status must not be flagged as missing: {:?}", missing_501);
+    assert!(
+        !missing_501.iter().any(|v| v.as_str() == Some("status")),
+        "completed status must not be flagged as missing: {:?}",
+        missing_501
+    );
 }
 
 #[test]
@@ -6201,9 +6278,9 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         .handle_request(serde_json::from_value(req).unwrap())
         .unwrap();
     let result = response.result.unwrap();
-    let bundle = result["data"]["kickoff_bundle"].as_object().expect(
-        "first init must return a kickoff_bundle in data",
-    );
+    let bundle = result["data"]["kickoff_bundle"]
+        .as_object()
+        .expect("first init must return a kickoff_bundle in data");
     assert!(bundle.contains_key("kickoff_prompt"));
     assert!(bundle.contains_key("methodology_summary"));
     assert!(bundle.contains_key("entry_points"));
@@ -6234,7 +6311,9 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         // input_documents[] may be empty if path doesn't exist on disk, but
         // shape must hold (array of objects with path/size_bytes/mtime_unix_secs)
         for doc in input_documents {
-            let obj = doc.as_object().expect("input_documents entries must be objects");
+            let obj = doc
+                .as_object()
+                .expect("input_documents entries must be objects");
             assert!(obj.contains_key("path"));
             assert!(obj.contains_key("size_bytes"));
             assert!(obj.contains_key("mtime_unix_secs"));
@@ -6258,9 +6337,18 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         .iter()
         .filter_map(|e| e.get("kind").and_then(|v| v.as_str()))
         .collect();
-    assert!(kinds.contains("file"), "entry_points must include `file` steps: {kinds:?}");
-    assert!(kinds.contains("mcp"), "entry_points must include `mcp` steps: {kinds:?}");
-    assert!(kinds.contains("sql"), "entry_points must include `sql` steps: {kinds:?}");
+    assert!(
+        kinds.contains("file"),
+        "entry_points must include `file` steps: {kinds:?}"
+    );
+    assert!(
+        kinds.contains("mcp"),
+        "entry_points must include `mcp` steps: {kinds:?}"
+    );
+    assert!(
+        kinds.contains("sql"),
+        "entry_points must include `sql` steps: {kinds:?}"
+    );
 
     let content = result["content"][0]["text"].as_str().unwrap();
     assert!(
@@ -6273,12 +6361,14 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
 fn test_axon_init_project_returns_identical_bundle_on_re_init() {
     let server = create_test_server();
     let args = serde_json::json!({ "project_path": "/home/dstadel/projects/BookingSystem" });
-    let make_req = |id: u64| serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": { "name": "axon_init_project", "arguments": args },
-        "id": id
-    });
+    let make_req = |id: u64| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "axon_init_project", "arguments": args },
+            "id": id
+        })
+    };
     let first = server
         .handle_request(serde_json::from_value(make_req(1)).unwrap())
         .unwrap()
@@ -6290,16 +6380,16 @@ fn test_axon_init_project_returns_identical_bundle_on_re_init() {
         .result
         .unwrap();
     // Both calls must return the same project_code.
-    assert_eq!(first["data"]["project_code"], second["data"]["project_code"]);
+    assert_eq!(
+        first["data"]["project_code"],
+        second["data"]["project_code"]
+    );
     // The kickoff bundle must be present and equivalent on both calls.
     let b1 = &first["data"]["kickoff_bundle"];
     let b2 = &second["data"]["kickoff_bundle"];
     assert!(b1.is_object() && b2.is_object());
     assert_eq!(b1["kickoff_prompt"], b2["kickoff_prompt"]);
-    assert_eq!(
-        b1["methodology_summary"],
-        b2["methodology_summary"]
-    );
+    assert_eq!(b1["methodology_summary"], b2["methodology_summary"]);
     assert_eq!(b1["entry_points"], b2["entry_points"]);
     assert_eq!(b1["active_handoff"], b2["active_handoff"]);
 }
@@ -6437,7 +6527,9 @@ fn test_axon_init_project_persists_session_pointer_url_kind() {
         .unwrap();
     let result = response.result.unwrap();
     let bundle = &result["data"]["kickoff_bundle"];
-    let pointer = bundle.get("session_pointer").expect("session_pointer present");
+    let pointer = bundle
+        .get("session_pointer")
+        .expect("session_pointer present");
     assert_eq!(pointer["kind"].as_str(), Some("url"));
     assert_eq!(
         pointer["value"].as_str(),
@@ -6653,7 +6745,10 @@ fn test_axon_apply_guidelines_rejects_empty_accepted_list() {
         "{content}"
     );
     let data = result.get("data").unwrap();
-    assert_eq!(data.get("empty_input").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        data.get("empty_input").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     assert!(data.get("recovery_hint").is_some());
     assert_eq!(data.get("applied").unwrap().as_array().unwrap().len(), 0);
     assert_eq!(
@@ -7034,7 +7129,8 @@ fn test_soll_apply_plan_resolves_logical_keys_in_relations() {
         ))
         .unwrap();
     let edge_rows: Vec<Vec<String>> = serde_json::from_str(&edge_count).unwrap_or_default();
-    let count: i64 = edge_rows.first()
+    let count: i64 = edge_rows
+        .first()
         .and_then(|r| r.first())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -7351,7 +7447,9 @@ fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter
     assert!(
         err["available_logical_keys"]
             .as_array()
-            .map(|arr| arr.iter().any(|v| v.as_str() == Some("CPT-resolved-cpt-91")))
+            .map(|arr| arr
+                .iter()
+                .any(|v| v.as_str() == Some("CPT-resolved-cpt-91")))
             .unwrap_or(false),
         "available_logical_keys must list the keys that DID resolve: {err:?}"
     );
@@ -7368,8 +7466,10 @@ fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter
     let repair_unresolved = repair["unresolved_keys"]
         .as_array()
         .expect("repair unresolved_keys array");
-    let repair_unresolved_names: Vec<&str> =
-        repair_unresolved.iter().filter_map(|v| v.as_str()).collect();
+    let repair_unresolved_names: Vec<&str> = repair_unresolved
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
     assert!(repair_unresolved_names.contains(&"CPT-typo-not-created"));
     let follow_up = repair["follow_up_tools"]
         .as_array()
@@ -7435,7 +7535,9 @@ fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
         "error text must explain partial-diff refusal: {}",
         content
     );
-    let data = result.get("data").expect("data payload required for repair");
+    let data = result
+        .get("data")
+        .expect("data payload required for repair");
     assert_eq!(
         data.get("status").and_then(|v| v.as_str()),
         Some("input_invalid")
@@ -7550,8 +7652,9 @@ fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     assert!(node_html.contains("boundary: canonical"));
     assert!(node_html.contains("toggle-left"));
     assert!(node_html.contains("toggle-right"));
-    assert!(node_html
-        .contains("Generated node page combining hierarchy, local context, and relation diagnostics"));
+    assert!(node_html.contains(
+        "Generated node page combining hierarchy, local context, and relation diagnostics"
+    ));
 
     let subtree_html = std::fs::read_to_string(subtree_path).unwrap();
     assert!(subtree_html.contains("All Nodes In This Subtree"));
@@ -8053,10 +8156,7 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
         .result
         .unwrap();
     assert_eq!(response2["data"]["removed_count"].as_u64(), Some(0));
-    assert_eq!(
-        response2["data"]["kept"].as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(response2["data"]["kept"].as_array().unwrap().len(), 1);
 }
 
 // REQ-AXO-274 phase 2 — canonical relation policy extensions
@@ -8223,8 +8323,11 @@ fn test_axon_apply_methodology_bundle_rejects_unsupported_schema() {
     ));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let bundle_path = tmp_dir.join("bad-schema.json");
-    std::fs::write(&bundle_path, r#"{"schema":"wrong-schema-v0","version":"0.1","project_code":"AXO"}"#)
-        .unwrap();
+    std::fs::write(
+        &bundle_path,
+        r#"{"schema":"wrong-schema-v0","version":"0.1","project_code":"AXO"}"#,
+    )
+    .unwrap();
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "tools/call",
@@ -8375,9 +8478,7 @@ fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
 
     let count = server
         .graph_store
-        .query_count(
-            "SELECT count(*) FROM soll.Node WHERE type='Skill' AND project_code='PRO'",
-        )
+        .query_count("SELECT count(*) FROM soll.Node WHERE type='Skill' AND project_code='PRO'")
         .unwrap();
     assert!(
         count >= 1,
@@ -8861,9 +8962,7 @@ fn test_prompt_template_get_enforces_validation_rule_regex() {
 // rendering / validation can evolve without spinning up the MCP server.
 #[test]
 fn test_validate_and_resolve_prompt_params_helper_paths() {
-    use crate::mcp::tools_skill::{
-        render_mustache_template, validate_and_resolve_prompt_params,
-    };
+    use crate::mcp::tools_skill::{render_mustache_template, validate_and_resolve_prompt_params};
 
     let spec = serde_json::json!([
         {"name": "role", "type": "string", "required": true},
@@ -8875,15 +8974,18 @@ fn test_validate_and_resolve_prompt_params_helper_paths() {
     // Missing required → error surfaced ; default still applied.
     let supplied = serde_json::json!({});
     let (effective, errors) = validate_and_resolve_prompt_params(spec_array, &supplied);
-    assert!(
-        errors.iter().any(|e| e["rule"] == "required_missing" && e["param"] == "role")
-    );
+    assert!(errors
+        .iter()
+        .any(|e| e["rule"] == "required_missing" && e["param"] == "role"));
     assert_eq!(effective["tone"], serde_json::json!("neutral"));
 
     // All good → no errors, render succeeds.
     let supplied = serde_json::json!({ "role": "reviewer", "n": 3 });
     let (effective, errors) = validate_and_resolve_prompt_params(spec_array, &supplied);
-    assert!(errors.is_empty(), "valid input must produce zero errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "valid input must produce zero errors, got: {errors:?}"
+    );
     assert_eq!(effective["tone"], serde_json::json!("neutral"));
 
     let rendered = render_mustache_template(
@@ -8914,7 +9016,10 @@ fn test_re_anchor_returns_canonical_state_packet() {
     let result = resp.result.unwrap();
     let data = result.get("data").unwrap();
     assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
-    assert_eq!(data.get("project_code").and_then(|v| v.as_str()), Some("AXO"));
+    assert_eq!(
+        data.get("project_code").and_then(|v| v.as_str()),
+        Some("AXO")
+    );
     assert_eq!(
         data.get("reason").and_then(|v| v.as_str()),
         Some("test_drift_signal")
@@ -8946,9 +9051,9 @@ fn test_status_returns_methodology_drift_warnings_field() {
         .unwrap();
     let result = resp.result.unwrap();
     let data = result.get("data").unwrap();
-    let drift = data.get("methodology_drift_warnings").expect(
-        "status() must include methodology_drift_warnings field per REQ-AXO-91583",
-    );
+    let drift = data
+        .get("methodology_drift_warnings")
+        .expect("status() must include methodology_drift_warnings field per REQ-AXO-91583");
     assert!(
         drift.get("mandated_skills").is_some(),
         "drift envelope must contain mandated_skills list"
@@ -9007,10 +9112,7 @@ fn test_soll_manager_unlink_round_trip() {
     let result = resp.result.unwrap();
     let data = result.get("data").unwrap();
     assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("ok"));
-    assert_eq!(
-        data.get("edges_removed").and_then(|v| v.as_i64()),
-        Some(1)
-    );
+    assert_eq!(data.get("edges_removed").and_then(|v| v.as_i64()), Some(1));
 
     // Edge gone.
     assert_eq!(
@@ -9237,5 +9339,3 @@ fn test_soll_manager_unlink_protected_with_force() {
         "force=true must allow removal of the protected edge"
     );
 }
-
-

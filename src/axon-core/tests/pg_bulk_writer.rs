@@ -147,13 +147,9 @@ fn bulk_writer_copy_binary_round_trip() {
     // Round-trip a vector via the cosine ANN query: rank against
     // sample_embedding(0)'s vector and verify chunk-0000 surfaces top.
     let q = sample_embedding(0);
-    let where_segment = axon_core::postgres::vector::cosine_ann_where_order_limit(
-        "code-1024",
-        "AXO",
-        &q,
-        1,
-    )
-    .expect("ann query builds");
+    let where_segment =
+        axon_core::postgres::vector::cosine_ann_where_order_limit("code-1024", "AXO", &q, 1)
+            .expect("ann query builds");
     // The helper returns the FROM/WHERE/ORDER BY/LIMIT segment;
     // wrap in a sub-select so count(*) is well-formed (count + ORDER
     // BY without GROUP BY is invalid SQL and would surface as a

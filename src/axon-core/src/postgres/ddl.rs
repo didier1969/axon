@@ -75,16 +75,46 @@ pub fn generate_global_schema() -> Vec<String> {
 /// in the same order as `./scripts/start.sh` applies them at runtime.
 pub fn load_canonical_ddl_files() -> Vec<String> {
     const FILES: &[(&str, &str)] = &[
-        ("00_extensions.sql", include_str!("../../../../db/ddl/00_extensions.sql")),
-        ("01_soll_schema.sql", include_str!("../../../../db/ddl/01_soll_schema.sql")),
-        ("02_axon_runtime.sql", include_str!("../../../../db/ddl/02_axon_runtime.sql")),
-        ("03_ist_schema.sql", include_str!("../../../../db/ddl/03_ist_schema.sql")),
-        ("04_graph_functions.sql", include_str!("../../../../db/ddl/04_graph_functions.sql")),
-        ("05_ist_notify.sql", include_str!("../../../../db/ddl/05_ist_notify.sql")),
-        ("06_pgmq_tsv_async.sql", include_str!("../../../../db/ddl/06_pgmq_tsv_async.sql")),
-        ("07_registry_notify.sql", include_str!("../../../../db/ddl/07_registry_notify.sql")),
-        ("08_dashboard_state.sql", include_str!("../../../../db/ddl/08_dashboard_state.sql")),
-        ("09_embedder_observed.sql", include_str!("../../../../db/ddl/09_embedder_observed.sql")),
+        (
+            "00_extensions.sql",
+            include_str!("../../../../db/ddl/00_extensions.sql"),
+        ),
+        (
+            "01_soll_schema.sql",
+            include_str!("../../../../db/ddl/01_soll_schema.sql"),
+        ),
+        (
+            "02_axon_runtime.sql",
+            include_str!("../../../../db/ddl/02_axon_runtime.sql"),
+        ),
+        (
+            "03_ist_schema.sql",
+            include_str!("../../../../db/ddl/03_ist_schema.sql"),
+        ),
+        (
+            "04_graph_functions.sql",
+            include_str!("../../../../db/ddl/04_graph_functions.sql"),
+        ),
+        (
+            "05_ist_notify.sql",
+            include_str!("../../../../db/ddl/05_ist_notify.sql"),
+        ),
+        (
+            "06_pgmq_tsv_async.sql",
+            include_str!("../../../../db/ddl/06_pgmq_tsv_async.sql"),
+        ),
+        (
+            "07_registry_notify.sql",
+            include_str!("../../../../db/ddl/07_registry_notify.sql"),
+        ),
+        (
+            "08_dashboard_state.sql",
+            include_str!("../../../../db/ddl/08_dashboard_state.sql"),
+        ),
+        (
+            "09_embedder_observed.sql",
+            include_str!("../../../../db/ddl/09_embedder_observed.sql"),
+        ),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {
@@ -308,8 +338,10 @@ mod tests {
         // `public`, so the consumer code path (axon_init_project,
         // soll_validate, axon_commit_work) finds it under PG.
         assert!(joined.contains("soll.ProjectCodeRegistry"));
-        assert!(!joined.contains("public.ProjectCodeRegistry"),
-            "PCR should no longer be in public; consumers query soll.*");
+        assert!(
+            !joined.contains("public.ProjectCodeRegistry"),
+            "PCR should no longer be in public; consumers query soll.*"
+        );
         // REQ-AXO-901881 — `soll.ProjectCodeRegistry.project_code` is the PRIMARY
         // KEY, whose implicit unique index already covers lookups by code. The
         // canonical DDL (01_soll_schema.sql) deliberately emits NO separate
@@ -369,8 +401,7 @@ mod tests {
         // ChunkEmbedding gains project_code column for multi-project
         // filtering under the single global HNSW index.
         assert!(
-            joined.contains("ist.ChunkEmbedding")
-                && joined.contains("project_code TEXT NOT NULL")
+            joined.contains("ist.ChunkEmbedding") && joined.contains("project_code TEXT NOT NULL")
         );
         // Single global HNSW index (CPT-AXO-041). Substrings rather than
         // a single contiguous match because the canonical SQL formats

@@ -189,4 +189,3 @@ impl PipelineChannelCaps {
         caps
     }
 }
-

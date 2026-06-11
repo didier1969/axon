@@ -180,7 +180,10 @@ mod tests {
         assert_eq!(parsed.content_hash, "deadbeef");
         assert_eq!(parsed.mtime_ms, 1_700_000_000_000);
         assert_eq!(parsed.size_bytes, "fn one() {}\nfn two() {}\n".len() as u64);
-        assert!(!parsed.content.is_empty(), "content forwarded for A3 chunking");
+        assert!(
+            !parsed.content.is_empty(),
+            "content forwarded for A3 chunking"
+        );
     }
 
     /// REQ-AXO-901885 — a non-empty file whose extension has no parser (and no

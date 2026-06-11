@@ -34,8 +34,8 @@
 //! to hang on the culprit so the watchdog can name it).
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use axon_core::bench_pipeline_stages::collect_supported_files;
@@ -96,11 +96,9 @@ fn main() {
     };
     eprintln!("[diag] {} supported candidate files", candidates.len());
 
-    let in_flight: &'static Mutex<Option<InFlight>> =
-        Box::leak(Box::new(Mutex::new(None)));
+    let in_flight: &'static Mutex<Option<InFlight>> = Box::leak(Box::new(Mutex::new(None)));
     let done: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
-    let last_alerted: &'static AtomicUsize =
-        Box::leak(Box::new(AtomicUsize::new(usize::MAX)));
+    let last_alerted: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(usize::MAX)));
 
     // --- Watchdog thread: names the wedged file even if main spins. ---
     let watchdog = std::thread::spawn(move || {

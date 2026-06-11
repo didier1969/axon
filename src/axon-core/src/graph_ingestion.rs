@@ -8,7 +8,6 @@ use anyhow::{anyhow, Result};
 use crate::code_chunker::build_symbol_chunks;
 use crate::graph::GraphStore;
 
-
 pub mod rows;
 mod sql_helpers;
 mod types;
@@ -49,25 +48,53 @@ impl GraphStore {
 
     // ---- count_* / oldest_*_age_ms : KPI display (return 0 — pipeline_v2
     //      tracks via IndexedFile + Chunk + ChunkEmbedding directly) ----
-    pub fn count_persisted_file_pending(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn count_graph_wip_files(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn count_orphaned_file_vectorization_files(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn count_stale_inflight_file_vectorization_files(&self, _now_ms: i64, _stale_threshold_ms: i64) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn oldest_graph_pending_age_ms(&self, _now_ms: i64) -> Result<u64> { Ok(0) } // slice-5b-stub
-    pub fn oldest_semantic_pending_age_ms(&self, _now_ms: i64) -> Result<u64> { Ok(0) } // slice-5b-stub
-    pub fn fetch_claimable_file_vectorization_queue_count(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
+    pub fn count_persisted_file_pending(&self) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn count_graph_wip_files(&self) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn count_orphaned_file_vectorization_files(&self) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn count_stale_inflight_file_vectorization_files(
+        &self,
+        _now_ms: i64,
+        _stale_threshold_ms: i64,
+    ) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn oldest_graph_pending_age_ms(&self, _now_ms: i64) -> Result<u64> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn oldest_semantic_pending_age_ms(&self, _now_ms: i64) -> Result<u64> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn fetch_claimable_file_vectorization_queue_count(&self) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
 
     // ---- state-machine no-ops (legacy callers, pipeline_v2 bypasses) ----
-    pub fn backfill_file_vectorization_queue(&self) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn backfill_file_vectorization_queue_with_limit(&self, _limit: usize) -> Result<usize> { Ok(0) } // slice-5b-stub
-    pub fn recover_stale_inflight_file_vectorization_work(&self, _now_ms: i64, _stale_threshold_ms: i64) -> Result<usize> { Ok(0) } // slice-5b-stub
-    // REQ-AXO-901653 slice-5c — 11 stubs DELETED (zero callers post worker.rs +
-    // spawn_autonomous_ingestor + enqueue_claimed_files purge) :
-    // fetch_pending_batch, fetch_pending_candidates, mark_pending_files_deferred,
-    // mark_file_oversized_for_current_budget, claim_pending_paths,
-    // requeue_claimed_file_with_reason, requeue_claimed_paths_with_reason,
-    // mark_claimed_file_writer_pending_commit, insert_file_data_batch,
-    // upsert_file_queries, bulk_upsert_file_queries.
+    pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn backfill_file_vectorization_queue_with_limit(&self, _limit: usize) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+    pub fn recover_stale_inflight_file_vectorization_work(
+        &self,
+        _now_ms: i64,
+        _stale_threshold_ms: i64,
+    ) -> Result<usize> {
+        Ok(0)
+    } // slice-5b-stub
+      // REQ-AXO-901653 slice-5c — 11 stubs DELETED (zero callers post worker.rs +
+      // spawn_autonomous_ingestor + enqueue_claimed_files purge) :
+      // fetch_pending_batch, fetch_pending_candidates, mark_pending_files_deferred,
+      // mark_file_oversized_for_current_budget, claim_pending_paths,
+      // requeue_claimed_file_with_reason, requeue_claimed_paths_with_reason,
+      // mark_claimed_file_writer_pending_commit, insert_file_data_batch,
+      // upsert_file_queries, bulk_upsert_file_queries.
 
     pub fn append_file_lifecycle_events(&self, events: &[FileLifecycleEvent]) -> Result<()> {
         if events.is_empty() {
@@ -507,10 +534,11 @@ impl GraphStore {
                     row[2].as_str(),
                     row[3].as_str(),
                 ) {
-                    result
-                        .entry(fp.to_string())
-                        .or_default()
-                        .push((id.to_string(), content.to_string(), hash.to_string()));
+                    result.entry(fp.to_string()).or_default().push((
+                        id.to_string(),
+                        content.to_string(),
+                        hash.to_string(),
+                    ));
                 }
             }
         }
@@ -677,11 +705,7 @@ impl GraphStore {
                 let embedding_sql = match crate::postgres::vector::vector_literal(vector) {
                     Ok(lit) => lit,
                     Err(e) => {
-                        log::warn!(
-                            "skipping update_symbol_embeddings for {}: {}",
-                            id,
-                            e
-                        );
+                        log::warn!("skipping update_symbol_embeddings for {}: {}", id, e);
                         continue;
                     }
                 };
@@ -700,7 +724,6 @@ impl GraphStore {
 }
 
 // MIL-AXO-017 slice 6B Phase C: age_dual_write_enabled() shim removed.
-
 
 impl GraphStore {
     // REQ-AXO-901653 slice-5a: `count_persisted_file_pending` +
@@ -778,10 +801,9 @@ impl GraphStore {
         // return true → it gets read + parsed.
         let raw = self.query_json_writer(
             "SELECT path, content_hash, last_seen_ms, mtime_ms, size_bytes FROM IndexedFile \
-             WHERE content_hash <> ''"
+             WHERE content_hash <> ''",
         )?;
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)
-            .unwrap_or_default();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         Ok(rows
             .into_iter()
             .filter_map(|row| {
@@ -812,8 +834,7 @@ impl GraphStore {
              WHERE status='discovered' AND retry_count<{max_retry}"
         );
         let raw = self.query_json(&sql)?;
-        let rows: Vec<Vec<serde_json::Value>> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         Ok(rows
             .first()
             .and_then(|row| row.first())
@@ -921,9 +942,7 @@ impl GraphStore {
         symbols: &[crate::parser::Symbol],
         relations: &[crate::parser::Relation],
     ) -> Result<Vec<String>> {
-        use crate::graph_ingestion::rows::{
-            ChunkRow, RelationRow, SymbolRow,
-        };
+        use crate::graph_ingestion::rows::{ChunkRow, RelationRow, SymbolRow};
         use std::collections::HashSet;
 
         // REQ-AXO-901860 — skip the "UNK" sentinel (unregistered file) so a
@@ -984,10 +1003,8 @@ impl GraphStore {
         }
 
         let profile = crate::code_chunker::active_chunk_profile();
-        let fused = crate::code_chunker::fuse_small_chunks(
-            tagged_chunks,
-            profile.target_chunk_tokens,
-        );
+        let fused =
+            crate::code_chunker::fuse_small_chunks(tagged_chunks, profile.target_chunk_tokens);
 
         for tagged in fused {
             let chunk_id = Self::chunk_part_id(
@@ -1060,7 +1077,13 @@ impl GraphStore {
                 .into_iter()
                 .map(|(t, r)| (t.to_string(), r))
                 .collect(),
-            indexed_files: vec![(path.to_string(), content_hash.to_string(), last_seen_ms, last_seen_ms, content.len() as i64)],
+            indexed_files: vec![(
+                path.to_string(),
+                content_hash.to_string(),
+                last_seen_ms,
+                last_seen_ms,
+                content.len() as i64,
+            )],
             project_code: project_code.to_string(),
         };
         crate::postgres::bulk_writer::flush_batch(&batch)?;
@@ -1089,9 +1112,7 @@ impl GraphStore {
         files: &[crate::pipeline_v2::types::ParsedFile],
         project_code: &str,
     ) -> Result<Vec<Vec<(String, String, String)>>> {
-        use crate::graph_ingestion::rows::{
-            ChunkRow, RelationRow, SymbolRow,
-        };
+        use crate::graph_ingestion::rows::{ChunkRow, RelationRow, SymbolRow};
         use std::collections::HashSet;
 
         if files.is_empty() {
@@ -1114,7 +1135,8 @@ impl GraphStore {
         // the sole structural edge storage.
 
         // Per-file chunk_ids preserved for the return value.
-        let mut chunk_ids_per_file: Vec<Vec<(String, String, String)>> = Vec::with_capacity(files.len());
+        let mut chunk_ids_per_file: Vec<Vec<(String, String, String)>> =
+            Vec::with_capacity(files.len());
 
         // Cross-file deduplication: a Symbol id is uniquely keyed by
         // (project_code, path, name); a Chunk id by symbol+part_index.
@@ -1136,7 +1158,8 @@ impl GraphStore {
         let mut seen_other: HashSet<(&'static str, RelationRow)> = HashSet::new();
         // REQ-AXO-295 Phase 2 — IndexedFile rows accumulated for one
         // multi-row INSERT VALUES (was one INSERT per file).
-        let mut indexed_file_rows: Vec<(String, String, i64, i64, i64)> = Vec::with_capacity(files.len());
+        let mut indexed_file_rows: Vec<(String, String, i64, i64, i64)> =
+            Vec::with_capacity(files.len());
         // REQ-AXO-901653 slice-5a: `file_rows` accumulator (REQ-AXO-345
         // public.file UPSERT) deleted ; legacy state-machine table.
 
@@ -1178,10 +1201,8 @@ impl GraphStore {
 
             // Phase 2: fuse small adjacent chunks into context groups.
             let profile = crate::code_chunker::active_chunk_profile();
-            let fused = crate::code_chunker::fuse_small_chunks(
-                tagged_chunks,
-                profile.target_chunk_tokens,
-            );
+            let fused =
+                crate::code_chunker::fuse_small_chunks(tagged_chunks, profile.target_chunk_tokens);
 
             // Phase 3: generate chunk rows from the fused result.
             for tagged in fused {
@@ -1221,10 +1242,8 @@ impl GraphStore {
                     Some((idx, _)) => &parsed.content[..idx],
                     None => &parsed.content,
                 };
-                let file_content = format!(
-                    "file: {}\nkind: file_context\n\n{}",
-                    path_str, truncated
-                );
+                let file_content =
+                    format!("file: {}\nkind: file_context\n\n{}", path_str, truncated);
                 let token_count = crate::code_chunker::measured_symbol_token_count(&file_content)
                     .unwrap_or(file_content.len() / 3);
                 let chunk_hash = Self::stable_content_hash(&file_content);
@@ -1279,7 +1298,13 @@ impl GraphStore {
                 }
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
-            indexed_file_rows.push((path_str.clone(), parsed.content_hash.clone(), now_ms, parsed.mtime_ms, parsed.size_bytes as i64));
+            indexed_file_rows.push((
+                path_str.clone(),
+                parsed.content_hash.clone(),
+                now_ms,
+                parsed.mtime_ms,
+                parsed.size_bytes as i64,
+            ));
             // REQ-AXO-901653 slice-5a: legacy `public.file` row push deleted.
             chunk_ids_per_file.push(chunk_ids_emitted);
         }
@@ -1332,9 +1357,10 @@ impl GraphStore {
 
         // REQ-AXO-271 slice 2l : PG canonical only. pgvector literal +
         // the PG-shaped INSERT with `project_code` column (REQ-AXO-216).
-        let embedding_literal = crate::postgres::vector::vector_literal(embedding).map_err(|e| {
-            anyhow::anyhow!("upsert_chunk_embedding_v2: vector_literal failed: {e}")
-        })?;
+        let embedding_literal =
+            crate::postgres::vector::vector_literal(embedding).map_err(|e| {
+                anyhow::anyhow!("upsert_chunk_embedding_v2: vector_literal failed: {e}")
+            })?;
         let sql = format!(
             "INSERT INTO ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
              VALUES ('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
@@ -1412,11 +1438,13 @@ impl GraphStore {
             let embedded_at_ms = deduped.first().map(|it| it.3).unwrap_or(0);
             let rows: Vec<crate::graph_ingestion::rows::ChunkEmbeddingPersistRow> = deduped
                 .iter()
-                .map(|it| crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
-                    chunk_id: it.0.clone(),
-                    source_hash: it.1.clone(),
-                    embedding: it.2.clone(),
-                })
+                .map(
+                    |it| crate::graph_ingestion::rows::ChunkEmbeddingPersistRow {
+                        chunk_id: it.0.clone(),
+                        source_hash: it.1.clone(),
+                        embedding: it.2.clone(),
+                    },
+                )
                 .collect();
             self.pool
                 .native
@@ -1446,9 +1474,10 @@ impl GraphStore {
         for it in &deduped {
             let safe_chunk_id = Self::escape_sql(&it.0);
             let safe_source_hash = Self::escape_sql(&it.1);
-            let embedding_literal = crate::postgres::vector::vector_literal(&it.2).map_err(|e| {
-                anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
-            })?;
+            let embedding_literal =
+                crate::postgres::vector::vector_literal(&it.2).map_err(|e| {
+                    anyhow::anyhow!("upsert_chunk_embedding_v2_batch: vector_literal failed: {e}")
+                })?;
             values_rows.push(format!(
                 "('{cid}', '{mid}', '{pc}', '{sh}', {emb}, {ts})",
                 cid = safe_chunk_id,
@@ -1605,10 +1634,7 @@ impl GraphStore {
         Ok(out)
     }
 
-    pub fn fetch_chunk_for_embedding(
-        &self,
-        chunk_id: &str,
-    ) -> Result<Option<(String, String)>> {
+    pub fn fetch_chunk_for_embedding(&self, chunk_id: &str) -> Result<Option<(String, String)>> {
         let safe_id = Self::escape_sql(chunk_id);
         // Read from the writer ctx so B1 sees A3's freshly-committed
         // rows — the reader ctx may serve a slightly stale snapshot

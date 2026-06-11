@@ -10,10 +10,7 @@ use super::*;
 
 #[test]
 fn cleanup_files_unlinks_role_sockets_and_pid_file() {
-    let tmp = std::env::temp_dir().join(format!(
-        "axonctl-cleanup-test-{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("axonctl-cleanup-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
     let telemetry = tmp.join("telemetry.sock");

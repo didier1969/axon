@@ -40,11 +40,7 @@ impl McpServer {
             runtime_mode.as_str(),
             runtime_profile.as_str(),
             // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
-            crate::env_alias::read_with_alias_or(
-                "AXON_INSTANCE",
-                "AXON_INSTANCE_KIND",
-                "unknown",
-            ),
+            crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "unknown",),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string())
         );
         let status_cache_ttl_ms = match mode.unwrap_or("brief") {
@@ -130,15 +126,14 @@ impl McpServer {
         // REQ-AXO-901653 slice-5c — public.File dropped. Pipeline_v2 tracks
         // graph-readiness via Chunk + IndexedFile presence ; the legacy
         // boolean column is gone.
-        let graph_ready_depth = if runtime_mode.ingestion_enabled()
-            || runtime_mode.semantic_workers_enabled()
-        {
-            self.graph_store
-                .query_count("SELECT count(DISTINCT file_path) FROM ist.Chunk")
-                .unwrap_or(0) as usize
-        } else {
-            0
-        };
+        let graph_ready_depth =
+            if runtime_mode.ingestion_enabled() || runtime_mode.semantic_workers_enabled() {
+                self.graph_store
+                    .query_count("SELECT count(DISTINCT file_path) FROM ist.Chunk")
+                    .unwrap_or(0) as usize
+            } else {
+                0
+            };
         let orphan_vectorization_files = if runtime_mode.semantic_workers_enabled() {
             self.graph_store
                 .count_orphaned_file_vectorization_files()
@@ -318,11 +313,8 @@ impl McpServer {
         };
 
         // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
-        let instance_kind = crate::env_alias::read_with_alias_or(
-            "AXON_INSTANCE",
-            "AXON_INSTANCE_KIND",
-            "unknown",
-        );
+        let instance_kind =
+            crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "unknown");
         let runtime_identity =
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string());
         // REQ-AXO-108 — `data_root` is the compact form (e.g. `./.axon`)
@@ -333,8 +325,7 @@ impl McpServer {
         // dual instances on the same host (live vs dev) and worktree
         // layouts (`.worktrees/<branch>/.axon`) collapse to similar
         // compact strings.
-        let data_root_raw =
-            std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string());
+        let data_root_raw = std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string());
         let data_root_absolute = if data_root_raw == "unknown" {
             "unknown".to_string()
         } else {
@@ -442,8 +433,7 @@ impl McpServer {
         // emit a concrete operator command instead of looping on `status`
         // itself. The prior fallback (`status mode=full`) was recursive.
         // Anchor: CPT-AXO-029 IST freshness invariant.
-        let (status_next_action, recovery_hint) =
-            derive_recovery_action(&degraded_notes);
+        let (status_next_action, recovery_hint) = derive_recovery_action(&degraded_notes);
         // REQ-AXO-231 — when freshness is degraded, surface the magnitude
         // (not just the boolean flag) so the LLM client can route on
         // quantitative thresholds : how many files behind, how old the
@@ -452,8 +442,7 @@ impl McpServer {
         // status calls stay zero-cost. Falls back to Null on query
         // failure (the rest of the response remains useful).
         let staleness = if !indexed_projection_fresh {
-            self.compute_staleness_snapshot()
-                .unwrap_or(Value::Null)
+            self.compute_staleness_snapshot().unwrap_or(Value::Null)
         } else {
             Value::Null
         };
@@ -482,11 +471,7 @@ impl McpServer {
             runtime_mode.as_str(),
             runtime_profile.as_str(),
             // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
-            crate::env_alias::read_with_alias_or(
-                "AXON_INSTANCE",
-                "AXON_INSTANCE_KIND",
-                "unknown",
-            ),
+            crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "unknown",),
             std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
             queued_files,
             inflight_files,
@@ -506,9 +491,7 @@ impl McpServer {
         let recovery_command = recovery_hint
             .get("command")
             .and_then(|value| value.as_str());
-        let recovery_reason = recovery_hint
-            .get("reason")
-            .and_then(|value| value.as_str());
+        let recovery_reason = recovery_hint.get("reason").and_then(|value| value.as_str());
         // REQ-AXO-901871 — usability-first IST reads signal (operator
         // directive 2026-06-04). The freshness gate is TRUST CALIBRATION,
         // not availability: a brain serving a snapshot with 0 files changed
@@ -1054,8 +1037,8 @@ impl McpServer {
             crate::runtime_readiness::snapshot_runtime_readiness();
         let readiness_json = serde_json::to_value(&readiness_snapshot)
             .unwrap_or_else(|_| serde_json::json!({"kind": "ready"}));
-        let subsystems_json = serde_json::to_value(&subsystem_reports)
-            .unwrap_or_else(|_| serde_json::json!([]));
+        let subsystems_json =
+            serde_json::to_value(&subsystem_reports).unwrap_or_else(|_| serde_json::json!([]));
         let mut response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -1341,9 +1324,7 @@ impl McpServer {
     // Lang derived from CONTAINS source_id extension (read-only SQL, one round
     // trip, <50ms budget).
     pub(crate) fn ist_call_graph_coverage_snapshot(&self) -> Value {
-        let rows: Vec<Vec<String>> = match self
-            .graph_store
-            .query_json(IST_CALL_GRAPH_COVERAGE_SQL)
+        let rows: Vec<Vec<String>> = match self.graph_store.query_json(IST_CALL_GRAPH_COVERAGE_SQL)
         {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => return json!({"per_project": {}, "alerts": []}),
@@ -1451,8 +1432,8 @@ impl McpServer {
             .graph_store
             .query_json(sql)
             .map_err(|e| format!("staleness query failed: {e}"))?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&json)
-            .map_err(|e| format!("staleness parse failed: {e}"))?;
+        let rows: Vec<Vec<String>> =
+            serde_json::from_str(&json).map_err(|e| format!("staleness parse failed: {e}"))?;
         Ok(staleness_from_row(rows.first().map(|r| r.as_slice())))
     }
 }
@@ -1594,7 +1575,8 @@ mod tests {
         ];
         let out = ist_call_graph_coverage_build(&rows);
         assert_eq!(
-            out.pointer("/per_project/AXO/rust/fns").and_then(Value::as_u64),
+            out.pointer("/per_project/AXO/rust/fns")
+                .and_then(Value::as_u64),
             Some(3617)
         );
         assert_eq!(
@@ -1611,10 +1593,7 @@ mod tests {
 
     #[test]
     fn coverage_build_emits_zero_outgoing_calls_alert_above_threshold() {
-        let rows = vec![
-            row("AXO", "rust", 3617, 0),
-            row("AXO", "python", 460, 2727),
-        ];
+        let rows = vec![row("AXO", "rust", 3617, 0), row("AXO", "python", 460, 2727)];
         let out = ist_call_graph_coverage_build(&rows);
         let alerts = out.get("alerts").and_then(Value::as_array).unwrap();
         assert_eq!(alerts.len(), 1);
@@ -1642,11 +1621,15 @@ mod tests {
 
     #[test]
     fn coverage_build_handles_short_or_malformed_rows() {
-        let rows = vec![vec!["AXO".to_string(), "rust".to_string()], row("OPT", "python", 10, 5)];
+        let rows = vec![
+            vec!["AXO".to_string(), "rust".to_string()],
+            row("OPT", "python", 10, 5),
+        ];
         let out = ist_call_graph_coverage_build(&rows);
         assert!(out.pointer("/per_project/AXO").is_none());
         assert_eq!(
-            out.pointer("/per_project/OPT/python/fns").and_then(Value::as_u64),
+            out.pointer("/per_project/OPT/python/fns")
+                .and_then(Value::as_u64),
             Some(10)
         );
     }
@@ -1655,8 +1638,14 @@ mod tests {
     #[test]
     fn recovery_action_canonical_when_no_blockers() {
         let (action, hint) = derive_recovery_action(&[]);
-        assert_eq!(action.get("kind").and_then(Value::as_str), Some("read_project_truth"));
-        assert_eq!(action.get("tool").and_then(Value::as_str), Some("project_status"));
+        assert_eq!(
+            action.get("kind").and_then(Value::as_str),
+            Some("read_project_truth")
+        );
+        assert_eq!(
+            action.get("tool").and_then(Value::as_str),
+            Some("project_status")
+        );
         assert!(hint.is_null());
     }
 
@@ -1664,8 +1653,14 @@ mod tests {
     fn recovery_action_emits_concrete_command_for_stale_ist() {
         let notes = vec!["indexed_projections_not_fresh".to_string()];
         let (action, hint) = derive_recovery_action(&notes);
-        assert_eq!(action.get("kind").and_then(Value::as_str), Some("start_indexer"));
-        assert_eq!(action.get("tool").and_then(Value::as_str), Some("axon-live"));
+        assert_eq!(
+            action.get("kind").and_then(Value::as_str),
+            Some("start_indexer")
+        );
+        assert_eq!(
+            action.get("tool").and_then(Value::as_str),
+            Some("axon-live")
+        );
         assert_eq!(
             hint.get("command").and_then(Value::as_str),
             Some("./scripts/axon-live start --indexer-graph")
@@ -1743,7 +1738,10 @@ mod tests {
         // diagnose. Not recursive in spirit (different mode produces different output).
         let notes = vec!["runtime_authority_not_converged".to_string()];
         let (action, hint) = derive_recovery_action(&notes);
-        assert_eq!(action.get("kind").and_then(Value::as_str), Some("inspect_runtime_status"));
+        assert_eq!(
+            action.get("kind").and_then(Value::as_str),
+            Some("inspect_runtime_status")
+        );
         assert_eq!(
             action.pointer("/arguments/mode").and_then(Value::as_str),
             Some("full")

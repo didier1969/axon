@@ -130,7 +130,11 @@ async fn run_supervisor(
         fallback_scanner_bootstrap(&scanner, &input_tx).await;
         return;
     }
-    info!(roots = roots.len(), "Watchman: subscribing to {} project root(s)", roots.len());
+    info!(
+        roots = roots.len(),
+        "Watchman: subscribing to {} project root(s)",
+        roots.len()
+    );
 
     // Clock writer task + one-shot initial load of persisted clocks.
     let (clock_tx, clock_rx) = tokio::sync::mpsc::channel::<ClockUpdate>(256);
@@ -318,7 +322,8 @@ async fn run_root_subscription(
                 FeedAction::Delete(path) => {
                     let store = feeder_store.clone();
                     let p = path.to_string_lossy().to_string();
-                    let _ = tokio::task::spawn_blocking(move || store.delete_file_cascade(&p)).await;
+                    let _ =
+                        tokio::task::spawn_blocking(move || store.delete_file_cascade(&p)).await;
                 }
             }
         }
@@ -455,8 +460,12 @@ fn ensure_watchmanconfig(root: &Path) {
     let body = serde_json::json!({ "ignore_dirs": watchman_ignore_dirs() });
     match serde_json::to_string_pretty(&body) {
         Ok(serialized) => match std::fs::write(&config_path, serialized) {
-            Ok(()) => info!(path = %config_path.display(), "Watchman: wrote .watchmanconfig (ignore_dirs)"),
-            Err(err) => warn!(path = %config_path.display(), error = %err, "Watchman: failed to write .watchmanconfig"),
+            Ok(()) => {
+                info!(path = %config_path.display(), "Watchman: wrote .watchmanconfig (ignore_dirs)")
+            }
+            Err(err) => {
+                warn!(path = %config_path.display(), error = %err, "Watchman: failed to write .watchmanconfig")
+            }
         },
         Err(err) => warn!(error = %err, "Watchman: failed to serialize .watchmanconfig"),
     }
@@ -473,7 +482,9 @@ async fn load_initial_clocks(database_url: &str, root_keys: &[String]) -> HashMa
             return out;
         }
     };
-    let driver = tokio::spawn(async move { let _ = connection.await; });
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
     for key in root_keys {
         match client
             .query_opt(
@@ -488,11 +499,15 @@ async fn load_initial_clocks(database_url: &str, root_keys: &[String]) -> HashMa
                     Ok(clock) => {
                         out.insert(key.clone(), clock);
                     }
-                    Err(err) => warn!(root = %key, error = %err, "Watchman: stored clock unparseable; root starts fresh"),
+                    Err(err) => {
+                        warn!(root = %key, error = %err, "Watchman: stored clock unparseable; root starts fresh")
+                    }
                 }
             }
             Ok(None) => {}
-            Err(err) => warn!(root = %key, error = %err, "Watchman: clock load query failed; root starts fresh"),
+            Err(err) => {
+                warn!(root = %key, error = %err, "Watchman: clock load query failed; root starts fresh")
+            }
         }
     }
     drop(client);
@@ -510,7 +525,9 @@ async fn clock_writer_loop(mut rx: Receiver<ClockUpdate>, database_url: String) 
         if client.is_none() {
             match tokio_postgres::connect(&database_url, NoTls).await {
                 Ok((c, connection)) => {
-                    tokio::spawn(async move { let _ = connection.await; });
+                    tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
                     client = Some(c);
                 }
                 Err(err) => {
@@ -554,7 +571,11 @@ async fn fallback_scanner_bootstrap(scanner: &Arc<Scanner>, input_tx: &Sender<Pa
     let files = tokio::task::spawn_blocking(move || scanner.enumerate_files())
         .await
         .unwrap_or_default();
-    info!(files = files.len(), "Watchman fallback: one-shot scanner walk feeding {} files", files.len());
+    info!(
+        files = files.len(),
+        "Watchman fallback: one-shot scanner walk feeding {} files",
+        files.len()
+    );
     for path in files {
         if input_tx.send(path).await.is_err() {
             return;
@@ -593,7 +614,10 @@ mod tests {
         let actions = plan_feed_actions(root, entries, &|p| {
             p.extension().and_then(|e| e.to_str()) == Some("rs")
         });
-        assert_eq!(actions, vec![FeedAction::Upsert(PathBuf::from("/repo/src/keep.rs"))]);
+        assert_eq!(
+            actions,
+            vec![FeedAction::Upsert(PathBuf::from("/repo/src/keep.rs"))]
+        );
     }
 
     #[test]
@@ -603,20 +627,26 @@ mod tests {
         // gate would reject a non-existent file (is_file()==false), but a delete
         // must NOT depend on the eligibility gate.
         let actions = plan_feed_actions(root, entries, &|_| false);
-        assert_eq!(actions, vec![FeedAction::Delete(PathBuf::from("/repo/src/gone.rs"))]);
+        assert_eq!(
+            actions,
+            vec![FeedAction::Delete(PathBuf::from("/repo/src/gone.rs"))]
+        );
     }
 
     #[test]
     fn build_dir_paths_are_pruned_at_any_depth() {
         let root = Path::new("/repo");
         let entries = rels(&[
-            ("target/debug/foo.rs", true),          // rust build output
+            ("target/debug/foo.rs", true),             // rust build output
             ("src/a/node_modules/pkg/index.js", true), // nested dep store
-            (".axon/cargo-target/x.rs", true),      // axon's own build dir
-            ("src/real.rs", true),                  // the only legit one
+            (".axon/cargo-target/x.rs", true),         // axon's own build dir
+            ("src/real.rs", true),                     // the only legit one
         ]);
         let actions = plan_feed_actions(root, entries, &|_| true);
-        assert_eq!(actions, vec![FeedAction::Upsert(PathBuf::from("/repo/src/real.rs"))]);
+        assert_eq!(
+            actions,
+            vec![FeedAction::Upsert(PathBuf::from("/repo/src/real.rs"))]
+        );
     }
 
     #[test]
@@ -648,7 +678,10 @@ mod tests {
     #[test]
     fn ignore_dirs_excludes_vcs_includes_build_outputs() {
         let dirs = watchman_ignore_dirs();
-        assert!(!dirs.contains(&".git"), "ignore_dirs must NOT carry .git (Watchman owns it via ignore_vcs)");
+        assert!(
+            !dirs.contains(&".git"),
+            "ignore_dirs must NOT carry .git (Watchman owns it via ignore_vcs)"
+        );
         assert!(dirs.contains(&"target"));
         assert!(dirs.contains(&"node_modules"));
         assert!(dirs.contains(&".axon"));

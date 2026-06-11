@@ -71,9 +71,7 @@ impl SubsystemState {
     pub fn reason(&self) -> Option<&str> {
         match self {
             SubsystemState::Ready => None,
-            SubsystemState::Degraded { reason } | SubsystemState::Failed { reason } => {
-                Some(reason)
-            }
+            SubsystemState::Degraded { reason } | SubsystemState::Failed { reason } => Some(reason),
         }
     }
 }
@@ -243,10 +241,7 @@ pub fn tick_watchdog(now_ms: u64) -> Vec<(String, SubsystemState)> {
             slot.state = SubsystemState::Failed {
                 reason: reason.clone(),
             };
-            transitions.push((
-                (*name).to_string(),
-                SubsystemState::Failed { reason },
-            ));
+            transitions.push(((*name).to_string(), SubsystemState::Failed { reason }));
         }
     }
     transitions

@@ -296,7 +296,10 @@ fn cheap_line_window_segments(body_start: usize, end: usize, window: usize) -> V
     let mut cursor = body_start;
     while cursor < end {
         let next = (cursor + window).min(end);
-        segments.push(BodySegment::LineRange { start: cursor, end: next });
+        segments.push(BodySegment::LineRange {
+            start: cursor,
+            end: next,
+        });
         cursor = next;
     }
     segments
@@ -665,10 +668,16 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
     // thread and stall the whole pipeline. If the wall-clock budget is exceeded
     // we bail to cheap fixed line-windows with BYTE-BASED token estimates (no
     // further tokenizer encodes) and LOG it so the offending file can be analysed.
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(chunk_budget_ms());
-    let (mut segments, bailed) =
-        dp_segment_body(profile, symbol, &lines, &repeated_context, body_start, end, deadline);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(chunk_budget_ms());
+    let (mut segments, bailed) = dp_segment_body(
+        profile,
+        symbol,
+        &lines,
+        &repeated_context,
+        body_start,
+        end,
+        deadline,
+    );
     if segments.is_empty() {
         segments.push(BodySegment::LineRange { start, end });
     }
@@ -756,10 +765,7 @@ pub struct TaggedChunk {
 /// chunk_id is derived from the first symbol in the group.
 ///
 /// Returns `(chunk_id_suffix, content, estimated_tokens, start_line, end_line, source_symbol_id)`.
-pub fn fuse_small_chunks(
-    mut tagged: Vec<TaggedChunk>,
-    target_tokens: usize,
-) -> Vec<TaggedChunk> {
+pub fn fuse_small_chunks(mut tagged: Vec<TaggedChunk>, target_tokens: usize) -> Vec<TaggedChunk> {
     if tagged.is_empty() {
         return tagged;
     }
@@ -808,7 +814,8 @@ pub fn fuse_small_chunks(
         // additions/renames). REQ-AXO-901846: disambiguated by a per-file
         // fused-group sequence so identical spans never collide.
         let first = &group[0];
-        let file_prefix = first.symbol_id
+        let file_prefix = first
+            .symbol_id
             .rsplit_once("::")
             .map(|(prefix, _)| prefix)
             .unwrap_or(&first.symbol_id);
@@ -1155,7 +1162,11 @@ mod tests {
             "5000-line body chunking took {elapsed:?} (limit {max_elapsed:?}; \
              O(N²) regression would be far slower)"
         );
-        assert!(chunks.len() > 1, "expected multi-part split, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multi-part split, got {}",
+            chunks.len()
+        );
         // Contiguous, gap-free, in order.
         for w in chunks.windows(2) {
             assert_eq!(
@@ -1284,7 +1295,10 @@ mod tests {
             "degenerate body fan-out must be capped, got {} chunks",
             chunks.len()
         );
-        assert!(chunks.len() > 1, "a 640 KB body must still split into multiple chunks");
+        assert!(
+            chunks.len() > 1,
+            "a 640 KB body must still split into multiple chunks"
+        );
         // Contiguous, gap-free coverage.
         for w in chunks.windows(2) {
             assert_eq!(
@@ -1316,7 +1330,10 @@ mod tests {
             i += 1;
         }
         let content = format!("var data = {{{payload}}};");
-        assert!(content.lines().count() == 1, "must be a single physical line");
+        assert!(
+            content.lines().count() == 1,
+            "must be a single physical line"
+        );
 
         let t0 = std::time::Instant::now();
         let chunks = build_symbol_chunks(&symbol, &content);

@@ -27,12 +27,18 @@ const TEST_PATH_FRAGMENTS: &[&str] = &["/tests/", "/test/"];
 const TEST_PATH_SUFFIXES: &[&str] = &["_test.rs", "_test.exs", ".test.ts", ".test.js"];
 
 fn is_callable(kind_byte: u8) -> bool {
-    matches!(NodeKind::from_u8(kind_byte), NodeKind::Function | NodeKind::Method)
+    matches!(
+        NodeKind::from_u8(kind_byte),
+        NodeKind::Function | NodeKind::Method
+    )
 }
 
 fn is_test_path(path: &str) -> bool {
     let lowered = path.to_ascii_lowercase();
-    if TEST_PATH_FRAGMENTS.iter().any(|frag| lowered.contains(frag)) {
+    if TEST_PATH_FRAGMENTS
+        .iter()
+        .any(|frag| lowered.contains(frag))
+    {
         return true;
     }
     TEST_PATH_SUFFIXES.iter().any(|suf| lowered.ends_with(suf))
@@ -390,7 +396,9 @@ fn kind_label(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ist_snapshot::snapshot::{EdgeTriple, NodeFlags, NodeKind, NodeRecord, RelationType};
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
 
     fn func(id: &str, public: bool) -> NodeRecord {
         NodeRecord {
@@ -426,9 +434,21 @@ mod tests {
             func("AXO::src/lib.rs::real", true),
         ];
         let edges = vec![
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::wrap", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::real", RelationType::Contains),
-            edge("AXO::src/lib.rs::wrap", "AXO::src/lib.rs::real", RelationType::Calls),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::wrap",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::real",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs::wrap",
+                "AXO::src/lib.rs::real",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let wrappers = wrapper_candidates(&g, "AXO", 5);
@@ -443,9 +463,21 @@ mod tests {
             func("AXO::src/lib.rs::real", false),
         ];
         let edges = vec![
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::wrap_pub", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::real", RelationType::Contains),
-            edge("AXO::src/lib.rs::wrap_pub", "AXO::src/lib.rs::real", RelationType::Calls),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::wrap_pub",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::real",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs::wrap_pub",
+                "AXO::src/lib.rs::real",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
@@ -459,9 +491,21 @@ mod tests {
             func("AXO::src/tests/lib.rs::real", false),
         ];
         let edges = vec![
-            edge("AXO::src/tests/lib.rs", "AXO::src/tests/lib.rs::wrap", RelationType::Contains),
-            edge("AXO::src/tests/lib.rs", "AXO::src/tests/lib.rs::real", RelationType::Contains),
-            edge("AXO::src/tests/lib.rs::wrap", "AXO::src/tests/lib.rs::real", RelationType::Calls),
+            edge(
+                "AXO::src/tests/lib.rs",
+                "AXO::src/tests/lib.rs::wrap",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/tests/lib.rs",
+                "AXO::src/tests/lib.rs::real",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/tests/lib.rs::wrap",
+                "AXO::src/tests/lib.rs::real",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
@@ -476,11 +520,31 @@ mod tests {
             func("AXO::src/lib.rs::b", false),
         ];
         let edges = vec![
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::orchestrator", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::a", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::b", RelationType::Contains),
-            edge("AXO::src/lib.rs::orchestrator", "AXO::src/lib.rs::a", RelationType::Calls),
-            edge("AXO::src/lib.rs::orchestrator", "AXO::src/lib.rs::b", RelationType::Calls),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::orchestrator",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::a",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::b",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs::orchestrator",
+                "AXO::src/lib.rs::a",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::src/lib.rs::orchestrator",
+                "AXO::src/lib.rs::b",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
@@ -529,7 +593,11 @@ mod tests {
             let caller = format!("AXO::src/core.rs::caller_{i:02}");
             nodes.push(func(&caller, false));
             edges.push(edge("AXO::src/core.rs", &caller, RelationType::Contains));
-            edges.push(edge(&caller, "AXO::src/core.rs::now_ms", RelationType::Calls));
+            edges.push(edge(
+                &caller,
+                "AXO::src/core.rs::now_ms",
+                RelationType::Calls,
+            ));
         }
         let g = IstGraph::build(nodes, edges);
         assert!(
@@ -546,9 +614,21 @@ mod tests {
             func("AXO::src/core.rs::caller", false),
         ];
         let edges = vec![
-            edge("AXO::src/core.rs", "AXO::src/core.rs::hub", RelationType::Contains),
-            edge("AXO::src/core.rs", "AXO::src/core.rs::caller", RelationType::Contains),
-            edge("AXO::src/core.rs::caller", "AXO::src/core.rs::hub", RelationType::Calls),
+            edge(
+                "AXO::src/core.rs",
+                "AXO::src/core.rs::hub",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/core.rs",
+                "AXO::src/core.rs::caller",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/core.rs::caller",
+                "AXO::src/core.rs::hub",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert!(god_objects(&g, "AXO").is_empty());
@@ -565,13 +645,41 @@ mod tests {
             func("AXO::src/a.rs::local", false),
         ];
         let edges = vec![
-            edge("AXO::src/a.rs", "AXO::src/a.rs::source", RelationType::Contains),
-            edge("AXO::src/a.rs", "AXO::src/a.rs::local", RelationType::Contains),
-            edge("AXO::src/b.rs", "AXO::src/b.rs::callee_1", RelationType::Contains),
-            edge("AXO::src/b.rs", "AXO::src/b.rs::callee_2", RelationType::Contains),
-            edge("AXO::src/a.rs::source", "AXO::src/b.rs::callee_1", RelationType::Calls),
-            edge("AXO::src/a.rs::source", "AXO::src/b.rs::callee_2", RelationType::Calls),
-            edge("AXO::src/a.rs::source", "AXO::src/a.rs::local", RelationType::Calls),
+            edge(
+                "AXO::src/a.rs",
+                "AXO::src/a.rs::source",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/a.rs",
+                "AXO::src/a.rs::local",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/b.rs",
+                "AXO::src/b.rs::callee_1",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/b.rs",
+                "AXO::src/b.rs::callee_2",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/a.rs::source",
+                "AXO::src/b.rs::callee_1",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::src/a.rs::source",
+                "AXO::src/b.rs::callee_2",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::src/a.rs::source",
+                "AXO::src/a.rs::local",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let envy = feature_envy_candidates(&g, "AXO", 5);
@@ -590,11 +698,31 @@ mod tests {
             func("AXO::src/lib.rs::public_orphan", true),
         ];
         let edges = vec![
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::orphan_one", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::orphan_two", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::called", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::public_orphan", RelationType::Contains),
-            edge("AXO::src/lib.rs::orphan_one", "AXO::src/lib.rs::called", RelationType::Calls),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::orphan_one",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::orphan_two",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::called",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::public_orphan",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs::orphan_one",
+                "AXO::src/lib.rs::called",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = orphan_code_symbols(&g, "AXO", 10);
@@ -602,7 +730,10 @@ mod tests {
         // orphan_two has zero callers → orphan
         // called has a caller → not orphan
         // public_orphan is public → excluded
-        assert_eq!(orphans, vec!["orphan_one".to_string(), "orphan_two".to_string()]);
+        assert_eq!(
+            orphans,
+            vec!["orphan_one".to_string(), "orphan_two".to_string()]
+        );
     }
 
     #[test]
@@ -613,8 +744,16 @@ mod tests {
             func("AXO::src/lib.rs::unrelated", true),
         ];
         let edges = vec![
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::reserve_memory_budget", RelationType::Contains),
-            edge("AXO::src/lib.rs", "AXO::src/lib.rs::unrelated", RelationType::Contains),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::reserve_memory_budget",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::unrelated",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let hits = lexical_symbol_search(&g, "AXO", "memory", 10);
@@ -662,8 +801,16 @@ mod tests {
             },
         ];
         let edges = vec![
-            edge("AXO::src/a.rs", "AXO::src/a.rs::foo", RelationType::Contains),
-            edge("OPT::src/b.rs", "OPT::src/b.rs::foo", RelationType::Contains),
+            edge(
+                "AXO::src/a.rs",
+                "AXO::src/a.rs::foo",
+                RelationType::Contains,
+            ),
+            edge(
+                "OPT::src/b.rs",
+                "OPT::src/b.rs::foo",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let workspace_hits = lexical_symbol_search(&g, "*", "foo", 10);

@@ -220,14 +220,16 @@ pub fn spawn_a3_batched_worker(
                 // the batch content (~1.6 MB per flush).
                 let receipt_meta: Vec<(String, String, usize, usize, i64, u64)> = group_batch
                     .iter()
-                    .map(|p| (
-                        p.path.to_string_lossy().into_owned(),
-                        p.content_hash.clone(),
-                        p.symbols.len(),
-                        p.relations.len(),
-                        p.mtime_ms,
-                        p.size_bytes,
-                    ))
+                    .map(|p| {
+                        (
+                            p.path.to_string_lossy().into_owned(),
+                            p.content_hash.clone(),
+                            p.symbols.len(),
+                            p.relations.len(),
+                            p.mtime_ms,
+                            p.size_bytes,
+                        )
+                    })
                     .collect();
                 let group_len = group_batch.len();
                 let store_clone = store.clone();
@@ -252,14 +254,16 @@ pub fn spawn_a3_batched_worker(
                             group_len,
                             chunks_total
                         );
-                        let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
-                            as u64;
+                        let elapsed_us =
+                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         let per_item_us = elapsed_us / (total_items as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
                         for (
                             (path, content_hash, sym_count, rel_count, mtime_ms, size_bytes),
                             chunk_metas,
-                        ) in receipt_meta.into_iter().zip(chunk_metas_per_file.into_iter())
+                        ) in receipt_meta
+                            .into_iter()
+                            .zip(chunk_metas_per_file.into_iter())
                         {
                             let state = embedder_state();
                             let mut chunk_ids = Vec::with_capacity(chunk_metas.len());
@@ -369,7 +373,12 @@ mod tests {
     #[tokio::test]
     async fn a3_enroll_writes_indexed_file_row_with_supplied_hash() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let parsed = parsed_with("/tmp/demo_indexed.rs", "fn demo() {}", "hash-abc", vec!["demo"]);
+        let parsed = parsed_with(
+            "/tmp/demo_indexed.rs",
+            "fn demo() {}",
+            "hash-abc",
+            vec!["demo"],
+        );
 
         let receipt = a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
             .await
@@ -435,7 +444,10 @@ mod tests {
                 "SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/a3_parsed.rs' AND status = 'indexed'",
             )
             .unwrap();
-        assert_eq!(n_indexed, 0, "A3 must NOT write the legacy 'indexed' status");
+        assert_eq!(
+            n_indexed, 0,
+            "A3 must NOT write the legacy 'indexed' status"
+        );
     }
 
     /// REQ-AXO-901916 (PIL-007 / CP5a) — the dedup cache hydrates by the
@@ -542,12 +554,7 @@ mod tests {
     #[tokio::test]
     async fn a3_enroll_is_idempotent_on_repeated_calls_with_same_hash() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let parsed_a = parsed_with(
-            "/tmp/idem_v2.rs",
-            "fn idem() {}",
-            "hash-1",
-            vec!["idem"],
-        );
+        let parsed_a = parsed_with("/tmp/idem_v2.rs", "fn idem() {}", "hash-1", vec!["idem"]);
         let parsed_b = parsed_a.clone();
 
         let r1 = a3_enroll(parsed_a, store.clone(), super::super::const_resolver("AXO"))
@@ -640,12 +647,20 @@ mod tests {
         let parsed_v1 = parsed_with("/tmp/change_v2.rs", "fn v1() {}", "hash-v1", vec!["v1"]);
         let parsed_v2 = parsed_with("/tmp/change_v2.rs", "fn v2() {}", "hash-v2", vec!["v2"]);
 
-        a3_enroll(parsed_v1, store.clone(), super::super::const_resolver("AXO"))
-            .await
-            .unwrap();
-        a3_enroll(parsed_v2, store.clone(), super::super::const_resolver("AXO"))
-            .await
-            .unwrap();
+        a3_enroll(
+            parsed_v1,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        )
+        .await
+        .unwrap();
+        a3_enroll(
+            parsed_v2,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        )
+        .await
+        .unwrap();
 
         let after = store
             .query_count(

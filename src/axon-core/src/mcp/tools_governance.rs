@@ -465,7 +465,9 @@ impl McpServer {
 
         if !tech_debt.is_empty() {
             evidence.push_str("\n### ⚠️ Technical Debt & Panic Points\n");
-            evidence.push_str("The following points present crash risks (panic) or poor error handling:\n\n");
+            evidence.push_str(
+                "The following points present crash risks (panic) or poor error handling:\n\n",
+            );
             for (file, issue) in tech_debt.iter().take(10) {
                 evidence.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
             }
@@ -484,7 +486,8 @@ impl McpServer {
             hygiene_score
         ));
         if god_objects.is_empty() && dead_code == 0 {
-            evidence.push_str("✅ Healthy codebase: zero God Objects and zero dead code detected.\n");
+            evidence
+                .push_str("✅ Healthy codebase: zero God Objects and zero dead code detected.\n");
         } else {
             if !god_objects.is_empty() {
                 evidence.push_str(&format!(
@@ -757,10 +760,7 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .unwrap_or(5)
             .clamp(1, 1000) as usize;
-        let offset = args
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let max_depth = args
             .get("max_depth")
             .and_then(|v| v.as_u64())
@@ -773,10 +773,9 @@ impl McpServer {
         // Symbol.embedding is `vector(N)` ; pgvector `<=>` returns cosine distance.
         let cosine_expr = "(s.embedding <=> other.embedding)";
         let project_filter = match project {
-            Some(p) if !p.is_empty() && p != "*" => format!(
-                " AND other.project_code = '{}'",
-                p.replace('\'', "''")
-            ),
+            Some(p) if !p.is_empty() && p != "*" => {
+                format!(" AND other.project_code = '{}'", p.replace('\'', "''"))
+            }
             _ => String::new(),
         };
         let query = format!(
@@ -821,10 +820,9 @@ impl McpServer {
         // the vector pre-filter.
         let source_id: Option<String> = {
             let proj_pred = match project {
-                Some(p) if !p.is_empty() && p != "*" => format!(
-                    " AND project_code = '{}'",
-                    p.replace('\'', "''")
-                ),
+                Some(p) if !p.is_empty() && p != "*" => {
+                    format!(" AND project_code = '{}'", p.replace('\'', "''"))
+                }
                 _ => String::new(),
             };
             let sql = format!(
@@ -847,7 +845,8 @@ impl McpServer {
             surfaces_used.push("graph_vf2_isomorphism");
             let snap_opt = view.cache_handle().get(project_for_graph);
             if let Some(snap) = snap_opt {
-                let src_nbhd = snap.neighborhood_subgraph(source_id.as_deref().unwrap_or(""), max_depth);
+                let src_nbhd =
+                    snap.neighborhood_subgraph(source_id.as_deref().unwrap_or(""), max_depth);
                 let flags: Vec<bool> = candidates
                     .iter()
                     .map(|c| {
@@ -861,11 +860,8 @@ impl McpServer {
                         let Some(cand_nbhd) = snap.neighborhood_subgraph(cand_id, max_depth) else {
                             return false;
                         };
-                        let matches = crate::ist_snapshot::algorithms::vf2_subgraph_match(
-                            src,
-                            &cand_nbhd,
-                            1,
-                        );
+                        let matches =
+                            crate::ist_snapshot::algorithms::vf2_subgraph_match(src, &cand_nbhd, 1);
                         !matches.is_empty()
                     })
                     .collect();
@@ -892,15 +888,12 @@ impl McpServer {
             })
             .collect();
         scored.sort_by(|a, b| match b.1.cmp(&a.1) {
-            std::cmp::Ordering::Equal => {
-                a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
-            }
+            std::cmp::Ordering::Equal => a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal),
             other => other,
         });
 
         let total_available = scored.len() as u64;
-        let paginated: Vec<&(usize, bool, f64)> =
-            scored.iter().skip(offset).take(limit).collect();
+        let paginated: Vec<&(usize, bool, f64)> = scored.iter().skip(offset).take(limit).collect();
         let returned = paginated.len() as u64;
         let has_more = (offset as u64).saturating_add(returned) < total_available;
 
@@ -929,10 +922,7 @@ impl McpServer {
             format!(
                 "### 👯 Semantic Clones detected for '{}'\n\n{}",
                 symbol,
-                format_table_from_json(
-                    &display_json,
-                    &["Name", "Type", "Cosine", "Structural"]
-                )
+                format_table_from_json(&display_json, &["Name", "Type", "Cosine", "Structural"])
             )
         } else {
             format!(
@@ -988,10 +978,7 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .unwrap_or(20)
             .clamp(1, 1000) as usize;
-        let offset = args
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let sort_by = args
             .get("sort_by")
             .and_then(|v| v.as_str())
@@ -1057,14 +1044,14 @@ impl McpServer {
 
         surfaces_used.push("graph_ram");
         let layer_def: Vec<(&str, u32)> = vec![(source_layer, 0), (target_layer, 1)];
-        let mut violations =
-            crate::ist_snapshot::algorithms::layer_violations(&snap, &layer_def);
+        let mut violations = crate::ist_snapshot::algorithms::layer_violations(&snap, &layer_def);
 
         // sort_by selectors per GUI-AXO-1004 ; default "severity" =
         // edges where the layer gap is biggest, then alphabetic for
         // determinism.
         match sort_by {
-            "alphabetical" => violations.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str()))),
+            "alphabetical" => violations
+                .sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str()))),
             _ => violations.sort_by(|a, b| {
                 let sev_b = (b.3 as i64 - b.2 as i64).abs();
                 let sev_a = (a.3 as i64 - a.2 as i64).abs();

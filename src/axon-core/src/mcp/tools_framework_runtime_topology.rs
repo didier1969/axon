@@ -15,11 +15,8 @@ impl McpServer {
     pub(super) fn runtime_topology_snapshot(&self, runtime_mode: AxonRuntimeMode) -> Value {
         let mut status = RuntimeTopologyStatus::from_runtime_mode(runtime_mode);
         // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
-        let instance_kind = crate::env_alias::read_with_alias_or(
-            "AXON_INSTANCE",
-            "AXON_INSTANCE_KIND",
-            "dev",
-        );
+        let instance_kind =
+            crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "dev");
         let project_root = std::env::var("AXON_PROJECT_ROOT")
             .ok()
             .filter(|value| !value.trim().is_empty())

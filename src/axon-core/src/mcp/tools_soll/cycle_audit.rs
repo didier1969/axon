@@ -141,7 +141,10 @@ mod tests {
     #[test]
     fn build_response_zero_cycles_emits_ok_status() {
         let resp = build_audit_response("AXO", 350, 700, &[]);
-        assert_eq!(resp.pointer("/data/status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            resp.pointer("/data/status").and_then(Value::as_str),
+            Some("ok")
+        );
         assert_eq!(
             resp.pointer("/data/cycle_count").and_then(Value::as_u64),
             Some(0)

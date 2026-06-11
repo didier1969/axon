@@ -6,7 +6,6 @@ mod tests {
         provider_resolution_for_label, ProductionLane, ProviderStrategy, ProviderSupportRole,
     };
 
-
     #[test]
     fn provider_resolution_keeps_tensorrt_as_vector_support_strategy_not_lane() {
         let resolution = provider_resolution_for_label(

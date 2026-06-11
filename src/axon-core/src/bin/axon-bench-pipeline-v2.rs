@@ -29,8 +29,8 @@ use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
     const_resolver, load_embedding_dedup_cache, spawn_pipeline_a, spawn_pipeline_b_full_multi,
-    B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder,
-    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
+    B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts,
+    PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -82,9 +82,7 @@ impl Args {
                 "--duration-secs" => {
                     duration_secs = iter.next().context("--duration-secs N")?.parse()?
                 }
-                "--warmup-secs" => {
-                    warmup_secs = iter.next().context("--warmup-secs N")?.parse()?
-                }
+                "--warmup-secs" => warmup_secs = iter.next().context("--warmup-secs N")?.parse()?,
                 "--cycle" => cycle = true,
                 "--project" => project = iter.next().context("--project AXO")?,
                 "--gpu" => embedder_mode = EmbedderMode::Gpu,
@@ -143,17 +141,13 @@ fn walk_source(root: &Path, max_files: usize) -> Result<Vec<PathBuf>> {
     // starting with '.') diverged from the production filter by
     // 5-10× on real repos.
     let project_code = "AXO";
-    let scanner = axon_core::scanner::Scanner::new(
-        &root.to_string_lossy(),
-        project_code,
-    );
+    let scanner = axon_core::scanner::Scanner::new(&root.to_string_lossy(), project_code);
     let mut files = scanner.enumerate_files();
     if files.len() > max_files {
         files.truncate(max_files);
     }
     Ok(files)
 }
-
 
 fn build_embedder(mode: EmbedderMode) -> Result<Arc<dyn B2Embedder>> {
     match mode {
@@ -251,8 +245,7 @@ async fn run() -> Result<()> {
     // Slice 5 SOTA — the bench creates its own b_chunks channel and
     // a synthetic demand_pull task to feed B2/B3. demand_pull does
     // SELECT-with-content from PG (a chunk B2 just persisted via A3).
-    let (b_chunks_tx, b_chunks_rx) =
-        tokio::sync::mpsc::channel::<ChunkForEmbedding>(caps.internal);
+    let (b_chunks_tx, b_chunks_rx) = tokio::sync::mpsc::channel::<ChunkForEmbedding>(caps.internal);
 
     // REQ-AXO-901748 — hydrate the dedup cache so the bench mirrors the
     // production runtime path. demand_pull skips chunks whose hash is
@@ -369,8 +362,8 @@ async fn run() -> Result<()> {
     // snapshot metrics at end-of-warmup and end-of-bench to compute the
     // differential plateau throughput (vs the cold-start period dominated
     // by TensorRT compile).
-    let warmup_marker = (args.warmup_secs > 0)
-        .then(|| Instant::now() + Duration::from_secs(args.warmup_secs));
+    let warmup_marker =
+        (args.warmup_secs > 0).then(|| Instant::now() + Duration::from_secs(args.warmup_secs));
     let mut warmup_snapshot_a: Option<u64> = None;
     let mut warmup_snapshot_b: Option<u64> = None;
     let mut warmup_marker_t: Option<Instant> = None;
@@ -431,7 +424,10 @@ async fn run() -> Result<()> {
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.first()
             .and_then(|r| r.first())
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(-1)
     }
     let chunk_rows = writer_count(&store, "Chunk");
@@ -468,9 +464,8 @@ async fn run() -> Result<()> {
     // (capacity-bound = "le drum"). Stages with high t_recv_ratio are
     // starved (machine de décolletage sans barres) ; stages with high
     // t_send_ratio are backpressured (drum aval bouché).
-    let snaps_all: [&StageSnapshot; 6] = [
-        &snap_a1, &snap_a2, &snap_a3, &snap_b1, &snap_b2, &snap_b3,
-    ];
+    let snaps_all: [&StageSnapshot; 6] =
+        [&snap_a1, &snap_a2, &snap_a3, &snap_b1, &snap_b2, &snap_b3];
     let drum = snaps_all
         .iter()
         .max_by(|a, b| {
@@ -520,24 +515,67 @@ async fn run() -> Result<()> {
                  {},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
                  {},{:.4},{}",
-                a_count, b_count, elapsed.as_millis(), files_per_sec, chunks_per_sec,
-                sustained_files_per_sec, sustained_chunks_per_sec,
-                sustained_elapsed.map(|d| d.as_millis() as f64).unwrap_or(-1.0),
-                snap_a1.items_in_total, snap_a1.items_out_total, snap_a1.errors_total, snap_a1.backpressure_blocks_total,
-                snap_a2.items_in_total, snap_a2.items_out_total, snap_a2.errors_total, snap_a2.backpressure_blocks_total,
-                snap_a3.items_in_total, snap_a3.items_out_total, snap_a3.errors_total, snap_a3.backpressure_blocks_total,
-                snap_b1.items_in_total, snap_b1.items_out_total, snap_b1.errors_total, snap_b1.backpressure_blocks_total,
-                snap_b2.items_in_total, snap_b2.items_out_total, snap_b2.errors_total, snap_b2.backpressure_blocks_total,
-                snap_b3.items_in_total, snap_b3.items_out_total, snap_b3.errors_total, snap_b3.backpressure_blocks_total,
-                snap_a1.t_recv_total_us, snap_a1.t_work_total_us, snap_a1.t_send_total_us,
-                snap_a2.t_recv_total_us, snap_a2.t_work_total_us, snap_a2.t_send_total_us,
-                snap_a3.t_recv_total_us, snap_a3.t_work_total_us, snap_a3.t_send_total_us,
-                snap_b1.t_recv_total_us, snap_b1.t_work_total_us, snap_b1.t_send_total_us,
-                snap_b2.t_recv_total_us, snap_b2.t_work_total_us, snap_b2.t_send_total_us,
-                snap_b3.t_recv_total_us, snap_b3.t_work_total_us, snap_b3.t_send_total_us,
-                snap_a1.t_work_ratio(), snap_a2.t_work_ratio(), snap_a3.t_work_ratio(),
-                snap_b1.t_work_ratio(), snap_b2.t_work_ratio(), snap_b3.t_work_ratio(),
-                drum_name, drum_ratio, total_files,
+                a_count,
+                b_count,
+                elapsed.as_millis(),
+                files_per_sec,
+                chunks_per_sec,
+                sustained_files_per_sec,
+                sustained_chunks_per_sec,
+                sustained_elapsed
+                    .map(|d| d.as_millis() as f64)
+                    .unwrap_or(-1.0),
+                snap_a1.items_in_total,
+                snap_a1.items_out_total,
+                snap_a1.errors_total,
+                snap_a1.backpressure_blocks_total,
+                snap_a2.items_in_total,
+                snap_a2.items_out_total,
+                snap_a2.errors_total,
+                snap_a2.backpressure_blocks_total,
+                snap_a3.items_in_total,
+                snap_a3.items_out_total,
+                snap_a3.errors_total,
+                snap_a3.backpressure_blocks_total,
+                snap_b1.items_in_total,
+                snap_b1.items_out_total,
+                snap_b1.errors_total,
+                snap_b1.backpressure_blocks_total,
+                snap_b2.items_in_total,
+                snap_b2.items_out_total,
+                snap_b2.errors_total,
+                snap_b2.backpressure_blocks_total,
+                snap_b3.items_in_total,
+                snap_b3.items_out_total,
+                snap_b3.errors_total,
+                snap_b3.backpressure_blocks_total,
+                snap_a1.t_recv_total_us,
+                snap_a1.t_work_total_us,
+                snap_a1.t_send_total_us,
+                snap_a2.t_recv_total_us,
+                snap_a2.t_work_total_us,
+                snap_a2.t_send_total_us,
+                snap_a3.t_recv_total_us,
+                snap_a3.t_work_total_us,
+                snap_a3.t_send_total_us,
+                snap_b1.t_recv_total_us,
+                snap_b1.t_work_total_us,
+                snap_b1.t_send_total_us,
+                snap_b2.t_recv_total_us,
+                snap_b2.t_work_total_us,
+                snap_b2.t_send_total_us,
+                snap_b3.t_recv_total_us,
+                snap_b3.t_work_total_us,
+                snap_b3.t_send_total_us,
+                snap_a1.t_work_ratio(),
+                snap_a2.t_work_ratio(),
+                snap_a3.t_work_ratio(),
+                snap_b1.t_work_ratio(),
+                snap_b2.t_work_ratio(),
+                snap_b3.t_work_ratio(),
+                drum_name,
+                drum_ratio,
+                total_files,
             );
         }
         OutputMode::Human => {
@@ -613,7 +651,9 @@ mod tests {
 
         let files = walk_source(dir.path(), 100).unwrap();
         assert_eq!(files.len(), 5, "exactly 5 .rs files under nested/");
-        assert!(files.iter().all(|p| p.extension().and_then(|e| e.to_str()) == Some("rs")));
+        assert!(files
+            .iter()
+            .all(|p| p.extension().and_then(|e| e.to_str()) == Some("rs")));
 
         let capped = walk_source(dir.path(), 3).unwrap();
         assert_eq!(capped.len(), 3, "max_files cap must clamp the walk");
@@ -629,7 +669,11 @@ mod tests {
         let files = walk_source(dir.path(), 100).unwrap();
         let names: Vec<String> = files
             .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert!(names.contains(&"kept.rs".to_string()));
         assert!(!names.contains(&"ignored.js".to_string()));

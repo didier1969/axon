@@ -111,9 +111,7 @@ impl DirectoryMatcher {
         match self {
             Self::Exact(value) => segment == *value,
             Self::Prefix(prefix) => segment.starts_with(*prefix),
-            Self::SegmentPair(parent, child) => {
-                segment == *child && prev == Some(*parent)
-            }
+            Self::SegmentPair(parent, child) => segment == *child && prev == Some(*parent),
         }
     }
 
@@ -507,7 +505,10 @@ const DIRECTORY_RULES: &[DirectoryRule] = &[
 pub fn is_watch_pruned_segment(name: &str) -> bool {
     // Single-segment context (no parent) → pair matchers (priv/static) can't be
     // decided here; they are enforced downstream by `classify_path`.
-    name.starts_with('.') || DIRECTORY_RULES.iter().any(|rule| rule.matcher.matches(name, None))
+    name.starts_with('.')
+        || DIRECTORY_RULES
+            .iter()
+            .any(|rule| rule.matcher.matches(name, None))
 }
 
 /// REQ-AXO-901893 — directory segment names to emit into a `.watchmanconfig`
@@ -1124,10 +1125,10 @@ mod tests {
         }
         for hand_written in [
             "/p/src/main.rs",
-            "/p/lib/parser.go",          // not *.pb.go
-            "/p/app/models.py",          // not *_pb2.py
-            "/p/min.js",                 // not *.min.js (no dot-prefix)
-            "/p/generated_helpers.ts",   // not *.generated.ts
+            "/p/lib/parser.go",        // not *.pb.go
+            "/p/app/models.py",        // not *_pb2.py
+            "/p/min.js",               // not *.min.js (no dot-prefix)
+            "/p/generated_helpers.ts", // not *.generated.ts
             "/p/cargo_lock_notes.md",
         ] {
             assert!(

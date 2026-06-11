@@ -50,7 +50,6 @@ fn split_boot_roles_enable_only_owned_services() {
     assert!(indexer.promotable);
 }
 
-
 struct RuntimeEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -120,9 +119,9 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
     let _ = server.graph_store.execute(&format!(
         "DELETE FROM ist.Edge WHERE source_id IN ({list}) OR target_id IN ({list})"
     ));
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM ist.Symbol WHERE id IN ({list})"
-    ));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM ist.Symbol WHERE id IN ({list})"));
 }
 
 fn create_test_server() -> McpServer {
@@ -150,11 +149,16 @@ static TEST_DBS: Mutex<Vec<TestDb>> = Mutex::new(Vec::new());
 fn test_database_exists(pg_port: &str, name: &str) -> bool {
     let out = std::process::Command::new("psql")
         .args([
-            "-h", "127.0.0.1",
-            "-p", pg_port,
-            "-U", "axon",
-            "-d", "postgres",
-            "-X", "-tAc",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            "postgres",
+            "-X",
+            "-tAc",
             &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'"),
         ])
         .output()
@@ -184,10 +188,14 @@ fn sweep_reclaims_leaked_test_databases_but_preserves_template() {
     );
     let created = std::process::Command::new("createdb")
         .args([
-            "-h", "127.0.0.1",
-            "-p", &pg_port,
-            "-U", "axon",
-            "-T", "axon_test_template",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &pg_port,
+            "-U",
+            "axon",
+            "-T",
+            "axon_test_template",
             &leaked,
         ])
         .output()

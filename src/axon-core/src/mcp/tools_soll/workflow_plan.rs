@@ -488,12 +488,20 @@ impl McpServer {
             let unresolved: Vec<String> = first
                 .get("unresolved_keys")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let available: Vec<String> = first
                 .get("available_logical_keys")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             json!({
                 "invalid_field": "operations[].payload.source_id|target_id",
@@ -543,7 +551,9 @@ impl McpServer {
         let project_code = match self.resolve_project_code(project_code_input) {
             Ok(code) => code,
             Err(_) => {
-                return Some(self.wrong_project_scope_response(project_code_input, "soll_query_context"));
+                return Some(
+                    self.wrong_project_scope_response(project_code_input, "soll_query_context"),
+                );
             }
         };
         let limit = args
@@ -747,10 +757,7 @@ pub(super) fn format_soll_query_context_summary(
         if counts.is_empty() {
             return String::new();
         }
-        let parts: Vec<String> = counts
-            .iter()
-            .map(|(k, v)| format!("{v} {k}"))
-            .collect();
+        let parts: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
         format!(" ({})", parts.join(", "))
     }
 
@@ -774,9 +781,7 @@ pub(super) fn format_soll_query_context_summary(
     }
 
     // Requirements — show top-3 ids + status breakdown.
-    let req_counts = status_counts(reqs, |row| {
-        split_row(row, 3).get(2).map(|s| s.to_string())
-    });
+    let req_counts = status_counts(reqs, |row| split_row(row, 3).get(2).map(|s| s.to_string()));
     let top_reqs: Vec<&str> = reqs
         .iter()
         .take(3)
@@ -927,8 +932,14 @@ mod soll_query_context_summary_tests {
         assert!(text.contains("DEC-AXO-001"), "missing DEC id: {text}");
         assert!(text.contains("REV-001"), "missing revision id: {text}");
         // Status breakdown counts each REQ status.
-        assert!(text.contains("1 current"), "missing 'current' count: {text}");
-        assert!(text.contains("1 planned"), "missing 'planned' count: {text}");
+        assert!(
+            text.contains("1 current"),
+            "missing 'current' count: {text}"
+        );
+        assert!(
+            text.contains("1 planned"),
+            "missing 'planned' count: {text}"
+        );
         assert!(
             text.contains("1 delivered"),
             "missing 'delivered' count: {text}"

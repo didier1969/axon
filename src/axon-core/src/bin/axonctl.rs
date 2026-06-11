@@ -24,7 +24,9 @@ impl InstanceKind {
         match s {
             "dev" => Ok(Self::Dev),
             "live" => Ok(Self::Live),
-            _ => Err(anyhow!("invalid --instance-kind: `{s}` (expected dev|live)")),
+            _ => Err(anyhow!(
+                "invalid --instance-kind: `{s}` (expected dev|live)"
+            )),
         }
     }
 
@@ -58,7 +60,9 @@ impl RuntimeRole {
             "brain" => Ok(Self::Brain),
             "indexer" => Ok(Self::Indexer),
             "all" => Ok(Self::All),
-            _ => Err(anyhow!("invalid --role: `{s}` (expected brain|indexer|all)")),
+            _ => Err(anyhow!(
+                "invalid --role: `{s}` (expected brain|indexer|all)"
+            )),
         }
     }
 
@@ -124,16 +128,18 @@ impl InstanceConfig {
         };
 
         // Role layout: axon-role-layout.sh lines 99-142
-        let run_root = project_root.join(instance_dir).join(format!("run-{role_label}"));
+        let run_root = project_root
+            .join(instance_dir)
+            .join(format!("run-{role_label}"));
         let db_root = project_root.join(instance_dir).join("graph_v2");
         let tmux_session = match instance_kind {
             InstanceKind::Dev => format!("axon-dev-{role_label}"),
             InstanceKind::Live => format!("axon-{role_label}"),
         };
-        let telemetry_sock =
-            PathBuf::from(format!("/tmp/axon-{instance_label}-{role_label}-telemetry.sock"));
-        let mcp_sock =
-            PathBuf::from(format!("/tmp/axon-{instance_label}-{role_label}-mcp.sock"));
+        let telemetry_sock = PathBuf::from(format!(
+            "/tmp/axon-{instance_label}-{role_label}-telemetry.sock"
+        ));
+        let mcp_sock = PathBuf::from(format!("/tmp/axon-{instance_label}-{role_label}-mcp.sock"));
 
         let pid_file = run_root.join(format!("{binary_name}.pid"));
         let runtime_state_file = run_root.join("runtime.env");
@@ -220,9 +226,7 @@ struct GlobalArgs {
 
 fn parse_global_args(raw: Vec<String>) -> Result<(String, GlobalArgs)> {
     let mut iter = raw.into_iter();
-    let command = iter
-        .next()
-        .ok_or_else(|| anyhow!("{}", usage()))?;
+    let command = iter.next().ok_or_else(|| anyhow!("{}", usage()))?;
 
     let mut args = GlobalArgs {
         project_root: None,
@@ -378,10 +382,7 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
                 let phase = StopPhase {
                     name: "kill_beam_by_node_name".into(),
                     pids_targeted: beam_pids.clone(),
-                    detail: format!(
-                        "BEAM processes matching node {}",
-                        config.elixir_node_name
-                    ),
+                    detail: format!("BEAM processes matching node {}", config.elixir_node_name),
                 };
                 return (beam_pids, Some(phase));
             }
@@ -484,11 +485,7 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
     }
 
     // Step 7: Cleanup sockets and PID file
-    cleanup_files(&[
-        &config.telemetry_sock,
-        &config.mcp_sock,
-        &config.pid_file,
-    ]);
+    cleanup_files(&[&config.telemetry_sock, &config.mcp_sock, &config.pid_file]);
 
     // Step 8: Final verification
     let final_remaining = find_instance_all_pids(&config);
@@ -657,10 +654,7 @@ fn find_instance_all_pids(config: &InstanceConfig) -> Vec<i32> {
 }
 
 fn find_port_listener_pids(config: &InstanceConfig) -> Vec<i32> {
-    let output = Command::new("ss")
-        .args(["-ltnp"])
-        .output()
-        .ok();
+    let output = Command::new("ss").args(["-ltnp"]).output().ok();
     let Some(output) = output else { return vec![] };
     if !output.status.success() {
         return vec![];
@@ -800,11 +794,8 @@ fn compute_role_contract_violations(
     sockets: &[SocketStatus],
     mcp_http_listening: bool,
 ) -> Vec<String> {
-    let socket_present = |name: &str| -> bool {
-        sockets
-            .iter()
-            .any(|s| s.name == name && s.exists)
-    };
+    let socket_present =
+        |name: &str| -> bool { sockets.iter().any(|s| s.name == name && s.exists) };
     let mcp_available = socket_present("mcp") || mcp_http_listening;
     let mut violations = Vec::new();
     match role {
@@ -945,8 +936,7 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
     // pid-file-derived `alive` is a false DOWN on a healthy runtime. A brain
     // that serves its MCP surface, or an indexer that holds a live writer
     // guard, IS alive.
-    let mcp_available =
-        mcp_http_listening || sockets.iter().any(|s| s.name == "mcp" && s.exists);
+    let mcp_available = mcp_http_listening || sockets.iter().any(|s| s.name == "mcp" && s.exists);
     let guard_owner_live = writer_guards.iter().any(|g| g.exists && g.owner_alive);
     let role_liveness_signal = match config.role {
         RuntimeRole::Brain => mcp_available,
@@ -998,9 +988,15 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
             report.instance_kind, report.role, report.overall
         );
         if let Some(pid) = report.process.pid {
-            println!("  process: pid={pid} alive={} match={}", report.process.alive, report.process.cmdline_matches);
+            println!(
+                "  process: pid={pid} alive={} match={}",
+                report.process.alive, report.process.cmdline_matches
+            );
         } else if report.effective_alive {
-            println!("  process: live via {} (no pid file)", report.liveness_source);
+            println!(
+                "  process: live via {} (no pid file)",
+                report.liveness_source
+            );
         } else {
             println!("  process: no pid file");
         }
@@ -1017,10 +1013,7 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         for g in &report.writer_guards {
             if g.exists {
                 let state = if g.stale { "STALE" } else { "held" };
-                println!(
-                    "  guard {}: {} (pid={:?})",
-                    g.target, state, g.owner_pid
-                );
+                println!("  guard {}: {} (pid={:?})", g.target, state, g.owner_pid);
             }
         }
     }
@@ -1040,10 +1033,7 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
 // ---------------------------------------------------------------------------
 //
 fn get_listening_ports() -> BTreeSet<u16> {
-    let output = Command::new("ss")
-        .args(["-ltn"])
-        .output()
-        .ok();
+    let output = Command::new("ss").args(["-ltn"]).output().ok();
     let Some(output) = output else {
         return BTreeSet::new();
     };
@@ -1062,7 +1052,6 @@ fn get_listening_ports() -> BTreeSet<u16> {
     }
     ports
 }
-
 
 // ---------------------------------------------------------------------------
 // Phase 5 (REQ-AXO-901735) : axonctl preflight — pre-launch checks
@@ -1141,10 +1130,16 @@ fn check_env_no_stale_vars() -> PreflightCheck {
     // (env_var_name, soll_ref_explaining_retirement)
     let retired: &[(&str, &str)] = &[
         ("AXON_AGE_ONLY_RELATIONS", "MIL-AXO-017 retire Apache AGE"),
-        ("AXON_INDEXER_PG_OPT_IN", "MIL-AXO-017 Gate 7 merged 2026-05-13"),
+        (
+            "AXON_INDEXER_PG_OPT_IN",
+            "MIL-AXO-017 Gate 7 merged 2026-05-13",
+        ),
         ("AXON_DUCKDB_WAL_DIR", "REQ-AXO-271 slice 2-6 retire DuckDB"),
         ("AXON_DUCKDB_OPT_IN", "REQ-AXO-271 retire DuckDB"),
-        ("AXON_HOT_STATUS_CACHE", "REQ-AXO-901653 slice-5d retire FVQ flush path"),
+        (
+            "AXON_HOT_STATUS_CACHE",
+            "REQ-AXO-901653 slice-5d retire FVQ flush path",
+        ),
         (
             "AXON_FILE_VECTORIZATION_QUEUE_DEPTH",
             "REQ-AXO-901632 retire FVQ",
@@ -1197,10 +1192,7 @@ fn check_env_no_stale_vars() -> PreflightCheck {
         PreflightCheck {
             name: "env-stale-vars".to_string(),
             passed: true,
-            detail: format!(
-                "Aucune des {} env vars retirées présente",
-                retired.len()
-            ),
+            detail: format!("Aucune des {} env vars retirées présente", retired.len()),
         }
     } else {
         PreflightCheck {
@@ -1225,7 +1217,9 @@ fn check_ort_dylib_path_canonical() -> PreflightCheck {
         Err(_) => PreflightCheck {
             name: "ort-dylib-path".to_string(),
             passed: true,
-            detail: "ORT_DYLIB_PATH unset — runtime résoudra via artifact manifest (REQ-AXO-901630)".to_string(),
+            detail:
+                "ORT_DYLIB_PATH unset — runtime résoudra via artifact manifest (REQ-AXO-901630)"
+                    .to_string(),
         },
         Ok(path) => {
             let trimmed = path.trim().to_string();
@@ -1233,7 +1227,8 @@ fn check_ort_dylib_path_canonical() -> PreflightCheck {
                 return PreflightCheck {
                     name: "ort-dylib-path".to_string(),
                     passed: true,
-                    detail: "ORT_DYLIB_PATH empty — runtime résoudra via artifact manifest".to_string(),
+                    detail: "ORT_DYLIB_PATH empty — runtime résoudra via artifact manifest"
+                        .to_string(),
                 };
             }
             let p = Path::new(&trimmed);
@@ -1304,7 +1299,10 @@ fn cmd_preflight(config: InstanceConfig, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("axonctl preflight — instance={} role={}", report.instance_kind, report.role);
+        println!(
+            "axonctl preflight — instance={} role={}",
+            report.instance_kind, report.role
+        );
         for c in &report.checks {
             let marker = if c.passed { "✅" } else { "❌" };
             println!("  {marker} {} — {}", c.name, c.detail);
@@ -1489,10 +1487,7 @@ mod tests {
             c.telemetry_sock,
             PathBuf::from("/tmp/axon-dev-indexer-telemetry.sock")
         );
-        assert_eq!(
-            c.mcp_sock,
-            PathBuf::from("/tmp/axon-dev-indexer-mcp.sock")
-        );
+        assert_eq!(c.mcp_sock, PathBuf::from("/tmp/axon-dev-indexer-mcp.sock"));
     }
 
     #[test]
@@ -1551,7 +1546,8 @@ mod tests {
         let entry = ProcEntry {
             pid: 100,
             ppid: 1,
-            command: "/nix/store/xxx/beam.smp -name axon_dev_nexus@127.0.0.1 -setcookie secret".into(),
+            command: "/nix/store/xxx/beam.smp -name axon_dev_nexus@127.0.0.1 -setcookie secret"
+                .into(),
         };
         assert!(process_matches_instance(&entry, &config));
     }
@@ -1691,10 +1687,7 @@ wait
             final_remaining
         );
 
-        assert!(
-            parent_ts.exists(),
-            "parent did not record SIGTERM receipt"
-        );
+        assert!(parent_ts.exists(), "parent did not record SIGTERM receipt");
 
         if child_ts.exists() {
             let pts: u64 = std::fs::read_to_string(&parent_ts)

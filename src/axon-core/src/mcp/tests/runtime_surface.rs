@@ -992,8 +992,7 @@ fn test_status_uses_ist_projection_freshness_label_and_field() {
         "legacy `advanced_indexed_surfaces_visible` alias must remain for backward compatibility"
     );
     assert_eq!(
-        availability["ist_projection_fresh"],
-        availability["advanced_indexed_surfaces_visible"],
+        availability["ist_projection_fresh"], availability["advanced_indexed_surfaces_visible"],
         "the two fields must always agree until the alias is retired"
     );
 
@@ -1273,11 +1272,7 @@ fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
     let server = create_test_server();
     server
         .graph_store
-        .sync_project_registry_entry(
-            "AXO",
-            Some("axon"),
-            Some("/home/test/axon-cwd-fixture"),
-        )
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axon-cwd-fixture"))
         .unwrap();
     unsafe {
         std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axon-cwd-fixture");
@@ -1425,19 +1420,11 @@ fn test_auto_resolve_project_code_str_helper() {
     let server = create_test_server();
     server
         .graph_store
-        .sync_project_registry_entry(
-            "AXO",
-            Some("axon"),
-            Some("/home/test/axon-cwd-fixture"),
-        )
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axon-cwd-fixture"))
         .unwrap();
     server
         .graph_store
-        .sync_project_registry_entry(
-            "BKS",
-            Some("BookingSystem"),
-            Some("/home/test/bks-other"),
-        )
+        .sync_project_registry_entry("BKS", Some("BookingSystem"), Some("/home/test/bks-other"))
         .unwrap();
     // Exact match returns the code.
     unsafe {
@@ -1487,11 +1474,7 @@ fn test_retrieve_context_falls_back_to_workspace_when_cwd_unmatched() {
     let server = create_test_server();
     server
         .graph_store
-        .sync_project_registry_entry(
-            "AXO",
-            Some("axon"),
-            Some("/home/test/axon-cwd-fixture"),
-        )
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axon-cwd-fixture"))
         .unwrap();
     unsafe {
         std::env::set_var("AXON_PROJECT_ROOT", "/tmp/unrelated-path");
@@ -1739,8 +1722,12 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     // contract is that the KEY is always present (u64 when a heartbeat
     // exists, null when absent), never missing.
     {
-        let v = &data["runtime_authority"]["runtime_state"]["indexer_feed"]["last_good_payload_at_ms"];
-        assert!(v.is_u64() || v.is_null(), "last_good_payload_at_ms must be u64 or null, got {v:?}");
+        let v =
+            &data["runtime_authority"]["runtime_state"]["indexer_feed"]["last_good_payload_at_ms"];
+        assert!(
+            v.is_u64() || v.is_null(),
+            "last_good_payload_at_ms must be u64 or null, got {v:?}"
+        );
     }
     assert!(
         data["runtime_authority"]["runtime_state"]["ist_snapshot"]["state"]
@@ -2471,7 +2458,6 @@ fn test_status_exposes_tensorrt_ready_vector_pipeline_telemetry() {
     }
 }
 
-
 #[test]
 fn test_status_indexer_omits_soll_mcp_job_counts() {
     let _guard = env_lock();
@@ -2901,10 +2887,8 @@ fn test_status_exposes_data_root_absolute_for_unambiguous_cross_reference() {
         .unwrap_or_else(|p| p.into_inner());
     let tmp = tempdir().unwrap();
     let abs_path = tmp.path().to_path_buf();
-    let _g_db = crate::test_support::EnvVarGuard::set(
-        "AXON_DB_ROOT",
-        &abs_path.display().to_string(),
-    );
+    let _g_db =
+        crate::test_support::EnvVarGuard::set("AXON_DB_ROOT", &abs_path.display().to_string());
 
     let server = create_test_server();
     let response = server.axon_status(&json!({ "mode": "json" })).unwrap();

@@ -327,7 +327,10 @@ mod tests {
             let second = content_token_count(s); // cache hit
             let uncached = content_token_count_uncached(s);
             assert_eq!(first, second, "repeat call must be stable for {s:?}");
-            assert_eq!(first, uncached, "cache must equal the uncached count for {s:?}");
+            assert_eq!(
+                first, uncached,
+                "cache must equal the uncached count for {s:?}"
+            );
         }
     }
 

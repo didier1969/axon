@@ -36,7 +36,9 @@ fn watchdog_defaults_are_internally_consistent() {
 
 #[tokio::test]
 async fn heartbeat_task_resets_staleness_clock_within_two_periods() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let period_ms: u64 = 200;
     require_heartbeat(Subsystem::BrainMcp, period_ms);
@@ -65,7 +67,9 @@ async fn heartbeat_task_resets_staleness_clock_within_two_periods() {
 
 #[tokio::test]
 async fn watchdog_observes_dead_heartbeat_after_threshold() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let period_ms: u64 = 100;
     require_heartbeat(Subsystem::Embedder, period_ms);
@@ -92,8 +96,5 @@ async fn watchdog_observes_dead_heartbeat_after_threshold() {
         "watchdog must observe the dead heartbeat as one transition, got {transitions:?}"
     );
     assert_eq!(transitions[0].0, "embedder");
-    assert!(matches!(
-        transitions[0].1,
-        SubsystemState::Failed { .. }
-    ));
+    assert!(matches!(transitions[0].1, SubsystemState::Failed { .. }));
 }

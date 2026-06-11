@@ -36,7 +36,8 @@ pub(crate) struct InlineEmbedRequest {
 static INLINE_TX: OnceLock<Sender<InlineEmbedRequest>> = OnceLock::new();
 
 #[allow(dead_code)]
-pub(crate) fn create_vector_lane_inbox() -> (Sender<InlineEmbedRequest>, Receiver<InlineEmbedRequest>) {
+pub(crate) fn create_vector_lane_inbox(
+) -> (Sender<InlineEmbedRequest>, Receiver<InlineEmbedRequest>) {
     bounded(INLINE_INBOX_CAPACITY)
 }
 
@@ -130,8 +131,7 @@ mod tests {
         let (tx, rx) = create_vector_lane_inbox();
         let lane = thread::spawn(move || {
             let req = rx.recv().expect("inline request received");
-            let embeddings: Vec<Vec<f32>> =
-                req.texts.iter().map(|_| vec![0.5_f32; 4]).collect();
+            let embeddings: Vec<Vec<f32>> = req.texts.iter().map(|_| vec![0.5_f32; 4]).collect();
             req.respond_to
                 .send(Ok(embeddings))
                 .expect("response sent back");

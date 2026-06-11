@@ -50,17 +50,19 @@ mod provider_contract;
 mod provider_runtime;
 
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
+pub(crate) use gpu_backend::OrtGpuFirstTextEmbedding;
 pub(crate) use gpu_backend::{
     cuda_execution_provider_dispatch, ort_cuda_provider_library_available,
     ort_cuda_provider_library_path,
 };
-pub(crate) use gpu_backend::OrtGpuFirstTextEmbedding;
 #[cfg(test)]
 use gpu_backend::{cuda_memory_limit_bytes, cuda_tf32_enabled};
 pub use gpu_policy::current_gpu_memory_pressure_active;
 use gpu_policy::embedding_provider_requested_is_gpu;
 #[cfg(test)]
 use gpu_policy::gpu_memory_pressure_active;
+#[cfg(test)]
+pub(crate) use gpu_telemetry::clear_gpu_memory_snapshot_cache_for_tests;
 pub use gpu_telemetry::{
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, GpuMemorySnapshot,
     GpuUtilizationSnapshot,
@@ -71,8 +73,6 @@ pub(crate) use gpu_telemetry::{
     gpu_telemetry_device_index, nvml_library_path, parse_nvidia_smi_memory_csv,
     parse_nvidia_smi_utilization_csv,
 };
-#[cfg(test)]
-pub(crate) use gpu_telemetry::clear_gpu_memory_snapshot_cache_for_tests;
 pub use provider_contract::{
     ProductionLane, ProviderResolution, ProviderStrategy, ProviderSupportRole,
 };
@@ -80,8 +80,8 @@ pub use provider_contract::{
 // re-derives the resolution from a paired indexer's heartbeat-supplied
 // requested/effective labels so the surfaced vector_pipeline_telemetry stays
 // coherent. Keep the re-export crate-wide, not test-only.
-pub(crate) use provider_runtime::provider_resolution_for_label;
 use provider_runtime::cpu_provider_effective_label;
+pub(crate) use provider_runtime::provider_resolution_for_label;
 pub use provider_runtime::{
     current_embedding_provider_diagnostics, current_gpu_present, embedder_provider_fallback_reason,
     embedding_provider_diagnostics, set_gpu_present, EmbeddingProviderDiagnostics,
@@ -119,25 +119,12 @@ pub(super) struct QueryEmbeddingRequest {
     reply: Sender<anyhow::Result<Vec<Vec<f32>>>>,
 }
 
-
-
-
-
-
-
 static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
     OnceLock::new();
 
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
 }
-
-
-
-
-
-
-
 
 const FASTEMBED_OUTPUT_PRECEDENCE: &[OutputKey] = &[
     OutputKey::OnlyOne,
@@ -309,8 +296,6 @@ pub fn bootstrap_runtime_tuning_state() -> RuntimeTuningState {
     bootstrap_runtime_tuning_state_from_env()
 }
 
-
-
 pub fn current_runtime_tuning_snapshot() -> RuntimeTuningSnapshot {
     runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env())
 }
@@ -334,9 +319,6 @@ fn configured_embedding_micro_batch_max_total_tokens(total_items: usize) -> usiz
         .embed_micro_batch_max_total_tokens
         .clamp(max_length, max_length.saturating_mul(total_items.max(1)))
 }
-
-
-
 
 fn ort_pooling_cls(
     shape: &[i64],
@@ -506,8 +488,6 @@ fn build_token_aware_micro_batches(
     micro_batches
 }
 
-
-
 pub(crate) fn embed_texts_with_breakdown_ort(
     model: &mut OrtGpuFirstTextEmbedding,
     texts: &[String],
@@ -621,7 +601,6 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
     canonical_provider
 }
 
-
 // REQ-AXO-901872 : background CHECKPOINT thread retiré (résidu DuckDB-era). Le
 // `CHECKPOINT;` forcé toutes les 10s prenait le writer-mutex et affamait le brain
 // MCP (pics latence 5-7s, RCA session 72). PostgreSQL gère les checkpoints
@@ -698,7 +677,6 @@ impl SemanticWorkerPool {
             _query_workers: query_workers,
         }
     }
-
 
     pub(super) fn query_worker_loop(worker_idx: usize, query_rx: Receiver<QueryEmbeddingRequest>) {
         info!(
@@ -792,8 +770,6 @@ impl SemanticWorkerPool {
         }
     }
 
-
-
     fn build_text_embedding_model(lane: &str, worker_idx: usize) -> Option<TextEmbedding> {
         let options = InitOptions::new(fastembed_model())
             .with_cache_dir(embedding_model_cache_dir())
@@ -869,18 +845,7 @@ impl SemanticWorkerPool {
             }
         }
     }
-
 }
-
-
-
-
-
-
-
-
-
-
 
 /// REQ-AXO-901945 — idle window after which the in-process CPU query
 /// model is dropped to reclaim host RAM. `AXON_QUERY_EMBED_IDLE_SECS`
@@ -1090,8 +1055,6 @@ pub fn vector_stale_inflight_recovery_interval_ms() -> u64 {
         .unwrap_or(DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS);
     scale_vector_maintenance_interval_for_quiescent(base_ms, 1_000, 300_000)
 }
-
-
 
 fn scale_vector_maintenance_interval_for_quiescent(base_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
     let scale_pct = std::env::var("AXON_QUIESCENT_INTERVAL_SCALE_PCT")
@@ -1388,9 +1351,10 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         ));
     }
     // BGE-Large-v1.5 query prefix for optimal retrieval quality.
-    let texts: Vec<String> = texts.into_iter().map(|t| {
-        format!("Represent this sentence for searching relevant passages: {t}")
-    }).collect();
+    let texts: Vec<String> = texts
+        .into_iter()
+        .map(|t| format!("Represent this sentence for searching relevant passages: {t}"))
+        .collect();
 
     // REQ-AXO-128 — under brain_only / indexer_graph the registered
     // sender belongs to the in-process CPU worker spawned at boot
@@ -1407,7 +1371,6 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 
     request_query_embedding(&sender, texts)
 }
-
 
 /// REQ-AXO-176 — Public benchmarking facade for the in-process ORT
 /// embedder. Accepts a vector of texts, loads the configured BGE
@@ -1429,14 +1392,8 @@ pub fn run_embedder_throughput_bench(
 
     let n = texts.len();
     let embed_start = std::time::Instant::now();
-    let (
-        embeddings,
-        tokenize_ms,
-        host_prepare_ms,
-        input_copy_ms,
-        inference_ms,
-        output_extract_ms,
-    ) = embed_texts_with_breakdown_ort(&mut model, &texts)?;
+    let (embeddings, tokenize_ms, host_prepare_ms, input_copy_ms, inference_ms, output_extract_ms) =
+        embed_texts_with_breakdown_ort(&mut model, &texts)?;
     let total_embed_ms = embed_start.elapsed().as_millis() as u64;
 
     Ok(EmbeddingThroughputBench {
@@ -1543,18 +1500,16 @@ pub fn run_embedder_throughput_bench_parallel(
     };
 
     for h in handles {
-        let res = h
-            .join()
-            .map_err(|payload| {
-                anyhow!(
-                    "worker thread panicked: {}",
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "<no-payload>".to_string())
-                )
-            })??;
+        let res = h.join().map_err(|payload| {
+            anyhow!(
+                "worker thread panicked: {}",
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<no-payload>".to_string())
+            )
+        })??;
         aggregate.n = aggregate.n.saturating_add(res.n);
         if res.embedding_dim > aggregate.embedding_dim {
             aggregate.embedding_dim = res.embedding_dim;
@@ -1846,8 +1801,7 @@ pub fn run_embedder_sustained_sweep_aligned(
     for &batch_size in batch_sizes {
         if align_microbatch {
             let max_length = configured_embedding_max_length();
-            let target_total_tokens =
-                batch_size.saturating_mul(max_length).max(max_length);
+            let target_total_tokens = batch_size.saturating_mul(max_length).max(max_length);
             crate::runtime_tuning::update_runtime_tuning_state(
                 bootstrap_runtime_tuning_state_from_env(),
                 None,
@@ -1939,8 +1893,7 @@ fn sustained_bench_with_loaded_model(
 
     // Warmup — discard timings (per-shape TRT compile absorption).
     if warmup_secs > 0 {
-        let warmup_until = std::time::Instant::now()
-            + std::time::Duration::from_secs(warmup_secs);
+        let warmup_until = std::time::Instant::now() + std::time::Duration::from_secs(warmup_secs);
         while std::time::Instant::now() < warmup_until {
             let texts = prep_batch(batch_size);
             let _ = embed_texts_with_breakdown_ort(model, &texts)?;
@@ -1948,8 +1901,8 @@ fn sustained_bench_with_loaded_model(
     }
 
     // Sustained — measure each iteration.
-    let sustained_until = std::time::Instant::now()
-        + std::time::Duration::from_secs(sustained_secs);
+    let sustained_until =
+        std::time::Instant::now() + std::time::Duration::from_secs(sustained_secs);
     let mut iter_observations: Vec<(std::time::Instant, usize, u64)> = Vec::new();
     let mut total_chunks: usize = 0;
     let mut embedding_dim: usize = 0;
@@ -1957,8 +1910,7 @@ fn sustained_bench_with_loaded_model(
     while std::time::Instant::now() < sustained_until {
         let texts = prep_batch(batch_size);
         let iter_start = std::time::Instant::now();
-        let (embeddings, _t, _hp, _ic, _inf, _oe) =
-            embed_texts_with_breakdown_ort(model, &texts)?;
+        let (embeddings, _t, _hp, _ic, _inf, _oe) = embed_texts_with_breakdown_ort(model, &texts)?;
         let iter_ms = iter_start.elapsed().as_millis() as u64;
         if embedding_dim == 0 {
             embedding_dim = embeddings.first().map(|v| v.len()).unwrap_or(0);
@@ -1979,11 +1931,9 @@ fn sustained_bench_with_loaded_model(
     let actual_sustained_secs = sustained_secs as f64;
     let mean_ch_per_s = (total_chunks as f64) / actual_sustained_secs;
 
-    let rolling_min = rolling_window_min_ch_per_s(
-        &iter_observations,
-        std::time::Duration::from_secs(10),
-    )
-    .unwrap_or(mean_ch_per_s);
+    let rolling_min =
+        rolling_window_min_ch_per_s(&iter_observations, std::time::Duration::from_secs(10))
+            .unwrap_or(mean_ch_per_s);
 
     // p50/p95 from per-iteration chunks/sec.
     let mut sorted = iter_ch_per_s.clone();
@@ -2130,8 +2080,7 @@ pub fn run_embedder_pipeline_bench(
 
     // Warmup — discard timings.
     if warmup_secs > 0 {
-        let warmup_until = std::time::Instant::now()
-            + std::time::Duration::from_secs(warmup_secs);
+        let warmup_until = std::time::Instant::now() + std::time::Duration::from_secs(warmup_secs);
         while std::time::Instant::now() < warmup_until {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(texts) => {
@@ -2148,8 +2097,8 @@ pub fn run_embedder_pipeline_bench(
     }
 
     // Sustained — measure each iteration.
-    let sustained_until = std::time::Instant::now()
-        + std::time::Duration::from_secs(sustained_secs);
+    let sustained_until =
+        std::time::Instant::now() + std::time::Duration::from_secs(sustained_secs);
     let mut iter_observations: Vec<(std::time::Instant, usize, u64)> = Vec::new();
     let mut total_chunks: usize = 0;
     let mut embedding_dim: usize = 0;
@@ -2190,11 +2139,9 @@ pub fn run_embedder_pipeline_bench(
     let actual_sustained_secs = sustained_secs as f64;
     let mean_ch_per_s = (total_chunks as f64) / actual_sustained_secs;
 
-    let rolling_min = rolling_window_min_ch_per_s(
-        &iter_observations,
-        std::time::Duration::from_secs(10),
-    )
-    .unwrap_or(mean_ch_per_s);
+    let rolling_min =
+        rolling_window_min_ch_per_s(&iter_observations, std::time::Duration::from_secs(10))
+            .unwrap_or(mean_ch_per_s);
 
     Ok(PipelineBench {
         label: label.to_string(),
@@ -2225,26 +2172,20 @@ mod tests {
     use super::{
         build_token_aware_micro_batches, configured_embedding_max_length,
         cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
-        current_runtime_tuning_state,
-        embedding_lane_config_from_env,
-        embedding_model_cache_dir, embedding_provider_diagnostics,
-        gpu_memory_soft_limit_mb,
-        load_runtime_embedding_tokenizer, query_embedding_allowed,
-        request_query_embedding,
-        EmbeddingLaneConfig,
-        GpuMemorySnapshot, QueryEmbeddingRequest,
+        current_runtime_tuning_state, embedding_lane_config_from_env, embedding_model_cache_dir,
+        embedding_provider_diagnostics, gpu_memory_soft_limit_mb, load_runtime_embedding_tokenizer,
+        query_embedding_allowed, request_query_embedding, EmbeddingLaneConfig, GpuMemorySnapshot,
+        QueryEmbeddingRequest,
     };
     use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
     use crate::vector_control::{
-        allowed_gpu_vector_workers,
-        current_vector_batch_controller_diagnostics, current_vector_drain_state,
-        graph_projection_allowed, reset_utility_first_scheduler_for_tests, semantic_policy,
-        vector_claim_target,
-        vector_embed_target_chunks, vector_ready_reserve_target,
-        VectorBatchController, VectorBatchControllerObservation,
-        VectorBatchControllerState, VectorDrainState, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
-        CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD,
+        allowed_gpu_vector_workers, current_vector_batch_controller_diagnostics,
+        current_vector_drain_state, graph_projection_allowed,
+        reset_utility_first_scheduler_for_tests, semantic_policy, vector_claim_target,
+        vector_embed_target_chunks, vector_ready_reserve_target, VectorBatchController,
+        VectorBatchControllerObservation, VectorBatchControllerState, VectorDrainState,
+        AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD, CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD,
     };
     use crossbeam_channel::{bounded, unbounded};
     use fastembed::{InitOptions, TextEmbedding};
@@ -2279,7 +2220,10 @@ mod tests {
             Some(std::time::Duration::from_secs(1200))
         );
         // 0 disables idle-drop (model stays resident).
-        assert_eq!(super::parse_query_embed_idle_timeout(Some("0".into())), None);
+        assert_eq!(
+            super::parse_query_embed_idle_timeout(Some("0".into())),
+            None
+        );
         // Explicit override honoured (with whitespace tolerance).
         assert_eq!(
             super::parse_query_embed_idle_timeout(Some("  300 ".into())),
@@ -2612,8 +2556,6 @@ mod tests {
         super::refresh_runtime_tuning_snapshot_from_env();
     }
 
-
-
     #[test]
     fn test_current_vector_drain_state_prefers_interactive_guard() {
         let state =
@@ -2751,8 +2693,6 @@ mod tests {
         assert_eq!(config.vector_workers, 0);
     }
 
-
-
     #[test]
     fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_controller() {
         let _guard = lock_env_guard();
@@ -2884,7 +2824,6 @@ mod tests {
         assert_eq!(config.vector_workers, 5);
     }
 
-
     #[test]
     fn test_configured_embedding_max_length_defaults_to_model_cap() {
         let _guard = lock_env_guard();
@@ -3009,8 +2948,6 @@ mod tests {
         assert!((parsed.gpu_utilization_ratio - 0.31).abs() < f64::EPSILON);
         assert!((parsed.memory_utilization_ratio - 0.02).abs() < f64::EPSILON);
     }
-
-
 
     #[test]
     #[ignore = "manual runtime probe for FastEmbed CUDA init parity"]
@@ -3231,7 +3168,6 @@ mod tests {
         assert_eq!(vector_embed_target_chunks(&lane_config, false), 64);
     }
 
-
     #[test]
     fn test_fetch_segments_for_file_returns_all_segments_in_line_order() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
@@ -3272,20 +3208,6 @@ mod tests {
         assert!(reserve <= 40);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     #[test]
     fn test_bootstrap_runtime_tuning_does_not_cap_inflight_persists_to_legacy_eight() {
         let _guard = lock_env_guard();
@@ -3304,7 +3226,6 @@ mod tests {
         }
         super::refresh_runtime_tuning_snapshot_from_env();
     }
-
 
     #[test]
     fn test_gpu_memory_soft_limit_mb_falls_back_to_operator_budget() {
@@ -3565,11 +3486,15 @@ mod tests {
 
         let first_regression = controller.observe(
             32_000,
-            controller_observation_with_runtime(4_096, false, false, 12, 896, 24, 138_240, 2_048, 0),
+            controller_observation_with_runtime(
+                4_096, false, false, 12, 896, 24, 138_240, 2_048, 0,
+            ),
         );
         let second_regression = controller.observe(
             43_000,
-            controller_observation_with_runtime(4_096, false, false, 16, 1_280, 32, 215_040, 2_048, 0),
+            controller_observation_with_runtime(
+                4_096, false, false, 16, 1_280, 32, 215_040, 2_048, 0,
+            ),
         );
 
         assert_ne!(first_regression.reason, "embed_efficiency_regressed");
@@ -3668,11 +3593,6 @@ mod tests {
         std::env::remove_var("AXON_VECTOR_WORKERS");
         std::env::remove_var("AXON_EMBEDDING_PROVIDER");
     }
-
-
-
-
-
 
     #[test]
     fn test_vector_batch_controller_does_not_expand_file_window_when_chunk_density_is_already_good()

@@ -48,8 +48,7 @@ struct FsCounterSnapshot {
     eligible_files: i64,
 }
 
-static FS_COUNTER_CACHE: std::sync::Mutex<Option<FsCounterSnapshot>> =
-    std::sync::Mutex::new(None);
+static FS_COUNTER_CACHE: std::sync::Mutex<Option<FsCounterSnapshot>> = std::sync::Mutex::new(None);
 
 /// Walk `watch_root` once (pruning build/dep/VCS noise dirs) and return
 /// `(disk_files, eligible_files)`. CPU/IO-bound — callers MUST run this off
@@ -629,11 +628,23 @@ impl McpServer {
                          |--------------|--------------|--------------|--------------|------------|\n",
                     );
                     for entry in arr {
-                        let code = entry.get("project_code").and_then(|v| v.as_str()).unwrap_or("?");
-                        let idx = entry.get("indexed_files").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let code = entry
+                            .get("project_code")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let idx = entry
+                            .get("indexed_files")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
                         let ch = entry.get("chunks").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let emb = entry.get("embeddings").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let cov = entry.get("coverage_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let emb = entry
+                            .get("embeddings")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let cov = entry
+                            .get("coverage_pct")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
                         lines.push_str(&format!(
                             "| {code:<12} | {idx:>12} | {ch:>12} | {emb:>12} | {cov:>9.2}% |\n"
                         ));
@@ -888,11 +899,13 @@ impl McpServer {
             // every other tool and yielding `[]` (e.g. status + embedding_status).
             let res = self
                 .execute_tool_direct(normalized_tool_name, &tool_args)
-                .unwrap_or_else(|| json!({
-                    "status": "unknown_tool",
-                    "tool": tool_name,
-                    "hint": "tool not recognized by the canonical dispatcher; check `help`"
-                }));
+                .unwrap_or_else(|| {
+                    json!({
+                        "status": "unknown_tool",
+                        "tool": tool_name,
+                        "hint": "tool not recognized by the canonical dispatcher; check `help`"
+                    })
+                });
             all_results.push(json!({
                 "name": tool_name,
                 "result": res
@@ -936,16 +949,15 @@ impl McpServer {
             .filter(|s| !s.is_empty());
         let project_code = match project_code {
             Some(code) => code.to_string(),
-            None => return Some(rescan_error_envelope(
-                "",
-                "missing_project_code",
-                "argument `project_code` is required",
-            )),
+            None => {
+                return Some(rescan_error_envelope(
+                    "",
+                    "missing_project_code",
+                    "argument `project_code` is required",
+                ))
+            }
         };
-        let full = args
-            .get("full")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let mode_label = if full { "full" } else { "delta" };
 
         // Step 1 — resolve project_path via soll.ProjectCodeRegistry.
@@ -1129,4 +1141,3 @@ fn rescan_error_envelope(project_code: &str, code: &str, message: &str) -> Value
         "isError": true,
     })
 }
-

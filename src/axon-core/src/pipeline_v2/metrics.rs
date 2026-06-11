@@ -119,9 +119,7 @@ impl StageMetrics {
             items_out_total: items_out,
             errors_total: self.errors_total.load(Ordering::Relaxed),
             inflight: self.inflight.load(Ordering::Relaxed),
-            backpressure_blocks_total: self
-                .backpressure_blocks_total
-                .load(Ordering::Relaxed),
+            backpressure_blocks_total: self.backpressure_blocks_total.load(Ordering::Relaxed),
             mean_duration_us,
             t_recv_total_us: self.t_recv_total_us.load(Ordering::Relaxed),
             t_work_total_us: total_us,

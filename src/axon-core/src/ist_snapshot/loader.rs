@@ -30,7 +30,8 @@ pub trait JsonSqlStore {
 }
 
 const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text FROM ist.symbol WHERE project_code = '{P}'";
-const EDGE_SQL: &str = "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
+const EDGE_SQL: &str =
+    "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
 
 /// Cold-load one project's snapshot. `project_code` is escaped at the
 /// call site by replacing `'` with `''` ; callers must not pass arbitrary

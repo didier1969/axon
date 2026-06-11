@@ -29,7 +29,6 @@ fn freshness_state_for_feed(runtime_truth_feed: &axon_core::bridge::RuntimeTruth
     }
 }
 
-
 /// REQ-AXO-901854 — an indexer PG lifecycle heartbeat younger than this is
 /// treated as "indexer paired & alive" (it UPSERTs every ~5 s). Shared by the
 /// runtime-truth pairing signal and the dashboard Pipeline-B compute verdict.
@@ -59,7 +58,9 @@ pub(crate) fn spawn_runtime_telemetry(
                 .latest_lifecycle_heartbeat("indexer")
                 .ok()
                 .flatten()
-                .filter(|row| (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS);
+                .filter(|row| {
+                    (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS
+                });
             let indexer_paired = indexer_peer_hb.is_some();
             let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
                 service_guard::record_runtime_truth_bridge_dispatch(None)
@@ -165,8 +166,8 @@ pub(crate) fn spawn_runtime_telemetry(
             let dashboard_ts_ms = now_ms_tick;
             let dashboard_install_generation = std::env::var("AXON_INSTALL_GENERATION")
                 .unwrap_or_else(|_| "workspace".to_string());
-            let dashboard_instance_kind = std::env::var("AXON_INSTANCE_KIND")
-                .unwrap_or_else(|_| "unknown".to_string());
+            let dashboard_instance_kind =
+                std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
             let dashboard_embedder = crate::embedder::current_embedding_provider_diagnostics();
             let dashboard_build_id = std::env::var("AXON_BUILD_ID")
                 .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());

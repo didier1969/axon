@@ -56,9 +56,9 @@ pub mod embedder_gpu;
 pub mod in_flight;
 pub mod indexed_file_cache;
 pub mod metrics;
+pub mod notify_listener;
 pub mod orchestrator;
 pub mod project_resolver;
-pub mod notify_listener;
 pub mod stage_a1;
 pub mod stage_a2;
 pub mod stage_a3;
@@ -69,31 +69,23 @@ pub mod tsv_worker;
 pub mod types;
 pub mod worker_pool;
 
-pub use channels::{
-    PipelineChannelCaps, INTERNAL_CHANNEL_CAP_DEFAULT,
-};
+pub use channels::{PipelineChannelCaps, INTERNAL_CHANNEL_CAP_DEFAULT};
+pub use embedder_gpu::GpuB2Embedder;
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
+pub use notify_listener::{spawn_chunk_pending_state_listener, spawn_pending_reconcile_loop};
 pub use orchestrator::{
-    spawn_pipeline_a, spawn_pipeline_a_with_cache,
-    spawn_pipeline_b_full, spawn_pipeline_b_full_multi, PipelineAHandles,
-    PipelineAWorkerCounts, PipelineBFullHandles, PipelineBWorkerCounts,
+    spawn_pipeline_a, spawn_pipeline_a_with_cache, spawn_pipeline_b_full,
+    spawn_pipeline_b_full_multi, PipelineAHandles, PipelineAWorkerCounts, PipelineBFullHandles,
+    PipelineBWorkerCounts,
+};
+pub use project_resolver::{
+    const_resolver, project_code_from_chunk_id, ProjectCodeResolver, ProjectRegistrySnapshot,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::EnrolledFile;
-pub use notify_listener::{
-    spawn_chunk_pending_state_listener,
-    spawn_pending_reconcile_loop,
-};
-pub use stage_b1::{
-    load_embedding_dedup_cache,
-    ChunkForEmbedding, EmbeddingDedupCache,
-};
-pub use embedder_gpu::GpuB2Embedder;
-pub use project_resolver::{
-    const_resolver, project_code_from_chunk_id, ProjectCodeResolver, ProjectRegistrySnapshot,
-};
+pub use stage_b1::{load_embedding_dedup_cache, ChunkForEmbedding, EmbeddingDedupCache};
 pub use stage_b2::{spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::PersistedEmbedding;
 pub use tsv_worker::{spawn_tsv_workers, DrainStats, TsvWorkerConfig};

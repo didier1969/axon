@@ -116,9 +116,7 @@ impl PhantomRuleEngine {
 
             for pattern in &rule_file.meta.file_patterns {
                 if let Ok(re) = Regex::new(pattern) {
-                    engine
-                        .rules_by_pattern
-                        .push((re, compiled.clone()));
+                    engine.rules_by_pattern.push((re, compiled.clone()));
                 }
             }
         }
@@ -149,11 +147,7 @@ impl PhantomRuleEngine {
 pub fn init_global_engine(rules_dir: &Path) {
     match PhantomRuleEngine::load_rules_dir(rules_dir) {
         Ok(engine) => {
-            let count: usize = engine
-                .rules_by_extension
-                .values()
-                .map(|v| v.len())
-                .sum();
+            let count: usize = engine.rules_by_extension.values().map(|v| v.len()).sum();
             tracing::info!(
                 rules_count = count,
                 "Phantom symbol engine loaded from {}",
@@ -180,11 +174,7 @@ impl PhantomRuleEngine {
             return (Vec::new(), Vec::new());
         }
 
-        let file_id = format!(
-            "{}::{}",
-            project_code.unwrap_or("_"),
-            path.display()
-        );
+        let file_id = format!("{}::{}", project_code.unwrap_or("_"), path.display());
 
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
@@ -202,11 +192,7 @@ impl PhantomRuleEngine {
                     continue;
                 }
 
-                if rule
-                    .exclude_regexes
-                    .iter()
-                    .any(|ex| ex.is_match(&captured))
-                {
+                if rule.exclude_regexes.iter().any(|ex| ex.is_match(&captured)) {
                     continue;
                 }
 
@@ -223,10 +209,7 @@ impl PhantomRuleEngine {
                 }
                 seen.insert(dedup_key, true);
 
-                let line = content[..captures.get(0).unwrap().start()]
-                    .lines()
-                    .count()
-                    + 1;
+                let line = content[..captures.get(0).unwrap().start()].lines().count() + 1;
 
                 symbols.push(Symbol {
                     name: captured.clone(),
@@ -309,8 +292,7 @@ fn main() {
     let db = env::var("DATABASE_URL").unwrap();
 }
 "#;
-        let (symbols, relations) =
-            engine.extract(Path::new("src/main.rs"), content, Some("AXO"));
+        let (symbols, relations) = engine.extract(Path::new("src/main.rs"), content, Some("AXO"));
 
         assert_eq!(symbols.len(), 2);
         assert_eq!(symbols[0].name, "AXON_BRAIN_PORT");
@@ -319,7 +301,9 @@ fn main() {
 
         assert_eq!(relations.len(), 2);
         assert_eq!(relations[0].rel_type, "reads");
-        assert!(relations[0].to.contains("phantom::env_var::AXON_BRAIN_PORT"));
+        assert!(relations[0]
+            .to
+            .contains("phantom::env_var::AXON_BRAIN_PORT"));
     }
 
     #[test]
@@ -355,10 +339,12 @@ export AXON_BRAIN_PORT="44129"
 echo "Port is $AXON_BRAIN_PORT"
 nc -z localhost ${AXON_BRAIN_PORT}
 "#;
-        let (_, relations) =
-            engine.extract(Path::new("scripts/start.sh"), content, Some("AXO"));
+        let (_, relations) = engine.extract(Path::new("scripts/start.sh"), content, Some("AXO"));
 
-        let declares: Vec<_> = relations.iter().filter(|r| r.rel_type == "declares").collect();
+        let declares: Vec<_> = relations
+            .iter()
+            .filter(|r| r.rel_type == "declares")
+            .collect();
         let reads: Vec<_> = relations.iter().filter(|r| r.rel_type == "reads").collect();
 
         assert!(!declares.is_empty(), "should find DECLARES from export");
@@ -391,8 +377,7 @@ let a = env::var("DATABASE_URL").ok();
 let b = env::var("DATABASE_URL").ok();
 let c = env::var("DATABASE_URL").ok();
 "#;
-        let (_, relations) =
-            engine.extract(Path::new("src/lib.rs"), content, Some("AXO"));
+        let (_, relations) = engine.extract(Path::new("src/lib.rs"), content, Some("AXO"));
 
         assert_eq!(relations.len(), 1, "same phantom + same edge type = dedup");
     }
@@ -425,8 +410,7 @@ min_length = 4
     AXON_BRAIN_PORT = 44129;
     PHX_PORT = 44127;
 "#;
-        let (symbols, _) =
-            engine.extract(Path::new("devenv.nix"), content, Some("AXO"));
+        let (symbols, _) = engine.extract(Path::new("devenv.nix"), content, Some("AXO"));
 
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"AXON_BRAIN_PORT"));
@@ -474,12 +458,26 @@ SELECT s.name FROM Symbol s JOIN Edge e ON s.id = e.source_id WHERE e.relation_t
             engine.extract(Path::new("db/ddl/schema.sql"), content, Some("AXO"));
 
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"Node"), "should extract table from CREATE TABLE: got {:?}", names);
-        assert!(names.contains(&"Symbol"), "should extract table from FROM/JOIN: got {:?}", names);
+        assert!(
+            names.contains(&"Node"),
+            "should extract table from CREATE TABLE: got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"Symbol"),
+            "should extract table from FROM/JOIN: got {:?}",
+            names
+        );
 
-        let declares: Vec<_> = relations.iter().filter(|r| r.rel_type == "declares").collect();
+        let declares: Vec<_> = relations
+            .iter()
+            .filter(|r| r.rel_type == "declares")
+            .collect();
         let reads: Vec<_> = relations.iter().filter(|r| r.rel_type == "reads").collect();
-        assert!(!declares.is_empty(), "CREATE TABLE should produce DECLARES edge");
+        assert!(
+            !declares.is_empty(),
+            "CREATE TABLE should produce DECLARES edge"
+        );
         assert!(!reads.is_empty(), "SELECT FROM should produce READS edge");
     }
 
@@ -509,13 +507,28 @@ min_length = 10
 // REQ-AXO-345 — A2 in/out trace.
 // REQ-AXO-347 — defensive empty-file fast-path.
 "#;
-        let (symbols, relations) =
-            engine.extract(Path::new("src/pipeline_v2/stage_a2.rs"), content, Some("AXO"));
+        let (symbols, relations) = engine.extract(
+            Path::new("src/pipeline_v2/stage_a2.rs"),
+            content,
+            Some("AXO"),
+        );
 
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"CPT-AXO-054"), "should find CPT ref: got {:?}", names);
-        assert!(names.contains(&"REQ-AXO-345"), "should find REQ ref: got {:?}", names);
-        assert!(names.contains(&"REQ-AXO-347"), "should find REQ ref: got {:?}", names);
+        assert!(
+            names.contains(&"CPT-AXO-054"),
+            "should find CPT ref: got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"REQ-AXO-345"),
+            "should find REQ ref: got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"REQ-AXO-347"),
+            "should find REQ ref: got {:?}",
+            names
+        );
 
         assert!(symbols.iter().all(|s| s.kind == "soll_ref"));
         assert!(relations.iter().all(|r| r.rel_type == "implements"));

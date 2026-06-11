@@ -337,8 +337,8 @@ pub fn spawn_tsv_workers(store: Arc<GraphStore>, cfg: TsvWorkerConfig) -> Vec<Jo
                             "tsv worker drain failed"
                         );
                         tokio::time::sleep(Duration::from_millis(error_backoff_ms)).await;
-                        error_backoff_ms = (error_backoff_ms.saturating_mul(2))
-                            .min(ERROR_BACKOFF_MAX_MS);
+                        error_backoff_ms =
+                            (error_backoff_ms.saturating_mul(2)).min(ERROR_BACKOFF_MAX_MS);
                     }
                 }
             }
@@ -369,7 +369,10 @@ mod tests {
         assert_eq!(next_idle_backoff_ms(200), 400);
         assert_eq!(next_idle_backoff_ms(800), 1_600);
         assert_eq!(next_idle_backoff_ms(1_600), IDLE_BACKOFF_MAX_MS);
-        assert_eq!(next_idle_backoff_ms(IDLE_BACKOFF_MAX_MS), IDLE_BACKOFF_MAX_MS);
+        assert_eq!(
+            next_idle_backoff_ms(IDLE_BACKOFF_MAX_MS),
+            IDLE_BACKOFF_MAX_MS
+        );
         // Overflow-safe.
         assert_eq!(next_idle_backoff_ms(u64::MAX), IDLE_BACKOFF_MAX_MS);
     }

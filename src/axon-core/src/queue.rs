@@ -273,7 +273,9 @@ impl QueueStore {
             let cost = task.estimated_cost_bytes;
             state.queued_bytes = state.queued_bytes.saturating_sub(cost);
             state.inflight_bytes = state.inflight_bytes.saturating_add(cost);
-            state.inflight_tasks.insert(reservation_id.to_string(), task);
+            state
+                .inflight_tasks
+                .insert(reservation_id.to_string(), task);
         }
     }
 
@@ -400,10 +402,7 @@ impl QueueStore {
         if next_committed > state.budget_bytes {
             return Err(format!(
                 "Memory budget exhausted (queued={} inflight={} estimate={} budget={})",
-                state.queued_bytes,
-                state.inflight_bytes,
-                estimated_cost_bytes,
-                state.budget_bytes
+                state.queued_bytes, state.inflight_bytes, estimated_cost_bytes, state.budget_bytes
             ));
         }
 

@@ -139,12 +139,7 @@ impl McpServer {
             .iter()
             .find(|allowed| **allowed == selected)
             .copied()
-            .ok_or_else(|| {
-                anyhow!(
-                    "Relation `{}` not found in canonical policy",
-                    selected
-                )
-            })?;
+            .ok_or_else(|| anyhow!("Relation `{}` not found in canonical policy", selected))?;
 
         Ok((selected_static, policy))
     }
@@ -329,7 +324,13 @@ impl McpServer {
             snapshot
                 .edges
                 .iter()
-                .map(|e| (e.source_id.clone(), e.target_id.clone(), e.relation_type.clone()))
+                .map(|e| {
+                    (
+                        e.source_id.clone(),
+                        e.target_id.clone(),
+                        e.relation_type.clone(),
+                    )
+                })
                 .collect()
         } else {
             let rows_raw = self.graph_store.query_json(
@@ -338,7 +339,11 @@ impl McpServer {
             let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
             rows.into_iter()
                 .filter_map(|r| {
-                    if r.len() < 3 { None } else { Some((r[0].clone(), r[1].clone(), r[2].clone())) }
+                    if r.len() < 3 {
+                        None
+                    } else {
+                        Some((r[0].clone(), r[1].clone(), r[2].clone()))
+                    }
                 })
                 .collect()
         };
@@ -358,7 +363,8 @@ impl McpServer {
                 continue;
             }
 
-            let source_kind = match self.classify_endpoint_fast(source_id, snapshot_opt.as_deref()) {
+            let source_kind = match self.classify_endpoint_fast(source_id, snapshot_opt.as_deref())
+            {
                 Ok(kind) => kind,
                 Err(e) => {
                     violations.push(format!(
@@ -368,7 +374,8 @@ impl McpServer {
                     continue;
                 }
             };
-            let target_kind = match self.classify_endpoint_fast(target_id, snapshot_opt.as_deref()) {
+            let target_kind = match self.classify_endpoint_fast(target_id, snapshot_opt.as_deref())
+            {
                 Ok(kind) => kind,
                 Err(e) => {
                     violations.push(format!(
@@ -580,17 +587,13 @@ impl McpServer {
                 //     `allowed` field already inside policy_payload)
                 //   * reverse_canonical: when forbidden, the reverse
                 //     direction that IS canonical (alias for did_you_mean)
-                payload["canonical_direction"] = Value::from(format!(
-                    "{} -> {}",
-                    source_kind, target_kind
-                ));
+                payload["canonical_direction"] =
+                    Value::from(format!("{} -> {}", source_kind, target_kind));
                 payload["allowed_relation_types"] = payload
                     .get("allowed_relations")
                     .cloned()
                     .unwrap_or_else(|| Value::Array(vec![]));
-                payload["reverse_canonical"] = if payload["pair_allowed"]
-                    .as_bool()
-                    .unwrap_or(false)
+                payload["reverse_canonical"] = if payload["pair_allowed"].as_bool().unwrap_or(false)
                 {
                     Value::Null
                 } else {

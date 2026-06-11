@@ -429,23 +429,15 @@ pub(super) fn required_field_hint_for_artifact_kind(kind: &str) -> &'static str 
             "supply a document reference (file path or URL) — \
              accepted aliases: `artifact_ref`, `path`, `file_path`, `uri`"
         }
-        "Symbol" => {
-            "supply a canonical symbol id (e.g. `module::function`) in `artifact_ref`"
-        }
+        "Symbol" => "supply a canonical symbol id (e.g. `module::function`) in `artifact_ref`",
         "Test" => {
             "supply a qualified test path (e.g. `module::tests::test_name`) \
              or canonical test id in `artifact_ref`"
         }
         "Metric" => "supply a metric name or dashboard URL in `artifact_ref`",
-        "Validation" => {
-            "supply a canonical validation id (`VAL-CODE-NNN`) in `artifact_ref`"
-        }
-        "Rationale" => {
-            "supply rationale text or a document reference in `artifact_ref`"
-        }
-        "Diff" => {
-            "supply a commit SHA or a path to a `.diff` artifact in `artifact_ref`"
-        }
+        "Validation" => "supply a canonical validation id (`VAL-CODE-NNN`) in `artifact_ref`",
+        "Rationale" => "supply rationale text or a document reference in `artifact_ref`",
+        "Diff" => "supply a commit SHA or a path to a `.diff` artifact in `artifact_ref`",
         _ => "supply a non-empty `artifact_ref` value matching the artifact_type",
     }
 }
@@ -507,20 +499,11 @@ mod requirement_state_tests {
     #[test]
     fn active_statuses_need_full_coverage_to_be_done() {
         for status in ["current", "accepted"] {
-            assert_eq!(
-                requirement_state_from(status, "AC1: foo", 1, 0),
-                "done"
-            );
+            assert_eq!(requirement_state_from(status, "AC1: foo", 1, 0), "done");
             // Missing evidence → partial, not done.
-            assert_eq!(
-                requirement_state_from(status, "AC1: foo", 0, 0),
-                "partial"
-            );
+            assert_eq!(requirement_state_from(status, "AC1: foo", 0, 0), "partial");
             // Broken file evidence → partial.
-            assert_eq!(
-                requirement_state_from(status, "AC1: foo", 1, 1),
-                "partial"
-            );
+            assert_eq!(requirement_state_from(status, "AC1: foo", 1, 1), "partial");
         }
     }
 

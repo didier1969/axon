@@ -13,15 +13,17 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 #[cfg(test)]
 use anyhow::Context;
+use anyhow::Result;
 
 use crate::graph::GraphStore;
 
 /// Load all existing (chunk_id, source_hash) pairs from ChunkEmbedding
 /// for hydrating the embedding dedup cache at boot.
-pub fn load_embedding_dedup_cache(store: &GraphStore) -> Result<Arc<dashmap::DashMap<String, String>>> {
+pub fn load_embedding_dedup_cache(
+    store: &GraphStore,
+) -> Result<Arc<dashmap::DashMap<String, String>>> {
     let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
     let safe = model_id.replace('\'', "''");
     let raw = store.query_json_writer(&format!(
@@ -68,11 +70,10 @@ pub async fn b1_fetch_for_embedding(
 ) -> Result<Option<ChunkForEmbedding>> {
     let store_clone = store.clone();
     let id_for_block = chunk_id.clone();
-    let fetched = tokio::task::spawn_blocking(move || {
-        store_clone.fetch_chunk_for_embedding(&id_for_block)
-    })
-    .await
-    .context("B1 fetch task panicked or was cancelled")??;
+    let fetched =
+        tokio::task::spawn_blocking(move || store_clone.fetch_chunk_for_embedding(&id_for_block))
+            .await
+            .context("B1 fetch task panicked or was cancelled")??;
 
     Ok(fetched.map(|(content, content_hash)| ChunkForEmbedding {
         chunk_id,

@@ -180,9 +180,7 @@ impl McpServer {
             .map(|pairs| {
                 pairs
                     .into_iter()
-                    .map(|(name, count)| {
-                        (name, serde_json::Value::Number((count as i64).into()))
-                    })
+                    .map(|(name, count)| (name, serde_json::Value::Number((count as i64).into())))
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             })
             .unwrap_or_else(|| {
@@ -457,7 +455,10 @@ impl McpServer {
                 "needs_human_confirmation": true
             }));
         }
-        for phantom_ref in phantom_dead_refs.iter().take(if brief_mode { 5 } else { 10 }) {
+        for phantom_ref in phantom_dead_refs
+            .iter()
+            .take(if brief_mode { 5 } else { 10 })
+        {
             let (estimated_effort, estimated_risk) =
                 recommend_effort_and_risk("phantom_dead_ref", &json!({}));
             findings.push(json!({
@@ -476,7 +477,10 @@ impl McpServer {
                 "needs_human_confirmation": true
             }));
         }
-        for phantom_conflict in phantom_multi_declare.iter().take(if brief_mode { 5 } else { 10 }) {
+        for phantom_conflict in phantom_multi_declare
+            .iter()
+            .take(if brief_mode { 5 } else { 10 })
+        {
             let (estimated_effort, estimated_risk) =
                 recommend_effort_and_risk("phantom_multi_declare", &json!({}));
             findings.push(json!({

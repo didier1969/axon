@@ -53,11 +53,7 @@ async fn handle_livez() -> Response {
 async fn handle_readyz(Extension(server): Extension<Arc<McpServer>>) -> Response {
     let probe = tokio::task::spawn_blocking(move || server.execute_raw_sql("SELECT 1")).await;
     match probe {
-        Ok(Ok(_)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"state": "ready"})),
-        )
-            .into_response(),
+        Ok(Ok(_)) => (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response(),
         Ok(Err(e)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({

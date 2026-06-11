@@ -97,7 +97,9 @@ impl EmbedderLifecycle {
     /// happened (state changed from Sleeping to Ready).
     pub fn request_wake(&self) -> bool {
         self.last_used_ms.store(now_unix_ms(), Ordering::Release);
-        let prev = self.phase.swap(EmbedderPhase::Ready as u8, Ordering::AcqRel);
+        let prev = self
+            .phase
+            .swap(EmbedderPhase::Ready as u8, Ordering::AcqRel);
         if prev == EmbedderPhase::Sleeping as u8 {
             self.wake_count.fetch_add(1, Ordering::AcqRel);
             true

@@ -86,9 +86,9 @@ impl Args {
         while i < args.len() {
             match args[i].as_str() {
                 "--sweep-batches" => {
-                    let raw = args
-                        .get(i + 1)
-                        .ok_or_else(|| anyhow::anyhow!("--sweep-batches requires comma-separated list"))?;
+                    let raw = args.get(i + 1).ok_or_else(|| {
+                        anyhow::anyhow!("--sweep-batches requires comma-separated list")
+                    })?;
                     sweep_batches = raw
                         .split(',')
                         .map(|s| s.trim().parse::<usize>())
@@ -256,10 +256,12 @@ fn run() -> anyhow::Result<()> {
         args.source.display(),
         args.label
     );
-    eprintln!("   ORT_DYLIB_PATH={}",
+    eprintln!(
+        "   ORT_DYLIB_PATH={}",
         std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "<unset>".into())
     );
-    eprintln!("   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
+    eprintln!(
+        "   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
         std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap_or_else(|_| "<unset>".into())
     );
 
@@ -271,11 +273,7 @@ fn run() -> anyhow::Result<()> {
             args.workers,
         )?
     } else {
-        axon_core::embedder::run_embedder_throughput_bench(
-            &args.label,
-            texts,
-            args.force_gpu,
-        )?
+        axon_core::embedder::run_embedder_throughput_bench(&args.label, texts, args.force_gpu)?
     };
 
     match args.output {
@@ -312,14 +310,18 @@ fn run() -> anyhow::Result<()> {
             println!("   dim            {}", bench.embedding_dim);
             println!("   load_ms        {}", bench.load_ms);
             println!("   total_embed_ms {}", bench.total_embed_ms);
-            println!("     tokenize     {} ({}%)",
+            println!(
+                "     tokenize     {} ({}%)",
                 bench.tokenize_ms,
-                pct(bench.tokenize_ms, bench.total_embed_ms));
+                pct(bench.tokenize_ms, bench.total_embed_ms)
+            );
             println!("     host_prepare {}", bench.host_prepare_ms);
             println!("     input_copy   {}", bench.input_copy_ms);
-            println!("     inference    {} ({}%)",
+            println!(
+                "     inference    {} ({}%)",
                 bench.inference_ms,
-                pct(bench.inference_ms, bench.total_embed_ms));
+                pct(bench.inference_ms, bench.total_embed_ms)
+            );
             println!("     output_extract {}", bench.output_extract_ms);
             println!("     unaccounted  {}", unaccounted);
             println!("   chunks/sec     {:.2}", bench.chunks_per_second());
@@ -393,8 +395,14 @@ fn run_sustained_sweep(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
                 println!("  ── batch={} ──", bench.batch_size);
                 println!("     mean_ch_per_s   {:.2}", bench.mean_ch_per_s);
                 println!("     rolling_10s_min {:.2}", bench.rolling_10s_min);
-                println!("     p50 / p95       {:.2} / {:.2}", bench.p50_ch_per_s, bench.p95_ch_per_s);
-                println!("     iter_ms / gap   {:.2} / {:.2}", bench.mean_iter_ms, bench.mean_inter_iter_gap_ms);
+                println!(
+                    "     p50 / p95       {:.2} / {:.2}",
+                    bench.p50_ch_per_s, bench.p95_ch_per_s
+                );
+                println!(
+                    "     iter_ms / gap   {:.2} / {:.2}",
+                    bench.mean_iter_ms, bench.mean_inter_iter_gap_ms
+                );
                 println!("     total_chunks    {}", bench.total_chunks);
             }
         }
@@ -414,10 +422,12 @@ fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
         texts.len(),
         args.label
     );
-    eprintln!("   ORT_DYLIB_PATH={}",
+    eprintln!(
+        "   ORT_DYLIB_PATH={}",
         std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "<unset>".into())
     );
-    eprintln!("   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
+    eprintln!(
+        "   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
         std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap_or_else(|_| "<unset>".into())
     );
 
@@ -462,7 +472,10 @@ fn run_sustained(args: Args, texts: Vec<String>) -> anyhow::Result<()> {
             println!("   p50_ch_per_s   {:.2}", bench.p50_ch_per_s);
             println!("   p95_ch_per_s   {:.2}", bench.p95_ch_per_s);
             println!("   mean_iter_ms   {:.2}", bench.mean_iter_ms);
-            println!("   mean_inter_iter_gap_ms {:.2}  (← REQ-AXO-262 dispatch overhead)", bench.mean_inter_iter_gap_ms);
+            println!(
+                "   mean_inter_iter_gap_ms {:.2}  (← REQ-AXO-262 dispatch overhead)",
+                bench.mean_inter_iter_gap_ms
+            );
             println!("   dim            {}", bench.embedding_dim);
             // REQ-AXO-262 — iter-by-iter trace to expose bimodal distribution.
             println!("   iter_ch_per_s trace (first 30):");

@@ -40,7 +40,13 @@ fn seed_registry_counters_sql(project_code: &str) -> String {
         ("last_rev", "REV"),
     ]
     .iter()
-    .map(|(col, prefix)| format!("{col} = GREATEST({col}, {expr})", col = col, expr = max_for(prefix)))
+    .map(|(col, prefix)| {
+        format!(
+            "{col} = GREATEST({col}, {expr})",
+            col = col,
+            expr = max_for(prefix)
+        )
+    })
     .collect();
     format!(
         "UPDATE soll.Registry SET {assignments} WHERE project_code = '{project_code}'",
@@ -112,17 +118,17 @@ impl McpServer {
             if let Ok(codes) = self.query_single_column(
                 "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code ASC",
             ) {
-                let codes: Vec<String> = codes
-                    .into_iter()
-                    .filter(|v| !v.trim().is_empty())
-                    .collect();
+                let codes: Vec<String> =
+                    codes.into_iter().filter(|v| !v.trim().is_empty()).collect();
                 if codes.len() == 1 {
                     return Ok(codes.into_iter().next().unwrap());
                 }
                 if codes.len() > 1 {
                     // Try matching AXON_PROJECT_ROOT or cwd against registered project paths.
                     let search_path = std::env::var("AXON_PROJECT_ROOT")
-                        .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
+                        .or_else(|_| {
+                            std::env::current_dir().map(|p| p.to_string_lossy().to_string())
+                        })
                         .unwrap_or_default();
                     if !search_path.is_empty() {
                         let cwd_escaped = escape_sql(&search_path);
@@ -209,12 +215,7 @@ impl McpServer {
             .file_name()
             .map(|value| value.to_string_lossy().trim().to_string())
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow!(
-                    "Cannot derive project name from path `{}`",
-                    project_path
-                )
-            })
+            .ok_or_else(|| anyhow!("Cannot derive project name from path `{}`", project_path))
     }
 
     fn split_project_name_parts(&self, raw: &str) -> Vec<String> {
@@ -452,9 +453,7 @@ impl McpServer {
     ) -> serde_json::Value {
         let registered: Vec<String> = self
             .graph_store
-            .query_json(
-                "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code",
-            )
+            .query_json("SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code")
             .ok()
             .and_then(|s| serde_json::from_str::<Vec<Vec<String>>>(&s).ok())
             .map(|rows| {
@@ -605,8 +604,7 @@ impl McpServer {
                     .unwrap_or("")
             )
         } else {
-            "No canonical project found in ProjectCodeRegistry for the given criteria."
-                .to_string()
+            "No canonical project found in ProjectCodeRegistry for the given criteria.".to_string()
         };
 
         Some(serde_json::json!({
@@ -687,8 +685,8 @@ mod tests_req_axo_323 {
     fn seed_sql_targets_all_eleven_counters_with_greatest_idempotence() {
         let sql = seed_registry_counters_sql("AXO");
         for col in [
-            "last_vis", "last_pil", "last_req", "last_cpt", "last_dec", "last_mil",
-            "last_val", "last_stk", "last_gui", "last_prv", "last_rev",
+            "last_vis", "last_pil", "last_req", "last_cpt", "last_dec", "last_mil", "last_val",
+            "last_stk", "last_gui", "last_prv", "last_rev",
         ] {
             let pattern = format!("{col} = GREATEST({col},");
             assert!(
@@ -701,14 +699,22 @@ mod tests_req_axo_323 {
     #[test]
     fn seed_sql_filters_by_canonical_id_regex_and_scoped_project_code() {
         let sql = seed_registry_counters_sql("AXO");
-        assert!(sql.contains("project_code = 'AXO'"), "project_code scope missing: {sql}");
+        assert!(
+            sql.contains("project_code = 'AXO'"),
+            "project_code scope missing: {sql}"
+        );
         assert!(
             sql.contains("id ~ '^[A-Z]{3}-[A-Z][A-Z0-9]{2}-[0-9]+$'"),
             "canonical id regex missing: {sql}"
         );
-        for prefix in ["VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "PRV", "REV"] {
+        for prefix in [
+            "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "PRV", "REV",
+        ] {
             let like = format!("id LIKE '{prefix}-%'");
-            assert!(sql.contains(&like), "missing prefix filter for {prefix}: {sql}");
+            assert!(
+                sql.contains(&like),
+                "missing prefix filter for {prefix}: {sql}"
+            );
         }
     }
 

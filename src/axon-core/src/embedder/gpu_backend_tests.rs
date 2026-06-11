@@ -108,7 +108,10 @@ fn bucket_up_passthrough_when_buckets_empty() {
 
 #[test]
 fn parse_seq_buckets_defaults_to_canonical_list() {
-    assert_eq!(parse_seq_buckets_from_env(None), DEFAULT_SEQ_BUCKETS.to_vec());
+    assert_eq!(
+        parse_seq_buckets_from_env(None),
+        DEFAULT_SEQ_BUCKETS.to_vec()
+    );
 }
 
 #[test]

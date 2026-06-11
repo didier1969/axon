@@ -124,7 +124,10 @@ mod tests {
     #[test]
     fn project_code_from_chunk_id_returns_none_on_malformed_input() {
         assert_eq!(project_code_from_chunk_id(""), None);
-        assert_eq!(project_code_from_chunk_id("no_delimiter_at_all"), Some("no_delimiter_at_all"));
+        assert_eq!(
+            project_code_from_chunk_id("no_delimiter_at_all"),
+            Some("no_delimiter_at_all")
+        );
         // Empty leading segment is rejected — a stray `::name` is not a
         // valid project_code prefix.
         assert_eq!(project_code_from_chunk_id("::bad::chunk"), None);
@@ -139,13 +142,20 @@ mod tests {
             ("BBB".into(), "/home/u/projects/a/b".into()),
         ]);
         // The deepest (most specific) registered project wins.
-        assert_eq!(snap.resolve(Path::new("/home/u/projects/a/b/src/f.rs")), Some("BBB"));
-        assert_eq!(snap.resolve(Path::new("/home/u/projects/a/x.rs")), Some("AAA"));
+        assert_eq!(
+            snap.resolve(Path::new("/home/u/projects/a/b/src/f.rs")),
+            Some("BBB")
+        );
+        assert_eq!(
+            snap.resolve(Path::new("/home/u/projects/a/x.rs")),
+            Some("AAA")
+        );
     }
 
     #[test]
     fn snapshot_returns_none_outside_all_projects() {
-        let snap = ProjectRegistrySnapshot::from_rows([("AAA".into(), "/home/u/projects/a".into())]);
+        let snap =
+            ProjectRegistrySnapshot::from_rows([("AAA".into(), "/home/u/projects/a".into())]);
         assert_eq!(snap.resolve(Path::new("/tmp/elsewhere.rs")), None);
         // Component-wise: a sibling sharing a string prefix must NOT match.
         assert_eq!(snap.resolve(Path::new("/home/u/projects/ab/f.rs")), None);
@@ -159,16 +169,17 @@ mod tests {
             ("AXO".into(), "/home/u/projects/axon".into()),
         ]);
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap.resolve(Path::new("/home/u/projects/axon/src/f.rs")), Some("AXO"));
+        assert_eq!(
+            snap.resolve(Path::new("/home/u/projects/axon/src/f.rs")),
+            Some("AXO")
+        );
     }
 
     #[test]
     fn snapshot_into_resolver_returns_unk_sentinel_for_unmatched() {
-        let r = ProjectRegistrySnapshot::from_rows([(
-            "AXO".into(),
-            "/home/u/projects/axon".into(),
-        )])
-        .into_resolver();
+        let r =
+            ProjectRegistrySnapshot::from_rows([("AXO".into(), "/home/u/projects/axon".into())])
+                .into_resolver();
         assert_eq!(r(Path::new("/home/u/projects/axon/x.rs")), "AXO");
         assert_eq!(r(Path::new("/tmp/foo.rs")), "UNK");
     }

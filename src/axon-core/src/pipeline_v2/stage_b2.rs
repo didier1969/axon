@@ -90,7 +90,9 @@ pub async fn b2_embed(
         let texts = vec![content];
         let mut out = embedder_for_block.embed_batch(&texts)?;
         if out.is_empty() {
-            return Err(anyhow::anyhow!("B2: embedder returned 0 embeddings for 1 input"));
+            return Err(anyhow::anyhow!(
+                "B2: embedder returned 0 embeddings for 1 input"
+            ));
         }
         Ok(out.remove(0))
     })
@@ -156,10 +158,8 @@ pub fn spawn_b2_batched_worker(
                 let recv_started = Instant::now();
                 match tokio::time::timeout(remaining, rx.recv()).await {
                     Ok(Some(item)) => {
-                        let recv_us = recv_started
-                            .elapsed()
-                            .as_micros()
-                            .min(u128::from(u64::MAX)) as u64;
+                        let recv_us =
+                            recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         metrics.record_recv_wait(recv_us);
                         batch.push(item);
                     }
@@ -169,10 +169,8 @@ pub fn spawn_b2_batched_worker(
                         break;
                     }
                     Err(_) => {
-                        let recv_us = recv_started
-                            .elapsed()
-                            .as_micros()
-                            .min(u128::from(u64::MAX)) as u64;
+                        let recv_us =
+                            recv_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         metrics.record_recv_wait(recv_us);
                         break;
                     }
@@ -185,15 +183,12 @@ pub fn spawn_b2_batched_worker(
             let texts: Vec<String> = batch.iter().map(|p| p.content.clone()).collect();
             let embedder_clone = embedder.clone();
             let started = Instant::now();
-            let join_result = tokio::task::spawn_blocking(move || {
-                embedder_clone.embed_batch(&texts)
-            })
-            .await;
+            let join_result =
+                tokio::task::spawn_blocking(move || embedder_clone.embed_batch(&texts)).await;
 
             match join_result {
                 Ok(Ok(embeddings)) if embeddings.len() == batch.len() => {
-                    let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
-                        as u64;
+                    let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                     let per_item_us = elapsed_us / (batch.len() as u64).max(1);
                     // Slice 7 dashboard fix — record throughput sample for
                     // the sliding-window rate widget (chunks/sec live).
@@ -484,11 +479,20 @@ mod tests {
 
         // No output should arrive (all failed).
         let maybe = tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await;
-        assert!(maybe.is_err() || maybe.unwrap().is_none(), "failed batch must not produce output");
+        assert!(
+            maybe.is_err() || maybe.unwrap().is_none(),
+            "failed batch must not produce output"
+        );
 
         let snap = metrics.snapshot();
-        assert_eq!(snap.errors_total, 4, "all 4 items must be counted as errors");
-        assert!(embedder.call_count.load(Ordering::SeqCst) >= 1, "embedder was called");
+        assert_eq!(
+            snap.errors_total, 4,
+            "all 4 items must be counted as errors"
+        );
+        assert!(
+            embedder.call_count.load(Ordering::SeqCst) >= 1,
+            "embedder was called"
+        );
 
         // Send another batch to prove the worker survived the failure.
         drop(in_tx);

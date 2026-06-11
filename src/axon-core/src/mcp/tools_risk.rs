@@ -64,7 +64,14 @@ impl McpServer {
         project: Option<&str>,
     ) -> Option<String> {
         let radius = depth.clamp(1, 2);
-        let columns = ["Target Type", "Target ID", "Link Type", "Distance", "Label", "URI"];
+        let columns = [
+            "Target Type",
+            "Target ID",
+            "Link Type",
+            "Distance",
+            "Label",
+            "URI",
+        ];
 
         // REQ-AXO-901884 / feedback_trimodal_use_ram_graph_not_pg — RAM-first
         // (PIL-AXO-9002): when the per-project CSR is warm, derive the local
@@ -178,12 +185,7 @@ impl McpServer {
         let query_outcome: Result<String, anyhow::Error> = if ram_attempted {
             surfaces_used.push("graph_ram");
             surfaces_degraded.push("inferred_bridge_edges_unavailable_in_ram_v1");
-            Ok(self.build_impact_rows_from_ram(
-                &view,
-                project.unwrap_or(""),
-                &target_id,
-                depth,
-            ))
+            Ok(self.build_impact_rows_from_ram(&view, project.unwrap_or(""), &target_id, depth))
         } else {
             surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
@@ -391,11 +393,8 @@ impl McpServer {
                 });
                 // REQ-AXO-901753 — SRS slice 3: legacy proximity from
                 // target + impacted symbols.
-                let legacy_proximity_value = self.detect_impact_legacy_proximity(
-                    project,
-                    &target_id,
-                    &impacted_symbol_ids,
-                );
+                let legacy_proximity_value =
+                    self.detect_impact_legacy_proximity(project, &target_id, &impacted_symbol_ids);
 
                 // REQ-AXO-91512 — tri-modal envelope (GUI-AXO-1003).
                 let total_available = impact_radius as u64;
@@ -913,12 +912,9 @@ impl McpServer {
             surfaces_degraded.push("graph_ram_unavailable");
             let depth_i = depth.clamp(1, 10) as i64;
             let safe_target = target_id.replace('\'', "''");
-            let sql = format!(
-                "SELECT count(*) FROM ist.callers_of('{safe_target}', {depth_i}, NULL)"
-            );
-            self.graph_store
-                .query_count(&sql)
-                .unwrap_or(0)
+            let sql =
+                format!("SELECT count(*) FROM ist.callers_of('{safe_target}', {depth_i}, NULL)");
+            self.graph_store.query_count(&sql).unwrap_or(0)
         };
 
         let report = format!(
@@ -927,9 +923,14 @@ impl McpServer {
             format_standard_contract(
                 "ok",
                 "mutation blast-radius estimated",
-                &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
+                &project
+                    .map(|p| format!("project:{}", p))
+                    .unwrap_or_else(|| "workspace:*".to_string()),
                 &evidence_by_mode(
-                    &format!("Modifying '{}' will cascade-impact ~{} components in the architecture.", symbol, count),
+                    &format!(
+                        "Modifying '{}' will cascade-impact ~{} components in the architecture.",
+                        symbol, count
+                    ),
                     mode,
                 ),
                 &["review impact output for precise affected components"],
@@ -1031,10 +1032,26 @@ impl McpServer {
         let mut meta_by_id: std::collections::HashMap<String, (String, String, String)> =
             std::collections::HashMap::new();
         for row in &lookup_rows {
-            let id = row.first().and_then(Value::as_str).unwrap_or("").to_string();
-            let name = row.get(1).and_then(Value::as_str).unwrap_or("-").to_string();
-            let kind = row.get(2).and_then(Value::as_str).unwrap_or("-").to_string();
-            let proj = row.get(3).and_then(Value::as_str).unwrap_or("unknown").to_string();
+            let id = row
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = row
+                .get(1)
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_string();
+            let kind = row
+                .get(2)
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_string();
+            let proj = row
+                .get(3)
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
             if !id.is_empty() {
                 meta_by_id.insert(id, (name, kind, proj));
             }

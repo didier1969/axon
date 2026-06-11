@@ -42,9 +42,7 @@ const CPU_QUERY_QUEUE_DEPTH: usize = 8;
 /// not own a GPU subprocess (brain_only, indexer_graph). No-op for
 /// indexer_vector / indexer_full where the SemanticWorkerPool spawns
 /// its own GPU-backed worker via the canonical pipeline.
-pub(crate) fn spawn_brain_query_worker_if_needed(
-    mode: crate::runtime_mode::AxonRuntimeMode,
-) {
+pub(crate) fn spawn_brain_query_worker_if_needed(mode: crate::runtime_mode::AxonRuntimeMode) {
     if mode.semantic_workers_enabled() {
         return;
     }

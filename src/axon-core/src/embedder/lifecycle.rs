@@ -197,7 +197,10 @@ mod tests {
         // DB says nothing is orphaned → wholesale replace with empty truth.
         state.hydrate_from_db_rows(Vec::<String>::new());
         assert_eq!(state.pending_count(), 0);
-        assert!(state.is_empty(), "phantom pending must be purged so should_sleep can fire");
+        assert!(
+            state.is_empty(),
+            "phantom pending must be purged so should_sleep can fire"
+        );
     }
 
     #[test]
@@ -212,7 +215,9 @@ mod tests {
         assert_eq!(state.pending_count(), 2);
         assert!(state.pending_subset(&["phantom-leaked".into()]).is_empty());
         assert_eq!(
-            state.pending_subset(&["genuine-1".into(), "genuine-2".into()]).len(),
+            state
+                .pending_subset(&["genuine-1".into(), "genuine-2".into()])
+                .len(),
             2
         );
     }
@@ -223,14 +228,12 @@ mod tests {
         state.mark_pending("b");
         state.mark_pending("a");
         state.mark_pending("c");
-        let result = state.pending_subset(&[
-            "x".into(),
-            "a".into(),
-            "y".into(),
-            "b".into(),
-            "c".into(),
-        ]);
-        assert_eq!(result, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        let result =
+            state.pending_subset(&["x".into(), "a".into(), "y".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            result,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

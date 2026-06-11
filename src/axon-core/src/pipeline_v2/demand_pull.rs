@@ -64,7 +64,6 @@ pub struct DemandPullSnapshot {
     pub skipped_above_threshold: u64,
 }
 
-
 /// Adaptive demand-pull backoff floor (active drain cadence) — published to
 /// `runtime_config_snapshot` so the dashboard reports the real value, not a
 /// hardcoded literal. After a productive pull the loop resets to this.
@@ -104,8 +103,15 @@ pub fn spawn_pipeline_b_demand_pull(
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match demand_pull_b_loop(&store, &database_url, &b_chunks_tx, threshold, batch_size, &metrics_clone)
-                .await
+            match demand_pull_b_loop(
+                &store,
+                &database_url,
+                &b_chunks_tx,
+                threshold,
+                batch_size,
+                &metrics_clone,
+            )
+            .await
             {
                 Ok(()) => {
                     warn!("demand-pull B: LISTEN loop exited cleanly; reconnecting");
@@ -231,9 +237,7 @@ async fn demand_pull_b_loop(
         .await
         .context("demand-pull B: LISTEN failed")?;
 
-    info!(
-        "demand-pull B: active (threshold={threshold}, batch={batch_size})"
-    );
+    info!("demand-pull B: active (threshold={threshold}, batch={batch_size})");
 
     let mut consecutive_empty = 0u32;
     let safety_interval = Duration::from_secs(SAFETY_POLL_SECS);
@@ -393,7 +397,9 @@ async fn pull_and_feed_b(
 ) -> PullBatch {
     let in_flight = b_chunks_tx.max_capacity() - b_chunks_tx.capacity();
     if in_flight >= threshold {
-        metrics.skipped_above_threshold.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .skipped_above_threshold
+            .fetch_add(1, Ordering::Relaxed);
         return PullBatch { fed: 0, head: None };
     }
 
@@ -432,7 +438,9 @@ async fn pull_and_feed_b(
                 }
                 sent += 1;
             }
-            metrics.items_fed_total.fetch_add(sent as u64, Ordering::Relaxed);
+            metrics
+                .items_fed_total
+                .fetch_add(sent as u64, Ordering::Relaxed);
             *consecutive_empty = 0;
             if sent > 0 {
                 info!("demand-pull B: fed {sent}/{count} chunks (in_flight={in_flight}/{threshold}, backpressured by B2)");
@@ -532,7 +540,10 @@ mod tests {
         // pipeline-A claim machinery (retry_count poison-pill / claim window).
         // demand_pull is now B-side only; the live consts below are what remain.
         assert!(SAFETY_POLL_SECS >= 10, "safety poll must be at least 10s");
-        assert!(IDLE_THRESHOLD >= 3, "idle detection needs at least 3 empty pulls");
+        assert!(
+            IDLE_THRESHOLD >= 3,
+            "idle detection needs at least 3 empty pulls"
+        );
         // REQ-AXO-901810 G7 — coalesce must be small enough that it
         // does not perceptibly slow steady-state replenishment, but
         // large enough to actually catch inotify bursts. 10ms < x <
@@ -556,7 +567,10 @@ mod tests {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
         assert!(first, "first caller must acquire the idle guard");
-        assert!(!second, "second caller must be rejected while the cycle is active");
+        assert!(
+            !second,
+            "second caller must be rejected while the cycle is active"
+        );
         // Release and verify the guard is reusable.
         guard.store(false, Ordering::Release);
         let third = guard
@@ -585,5 +599,4 @@ mod tests {
         }
         assert_eq!(drained, 32, "all burst events must drain in one cycle");
     }
-
 }

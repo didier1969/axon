@@ -4,11 +4,7 @@ use super::*;
 // inference/mutation.rs (REQ-AXO-139 follow-up). Five internal-error
 // stages share the same structured-recovery shape so the LLM can route on
 // `data.parameter_repair.{stage, target_id?, follow_up_tools, hint}`.
-fn entrench_internal_error_response(
-    stage: &str,
-    target_id: Option<&str>,
-    err: &str,
-) -> Value {
+fn entrench_internal_error_response(stage: &str, target_id: Option<&str>, err: &str) -> Value {
     let text = match target_id {
         Some(id) => format!("Entrenchment {} failed for `{}`: {}", stage, id, err),
         None => format!("Entrenchment {} failed: {}", stage, err),
@@ -297,50 +293,50 @@ impl McpServer {
                 // (REQ-AXO-91501 slice 2 dependency).
                 let total_available = inference.impacted_candidates.len() as u64;
                 Some(json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!(
-                        "Assistive SOLL inference for `{}` suggests `{}` with {} impacted candidate(s).",
-                        inference.project_code,
-                        inference.proposed_operation_kind,
-                        inference.impacted_candidates.len()
-                    )
-                }],
-                "data": {
-                    "project_code": inference.project_code,
-                    "statement": inference.statement,
-                    "candidate_entity_type": inference.candidate_entity_type,
-                    "proposed_operation_kind": inference.proposed_operation_kind,
-                    "confidence": inference.confidence,
-                    "target_ids": inference.target_ids,
-                    "impacted_candidates": inference.impacted_candidates.iter().map(|candidate| json!({
-                        "id": candidate.id,
-                        "entity_type": candidate.entity_type,
-                        "title": candidate.title,
-                        "score": candidate.score,
-                        "reasons": candidate.reasons
-                    })).collect::<Vec<_>>(),
-                    "ambiguity_warnings": inference.ambiguity_warnings,
-                    "next_best_actions": if inference.impacted_candidates.is_empty() {
-                        vec![
-                            "inspect the current SOLL context and choose explicit target_ids".to_string(),
-                            "create or update canonical nodes manually with `soll_manager` if the nuance truly requires a new entity".to_string()
-                        ]
-                    } else {
-                        vec![
-                            "confirm the target_ids and call `entrench_nuance` with `confirm=true`".to_string(),
-                            "override target_ids explicitly if the proposed scope is too broad".to_string()
-                        ]
-                    },
-                    "surfaces_used": ["soll_pg"],
-                    "total_available": total_available,
-                    "next_call_hint": if inference.impacted_candidates.is_empty() {
-                        "soll_query_context project_code=<code> to inspect candidates manually"
-                    } else {
-                        "entrench_nuance with confirm=true once target_ids reviewed"
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Assistive SOLL inference for `{}` suggests `{}` with {} impacted candidate(s).",
+                            inference.project_code,
+                            inference.proposed_operation_kind,
+                            inference.impacted_candidates.len()
+                        )
+                    }],
+                    "data": {
+                        "project_code": inference.project_code,
+                        "statement": inference.statement,
+                        "candidate_entity_type": inference.candidate_entity_type,
+                        "proposed_operation_kind": inference.proposed_operation_kind,
+                        "confidence": inference.confidence,
+                        "target_ids": inference.target_ids,
+                        "impacted_candidates": inference.impacted_candidates.iter().map(|candidate| json!({
+                            "id": candidate.id,
+                            "entity_type": candidate.entity_type,
+                            "title": candidate.title,
+                            "score": candidate.score,
+                            "reasons": candidate.reasons
+                        })).collect::<Vec<_>>(),
+                        "ambiguity_warnings": inference.ambiguity_warnings,
+                        "next_best_actions": if inference.impacted_candidates.is_empty() {
+                            vec![
+                                "inspect the current SOLL context and choose explicit target_ids".to_string(),
+                                "create or update canonical nodes manually with `soll_manager` if the nuance truly requires a new entity".to_string()
+                            ]
+                        } else {
+                            vec![
+                                "confirm the target_ids and call `entrench_nuance` with `confirm=true`".to_string(),
+                                "override target_ids explicitly if the proposed scope is too broad".to_string()
+                            ]
+                        },
+                        "surfaces_used": ["soll_pg"],
+                        "total_available": total_available,
+                        "next_call_hint": if inference.impacted_candidates.is_empty() {
+                            "soll_query_context project_code=<code> to inspect candidates manually"
+                        } else {
+                            "entrench_nuance with confirm=true once target_ids reviewed"
+                        }
                     }
-                }
-            }))
+                }))
             }
             Err(error) => Some(entrench_internal_error_response(
                 "inference",

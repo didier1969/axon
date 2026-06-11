@@ -113,8 +113,7 @@ async fn listen_once(database_url: &str) -> Result<()> {
         };
         let mut projects: HashSet<String> = HashSet::new();
         push_payload(&first.payload(), &mut projects);
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(COALESCE_WINDOW_MS);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(COALESCE_WINDOW_MS);
         while let Ok(maybe) = tokio::time::timeout_at(deadline, notify_rx.recv()).await {
             match maybe {
                 Some(n) => push_payload(&n.payload(), &mut projects),
@@ -181,7 +180,10 @@ mod tests {
     #[test]
     fn push_payload_ignores_empty_project_code() {
         let mut set = HashSet::new();
-        push_payload(r#"{"op":"insert","project_code":"","table":"edge"}"#, &mut set);
+        push_payload(
+            r#"{"op":"insert","project_code":"","table":"edge"}"#,
+            &mut set,
+        );
         assert!(set.is_empty());
     }
 

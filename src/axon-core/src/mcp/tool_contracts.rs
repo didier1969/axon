@@ -209,8 +209,7 @@ pub(crate) fn classify_pg_undefined(raw: &str) -> Option<&'static str> {
 /// `JOIN` clause so the repair can inline each one's real columns. De-duplicated,
 /// lower-cased, capped at 4. Pure (no DB) so the parsing is unit-testable.
 pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
-    let Ok(re) =
-        regex::Regex::new(r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)")
+    let Ok(re) = regex::Regex::new(r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)")
     else {
         return Vec::new();
     };
@@ -282,12 +281,21 @@ mod tests {
         let schema = derived_input_schema("soll_manager").unwrap();
         let required = schema["required"].as_array().unwrap();
         for field in ["action", "entity", "data"] {
-            assert!(required.iter().any(|v| v == field), "missing required {field}");
+            assert!(
+                required.iter().any(|v| v == field),
+                "missing required {field}"
+            );
         }
         // `data` resolves (directly or via $ref/$defs) to a schema carrying the
         // canonical field names — the win over the prose blob.
         let rendered = serde_json::to_string(&schema).unwrap();
-        for field in ["project_code", "attach_to", "relation_type", "source_id", "target_id"] {
+        for field in [
+            "project_code",
+            "attach_to",
+            "relation_type",
+            "source_id",
+            "target_id",
+        ] {
             assert!(rendered.contains(field), "data schema must mention {field}");
         }
     }
@@ -302,9 +310,7 @@ mod tests {
     fn classify_pg_undefined_column_and_table() {
         // The exact PG error the LLM hit in session 75.
         assert_eq!(
-            classify_pg_undefined(
-                r#"db error — column "kind" does not exist [SQLSTATE 42703]"#
-            ),
+            classify_pg_undefined(r#"db error — column "kind" does not exist [SQLSTATE 42703]"#),
             Some("undefined_column")
         );
         assert_eq!(
@@ -312,7 +318,10 @@ mod tests {
             Some("undefined_table")
         );
         // Unrelated errors are left to the raw passthrough.
-        assert_eq!(classify_pg_undefined("syntax error at or near \"SELEC\""), None);
+        assert_eq!(
+            classify_pg_undefined("syntax error at or near \"SELEC\""),
+            None
+        );
         assert_eq!(classify_pg_undefined("permission denied for table x"), None);
     }
 
@@ -333,7 +342,9 @@ mod tests {
         );
         // soll.node appears twice → deduped to one.
         assert_eq!(
-            rels.iter().filter(|(s, t)| s == "soll" && t == "node").count(),
+            rels.iter()
+                .filter(|(s, t)| s == "soll" && t == "node")
+                .count(),
             1
         );
         assert!(rels.contains(&("ist".to_string(), "symbol".to_string())));
@@ -394,6 +405,9 @@ mod tests {
             .find(|t| t["name"].as_str() == Some("soll_manager"))
             .unwrap();
         let rendered = serde_json::to_string(&soll["inputSchema"]).unwrap();
-        assert!(rendered.contains("relation_type"), "data fields must be advertised");
+        assert!(
+            rendered.contains("relation_type"),
+            "data fields must be advertised"
+        );
     }
 }

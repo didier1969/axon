@@ -209,7 +209,9 @@ pub(super) fn score_node(
         let bonus = (centrality * 100.0).round() as i64;
         if bonus > 0 {
             score += bonus;
-            reasons.push(format!("centrality bonus +{bonus} (PageRank {centrality:.3})"));
+            reasons.push(format!(
+                "centrality bonus +{bonus} (PageRank {centrality:.3})"
+            ));
         }
     }
 
@@ -346,10 +348,7 @@ mod tests {
     #[test]
     fn delivered_superseded_completed_archived_are_terminal() {
         for status in ["delivered", "superseded", "completed", "archived"] {
-            assert!(
-                is_terminal_status(status),
-                "`{status}` must be terminal"
-            );
+            assert!(is_terminal_status(status), "`{status}` must be terminal");
         }
     }
 

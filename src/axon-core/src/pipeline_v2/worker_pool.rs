@@ -74,8 +74,8 @@ pub fn spawn_stage_workers<I, O, F, Fut>(
                 let started = Instant::now();
                 match work(item).await {
                     Ok(out) => {
-                        let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX))
-                            as u64;
+                        let elapsed_us =
+                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         metrics.record_finished(elapsed_us);
                         if tx.capacity() == 0 {
                             metrics.record_backpressure_block();
@@ -190,7 +190,7 @@ mod tests {
         // exits on `None` rapidly. We only assert non-decreasing snapshot.
         let _ = snap.t_recv_total_us; // smoke-test field exists
         let _ = snap.t_send_total_us; // smoke-test field exists
-        // Sum should respect monotonicity invariant.
+                                      // Sum should respect monotonicity invariant.
         assert!(
             snap.t_recv_total_us + snap.t_work_total_us + snap.t_send_total_us > 0,
             "at least one temporal counter must register a non-zero μs"

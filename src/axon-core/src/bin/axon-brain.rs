@@ -1,4 +1,6 @@
-fn main() -> anyhow::Result<()> { axon_core::runtime_boot::run_brain() }
+fn main() -> anyhow::Result<()> {
+    axon_core::runtime_boot::run_brain()
+}
 
 #[cfg(test)]
 mod tests {

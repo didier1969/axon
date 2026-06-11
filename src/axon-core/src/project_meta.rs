@@ -438,8 +438,11 @@ mod tests {
         let project_dir = tmp_root.join("sample");
         let meta_dir = project_dir.join(".axon");
         fs::create_dir_all(&meta_dir).expect("create meta dir");
-        fs::write(meta_dir.join("meta.json"), r#"{"code":"TST","name":"req172-test"}"#)
-            .expect("write meta.json");
+        fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"code":"TST","name":"req172-test"}"#,
+        )
+        .expect("write meta.json");
 
         let prior_watch = std::env::var("AXON_WATCH_DIR").ok();
         let prior_projects = std::env::var("AXON_PROJECTS_ROOT").ok();

@@ -29,9 +29,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::embedder::lifecycle_machine::{
-    process_lifecycle, spawn_idle_watchdog, EmbedderPhase,
-};
+use crate::embedder::lifecycle_machine::{process_lifecycle, spawn_idle_watchdog, EmbedderPhase};
 use crate::embedder::{embed_texts_with_breakdown_ort, OrtGpuFirstTextEmbedding};
 
 use super::stage_b2::B2Embedder;
@@ -164,7 +162,8 @@ impl B2Embedder for GpuB2Embedder {
                 phase = ?process_lifecycle().phase(),
                 "GpuB2Embedder waking from sleep ; reloading session"
             );
-            let model = OrtGpuFirstTextEmbedding::try_new(&self.lane, self.worker_idx, self.use_cuda)?;
+            let model =
+                OrtGpuFirstTextEmbedding::try_new(&self.lane, self.worker_idx, self.use_cuda)?;
             *guard = Some(model);
         }
         // Bump last_used_ms and flip phase to Ready on every embed.
@@ -172,8 +171,14 @@ impl B2Embedder for GpuB2Embedder {
         let _was_sleeping = process_lifecycle().request_wake();
         // SAFETY of unwrap : we just ensured guard is Some.
         let model = guard.as_mut().expect("session just ensured Some");
-        let (embeddings, _tokenize_ms, _host_prepare_ms, _input_copy_ms, _inference_ms, _output_extract_ms) =
-            embed_texts_with_breakdown_ort(&mut *model, texts)?;
+        let (
+            embeddings,
+            _tokenize_ms,
+            _host_prepare_ms,
+            _input_copy_ms,
+            _inference_ms,
+            _output_extract_ms,
+        ) = embed_texts_with_breakdown_ort(&mut *model, texts)?;
         // Belt-and-braces : after a successful embed, the phase must
         // be Ready. (The `request_wake` above already set it.)
         debug_assert_eq!(process_lifecycle().phase(), EmbedderPhase::Ready);

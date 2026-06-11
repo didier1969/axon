@@ -165,11 +165,7 @@ pub fn shortest_path(
     None
 }
 
-fn reconstruct_path(
-    end: u32,
-    parent: &HashMap<u32, Option<u32>>,
-    graph: &IstGraph,
-) -> Vec<String> {
+fn reconstruct_path(end: u32, parent: &HashMap<u32, Option<u32>>, graph: &IstGraph) -> Vec<String> {
     let mut chain: Vec<u32> = Vec::new();
     let mut cursor = Some(end);
     while let Some(node) = cursor {
@@ -231,12 +227,7 @@ pub fn bidi_bfs(
                 expand_parent.insert(nbr, Some(node));
                 if opposite_parent.contains_key(&nbr) {
                     // Meet point — splice both halves.
-                    return Some(splice_bidi_path(
-                        nbr,
-                        &fwd_parent,
-                        &rev_parent,
-                        graph,
-                    ));
+                    return Some(splice_bidi_path(nbr, &fwd_parent, &rev_parent, graph));
                 }
                 next.push(nbr);
             }
@@ -447,12 +438,7 @@ pub fn layer_violations(
                 continue;
             };
             if src_layer < tgt_layer {
-                violations.push((
-                    src_id.to_string(),
-                    tgt_id.to_string(),
-                    src_layer,
-                    tgt_layer,
-                ));
+                violations.push((src_id.to_string(), tgt_id.to_string(), src_layer, tgt_layer));
             }
         }
     }
@@ -475,7 +461,11 @@ pub fn snapshot_edge_diff(
         let mut out: HashSet<(String, String, u8)> = HashSet::new();
         for src in 0..g.node_count() as u32 {
             for (tgt, rel) in g.forward_neighbors(src) {
-                out.insert((g.id_of(src).to_string(), g.id_of(tgt).to_string(), rel as u8));
+                out.insert((
+                    g.id_of(src).to_string(),
+                    g.id_of(tgt).to_string(),
+                    rel as u8,
+                ));
             }
         }
         out
@@ -783,7 +773,10 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         let path = shortest_path(&g, "a", "c", 5, &[]).expect("path exists");
-        assert_eq!(path, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            path,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
@@ -875,8 +868,9 @@ mod tests {
             1,
             "expected exactly one bridge (c-d), got: {bridges:?}"
         );
-        let pair: HashSet<&str> =
-            [bridges[0].0.as_str(), bridges[0].1.as_str()].into_iter().collect();
+        let pair: HashSet<&str> = [bridges[0].0.as_str(), bridges[0].1.as_str()]
+            .into_iter()
+            .collect();
         assert!(pair.contains("c") && pair.contains("d"));
     }
 
@@ -916,11 +910,7 @@ mod tests {
     fn layer_violations_detects_upward_edges() {
         // db (prio 0) <-- core (prio 1) <-- mcp (prio 2). Edges going
         // upward (db → core or core → mcp) violate ; downward OK.
-        let nodes = vec![
-            n("db/foo"),
-            n("core/bar"),
-            n("mcp/baz"),
-        ];
+        let nodes = vec![n("db/foo"), n("core/bar"), n("mcp/baz")];
         let edges = vec![
             // OK : downward.
             e("mcp/baz", "core/bar", RelationType::Calls),

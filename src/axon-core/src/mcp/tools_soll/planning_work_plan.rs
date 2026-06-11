@@ -334,7 +334,9 @@ impl McpServer {
         let project_code_owned = match self.resolve_project_code(project_code_input) {
             Ok(code) => code,
             Err(_) => {
-                return Some(self.wrong_project_scope_response(project_code_input, "soll_work_plan"));
+                return Some(
+                    self.wrong_project_scope_response(project_code_input, "soll_work_plan"),
+                );
             }
         };
         let project_code = project_code_owned.as_str();
@@ -731,8 +733,7 @@ impl McpServer {
                     );
                 }
                 "Decision" => {
-                    let evidence_count =
-                        snapshot.traceability_count_for("decision", &snap_node.id);
+                    let evidence_count = snapshot.traceability_count_for("decision", &snap_node.id);
                     nodes.insert(
                         snap_node.id.clone(),
                         WorkPlanNode {
@@ -912,13 +913,27 @@ mod tests {
         let mut nodes = HashMap::new();
         nodes.insert("MIL-AXO-019".into(), mk_node("MIL-AXO-019", "Milestone"));
         for n in 1..=3 {
-            nodes.insert(format!("REQ-AXO-100{n}"), mk_node(&format!("REQ-AXO-100{n}"), "Requirement"));
-            nodes.insert(format!("REQ-AXO-200{n}"), mk_node(&format!("REQ-AXO-200{n}"), "Requirement"));
+            nodes.insert(
+                format!("REQ-AXO-100{n}"),
+                mk_node(&format!("REQ-AXO-100{n}"), "Requirement"),
+            );
+            nodes.insert(
+                format!("REQ-AXO-200{n}"),
+                mk_node(&format!("REQ-AXO-200{n}"), "Requirement"),
+            );
         }
         let mut edges = Vec::new();
         for n in 1..=3 {
-            edges.push(mk_edge("MIL-AXO-019", &format!("REQ-AXO-100{n}"), "TARGETS"));
-            edges.push(mk_edge(&format!("REQ-AXO-200{n}"), &format!("REQ-AXO-100{n}"), "REFINES"));
+            edges.push(mk_edge(
+                "MIL-AXO-019",
+                &format!("REQ-AXO-100{n}"),
+                "TARGETS",
+            ));
+            edges.push(mk_edge(
+                &format!("REQ-AXO-200{n}"),
+                &format!("REQ-AXO-100{n}"),
+                "REFINES",
+            ));
         }
 
         let snapshot = SollSnapshot::build("AXO", 1, nodes, edges, Vec::new());
@@ -935,14 +950,20 @@ mod tests {
         // REFINES would only matter if the edge direction matched ; here
         // REFINES is child→parent (REQ-200x → REQ-100x), so from
         // MIL-AXO-019 only the 3 direct TARGETS targets are reachable.
-        assert_eq!(counts.get("MIL-AXO-019").copied().unwrap_or(0), 3,
-            "MIL-AXO-019 should count 3 TARGETS descendants (legacy filter returned 0)");
+        assert_eq!(
+            counts.get("MIL-AXO-019").copied().unwrap_or(0),
+            3,
+            "MIL-AXO-019 should count 3 TARGETS descendants (legacy filter returned 0)"
+        );
 
         // REQ-AXO-2001 has 1 outgoing REFINES → REQ-AXO-1001. Patch A
         // counts REFINES as filiation, so descendants == 1 (legacy filter
         // returned 0 because REFINES was excluded).
-        assert_eq!(counts.get("REQ-AXO-2001").copied().unwrap_or(0), 1,
-            "REQ-AXO-2001 → REQ-AXO-1001 REFINES should count as 1 descendant");
+        assert_eq!(
+            counts.get("REQ-AXO-2001").copied().unwrap_or(0),
+            1,
+            "REQ-AXO-2001 → REQ-AXO-1001 REFINES should count as 1 descendant"
+        );
     }
 
     /// Umbrella REQ pattern: parent REQ raffinée par N sous-REQ via REFINES
@@ -953,9 +974,15 @@ mod tests {
     #[test]
     fn refines_direction_pinned_child_to_parent() {
         let mut nodes = HashMap::new();
-        nodes.insert("REQ-AXO-91483".into(), mk_node("REQ-AXO-91483", "Requirement"));
+        nodes.insert(
+            "REQ-AXO-91483".into(),
+            mk_node("REQ-AXO-91483", "Requirement"),
+        );
         for n in 91484..=91486 {
-            nodes.insert(format!("REQ-AXO-{n}"), mk_node(&format!("REQ-AXO-{n}"), "Requirement"));
+            nodes.insert(
+                format!("REQ-AXO-{n}"),
+                mk_node(&format!("REQ-AXO-{n}"), "Requirement"),
+            );
         }
         let edges: Vec<SnapshotEdge> = (91484..=91486)
             .map(|n| mk_edge(&format!("REQ-AXO-{n}"), "REQ-AXO-91483", "REFINES"))
@@ -983,7 +1010,10 @@ mod tests {
         let mut nodes = HashMap::new();
         nodes.insert("CPT-AXO-018".into(), mk_node("CPT-AXO-018", "Concept"));
         for n in 91493..=91497 {
-            nodes.insert(format!("REQ-AXO-{n}"), mk_node(&format!("REQ-AXO-{n}"), "Requirement"));
+            nodes.insert(
+                format!("REQ-AXO-{n}"),
+                mk_node(&format!("REQ-AXO-{n}"), "Requirement"),
+            );
         }
         let edges: Vec<SnapshotEdge> = (91493..=91497)
             .map(|n| mk_edge("CPT-AXO-018", &format!("REQ-AXO-{n}"), "EXPLAINS"))
@@ -999,19 +1029,32 @@ mod tests {
         let counts = descendant_counts_snapshot(&snapshot, &allowed);
 
         // CPT EXPLAINS 5 REQ → 5 descendants (legacy filter returned 0).
-        assert_eq!(counts.get("CPT-AXO-018").copied().unwrap_or(0), 5,
-            "CPT EXPLAINS should contribute to descendant count");
+        assert_eq!(
+            counts.get("CPT-AXO-018").copied().unwrap_or(0),
+            5,
+            "CPT EXPLAINS should contribute to descendant count"
+        );
     }
 
     /// Predicate self-test: is_descendant_relation accepts the 6 canonical
     /// filiation relations and rejects unrelated ones.
     #[test]
     fn descendant_predicate_accepts_canonical_filiation() {
-        for canon in ["SOLVES", "BELONGS_TO", "TARGETS", "REFINES", "EXPLAINS", "VERIFIES"] {
+        for canon in [
+            "SOLVES",
+            "BELONGS_TO",
+            "TARGETS",
+            "REFINES",
+            "EXPLAINS",
+            "VERIFIES",
+        ] {
             assert!(is_descendant_relation(canon), "{canon} should be filiation");
         }
         for non in ["SUPERSEDES", "INHERITS_FROM", "RANDOM"] {
-            assert!(!is_descendant_relation(non), "{non} should not be filiation");
+            assert!(
+                !is_descendant_relation(non),
+                "{non} should not be filiation"
+            );
         }
     }
 
@@ -1116,19 +1159,73 @@ mod tests {
                 },
             );
         };
-        add(&mut nodes, "DEC-AXO-100", WorkPlanEntityType::Decision, "current", "", 100);
-        add(&mut nodes, "DEC-AXO-200", WorkPlanEntityType::Decision, "current", "", 60);
-        add(&mut nodes, "DEC-AXO-300", WorkPlanEntityType::Decision, "delivered", "", 9999);
-        add(&mut nodes, "REQ-AXO-1", WorkPlanEntityType::Requirement, "current", "P1", 50);
-        add(&mut nodes, "REQ-AXO-2", WorkPlanEntityType::Requirement, "planned", "P0", 40);
-        add(&mut nodes, "REQ-AXO-3", WorkPlanEntityType::Requirement, "delivered", "P0", 99);
-        add(&mut nodes, "REQ-AXO-4", WorkPlanEntityType::Requirement, "current", "P2", 70);
+        add(
+            &mut nodes,
+            "DEC-AXO-100",
+            WorkPlanEntityType::Decision,
+            "current",
+            "",
+            100,
+        );
+        add(
+            &mut nodes,
+            "DEC-AXO-200",
+            WorkPlanEntityType::Decision,
+            "current",
+            "",
+            60,
+        );
+        add(
+            &mut nodes,
+            "DEC-AXO-300",
+            WorkPlanEntityType::Decision,
+            "delivered",
+            "",
+            9999,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-1",
+            WorkPlanEntityType::Requirement,
+            "current",
+            "P1",
+            50,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-2",
+            WorkPlanEntityType::Requirement,
+            "planned",
+            "P0",
+            40,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-3",
+            WorkPlanEntityType::Requirement,
+            "delivered",
+            "P0",
+            99,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-4",
+            WorkPlanEntityType::Requirement,
+            "current",
+            "P2",
+            70,
+        );
 
         let schedulable: HashSet<String> = [
-            "DEC-AXO-100", "DEC-AXO-200",
-            "REQ-AXO-1", "REQ-AXO-2", "REQ-AXO-4",
+            "DEC-AXO-100",
+            "DEC-AXO-200",
+            "REQ-AXO-1",
+            "REQ-AXO-2",
+            "REQ-AXO-4",
         ]
-        .iter().map(|s| s.to_string()).collect();
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
         let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable);
 
@@ -1136,11 +1233,14 @@ mod tests {
         for item in &wave.items {
             assert!(
                 matches!(item.entity_type, WorkPlanEntityType::Requirement),
-                "{} must be Requirement, got {:?}", item.id, item.entity_type
+                "{} must be Requirement, got {:?}",
+                item.id,
+                item.entity_type
             );
             assert!(
                 item.status != "delivered" && item.status != "superseded",
-                "{} terminal status leaked", item.id
+                "{} terminal status leaked",
+                item.id
             );
         }
 
@@ -1187,8 +1287,7 @@ mod tests {
                 centrality: None,
             },
         );
-        let schedulable: HashSet<String> =
-            ["REQ-AXO-99"].iter().map(|s| s.to_string()).collect();
+        let schedulable: HashSet<String> = ["REQ-AXO-99"].iter().map(|s| s.to_string()).collect();
         let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable);
         assert_eq!(wave.items.len(), 1);
         // Reason annotated with the fall-back parent_score = own score.

@@ -3,8 +3,8 @@
 // in their respective bin smoke tests.
 
 use super::{
-    collect_supported_files, run_graph_projection_bench, run_writer_bench,
-    summarize_end_to_end, SyntheticChunkRow,
+    collect_supported_files, run_graph_projection_bench, run_writer_bench, summarize_end_to_end,
+    SyntheticChunkRow,
 };
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,7 +26,11 @@ fn make_test_corpus() -> tempfile::TempDir {
 
     let py = dir.path().join("hello.py");
     let mut f = std::fs::File::create(&py).unwrap();
-    writeln!(f, "def add(a, b):\n    return a + b\ndef sub(a, b):\n    return a - b").unwrap();
+    writeln!(
+        f,
+        "def add(a, b):\n    return a + b\ndef sub(a, b):\n    return a - b"
+    )
+    .unwrap();
 
     // One unsupported file (.bin) — must be skipped
     let bin = dir.path().join("ignored.bin");
@@ -49,11 +53,24 @@ fn collect_supported_files_walks_tree_excluding_noise_dirs() {
     let collected = collect_supported_files(dir.path(), 100).unwrap();
     let names: Vec<String> = collected
         .iter()
-        .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
         .collect();
-    assert!(names.contains(&"hello.rs".to_string()), "rs file collected: {names:?}");
-    assert!(names.contains(&"hello.py".to_string()), "py file collected: {names:?}");
-    assert!(!names.contains(&"ignored.bin".to_string()), ".bin must not be collected: {names:?}");
+    assert!(
+        names.contains(&"hello.rs".to_string()),
+        "rs file collected: {names:?}"
+    );
+    assert!(
+        names.contains(&"hello.py".to_string()),
+        "py file collected: {names:?}"
+    );
+    assert!(
+        !names.contains(&"ignored.bin".to_string()),
+        ".bin must not be collected: {names:?}"
+    );
     assert!(
         !names.contains(&"excluded.rs".to_string()),
         "files under target/ must be excluded: {names:?}"
@@ -71,19 +88,28 @@ fn collect_supported_files_respects_max_files_cap() {
 fn run_graph_projection_bench_computes_metrics_on_real_corpus() {
     let dir = make_test_corpus();
     let bench = run_graph_projection_bench("test", dir.path(), 100).unwrap();
-    assert!(bench.files_processed >= 1, "expected >=1 processed file, got {}", bench.files_processed);
+    assert!(
+        bench.files_processed >= 1,
+        "expected >=1 processed file, got {}",
+        bench.files_processed
+    );
     assert!(
         bench.symbols_extracted > 0,
         "expected >0 symbols extracted from 2 toy files; got {}",
         bench.symbols_extracted
     );
-    assert!(bench.elapsed_ms < 30_000, "bench should complete in <30s on toy corpus; got {}ms", bench.elapsed_ms);
+    assert!(
+        bench.elapsed_ms < 30_000,
+        "bench should complete in <30s on toy corpus; got {}ms",
+        bench.elapsed_ms
+    );
     assert!(bench.files_per_s > 0.0, "files_per_s must be positive");
 }
 
 #[test]
 fn run_graph_projection_bench_rejects_missing_dir() {
-    let res = run_graph_projection_bench("test", &PathBuf::from("/nonexistent/axon/path/12345"), 10);
+    let res =
+        run_graph_projection_bench("test", &PathBuf::from("/nonexistent/axon/path/12345"), 10);
     assert!(res.is_err(), "missing source_dir must error");
 }
 
@@ -105,9 +131,9 @@ fn run_writer_bench_drives_persist_closure_correct_count() {
 
     let bench = run_writer_bench(
         "test-writer",
-        100,  // total_chunks
-        25,   // batch_size
-        16,   // small embedding_dim for speed
+        100, // total_chunks
+        25,  // batch_size
+        16,  // small embedding_dim for speed
         "noop-control",
         |rows| {
             calls_p.fetch_add(1, Ordering::Relaxed);
@@ -133,22 +159,19 @@ fn run_writer_bench_handles_partial_last_batch() {
     let last_batch = Arc::new(AtomicUsize::new(0));
     let last_batch_p = last_batch.clone();
 
-    let bench = run_writer_bench(
-        "test-partial",
-        103,
-        25,
-        4,
-        "noop",
-        move |rows| {
-            last_batch_p.store(rows.len(), Ordering::Relaxed);
-            Ok(())
-        },
-    )
+    let bench = run_writer_bench("test-partial", 103, 25, 4, "noop", move |rows| {
+        last_batch_p.store(rows.len(), Ordering::Relaxed);
+        Ok(())
+    })
     .unwrap();
 
     assert_eq!(bench.chunks_written, 103);
     assert_eq!(bench.batches_written, 5); // 25*4 + 3
-    assert_eq!(last_batch.load(Ordering::Relaxed), 3, "last batch had 3 rows");
+    assert_eq!(
+        last_batch.load(Ordering::Relaxed),
+        3,
+        "last batch had 3 rows"
+    );
 }
 
 #[test]
@@ -182,7 +205,11 @@ fn synthetic_chunk_row_embedding_is_deterministic() {
         b = Some(rows[0].embedding.clone());
         Ok(())
     });
-    assert_eq!(a.unwrap(), b.unwrap(), "embedding seed=0 must be deterministic");
+    assert_eq!(
+        a.unwrap(),
+        b.unwrap(),
+        "embedding seed=0 must be deterministic"
+    );
 }
 
 #[test]
@@ -203,7 +230,11 @@ fn summarize_end_to_end_computes_mean_and_percentiles() {
     let s = summarize_end_to_end("steady", &samples);
     assert_eq!(s.total_chunks, 1000);
     assert_eq!(s.sample_count, 10);
-    assert!((s.mean_ch_per_s - 100.0).abs() < 0.001, "mean: {}", s.mean_ch_per_s);
+    assert!(
+        (s.mean_ch_per_s - 100.0).abs() < 0.001,
+        "mean: {}",
+        s.mean_ch_per_s
+    );
     assert!((s.p50_ch_per_s - 100.0).abs() < 0.001);
     assert!((s.p95_ch_per_s - 100.0).abs() < 0.001);
     assert!((s.rolling_10s_min - 100.0).abs() < 0.001);

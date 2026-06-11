@@ -206,7 +206,10 @@ fn run() -> anyhow::Result<()> {
             );
         }
         OutputMode::Human => {
-            println!("📊 axon-bench-writer [{}] backend={}", bench.label, bench.backend);
+            println!(
+                "📊 axon-bench-writer [{}] backend={}",
+                bench.label, bench.backend
+            );
             println!("   total           {}", args.total);
             println!("   batch           {}", bench.batch_size);
             println!("   dim             {}", args.dim);
@@ -220,9 +223,7 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bench_pgvector(
-    args: &Args,
-) -> anyhow::Result<axon_core::bench_pipeline_stages::WriterBench> {
+fn bench_pgvector(args: &Args) -> anyhow::Result<axon_core::bench_pipeline_stages::WriterBench> {
     use axon_core::graph_ingestion::rows::ChunkEmbeddingPersistRow;
     use axon_core::postgres::bulk_writer::flush_chunk_embeddings;
 

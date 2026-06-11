@@ -291,8 +291,7 @@ mod tests {
     #[test]
     fn upsert_sql_escapes_single_quotes_in_ids() {
         let v = sample_vector(0.0);
-        let sql =
-            upsert_chunk_embedding_sql("id'with'quotes", "m", "AXO", "h", &v, 0).unwrap();
+        let sql = upsert_chunk_embedding_sql("id'with'quotes", "m", "AXO", "h", &v, 0).unwrap();
         // The escaped sequence appears (single quotes doubled).
         assert!(sql.contains("'id''with''quotes'"));
     }

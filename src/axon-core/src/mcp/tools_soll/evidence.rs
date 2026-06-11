@@ -240,10 +240,13 @@ impl McpServer {
             .filter_map(|d| d.get("reasons").and_then(|r| r.as_array()))
             .flatten()
             .filter_map(|r| r.as_str())
-            .find(|r| *r != "traceability_inserted" && *r != "matched_indexed_file"
-                && *r != "normalized_relative_project_path"
-                && *r != "resolved_existing_project_file"
-                && *r != "resolved_existing_absolute_file")
+            .find(|r| {
+                *r != "traceability_inserted"
+                    && *r != "matched_indexed_file"
+                    && *r != "normalized_relative_project_path"
+                    && *r != "resolved_existing_project_file"
+                    && *r != "resolved_existing_absolute_file"
+            })
             .map(str::to_string);
 
         let next_action = match status_str {
@@ -352,15 +355,16 @@ impl McpServer {
                 "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
                 "accepted_artifact_schema": accepted_schema,
             }),
-            _ => first_rejected_repair(&artifact_diagnostics, &accepted_schema)
-                .unwrap_or_else(|| {
+            _ => first_rejected_repair(&artifact_diagnostics, &accepted_schema).unwrap_or_else(
+                || {
                     json!({
                         "invalid_field": "artifacts",
                         "hint": "review `artifact_diagnostics` for per-artifact rejection reasons",
                         "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
                         "accepted_artifact_schema": accepted_schema,
                     })
-                }),
+                },
+            ),
         };
 
         let content_text = match status_str {
@@ -372,7 +376,9 @@ impl McpServer {
                 "Attached 0 evidence item(s) to {}:{} — `artifacts` array was empty. {}",
                 entity_type,
                 entity_id,
-                next_action.as_deref().unwrap_or("supply at least one artifact"),
+                next_action
+                    .as_deref()
+                    .unwrap_or("supply at least one artifact"),
             ),
             "rejected_all" => format!(
                 "Attached 0 of {} evidence item(s) to {}:{} — all rejected. {}",
@@ -439,8 +445,12 @@ mod build_suggested_absolute_path_tests {
 
     #[test]
     fn returns_joined_path_for_relative_ref() {
-        let result = build_suggested_absolute_path("Cargo.toml", Some("/home/dstadel/projects/axon"));
-        assert_eq!(result.as_deref(), Some("/home/dstadel/projects/axon/Cargo.toml"));
+        let result =
+            build_suggested_absolute_path("Cargo.toml", Some("/home/dstadel/projects/axon"));
+        assert_eq!(
+            result.as_deref(),
+            Some("/home/dstadel/projects/axon/Cargo.toml")
+        );
     }
 
     #[test]
@@ -499,11 +509,7 @@ fn first_rejected_repair(
         let reasons: Vec<&str> = diag
             .get("reasons")
             .and_then(|r| r.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
         let primary = reasons
             .iter()
@@ -578,7 +584,7 @@ fn first_rejected_repair(
                     )),
                 };
                 repair
-            },
+            }
             "traceability_insert_failed" => json!({
                 "invalid_field": "artifact_ref",
                 "rejected_artifact_index": idx,
@@ -704,10 +710,10 @@ impl McpServer {
                 explicit_refs.iter().any(|r| r == &artifact_ref)
             };
             if should_remove {
-                if let Err(e) = self.graph_store.execute_param(
-                    "DELETE FROM soll.Traceability WHERE id = ?",
-                    &json!([id]),
-                ) {
+                if let Err(e) = self
+                    .graph_store
+                    .execute_param("DELETE FROM soll.Traceability WHERE id = ?", &json!([id]))
+                {
                     kept.push(json!({
                         "id": id,
                         "artifact_ref": artifact_ref,

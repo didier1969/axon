@@ -15,9 +15,7 @@ use crate::optimizer::{
     collect_runtime_signals_window,
 };
 use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_observability::{
-    process_memory_snapshot,
-};
+use crate::runtime_observability::process_memory_snapshot;
 use crate::service_guard;
 use crate::vector_control::{
     allowed_gpu_vector_workers, current_vector_batch_controller_diagnostics,

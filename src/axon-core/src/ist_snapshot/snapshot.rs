@@ -234,24 +234,14 @@ impl IstGraph {
     pub fn forward_neighbors(&self, idx: u32) -> impl Iterator<Item = (u32, RelationType)> + '_ {
         let start = self.fwd_offsets[idx as usize] as usize;
         let end = self.fwd_offsets[idx as usize + 1] as usize;
-        (start..end).map(move |slot| {
-            (
-                self.fwd_targets[slot],
-                relation_from_u8(self.fwd_rel[slot]),
-            )
-        })
+        (start..end).map(move |slot| (self.fwd_targets[slot], relation_from_u8(self.fwd_rel[slot])))
     }
 
     /// Reverse neighbors of `idx` (in-edges) as `(source_idx, relation_type)`.
     pub fn reverse_neighbors(&self, idx: u32) -> impl Iterator<Item = (u32, RelationType)> + '_ {
         let start = self.rev_offsets[idx as usize] as usize;
         let end = self.rev_offsets[idx as usize + 1] as usize;
-        (start..end).map(move |slot| {
-            (
-                self.rev_sources[slot],
-                relation_from_u8(self.rev_rel[slot]),
-            )
-        })
+        (start..end).map(move |slot| (self.rev_sources[slot], relation_from_u8(self.rev_rel[slot])))
     }
 
     /// REQ-AXO-91518 — Extract the `depth`-bounded neighborhood of `root_id`
@@ -326,18 +316,16 @@ impl IstGraph {
         let mut project_codes: Vec<String> = Vec::new();
         let mut project_to_idx: HashMap<String, u8> = HashMap::new();
 
-        let intern_project = |code: String,
-                                  codes: &mut Vec<String>,
-                                  map: &mut HashMap<String, u8>|
-         -> u8 {
-            if let Some(&idx) = map.get(&code) {
-                return idx;
-            }
-            let idx = u8::try_from(codes.len()).unwrap_or(u8::MAX);
-            map.insert(code.clone(), idx);
-            codes.push(code);
-            idx
-        };
+        let intern_project =
+            |code: String, codes: &mut Vec<String>, map: &mut HashMap<String, u8>| -> u8 {
+                if let Some(&idx) = map.get(&code) {
+                    return idx;
+                }
+                let idx = u8::try_from(codes.len()).unwrap_or(u8::MAX);
+                map.insert(code.clone(), idx);
+                codes.push(code);
+                idx
+            };
 
         for record in nodes {
             let proj_idx = intern_project(
@@ -396,10 +384,8 @@ impl IstGraph {
         }
 
         let node_count = ids.len();
-        let (fwd_offsets, fwd_targets, fwd_rel) =
-            build_csr(node_count, &sources, &targets, &rels);
-        let (rev_offsets, rev_sources, rev_rel) =
-            build_csr(node_count, &targets, &sources, &rels);
+        let (fwd_offsets, fwd_targets, fwd_rel) = build_csr(node_count, &sources, &targets, &rels);
+        let (rev_offsets, rev_sources, rev_rel) = build_csr(node_count, &targets, &sources, &rels);
 
         Self {
             ids,
@@ -519,7 +505,10 @@ impl IstGraph {
         let start = self.index_of(source_id)?;
         let goal = self.index_of(sink_id)?;
         if start == goal {
-            return Some((vec![self.id_of(start).to_string()], vec![RelationType::Calls]));
+            return Some((
+                vec![self.id_of(start).to_string()],
+                vec![RelationType::Calls],
+            ));
         }
         // parents[idx] = (predecessor_idx, edge_relation)
         let mut parents: std::collections::HashMap<u32, (u32, RelationType)> =
@@ -581,8 +570,7 @@ impl IstGraph {
     /// `get_circular_dependency_count_fast`. Linear in edges, dedup via
     /// canonical pair ordering. Self-loops (A→A) are excluded.
     pub fn reciprocal_calls_cycle_count(&self) -> usize {
-        let mut pairs: std::collections::HashSet<(u32, u32)> =
-            std::collections::HashSet::new();
+        let mut pairs: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
         for source_idx in 0..(self.ids.len() as u32) {
             for (target_idx, rel) in self.forward_neighbors(source_idx) {
                 if !matches!(rel, RelationType::Calls) {
@@ -810,10 +798,7 @@ mod tests {
         );
         assert_eq!(RelationType::from_db("uses"), RelationType::Uses);
         assert_eq!(RelationType::from_db("calls"), RelationType::Calls);
-        assert_eq!(
-            RelationType::from_db("calls_nif"),
-            RelationType::CallsNif
-        );
+        assert_eq!(RelationType::from_db("calls_nif"), RelationType::CallsNif);
     }
 
     #[test]
@@ -931,7 +916,10 @@ mod tests {
         let (names, rels) = g
             .bfs_shortest_path("a", "c", 6, &[])
             .expect("path must exist");
-        assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            names,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
         // rels has one slot per node: source placeholder + 2 edge rels.
         assert_eq!(rels.len(), 3);
         assert!(matches!(rels[0], RelationType::Calls)); // placeholder
@@ -969,7 +957,10 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         let (names, _) = g.bfs_shortest_path("a", "d", 6, &[]).expect("path");
-        assert_eq!(names, vec!["a".to_string(), "b".to_string(), "d".to_string()]);
+        assert_eq!(
+            names,
+            vec!["a".to_string(), "b".to_string(), "d".to_string()]
+        );
     }
 
     #[test]

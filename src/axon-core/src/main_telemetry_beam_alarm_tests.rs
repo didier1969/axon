@@ -6,8 +6,7 @@
 
 use super::handle_beam_alarm;
 use crate::runtime_readiness::{
-    report_subsystem_state, reset_for_tests, snapshot_subsystem_reports, Subsystem,
-    SubsystemState,
+    report_subsystem_state, reset_for_tests, snapshot_subsystem_reports, Subsystem, SubsystemState,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -18,7 +17,9 @@ fn registry_test_lock() -> &'static Mutex<()> {
 
 #[test]
 fn beam_alarm_memory_high_watermark_set_marks_dashboard_degraded() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     // Pre-condition: explicitly Ready so the transition is observable.
     report_subsystem_state(Subsystem::Dashboard, SubsystemState::Ready);
@@ -43,7 +44,9 @@ fn beam_alarm_memory_high_watermark_set_marks_dashboard_degraded() {
 
 #[test]
 fn beam_alarm_disk_almost_full_set_marks_ist_writer_degraded() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     report_subsystem_state(Subsystem::IstWriter, SubsystemState::Ready);
 
@@ -64,7 +67,9 @@ fn beam_alarm_disk_almost_full_set_marks_ist_writer_degraded() {
 
 #[test]
 fn beam_alarm_clear_restores_ready() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     handle_beam_alarm(r#"{"alarm":"system_memory_high_watermark","action":"set"}"#);
     handle_beam_alarm(r#"{"alarm":"system_memory_high_watermark","action":"clear"}"#);
@@ -83,7 +88,9 @@ fn beam_alarm_clear_restores_ready() {
 
 #[test]
 fn beam_alarm_unknown_does_not_mutate_registry() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let before = snapshot_subsystem_reports();
     handle_beam_alarm(r#"{"alarm":"some_future_alarm_we_do_not_know","action":"set"}"#);
@@ -100,7 +107,9 @@ fn beam_alarm_unknown_does_not_mutate_registry() {
 
 #[test]
 fn beam_alarm_invalid_json_is_ignored_safely() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let before = snapshot_subsystem_reports();
     handle_beam_alarm("not json at all {{{");

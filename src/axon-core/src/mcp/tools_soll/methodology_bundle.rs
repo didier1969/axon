@@ -145,10 +145,7 @@ impl McpServer {
                 }
                 let title = g.get("title").cloned().unwrap_or(Value::Null);
                 let description = g.get("description").cloned().unwrap_or(Value::Null);
-                let status = g
-                    .get("status")
-                    .cloned()
-                    .unwrap_or_else(|| json!("active"));
+                let status = g.get("status").cloned().unwrap_or_else(|| json!("active"));
                 let metadata = g.get("metadata").cloned().unwrap_or_else(|| json!({}));
                 let mgr_args = json!({
                     "action": "create",

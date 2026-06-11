@@ -117,7 +117,9 @@ fn any_failed_dominates_degraded_in_roll_up() {
 
 #[test]
 fn registry_report_and_snapshot_round_trip() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
     report_subsystem_state(
@@ -139,7 +141,9 @@ fn registry_report_and_snapshot_round_trip() {
 
 #[test]
 fn registry_replaces_state_on_repeated_report() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     report_subsystem_state(
         Subsystem::IstReader,
@@ -149,7 +153,10 @@ fn registry_replaces_state_on_repeated_report() {
     );
     report_subsystem_state(Subsystem::IstReader, SubsystemState::Ready);
     let reports = snapshot_subsystem_reports();
-    let entry = reports.iter().find(|r| r.subsystem == "ist_reader").unwrap();
+    let entry = reports
+        .iter()
+        .find(|r| r.subsystem == "ist_reader")
+        .unwrap();
     assert!(
         matches!(entry.state, SubsystemState::Ready),
         "later report must replace earlier state, not append"
@@ -158,7 +165,9 @@ fn registry_replaces_state_on_repeated_report() {
 
 #[test]
 fn snapshot_order_is_canonical_across_reporting_order() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     report_subsystem_state(Subsystem::Watcher, SubsystemState::Ready);
     report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
@@ -179,7 +188,9 @@ fn snapshot_order_is_canonical_across_reporting_order() {
 
 #[test]
 fn snapshot_runtime_readiness_combines_snapshot_and_roll_up_atomically() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
     report_subsystem_state(
@@ -200,7 +211,9 @@ fn snapshot_runtime_readiness_combines_snapshot_and_roll_up_atomically() {
 
 #[test]
 fn watchdog_does_not_flip_subsystem_without_heartbeat_requirement() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     // Reported Ready ages ago, but no heartbeat opt-in — must stay Ready.
     report_subsystem_state(Subsystem::BrainMcp, SubsystemState::Ready);
@@ -218,7 +231,9 @@ fn watchdog_does_not_flip_subsystem_without_heartbeat_requirement() {
 
 #[test]
 fn watchdog_flips_stale_subsystem_to_failed_after_threshold() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let period_ms: u64 = 5_000;
     require_heartbeat(Subsystem::BrainMcp, period_ms);
@@ -264,7 +279,9 @@ fn watchdog_flips_stale_subsystem_to_failed_after_threshold() {
 
 #[test]
 fn watchdog_is_idempotent_on_already_failed_subsystem() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     require_heartbeat(Subsystem::Embedder, 1_000);
     report_subsystem_state(
@@ -297,7 +314,9 @@ fn watchdog_is_idempotent_on_already_failed_subsystem() {
 
 #[test]
 fn watchdog_flips_degraded_subsystem_too_when_stale() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     let period_ms: u64 = 2_000;
     require_heartbeat(Subsystem::Dashboard, period_ms);
@@ -320,7 +339,9 @@ fn watchdog_flips_degraded_subsystem_too_when_stale() {
 
 #[test]
 fn report_state_preserves_heartbeat_period_across_updates() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     require_heartbeat(Subsystem::IstReader, 4_242);
     assert_eq!(
@@ -339,7 +360,9 @@ fn report_state_preserves_heartbeat_period_across_updates() {
 
 #[test]
 fn require_heartbeat_materializes_ready_slot_when_no_prior_report() {
-    let _guard = registry_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = registry_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
     require_heartbeat(Subsystem::Watcher, 1_000);
     let reports = snapshot_subsystem_reports();
@@ -348,8 +371,5 @@ fn require_heartbeat_materializes_ready_slot_when_no_prior_report() {
         matches!(watcher.state, SubsystemState::Ready),
         "require_heartbeat without prior report must materialize a Ready slot"
     );
-    assert_eq!(
-        heartbeat_period_for_tests(Subsystem::Watcher),
-        Some(1_000)
-    );
+    assert_eq!(heartbeat_period_for_tests(Subsystem::Watcher), Some(1_000));
 }

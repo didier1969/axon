@@ -192,7 +192,10 @@ mod tests {
         assert_eq!(reg.len(), 1);
 
         drop(g2);
-        assert!(reg.snapshot().is_none(), "all guards dropped → nothing in flight");
+        assert!(
+            reg.snapshot().is_none(),
+            "all guards dropped → nothing in flight"
+        );
         assert_eq!(reg.len(), 0);
     }
 

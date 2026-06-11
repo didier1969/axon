@@ -20,12 +20,16 @@ impl McpServer {
         // REQ-AXO-043 — wrong_project_scope contract via shared helper.
         // Previously `.ok()?` swallowed resolve_project_code errors and the
         // framework rendered a generic "Invalid arguments".
-        let project_code = match self.resolve_project_code(project_code_input) {
-            Ok(code) => code,
-            Err(_) => {
-                return Some(self.wrong_project_scope_response(project_code_input, "soll_verify_requirements"));
-            }
-        };
+        let project_code =
+            match self.resolve_project_code(project_code_input) {
+                Ok(code) => code,
+                Err(_) => {
+                    return Some(self.wrong_project_scope_response(
+                        project_code_input,
+                        "soll_verify_requirements",
+                    ));
+                }
+            };
         let owned_summary;
         let summary: &RequirementCoverageSummary = match cached_coverage {
             Some(c) => c,
@@ -113,12 +117,24 @@ impl McpServer {
             .iter()
             .filter(|e| e.state == "partial")
             .min_by_key(|e| e.missing_dimensions.len())
-            .map(|e| format!("\nNext to close: {} (needs: {})", e.id, e.missing_dimensions.join(", ")))
+            .map(|e| {
+                format!(
+                    "\nNext to close: {} (needs: {})",
+                    e.id,
+                    e.missing_dimensions.join(", ")
+                )
+            })
             .unwrap_or_default();
         let text = format!(
             "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}",
-            summary.done, summary.partial, summary.missing,
-            if top_gaps.is_empty() { "  (none)".to_string() } else { top_gaps.join("\n") },
+            summary.done,
+            summary.partial,
+            summary.missing,
+            if top_gaps.is_empty() {
+                "  (none)".to_string()
+            } else {
+                top_gaps.join("\n")
+            },
             next_to_close
         );
 

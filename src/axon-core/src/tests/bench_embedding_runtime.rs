@@ -324,4 +324,3 @@ fn bench_bge_large_tokenizer_vs_ort_runtime() {
     println!("Output tensors: {}", output_count);
     assert!(output_count > 0, "expected at least one output tensor");
 }
-

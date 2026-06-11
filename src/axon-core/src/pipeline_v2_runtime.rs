@@ -33,24 +33,24 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
-use crate::pipeline_v2::{
-    GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder, ProjectCodeResolver,
-    ProjectRegistrySnapshot,
-    PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
-};
 use crate::pipeline_v2::orchestrator::spawn_pipeline_a_with_cache;
+use crate::pipeline_v2::{
+    GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder, PipelineAWorkerCounts,
+    PipelineBWorkerCounts, PipelineChannelCaps, ProjectCodeResolver, ProjectRegistrySnapshot,
+};
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
-use std::sync::atomic::AtomicPtr;
 use crate::pipeline_v2::demand_pull::DemandPullMetrics;
+use std::sync::atomic::AtomicPtr;
 
-static DEMAND_PULL_METRICS_B: AtomicPtr<DemandPullMetrics> =
-    AtomicPtr::new(std::ptr::null_mut());
+static DEMAND_PULL_METRICS_B: AtomicPtr<DemandPullMetrics> = AtomicPtr::new(std::ptr::null_mut());
 
 pub fn demand_pull_metrics_b() -> Option<Arc<DemandPullMetrics>> {
     let ptr = DEMAND_PULL_METRICS_B.load(std::sync::atomic::Ordering::Acquire);
-    if ptr.is_null() { return None; }
+    if ptr.is_null() {
+        return None;
+    }
     unsafe {
         Arc::increment_strong_count(ptr);
         Some(Arc::from_raw(ptr))
@@ -165,34 +165,39 @@ pub fn spawn_pipeline_v2_indexer(
     // resolution ONLY if the registry SELECT fails / is empty (explicit degraded
     // path). "UNK" stays the DROP sentinel (REQ-AXO-901860): graph_ingestion
     // skips it, so an unresolved file is enrolled nowhere.
-    let resolver: ProjectCodeResolver =
-        match crate::project_meta::registered_project_identities(&store) {
-            Ok(ids) if !ids.is_empty() => {
-                let n = ids.len();
-                let rows = ids
-                    .into_iter()
-                    .map(|id| (id.code, id.project_path.to_string_lossy().into_owned()));
-                info!("pipeline_v2: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
-                ProjectRegistrySnapshot::from_rows(rows).into_resolver()
-            }
-            other => {
-                match &other {
-                    Err(e) => warn!(error = %e, "pipeline_v2: registry snapshot hydration failed — per-file scanner fallback"),
-                    Ok(_) => warn!("pipeline_v2: PG project registry empty — per-file scanner fallback"),
+    let resolver: ProjectCodeResolver = match crate::project_meta::registered_project_identities(
+        &store,
+    ) {
+        Ok(ids) if !ids.is_empty() => {
+            let n = ids.len();
+            let rows = ids
+                .into_iter()
+                .map(|id| (id.code, id.project_path.to_string_lossy().into_owned()));
+            info!("pipeline_v2: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
+            ProjectRegistrySnapshot::from_rows(rows).into_resolver()
+        }
+        other => {
+            match &other {
+                Err(e) => {
+                    warn!(error = %e, "pipeline_v2: registry snapshot hydration failed — per-file scanner fallback")
                 }
-                let store_for_resolver = store.clone();
-                let scanner_for_resolver = scanner.clone();
-                Arc::new(move |path: &std::path::Path| -> String {
-                    match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
-                        Ok(code) => code,
-                        Err(err) => {
-                            warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel)");
-                            "UNK".to_string()
-                        }
-                    }
-                }) as ProjectCodeResolver
+                Ok(_) => {
+                    warn!("pipeline_v2: PG project registry empty — per-file scanner fallback")
+                }
             }
-        };
+            let store_for_resolver = store.clone();
+            let scanner_for_resolver = scanner.clone();
+            Arc::new(move |path: &std::path::Path| -> String {
+                match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel)");
+                        "UNK".to_string()
+                    }
+                }
+            }) as ProjectCodeResolver
+        }
+    };
 
     // REQ-AXO-901746 — hydrate the content-hash dedup cache from PG at boot.
     // Files whose (path, content_hash) match are skipped between A1 and A2,
@@ -229,7 +234,8 @@ pub fn spawn_pipeline_v2_indexer(
         counts_a.a3,
         runtime_mode.as_str()
     );
-    let handles_a = spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
+    let handles_a =
+        spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
 
     // REQ-AXO-901874 — indexer liveness heartbeat, decoupled from the GPU
     // embedder. This function is reached for every ingestion-enabled mode
@@ -305,9 +311,13 @@ pub fn spawn_pipeline_v2_indexer(
         };
         // REQ-AXO-901748 — hydrate embedding dedup cache so B1 skips
         // chunks that already have a valid embedding with the same hash.
-        let embedding_dedup = match crate::pipeline_v2::stage_b1::load_embedding_dedup_cache(&store) {
+        let embedding_dedup = match crate::pipeline_v2::stage_b1::load_embedding_dedup_cache(&store)
+        {
             Ok(cache) => {
-                info!("pipeline_v2: embedding dedup cache hydrated with {} entries", cache.len());
+                info!(
+                    "pipeline_v2: embedding dedup cache hydrated with {} entries",
+                    cache.len()
+                );
                 Some(cache)
             }
             Err(err) => {
@@ -321,10 +331,7 @@ pub fn spawn_pipeline_v2_indexer(
         let embedders: Vec<Arc<dyn crate::pipeline_v2::B2Embedder>> = if counts_b.b2 > 1 {
             let mut v = vec![embedder];
             for i in 1..counts_b.b2 {
-                match GpuB2Embedder::try_new_cuda(
-                    &format!("indexer-pipeline-v2-b2w{i}"),
-                    i,
-                ) {
+                match GpuB2Embedder::try_new_cuda(&format!("indexer-pipeline-v2-b2w{i}"), i) {
                     Ok(e) => v.push(Arc::new(e) as Arc<dyn crate::pipeline_v2::B2Embedder>),
                     Err(err) => {
                         warn!(worker = i, error = %err, "pipeline_v2: extra B2 worker init failed, continuing with fewer");
@@ -338,19 +345,20 @@ pub fn spawn_pipeline_v2_indexer(
             vec![embedder]
         };
         let mut handles_b = crate::pipeline_v2::orchestrator::spawn_pipeline_b_full_multi(
-            counts_b, caps, store.clone(), embedders, b_chunks_rx, embedding_dedup,
+            counts_b,
+            caps,
+            store.clone(),
+            embedders,
+            b_chunks_rx,
+            embedding_dedup,
         );
         // REQ-AXO-314 — keep the receipt rx alive by draining it in a
         // background task. Dropping `handles_b.output_rx` immediately
         // would close the receipt channel; B3 then short-circuits on
         // its first `tx.send(receipt)` failure and cascades upstream.
-        let mut output_rx_b = std::mem::replace(
-            &mut handles_b.output_rx,
-            tokio::sync::mpsc::channel(1).1,
-        );
-        tokio::spawn(async move {
-            while output_rx_b.recv().await.is_some() {}
-        });
+        let mut output_rx_b =
+            std::mem::replace(&mut handles_b.output_rx, tokio::sync::mpsc::channel(1).1);
+        tokio::spawn(async move { while output_rx_b.recv().await.is_some() {} });
 
         // DEC-AXO-901620 + slice 5 SOTA — demand-pull B feeds
         // ChunkForEmbedding directly to the b_chunks channel (one PG
@@ -366,7 +374,10 @@ pub fn spawn_pipeline_v2_indexer(
             demand_pull_b_threshold,
             demand_pull_b_batch,
         );
-        DEMAND_PULL_METRICS_B.store(Arc::into_raw(_metrics_b) as *mut _, std::sync::atomic::Ordering::Release);
+        DEMAND_PULL_METRICS_B.store(
+            Arc::into_raw(_metrics_b) as *mut _,
+            std::sync::atomic::Ordering::Release,
+        );
     } else {
         // No B side — drop the b_chunks tx so demand_pull won't be
         // spawned. The unused rx is also dropped here.
@@ -592,13 +603,22 @@ mod tests {
         // test.)
         std::env::remove_var(prov_key);
         std::env::set_var(trt_key, "1");
-        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=1 is inert");
+        assert!(
+            !gpu_provider_explicitly_requested(),
+            "legacy TRT flag=1 is inert"
+        );
 
         std::env::set_var(trt_key, "true");
-        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=true is inert");
+        assert!(
+            !gpu_provider_explicitly_requested(),
+            "legacy TRT flag=true is inert"
+        );
 
         std::env::set_var(trt_key, "0");
-        assert!(!gpu_provider_explicitly_requested(), "legacy TRT flag=0 is inert");
+        assert!(
+            !gpu_provider_explicitly_requested(),
+            "legacy TRT flag=0 is inert"
+        );
     }
 
     /// REQ-AXO-901874 — the indexer liveness heartbeat is spawned from

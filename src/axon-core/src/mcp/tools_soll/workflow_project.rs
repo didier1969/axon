@@ -121,9 +121,7 @@ impl McpServer {
         let resolved_project_path: Option<std::path::PathBuf> = explicit_project_path
             .as_deref()
             .map(std::path::PathBuf::from)
-            .or_else(|| {
-                project_code_arg.and_then(|code| self.lookup_project_path_by_code(code))
-            });
+            .or_else(|| project_code_arg.and_then(|code| self.lookup_project_path_by_code(code)));
 
         // REQ-AXO-91571 — gate scope to `PRO` (cross-project canonical
         // guidelines) + the effective project's own guidelines. Without
@@ -131,18 +129,14 @@ impl McpServer {
         // / GUI-PRO-002 (TDD / Documentation MCP) would fire on every
         // AXO commit (observed session 43 : GUI-FSF-002, GUI-MLD-002,
         // GUI-NEX-001, GUI-TE2-001 leaking from sibling projects).
-        let effective_project_code: Option<String> = project_code_arg
-            .map(str::to_string)
-            .or_else(|| {
+        let effective_project_code: Option<String> =
+            project_code_arg.map(str::to_string).or_else(|| {
                 resolved_project_path
                     .as_ref()
                     .and_then(|p| self.lookup_project_code_by_path(p))
             });
         let guideline_scope_filter = match effective_project_code.as_deref() {
-            Some(code) => format!(
-                "AND project_code IN ('PRO', '{}')",
-                escape_sql(code)
-            ),
+            Some(code) => format!("AND project_code IN ('PRO', '{}')", escape_sql(code)),
             None => "AND project_code = 'PRO'".to_string(),
         };
         let rows_raw = self
@@ -452,9 +446,7 @@ impl McpServer {
     /// `{kind, value, label?}` or an error message describing the
     /// rejection. `kind` ∈ `file|url|soll_node|none`. `value` is required
     /// for the first three kinds; ignored for `none`.
-    fn validate_session_pointer(
-        pointer: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    fn validate_session_pointer(pointer: &serde_json::Value) -> Result<serde_json::Value, String> {
         let object = pointer
             .as_object()
             .ok_or_else(|| "session_pointer must be a JSON object".to_string())?;
@@ -462,7 +454,9 @@ impl McpServer {
             .get("kind")
             .and_then(|value| value.as_str())
             .map(str::trim)
-            .ok_or_else(|| "session_pointer.kind is required (file|url|soll_node|none)".to_string())?;
+            .ok_or_else(|| {
+                "session_pointer.kind is required (file|url|soll_node|none)".to_string()
+            })?;
         if !matches!(kind, "file" | "url" | "soll_node" | "none") {
             return Err(format!(
                 "session_pointer.kind must be one of file|url|soll_node|none (got `{}`)",
@@ -531,24 +525,27 @@ impl McpServer {
     }
 
     fn find_active_handoff(project_path: &str) -> Option<String> {
-        let dir = std::path::Path::new(project_path).join("docs").join("working-notes");
+        let dir = std::path::Path::new(project_path)
+            .join("docs")
+            .join("working-notes");
         if !dir.is_dir() {
             return None;
         }
-        let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
-            .ok()?
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = path.file_name()?.to_string_lossy().to_string();
-                // Match docs/working-notes/<date>-handoff-*.md pattern.
-                if !name.ends_with(".md") || !name.contains("-handoff-") {
-                    return None;
-                }
-                let mtime = entry.metadata().ok()?.modified().ok()?;
-                Some((mtime, path))
-            })
-            .collect();
+        let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+            std::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let name = path.file_name()?.to_string_lossy().to_string();
+                    // Match docs/working-notes/<date>-handoff-*.md pattern.
+                    if !name.ends_with(".md") || !name.contains("-handoff-") {
+                        return None;
+                    }
+                    let mtime = entry.metadata().ok()?.modified().ok()?;
+                    Some((mtime, path))
+                })
+                .collect();
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
         candidates
             .into_iter()
@@ -562,11 +559,7 @@ impl McpServer {
     // returned when no rows match. Bounded LIMITs guarantee a sparse
     // project does not bloat the response.
 
-    fn read_in_progress_requirements(
-        &self,
-        project_code: &str,
-        limit: usize,
-    ) -> serde_json::Value {
+    fn read_in_progress_requirements(&self, project_code: &str, limit: usize) -> serde_json::Value {
         // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven kickoff
         // helper: iterate Requirement nodes, filter status=in_progress,
         // sort by metadata.updated_at DESC, take limit.
@@ -616,11 +609,7 @@ impl McpServer {
         )
     }
 
-    fn read_recent_soll_writes(
-        &self,
-        project_code: &str,
-        limit: usize,
-    ) -> serde_json::Value {
+    fn read_recent_soll_writes(&self, project_code: &str, limit: usize) -> serde_json::Value {
         // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven: rank all
         // SOLL nodes by metadata.updated_at DESC, take limit.
         let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
@@ -875,13 +864,7 @@ impl McpServer {
         if !root.is_dir() {
             return serde_json::json!([]);
         }
-        let patterns = [
-            "README",
-            "vision",
-            "brief",
-            "PRD",
-            "CONTEXT",
-        ];
+        let patterns = ["README", "vision", "brief", "PRD", "CONTEXT"];
         let mut hits: Vec<serde_json::Value> = Vec::new();
         let read_dir = match std::fs::read_dir(root) {
             Ok(rd) => rd,
@@ -1223,8 +1206,7 @@ impl McpServer {
         ));
         response_text.push_str("Available global rules. Which ones do you want to activate, ignore, or specialize for this project?\n");
         response_text.push_str(&rules_text);
-        response_text
-            .push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
+        response_text.push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
 
         let warnings: Vec<serde_json::Value> = if path_exists_on_disk {
             Vec::new()
@@ -1306,7 +1288,10 @@ impl McpServer {
         &self,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let supplied_project = args.get("project_code").and_then(|value| value.as_str()).unwrap_or("");
+        let supplied_project = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let project_code = match self.require_registered_mutation_project_code(
             args.get("project_code").and_then(|value| value.as_str()),
             "axon_apply_guidelines",
@@ -1470,9 +1455,12 @@ impl McpServer {
             data["empty_input"] = serde_json::json!(true);
         }
         // already_applied with no failures is a successful idempotent no-op.
-        let pure_already_applied =
-            nothing_applied && failed.is_empty() && unknown.is_empty() && !already_applied.is_empty();
-        let is_error = empty_input || (nothing_applied && !pure_already_applied) || !failed.is_empty();
+        let pure_already_applied = nothing_applied
+            && failed.is_empty()
+            && unknown.is_empty()
+            && !already_applied.is_empty();
+        let is_error =
+            empty_input || (nothing_applied && !pure_already_applied) || !failed.is_empty();
         if empty_input || (nothing_applied && !pure_already_applied) {
             data["recovery_hint"] = serde_json::json!(recovery_hint);
         }

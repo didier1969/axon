@@ -1,4 +1,6 @@
-fn main() -> anyhow::Result<()> { axon_core::runtime_boot::run_indexer() }
+fn main() -> anyhow::Result<()> {
+    axon_core::runtime_boot::run_indexer()
+}
 
 #[cfg(test)]
 mod tests {

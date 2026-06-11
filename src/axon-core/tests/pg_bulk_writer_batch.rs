@@ -148,10 +148,8 @@ fn flush_batch_cross_table_round_trip() {
             )
         })
         .collect();
-    let calls_nif: Vec<BulkWriterRelationRow> = vec![sample_relation(
-        "AXO::sym::0000",
-        "AXO::nif::erlang_apply",
-    )];
+    let calls_nif: Vec<BulkWriterRelationRow> =
+        vec![sample_relation("AXO::sym::0000", "AXO::nif::erlang_apply")];
 
     let batch = PgBulkBatch {
         symbols: symbols.clone(),

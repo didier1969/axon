@@ -66,11 +66,7 @@ impl Args {
         while i < raw.len() {
             match raw[i].as_str() {
                 "--tool" => {
-                    tool_filter = Some(
-                        raw.get(i + 1)
-                            .ok_or("--tool requires value")?
-                            .clone(),
-                    );
+                    tool_filter = Some(raw.get(i + 1).ok_or("--tool requires value")?.clone());
                     i += 2;
                 }
                 "--corpus" => {
@@ -78,12 +74,18 @@ impl Args {
                     i += 2;
                 }
                 "--mode" => {
-                    mode = raw.get(i + 1).ok_or("--mode requires before|after")?.clone();
+                    mode = raw
+                        .get(i + 1)
+                        .ok_or("--mode requires before|after")?
+                        .clone();
                     i += 2;
                 }
                 "--baseline-csv" => {
-                    baseline_csv =
-                        Some(raw.get(i + 1).ok_or("--baseline-csv requires path")?.clone());
+                    baseline_csv = Some(
+                        raw.get(i + 1)
+                            .ok_or("--baseline-csv requires path")?
+                            .clone(),
+                    );
                     i += 2;
                 }
                 "--mcp-url" => {
@@ -204,8 +206,7 @@ fn execute_question(q: &Question, mcp_url: &str) -> QuestionResult {
     match output {
         Ok(o) if o.status.success() => {
             let raw = String::from_utf8_lossy(&o.stdout).to_string();
-            let response: Value =
-                serde_json::from_str(&raw).unwrap_or_else(|_| Value::Null);
+            let response: Value = serde_json::from_str(&raw).unwrap_or_else(|_| Value::Null);
             let returned = extract_symbol_ids(&response);
             let concept_hits = count_concept_hits(&response, &q.expected_concepts);
             let precision_at_5 = precision_at_k(&returned, &q.expected_top_symbols, 5);
@@ -237,10 +238,7 @@ fn execute_question(q: &Question, mcp_url: &str) -> QuestionResult {
             recall_at_5: 0.0,
             recall_at_10: 0.0,
             concept_hits: 0,
-            error: Some(format!(
-                "curl exited {}",
-                o.status.code().unwrap_or(-1)
-            )),
+            error: Some(format!("curl exited {}", o.status.code().unwrap_or(-1))),
         },
         Err(e) => QuestionResult {
             question_id: q.id.clone(),
@@ -299,7 +297,10 @@ fn count_concept_hits(response: &Value, concepts: &[String]) -> usize {
     }
     let serialized = serde_json::to_string(response).unwrap_or_default();
     let lc = serialized.to_lowercase();
-    concepts.iter().filter(|c| lc.contains(&c.to_lowercase())).count()
+    concepts
+        .iter()
+        .filter(|c| lc.contains(&c.to_lowercase()))
+        .count()
 }
 
 fn precision_at_k(returned: &[String], expected: &[String], k: usize) -> f64 {
@@ -403,7 +404,11 @@ fn emit(
             );
         }
         OutputMode::Human => {
-            println!("# axon-bench-tool-migration mode={} N={}", args.mode, results.len());
+            println!(
+                "# axon-bench-tool-migration mode={} N={}",
+                args.mode,
+                results.len()
+            );
             println!("latency p50 = {} ms", p50);
             println!("latency p99 = {} ms", p99);
             println!("precision@5 = {:.3}", avg_prec_5);
@@ -473,7 +478,11 @@ mod tests {
     #[test]
     fn precision_at_k_exact_match_returns_partial_precision() {
         // 1 hit out of top-3 returned = 1/3 precision
-        let prec = precision_at_k(&s(&["axon_status", "graph_store", "foo"]), &s(&["axon_status"]), 3);
+        let prec = precision_at_k(
+            &s(&["axon_status", "graph_store", "foo"]),
+            &s(&["axon_status"]),
+            3,
+        );
         assert!((prec - (1.0 / 3.0)).abs() < 1e-9);
     }
 
@@ -510,10 +519,8 @@ mod tests {
 
     #[test]
     fn extract_symbol_ids_walks_nested_data() {
-        let v: Value = serde_json::from_str(
-            r#"{"data":{"results":[{"id":"alpha"},{"id":"beta"}]}}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"data":{"results":[{"id":"alpha"},{"id":"beta"}]}}"#).unwrap();
         let out = extract_symbol_ids(&v);
         assert!(out.contains(&"alpha".to_string()));
         assert!(out.contains(&"beta".to_string()));

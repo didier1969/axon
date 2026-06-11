@@ -975,7 +975,10 @@ mod tests {
                 "SELECT count(*) FROM ist.IndexedFile WHERE path LIKE '{root_canon}/target/%'"
             ))
             .unwrap();
-        assert_eq!(in_build, 0, "build-dir files must be pruned, never enrolled");
+        assert_eq!(
+            in_build, 0,
+            "build-dir files must be pruned, never enrolled"
+        );
 
         let _ = store.execute(&format!(
             "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"
@@ -996,9 +999,19 @@ mod tests {
         let root_canon = root.canonicalize().unwrap().to_string_lossy().to_string();
 
         std::fs::write(root.join("present.rs"), "fn p() {}\n").unwrap();
-        let present = root.join("present.rs").canonicalize().unwrap().to_string_lossy().to_string();
+        let present = root
+            .join("present.rs")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         std::fs::write(root.join("present2.rs"), "fn p2() {}\n").unwrap();
-        let present2 = root.join("present2.rs").canonicalize().unwrap().to_string_lossy().to_string();
+        let present2 = root
+            .join("present2.rs")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let gone = format!("{root_canon}/gone.rs"); // never created on disk
 
         store
@@ -1033,18 +1046,32 @@ mod tests {
         // scan_start far ahead so every candidate qualifies by timestamp; the
         // FS exists() check is then the sole discriminator.
         let scan_start = chrono::Utc::now().timestamp_millis() + 1_000_000;
-        let deleted = store.delete_stale_indexed_files(scan_start, &root_canon).unwrap();
+        let deleted = store
+            .delete_stale_indexed_files(scan_start, &root_canon)
+            .unwrap();
 
-        assert!(deleted.contains(&gone), "FS-confirmed-gone file must be purged: {deleted:?}");
-        assert!(!deleted.contains(&present), "parsed row (discovered_ms=0) must never be a stale candidate");
-        assert!(!deleted.contains(&present2), "present file must survive even with an old discovered_ms");
+        assert!(
+            deleted.contains(&gone),
+            "FS-confirmed-gone file must be purged: {deleted:?}"
+        );
+        assert!(
+            !deleted.contains(&present),
+            "parsed row (discovered_ms=0) must never be a stale candidate"
+        );
+        assert!(
+            !deleted.contains(&present2),
+            "present file must survive even with an old discovered_ms"
+        );
 
         let survivors = store
             .query_count(&format!(
                 "SELECT count(*) FROM ist.IndexedFile WHERE path IN ('{present}','{present2}')"
             ))
             .unwrap();
-        assert_eq!(survivors, 2, "both present files survive the stale reconciliation");
+        assert_eq!(
+            survivors, 2,
+            "both present files survive the stale reconciliation"
+        );
 
         let _ = store.execute(&format!(
             "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"

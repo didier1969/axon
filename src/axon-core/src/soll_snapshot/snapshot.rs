@@ -353,10 +353,22 @@ mod tests {
     #[test]
     fn build_indexes_nodes_by_type() {
         let mut nodes = HashMap::new();
-        nodes.insert("REQ-AXO-001".to_string(), mk_node("REQ-AXO-001", "Requirement"));
-        nodes.insert("REQ-AXO-002".to_string(), mk_node("REQ-AXO-002", "Requirement"));
-        nodes.insert("DEC-AXO-001".to_string(), mk_node("DEC-AXO-001", "Decision"));
-        nodes.insert("MIL-AXO-001".to_string(), mk_node("MIL-AXO-001", "Milestone"));
+        nodes.insert(
+            "REQ-AXO-001".to_string(),
+            mk_node("REQ-AXO-001", "Requirement"),
+        );
+        nodes.insert(
+            "REQ-AXO-002".to_string(),
+            mk_node("REQ-AXO-002", "Requirement"),
+        );
+        nodes.insert(
+            "DEC-AXO-001".to_string(),
+            mk_node("DEC-AXO-001", "Decision"),
+        );
+        nodes.insert(
+            "MIL-AXO-001".to_string(),
+            mk_node("MIL-AXO-001", "Milestone"),
+        );
 
         let snap = SollSnapshot::build("AXO", 1, nodes, vec![], vec![]);
         assert_eq!(snap.node_ids_of_type("Requirement").len(), 2);

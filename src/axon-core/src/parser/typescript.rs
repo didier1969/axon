@@ -150,8 +150,7 @@ impl TypeScriptParser {
                 }
                 "class_declaration" => {
                     if let Some(name_node) = parent.child_by_field_name("name") {
-                        class_prefix =
-                            Some(name_node.utf8_text(source).unwrap_or("").to_string());
+                        class_prefix = Some(name_node.utf8_text(source).unwrap_or("").to_string());
                     }
                 }
                 _ => {}

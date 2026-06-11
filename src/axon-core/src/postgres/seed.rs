@@ -190,12 +190,16 @@ pub fn apply_canonical_seed_dir(store: &GraphStore, seed_dir: &Path) -> Result<u
     files.sort();
     let mut applied = 0usize;
     for path in &files {
-        let sql = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let sql =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         for stmt in split_canonical_sql_statements(&sql) {
-            store
-                .execute(&stmt)
-                .with_context(|| format!("apply seed stmt from {}: {}", path.display(), stmt.chars().take(80).collect::<String>()))?;
+            store.execute(&stmt).with_context(|| {
+                format!(
+                    "apply seed stmt from {}: {}",
+                    path.display(),
+                    stmt.chars().take(80).collect::<String>()
+                )
+            })?;
             applied += 1;
         }
     }
@@ -212,7 +216,13 @@ fn split_canonical_sql_statements(sql: &str) -> Vec<String> {
         .split(";\n")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .map(|s| if s.ends_with(';') { s } else { format!("{};", s) })
+        .map(|s| {
+            if s.ends_with(';') {
+                s
+            } else {
+                format!("{};", s)
+            }
+        })
         .collect()
 }
 
@@ -243,32 +253,40 @@ pub fn load_seed_if_needed(store: &GraphStore, path: &Path) -> Result<usize> {
 pub fn apply_seed(store: &GraphStore, doc: &SeedDocument) -> Result<usize> {
     let mut total = 0usize;
     for r in &doc.registry {
-        store.execute(&insert_registry_sql(r))
+        store
+            .execute(&insert_registry_sql(r))
             .with_context(|| format!("insert registry row {}", r.id))?;
         total += 1;
     }
     for n in &doc.nodes {
-        store.execute(&insert_node_sql(n))
+        store
+            .execute(&insert_node_sql(n))
             .with_context(|| format!("insert node {}", n.id))?;
         total += 1;
     }
     for e in &doc.edges {
-        store.execute(&insert_edge_sql(e))
+        store
+            .execute(&insert_edge_sql(e))
             .with_context(|| format!("insert edge {} -> {}", e.source_id, e.target_id))?;
         total += 1;
     }
     for r in &doc.revisions {
-        store.execute(&insert_revision_sql(r))
+        store
+            .execute(&insert_revision_sql(r))
             .with_context(|| format!("insert revision {}", r.revision_id))?;
         total += 1;
     }
     for rc in &doc.revision_changes {
-        store.execute(&insert_revision_change_sql(rc))
-            .with_context(|| format!("insert revision_change {}/{}", rc.revision_id, rc.entity_id))?;
+        store
+            .execute(&insert_revision_change_sql(rc))
+            .with_context(|| {
+                format!("insert revision_change {}/{}", rc.revision_id, rc.entity_id)
+            })?;
         total += 1;
     }
     for t in &doc.traceability {
-        store.execute(&insert_traceability_sql(t))
+        store
+            .execute(&insert_traceability_sql(t))
             .with_context(|| format!("insert traceability {}", t.id))?;
         total += 1;
     }
@@ -302,10 +320,12 @@ fn jsonb_or_null(v: &Option<serde_json::Value>) -> String {
             // parse the inner JSON so the column lands as a JSONB
             // OBJECT — what every consumer expects.
             let canonical = match value {
-                serde_json::Value::String(s) => match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(parsed) if !parsed.is_string() => parsed,
-                    _ => value.clone(),
-                },
+                serde_json::Value::String(s) => {
+                    match serde_json::from_str::<serde_json::Value>(s) {
+                        Ok(parsed) if !parsed.is_string() => parsed,
+                        _ => value.clone(),
+                    }
+                }
                 _ => value.clone(),
             };
             format!("{}::jsonb", sql_quote(&canonical.to_string()))

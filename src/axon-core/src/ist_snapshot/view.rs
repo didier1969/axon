@@ -118,11 +118,7 @@ impl IstGraphView {
     /// REQ-AXO-901595 — RAM wrapper candidates. `None` ⇒ caller falls back
     /// to `GraphStore::get_wrapper_candidates`. Result format mirrors the
     /// PG path : `"source_name -> target_name"`.
-    pub fn wrapper_candidates(
-        &self,
-        project: &str,
-        limit: usize,
-    ) -> Option<Vec<String>> {
+    pub fn wrapper_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::wrapper_candidates(&snap, project, limit))
     }
@@ -130,11 +126,7 @@ impl IstGraphView {
     /// REQ-AXO-901595 — RAM feature-envy candidates. `None` ⇒ caller falls
     /// back to `GraphStore::get_feature_envy_candidates`. Result format
     /// mirrors the PG path : `"source -> dominant_foreign_path (foreign/total)"`.
-    pub fn feature_envy_candidates(
-        &self,
-        project: &str,
-        limit: usize,
-    ) -> Option<Vec<String>> {
+    pub fn feature_envy_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::feature_envy_candidates(&snap, project, limit))
     }
@@ -143,10 +135,7 @@ impl IstGraphView {
     /// caller falls back to `GraphStore::get_god_objects`. Returns the same
     /// `(name, fan_in)` pairs the PG path produces, sorted by fan_in desc
     /// then name asc.
-    pub fn god_objects(
-        &self,
-        project: &str,
-    ) -> Option<Vec<(String, usize)>> {
+    pub fn god_objects(&self, project: &str) -> Option<Vec<(String, usize)>> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::god_objects(&snap, project))
     }
@@ -157,11 +146,7 @@ impl IstGraphView {
     /// link — that filter requires SOLL state outside the IstGraph, so
     /// callers requiring the canonical orphan_code set must keep the PG
     /// path.
-    pub fn orphan_code_symbols(
-        &self,
-        project: &str,
-        limit: usize,
-    ) -> Option<Vec<String>> {
+    pub fn orphan_code_symbols(&self, project: &str, limit: usize) -> Option<Vec<String>> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::orphan_code_symbols(&snap, project, limit))
     }
@@ -177,7 +162,9 @@ impl IstGraphView {
         limit: usize,
     ) -> Option<Vec<(String, &'static str, String)>> {
         let snap = self.try_snapshot(project)?;
-        Some(code_smells::lexical_symbol_search(&snap, project, query_text, limit))
+        Some(code_smells::lexical_symbol_search(
+            &snap, project, query_text, limit,
+        ))
     }
 }
 
@@ -232,7 +219,9 @@ mod tests {
     fn forward_returns_none_when_disabled_env() {
         std::env::remove_var("AXON_IST_RAM_ENABLED");
         let view = IstGraphView::new(warm_cache());
-        assert!(view.forward_at_radius("AXO", "AXO::a", 1, 10, &[]).is_none());
+        assert!(view
+            .forward_at_radius("AXO", "AXO::a", 1, 10, &[])
+            .is_none());
     }
 
     #[test]

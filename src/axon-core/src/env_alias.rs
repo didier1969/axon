@@ -50,7 +50,10 @@ pub fn read_with_alias(canonical: &'static str, alias: &'static str) -> Option<S
         if !value.trim().is_empty() {
             // If alias is ALSO set, surface the duplication once so the
             // operator knows which one is winning.
-            if std::env::var(alias).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            if std::env::var(alias)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
                 warn_once(alias, canonical);
             }
             return Some(value);

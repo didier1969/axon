@@ -32,8 +32,11 @@ mod tests {
         let mut files = Vec::with_capacity(file_count);
         for idx in 0..file_count {
             let path = root.join(format!("file_{idx}.rs"));
-            std::fs::write(&path, format!("// REQ-AXO-901676 fixture {idx}\nfn main() {{}}\n"))
-                .expect("write fixture file");
+            std::fs::write(
+                &path,
+                format!("// REQ-AXO-901676 fixture {idx}\nfn main() {{}}\n"),
+            )
+            .expect("write fixture file");
             files.push(path.to_string_lossy().to_string());
         }
         (root, files)
@@ -78,7 +81,8 @@ mod tests {
             .and_then(|v| v.as_u64())
             .expect("files_scheduled field");
         assert_eq!(
-            files_scheduled as usize, files.len(),
+            files_scheduled as usize,
+            files.len(),
             "files_scheduled must match enumerated count"
         );
         assert!(
@@ -112,11 +116,7 @@ mod tests {
         let code = three_char_code_from_scope(&scope);
         let project_path = root.to_string_lossy().to_string();
         store
-            .sync_project_registry_entry(
-                &code,
-                Some("rescan-full-fixture"),
-                Some(&project_path),
-            )
+            .sync_project_registry_entry(&code, Some("rescan-full-fixture"), Some(&project_path))
             .expect("register project");
 
         // Seed IndexedFile rows carrying a `stale-hash` so we can assert the
@@ -185,18 +185,16 @@ mod tests {
         // contract is therefore: the seeded `stale-hash` is gone AND the rows
         // are back as `discovered` (enqueued for re-parse) — NOT row-absence,
         // which only held under the pre-901893 async-NOTIFY design.
-        let stale_hash_rows = read_count_where(
-            &store,
-            &project_path,
-            "content_hash = 'stale-hash'",
-        );
+        let stale_hash_rows =
+            read_count_where(&store, &project_path, "content_hash = 'stale-hash'");
         assert_eq!(
             stale_hash_rows, 0,
             "full=true must invalidate the cached content_hash (seeded 'stale-hash' must be gone)"
         );
         let discovered_rows = read_count_where(&store, &project_path, "status = 'discovered'");
         assert_eq!(
-            discovered_rows, files.len() as i64,
+            discovered_rows,
+            files.len() as i64,
             "full=true must re-enrol every file as status='discovered' for re-parse"
         );
 
@@ -274,7 +272,10 @@ mod tests {
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.first()
             .and_then(|r| r.first())
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(0)
     }
 

@@ -54,7 +54,11 @@ pub(crate) fn resolve_indexer_liveness(
             );
             IndexerLiveness {
                 ready: fresh,
-                source: if fresh { "pg_heartbeat" } else { "pg_heartbeat_stale" },
+                source: if fresh {
+                    "pg_heartbeat"
+                } else {
+                    "pg_heartbeat_stale"
+                },
                 feed,
             }
         }
@@ -103,7 +107,6 @@ pub(crate) fn split_runtime_state_from_file(path: &PathBuf) -> Option<HashMap<St
     Some(values)
 }
 
-
 pub(crate) fn runtime_truth_feed_snapshot(feed: &RuntimeTruthFeed) -> Value {
     let state = if feed.stale {
         "stale"
@@ -131,8 +134,11 @@ mod resolve_indexer_liveness_tests {
     #[test]
     fn fresh_heartbeat_is_ready_and_canonical() {
         let now = 1_000_000;
-        let live =
-            resolve_indexer_liveness(now, Some(now - 3_000), EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS);
+        let live = resolve_indexer_liveness(
+            now,
+            Some(now - 3_000),
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        );
         assert!(!live.feed.stale, "fresh heartbeat yields a non-stale feed");
         assert!(live.feed.degraded_reason.is_none());
         assert!(live.ready);
@@ -148,16 +154,23 @@ mod resolve_indexer_liveness_tests {
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );
         assert!(live.feed.stale);
-        assert_eq!(live.feed.degraded_reason.as_deref(), Some("indexer_heartbeat_stale"));
+        assert_eq!(
+            live.feed.degraded_reason.as_deref(),
+            Some("indexer_heartbeat_stale")
+        );
         assert!(!live.ready);
         assert_eq!(live.source, "pg_heartbeat_stale");
     }
 
     #[test]
     fn absent_heartbeat_is_loud_not_silent() {
-        let live = resolve_indexer_liveness(1_000_000, None, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS);
+        let live =
+            resolve_indexer_liveness(1_000_000, None, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS);
         assert!(live.feed.stale);
-        assert_eq!(live.feed.degraded_reason.as_deref(), Some("indexer_heartbeat_absent"));
+        assert_eq!(
+            live.feed.degraded_reason.as_deref(),
+            Some("indexer_heartbeat_absent")
+        );
         assert!(!live.ready);
         assert_eq!(live.source, "no_heartbeat");
     }
@@ -170,7 +183,10 @@ mod resolve_indexer_liveness_tests {
             Some(now + 10_000),
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );
-        assert!(live.ready, "a just-written (skewed) heartbeat is still proof of life");
+        assert!(
+            live.ready,
+            "a just-written (skewed) heartbeat is still proof of life"
+        );
         assert_eq!(live.source, "pg_heartbeat");
     }
 }

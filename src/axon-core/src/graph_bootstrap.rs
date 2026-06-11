@@ -79,7 +79,12 @@ impl GraphStore {
     }
 
     pub fn new_brain_reader_soll_writer(db_root: &str) -> Result<Self> {
-        Self::new_with_modes(db_root, db_root != ":memory:", SollAccessMode::ReadWrite, None)
+        Self::new_with_modes(
+            db_root,
+            db_root != ":memory:",
+            SollAccessMode::ReadWrite,
+            None,
+        )
     }
 
     pub fn new_indexer_ist_writer_soll_reader(db_root: &str) -> Result<Self> {
@@ -338,7 +343,10 @@ impl GraphStore {
                 schema.to_lowercase().replace('\'', "''"),
                 table.to_lowercase().replace('\'', "''"),
             ),
-            None => format!("table_name = '{}'", target.to_lowercase().replace('\'', "''")),
+            None => format!(
+                "table_name = '{}'",
+                target.to_lowercase().replace('\'', "''")
+            ),
         };
         let raw = self.query_json(&format!(
             "SELECT column_name FROM information_schema.columns WHERE {where_clause}"
@@ -1179,9 +1187,7 @@ mod graph_bootstrap_tests {
         // ist.Project; seed the parent row + an explicit project_code (the
         // legacy seed omitted both and broke post-901860).
         indexer
-            .execute(
-                "INSERT INTO ist.Project (code) VALUES ('AXO') ON CONFLICT (code) DO NOTHING",
-            )
+            .execute("INSERT INTO ist.Project (code) VALUES ('AXO') ON CONFLICT (code) DO NOTHING")
             .unwrap();
         // The production constructors above resolve to the process-shared test
         // DB (env override), so a hard-coded path collides across the parallel

@@ -113,11 +113,9 @@ fn rolling_window_min_finds_dip_in_sustained_run() {
         obs.push((t, chunks, ms));
         t += std::time::Duration::from_millis(1000);
     }
-    let got = crate::embedder::rolling_window_min_ch_per_s(
-        &obs,
-        std::time::Duration::from_secs(10),
-    )
-    .unwrap();
+    let got =
+        crate::embedder::rolling_window_min_ch_per_s(&obs, std::time::Duration::from_secs(10))
+            .unwrap();
     // The 10s window ending at obs 11 covers obs 2..11 (10 obs):
     // 9 obs at 100 ch/s + 1 obs at 10 ch/s in same total wall time
     // = (9*100 + 10) chunks / 10s ≈ 91 ch/s
@@ -138,13 +136,15 @@ fn rolling_window_min_skips_zero_window_observations() {
     let now = std::time::Instant::now();
     let obs = vec![
         (now, 0usize, 0u64), // zero-ms observation, must be skipped
-        (now + std::time::Duration::from_millis(500), 100usize, 1000u64),
+        (
+            now + std::time::Duration::from_millis(500),
+            100usize,
+            1000u64,
+        ),
     ];
-    let got = crate::embedder::rolling_window_min_ch_per_s(
-        &obs,
-        std::time::Duration::from_secs(10),
-    )
-    .unwrap();
+    let got =
+        crate::embedder::rolling_window_min_ch_per_s(&obs, std::time::Duration::from_secs(10))
+            .unwrap();
     // Window containing both observations: 100 chunks / 1000ms = 100 ch/s
     // (the 0/0 observation contributes 0 chunks + 0ms, so it doesn't pollute)
     assert!(
@@ -155,16 +155,19 @@ fn rolling_window_min_skips_zero_window_observations() {
 
 #[test]
 fn run_embedder_sustained_bench_rejects_empty_pool() {
-    let res = crate::embedder::run_embedder_sustained_bench(
-        "test", vec![], 1, 0, 1, false,
-    );
+    let res = crate::embedder::run_embedder_sustained_bench("test", vec![], 1, 0, 1, false);
     assert!(res.is_err(), "empty pool must return error");
 }
 
 #[test]
 fn run_embedder_sustained_bench_rejects_zero_batch() {
     let res = crate::embedder::run_embedder_sustained_bench(
-        "test", vec!["text".to_string()], 0, 0, 1, false,
+        "test",
+        vec!["text".to_string()],
+        0,
+        0,
+        1,
+        false,
     );
     assert!(res.is_err(), "batch_size=0 must return error");
 }
@@ -172,7 +175,12 @@ fn run_embedder_sustained_bench_rejects_zero_batch() {
 #[test]
 fn run_embedder_sustained_bench_rejects_zero_sustained_secs() {
     let res = crate::embedder::run_embedder_sustained_bench(
-        "test", vec!["text".to_string()], 1, 0, 0, false,
+        "test",
+        vec!["text".to_string()],
+        1,
+        0,
+        0,
+        false,
     );
     assert!(res.is_err(), "sustained_secs=0 must return error");
 }
@@ -180,7 +188,14 @@ fn run_embedder_sustained_bench_rejects_zero_sustained_secs() {
 #[test]
 fn run_embedder_pipeline_bench_rejects_zero_channel() {
     let res = crate::embedder::run_embedder_pipeline_bench(
-        "test", vec!["text".to_string()], 4, 0, 128, 0, 1, false,
+        "test",
+        vec!["text".to_string()],
+        4,
+        0,
+        128,
+        0,
+        1,
+        false,
     );
     assert!(res.is_err(), "channel_capacity=0 must return error");
 }

@@ -388,10 +388,9 @@ pub fn current_vector_downstream_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_watcher_first_priority_lanes,
-        current_admission_controller_state, current_graph_production_state,
-        current_runtime_priority_contract_state, current_vector_downstream_state,
-        detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
+        canonical_watcher_first_priority_lanes, current_admission_controller_state,
+        current_graph_production_state, current_runtime_priority_contract_state,
+        current_vector_downstream_state, detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
         recommend_admission_controller_profile, recommend_embedding_lane_sizing, recommend_sizing,
         wsl_cuda_runtime_available, RuntimeProfile,
     };

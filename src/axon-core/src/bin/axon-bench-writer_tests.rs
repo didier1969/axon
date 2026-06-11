@@ -21,13 +21,20 @@ fn parse_defaults_when_no_args() {
 #[test]
 fn parse_overrides_each_flag() {
     let parsed = Args::parse_from(&args(&[
-        "--backend", "pgvector",
-        "--total", "500",
-        "--batch", "50",
-        "--dim", "384",
-        "--project-code", "BKS",
-        "--model-id", "bge-base",
-        "--label", "trial",
+        "--backend",
+        "pgvector",
+        "--total",
+        "500",
+        "--batch",
+        "50",
+        "--dim",
+        "384",
+        "--project-code",
+        "BKS",
+        "--model-id",
+        "bge-base",
+        "--label",
+        "trial",
         "--human",
     ]))
     .unwrap();
@@ -64,5 +71,8 @@ fn parse_rejects_non_numeric_total() {
 #[test]
 fn chrono_now_ms_returns_positive_value() {
     let v = chrono_now_ms();
-    assert!(v > 1_700_000_000_000i64, "epoch ms must be after 2023-11; got {v}");
+    assert!(
+        v > 1_700_000_000_000i64,
+        "epoch ms must be after 2023-11; got {v}"
+    );
 }

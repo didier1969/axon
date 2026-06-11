@@ -105,9 +105,7 @@ fn bench_bulk_writer_chunk_embedding_throughput() {
     let bulk_rps = ROW_COUNT as f64 / (bulk_ms / 1000.0);
 
     let bulk_count = store
-        .query_count(
-            "SELECT count(*)::BIGINT FROM public.ChunkEmbedding WHERE project_code='AXO'",
-        )
+        .query_count("SELECT count(*)::BIGINT FROM public.ChunkEmbedding WHERE project_code='AXO'")
         .expect("bulk row count");
     assert_eq!(
         bulk_count as usize, ROW_COUNT,

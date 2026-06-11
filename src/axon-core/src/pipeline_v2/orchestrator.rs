@@ -62,10 +62,7 @@ pub struct PipelineBWorkerCounts {
 
 impl Default for PipelineBWorkerCounts {
     fn default() -> Self {
-        Self {
-            b2: 1,
-            b3: 2,
-        }
+        Self { b2: 1, b3: 2 }
     }
 }
 
@@ -245,14 +242,16 @@ pub fn spawn_pipeline_a_with_cache(
                 }
                 if (forwarded + skipped) % 1000 == 0 {
                     tracing::info!(
-                        forwarded, skipped,
+                        forwarded,
+                        skipped,
                         "A1 pre-filter (mtime/size): {} files skipped without reading",
                         skipped
                     );
                 }
             }
             tracing::info!(
-                forwarded, skipped,
+                forwarded,
+                skipped,
                 "A1 pre-filter done: {} files skipped (no read/hash/parse)",
                 skipped
             );
@@ -291,16 +290,22 @@ pub fn spawn_pipeline_a_with_cache(
                 }
                 if (forwarded + skipped) % 500 == 0 && (forwarded + skipped) > 0 {
                     tracing::info!(
-                        forwarded, skipped,
+                        forwarded,
+                        skipped,
                         "dedup filter: {:.0}% skipped",
                         skipped as f64 / (forwarded + skipped) as f64 * 100.0
                     );
                 }
             }
             tracing::info!(
-                forwarded, skipped,
+                forwarded,
+                skipped,
                 "dedup filter done: {:.0}% skipped",
-                if forwarded + skipped > 0 { skipped as f64 / (forwarded + skipped) as f64 * 100.0 } else { 0.0 }
+                if forwarded + skipped > 0 {
+                    skipped as f64 / (forwarded + skipped) as f64 * 100.0
+                } else {
+                    0.0
+                }
             );
         });
         filtered_rx
@@ -420,7 +425,14 @@ pub fn spawn_pipeline_b_full_with_dedup(
     b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
     embedding_cache: super::stage_b1::EmbeddingDedupCache,
 ) -> PipelineBFullHandles {
-    spawn_pipeline_b_full_multi(counts, caps, store, vec![embedder], b_chunks_rx, embedding_cache)
+    spawn_pipeline_b_full_multi(
+        counts,
+        caps,
+        store,
+        vec![embedder],
+        b_chunks_rx,
+        embedding_cache,
+    )
 }
 
 /// REQ-AXO-901748 — multi-embedder variant. Each embedder in the vec
@@ -521,8 +533,7 @@ pub fn spawn_pipeline_b_full_multi(
                 embedding_cache_for_b3.clone(),
             );
         } else {
-            let mut worker_txs: Vec<mpsc::Sender<EmbeddedChunk>> =
-                Vec::with_capacity(n_workers);
+            let mut worker_txs: Vec<mpsc::Sender<EmbeddedChunk>> = Vec::with_capacity(n_workers);
             for _ in 0..n_workers {
                 let (wtx, wrx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
                 worker_txs.push(wtx);
@@ -580,7 +591,12 @@ mod tests {
         };
         let caps = PipelineChannelCaps::default();
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let mut handles = spawn_pipeline_a(counts, caps, store.clone(), super::super::const_resolver("AXO"));
+        let mut handles = spawn_pipeline_a(
+            counts,
+            caps,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        );
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
@@ -611,9 +627,7 @@ mod tests {
         assert_eq!(indexed, 1);
 
         let symbols = store
-            .query_count(
-                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'main'",
-            )
+            .query_count("SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'main'")
             .unwrap();
         assert!(symbols >= 1);
 
@@ -664,7 +678,12 @@ mod tests {
             a3: 1,
         };
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let handles = spawn_pipeline_a(counts, PipelineChannelCaps::default(), store, super::super::const_resolver("AXO"));
+        let handles = spawn_pipeline_a(
+            counts,
+            PipelineChannelCaps::default(),
+            store,
+            super::super::const_resolver("AXO"),
+        );
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
@@ -673,8 +692,14 @@ mod tests {
         let snap_a1 = handles.metrics_a1.snapshot();
         let snap_a2 = handles.metrics_a2.snapshot();
         let snap_a3 = handles.metrics_a3.snapshot();
-        assert_eq!(snap_a1.items_out_total, 1, "A1 reads any file regardless of extension");
-        assert_eq!(snap_a1.errors_total, 0, "A1 read of a text file is not an error");
+        assert_eq!(
+            snap_a1.items_out_total, 1,
+            "A1 reads any file regardless of extension"
+        );
+        assert_eq!(
+            snap_a1.errors_total, 0,
+            "A1 read of a text file is not an error"
+        );
         assert_eq!(
             snap_a2.errors_total, 0,
             "REQ-AXO-901885: no-parser extension is a clean zero-symbol skip, NOT an error",
@@ -722,12 +747,14 @@ mod tests {
             a2: 1,
             a3: 1,
         };
-        let counts_b = PipelineBWorkerCounts {
-            b2: 1,
-            b3: 1,
-        };
+        let counts_b = PipelineBWorkerCounts { b2: 1, b3: 1 };
 
-        let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), super::super::const_resolver("AXO"));
+        let mut handles_a = spawn_pipeline_a(
+            counts_a,
+            caps,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        );
 
         // Send the file into A and await its receipt FIRST, so B's feed can be
         // scoped to exactly THIS file's chunk_ids. Was: a DB-WIDE
@@ -746,8 +773,7 @@ mod tests {
         // Feed B ONLY this file's chunks (by id), mirroring demand_pull_b's
         // SELECT-with-content but scoped so the test is independent of any other
         // test's residue in the shared test DB.
-        let (b_chunks_tx, b_chunks_rx) =
-            mpsc::channel::<ChunkForEmbedding>(caps.internal);
+        let (b_chunks_tx, b_chunks_rx) = mpsc::channel::<ChunkForEmbedding>(caps.internal);
         let store_for_feeder = store.clone();
         let feed_ids = enrolled.chunk_ids.clone();
         tokio::spawn(async move {
@@ -778,11 +804,10 @@ mod tests {
 
         let mut persisted = 0usize;
         for _ in 0..expected_chunks {
-            let receipt =
-                tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
-                    .await
-                    .expect("B3 must produce a persist receipt within 5 s")
-                    .expect("B3 output channel must yield Some(PersistedEmbedding)");
+            let receipt = tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
+                .await
+                .expect("B3 must produce a persist receipt within 5 s")
+                .expect("B3 output channel must yield Some(PersistedEmbedding)");
             assert!(enrolled.chunk_ids.contains(&receipt.chunk_id));
             persisted += 1;
         }

@@ -35,18 +35,12 @@ impl McpServer {
 
         let view = process_view();
         if !view.is_warm(&project) {
-            return Some(ist_cache_miss_error(
-                "ist_centrality_pagerank",
-                &project,
-            ));
+            return Some(ist_cache_miss_error("ist_centrality_pagerank", &project));
         }
         let snapshot = match view.cache_handle().get(&project) {
             Some(s) => s,
             None => {
-                return Some(ist_cache_miss_error(
-                    "ist_centrality_pagerank",
-                    &project,
-                ));
+                return Some(ist_cache_miss_error("ist_centrality_pagerank", &project));
             }
         };
 
@@ -67,11 +61,7 @@ impl McpServer {
         } else {
             format!(
                 "ist_centrality_pagerank {} top {} (damping={}, iter={}) — top: {}",
-                project,
-                top,
-                damping,
-                iterations,
-                pairs[0].0
+                project, top, damping, iterations, pairs[0].0
             )
         };
         Some(json!({
@@ -251,7 +241,8 @@ fn ist_cache_miss_error(tool: &str, project: &str) -> Value {
             project
         )
     } else {
-        "set AXON_IST_RAM_ENABLED=1 in the brain env, restart, then call `ist_snapshot_warm`".to_string()
+        "set AXON_IST_RAM_ENABLED=1 in the brain env, restart, then call `ist_snapshot_warm`"
+            .to_string()
     };
     json!({
         "content": [{

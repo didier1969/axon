@@ -138,5 +138,4 @@ mod tests {
         assert!(!mode.ingestion_enabled());
         assert_eq!(mode.declared_process_role(), AxonProcessRole::Brain);
     }
-
 }

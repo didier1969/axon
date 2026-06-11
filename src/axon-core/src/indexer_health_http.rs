@@ -15,12 +15,7 @@
 // tourner la pipeline). V2 raffinera /readyz (PG ping via tokio-postgres,
 // freshness IST snapshot) et /startupz (flag AtomicBool set par init).
 
-use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,11 +63,7 @@ pub fn health_router(state: IndexerHealthState) -> Router {
                     // V2 (TODO) : ping PG via tokio-postgres + check
                     // freshness IST snapshot pour distinguer ready vs
                     // degraded (cf. doctrine Sridharan graceful degradation).
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({"state": "ready"})),
-                    )
-                        .into_response()
+                    (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response()
                 }
             }),
         )

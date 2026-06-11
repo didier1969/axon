@@ -14,9 +14,9 @@ use tokenizers::{Encoding, Tokenizer};
 use tracing::{info, warn};
 
 use super::{
-    embedding_model_cache_dir, gpu_memory_soft_limit_mb,
-    load_runtime_embedding_tokenizer, normalize_embedding,
-    ort_pooling_cls, ort_pooling_mean, runtime_embedding_snapshot_dir, FASTEMBED_OUTPUT_PRECEDENCE,
+    embedding_model_cache_dir, gpu_memory_soft_limit_mb, load_runtime_embedding_tokenizer,
+    normalize_embedding, ort_pooling_cls, ort_pooling_mean, runtime_embedding_snapshot_dir,
+    FASTEMBED_OUTPUT_PRECEDENCE,
 };
 
 pub(crate) struct OrtGpuFirstTextEmbedding {
@@ -65,15 +65,6 @@ pub(super) struct EmbeddingBatchStats {
     pub batch_size_total: usize,
 }
 
-
-
-
-
-
-
-
-
-
 impl OrtGpuFirstTextEmbedding {
     pub(crate) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
         let snapshot_dir = runtime_embedding_snapshot_dir()?;
@@ -94,7 +85,9 @@ impl OrtGpuFirstTextEmbedding {
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|err| anyhow!("failed to set ORT optimization level: {err}"))?
             .with_memory_pattern(memory_pattern_enabled)
-            .map_err(|err| anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}"))?;
+            .map_err(|err| {
+                anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}")
+            })?;
 
         // REQ-AXO-901798 — track which provider the session actually loaded
         // so we can update the shared diagnostics slot after a successful
@@ -179,7 +172,9 @@ impl OrtGpuFirstTextEmbedding {
         // Path retained behind AXON_ORT_BIND_OUTPUT_PER_ITER=0 for
         // future A/B work. See VAL-AXO-055.
         let bind_output_per_iter = ort_bind_output_per_iter_from_env(
-            std::env::var("AXON_ORT_BIND_OUTPUT_PER_ITER").ok().as_deref(),
+            std::env::var("AXON_ORT_BIND_OUTPUT_PER_ITER")
+                .ok()
+                .as_deref(),
         );
         if !bind_output_per_iter {
             io_binding
@@ -187,9 +182,8 @@ impl OrtGpuFirstTextEmbedding {
                 .map_err(|err| anyhow!("failed to pre-bind output {}: {err}", output_name))?;
         }
 
-        let seq_buckets = parse_seq_buckets_from_env(
-            std::env::var("AXON_EMBEDDER_SEQ_BUCKETS").ok().as_deref(),
-        );
+        let seq_buckets =
+            parse_seq_buckets_from_env(std::env::var("AXON_EMBEDDER_SEQ_BUCKETS").ok().as_deref());
 
         info!(
             "✅ Semantic {} Worker [{}]: ORT GPU-first embedding runner loaded (provider={}, bind_output_per_iter={}, seq_buckets={:?})",
@@ -416,11 +410,6 @@ impl OrtGpuFirstTextEmbedding {
     }
 }
 
-
-
-
-
-
 /// REQ-AXO-262 — pure helper to parse
 /// `AXON_ORT_BIND_OUTPUT_PER_ITER` env override.
 ///
@@ -581,9 +570,8 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     //
     // Override via AXON_TRT_PROFILE_{MIN,OPT,MAX}_SHAPES if a different
     // range is required (e.g. for a smaller VRAM budget).
-    let trt_profile_min = std::env::var("AXON_TRT_PROFILE_MIN_SHAPES").unwrap_or_else(|_| {
-        "input_ids:1x1,attention_mask:1x1,token_type_ids:1x1".to_string()
-    });
+    let trt_profile_min = std::env::var("AXON_TRT_PROFILE_MIN_SHAPES")
+        .unwrap_or_else(|_| "input_ids:1x1,attention_mask:1x1,token_type_ids:1x1".to_string());
     let trt_profile_opt = std::env::var("AXON_TRT_PROFILE_OPT_SHAPES").unwrap_or_else(|_| {
         "input_ids:64x256,attention_mask:64x256,token_type_ids:64x256".to_string()
     });
@@ -610,7 +598,6 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
 
     Ok(ExecutionProviderDispatch::from(provider).error_on_failure())
 }
-
 
 pub(crate) fn cuda_memory_limit_bytes() -> usize {
     (std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")

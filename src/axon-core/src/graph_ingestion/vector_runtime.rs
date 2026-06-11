@@ -337,9 +337,18 @@ mod tests {
         assert!(sql.contains("ON CONFLICT (fault_id) DO UPDATE"));
         // Must update every non-key column on conflict.
         for col in [
-            "lane", "worker_id", "fatal_stage", "fatal_reason_raw", "fatal_class",
-            "provider", "batch_id", "texts_count", "input_bytes", "vram_used_mb",
-            "occurred_at_ms", "restart_attempt",
+            "lane",
+            "worker_id",
+            "fatal_stage",
+            "fatal_reason_raw",
+            "fatal_class",
+            "provider",
+            "batch_id",
+            "texts_count",
+            "input_bytes",
+            "vram_used_mb",
+            "occurred_at_ms",
+            "restart_attempt",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -354,8 +363,13 @@ mod tests {
         assert!(sql.contains("INSERT INTO axon_runtime.VectorLaneState"));
         assert!(sql.contains("ON CONFLICT (lane) DO UPDATE"));
         for col in [
-            "state", "reason", "updated_at_ms", "worker_id", "restart_attempt",
-            "last_success_at_ms", "last_fault_id",
+            "state",
+            "reason",
+            "updated_at_ms",
+            "worker_id",
+            "restart_attempt",
+            "last_success_at_ms",
+            "last_fault_id",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -370,10 +384,24 @@ mod tests {
         assert!(sql.contains("INSERT INTO axon_runtime.VectorPersistOutbox"));
         assert!(sql.contains("ON CONFLICT (outbox_id) DO UPDATE"));
         for col in [
-            "run_id", "model_id", "status", "attempts", "queued_at_ms", "claimed_at_ms",
-            "completed_at_ms", "last_error_reason", "claim_token", "lease_heartbeat_at_ms",
-            "lease_owner", "lease_epoch", "chunk_count", "file_count", "input_bytes",
-            "fetch_ms", "embed_ms", "payload_json",
+            "run_id",
+            "model_id",
+            "status",
+            "attempts",
+            "queued_at_ms",
+            "claimed_at_ms",
+            "completed_at_ms",
+            "last_error_reason",
+            "claim_token",
+            "lease_heartbeat_at_ms",
+            "lease_owner",
+            "lease_epoch",
+            "chunk_count",
+            "file_count",
+            "input_bytes",
+            "fetch_ms",
+            "embed_ms",
+            "payload_json",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -397,9 +425,7 @@ mod tests {
 
     #[test]
     fn lifecycle_heartbeat_upsert_sql_shape() {
-        use crate::embedder::lifecycle_machine::{
-            EmbedderPhase, LifecycleHeartbeatSnapshot,
-        };
+        use crate::embedder::lifecycle_machine::{EmbedderPhase, LifecycleHeartbeatSnapshot};
         let snapshot = LifecycleHeartbeatSnapshot {
             phase: EmbedderPhase::Sleeping,
             last_used_ms: 1_700_000_000_000,
@@ -416,8 +442,15 @@ mod tests {
         assert!(sql.contains("INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat"));
         assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
         for col in [
-            "phase", "last_used_ms", "wake_count", "sleep_count",
-            "pending_count", "heartbeat_ms", "compute", "compute_source", "build_id",
+            "phase",
+            "last_used_ms",
+            "wake_count",
+            "sleep_count",
+            "pending_count",
+            "heartbeat_ms",
+            "compute",
+            "compute_source",
+            "build_id",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -436,9 +469,7 @@ mod tests {
 
     #[test]
     fn lifecycle_heartbeat_upsert_sql_emits_null_build_id_when_absent() {
-        use crate::embedder::lifecycle_machine::{
-            EmbedderPhase, LifecycleHeartbeatSnapshot,
-        };
+        use crate::embedder::lifecycle_machine::{EmbedderPhase, LifecycleHeartbeatSnapshot};
         let snapshot = LifecycleHeartbeatSnapshot {
             phase: EmbedderPhase::Ready,
             last_used_ms: 1,
@@ -460,9 +491,7 @@ mod tests {
 
     #[test]
     fn lifecycle_heartbeat_upsert_sql_escapes_role() {
-        use crate::embedder::lifecycle_machine::{
-            EmbedderPhase, LifecycleHeartbeatSnapshot,
-        };
+        use crate::embedder::lifecycle_machine::{EmbedderPhase, LifecycleHeartbeatSnapshot};
         let snapshot = LifecycleHeartbeatSnapshot {
             phase: EmbedderPhase::Ready,
             last_used_ms: 0,

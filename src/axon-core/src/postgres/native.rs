@@ -114,9 +114,10 @@ impl NativePgCtx {
         let schema_search_path = match schema {
             None => Some("ist".to_string()),
             Some(s) if s.is_empty() => Some("ist".to_string()),
-            Some(s) => Some(validate_schema_identifier(s).map_err(|reason| {
-                anyhow::anyhow!("rejected schema {s:?}: {reason}")
-            })?),
+            Some(s) => Some(
+                validate_schema_identifier(s)
+                    .map_err(|reason| anyhow::anyhow!("rejected schema {s:?}: {reason}"))?,
+            ),
         };
 
         let url = database_url.to_string();

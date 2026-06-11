@@ -177,9 +177,7 @@ fn graphstore_boots_under_postgres_backend() {
     assert_eq!(count, 1, "upsert should land exactly one row");
     // Idempotence: re-issuing the same upsert under ON CONFLICT keeps
     // the row count at 1.
-    store
-        .execute(&upsert)
-        .expect("pgvector upsert idempotent");
+    store.execute(&upsert).expect("pgvector upsert idempotent");
     let count_after_replay = store
         .query_count(
             "SELECT count(*)::BIGINT FROM public.ChunkEmbedding WHERE project_code = 'TST'",
@@ -194,12 +192,19 @@ fn graphstore_boots_under_postgres_backend() {
     // Verify each label exists in ag_catalog so the migration plan has
     // a stable foundation.
     let graph_count = store
-        .query_count(
-            "SELECT count(*)::BIGINT FROM ag_catalog.ag_graph WHERE name = 'axon_graph'",
-        )
+        .query_count("SELECT count(*)::BIGINT FROM ag_catalog.ag_graph WHERE name = 'axon_graph'")
         .expect("ag_catalog.ag_graph readable");
     assert_eq!(graph_count, 1, "axon_graph must exist after bootstrap");
-    for label in ["File", "Symbol", "Chunk", "CONTAINS", "CALLS", "CALLS_NIF", "IMPACTS", "SUBSTANTIATES"] {
+    for label in [
+        "File",
+        "Symbol",
+        "Chunk",
+        "CONTAINS",
+        "CALLS",
+        "CALLS_NIF",
+        "IMPACTS",
+        "SUBSTANTIATES",
+    ] {
         let label_count = store
             .query_count(&format!(
                 "SELECT count(*)::BIGINT FROM ag_catalog.ag_label l \
@@ -239,11 +244,13 @@ fn graphstore_boots_under_postgres_backend() {
              "created_at": 1714999999000_i64}
         ]
     });
-    let doc: axon_core::postgres::seed::SeedDocument =
-        serde_json::from_value(synthetic).unwrap();
+    let doc: axon_core::postgres::seed::SeedDocument = serde_json::from_value(synthetic).unwrap();
     let inserted = axon_core::postgres::seed::apply_seed(&store, &doc)
         .expect("apply_seed should succeed against PG-backed store");
-    assert_eq!(inserted, 4, "expected 1 registry + 1 node + 1 edge + 1 revision");
+    assert_eq!(
+        inserted, 4,
+        "expected 1 registry + 1 node + 1 edge + 1 revision"
+    );
     assert_eq!(
         store
             .query_count("SELECT count(*)::BIGINT FROM soll.Node")
@@ -273,7 +280,10 @@ fn graphstore_boots_under_postgres_backend() {
             "SELECT count(*)::BIGINT FROM information_schema.schemata WHERE schema_name = 'axon_runtime'",
         )
         .expect("axon_runtime schema check");
-    assert_eq!(runtime_schema_present, 1, "axon_runtime schema should exist");
+    assert_eq!(
+        runtime_schema_present, 1,
+        "axon_runtime schema should exist"
+    );
     for table in [
         "OptimizerDecisionLog",
         "VectorWorkerFault",
@@ -346,15 +356,16 @@ fn graphstore_boots_under_postgres_backend() {
         serde_json::from_value(req_with_ac).unwrap();
     let inserted_ac = axon_core::postgres::seed::apply_seed(&store, &doc_ac)
         .expect("apply_seed for REQ-247/249 smoke should succeed");
-    assert_eq!(inserted_ac, 1, "expected exactly one new node from smoke seed");
+    assert_eq!(
+        inserted_ac, 1,
+        "expected exactly one new node from smoke seed"
+    );
 
     // Sanity probe: jsonb_typeof confirms metadata is stored as an OBJECT
     // (not a JSONB string scalar — that would mean the pre-REQ-249
     // double-encoding leaked through).
     let metadata_typeof = store
-        .query_json(
-            "SELECT jsonb_typeof(metadata) FROM soll.Node WHERE id = 'REQ-AXO-9999'",
-        )
+        .query_json("SELECT jsonb_typeof(metadata) FROM soll.Node WHERE id = 'REQ-AXO-9999'")
         .expect("jsonb_typeof on soll.Node.metadata");
     assert!(
         metadata_typeof.contains("object"),
@@ -407,4 +418,3 @@ fn graphstore_boots_under_postgres_backend() {
     std::env::remove_var("AXON_DB_BACKEND");
     std::env::remove_var("AXON_LIVE_DATABASE_URL");
 }
-

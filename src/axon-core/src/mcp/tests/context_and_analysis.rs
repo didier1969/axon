@@ -762,14 +762,8 @@ fn test_conception_view_rejects_unregistered_project_code() {
         "unregistered project_code must surface isError; response={response:?}"
     );
     let data = response.get("data").expect("data");
-    assert_eq!(
-        data["status"].as_str(),
-        Some("wrong_project_scope")
-    );
-    assert_eq!(
-        data["rejected_project_code"].as_str(),
-        Some("ZZZ")
-    );
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(data["rejected_project_code"].as_str(), Some("ZZZ"));
     assert!(
         data["registered_project_codes"].is_array(),
         "registered_project_codes must be an array"
@@ -867,14 +861,8 @@ fn test_change_safety_rejects_unregistered_project_code() {
         "unregistered project_code must surface isError; response={response:?}"
     );
     let data = response.get("data").expect("data");
-    assert_eq!(
-        data["status"].as_str(),
-        Some("wrong_project_scope")
-    );
-    assert_eq!(
-        data["rejected_project_code"].as_str(),
-        Some("ZZZ")
-    );
+    assert_eq!(data["status"].as_str(), Some("wrong_project_scope"));
+    assert_eq!(data["rejected_project_code"].as_str(), Some("ZZZ"));
     assert_eq!(
         data["operator_guidance"]["follow_up_tools"][0].as_str(),
         Some("project_registry_lookup")
@@ -955,7 +943,10 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         "surfaces_used must contain graph_pg or graph_ram, got {surfaces:?}"
     );
     assert_eq!(data["total_available"].as_u64(), Some(1));
-    assert_eq!(data["next_call_hint"].as_str(), Some("impact symbol=sink_fn"));
+    assert_eq!(
+        data["next_call_hint"].as_str(),
+        Some("impact symbol=sink_fn")
+    );
     assert_eq!(data["pagination"]["offset"].as_u64(), Some(0));
     assert_eq!(data["pagination"]["limit"].as_u64(), Some(3));
     assert!(data["pagination"]["next_offset"].is_null());
@@ -999,7 +990,10 @@ fn test_path_not_found_branch_exposes_trimodal_envelope() {
         "surfaces_used must contain graph_pg or graph_ram, got {surfaces:?}"
     );
     assert_eq!(data["total_available"].as_u64(), Some(0));
-    assert_eq!(data["next_call_hint"].as_str(), Some("inspect symbol=isolated_a"));
+    assert_eq!(
+        data["next_call_hint"].as_str(),
+        Some("inspect symbol=isolated_a")
+    );
     assert_eq!(data["pagination"]["offset"].as_u64(), Some(0));
     assert!(data["pagination"]["next_offset"].is_null());
 }
@@ -1805,13 +1799,37 @@ fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
         .collect();
 
     // Open items present.
-    assert!(item_ids.contains(&"DEC-AXO-001"), "open accepted decision must be in waves: {:?}", item_ids);
-    assert!(item_ids.contains(&"REQ-AXO-001"), "open current requirement must be in waves: {:?}", item_ids);
+    assert!(
+        item_ids.contains(&"DEC-AXO-001"),
+        "open accepted decision must be in waves: {:?}",
+        item_ids
+    );
+    assert!(
+        item_ids.contains(&"REQ-AXO-001"),
+        "open current requirement must be in waves: {:?}",
+        item_ids
+    );
     // Terminal items excluded.
-    assert!(!item_ids.contains(&"DEC-AXO-002"), "delivered decision must be excluded: {:?}", item_ids);
-    assert!(!item_ids.contains(&"REQ-AXO-002"), "completed requirement must be excluded: {:?}", item_ids);
-    assert!(!item_ids.contains(&"DEC-AXO-003"), "superseded decision must be excluded: {:?}", item_ids);
-    assert!(!item_ids.contains(&"REQ-AXO-003"), "archived requirement must be excluded: {:?}", item_ids);
+    assert!(
+        !item_ids.contains(&"DEC-AXO-002"),
+        "delivered decision must be excluded: {:?}",
+        item_ids
+    );
+    assert!(
+        !item_ids.contains(&"REQ-AXO-002"),
+        "completed requirement must be excluded: {:?}",
+        item_ids
+    );
+    assert!(
+        !item_ids.contains(&"DEC-AXO-003"),
+        "superseded decision must be excluded: {:?}",
+        item_ids
+    );
+    assert!(
+        !item_ids.contains(&"REQ-AXO-003"),
+        "archived requirement must be excluded: {:?}",
+        item_ids
+    );
 
     // Descendant counter weighted by OPEN descendants only — DEC-AXO-001
     // should report 'unblocks 1 descendant(s)' (REQ-AXO-001), not 0 or 2.
@@ -1830,7 +1848,11 @@ fn test_soll_work_plan_excludes_terminal_state_nodes_from_wave_1() {
         .iter()
         .find(|r| r.starts_with("unblocks "))
         .expect("unblocks reason must be present");
-    assert!(unblocks_str.contains("1 descendant"), "expected unblocks 1 descendant, got: {}", unblocks_str);
+    assert!(
+        unblocks_str.contains("1 descendant"),
+        "expected unblocks 1 descendant, got: {}",
+        unblocks_str
+    );
 }
 
 #[test]
@@ -1884,8 +1906,7 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
     let result = response.unwrap().result.expect("Expected result");
     let data = result.get("data").expect("data payload");
     let waves = data["ordered_waves"].as_array().expect("waves");
-    let mut score_by_id: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut score_by_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for wave in waves {
         for item in wave["items"].as_array().expect("items") {
             let id = item["id"].as_str().unwrap_or("").to_string();
@@ -1896,7 +1917,9 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
     let recent_score = *score_by_id
         .get("DEC-AXO-001")
         .expect("DEC-AXO-001 in waves");
-    let old_score = *score_by_id.get("DEC-AXO-002").expect("DEC-AXO-002 in waves");
+    let old_score = *score_by_id
+        .get("DEC-AXO-002")
+        .expect("DEC-AXO-002 in waves");
     assert!(
         old_score < recent_score,
         "100-day-old decision must score lower than 1-day-old decision when decay is enabled (recent={}, old={})",
@@ -1937,8 +1960,7 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
     let result = response.unwrap().result.expect("Expected result");
     let data = result.get("data").expect("data payload");
     let waves = data["ordered_waves"].as_array().expect("waves");
-    let mut score_by_id: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut score_by_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for wave in waves {
         for item in wave["items"].as_array().expect("items") {
             let id = item["id"].as_str().unwrap_or("").to_string();
@@ -1949,7 +1971,9 @@ fn test_soll_work_plan_temporal_decay_lowers_old_node_score() {
     let recent_score = *score_by_id
         .get("DEC-AXO-001")
         .expect("DEC-AXO-001 in waves");
-    let old_score = *score_by_id.get("DEC-AXO-002").expect("DEC-AXO-002 in waves");
+    let old_score = *score_by_id
+        .get("DEC-AXO-002")
+        .expect("DEC-AXO-002 in waves");
     assert_eq!(
         recent_score, old_score,
         "include_decay=false must yield identical scores for structurally identical nodes"
@@ -2012,10 +2036,7 @@ fn test_soll_work_plan_counts_decision_evidence() {
     );
 }
 
-
 // list_labels_tables tool removed (post-MIL-AXO-017 legacy cleanup).
-
-
 
 #[test]
 fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
@@ -2056,7 +2077,9 @@ fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
         )
         .unwrap();
 
-    let response = server.axon_status(&json!({"mode": "full"})).expect("status response");
+    let response = server
+        .axon_status(&json!({"mode": "full"}))
+        .expect("status response");
     let traceability = &response["data"]["traceability"];
 
     assert!(traceability["host_snapshot"].is_object());
@@ -2108,7 +2131,10 @@ fn test_axon_architectural_drift() {
         target: "db/repo.rs".into(),
         rel: RelationType::Calls,
     }];
-    crate::ist_snapshot::publish_process_snapshot("PRJ".into(), Arc::new(IstGraph::build(nodes, edges)));
+    crate::ist_snapshot::publish_process_snapshot(
+        "PRJ".into(),
+        Arc::new(IstGraph::build(nodes, edges)),
+    );
     std::env::set_var("AXON_IST_RAM_ENABLED", "1");
 
     let req = JsonRpcRequest {
@@ -2516,21 +2542,6 @@ fn test_retrieve_context_uses_repo_literal_fallback_when_index_has_no_anchor() {
     service_guard::reset_for_tests();
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[test]
 fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
     // REQ-AXO-142 — rewritten to use `test_support::ist_fixtures` so the
@@ -2625,8 +2636,7 @@ fn test_axon_inspect() {
     let harness = create_test_server_with_ist_seed(
         IstSeed::new()
             .symbol(
-                SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ")
-                    .tested(true),
+                SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ").tested(true),
             )
             .symbol(
                 SymbolFixture::new("prj::caller_func", "caller_func", "function", "PRJ")
@@ -2709,7 +2719,10 @@ fn test_axon_simulate_mutation_unknown_symbol_with_no_suggestions_recommends_wid
     let data = result.get("data").expect("data block present");
     assert_eq!(data["symbol_found"].as_bool(), Some(false));
     let suggestions = data["suggestions"].as_array().expect("suggestions array");
-    assert!(suggestions.is_empty(), "preconditions: no suggestions: {suggestions:?}");
+    assert!(
+        suggestions.is_empty(),
+        "preconditions: no suggestions: {suggestions:?}"
+    );
     assert_eq!(data["next_action"]["kind"].as_str(), Some("broaden_search"));
     assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
 }
@@ -2853,7 +2866,10 @@ fn test_axon_impact_unknown_symbol_with_no_suggestions_recommends_widening() {
     let data = result.get("data").expect("data block present");
     assert_eq!(data["impact_available"].as_bool(), Some(false));
     let suggestions = data["suggestions"].as_array().expect("suggestions array");
-    assert!(suggestions.is_empty(), "preconditions: no suggestions: {suggestions:?}");
+    assert!(
+        suggestions.is_empty(),
+        "preconditions: no suggestions: {suggestions:?}"
+    );
     assert_eq!(data["next_action"]["kind"].as_str(), Some("broaden_search"));
     assert_eq!(data["next_action"]["tool"].as_str(), Some("query"));
 
@@ -2945,7 +2961,10 @@ fn test_axon_inspect_unknown_symbol_with_no_suggestions_recommends_widening() {
     assert_eq!(data["symbol_found"].as_bool(), Some(false));
 
     let suggestions = data["suggestions"].as_array().expect("suggestions array");
-    assert!(suggestions.is_empty(), "preconditions: no suggestions for nonsense symbol");
+    assert!(
+        suggestions.is_empty(),
+        "preconditions: no suggestions for nonsense symbol"
+    );
 
     let next_action_kind = data["next_action"]["kind"].as_str().unwrap_or("");
     assert_eq!(
@@ -2967,7 +2986,9 @@ fn test_axon_inspect_unknown_symbol_with_no_suggestions_recommends_widening() {
         "must not advise picking a suggestion when none exist: {remediation_text}"
     );
     assert!(
-        remediation_text.contains("query") || remediation_text.contains("broaden") || remediation_text.contains("spelling"),
+        remediation_text.contains("query")
+            || remediation_text.contains("broaden")
+            || remediation_text.contains("spelling"),
         "must steer toward widening/spelling: {remediation_text}"
     );
 
@@ -3244,7 +3265,10 @@ fn test_axon_audit_taint_analysis() {
     // ist.project_telemetry.files_total) counts ENROLLED files via
     // ist.Project x ist.IndexedFile. Seed the parent Project + IndexedFile
     // rows (path = CONTAINS-edge source_id) so the project is indexed.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.rs', 'PRJ', 'hash-src/api.rs', 0), ('src/api_dummy.rs', 'PRJ', 'hash-src/api_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3304,7 +3328,10 @@ fn test_axon_audit_technical_debt() {
     // REQ-AXO-901860 — enroll the project so audit isn't gated as unindexed;
     // IndexedFile.path must match the CONTAINS-edge source_id for
     // get_technical_debt's IndexedFile JOIN.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/danger.rs', 'PRJ', 'hash-src/danger.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3352,7 +3379,10 @@ fn test_axon_audit_technical_debt_comments() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll project + IndexedFile (path = CONTAINS source)
     // so audit isn't gated and the tech-debt IndexedFile JOIN matches.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/todo.rs', 'PRJ', 'hash-src/todo.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3397,7 +3427,10 @@ fn test_axon_audit_secrets_detection() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll project + IndexedFile (path = CONTAINS source)
     // so audit isn't gated and the secrets tech-debt JOIN matches.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/config.rs', 'PRJ', 'hash-src/config.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3440,7 +3473,10 @@ fn test_axon_audit_cross_language_taint() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll project + IndexedFile rows so audit isn't gated
     // as unindexed (taint findings derive from Symbol+Edge once past the gate).
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.ex', 'PRJ', 'hash-src/api.ex', 0), ('src/api_dummy.ex', 'PRJ', 'hash-src/api_dummy.ex', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3498,7 +3534,10 @@ fn test_axon_health_god_objects() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll project + IndexedFile so health isn't gated as
     // unindexed; god-objects then surface via get_god_objects (project=*).
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/god.rs', 'PRJ', 'hash-src/god.rs', 0), ('src/god_dummy.rs', 'PRJ', 'hash-src/god_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3607,8 +3646,14 @@ fn test_axon_audit_respects_project_scope() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll both projects + their IndexedFile rows so the
     // scoped audit (project=PJA) isn't gated as unindexed.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING").unwrap();
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/input.rs', 'PJA', 'hash-apps/pja/lib/input.rs', 0), ('apps/pjb/lib/unsafe.rs', 'PJB', 'hash-apps/pjb/lib/unsafe.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3668,8 +3713,14 @@ fn test_axon_health_respects_project_scope() {
     let server = create_test_server();
     // REQ-AXO-901860 — enroll both projects + their IndexedFile rows so the
     // scoped health (project=PJA) isn't gated as unindexed.
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING").unwrap();
-    server.graph_store.execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/covered.rs', 'PJA', 'hash-apps/pja/lib/covered.rs', 0), ('apps/pjb/lib/god.rs', 'PJB', 'hash-apps/pjb/lib/god.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
         .graph_store
@@ -3728,7 +3779,6 @@ fn test_axon_health_respects_project_scope() {
     assert!(!content.contains("God Object"), "{}", content);
     assert!(!content.contains("GodClass"), "{}", content);
 }
-
 
 // REQ-AXO-264 Phase A — layered envelope contract.
 //
@@ -3798,7 +3848,9 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
     //   - "ok": git log ran (entries may still be empty if no recent commits)
     //   - "no_project_root": no AXON_PROJECT_ROOT/cwd resolvable
     //   - "git_error": git invocation failed (e.g. not a repo, git missing)
-    let recent_status = response["data"]["recent_band"]["status"].as_str().unwrap_or("");
+    let recent_status = response["data"]["recent_band"]["status"]
+        .as_str()
+        .unwrap_or("");
     assert!(
         matches!(recent_status, "ok" | "no_project_root" | "git_error"),
         "recent_band.status must be one of {{ok, no_project_root, git_error}}, got {recent_status:?}",
@@ -3810,7 +3862,9 @@ fn test_retrieve_context_layered_returns_three_bands_in_one_call() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        intent_reqs.iter().any(|row| row["id"].as_str() == Some("REQ-AXO-2640")),
+        intent_reqs
+            .iter()
+            .any(|row| row["id"].as_str() == Some("REQ-AXO-2640")),
         "intent_band.requirements should contain REQ-AXO-2640, got {:?}",
         intent_reqs
     );
@@ -3855,14 +3909,22 @@ fn test_retrieve_context_legacy_shape_unchanged_after_layered_addition() {
         .result
         .unwrap();
 
-    assert!(response["data"]["packet"].is_object(),
-        "legacy retrieve_context must still expose `data.packet`");
-    assert!(response["data"]["intent_band"].is_null(),
-        "legacy retrieve_context must NOT expose intent_band");
-    assert!(response["data"]["code_band"].is_null(),
-        "legacy retrieve_context must NOT expose code_band");
-    assert!(response["data"]["recent_band"].is_null(),
-        "legacy retrieve_context must NOT expose recent_band");
+    assert!(
+        response["data"]["packet"].is_object(),
+        "legacy retrieve_context must still expose `data.packet`"
+    );
+    assert!(
+        response["data"]["intent_band"].is_null(),
+        "legacy retrieve_context must NOT expose intent_band"
+    );
+    assert!(
+        response["data"]["code_band"].is_null(),
+        "legacy retrieve_context must NOT expose code_band"
+    );
+    assert!(
+        response["data"]["recent_band"].is_null(),
+        "legacy retrieve_context must NOT expose recent_band"
+    );
 }
 
 // REQ-AXO-264 A6 v1 — recent_band must surface git log entries from
@@ -3876,27 +3938,71 @@ fn test_recent_band_collects_git_log_within_24h_window() {
 
     // Init a fresh git repo and produce one commit touching two files.
     let must_run = |cmd: &mut Command| {
-        let status = cmd.status().unwrap_or_else(|err| panic!("command failed to start: {err}"));
+        let status = cmd
+            .status()
+            .unwrap_or_else(|err| panic!("command failed to start: {err}"));
         assert!(status.success(), "command failed: {:?}", cmd);
     };
-    must_run(Command::new("git").arg("-C").arg(repo).arg("init").arg("-q"));
-    must_run(Command::new("git").arg("-C").arg(repo).arg("config").arg("user.email").arg("test@axon.local"));
-    must_run(Command::new("git").arg("-C").arg(repo).arg("config").arg("user.name").arg("Axon Test"));
+    must_run(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("init")
+            .arg("-q"),
+    );
+    must_run(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("config")
+            .arg("user.email")
+            .arg("test@axon.local"),
+    );
+    must_run(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("config")
+            .arg("user.name")
+            .arg("Axon Test"),
+    );
     std::fs::write(repo.join("alpha.rs"), b"// alpha\n").unwrap();
     std::fs::write(repo.join("beta.rs"), b"// beta\n").unwrap();
-    must_run(Command::new("git").arg("-C").arg(repo).arg("add").arg("alpha.rs").arg("beta.rs"));
-    must_run(Command::new("git").arg("-C").arg(repo).arg("commit").arg("-q").arg("-m").arg("layered-test seed commit"));
+    must_run(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("add")
+            .arg("alpha.rs")
+            .arg("beta.rs"),
+    );
+    must_run(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("layered-test seed commit"),
+    );
 
     let band = McpServer::collect_recent_band(Some(repo.to_string_lossy().as_ref()));
     assert_eq!(band["status"].as_str(), Some("ok"), "band: {band}");
-    let edits = band["git_recent_edits"].as_array().cloned().unwrap_or_default();
-    let files: Vec<&str> = edits.iter()
-        .filter_map(|e| e["file"].as_str())
-        .collect();
-    assert!(files.contains(&"alpha.rs"), "alpha.rs missing from {files:?}");
+    let edits = band["git_recent_edits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let files: Vec<&str> = edits.iter().filter_map(|e| e["file"].as_str()).collect();
+    assert!(
+        files.contains(&"alpha.rs"),
+        "alpha.rs missing from {files:?}"
+    );
     assert!(files.contains(&"beta.rs"), "beta.rs missing from {files:?}");
     let first = &edits[0];
-    assert!(first["last_commit_subject"].as_str().unwrap_or("").contains("layered-test seed commit"));
+    assert!(first["last_commit_subject"]
+        .as_str()
+        .unwrap_or("")
+        .contains("layered-test seed commit"));
     assert!(band["tokens_used"].as_u64().unwrap_or(0) > 0);
 }
 
@@ -3907,12 +4013,17 @@ fn test_recent_band_collects_git_log_within_24h_window() {
 fn test_recent_band_returns_stable_contract_when_no_project_root() {
     let none_band = McpServer::collect_recent_band(None);
     assert_eq!(none_band["status"].as_str(), Some("no_project_root"));
-    assert!(none_band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+    assert!(none_band["git_recent_edits"]
+        .as_array()
+        .map_or(false, |a| a.is_empty()));
     assert_eq!(none_band["tokens_used"].as_u64(), Some(0));
 
-    let bogus_band = McpServer::collect_recent_band(Some("/nonexistent/axon/test/path/does-not-exist"));
+    let bogus_band =
+        McpServer::collect_recent_band(Some("/nonexistent/axon/test/path/does-not-exist"));
     assert_eq!(bogus_band["status"].as_str(), Some("no_project_root"));
-    assert!(bogus_band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+    assert!(bogus_band["git_recent_edits"]
+        .as_array()
+        .map_or(false, |a| a.is_empty()));
 }
 
 // REQ-AXO-264 A6 v1 — non-git directory must return git_error contract,
@@ -3922,7 +4033,9 @@ fn test_recent_band_returns_git_error_when_not_a_repo() {
     let tempdir = tempdir().unwrap();
     let band = McpServer::collect_recent_band(Some(tempdir.path().to_string_lossy().as_ref()));
     assert_eq!(band["status"].as_str(), Some("git_error"), "band: {band}");
-    assert!(band["git_recent_edits"].as_array().map_or(false, |a| a.is_empty()));
+    assert!(band["git_recent_edits"]
+        .as_array()
+        .map_or(false, |a| a.is_empty()));
 }
 
 // REQ-AXO-264 A3 v2 — default budgets surfaced when caller omits `bands`.
@@ -3951,8 +4064,14 @@ fn test_retrieve_context_layered_surfaces_default_budgets() {
         .result
         .unwrap();
 
-    assert_eq!(response["data"]["intent_band"]["tokens_budget"].as_u64(), Some(2000));
-    assert_eq!(response["data"]["code_band"]["tokens_budget"].as_u64(), Some(6000));
+    assert_eq!(
+        response["data"]["intent_band"]["tokens_budget"].as_u64(),
+        Some(2000)
+    );
+    assert_eq!(
+        response["data"]["code_band"]["tokens_budget"].as_u64(),
+        Some(6000)
+    );
     // recent_band budget enforcement is internal — not surfaced as a field
     // on recent_band itself but counted in tokens_overflowed.
     assert!(response["data"]["intent_band"]["tokens_overflowed"].is_number());
@@ -4011,13 +4130,25 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
         .result
         .unwrap();
 
-    let kept = response["data"]["code_band"]["chunks"].as_array().cloned().unwrap_or_default();
-    let used = response["data"]["code_band"]["tokens_used"].as_u64().unwrap_or(0);
-    let budget = response["data"]["code_band"]["tokens_budget"].as_u64().unwrap_or(0);
-    let overflowed = response["data"]["code_band"]["tokens_overflowed"].as_u64().unwrap_or(0);
+    let kept = response["data"]["code_band"]["chunks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let used = response["data"]["code_band"]["tokens_used"]
+        .as_u64()
+        .unwrap_or(0);
+    let budget = response["data"]["code_band"]["tokens_budget"]
+        .as_u64()
+        .unwrap_or(0);
+    let overflowed = response["data"]["code_band"]["tokens_overflowed"]
+        .as_u64()
+        .unwrap_or(0);
 
     assert_eq!(budget, 200, "explicit budget should be surfaced");
-    assert!(used <= budget, "tokens_used ({used}) must be <= budget ({budget})");
+    assert!(
+        used <= budget,
+        "tokens_used ({used}) must be <= budget ({budget})"
+    );
     assert!(
         overflowed > 0 || kept.is_empty(),
         "with a 200-token budget on 30 fat chunks we expect either truncation overflow > 0 or empty kept set; got kept={} overflowed={}",

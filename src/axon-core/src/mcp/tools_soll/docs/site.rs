@@ -250,9 +250,7 @@ impl McpServer {
             match write_if_changed(&page_path, &page.html) {
                 Ok(true) => pages_written += 1,
                 Ok(false) => pages_unchanged += 1,
-                Err(error) => {
-                    return Err(format!("Derived docs write error: {}", error))
-                }
+                Err(error) => return Err(format!("Derived docs write error: {}", error)),
             }
             manifest_pages.push(json!({
                 "path": page.relative_path,
@@ -303,10 +301,8 @@ impl McpServer {
                         "has_docs": entry.has_docs
                     })).collect::<Vec<_>>()
                 });
-                let root_manifest_pretty =
-                    serde_json::to_string_pretty(&root_manifest).map_err(|error| {
-                        format!("Root manifest serialization error: {}", error)
-                    })?;
+                let root_manifest_pretty = serde_json::to_string_pretty(&root_manifest)
+                    .map_err(|error| format!("Root manifest serialization error: {}", error))?;
                 write_if_changed(&root_manifest_path, &root_manifest_pretty)
                     .map_err(|error| format!("Root manifest write error: {}", error))?;
                 (
@@ -401,40 +397,40 @@ impl McpServer {
                 // slice 1a centrality signal.
                 let total_available = summary.pages_total;
                 Some(json!({
-                "content": [{ "type": "text", "text": format!(
-                    "Generated navigable SOLL docs for `{}`.\nSite root: {}\nProject root: {}\nRefresh mode: {}\nPages total: {}\nPages written: {}\nPages unchanged: {}\nPages deleted: {}\nProject manifest: {}\nRoot index: {}",
-                    summary.project_code,
-                    summary.site_root,
-                    summary.project_output_root,
-                    summary.refresh_mode,
-                    summary.pages_total,
-                    summary.pages_written,
-                    summary.pages_unchanged,
-                    summary.pages_deleted,
-                    summary.project_manifest_path,
-                    summary.root_index_path
-                ) }],
-                "data": {
-                    "project_code": summary.project_code,
-                    "site_root": json_optional_string(&summary.site_root),
-                    "output_root": summary.project_output_root,
-                    "manifest_path": summary.project_manifest_path,
-                    "root_manifest_path": json_optional_string(&summary.root_manifest_path),
-                    "root_index_path": json_optional_string(&summary.root_index_path),
-                    "refresh_mode": summary.refresh_mode,
-                    "pages_total": summary.pages_total,
-                    "pages_written": summary.pages_written,
-                    "pages_unchanged": summary.pages_unchanged,
-                    "pages_deleted": summary.pages_deleted,
-                    "deleted_paths": summary.deleted_paths,
-                    "root_written": summary.root_written,
-                    "stale_docs": summary.stale_docs,
-                    "canonical_boundary": "Derived human docs only. Live SOLL and SOLL_EXPORT remain canonical.",
-                    "surfaces_used": ["soll_pg", "filesystem"],
-                    "total_available": total_available,
-                    "next_call_hint": "soll_validate project_code=<code> if pages_unchanged is unexpectedly high"
-                }
-            }))
+                    "content": [{ "type": "text", "text": format!(
+                        "Generated navigable SOLL docs for `{}`.\nSite root: {}\nProject root: {}\nRefresh mode: {}\nPages total: {}\nPages written: {}\nPages unchanged: {}\nPages deleted: {}\nProject manifest: {}\nRoot index: {}",
+                        summary.project_code,
+                        summary.site_root,
+                        summary.project_output_root,
+                        summary.refresh_mode,
+                        summary.pages_total,
+                        summary.pages_written,
+                        summary.pages_unchanged,
+                        summary.pages_deleted,
+                        summary.project_manifest_path,
+                        summary.root_index_path
+                    ) }],
+                    "data": {
+                        "project_code": summary.project_code,
+                        "site_root": json_optional_string(&summary.site_root),
+                        "output_root": summary.project_output_root,
+                        "manifest_path": summary.project_manifest_path,
+                        "root_manifest_path": json_optional_string(&summary.root_manifest_path),
+                        "root_index_path": json_optional_string(&summary.root_index_path),
+                        "refresh_mode": summary.refresh_mode,
+                        "pages_total": summary.pages_total,
+                        "pages_written": summary.pages_written,
+                        "pages_unchanged": summary.pages_unchanged,
+                        "pages_deleted": summary.pages_deleted,
+                        "deleted_paths": summary.deleted_paths,
+                        "root_written": summary.root_written,
+                        "stale_docs": summary.stale_docs,
+                        "canonical_boundary": "Derived human docs only. Live SOLL and SOLL_EXPORT remain canonical.",
+                        "surfaces_used": ["soll_pg", "filesystem"],
+                        "total_available": total_available,
+                        "next_call_hint": "soll_validate project_code=<code> if pages_unchanged is unexpectedly high"
+                    }
+                }))
             }
             Err(error) => Some(json!({
                 "content": [{ "type": "text", "text": error.clone() }],

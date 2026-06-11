@@ -58,7 +58,10 @@ pub fn detect_legacy_proximity(
     // Step 1: find SOLL entities linked to this artifact via traceability.
     let mut linked_entity_ids: Vec<String> = Vec::new();
     for trace in &snapshot.traceability {
-        if trace.artifact_ref.to_ascii_lowercase().contains(&artifact_lower)
+        if trace
+            .artifact_ref
+            .to_ascii_lowercase()
+            .contains(&artifact_lower)
             || artifact_lower.contains(&trace.artifact_ref.to_ascii_lowercase())
         {
             if !linked_entity_ids.contains(&trace.soll_entity_id) {
@@ -175,8 +178,7 @@ fn infer_strategy(
         .get(succ_id.as_str())
         .map(|n| n.status.as_str())
         .unwrap_or("");
-    let successor_terminal =
-        successor_status == "delivered" || successor_status == "completed";
+    let successor_terminal = successor_status == "delivered" || successor_status == "completed";
 
     // IST residual: count traceability rows for the superseded entity.
     let entity_type_lower = node.entity_type.to_ascii_lowercase();
@@ -210,8 +212,10 @@ fn has_deprecated_tag(metadata_raw: &str) -> bool {
 
 fn extract_updated_at(metadata_raw: &str) -> Option<i64> {
     let meta: serde_json::Value = serde_json::from_str(metadata_raw).ok()?;
-    meta.get("updated_at")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    meta.get("updated_at").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    })
 }
 
 #[cfg(test)]
@@ -355,11 +359,7 @@ mod tests {
             // Traceability links the *requirement* to the artifact, not
             // the superseded decision directly. The decision has zero
             // traceability rows.
-            vec![mk_trace(
-                "Requirement",
-                "REQ-AXO-010",
-                "src/old_backend.rs",
-            )],
+            vec![mk_trace("Requirement", "REQ-AXO-010", "src/old_backend.rs")],
         );
         // REQ-AXO-010 is current → no legacy proximity from it.
         // DEC-AXO-001 is superseded but has no traceability to this
@@ -452,8 +452,7 @@ mod tests {
         );
         let result = detect_legacy_proximity("src/shared_module.rs", &snapshot).unwrap();
         assert_eq!(result.nodes.len(), 2);
-        let strategies: Vec<&LegacyStrategy> =
-            result.nodes.iter().map(|n| &n.strategy).collect();
+        let strategies: Vec<&LegacyStrategy> = result.nodes.iter().map(|n| &n.strategy).collect();
         assert!(strategies.contains(&&LegacyStrategy::ProgressiveActive));
         assert!(strategies.contains(&&LegacyStrategy::Abandoned));
     }
@@ -463,11 +462,7 @@ mod tests {
         let snapshot = build_snapshot(
             vec![mk_node("DEC-AXO-001", "Decision", "superseded")],
             vec![],
-            vec![mk_trace(
-                "Decision",
-                "DEC-AXO-001",
-                "src/OldBackend.rs",
-            )],
+            vec![mk_trace("Decision", "DEC-AXO-001", "src/OldBackend.rs")],
         );
         let result = detect_legacy_proximity("src/oldbackend.rs", &snapshot);
         assert!(result.is_some());
@@ -516,10 +511,7 @@ mod tests {
         for i in 0..500 {
             let id = format!("REQ-AXO-{:04}", i);
             let status = if i % 50 == 0 { "superseded" } else { "current" };
-            nodes.insert(
-                id.clone(),
-                mk_node(&id, "Requirement", status),
-            );
+            nodes.insert(id.clone(), mk_node(&id, "Requirement", status));
         }
         for i in 0..500 {
             let id = format!("DEC-AXO-{:04}", i);

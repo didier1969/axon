@@ -9,12 +9,14 @@ use super::{
 
 #[test]
 fn symbol_fixture_round_trips() {
-    let harness = create_test_server_with_ist_seed(IstSeed::new().symbol(
-        SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ")
-            .tested(true)
-            .is_nif(false)
-            .is_unsafe(false),
-    ))
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new().symbol(
+            SymbolFixture::new("prj::core_func", "core_func", "function", "PRJ")
+                .tested(true)
+                .is_nif(false)
+                .is_unsafe(false),
+        ),
+    )
     .unwrap();
 
     assert_ist_count(
@@ -64,12 +66,14 @@ fn call_fixture_canonical_and_synthetic_both_persist() {
 
 #[test]
 fn soll_node_fixture_round_trips() {
-    let harness = create_test_server_with_ist_seed(IstSeed::new().node(
-        SollNodeFixture::new("REQ-AXO-9999", "Requirement", "AXO", "fixture sanity")
-            .description("test fixture")
-            .status("current")
-            .metadata_json("{\"priority\":\"P3\"}"),
-    ))
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new().node(
+            SollNodeFixture::new("REQ-AXO-9999", "Requirement", "AXO", "fixture sanity")
+                .description("test fixture")
+                .status("current")
+                .metadata_json("{\"priority\":\"P3\"}"),
+        ),
+    )
     .unwrap();
 
     assert_ist_count(

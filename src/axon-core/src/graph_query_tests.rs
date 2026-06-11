@@ -11,11 +11,7 @@ use super::*;
 #[test]
 fn expand_named_params_handles_question_mark_in_string_value() {
     let query = "INSERT INTO soll.Node (id, title, description) VALUES (?, ?, ?)";
-    let params = serde_json::json!([
-        "REQ-AXO-XYZ",
-        "Title with ?",
-        "Does this fail? Yes or no?"
-    ]);
+    let params = serde_json::json!(["REQ-AXO-XYZ", "Title with ?", "Does this fail? Yes or no?"]);
     let expanded = GraphStore::expand_named_params(query, &params).unwrap();
     assert_eq!(
         expanded,

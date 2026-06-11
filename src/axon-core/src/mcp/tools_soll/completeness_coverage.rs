@@ -81,8 +81,7 @@ impl McpServer {
                 .ok()
                 .map(|identity| identity.project_path);
             // One stat() per unique stale path.
-            let mut fresh: HashMap<String, &'static str> =
-                HashMap::with_capacity(stale_refs.len());
+            let mut fresh: HashMap<String, &'static str> = HashMap::with_capacity(stale_refs.len());
             for raw_ref in &stale_refs {
                 let path = Path::new(raw_ref);
                 let candidate = if path.is_absolute() {
@@ -173,10 +172,7 @@ impl McpServer {
 
         // Stable iteration order by id so callers comparing snapshots
         // across calls (tests, diff tooling) see deterministic output.
-        let mut req_ids: Vec<&String> = snapshot
-            .node_ids_of_type("Requirement")
-            .iter()
-            .collect();
+        let mut req_ids: Vec<&String> = snapshot.node_ids_of_type("Requirement").iter().collect();
         req_ids.sort();
 
         for id in req_ids {
@@ -376,7 +372,11 @@ impl McpServer {
                 if !status_allowed(&node.status, true) {
                     continue;
                 }
-                if snapshot.traceability_rows_for("requirement", id).next().is_some() {
+                if snapshot
+                    .traceability_rows_for("requirement", id)
+                    .next()
+                    .is_some()
+                {
                     continue;
                 }
                 let meta: serde_json::Value =

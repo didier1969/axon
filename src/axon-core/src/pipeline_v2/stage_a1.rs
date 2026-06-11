@@ -199,7 +199,10 @@ mod tests {
         assert_eq!(prep.content, "fn main() { println!(\"hi\"); }");
         assert_eq!(prep.content.len() as u64, prep.size_bytes);
         assert_eq!(prep.content_hash.len(), 64, "sha256 hex = 64 chars");
-        assert!(prep.mtime_ms > 0, "mtime should be populated for a real file");
+        assert!(
+            prep.mtime_ms > 0,
+            "mtime should be populated for a real file"
+        );
     }
 
     #[tokio::test]
@@ -227,7 +230,10 @@ mod tests {
     #[tokio::test]
     async fn a1_prepare_fails_cleanly_when_path_does_not_exist() {
         let res = a1_prepare(PathBuf::from("/tmp/does/not/exist/axon-test")).await;
-        assert!(res.is_err(), "missing path must surface an error to the worker pool");
+        assert!(
+            res.is_err(),
+            "missing path must surface an error to the worker pool"
+        );
     }
 
     /// REQ-AXO-901895 Memory Shield — an oversized file (> 5 MB default) is
@@ -241,7 +247,10 @@ mod tests {
         file.write_all("x\n".repeat(2_800_000).as_bytes()).unwrap();
         file.flush().unwrap();
         let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
-        assert!(prep.content.is_empty(), "oversized file must yield empty content");
+        assert!(
+            prep.content.is_empty(),
+            "oversized file must yield empty content"
+        );
         assert!(prep.size_bytes > 5 * 1024 * 1024);
         assert_eq!(prep.content_hash.len(), 64);
     }
@@ -255,7 +264,10 @@ mod tests {
         file.write_all("x".repeat(9000).as_bytes()).unwrap(); // one 9 KB line > 8 KB
         file.flush().unwrap();
         let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
-        assert!(prep.content.is_empty(), "minified file must yield empty content");
+        assert!(
+            prep.content.is_empty(),
+            "minified file must yield empty content"
+        );
         assert_eq!(prep.content_hash.len(), 64);
         assert_eq!(prep.size_bytes, 9000);
     }
@@ -266,10 +278,14 @@ mod tests {
     #[tokio::test]
     async fn a1_prepare_skips_binary_file_with_empty_content() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&[0xFFu8, 0xFE, 0x00, 0x9F, 0x01, 0x02]).unwrap(); // invalid UTF-8
+        file.write_all(&[0xFFu8, 0xFE, 0x00, 0x9F, 0x01, 0x02])
+            .unwrap(); // invalid UTF-8
         file.flush().unwrap();
         let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
-        assert!(prep.content.is_empty(), "binary file must yield empty content");
+        assert!(
+            prep.content.is_empty(),
+            "binary file must yield empty content"
+        );
         assert_eq!(prep.content_hash.len(), 64);
     }
 

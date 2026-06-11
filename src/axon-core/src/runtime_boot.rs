@@ -519,7 +519,12 @@ fn init_runtime_tracing() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let info_log_enabled = std::env::var("AXON_INFO_LOG_FILE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
 
     let (info_appender, error_appender) = match std::env::var("AXON_RUN_ROOT") {
@@ -729,9 +734,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     }
     // REQ-AXO-097 — spawn the watchdog tick task once both roles
     // have wired their heartbeaters. Idempotent across re-init.
-    crate::runtime_watchdog::spawn_watchdog_task(
-        crate::runtime_watchdog::DEFAULT_TICK_INTERVAL_MS,
-    );
+    crate::runtime_watchdog::spawn_watchdog_task(crate::runtime_watchdog::DEFAULT_TICK_INTERVAL_MS);
 
     let mut acquired_writer_guards = Vec::new();
     for target in profile.writer_targets() {
@@ -959,13 +962,9 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE
     // (alias AXON_INSTANCE_KIND still honored with one-shot warn).
     match crate::postgres::database_url_for(
-        match crate::env_alias::read_with_alias_or(
-            "AXON_INSTANCE",
-            "AXON_INSTANCE_KIND",
-            "live",
-        )
-        .to_lowercase()
-        .as_str()
+        match crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
+            .to_lowercase()
+            .as_str()
         {
             "dev" => crate::postgres::AxonInstance::Dev,
             _ => crate::postgres::AxonInstance::Live,
@@ -993,10 +992,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     }
 
     main_background::spawn_shadow_optimizer(graph_store.clone());
-    main_background::spawn_runtime_trace_logger(
-        graph_store.clone(),
-        queue_store.clone(),
-    );
+    main_background::spawn_runtime_trace_logger(graph_store.clone(), queue_store.clone());
 
     if let Some(tel_listener) = tel_listener {
         loop {
@@ -1037,10 +1033,10 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 mod tests {
     use super::{
         apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
-        apply_canonical_ort_thread_defaults_from_openmp,
-        apply_graph_first_indexer_memory_defaults, canonical_effective_embedding_lane_config,
-        canonical_embedding_provider_request, graph_first_indexer_lane_sizing,
-        parse_boot_warm_project_codes, RuntimeBootProfile, RuntimeBootRole,
+        apply_canonical_ort_thread_defaults_from_openmp, apply_graph_first_indexer_memory_defaults,
+        canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
+        graph_first_indexer_lane_sizing, parse_boot_warm_project_codes, RuntimeBootProfile,
+        RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
@@ -1679,7 +1675,6 @@ mod tests {
             std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
         }
     }
-
 }
 
 // REQ-AXO-901653 slice-5c — WorkerPool spawn removed ; pipeline_v2 owns ingestion.

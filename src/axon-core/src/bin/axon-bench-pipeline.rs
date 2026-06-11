@@ -202,10 +202,12 @@ fn run() -> anyhow::Result<()> {
         args.label,
         args.force_gpu
     );
-    eprintln!("   ORT_DYLIB_PATH={}",
+    eprintln!(
+        "   ORT_DYLIB_PATH={}",
         std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "<unset>".into())
     );
-    eprintln!("   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
+    eprintln!(
+        "   AXON_GPU_EMBED_SERVICE_TENSORRT={}",
         std::env::var("AXON_GPU_EMBED_SERVICE_TENSORRT").unwrap_or_else(|_| "<unset>".into())
     );
 
@@ -250,7 +252,10 @@ fn run() -> anyhow::Result<()> {
             println!("   total_chunks    {}", bench.total_chunks);
             println!("   mean_ch_per_s   {:.2}", bench.mean_ch_per_s);
             println!("   rolling_10s_min {:.2}", bench.rolling_10s_min);
-            println!("   queue_high_water {} / {}", bench.queue_high_water, bench.channel_capacity);
+            println!(
+                "   queue_high_water {} / {}",
+                bench.queue_high_water, bench.channel_capacity
+            );
             println!("   dim             {}", bench.embedding_dim);
         }
     }

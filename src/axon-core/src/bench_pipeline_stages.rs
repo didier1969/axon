@@ -103,7 +103,11 @@ pub fn run_graph_projection_bench(
     let elapsed_secs = elapsed.as_secs_f64().max(1e-9);
 
     let safe_div = |num: f64, den: f64| -> f64 {
-        if den <= 0.0 { 0.0 } else { num / den }
+        if den <= 0.0 {
+            0.0
+        } else {
+            num / den
+        }
     };
 
     let _ = total_candidates;
@@ -125,10 +129,7 @@ pub fn run_graph_projection_bench(
 /// extension is supported by `parser::get_parser_for_file`. Skips
 /// hidden directories (`.git`, `.axon`, `node_modules`, `target`,
 /// etc.) to mirror the watcher policy.
-pub fn collect_supported_files(
-    dir: &Path,
-    max_files: usize,
-) -> anyhow::Result<Vec<PathBuf>> {
+pub fn collect_supported_files(dir: &Path, max_files: usize) -> anyhow::Result<Vec<PathBuf>> {
     use std::collections::VecDeque;
 
     let mut out: Vec<PathBuf> = Vec::with_capacity(max_files.min(8192));
@@ -148,16 +149,20 @@ pub fn collect_supported_files(
                 break;
             }
             let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             // Skip noise dirs to mirror watcher exclusions.
             if path.is_dir() {
                 if matches!(
                     name,
-                    ".git" | ".axon" | ".devenv" | ".direnv" | "target"
-                        | "node_modules" | ".worktrees" | "dist" | "build"
+                    ".git"
+                        | ".axon"
+                        | ".devenv"
+                        | ".direnv"
+                        | "target"
+                        | "node_modules"
+                        | ".worktrees"
+                        | "dist"
+                        | "build"
                 ) {
                     continue;
                 }
@@ -240,7 +245,11 @@ where
     // floor the rate to zero and mask real throughput.
     let elapsed_secs = elapsed.as_secs_f64().max(1e-9);
     let safe_div = |num: f64, den: f64| -> f64 {
-        if den <= 0.0 { 0.0 } else { num / den }
+        if den <= 0.0 {
+            0.0
+        } else {
+            num / den
+        }
     };
 
     Ok(WriterBench {

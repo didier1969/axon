@@ -795,7 +795,11 @@ mod tests {
         let cs = calls(&result.relations);
         assert!(cs.len() >= 2, "expected >= 2 calls, got {}", cs.len());
         for c in &cs {
-            assert_eq!(c.from, "foo", "every call inside `fn foo` must have from=foo, got {:?}", c);
+            assert_eq!(
+                c.from, "foo",
+                "every call inside `fn foo` must have from=foo, got {:?}",
+                c
+            );
         }
         let targets: Vec<&str> = cs.iter().map(|c| c.to.as_str()).collect();
         assert!(targets.contains(&"bar"));
@@ -847,7 +851,11 @@ mod tests {
             return;
         }
         for c in calls(&result.relations) {
-            assert_eq!(c.from, "", "top-level call should have empty caller, got {:?}", c);
+            assert_eq!(
+                c.from, "",
+                "top-level call should have empty caller, got {:?}",
+                c
+            );
         }
     }
 
@@ -914,11 +922,7 @@ mod tests {
             eprintln!("rust wasm grammar unavailable, skipping");
             return;
         }
-        let enums: Vec<&Symbol> = result
-            .symbols
-            .iter()
-            .filter(|s| s.kind == "enum")
-            .collect();
+        let enums: Vec<&Symbol> = result.symbols.iter().filter(|s| s.kind == "enum").collect();
         assert_eq!(
             enums.len(),
             1,
@@ -944,11 +948,7 @@ mod tests {
             eprintln!("rust wasm grammar unavailable, skipping");
             return;
         }
-        let impls: Vec<&Symbol> = result
-            .symbols
-            .iter()
-            .filter(|s| s.kind == "impl")
-            .collect();
+        let impls: Vec<&Symbol> = result.symbols.iter().filter(|s| s.kind == "impl").collect();
         assert_eq!(
             impls.len(),
             1,
@@ -978,11 +978,7 @@ mod tests {
             eprintln!("rust wasm grammar unavailable, skipping");
             return;
         }
-        let impls: Vec<&Symbol> = result
-            .symbols
-            .iter()
-            .filter(|s| s.kind == "impl")
-            .collect();
+        let impls: Vec<&Symbol> = result.symbols.iter().filter(|s| s.kind == "impl").collect();
         assert_eq!(
             impls.len(),
             1,

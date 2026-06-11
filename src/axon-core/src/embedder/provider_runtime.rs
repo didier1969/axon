@@ -91,7 +91,8 @@ pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingPr
     let gpu_present = current_gpu_present();
     let provider_requested =
         canonical_embedding_provider_request_for_mode(AxonRuntimeMode::from_env(), gpu_present);
-    let mut diagnostics = embedding_provider_diagnostics_with_request(provider_requested, gpu_present);
+    let mut diagnostics =
+        embedding_provider_diagnostics_with_request(provider_requested, gpu_present);
     diagnostics.provider_effective = provider_effective.clone();
     diagnostics.resolution = provider_resolution_for_label(
         &diagnostics.provider_requested,
@@ -245,7 +246,9 @@ mod tests {
     #[test]
     fn fallback_reason_returns_none_when_cpu_was_requested() {
         assert!(embedder_provider_fallback_reason("cpu", "cpu", None).is_none());
-        assert!(embedder_provider_fallback_reason("cpu", "cpu_missing_cuda_provider", None).is_none());
+        assert!(
+            embedder_provider_fallback_reason("cpu", "cpu_missing_cuda_provider", None).is_none()
+        );
     }
 
     #[test]

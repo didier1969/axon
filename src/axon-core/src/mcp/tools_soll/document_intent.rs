@@ -196,15 +196,17 @@ impl McpServer {
 
         let (attach_to, relation_type, attach_source) = match explicit_attach_to {
             Some(target) => {
-                let rel = explicit_relation_type
-                    .unwrap_or_else(|| default_relation_for_entity_to_pillar(entity_type).to_string());
+                let rel = explicit_relation_type.unwrap_or_else(|| {
+                    default_relation_for_entity_to_pillar(entity_type).to_string()
+                });
                 (target, rel, "explicit_argument")
             }
             None => match self.default_project_pillar(&project_code) {
                 Some(pillar_id) => (
                     pillar_id,
-                    explicit_relation_type
-                        .unwrap_or_else(|| default_relation_for_entity_to_pillar(entity_type).to_string()),
+                    explicit_relation_type.unwrap_or_else(|| {
+                        default_relation_for_entity_to_pillar(entity_type).to_string()
+                    }),
                     "auto_inferred_project_pillar",
                 ),
                 None => {
@@ -371,13 +373,19 @@ mod document_intent_classifier_tests {
 
     #[test]
     fn classifies_requirement_when_body_describes_problem_or_gap() {
-        let (kind, _) = classify_intent("Indexer fails on empty file", "the watcher cannot index empty files because the validator rejects 0-byte content");
+        let (kind, _) = classify_intent(
+            "Indexer fails on empty file",
+            "the watcher cannot index empty files because the validator rejects 0-byte content",
+        );
         assert_eq!(kind, "requirement");
     }
 
     #[test]
     fn classifies_decision_when_body_describes_choice() {
-        let (kind, _) = classify_intent("Pick option A", "After review we will go with option A; tradeoff documented in DEC-AXO-064");
+        let (kind, _) = classify_intent(
+            "Pick option A",
+            "After review we will go with option A; tradeoff documented in DEC-AXO-064",
+        );
         assert_eq!(kind, "decision");
     }
 

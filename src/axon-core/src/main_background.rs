@@ -445,10 +445,7 @@ pub(crate) fn shadow_optimizer_enabled() -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn spawn_runtime_trace_logger(
-    store: Arc<GraphStore>,
-    queue: Arc<QueueStore>,
-) {
+pub(crate) fn spawn_runtime_trace_logger(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
     if !runtime_trace_enabled() {
         return;
     }
@@ -1111,8 +1108,6 @@ fn should_attempt_memory_reclaim(
     process_memory.rss_anon_bytes >= min_anon_bytes
 }
 
-
-
 pub(crate) fn runtime_telemetry_snapshot(
     store: &GraphStore,
     queue: &QueueStore,
@@ -1440,7 +1435,6 @@ fn host_state_label(
         "healthy"
     }
 }
-
 
 #[cfg(test)]
 fn dynamic_claim_sleep(

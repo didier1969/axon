@@ -31,9 +31,12 @@ fn template_name() -> String {
 fn force_dropdb(db_name: &str, pg_port: &str) -> bool {
     std::process::Command::new("dropdb")
         .args([
-            "-h", "127.0.0.1",
-            "-p", pg_port,
-            "-U", "axon",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
             "--force",
             "--if-exists",
             db_name,
@@ -122,10 +125,14 @@ impl TestDb {
 
         let output = std::process::Command::new("createdb")
             .args([
-                "-h", "127.0.0.1",
-                "-p", &port,
-                "-U", "axon",
-                "-T", &template,
+                "-h",
+                "127.0.0.1",
+                "-p",
+                &port,
+                "-U",
+                "axon",
+                "-T",
+                &template,
                 &db_name,
             ])
             .output()
@@ -143,11 +150,17 @@ impl TestDb {
         // guards parkés en `static` qui ne déclenchent jamais `Drop`).
         register_for_atexit_cleanup(&db_name, &port);
 
-        TestDb { db_name, pg_port: port }
+        TestDb {
+            db_name,
+            pg_port: port,
+        }
     }
 
     pub(crate) fn url(&self) -> String {
-        format!("postgres://axon@127.0.0.1:{}/{}", self.pg_port, self.db_name)
+        format!(
+            "postgres://axon@127.0.0.1:{}/{}",
+            self.pg_port, self.db_name
+        )
     }
 }
 
@@ -191,10 +204,14 @@ pub(crate) fn shared_test_db_url() -> String {
         let template = template_name();
         let output = std::process::Command::new("createdb")
             .args([
-                "-h", "127.0.0.1",
-                "-p", &port,
-                "-U", "axon",
-                "-T", &template,
+                "-h",
+                "127.0.0.1",
+                "-p",
+                &port,
+                "-U",
+                "axon",
+                "-T",
+                &template,
                 &db_name,
             ])
             .output()
@@ -269,10 +286,14 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
 
     let mut child = match std::process::Command::new("psql")
         .args([
-            "-h", "127.0.0.1",
-            "-p", pg_port,
-            "-U", "axon",
-            "-d", "postgres",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            "postgres",
             "-X", // ignore ~/.psqlrc for deterministic behaviour
             "-q",
         ])
@@ -453,8 +474,18 @@ CREATE TRIGGER a_test_autofill_soll_edge BEFORE INSERT ON soll.Edge\n\
 
     let mut child = match std::process::Command::new("psql")
         .args([
-            "-h", "127.0.0.1", "-p", pg_port, "-U", "axon", "-d", dbname,
-            "-X", "-q", "-v", "ON_ERROR_STOP=1",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            dbname,
+            "-X",
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -493,8 +524,20 @@ fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
         let Some(path) = f.to_str() else { continue };
         let _ = std::process::Command::new("psql")
             .args([
-                "-h", "127.0.0.1", "-p", pg_port, "-U", "axon", "-d", dbname,
-                "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", path,
+                "-h",
+                "127.0.0.1",
+                "-p",
+                pg_port,
+                "-U",
+                "axon",
+                "-d",
+                dbname,
+                "-X",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-f",
+                path,
             ])
             .output();
     }

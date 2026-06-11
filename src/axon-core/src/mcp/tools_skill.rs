@@ -203,12 +203,8 @@ pub(crate) fn validate_and_resolve_prompt_params(
 /// Renders `template` through the `mustache` crate using `params` as the
 /// substitution scope. Errors propagate as `String` so the MCP envelope
 /// can surface them without leaking crate-specific types.
-pub(crate) fn render_mustache_template(
-    template: &str,
-    params: &Value,
-) -> Result<String, String> {
-    let compiled = mustache::compile_str(template)
-        .map_err(|e| format!("compile error: {}", e))?;
+pub(crate) fn render_mustache_template(template: &str, params: &Value) -> Result<String, String> {
+    let compiled = mustache::compile_str(template).map_err(|e| format!("compile error: {}", e))?;
     compiled
         .render_to_string(params)
         .map_err(|e| format!("render error: {}", e))
@@ -277,8 +273,7 @@ impl McpServer {
             let title = row[1].clone();
             let description = row[2].clone();
             let status = row[3].clone();
-            let metadata: Value =
-                serde_json::from_str(&row[4]).unwrap_or_else(|_| json!({}));
+            let metadata: Value = serde_json::from_str(&row[4]).unwrap_or_else(|_| json!({}));
 
             // Optional filter — invocation_mode (MANDATED / RECOMMENDED / OPTIONAL).
             if let Some(mode) = &mode_filter {
@@ -468,7 +463,10 @@ impl McpServer {
         let metadata: Value = serde_json::from_str(&row[4]).unwrap_or_else(|_| json!({}));
         let project_code = row[5].clone();
 
-        let context = arguments.get("context").cloned().unwrap_or_else(|| json!({}));
+        let context = arguments
+            .get("context")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         // REQ-AXO-91583 slice 2 — record this invocation in the per-process
         // ring buffer so methodology_drift_warnings can compute real diffs.
@@ -589,7 +587,10 @@ impl McpServer {
         let status = row[3].clone();
         let metadata: Value = serde_json::from_str(&row[4]).unwrap_or_else(|_| json!({}));
         let project_code = row[5].clone();
-        let supplied_params = arguments.get("params").cloned().unwrap_or_else(|| json!({}));
+        let supplied_params = arguments
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         // Slice 2 — typed parameter validation + Mustache rendering.
         let spec_array = metadata
@@ -722,9 +723,7 @@ impl McpServer {
         let pillars: Vec<Value> = pillar_rows
             .iter()
             .filter(|r| r.len() >= 3)
-            .map(|r| {
-                json!({ "id": r[0], "title": r[1], "status": r[2] })
-            })
+            .map(|r| json!({ "id": r[0], "title": r[1], "status": r[2] }))
             .collect();
 
         let decision_rows = query_string(&format!(

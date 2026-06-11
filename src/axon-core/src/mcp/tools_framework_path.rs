@@ -129,7 +129,9 @@ impl McpServer {
         // auto-populate it) so the BFS runs in RAM instead of falling to the
         // PG `ist.path` fallback. `view` reads the cache live per call, so
         // warming before traversal is sufficient.
-        let ram_attempted = project.map(|p| self.ensure_ram_snapshot_warm(p)).unwrap_or(false);
+        let ram_attempted = project
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
         let view = process_view();
         let ram_result = if ram_attempted {
             view.shortest_path(
@@ -171,8 +173,7 @@ impl McpServer {
                     .graph_store
                     .query_json(&lookup_sql)
                     .unwrap_or_else(|_| "[]".to_string());
-                let lookup_rows: Vec<Vec<Value>> =
-                    serde_json::from_str(&raw).unwrap_or_default();
+                let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
                 let mut name_by_id: HashMap<String, String> = HashMap::new();
                 for row in &lookup_rows {
                     if let (Some(id), Some(name)) = (

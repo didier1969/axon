@@ -35,9 +35,7 @@ use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::NoTls;
 
-use crate::graph_ingestion::rows::{
-    ChunkEmbeddingPersistRow, ChunkRow, RelationRow, SymbolRow,
-};
+use crate::graph_ingestion::rows::{ChunkEmbeddingPersistRow, ChunkRow, RelationRow, SymbolRow};
 
 /// Re-export so external integration tests can construct flush
 /// payloads. The carrier lives in `crate::graph_ingestion::rows`; the
@@ -58,9 +56,12 @@ static VECTOR_TYPE: OnceLock<Type> = OnceLock::new();
 /// `None` (unset) = adaptive — COPY only when the batch is large enough to
 /// amortise its fixed setup cost (see [`should_use_bulk_writer`]).
 pub fn bulk_writer_override() -> Option<bool> {
-    std::env::var("AXON_BULK_WRITER_ENABLED")
-        .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    std::env::var("AXON_BULK_WRITER_ENABLED").ok().map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Back-compat predicate: `true` iff COPY is *force-enabled* via env. The
@@ -260,10 +261,7 @@ pub(crate) async fn flush_chunk_embeddings_async(
     // Single transaction so the stage table, COPY, and merge are
     // atomic — a crash mid-merge rolls back cleanly and the FVQ
     // retry contract restores the file.
-    let tx = client
-        .transaction()
-        .await
-        .context("bulk_writer begin tx")?;
+    let tx = client.transaction().await.context("bulk_writer begin tx")?;
     tx.batch_execute(&stage_ddl)
         .await
         .context("bulk_writer stage table create")?;
@@ -732,9 +730,20 @@ async fn copy_chunks_in_tx(
         .await
         .context("bulk_writer Chunk copy_in begin (batch)")?;
     let column_types = [
-        Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT,
-        Type::TEXT, Type::TEXT, Type::TEXT, Type::INT8, Type::INT8,
-        Type::INT8, Type::INT8, Type::TEXT, Type::INT4,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::TEXT,
+        Type::INT8,
+        Type::INT8,
+        Type::INT8,
+        Type::INT8,
+        Type::TEXT,
+        Type::INT4,
     ];
     let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
     pin_mut!(writer);
@@ -744,10 +753,19 @@ async fn copy_chunks_in_tx(
             .as_mut()
             .write(&[
                 &row.chunk_id as &(dyn tokio_postgres::types::ToSql + Sync),
-                &row.source_type, &row.source_id, &row.project_code,
-                &row.file_path, &row.kind, &row.content, &row.content_hash,
-                &row.start_line, &row.end_line, &row.part_index,
-                &row.part_count, &row.chunk_path, &tc,
+                &row.source_type,
+                &row.source_id,
+                &row.project_code,
+                &row.file_path,
+                &row.kind,
+                &row.content,
+                &row.content_hash,
+                &row.start_line,
+                &row.end_line,
+                &row.part_index,
+                &row.part_count,
+                &row.chunk_path,
+                &tc,
             ])
             .await
             .context("bulk_writer Chunk copy row write (batch)")?;
@@ -829,7 +847,10 @@ async fn copy_edges_in_tx(
             .await
             .context("bulk_writer edge copy row write")?;
     }
-    writer.finish().await.context("bulk_writer edge copy_in finish")?;
+    writer
+        .finish()
+        .await
+        .context("bulk_writer edge copy_in finish")?;
 
     let merge_sql = "INSERT INTO ist.edge (source_id, target_id, relation_type, project_code, created_at_ms) \
          SELECT source_id, target_id, relation_type, project_code, created_at_ms FROM _bulk_edge_stage \
@@ -878,7 +899,10 @@ async fn copy_indexed_files_in_tx(
             .await
             .context("bulk_writer indexedfile copy row write")?;
     }
-    writer.finish().await.context("bulk_writer indexedfile copy_in finish")?;
+    writer
+        .finish()
+        .await
+        .context("bulk_writer indexedfile copy_in finish")?;
 
     // REQ-AXO-901860: project_code is a NOT NULL FK to ist.Project. A3 owns
     // its FK parents (the ist.Project row is UPSERTed first in
@@ -947,15 +971,24 @@ mod tests {
         // Adaptive (env unset): gate on row count around the VAL-AXO-067 crossover.
         let t = bulk_writer_min_profitable_rows();
         assert_eq!(t, BULK_WRITER_MIN_PROFITABLE_ROWS_DEFAULT);
-        assert!(!should_use_bulk_writer(t - 1), "small flush stays on INSERT");
+        assert!(
+            !should_use_bulk_writer(t - 1),
+            "small flush stays on INSERT"
+        );
         assert!(should_use_bulk_writer(t), "batch at threshold uses COPY");
         assert!(should_use_bulk_writer(t + 10_000), "huge batch uses COPY");
 
         // Explicit override wins over batch size, both directions.
         std::env::set_var("AXON_BULK_WRITER_ENABLED", "true");
-        assert!(should_use_bulk_writer(1), "force-on uses COPY even for 1 row");
+        assert!(
+            should_use_bulk_writer(1),
+            "force-on uses COPY even for 1 row"
+        );
         std::env::set_var("AXON_BULK_WRITER_ENABLED", "0");
-        assert!(!should_use_bulk_writer(1_000_000), "force-off never uses COPY");
+        assert!(
+            !should_use_bulk_writer(1_000_000),
+            "force-off never uses COPY"
+        );
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
 
         // Threshold is tunable for bench sweeps.

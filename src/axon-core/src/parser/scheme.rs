@@ -68,8 +68,8 @@ impl SchemeParser {
         if head.kind() == "symbol" {
             let head_text = self.text(*head, source);
             match head_text.as_str() {
-                "define" | "define*" | "define-public" | "define-syntax"
-                | "define-syntax-rule" | "define-record-type" | "define-method" => {
+                "define" | "define*" | "define-public" | "define-syntax" | "define-syntax-rule"
+                | "define-record-type" | "define-method" => {
                     self.extract_define(&head_text, list, &items, source, result);
                 }
                 _ if Self::is_atomese_type(&head_text) => {
@@ -278,7 +278,11 @@ mod tests {
     #[test]
     fn extracts_procedure_definition() {
         let r = parse("(define (square x) (* x x))");
-        let sym = r.symbols.iter().find(|s| s.name == "square").expect("square");
+        let sym = r
+            .symbols
+            .iter()
+            .find(|s| s.name == "square")
+            .expect("square");
         assert_eq!(sym.kind, "function");
         assert!(sym.is_public);
     }
@@ -290,24 +294,49 @@ mod tests {
              (define add (lambda (a b) (+ a b)))\n\
              (define-syntax-rule (swap! a b) (let ((t a)) (set! a b) (set! b t)))",
         );
-        assert_eq!(r.symbols.iter().find(|s| s.name == "pi").unwrap().kind, "variable");
-        assert_eq!(r.symbols.iter().find(|s| s.name == "add").unwrap().kind, "function");
-        assert_eq!(r.symbols.iter().find(|s| s.name == "swap!").unwrap().kind, "macro");
+        assert_eq!(
+            r.symbols.iter().find(|s| s.name == "pi").unwrap().kind,
+            "variable"
+        );
+        assert_eq!(
+            r.symbols.iter().find(|s| s.name == "add").unwrap().kind,
+            "function"
+        );
+        assert_eq!(
+            r.symbols.iter().find(|s| s.name == "swap!").unwrap().kind,
+            "macro"
+        );
     }
 
     #[test]
     fn module_internal_name_is_private() {
         let r = parse("(define %internal 42)");
-        assert!(!r.symbols.iter().find(|s| s.name == "%internal").unwrap().is_public);
+        assert!(
+            !r.symbols
+                .iter()
+                .find(|s| s.name == "%internal")
+                .unwrap()
+                .is_public
+        );
     }
 
     #[test]
     fn extracts_atomese_nodes_as_symbols() {
         let r = parse("(ConceptNode \"cat\")\n(PredicateNode \"eats\")");
-        let cat = r.symbols.iter().find(|s| s.name == "cat").expect("cat atom");
+        let cat = r
+            .symbols
+            .iter()
+            .find(|s| s.name == "cat")
+            .expect("cat atom");
         assert_eq!(cat.kind, "ConceptNode");
-        assert_eq!(cat.properties.get("atomese").map(String::as_str), Some("atom"));
-        assert!(r.symbols.iter().any(|s| s.name == "eats" && s.kind == "PredicateNode"));
+        assert_eq!(
+            cat.properties.get("atomese").map(String::as_str),
+            Some("atom")
+        );
+        assert!(r
+            .symbols
+            .iter()
+            .any(|s| s.name == "eats" && s.kind == "PredicateNode"));
     }
 
     #[test]

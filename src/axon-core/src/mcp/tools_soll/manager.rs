@@ -68,10 +68,7 @@ impl McpServer {
     /// (`sql` tool + `soll.Node`) post-MIL-AXO-017 ; the prior
     /// `cypher` + `soll.main.Node` + `duckdb_writer` strings referenced
     /// retired backends.
-    fn normalized_soll_writer_error(
-        action: &'static str,
-        e: anyhow::Error,
-    ) -> serde_json::Value {
+    fn normalized_soll_writer_error(action: &'static str, e: anyhow::Error) -> serde_json::Value {
         let raw = format!("{}", e);
         let category = if raw.contains("Writer Error")
             || raw.contains("INSERT INTO")
@@ -80,7 +77,9 @@ impl McpServer {
             || raw.contains("db error:")
         {
             "writer_failed"
-        } else if raw.contains("forbidden_relation") || raw.contains("No canonical relation allowed") {
+        } else if raw.contains("forbidden_relation")
+            || raw.contains("No canonical relation allowed")
+        {
             "forbidden_relation"
         } else if raw.contains("not found") {
             "target_not_found"
@@ -190,12 +189,20 @@ impl McpServer {
                     "stakeholder" => "Stakeholder",
                     "validation" => "Validation",
                     "guideline" => "Guideline",
-                    "skill" => "Skill", // REQ-AXO-91578
+                    "skill" => "Skill",                    // REQ-AXO-91578
                     "prompt_template" => "PromptTemplate", // REQ-AXO-91579
                     other => {
                         let accepted = [
-                            "vision", "pillar", "requirement", "concept", "decision",
-                            "milestone", "stakeholder", "validation", "guideline", "skill",
+                            "vision",
+                            "pillar",
+                            "requirement",
+                            "concept",
+                            "decision",
+                            "milestone",
+                            "stakeholder",
+                            "validation",
+                            "guideline",
+                            "skill",
                             "prompt_template",
                         ];
                         return Some(json!({
@@ -375,7 +382,7 @@ impl McpServer {
                                 },
                                 "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
                             }
-                        }))
+                        }));
                     }
                 };
                 let before_snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok();
@@ -665,12 +672,11 @@ impl McpServer {
                     "Validation" => "VAL",
                     "Stakeholder" => "STK",
                     "Guideline" => "GUI",
-                    "Skill" => "SKI", // REQ-AXO-91578
+                    "Skill" => "SKI",          // REQ-AXO-91578
                     "PromptTemplate" => "PRT", // REQ-AXO-91579
                     other => other,
                 };
-                let target_prefix: String =
-                    attach_to.split('-').next().unwrap_or("").to_string();
+                let target_prefix: String = attach_to.split('-').next().unwrap_or("").to_string();
                 let policy = relation_policy_for_pair(source_prefix, &target_prefix);
                 match &policy {
                     Some(p)
@@ -800,9 +806,7 @@ impl McpServer {
                 if let Some(supplied_status) = data.get("status").and_then(|v| v.as_str()) {
                     const ACCEPTED_STATUS: [&str; 5] =
                         ["current", "planned", "delivered", "superseded", "rejected"];
-                    if !supplied_status.is_empty()
-                        && !ACCEPTED_STATUS.contains(&supplied_status)
-                    {
+                    if !supplied_status.is_empty() && !ACCEPTED_STATUS.contains(&supplied_status) {
                         let normalization_hint = match supplied_status {
                             "completed" | "done" | "passed" | "closed" | "archived" => "delivered",
                             "accepted" | "in_progress" | "active" | "open" | "partial"
@@ -991,8 +995,14 @@ impl McpServer {
                         // cross-family path (e.g. REFINES + INHERITS_FROM) is not
                         // mistaken for a cycle. SUPERSEDES (redirect) and
                         // EPITOMIZES (Pillar→Vision axis) stay exempt.
-                        const FILIATION: [&str; 6] =
-                            ["SOLVES", "BELONGS_TO", "REFINES", "TARGETS", "EXPLAINS", "VERIFIES"];
+                        const FILIATION: [&str; 6] = [
+                            "SOLVES",
+                            "BELONGS_TO",
+                            "REFINES",
+                            "TARGETS",
+                            "EXPLAINS",
+                            "VERIFIES",
+                        ];
                         const NON_FILIATION_GUARDED: [&str; 6] = [
                             "INHERITS_FROM",
                             "USES",
@@ -1150,10 +1160,9 @@ impl McpServer {
                                 .or_else(|| project_code_from_canonical_entity_id(tgt))
                                 .unwrap_or_default();
                             let cte = "WITH inserted AS (INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, 'SUPERSEDES', ?) ON CONFLICT (source_id, target_id, relation_type) DO NOTHING RETURNING source_id), src_flip AS (UPDATE soll.Node SET status = 'current' WHERE id = ? RETURNING id) UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
-                            let exec = self.graph_store.execute_param(
-                                cte,
-                                &json!([src, tgt, target_project, src, tgt]),
-                            );
+                            let exec = self
+                                .graph_store
+                                .execute_param(cte, &json!([src, tgt, target_project, src, tgt]));
                             return match exec {
                                 Ok(()) => Some(json!({
                                     "content": [{
@@ -1234,7 +1243,8 @@ impl McpServer {
                                 Some(payload)
                             }
                             Err(e) => {
-                                let mut data = self.relation_guidance_for_link(src, tgt, explicit_rel);
+                                let mut data =
+                                    self.relation_guidance_for_link(src, tgt, explicit_rel);
                                 if let Some(obj) = data.as_object_mut() {
                                     obj.insert("status".to_string(), json!("input_invalid"));
                                     obj.insert("parameter_repair".to_string(), json!({
@@ -1245,7 +1255,10 @@ impl McpServer {
                                         "follow_up_tools": ["soll_relation_schema", "sql"],
                                         "hint": "the link insert failed; verify both endpoints exist via `sql SELECT id FROM soll.Node WHERE id IN ('<src>','<tgt>')` and the relation_type is allowed via `soll_relation_schema`"
                                     }));
-                                    obj.insert("diagnostic_excerpt".to_string(), json!(e.to_string().chars().take(240).collect::<String>()));
+                                    obj.insert(
+                                        "diagnostic_excerpt".to_string(),
+                                        json!(e.to_string().chars().take(240).collect::<String>()),
+                                    );
                                 }
                                 Some(json!({
                                     "content": [{ "type": "text", "text": Self::sanitized_link_error_text(&e) }],

@@ -87,7 +87,10 @@ async fn listen_state_only(database_url: &str) -> Result<()> {
         .batch_execute(&format!("LISTEN {}", LISTEN_CHANNEL))
         .await
         .context("LISTEN command failed")?;
-    info!(channel = LISTEN_CHANNEL, "state-only NOTIFY listener active");
+    info!(
+        channel = LISTEN_CHANNEL,
+        "state-only NOTIFY listener active"
+    );
 
     while let Some(notification) = notify_rx.recv().await {
         let chunk_id = notification.payload();
@@ -180,4 +183,3 @@ where
         }
     });
 }
-

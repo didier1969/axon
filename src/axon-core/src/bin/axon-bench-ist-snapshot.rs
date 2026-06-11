@@ -69,9 +69,7 @@ impl Args {
                     i += 1;
                 }
                 "-h" | "--help" => {
-                    println!(
-                        "axon-bench-ist-snapshot --project CODE [--probes N] [--human|--csv]"
-                    );
+                    println!("axon-bench-ist-snapshot --project CODE [--probes N] [--human|--csv]");
                     std::process::exit(0);
                 }
                 other => {
@@ -109,9 +107,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         .or_else(|_| std::env::var("AXON_DEV_DATABASE_URL"))
         .or_else(|_| std::env::var("DATABASE_URL"))
         .map_err(|_| {
-            anyhow::anyhow!(
-                "set AXON_LIVE_DATABASE_URL, AXON_DEV_DATABASE_URL or DATABASE_URL"
-            )
+            anyhow::anyhow!("set AXON_LIVE_DATABASE_URL, AXON_DEV_DATABASE_URL or DATABASE_URL")
         })?;
     let graph_store = GraphStore::new(&db_url)?;
     let store = GraphStoreSqlAdapter {
@@ -140,11 +136,7 @@ fn run(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn emit(
-    args: &Args,
-    stats: &axon_core::ist_snapshot::loader::LoadStats,
-    samples_us: &[u128],
-) {
+fn emit(args: &Args, stats: &axon_core::ist_snapshot::loader::LoadStats, samples_us: &[u128]) {
     let (p50, p99) = if samples_us.is_empty() {
         (0, 0)
     } else {

@@ -47,11 +47,7 @@ impl GraphStore {
             .map(|value| value.to_string()))
     }
 
-    pub fn refresh_symbol_projection(
-        &self,
-        symbol: &str,
-        _radius: u64,
-    ) -> Result<Option<String>> {
+    pub fn refresh_symbol_projection(&self, symbol: &str, _radius: u64) -> Result<Option<String>> {
         // REQ-AXO-271 slice 2 (post-MIL-AXO-017 / DEC-AXO-083 AGE retirement) :
         // the legacy GraphProjection cache refresh via SQL CALLS / CALLS_NIF
         // tables was conditional on `skip_legacy_relations()`, which always
@@ -187,7 +183,11 @@ impl GraphStore {
 
     /// Async row read — typed `tokio_postgres::Row`s for `FromRow`/`try_get`.
     pub async fn query_rows(&self, sql: &str) -> Result<Vec<tokio_postgres::Row>> {
-        self.pool.native.query(sql).await.map_err(Self::pg_to_anyhow)
+        self.pool
+            .native
+            .query(sql)
+            .await
+            .map_err(Self::pg_to_anyhow)
     }
 
     /// Async typed read: rows decoded into `T: FromRow`.
@@ -282,11 +282,9 @@ impl GraphStore {
     /// Returns `None` when the table is absent (fresh deployment) or on
     /// catalog error.
     pub fn pg_chunkembedding_total_bytes(&self) -> Option<i64> {
-        self.query_single_i64_writer(
-            "SELECT pg_total_relation_size('ist.ChunkEmbedding')::BIGINT",
-        )
-        .ok()
-        .flatten()
+        self.query_single_i64_writer("SELECT pg_total_relation_size('ist.ChunkEmbedding')::BIGINT")
+            .ok()
+            .flatten()
     }
 
     /// REQ-AXO-284 Slice 2 — cumulative WAL volume since the cluster was
@@ -346,9 +344,8 @@ impl GraphStore {
         // pairing holds (no "idle in transaction" leak). batch_execute aborts
         // the transaction on any statement error, so no explicit ROLLBACK is
         // needed — the connection returns to the pool already rolled back.
-        let mut combined = String::with_capacity(
-            queries.iter().map(|q| q.len() + 2).sum::<usize>() + 32,
-        );
+        let mut combined =
+            String::with_capacity(queries.iter().map(|q| q.len() + 2).sum::<usize>() + 32);
         combined.push_str("BEGIN;\n");
         for q in queries {
             combined.push_str(q);
@@ -398,7 +395,9 @@ impl GraphStore {
         if res.starts_with('{') {
             if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&res) {
                 if let Some(message) = envelope.get("_axon_plugin_error").and_then(|v| v.as_str()) {
-                    let pg_msg = envelope.pointer("/pg_error/message").and_then(|v| v.as_str());
+                    let pg_msg = envelope
+                        .pointer("/pg_error/message")
+                        .and_then(|v| v.as_str());
                     let pg_code = envelope.pointer("/pg_error/code").and_then(|v| v.as_str());
                     let pg_hint = envelope.pointer("/pg_error/hint").and_then(|v| v.as_str());
                     let mut detail = String::new();
@@ -456,9 +455,9 @@ impl GraphStore {
                         }
                     }
                     '?' if !in_single_quote => {
-                        let value = iter.next().ok_or_else(|| {
-                            anyhow!("Too few positional parameters supplied")
-                        })?;
+                        let value = iter
+                            .next()
+                            .ok_or_else(|| anyhow!("Too few positional parameters supplied"))?;
                         let replacement = match value {
                             serde_json::Value::Null => "NULL".to_string(),
                             serde_json::Value::Bool(v) => v.to_string(),
@@ -549,9 +548,7 @@ mod tests {
         assert!(write.contains("\"ok\":true"), "{write}");
 
         let count = store
-            .query_count(
-                "SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/sql_gateway.ex'",
-            )
+            .query_count("SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/sql_gateway.ex'")
             .unwrap();
         assert_eq!(count, 1);
     }

@@ -168,7 +168,7 @@ impl McpServer {
             "stakeholder" => Some("Stakeholder"),
             "validation" => Some("Validation"),
             "guideline" => Some("Guideline"),
-            "skill" => Some("Skill"), // REQ-AXO-91578
+            "skill" => Some("Skill"),                    // REQ-AXO-91578
             "prompt_template" => Some("PromptTemplate"), // REQ-AXO-91579
             _ => None,
         }
@@ -298,7 +298,10 @@ mod tests {
         assert_eq!(format_canonical_id("REQ", "AXO", 1_000), "REQ-AXO-1000");
         assert_eq!(format_canonical_id("REQ", "AXO", 9_999), "REQ-AXO-9999");
         assert_eq!(format_canonical_id("REQ", "AXO", 10_000), "REQ-AXO-10000");
-        assert_eq!(format_canonical_id("REQ", "AXO", 1_000_000), "REQ-AXO-1000000");
+        assert_eq!(
+            format_canonical_id("REQ", "AXO", 1_000_000),
+            "REQ-AXO-1000000"
+        );
     }
 
     #[test]
@@ -318,8 +321,14 @@ mod tests {
         assert!(!re.is_match("REQ-AXO-01"), "<3 digit suffix forbidden");
         assert!(!re.is_match("REQU-AXO-001"), "4-letter type forbidden");
         assert!(!re.is_match("REQ-AX-001"), "2-char project_code forbidden");
-        assert!(!re.is_match("REQ-1AX-001"), "project_code first char must be alpha");
-        assert!(!re.is_match("REQ-axo-001"), "project_code must be uppercase");
+        assert!(
+            !re.is_match("REQ-1AX-001"),
+            "project_code first char must be alpha"
+        );
+        assert!(
+            !re.is_match("REQ-axo-001"),
+            "project_code must be uppercase"
+        );
         assert!(!re.is_match("REQ-AXO-01a"), "suffix must be digits only");
         assert!(!re.is_match("REQ-AXO-"), "suffix cannot be empty");
         assert!(!re.is_match("R3Q-AXO-001"), "type must be alphabetic");

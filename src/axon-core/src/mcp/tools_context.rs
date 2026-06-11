@@ -507,11 +507,8 @@ impl McpServer {
 
         // REQ-AXO-901752 — SRS slice 2: detect legacy proximity from
         // artifacts returned in the evidence packet.
-        let legacy_proximity_value = self.detect_packet_legacy_proximity(
-            project,
-            &direct_evidence,
-            &supporting_chunks,
-        );
+        let legacy_proximity_value =
+            self.detect_packet_legacy_proximity(project, &direct_evidence, &supporting_chunks);
 
         let mut data = json!({
             "planner": {
@@ -598,7 +595,10 @@ impl McpServer {
         }
 
         let inner_data = inner.get("data").cloned().unwrap_or_else(|| json!({}));
-        let packet = inner_data.get("packet").cloned().unwrap_or_else(|| json!({}));
+        let packet = inner_data
+            .get("packet")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         // REQ-AXO-264 A3 v2: per-band token budgets read from
         // `args.bands.{intent,code,recent}.max_tokens`. Defaults from the
@@ -614,7 +614,10 @@ impl McpServer {
         let mut intent_concepts: Vec<Value> = Vec::new();
         let mut intent_decisions: Vec<Value> = Vec::new();
         let mut intent_requirements: Vec<Value> = Vec::new();
-        if let Some(entities) = packet.get("relevant_soll_entities").and_then(|value| value.as_array()) {
+        if let Some(entities) = packet
+            .get("relevant_soll_entities")
+            .and_then(|value| value.as_array())
+        {
             for entity in entities {
                 let row = json!({
                     "id": entity.get("id").cloned().unwrap_or(Value::Null),
@@ -622,7 +625,11 @@ impl McpServer {
                     "summary": entity.get("description").cloned().unwrap_or(Value::Null),
                     "status": entity.get("status").cloned().unwrap_or(Value::Null),
                 });
-                let kind = entity.get("entity_type").or_else(|| entity.get("type")).and_then(|value| value.as_str()).unwrap_or("");
+                let kind = entity
+                    .get("entity_type")
+                    .or_else(|| entity.get("type"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 match kind {
                     "Concept" => intent_concepts.push(row),
                     "Decision" => intent_decisions.push(row),
@@ -635,24 +642,40 @@ impl McpServer {
             "concepts": intent_concepts,
             "decisions": intent_decisions,
             "requirements": intent_requirements,
-        })).unwrap_or_default();
+        }))
+        .unwrap_or_default();
         let intent_tokens_pre = Self::estimate_tokens(&[&intent_text_full]);
 
         // Truncate intent rows in priority order: requirements > decisions > concepts.
-        let (intent_concepts_kept, intent_decisions_kept, intent_requirements_kept,
-             intent_tokens_post, intent_overflowed) = Self::truncate_intent_band(
-            intent_concepts, intent_decisions, intent_requirements, intent_budget,
+        let (
+            intent_concepts_kept,
+            intent_decisions_kept,
+            intent_requirements_kept,
+            intent_tokens_post,
+            intent_overflowed,
+        ) = Self::truncate_intent_band(
+            intent_concepts,
+            intent_decisions,
+            intent_requirements,
+            intent_budget,
         );
 
         // code_band ← packet.direct_evidence + packet.supporting_chunks (chunks reused).
         let mut code_chunks_full: Vec<Value> = Vec::new();
-        if let Some(evidence) = packet.get("direct_evidence").and_then(|value| value.as_array()) {
+        if let Some(evidence) = packet
+            .get("direct_evidence")
+            .and_then(|value| value.as_array())
+        {
             code_chunks_full.extend(evidence.iter().cloned());
         }
-        if let Some(supporting) = packet.get("supporting_chunks").and_then(|value| value.as_array()) {
+        if let Some(supporting) = packet
+            .get("supporting_chunks")
+            .and_then(|value| value.as_array())
+        {
             code_chunks_full.extend(supporting.iter().cloned());
         }
-        let code_tokens_pre = Self::estimate_tokens(&[&serde_json::to_string(&code_chunks_full).unwrap_or_default()]);
+        let code_tokens_pre =
+            Self::estimate_tokens(&[&serde_json::to_string(&code_chunks_full).unwrap_or_default()]);
         let (code_chunks, code_tokens_post, code_overflowed) =
             Self::truncate_chunks_band(code_chunks_full, code_budget);
 
@@ -661,11 +684,16 @@ impl McpServer {
         // subject} row per changed file. cwd hint goes into `current_focus`.
         // Falls back to a structured empty band when no project root is
         // resolvable (LLM clients still get a stable contract).
-        let project_root = std::env::var("AXON_PROJECT_ROOT")
-            .ok()
-            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()));
+        let project_root = std::env::var("AXON_PROJECT_ROOT").ok().or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        });
         let mut recent_band = Self::collect_recent_band(project_root.as_deref());
-        let recent_tokens_pre = recent_band.get("tokens_used").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
+        let recent_tokens_pre = recent_band
+            .get("tokens_used")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as usize;
         let (recent_band_truncated, recent_tokens_post, recent_overflowed) =
             Self::truncate_recent_band(std::mem::take(&mut recent_band), recent_budget);
         recent_band = recent_band_truncated;
@@ -770,7 +798,8 @@ impl McpServer {
         let measure = |c: &[Value], d: &[Value], r: &[Value]| -> usize {
             let s = serde_json::to_string(&json!({
                 "concepts": c, "decisions": d, "requirements": r
-            })).unwrap_or_default();
+            }))
+            .unwrap_or_default();
             Self::estimate_tokens(&[&s])
         };
         let pre = measure(&concepts, &decisions, &requirements);
@@ -881,7 +910,8 @@ impl McpServer {
         }
 
         let output = std::process::Command::new("git")
-            .arg("-C").arg(root)
+            .arg("-C")
+            .arg(root)
             .arg("log")
             .arg("--since=24.hours")
             .arg("--name-only")
@@ -912,7 +942,8 @@ impl McpServer {
         };
 
         let text = String::from_utf8_lossy(&stdout);
-        let mut by_file: std::collections::BTreeMap<String, (i64, String, String)> = std::collections::BTreeMap::new();
+        let mut by_file: std::collections::BTreeMap<String, (i64, String, String)> =
+            std::collections::BTreeMap::new();
         let mut current_hash = String::new();
         let mut current_ts: i64 = 0;
         let mut current_subject = String::new();
@@ -948,7 +979,10 @@ impl McpServer {
             .collect();
         // Sort by recency (newest first).
         entries.sort_by(|a, b| {
-            b["last_commit_ts"].as_i64().unwrap_or(0).cmp(&a["last_commit_ts"].as_i64().unwrap_or(0))
+            b["last_commit_ts"]
+                .as_i64()
+                .unwrap_or(0)
+                .cmp(&a["last_commit_ts"].as_i64().unwrap_or(0))
         });
         let recent_text = serde_json::to_string(&entries).unwrap_or_default();
         let tokens_used = Self::estimate_tokens(&[&recent_text]);
@@ -2169,8 +2203,7 @@ impl McpServer {
             }
         }
 
-        let project_filter =
-            Self::sql_project_filter_for_fields(project, &["c.project_code"]);
+        let project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]);
 
         // REQ-AXO-901883 — keep the raw `'[..]'::vector` literal (`qvec_literal`)
         // for the ANN `ORDER BY embedding <=> qvec` so pgvector can match the
@@ -2250,10 +2283,7 @@ impl McpServer {
             // CTEs), post-filter by repo_root prefix.
             if let Some(repo_root) = Self::project_repo_root(project) {
                 let fallback_query = query.replace(
-                    &Self::sql_project_filter_for_fields(
-                        project,
-                        &["c.project_code"],
-                    ),
+                    &Self::sql_project_filter_for_fields(project, &["c.project_code"]),
                     "",
                 );
                 let fallback_raw = run(&fallback_query);
@@ -2355,10 +2385,16 @@ impl McpServer {
         let env_is_truthy = |name: &str| {
             std::env::var(name)
                 .ok()
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
                 .unwrap_or(false)
         };
-        if env_is_truthy("AXON_IST_FTS_DISABLED") || env_is_truthy("AXON_HYBRID_RETRIEVAL_DISABLED") {
+        if env_is_truthy("AXON_IST_FTS_DISABLED") || env_is_truthy("AXON_HYBRID_RETRIEVAL_DISABLED")
+        {
             return Vec::new();
         }
         let trimmed = question.trim();
@@ -2833,8 +2869,11 @@ impl McpServer {
         // CSR traversal. Cache miss / disabled → silent fallback to the
         // legacy radius 1-2 / cap 2 SQL CTE path below.
         let ram_view = crate::ist_snapshot::process_view();
-        let cap_per_anchor: usize =
-            if matches!(route, RetrievalRoute::Impact) { 50 } else { 20 };
+        let cap_per_anchor: usize = if matches!(route, RetrievalRoute::Impact) {
+            50
+        } else {
+            20
+        };
         let total_cap: usize = cap_per_anchor * 2;
         let mut selected = Vec::new();
         let mut seen = HashSet::new();
@@ -2849,7 +2888,11 @@ impl McpServer {
                 continue;
             }
             if !anchor.project_code.is_empty() && ram_view.is_warm(&anchor.project_code) {
-                let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) { 10 } else { 5 };
+                let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) {
+                    10
+                } else {
+                    5
+                };
                 // REQ-AXO-901869 A3 — for the Impact route the relevant
                 // neighbours are the *callers* (who breaks if the anchor
                 // changes), i.e. reverse adjacency. Other routes want
@@ -4691,11 +4734,11 @@ mod tests {
             &qvec_literal,
             40,
             &project_filter,
-            "1=0",                 // entry_id_match (none)
-            "1=0",                 // entry_uri_match (none)
-            &lexical_predicate,    // lexical_predicate
-            "1=0",                 // lexical_uri_match (none)
-            "1=0",                 // path_match (none)
+            "1=0",              // entry_id_match (none)
+            "1=0",              // entry_uri_match (none)
+            &lexical_predicate, // lexical_predicate
+            "1=0",              // lexical_uri_match (none)
+            "1=0",              // path_match (none)
             10,
         );
 
@@ -4757,7 +4800,10 @@ mod tests {
         );
         // NULL renders as the literal string `"null"` → `parse_f64_value` is None.
         assert!(
-            lexical_row.get(9).and_then(McpServer::parse_f64_value).is_none(),
+            lexical_row
+                .get(9)
+                .and_then(McpServer::parse_f64_value)
+                .is_none(),
             "lexical-arm row must have an absent (NULL) distance: {lexical_row:?}"
         );
     }

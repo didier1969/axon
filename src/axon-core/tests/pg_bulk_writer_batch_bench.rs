@@ -177,10 +177,7 @@ fn bench_flush_batch_cross_table_throughput() {
         symbols as usize, SYMBOL_COUNT,
         "Symbol count must match input"
     );
-    assert_eq!(
-        chunks as usize, CHUNK_COUNT,
-        "Chunk count must match input"
-    );
+    assert_eq!(chunks as usize, CHUNK_COUNT, "Chunk count must match input");
 
     eprintln!();
     eprintln!(
@@ -191,9 +188,7 @@ fn bench_flush_batch_cross_table_throughput() {
         "  Symbol={} (with full-dim embeddings)  Chunk={}  CONTAINS={}  CALLS={}  CALLS_NIF={}",
         SYMBOL_COUNT, CHUNK_COUNT, CONTAINS_COUNT, CALLS_COUNT, CALLS_NIF_COUNT
     );
-    eprintln!(
-        "  COPY BINARY x5 + ON CONFLICT merge x5, all in one transaction:"
-    );
+    eprintln!("  COPY BINARY x5 + ON CONFLICT merge x5, all in one transaction:");
     eprintln!("    {elapsed_ms:.0} ms wall = {rps:.0} rows/s aggregate");
     eprintln!();
 
