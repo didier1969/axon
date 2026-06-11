@@ -230,20 +230,58 @@ pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
 /// Derived JSON Schema for a tracer-bullet tool, or `None` for any tool still
 /// served by the hand-written catalog literal (slice-2 rollout).
 pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
+    // REQ-AXO-901949 inv.7 — inline enum sub-schemas so the agent never resolves
+    // a `$ref`/`$defs`: `query.mode`, `soll_manager.action`/`entity` render as
+    // inline `{type, enum}`. A `$ref` to chase is friction for an LLM.
+    fn generator() -> schemars::SchemaGenerator {
+        schemars::generate::SchemaSettings::default()
+            .with(|s| s.inline_subschemas = true)
+            .into_generator()
+    }
     let schema = match name {
-        "sql" => schemars::schema_for!(SqlInput),
-        "query" => schemars::schema_for!(QueryInput),
-        "soll_manager" => schemars::schema_for!(SollManagerInput),
+        "sql" => generator().into_root_schema_for::<SqlInput>(),
+        "query" => generator().into_root_schema_for::<QueryInput>(),
+        "soll_manager" => generator().into_root_schema_for::<SollManagerInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;
-    // Strip cosmetic top-level keys schemars emits ($schema / title); MCP wants
-    // a plain object schema. `$defs` (enum sub-schemas) stay — valid JSON Schema.
     if let Some(obj) = value.as_object_mut() {
+        // Strip cosmetic top-level keys; with inlining there should be no
+        // $defs/definitions left, but drop them defensively.
         obj.remove("$schema");
         obj.remove("title");
+        obj.remove("$defs");
+        obj.remove("definitions");
+    }
+    // REQ-AXO-901949 inv.2 — correct-by-construction: express soll_manager's
+    // per-action requiredness in the schema itself (if/then) so a wrong-shaped
+    // call is structurally invalid, not merely flagged in prose.
+    if name == "soll_manager" {
+        augment_soll_manager_conditionals(&mut value);
     }
     Some(value)
+}
+
+/// REQ-AXO-901949 inv.2 — per-action `required` constraints for `soll_manager`,
+/// co-located with the struct (single source). create needs attach_to +
+/// relation_type ; link/unlink need source_id + target_id + relation_type ;
+/// update needs id. Encoded as JSON-Schema `allOf` if/then so a validator (inv.3)
+/// rejects the malformed call at dispatch instead of the handler discovering it
+/// late.
+fn augment_soll_manager_conditionals(schema: &mut Value) {
+    let conditionals = serde_json::json!([
+        { "if": { "properties": { "action": { "const": "create" } } },
+          "then": { "properties": { "data": { "required": ["attach_to", "relation_type"] } } } },
+        { "if": { "properties": { "action": { "const": "link" } } },
+          "then": { "properties": { "data": { "required": ["source_id", "target_id", "relation_type"] } } } },
+        { "if": { "properties": { "action": { "const": "unlink" } } },
+          "then": { "properties": { "data": { "required": ["source_id", "target_id", "relation_type"] } } } },
+        { "if": { "properties": { "action": { "const": "update" } } },
+          "then": { "properties": { "data": { "required": ["id"] } } } }
+    ]);
+    if let Some(obj) = schema.as_object_mut() {
+        obj.insert("allOf".to_string(), conditionals);
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +342,58 @@ mod tests {
     fn unknown_tool_has_no_derived_schema() {
         assert!(derived_input_schema("status").is_none());
         assert!(derived_input_schema("impact").is_none());
+    }
+
+    #[test]
+    fn derived_schemas_have_no_ref_or_defs() {
+        // REQ-AXO-901949 inv.7 — enums inlined; an agent never resolves a $ref.
+        for name in DERIVED_TOOLS {
+            let rendered = serde_json::to_string(&derived_input_schema(name).unwrap()).unwrap();
+            assert!(
+                !rendered.contains("$ref") && !rendered.contains("$defs") && !rendered.contains("definitions"),
+                "{name} schema must inline subschemas (no $ref/$defs): {rendered}"
+            );
+        }
+        // The enum actually rendered inline as {type,enum}.
+        let q = derived_input_schema("query").unwrap();
+        let mode = &q["properties"]["mode"];
+        let rendered = serde_json::to_string(mode).unwrap();
+        assert!(
+            rendered.contains("brief") && rendered.contains("verbose"),
+            "query.mode enum must be inline: {rendered}"
+        );
+    }
+
+    #[test]
+    fn soll_manager_schema_encodes_per_action_required() {
+        // REQ-AXO-901949 inv.2 — correct-by-construction: create requires
+        // attach_to+relation_type, link/unlink require source_id+target_id, etc.
+        let schema = derived_input_schema("soll_manager").unwrap();
+        let all_of = schema["allOf"].as_array().expect("allOf conditionals");
+        // create branch
+        let create = all_of
+            .iter()
+            .find(|c| c["if"]["properties"]["action"]["const"] == "create")
+            .expect("create conditional");
+        let create_req: Vec<&str> = create["then"]["properties"]["data"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(create_req.contains(&"attach_to") && create_req.contains(&"relation_type"));
+        // link branch
+        let link = all_of
+            .iter()
+            .find(|c| c["if"]["properties"]["action"]["const"] == "link")
+            .expect("link conditional");
+        let link_req: Vec<&str> = link["then"]["properties"]["data"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(link_req.contains(&"source_id") && link_req.contains(&"target_id"));
     }
 
     #[test]
