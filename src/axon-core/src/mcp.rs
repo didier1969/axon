@@ -41,6 +41,7 @@ mod tools_ist_algorithms;
 mod tools_ist_snapshot;
 mod tools_risk;
 mod tools_skill;
+mod tools_friction;
 mod tools_soll;
 pub(crate) mod tools_srs;
 pub(crate) mod tools_system;
@@ -1399,6 +1400,8 @@ impl McpServer {
             "debug" => self.axon_debug_with_args(arguments),
             "schema_overview" => self.axon_schema_overview(arguments),
             "query_examples" => self.axon_query_examples(arguments),
+            // REQ-AXO-901957 — closed-loop friction report + resolution.
+            "mcp_friction_report" => self.axon_mcp_friction_report(arguments),
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
             // REQ-AXO-901676 — proportionate recovery: force delta / full rescan

@@ -917,6 +917,29 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_friction_report",
+                "description": "[SYSTEM/SOLL] REQ-AXO-901957 — closed-loop MCP friction log. Returns top OPEN friction signatures by frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links and regression flags. Signatures record only the problem SHAPE (project_code, tool, problem_class, field name) — NEVER any argument content. Optional `mark_resolved` closes a signature against the SOLL fix that resolved it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Filter to one tenant; omit for the cross-tenant aggregate." },
+                        "limit": { "type": "integer", "description": "Max signatures per section (default 15)." },
+                        "mark_resolved": {
+                            "type": "object",
+                            "description": "Close a signature: {id, resolved_by_req, resolved_by_val, note}.",
+                            "properties": {
+                                "id": { "type": "integer" },
+                                "resolved_by_req": { "type": "string" },
+                                "resolved_by_val": { "type": "string" },
+                                "note": { "type": "string" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "sql",
                 "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough.",
                 // REQ-AXO-901949 — inputSchema derived from tool_contracts::SqlInput

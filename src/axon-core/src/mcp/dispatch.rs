@@ -79,7 +79,7 @@ impl McpServer {
                 })
         };
 
-        Some(self.attach_default_tool_guidance(
+        let final_response = self.attach_default_tool_guidance(
             normalized_name,
             arguments,
             response.unwrap_or_else(|| {
@@ -184,6 +184,12 @@ impl McpServer {
                     }
                 })
             }),
-        ))
+        );
+        // REQ-AXO-901957 — closed-loop friction capture at the single dispatch
+        // chokepoint every tool response passes through. Best-effort, records
+        // only the problem SHAPE (never arg content), only when the response
+        // carries a non-null problem_class.
+        self.record_mcp_friction(normalized_name, &final_response);
+        Some(final_response)
     }
 }

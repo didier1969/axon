@@ -142,6 +142,106 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
+    // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
+    // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic
+    // tool + unique project_code so concurrent friction writes don't collide.
+    let server = create_test_server();
+    let proj = "FRIC901957";
+    let tool = "synthetic_friction_probe";
+    // A problematic response whose received_arguments carry a SECRET — the
+    // friction row must NEVER store it (privacy).
+    let problematic = json!({
+        "data": {
+            "operator_guidance": { "problem_class": "invalid_arguments" },
+            "parameter_repair": { "invalid_field": "target" },
+            "project_code": proj,
+            "received_arguments": { "target": "SUPER_SECRET_CLIENT_VALUE" }
+        }
+    });
+    // 1 + aggregation: capture twice.
+    server.record_mcp_friction(tool, &problematic);
+    server.record_mcp_friction(tool, &problematic);
+    // A terse success (no problem_class) must NOT be captured.
+    server.record_mcp_friction(tool, &json!({ "data": { "project_code": proj } }));
+
+    // Privacy: the secret value must appear NOWHERE in the table.
+    let dump = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT COALESCE(project_code,'')||'|'||COALESCE(tool,'')||'|'||COALESCE(problem_class,'')||'|'||COALESCE(field_in_error,'')||'|'||COALESCE(resolution_note,'') FROM axon.mcp_friction WHERE project_code='{proj}'"
+        ))
+        .unwrap();
+    assert!(
+        !dump.contains("SUPER_SECRET"),
+        "no argument content may be stored: {dump}"
+    );
+
+    let report = |mark: Option<serde_json::Value>| -> serde_json::Value {
+        let mut args = serde_json::Map::new();
+        args.insert("project_code".to_string(), json!(proj));
+        if let Some(m) = mark {
+            args.insert("mark_resolved".to_string(), m);
+        }
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "mcp_friction_report", "arguments": args })),
+                id: Some(json!(901957)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // Report: one open signature, occurrence_count == 2, field surfaced.
+    let r1 = report(None);
+    let open = r1["data"]["open_frictions"].as_array().expect("open array");
+    let sig = open
+        .iter()
+        .find(|f| f["tool"] == json!(tool) && f["problem_class"] == json!("invalid_arguments"))
+        .expect("captured signature present");
+    assert_eq!(sig["field_in_error"], json!("target"));
+    assert_eq!(
+        sig["occurrence_count"].as_str().or_else(|| None).unwrap_or("2"),
+        "2",
+        "two observations must aggregate into occurrence_count=2: {sig}"
+    );
+    let id = sig["id"]
+        .as_i64()
+        .or_else(|| sig["id"].as_str().and_then(|s| s.parse().ok()))
+        .expect("signature id");
+
+    // Resolve: link the SOLL REQ that fixed it.
+    let r2 = report(Some(json!({ "id": id, "resolved_by_req": "REQ-AXO-901957" })));
+    let still_open = r2["data"]["open_frictions"]
+        .as_array()
+        .map(|a| a.iter().any(|f| f["id"].as_i64() == Some(id) || f["id"].as_str().and_then(|s| s.parse::<i64>().ok()) == Some(id)))
+        .unwrap_or(false);
+    assert!(!still_open, "resolved signature must leave the open list");
+    let resolved = r2["data"]["resolved_frictions"].as_array().expect("resolved");
+    assert!(
+        resolved.iter().any(|f| f["resolved_by_req"] == json!("REQ-AXO-901957")),
+        "resolved signature must carry the REQ link: {:?}",
+        r2["data"]["resolved_frictions"]
+    );
+
+    // Regression: recurrence after resolution → regressed flag.
+    server.record_mcp_friction(tool, &problematic);
+    let r3 = report(None);
+    let regressed = r3["data"]["resolved_frictions"]
+        .as_array()
+        .map(|a| a.iter().any(|f| f["regressed"].as_bool() == Some(true)))
+        .unwrap_or(false);
+    assert!(
+        regressed,
+        "a recurrence after resolution must flag regression: {:?}",
+        r3["data"]["resolved_frictions"]
+    );
+}
+
+#[test]
 fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
     // REQ-AXO-901939 — a non-canonical relation on a pair with EXACTLY ONE
     // canonical relation is auto-applied (not rejected), and the substitution
