@@ -619,8 +619,16 @@ fn test_invalid_arguments_returns_parameter_repair_with_input_schema_reference()
     );
     let hint = repair["hint"].as_str().expect("hint string");
     assert!(
-        hint.contains("help") && hint.contains("query"),
-        "hint must steer toward `help(tool=\"query\")`: {hint}"
+        hint.contains("corrected_call") && hint.contains("query"),
+        "hint must steer toward emitting `corrected_call` for `query` (repair-as-data, REQ-AXO-901949): {hint}"
+    );
+    // Repair-as-data (REQ-AXO-901949): the corrected call is handed back ready
+    // to emit, with each missing required field stubbed.
+    assert!(
+        repair["corrected_call"]["arguments"]["query"]
+            .as_str()
+            .is_some_and(|v| v.contains("<FILL")),
+        "corrected_call must stub the missing required `query`: {repair}"
     );
 }
 
@@ -653,11 +661,12 @@ fn invalid_arguments_authoritative_guidance_includes_micro_instruction_and_contr
     );
     assert_eq!(result["data"]["next_action"]["tool"], "help");
     assert_eq!(
-        result["data"]["next_action"]["arguments"]["tool"], "fs_read"
+        result["data"]["next_action"]["arguments"]["tool"],
+        "fs_read"
     );
     assert_eq!(
         result["data"]["repair_instruction"].as_str().unwrap(),
-        "Compare your arguments against input_schema. Fix required fields and types, then retry the same tool."
+        "Emit `parameter_repair.corrected_call` — it is your arguments with missing required fields stubbed. Fill the stubs and re-call. No schema diffing needed."
     );
 
     unsafe {
@@ -703,7 +712,10 @@ fn unknown_tool_name_authoritative_guidance_includes_surface_recovery() {
 }
 
 #[test]
-fn status_response_gets_default_rich_operator_guidance() {
+fn status_response_is_terse_by_default() {
+    // REQ-AXO-901947 invariant 4 — a clean success carries only the answer +
+    // `next_action`, NOT the full operator_guidance envelope (push→pull). The
+    // full envelope is opt-in (`detail:"full"`) — see the sibling test.
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
@@ -712,6 +724,36 @@ fn status_response_gets_default_rich_operator_guidance() {
             params: Some(json!({
                 "name": "status",
                 "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(9014)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    // Terse: the heavy guidance envelope is absent on a clean success...
+    assert!(
+        result["data"]["operator_guidance"]["llm_usage_instruction"].is_null(),
+        "terse-default success must NOT push the full guidance envelope: {}",
+        result["data"]
+    );
+    // ...but the minimal continuation (`next_action`) is always present.
+    assert!(
+        result["data"]["next_action"]["tool"].as_str().is_some(),
+        "terse-default success must still carry a minimal next_action: {}",
+        result["data"]
+    );
+}
+
+#[test]
+fn status_response_with_detail_full_pulls_rich_operator_guidance() {
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief", "detail": "full" }
             })),
             id: Some(json!(9004)),
         })
@@ -728,7 +770,10 @@ fn status_response_gets_default_rich_operator_guidance() {
     assert!(result["data"]["operator_guidance"]["token_efficiency_hint"]
         .as_str()
         .is_some_and(|text| text.contains("runtime truth")));
-    assert_ne!(result["data"]["next_action"]["tool"].as_str(), Some("status"));
+    assert_ne!(
+        result["data"]["next_action"]["tool"].as_str(),
+        Some("status")
+    );
     assert!(
         result["data"]["operator_guidance"]["alternative_strategies"]
             .as_array()
@@ -769,7 +814,7 @@ fn query_shadow_guidance_keeps_public_read_surface_available() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "query",
-                "arguments": { "query": "scan", "project": "AXO" }
+                "arguments": { "query": "scan", "project": "AXO", "detail": "full" }
             })),
             id: Some(json!(6211)),
         })

@@ -8,7 +8,6 @@ use std::thread;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod catalog;
 mod dispatch;
-mod tool_contracts;
 mod format;
 mod guidance;
 mod protocol;
@@ -16,6 +15,7 @@ mod runtime_topology_support;
 mod soll;
 #[cfg(test)]
 mod tests;
+mod tool_contracts;
 mod tools_context;
 mod tools_dx;
 mod tools_framework;
@@ -324,7 +324,9 @@ impl McpServer {
             "entrench_nuance" => "apply a bounded intent clarification",
             "soll_manager" => "perform an exact SOLL create/update/link operation",
             "soll_attach_evidence" => "attach proof to canonical intent",
-            "soll_remove_evidence" => "prune broken evidence rows so completeness reflects current code state",
+            "soll_remove_evidence" => {
+                "prune broken evidence rows so completeness reflects current code state"
+            }
             "soll_apply_plan" => "apply a larger SOLL batch transaction safely",
             "restore_soll" => "restore canonical intent from an export",
             "commit_work" => "commit work only after SOLL-aware validation",
@@ -550,10 +552,6 @@ impl McpServer {
             .entry("canonical_sources".to_string())
             .or_insert_with(Self::canonical_sources_snapshot);
 
-        let follow_up_tools = Self::default_follow_up_tools_for(normalized_name)
-            .iter()
-            .map(|tool| Value::String((*tool).to_string()))
-            .collect::<Vec<_>>();
         let status = data_object
             .get("status")
             .and_then(Value::as_str)
@@ -561,144 +559,172 @@ impl McpServer {
         let is_partial = status.starts_with("warn_")
             || status.contains("degraded")
             || data_object.get("problem_class").and_then(Value::as_str) == Some("degraded");
-        let recommended_action = next_action
-            .get("tool")
-            .and_then(Value::as_str)
-            .map(|tool| {
-                if is_error {
-                    format!("follow `{tool}` or retry `{normalized_name}` with corrected inputs")
-                } else if is_partial {
-                    format!("treat this as partial truth and continue with `{tool}`")
-                } else {
-                    format!("continue the workflow with `{tool}`")
-                }
-            })
-            .unwrap_or_else(|| "continue with the next guided MCP step".to_string());
-        let default_blocking_factors = if is_error || is_partial {
-            vec![json!({
-                "factor": if is_error { "response_requires_recovery" } else { "partial_truth_requires_follow_up" },
-                "severity": if is_error { "high" } else { "medium" },
-                "recommended_action": recommended_action
-            })]
-        } else {
-            Vec::new()
-        };
-        let default_remediation_actions = default_blocking_factors
-            .iter()
-            .filter_map(|factor| {
-                factor
-                    .get("recommended_action")
-                    .and_then(Value::as_str)
-                    .map(|value| Value::String(value.to_string()))
-            })
-            .collect::<Vec<_>>();
 
-        let operator_guidance = data_object
-            .entry("operator_guidance".to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if !operator_guidance.is_object() {
-            *operator_guidance = Value::Object(serde_json::Map::new());
-        }
-        let Some(operator_guidance_object) = operator_guidance.as_object_mut() else {
-            return response;
-        };
+        // REQ-AXO-901947 invariant 4 — terse by default (just-in-time minimal at
+        // the recency edge). A clean success carries only the answer + `next_action`
+        // (+ canonical_sources). The full guidance envelope is PULL: attached on
+        // error/partial (the just-in-time safety net, where attention is reliable)
+        // or on explicit opt-in (`detail`/`guidance` = "full", or
+        // AXON_MCP_GUIDANCE_FULL). Pushing it on every response is a per-call token
+        // tax that also pollutes the LLM's mid-context (lost-in-the-middle). The
+        // filet reste tirable → no capability loss for a lost LLM.
+        let attach_full = Self::mcp_guidance_full_enabled()
+            || is_error
+            || is_partial
+            || matches!(
+                arguments.get("detail").and_then(Value::as_str),
+                Some("full")
+            )
+            || matches!(
+                arguments.get("guidance").and_then(Value::as_str),
+                Some("full")
+            );
+        if attach_full {
+            let follow_up_tools = Self::default_follow_up_tools_for(normalized_name)
+                .iter()
+                .map(|tool| Value::String((*tool).to_string()))
+                .collect::<Vec<_>>();
+            let recommended_action = next_action
+                .get("tool")
+                .and_then(Value::as_str)
+                .map(|tool| {
+                    if is_error {
+                        format!(
+                            "follow `{tool}` or retry `{normalized_name}` with corrected inputs"
+                        )
+                    } else if is_partial {
+                        format!("treat this as partial truth and continue with `{tool}`")
+                    } else {
+                        format!("continue the workflow with `{tool}`")
+                    }
+                })
+                .unwrap_or_else(|| "continue with the next guided MCP step".to_string());
+            let default_blocking_factors = if is_error || is_partial {
+                vec![json!({
+                    "factor": if is_error { "response_requires_recovery" } else { "partial_truth_requires_follow_up" },
+                    "severity": if is_error { "high" } else { "medium" },
+                    "recommended_action": recommended_action
+                })]
+            } else {
+                Vec::new()
+            };
+            let default_remediation_actions = default_blocking_factors
+                .iter()
+                .filter_map(|factor| {
+                    factor
+                        .get("recommended_action")
+                        .and_then(Value::as_str)
+                        .map(|value| Value::String(value.to_string()))
+                })
+                .collect::<Vec<_>>();
 
-        operator_guidance_object
-            .entry("actionable_now".to_string())
-            .or_insert(Value::Bool(!is_error && !is_partial));
-        operator_guidance_object
-            .entry("blocking_factors".to_string())
-            .or_insert(Value::Array(default_blocking_factors));
-        operator_guidance_object
-            .entry("remediation_actions".to_string())
-            .or_insert(Value::Array(default_remediation_actions));
-        operator_guidance_object
-            .entry("follow_up_tools".to_string())
-            .or_insert(Value::Array(follow_up_tools));
-        operator_guidance_object
-            .entry("next_action".to_string())
-            .or_insert(next_action);
-        operator_guidance_object
-            .entry("workflow_stage".to_string())
-            .or_insert(Value::String(
-                Self::workflow_stage_for(normalized_name).to_string(),
-            ));
-        operator_guidance_object
-            .entry("primary_goal".to_string())
-            .or_insert(Value::String(
-                Self::primary_goal_for(normalized_name).to_string(),
-            ));
-        operator_guidance_object
-            .entry("token_efficiency_hint".to_string())
-            .or_insert(Value::String(
-                Self::token_efficiency_hint_for(normalized_name).to_string(),
-            ));
-        operator_guidance_object
-            .entry("alternative_strategies".to_string())
-            .or_insert(Value::Array(Self::alternative_strategies_for(
-                normalized_name,
-            )));
-        operator_guidance_object
+            let operator_guidance = data_object
+                .entry("operator_guidance".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !operator_guidance.is_object() {
+                *operator_guidance = Value::Object(serde_json::Map::new());
+            }
+            let Some(operator_guidance_object) = operator_guidance.as_object_mut() else {
+                return response;
+            };
+
+            operator_guidance_object
+                .entry("actionable_now".to_string())
+                .or_insert(Value::Bool(!is_error && !is_partial));
+            operator_guidance_object
+                .entry("blocking_factors".to_string())
+                .or_insert(Value::Array(default_blocking_factors));
+            operator_guidance_object
+                .entry("remediation_actions".to_string())
+                .or_insert(Value::Array(default_remediation_actions));
+            operator_guidance_object
+                .entry("follow_up_tools".to_string())
+                .or_insert(Value::Array(follow_up_tools));
+            operator_guidance_object
+                .entry("next_action".to_string())
+                .or_insert(next_action);
+            operator_guidance_object
+                .entry("workflow_stage".to_string())
+                .or_insert(Value::String(
+                    Self::workflow_stage_for(normalized_name).to_string(),
+                ));
+            operator_guidance_object
+                .entry("primary_goal".to_string())
+                .or_insert(Value::String(
+                    Self::primary_goal_for(normalized_name).to_string(),
+                ));
+            operator_guidance_object
+                .entry("token_efficiency_hint".to_string())
+                .or_insert(Value::String(
+                    Self::token_efficiency_hint_for(normalized_name).to_string(),
+                ));
+            operator_guidance_object
+                .entry("alternative_strategies".to_string())
+                .or_insert(Value::Array(Self::alternative_strategies_for(
+                    normalized_name,
+                )));
+            operator_guidance_object
             .entry("llm_usage_instruction".to_string())
             .or_insert(Value::String(
                 "Use `next_action` first. Bad args: fix via `parameter_repair`, retry same tool once. Partial: label partial, use `follow_up_tools`. Do not ask the client to choose MCP tools; ask only for irreversible mutation, missing intent, or unrecoverable blocker.".to_string(),
             ));
-        operator_guidance_object
-            .entry("llm_contract".to_string())
-            .or_insert(json!({
-                "first": "next_action",
-                "bad_args": "use parameter_repair, retry same tool once",
-                "partial": "label partial, keep evidence, use follow_up_tools[0]",
-                "no_answer": "switch once to the follow-up tool matching the missing dimension",
-                "ask_user_only_if": [
-                    "irreversible_mutation",
-                    "missing_business_intent",
-                    "unrecoverable_high_severity_blocker"
-                ],
-                "token_rule": "prefer brief mode; escalate only after a named missing dimension"
-            }));
-        operator_guidance_object
-            .entry("fallback_strategy".to_string())
-            .or_insert(json!([
-                {
-                    "if": "invalid_arguments",
-                    "do": "fix args from `parameter_repair`; retry same tool"
-                },
-                {
-                    "if": "unknown_or_wrong_target",
-                    "do": "use candidates or broaden with `query`"
-                },
-                {
-                    "if": "partial_or_degraded_truth",
-                    "do": "state the gap; use first relevant follow-up tool"
-                },
-                {
-                    "if": "no_structural_answer",
-                    "do": "switch once to the follow-up tool matching the missing dimension"
-                }
-            ]));
-        operator_guidance_object
+            operator_guidance_object
+                .entry("llm_contract".to_string())
+                .or_insert(json!({
+                    "first": "next_action",
+                    "bad_args": "use parameter_repair, retry same tool once",
+                    "partial": "label partial, keep evidence, use follow_up_tools[0]",
+                    "no_answer": "switch once to the follow-up tool matching the missing dimension",
+                    "ask_user_only_if": [
+                        "irreversible_mutation",
+                        "missing_business_intent",
+                        "unrecoverable_high_severity_blocker"
+                    ],
+                    "token_rule": "prefer brief mode; escalate only after a named missing dimension"
+                }));
+            operator_guidance_object
+                .entry("fallback_strategy".to_string())
+                .or_insert(json!([
+                    {
+                        "if": "invalid_arguments",
+                        "do": "fix args from `parameter_repair`; retry same tool"
+                    },
+                    {
+                        "if": "unknown_or_wrong_target",
+                        "do": "use candidates or broaden with `query`"
+                    },
+                    {
+                        "if": "partial_or_degraded_truth",
+                        "do": "state the gap; use first relevant follow-up tool"
+                    },
+                    {
+                        "if": "no_structural_answer",
+                        "do": "switch once to the follow-up tool matching the missing dimension"
+                    }
+                ]));
+            operator_guidance_object
             .entry("explicit_input_rule".to_string())
             .or_insert(Value::String(
                 "Do not ask the client to choose MCP tools. Ask only for irreversible mutation, missing intent, or unrecoverable high-severity blocker.".to_string(),
             ));
-        operator_guidance_object
-            .entry("why_this_next_step".to_string())
-            .or_insert(Value::String(
-                if response_text.contains("Invalid arguments for tool") {
-                    "Repair args from `parameter_repair`; do not widen search first.".to_string()
-                } else if response_text.contains("Tool not found") {
-                    "Inspect public MCP surface, then retry with a listed tool.".to_string()
-                } else if is_error {
-                    "Recover with the guided next step before blind retries.".to_string()
-                } else if is_partial {
-                    "Keep partial evidence; close the missing dimension next.".to_string()
-                } else {
-                    "Highest-signal follow-up for this tool family.".to_string()
-                },
-            ));
-        if response_text.contains("Invalid arguments for tool") {
             operator_guidance_object
+                .entry("why_this_next_step".to_string())
+                .or_insert(Value::String(
+                    if response_text.contains("Invalid arguments for tool") {
+                        "Repair args from `parameter_repair`; do not widen search first."
+                            .to_string()
+                    } else if response_text.contains("Tool not found") {
+                        "Inspect public MCP surface, then retry with a listed tool.".to_string()
+                    } else if is_error {
+                        "Recover with the guided next step before blind retries.".to_string()
+                    } else if is_partial {
+                        "Keep partial evidence; close the missing dimension next.".to_string()
+                    } else {
+                        "Highest-signal follow-up for this tool family.".to_string()
+                    },
+                ));
+            if response_text.contains("Invalid arguments for tool") {
+                operator_guidance_object
                 .entry("parameter_repair".to_string())
                 .or_insert_with(|| {
                     Self::parameter_repair_guidance_for(normalized_name, arguments)
@@ -706,7 +732,8 @@ impl McpServer {
                             "retry_rule": format!("Retry `{normalized_name}` with a schema-conformant argument object.")
                         }))
                 });
-        }
+            }
+        } // end attach_full (REQ-AXO-901947 terse-default gate)
 
         response
     }
@@ -1052,6 +1079,22 @@ impl McpServer {
 
     pub(crate) fn mcp_guidance_shadow_enabled() -> bool {
         std::env::var("AXON_MCP_GUIDANCE_SHADOW")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// REQ-AXO-901947 invariant 4 — env override forcing the full guidance
+    /// envelope on every response (debug / legacy consumers). Default off: the
+    /// surface is terse-by-default, full guidance is pulled on error/partial or
+    /// via `detail`/`guidance` = "full".
+    pub(crate) fn mcp_guidance_full_enabled() -> bool {
+        std::env::var("AXON_MCP_GUIDANCE_FULL")
             .ok()
             .map(|value| {
                 matches!(
@@ -1780,10 +1823,7 @@ impl McpServer {
         // for the LLM to issue N round-trips. Timeout returns a partial
         // snapshot with `data.next_action.kind = continue_polling_until_terminal_state`
         // so the existing polling guidance still applies.
-        let wait = args
-            .get("wait")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let wait = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
         let timeout_ms = args
             .get("timeout_ms")
             .and_then(|v| v.as_u64())

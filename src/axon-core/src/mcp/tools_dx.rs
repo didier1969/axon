@@ -613,9 +613,7 @@ impl McpServer {
         } else {
             None
         };
-        let project = explicit_project
-            .or(auto_project.as_deref())
-            .unwrap_or("*");
+        let project = explicit_project.or(auto_project.as_deref()).unwrap_or("*");
         let query_intent = Self::classify_query_intent(query_text);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
@@ -866,24 +864,17 @@ impl McpServer {
                     {
                         let existing: HashSet<String> = structured_results
                             .iter()
-                            .filter_map(|r| {
-                                r.get("name").and_then(Value::as_str).map(String::from)
-                            })
+                            .filter_map(|r| r.get("name").and_then(Value::as_str).map(String::from))
                             .collect();
                         for (name, kind, uri) in ram_hits {
-                            if existing.contains(&name)
-                                || structured_results.len() >= query_limit
-                            {
+                            if existing.contains(&name) || structured_results.len() >= query_limit {
                                 continue;
                             }
                             let mut obj = serde_json::Map::new();
                             obj.insert("name".to_string(), Value::from(name));
                             obj.insert("kind".to_string(), Value::from(kind));
                             obj.insert("uri".to_string(), Value::from(uri));
-                            obj.insert(
-                                "surface".to_string(),
-                                Value::from("graph_ram_lexical"),
-                            );
+                            obj.insert("surface".to_string(), Value::from("graph_ram_lexical"));
                             obj.insert("project".to_string(), Value::from(project));
                             structured_results.push(Value::Object(obj));
                             ram_lexical_lane_active = true;
@@ -905,22 +896,13 @@ impl McpServer {
                 // LLM-visible expansion context.
                 let direct_names: HashSet<String> = structured_results
                     .iter()
-                    .filter_map(|r| {
-                        r.get("name")
-                            .and_then(Value::as_str)
-                            .map(String::from)
-                    })
+                    .filter_map(|r| r.get("name").and_then(Value::as_str).map(String::from))
                     .collect();
-                let graph_neighbors =
-                    self.query_graph_r1_neighbors(&direct_names, project, 10);
+                let graph_neighbors = self.query_graph_r1_neighbors(&direct_names, project, 10);
                 let graph_lane_active = !graph_neighbors.is_empty();
                 let related_via_graph: Vec<String> = graph_neighbors
                     .iter()
-                    .filter_map(|n| {
-                        n.get("name")
-                            .and_then(Value::as_str)
-                            .map(String::from)
-                    })
+                    .filter_map(|n| n.get("name").and_then(Value::as_str).map(String::from))
                     .collect();
                 let total_available = structured_results.len();
                 let next_call_hint = structured_results
@@ -940,8 +922,7 @@ impl McpServer {
                 }
                 let mut surfaces_degraded: Vec<Value> = Vec::new();
                 if let Some(reason) = semantic_fallback_reason.as_ref() {
-                    surfaces_degraded
-                        .push(json!({"surface": "vector", "reason": reason}));
+                    surfaces_degraded.push(json!({"surface": "vector", "reason": reason}));
                 }
                 let response = json!({
                     "content": [{ "type": "text", "text": report }],
@@ -1174,6 +1155,10 @@ impl McpServer {
                     "project": if project == "*" { Value::Null } else { Value::String(project.to_string()) },
                     "result_count": 0,
                     "query_state": "structure_only_empty",
+                    // REQ-AXO-901947 inv. 5 — a no-answer is exactly when the LLM
+                    // needs recovery guidance: mark it degraded so the full
+                    // envelope is attached (just-in-time) despite terse-default.
+                    "problem_class": "degraded",
                     "diagnostic_route": "graph_symbol_index_no_exact_match"
                 }
             }));
@@ -1217,6 +1202,8 @@ impl McpServer {
                     "project": if project == "*" { Value::Null } else { Value::String(project.to_string()) },
                     "result_count": 0,
                     "query_state": "structure_only_empty",
+                    // REQ-AXO-901947 inv. 5 — no-answer keeps recovery guidance.
+                    "problem_class": "degraded",
                     "diagnostic_route": "degraded_structure_without_anchor"
                 }
             }))
@@ -1514,11 +1501,8 @@ impl McpServer {
         // subquery roundtrip. PG fallback preserves the existing behaviour
         // when the cache is cold OR the project is unspecified.
         let inspect_view = process_view();
-        let ram_attempted_inspect = project
-            .map(|p| inspect_view.is_warm(p))
-            .unwrap_or(false);
-        let inspect_call_rels: [RelationType; 2] =
-            [RelationType::Calls, RelationType::CallsNif];
+        let ram_attempted_inspect = project.map(|p| inspect_view.is_warm(p)).unwrap_or(false);
+        let inspect_call_rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
         let (ram_callers_count, ram_callees_count): (Option<i64>, Option<i64>) =
             if ram_attempted_inspect {
                 let project_key = project.unwrap_or("");
@@ -1687,17 +1671,13 @@ impl McpServer {
                     .and_then(|row| row.first())
                     .and_then(Value::as_str)
                     .unwrap_or(symbol);
-                let direct_set: HashSet<String> = std::iter::once(resolved_name.to_string()).collect();
-                let neighbors = self.query_graph_r1_neighbors(
-                    &direct_set,
-                    project.unwrap_or("*"),
-                    20,
-                );
+                let direct_set: HashSet<String> =
+                    std::iter::once(resolved_name.to_string()).collect();
+                let neighbors =
+                    self.query_graph_r1_neighbors(&direct_set, project.unwrap_or("*"), 20);
                 let related_names: Vec<String> = neighbors
                     .iter()
-                    .filter_map(|n| {
-                        n.get("name").and_then(Value::as_str).map(String::from)
-                    })
+                    .filter_map(|n| n.get("name").and_then(Value::as_str).map(String::from))
                     .collect();
                 let graph_lane_active = !related_names.is_empty();
                 let mut surfaces_used: Vec<&str> = vec!["symbol_index"];
@@ -1884,7 +1864,9 @@ impl McpServer {
         // REQ-AXO-901922 — lazy-warm the RAM snapshot (brain start does not
         // auto-populate it). Without this the cold cache forced the dead PG
         // fallback below (hardcoded empty since CALLS tables were dropped).
-        let ram_attempted = project.map(|p| self.ensure_ram_snapshot_warm(p)).unwrap_or(false);
+        let ram_attempted = project
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
         let mut surfaces_used: Vec<&'static str> = Vec::new();
         let mut surfaces_degraded: Vec<&'static str> = Vec::new();
 
@@ -1943,7 +1925,10 @@ impl McpServer {
             evidence.push('\n');
         }
         evidence.push_str("### ↑ Callers / Entry Points\n");
-        evidence.push_str(&format_table_from_json(&up_res, &["Name", "Type", "Project"]));
+        evidence.push_str(&format_table_from_json(
+            &up_res,
+            &["Name", "Type", "Project"],
+        ));
         evidence.push_str("\n\n### ↓ Deep Callees\n");
         evidence.push_str(&format_table_from_json(
             &down_res,
@@ -2043,9 +2028,8 @@ impl McpServer {
             // scoped code) and the real `source_id` column.
             let safe_target = target_id.replace('\'', "''");
             let proj_param = project.unwrap_or("").replace('\'', "''");
-            let sql = format!(
-                "SELECT source_id FROM ist.callers_of('{safe_target}', 1, '{proj_param}')"
-            );
+            let sql =
+                format!("SELECT source_id FROM ist.callers_of('{safe_target}', 1, '{proj_param}')");
             self.graph_store
                 .query_json(&sql)
                 .ok()
@@ -2075,10 +2059,7 @@ impl McpServer {
                 .collect::<Vec<_>>()
                 .join(", ");
             let project_filter = if let Some(p) = project {
-                format!(
-                    " AND project_code = '{}'",
-                    p.replace('\'', "''")
-                )
+                format!(" AND project_code = '{}'", p.replace('\'', "''"))
             } else {
                 String::new()
             };
