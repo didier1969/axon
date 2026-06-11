@@ -290,4 +290,32 @@ mod tests {
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
     }
+
+    #[test]
+    fn catalog_serves_derived_schema_for_tracer_tools() {
+        // Integration: the real tools/list catalog (pure fn, no DB) must carry
+        // the schemars-derived schema for the tracer-bullet tools, proving the
+        // override pass replaced the hand-written literal.
+        let catalog = super::super::catalog::tools_catalog(true);
+        let tools = catalog["tools"].as_array().expect("tools array");
+        for name in DERIVED_TOOLS {
+            let entry = tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} absent from catalog"));
+            let advertised = &entry["inputSchema"];
+            let expected = derived_input_schema(name).unwrap();
+            assert_eq!(
+                advertised, &expected,
+                "{name} catalog inputSchema must equal the derived schema"
+            );
+        }
+        // soll_manager.data is now a real field schema, not the prose blob.
+        let soll = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some("soll_manager"))
+            .unwrap();
+        let rendered = serde_json::to_string(&soll["inputSchema"]).unwrap();
+        assert!(rendered.contains("relation_type"), "data fields must be advertised");
+    }
 }
