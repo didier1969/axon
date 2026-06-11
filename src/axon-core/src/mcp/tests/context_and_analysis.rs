@@ -1778,6 +1778,48 @@ fn test_soll_work_plan_respects_limit_and_marks_truncated() {
 }
 
 #[test]
+fn test_soll_work_plan_default_limit_is_small_and_marks_truncated() {
+    // REQ-AXO-901936 — token-economy: the DEFAULT wave listing (no explicit
+    // limit) is small, with drill-down preserved via `truncated` + `limit=N`.
+    // AXO carries far more than the default's worth of actionable REQs, so the
+    // default must cap the listing and flag truncation.
+    let server = create_test_server();
+    for i in 1..=15 {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-9360{i:02}', 'Requirement', 'AXO', 'R{i}', '', 'planned', '{{\"priority\":\"P1\"}}') ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_work_plan",
+                "arguments": { "project_code": "AXO", "format": "json" }
+            })),
+            id: Some(json!(901936)),
+        })
+        .unwrap()
+        .result
+        .expect("result");
+    let data = response.get("data").expect("data");
+    let returned = data["summary"]["returned_items"].as_u64().expect("returned");
+    assert!(
+        returned <= 12,
+        "default wave listing must be small (<=12), got {returned}"
+    );
+    assert_eq!(
+        data["metadata"]["truncated"].as_bool(),
+        Some(true),
+        "a backlog larger than the default must mark truncated for drill-down"
+    );
+}
+
+#[test]
 fn test_soll_work_plan_returns_top_recommendations() {
     let server = create_test_server();
     server

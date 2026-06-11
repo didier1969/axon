@@ -340,15 +340,16 @@ impl McpServer {
             }
         };
         let project_code = project_code_owned.as_str();
-        // REQ-AXO-91500 patch A makes the scorer rank correctly via the
-        // broader filiation filter ; default limit stays at 50 per
-        // CPT-AXO-90009 pagination cognitive (top-K by default, drill-down
-        // via explicit `limit` arg). LLM may request `limit=N` for
-        // deeper inspection.
+        // REQ-AXO-901936 — token-economy: the default wave listing is small
+        // (the LLM pays every returned item in context). A 50-item default
+        // dumped most of the backlog on every call. Reconciles CPT-AXO-90009
+        // (top-K by default + drill-down) by keeping the EXACT mechanism — the
+        // `truncated` flag still fires and `limit=N` still drills down — while
+        // making K actually small. Explicit `limit` always wins.
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
-            .unwrap_or(50)
+            .unwrap_or(12)
             .max(1) as usize;
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(5).max(1) as usize;
         let include_ist = args
