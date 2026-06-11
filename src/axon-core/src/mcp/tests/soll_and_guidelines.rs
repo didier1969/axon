@@ -6244,6 +6244,20 @@ fn test_axon_init_project_returns_global_guidelines() {
     assert!(content.contains("GUI-PRO-001"));
     assert!(content.contains("GUI-PRO-002"));
     assert!(content.contains("Available global rules"));
+    // REQ-AXO-901909 — the catalogue is a terse digest, not a full-body
+    // dump. The read-on-demand pointer must be advertised so the LLM knows
+    // where the full bodies live, and no rule line may carry an unbounded
+    // multi-line body.
+    assert!(
+        content.contains("read any body in full via"),
+        "init must point to the on-demand body read, got: {content}"
+    );
+    for line in content.lines().filter(|l| l.starts_with("- **GUI-")) {
+        assert!(
+            line.chars().count() <= 200,
+            "REQ-AXO-901909: guideline line must be a bounded digest, got: {line}"
+        );
+    }
     assert!(content.contains("Server-assigned project code: `BKS`"));
     assert_eq!(result["data"]["project_code"].as_str(), Some("BKS"));
     assert_eq!(

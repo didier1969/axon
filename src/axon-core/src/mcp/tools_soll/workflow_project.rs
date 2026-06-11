@@ -33,6 +33,26 @@ fn project_workflow_error(
     })
 }
 
+/// REQ-AXO-901909 — collapse a guideline body to a single-line digest so
+/// `axon_init_project` can advertise the rule catalogue without re-dumping
+/// every full body on every init (GUI-PRO-100 token-economy). Newlines are
+/// flattened, the result is bounded to `GUIDELINE_DIGEST_MAX` characters,
+/// truncated back to the last word boundary, and marked with `…`. The full
+/// body stays one `sql SELECT description FROM soll.Node WHERE id=…` away.
+const GUIDELINE_DIGEST_MAX: usize = 100;
+fn guideline_digest(body: &str) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= GUIDELINE_DIGEST_MAX {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(GUIDELINE_DIGEST_MAX).collect();
+    if let Some(idx) = out.rfind(' ') {
+        out.truncate(idx);
+    }
+    out.push('…');
+    out
+}
+
 /// REQ-AXO-121 — recognize inline `#[cfg(test)] mod tests { … }` blocks
 /// inside the modified `.rs` file itself when looking for a `tests.rs`
 /// satisfier. Without this, GUI-PRO-001 forced a sibling `_tests.rs`
@@ -1172,7 +1192,18 @@ impl McpServer {
         let mut rules_text = String::new();
         for row in rows {
             if row.len() >= 3 {
-                rules_text.push_str(&format!("- **{}**: {} ({})\n", row[0], row[1], row[2]));
+                // REQ-AXO-901909 — advertise the rule catalogue with a terse
+                // one-line digest, NOT the full body. Some bodies run multiple
+                // KB (e.g. GUI-PRO-102) and re-dumping every one re-bills the
+                // cold-start token budget on every init, in every session
+                // (GUI-PRO-100 token-economy). Full bodies stay one `sql` read
+                // away (pointer printed below).
+                rules_text.push_str(&format!(
+                    "- **{}**: {} — {}\n",
+                    row[0],
+                    row[1],
+                    guideline_digest(&row[2])
+                ));
             }
         }
 
@@ -1204,7 +1235,7 @@ impl McpServer {
             "Server-assigned project code: `{}`.\n\n",
             project_code
         ));
-        response_text.push_str("Available global rules. Which ones do you want to activate, ignore, or specialize for this project?\n");
+        response_text.push_str("Available global rules (digest — read any body in full via `sql SELECT description FROM soll.Node WHERE id='<ID>'`). Which ones do you want to activate, ignore, or specialize for this project?\n");
         response_text.push_str(&rules_text);
         response_text.push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
 
@@ -1592,5 +1623,57 @@ mod commit_message_refactor_tests {
         // Conventional-Commits 1.0 is case-sensitive — `Refactor:` is
         // not a valid type token, so the gate stays strict.
         assert!(!commit_message_is_refactor("Refactor: tighten loop"));
+    }
+}
+
+#[cfg(test)]
+mod guideline_digest_tests {
+    //! REQ-AXO-901909 — `axon_init_project` must advertise the rule
+    //! catalogue as a terse digest, never re-dump every full body on
+    //! every init (GUI-PRO-100 token-economy). These lock the pure
+    //! digest contract: single-line, bounded, word-boundary truncation,
+    //! short bodies passed through verbatim.
+    use super::{guideline_digest, GUIDELINE_DIGEST_MAX};
+
+    #[test]
+    fn long_multiline_body_collapses_to_single_bounded_line() {
+        // Filler well past the digest bound, then a sentinel that only
+        // appears deep in the body (well beyond GUIDELINE_DIGEST_MAX).
+        let body = format!(
+            "## Phase A\n{}\nDEEP_BODY_SENTINEL must never reach the LLM at init.\n",
+            "step does a thing. ".repeat(30)
+        );
+        let digest = guideline_digest(&body);
+        assert!(
+            !digest.contains('\n'),
+            "digest must be single-line, got: {digest}"
+        );
+        // bounded to MAX chars + the ellipsis marker
+        assert!(
+            digest.chars().count() <= GUIDELINE_DIGEST_MAX + 1,
+            "digest must be bounded, got {} chars",
+            digest.chars().count()
+        );
+        assert!(
+            digest.ends_with('…'),
+            "truncated digest must carry the ellipsis marker, got: {digest}"
+        );
+        // the deep-body sentinel must NOT survive into the digest
+        assert!(
+            !digest.contains("DEEP_BODY_SENTINEL"),
+            "full body must not leak into the digest, got: {digest}"
+        );
+    }
+
+    #[test]
+    fn short_body_passes_through_verbatim_without_ellipsis() {
+        let body = "Tests written before or with the source code.";
+        assert_eq!(guideline_digest(body), body);
+    }
+
+    #[test]
+    fn embedded_newlines_in_short_body_are_flattened() {
+        let digest = guideline_digest("line one\nline two");
+        assert_eq!(digest, "line one line two");
     }
 }
