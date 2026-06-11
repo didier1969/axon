@@ -566,7 +566,18 @@ impl McpServer {
             .ok()
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
-        let cache_key = format!("{}|{}", project_code, limit);
+        // REQ-AXO-901941 — `changed_since` cursor (epoch ms). When supplied,
+        // return ONLY nodes whose `metadata.updated_at` is newer than the
+        // cursor, so a session re-checks state without re-paying the whole
+        // graph in context. The response returns a fresh `cursor` (now) to
+        // pass on the next call. `changed_since` is an integer, inlined
+        // safely. Nodes predating updated_at tracking are excluded from a
+        // delta (treated as unchanged-since-cursor).
+        let changed_since = args.get("changed_since").and_then(|v| v.as_i64());
+        let since_clause = changed_since
+            .map(|c| format!(" AND (metadata->>'updated_at')::bigint > {c}"))
+            .unwrap_or_default();
+        let cache_key = format!("{}|{}|{}", project_code, limit, changed_since.unwrap_or(-1));
         if let Some(cached) = Self::read_soll_context_cache(&cache_key, now_ms) {
             return Some(cached);
         }
@@ -577,10 +588,11 @@ impl McpServer {
                 "SELECT id || '|' || title || '|' || COALESCE(status,'')
                  FROM soll.Node
                  WHERE project_code = '{project}'
-                   AND type = 'Requirement'
+                   AND type = 'Requirement'{since}
                  ORDER BY id DESC
                  LIMIT {limit}",
                 project = escaped_project,
+                since = since_clause,
                 limit = limit
             ))
             .unwrap_or_default();
@@ -593,10 +605,11 @@ impl McpServer {
                 "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || left(COALESCE(description,''), 200)
                  FROM soll.Node
                  WHERE project_code = '{project}'
-                   AND type = 'Vision'
+                   AND type = 'Vision'{since}
                  ORDER BY id DESC
                  LIMIT {limit}",
                 project = escaped_project,
+                since = since_clause,
                 limit = limit
             ))
             .unwrap_or_default();
@@ -605,10 +618,11 @@ impl McpServer {
                 "SELECT id || '|' || title || '|' || COALESCE(status,'')
                  FROM soll.Node
                  WHERE project_code = '{project}'
-                   AND type = 'Decision'
+                   AND type = 'Decision'{since}
                  ORDER BY id DESC
                  LIMIT {limit}",
                 project = escaped_project,
+                since = since_clause,
                 limit = limit
             ))
             .unwrap_or_default();
@@ -715,7 +729,11 @@ impl McpServer {
                 "operational_digest": operational_digest,
                 "surfaces_used": ["soll_pg"],
                 "total_available": total_available,
-                "next_call_hint": "soll_work_plan project_code=<code> top=8 for scored execution order"
+                // REQ-AXO-901941 — pass `cursor` back on the next call as
+                // `changed_since` to receive ONLY nodes changed since now.
+                "cursor": now_ms,
+                "changed_since": changed_since,
+                "next_call_hint": "soll_work_plan project_code=<code> top=8 for scored execution order ; or re-call with changed_since=<cursor> for a delta"
             }
         });
         Self::write_soll_context_cache(cache_key, now_ms, &response);

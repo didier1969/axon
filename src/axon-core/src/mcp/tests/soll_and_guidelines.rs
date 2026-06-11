@@ -4181,6 +4181,60 @@ fn test_soll_query_context_returns_project_visions_from_source() {
 }
 
 #[test]
+fn test_soll_query_context_changed_since_returns_delta_and_cursor() {
+    // REQ-AXO-901941 — `changed_since` returns only nodes whose updated_at is
+    // newer than the cursor; the response carries a fresh `cursor`.
+    let server = create_test_server();
+    let code = scoped_test_project_code(&server);
+    let req_id = format!("REQ-{code}-001");
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Changed req', '', 'planned', '{{\"updated_at\":5000}}')"))
+        .unwrap();
+
+    let call = |changed_since: Option<i64>, rid: i64| -> serde_json::Value {
+        let mut args = serde_json::Map::new();
+        args.insert("project_code".to_string(), json!(code));
+        if let Some(c) = changed_since {
+            args.insert("changed_since".to_string(), json!(c));
+        }
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "soll_query_context", "arguments": args })),
+                id: Some(json!(rid)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+    let reqs_contain = |resp: &serde_json::Value, id: &str| -> bool {
+        resp["data"]["requirements"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v.as_str().map(|s| s.contains(id)).unwrap_or(false)))
+            .unwrap_or(false)
+    };
+
+    // changed_since before the node's updated_at → included.
+    let before = call(Some(1000), 1);
+    assert!(reqs_contain(&before, &req_id), "delta must include newer node");
+    assert!(
+        before["data"]["cursor"].as_i64().unwrap_or(0) > 0,
+        "a fresh cursor must be returned"
+    );
+    // changed_since after the node's updated_at → excluded.
+    let after = call(Some(9000), 2);
+    assert!(
+        !reqs_contain(&after, &req_id),
+        "delta must exclude a node older than the cursor"
+    );
+    // no cursor → full (node present).
+    let full = call(None, 3);
+    assert!(reqs_contain(&full, &req_id), "full query must include the node");
+}
+
+#[test]
 fn test_soll_query_context_bounds_vision_body_to_digest() {
     // REQ-AXO-901935 — a list surface must render a bounded digest, never the
     // full Vision body (often >1 KB) on every call.
