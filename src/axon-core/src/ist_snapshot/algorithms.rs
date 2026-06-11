@@ -106,7 +106,14 @@ pub fn structural_sccs(graph: &IstGraph) -> Vec<Vec<String>> {
         return Vec::new();
     }
     let (pg, _) = to_petgraph(graph);
-    let raw = petgraph::algo::tarjan_scc(&pg);
+    // REQ-AXO-901928 — petgraph 0.6.5 `tarjan_scc` is RECURSIVE (its own doc
+    // says "This implementation is recursive"); on a deep call-chain it
+    // recurses to depth = chain length and stack-overflows (SIGABRT observed on
+    // a synthetic 20k-node deep graph). Use an explicit-stack iterative Tarjan
+    // so the tool degrades gracefully instead of aborting the process
+    // (PIL-AXO-002 no dead-end). Same pattern as the iterative DFS in
+    // `bridges_and_articulation`.
+    let raw = tarjan_scc_iterative(&pg);
     let mut out: Vec<Vec<String>> = raw
         .into_iter()
         .filter(|c| c.len() > 1)
@@ -114,6 +121,77 @@ pub fn structural_sccs(graph: &IstGraph) -> Vec<Vec<String>> {
         .collect();
     out.sort_by(|a, b| b.len().cmp(&a.len()));
     out
+}
+
+/// REQ-AXO-901928 — iterative Tarjan strongly-connected-components over a
+/// `petgraph::DiGraph`, with an explicit work stack instead of recursion so it
+/// cannot overflow the call stack on pathologically deep graphs. Returns every
+/// SCC (callers filter by size). Classic Tarjan with `index`/`lowlink`/on-stack
+/// state held in flat `Vec`s keyed by `NodeIndex::index()`.
+fn tarjan_scc_iterative(pg: &DiGraph<String, u8>) -> Vec<Vec<NodeIndex>> {
+    let n = pg.node_count();
+    const UNVISITED: u32 = u32::MAX;
+    let mut index_of: Vec<u32> = vec![UNVISITED; n];
+    let mut lowlink: Vec<u32> = vec![0; n];
+    let mut on_stack: Vec<bool> = vec![false; n];
+    let mut comp_stack: Vec<NodeIndex> = Vec::new();
+    let mut sccs: Vec<Vec<NodeIndex>> = Vec::new();
+    let mut counter: u32 = 0;
+
+    for root in pg.node_indices() {
+        if index_of[root.index()] != UNVISITED {
+            continue;
+        }
+        // Each frame = (node, its successors, next-successor cursor). Indexing
+        // `work[..]` directly (not holding `last_mut()`) keeps the borrow
+        // checker happy across the `work.push` for a tree edge.
+        let mut work: Vec<(NodeIndex, Vec<NodeIndex>, usize)> = Vec::new();
+        index_of[root.index()] = counter;
+        lowlink[root.index()] = counter;
+        counter += 1;
+        comp_stack.push(root);
+        on_stack[root.index()] = true;
+        work.push((root, pg.neighbors(root).collect(), 0));
+
+        while let Some(frame_idx) = work.len().checked_sub(1) {
+            let v = work[frame_idx].0;
+            let pos = work[frame_idx].2;
+            if pos < work[frame_idx].1.len() {
+                let w = work[frame_idx].1[pos];
+                work[frame_idx].2 += 1;
+                if index_of[w.index()] == UNVISITED {
+                    index_of[w.index()] = counter;
+                    lowlink[w.index()] = counter;
+                    counter += 1;
+                    comp_stack.push(w);
+                    on_stack[w.index()] = true;
+                    work.push((w, pg.neighbors(w).collect(), 0));
+                } else if on_stack[w.index()] {
+                    lowlink[v.index()] = lowlink[v.index()].min(index_of[w.index()]);
+                }
+            } else {
+                // All successors of v explored: if v is an SCC root, pop it.
+                if lowlink[v.index()] == index_of[v.index()] {
+                    let mut component = Vec::new();
+                    loop {
+                        let w = comp_stack.pop().expect("comp_stack non-empty");
+                        on_stack[w.index()] = false;
+                        component.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(component);
+                }
+                work.pop();
+                if let Some(parent) = work.last() {
+                    let p = parent.0.index();
+                    lowlink[p] = lowlink[p].min(lowlink[v.index()]);
+                }
+            }
+        }
+    }
+    sccs
 }
 
 /// REQ-AXO-91488 — single-direction BFS shortest path with parent tracking.
@@ -762,6 +840,39 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         assert!(structural_sccs(&g).is_empty());
+    }
+
+    #[test]
+    fn structural_sccs_deep_chain_does_not_stack_overflow() {
+        // REQ-AXO-901928 — a long acyclic call-chain. The recursive petgraph
+        // `tarjan_scc` recursed to depth = chain length and SIGABRT'd here; the
+        // iterative implementation must complete and (a DAG) report no SCC > 1.
+        const DEPTH: usize = 60_000;
+        let nodes: Vec<_> = (0..DEPTH).map(|i| n(&format!("c{i}"))).collect();
+        let edges: Vec<_> = (0..DEPTH - 1)
+            .map(|i| e(&format!("c{i}"), &format!("c{}", i + 1), RelationType::Calls))
+            .collect();
+        let g = IstGraph::build(nodes, edges);
+        assert!(
+            structural_sccs(&g).is_empty(),
+            "a deep acyclic chain has no SCC > 1"
+        );
+    }
+
+    #[test]
+    fn structural_sccs_detects_large_deep_cycle() {
+        // REQ-AXO-901928 — a deep cycle (chain + back edge) is ONE big SCC. The
+        // iterative Tarjan must find it without recursing chain-deep.
+        const SIZE: usize = 5_000;
+        let nodes: Vec<_> = (0..SIZE).map(|i| n(&format!("k{i}"))).collect();
+        let mut edges: Vec<_> = (0..SIZE - 1)
+            .map(|i| e(&format!("k{i}"), &format!("k{}", i + 1), RelationType::Calls))
+            .collect();
+        edges.push(e(&format!("k{}", SIZE - 1), "k0", RelationType::Calls));
+        let g = IstGraph::build(nodes, edges);
+        let sccs = structural_sccs(&g);
+        assert_eq!(sccs.len(), 1, "the whole cycle is one SCC");
+        assert_eq!(sccs[0].len(), SIZE, "every node is in the cycle");
     }
 
     #[test]
