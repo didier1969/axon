@@ -553,6 +553,36 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[test]
+    fn render_pg_value_decodes_temporal_and_uuid_types() {
+        // REQ-AXO-901960 — the temporal family used to fall through to the
+        // `<unsupported type ...>` sentinel, so e.g.
+        // `axon.mcp_friction.last_observed_at` (timestamptz) was unreadable via
+        // the `sql` tool. They now render their real value.
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let res = store
+            .query_json(
+                "SELECT \
+                   '2026-06-12T13:00:00Z'::timestamptz AS ts, \
+                   '2026-06-12 13:00:00'::timestamp AS tsn, \
+                   '2026-06-12'::date AS d, \
+                   '13:00:00'::time AS t",
+            )
+            .unwrap();
+        assert!(
+            !res.contains("<unsupported type"),
+            "sentinel leaked for a temporal value: {res}"
+        );
+        assert!(
+            res.contains("2026-06-12"),
+            "timestamptz/timestamp/date value missing: {res}"
+        );
+        assert!(
+            res.contains("13:00:00"),
+            "time value missing: {res}"
+        );
+    }
+
     /// REQ-AXO-129 — `query_on_ctx` must convert plugin error
     /// envelopes to `Err`, so callers see a real failure instead of
     /// the historical silent `Ok("[]")`. This guards the wrapper

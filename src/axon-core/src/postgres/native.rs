@@ -650,5 +650,33 @@ fn render_pg_value(row: &tokio_postgres::Row, col: usize) -> String {
             return v.map(|j| j.to_string()).unwrap_or_else(|| "null".into());
         }
     }
+    // REQ-AXO-901960 — the temporal family was falling through to the
+    // `<unsupported type ...>` sentinel, so e.g. `axon.mcp_friction.last_observed_at`
+    // (timestamptz) was unreadable via the `sql` tool — an LLM (or operator)
+    // querying any timestamped row got a useless placeholder. Decoded here via
+    // tokio-postgres' already-enabled `with-chrono-0_4` feature (no new
+    // dependency). timestamptz → RFC3339 so the value round-trips back into a
+    // WHERE clause. (numeric remains the ::BIGINT/::TEXT cast workaround pending
+    // a `rust_decimal` decision — REQ-AXO-901905 sibling.)
+    if ty == Type::TIMESTAMPTZ {
+        if let Ok(v) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(col) {
+            return v.map(|t| t.to_rfc3339()).unwrap_or_else(|| "null".into());
+        }
+    }
+    if ty == Type::TIMESTAMP {
+        if let Ok(v) = row.try_get::<_, Option<chrono::NaiveDateTime>>(col) {
+            return v.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
+        }
+    }
+    if ty == Type::DATE {
+        if let Ok(v) = row.try_get::<_, Option<chrono::NaiveDate>>(col) {
+            return v.map(|d| d.to_string()).unwrap_or_else(|| "null".into());
+        }
+    }
+    if ty == Type::TIME {
+        if let Ok(v) = row.try_get::<_, Option<chrono::NaiveTime>>(col) {
+            return v.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
+        }
+    }
     format!("<unsupported type {}>", ty.name())
 }
