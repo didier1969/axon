@@ -222,4 +222,109 @@ impl McpServer {
             _ => false,
         }
     }
+
+    /// REQ-AXO-901961 S3/S4 — `mcp_telemetry_report`: usage + latency analytics
+    /// projected from the `axon.mcp_call_stat` rollup. Answers "how is the
+    /// system used / average latency / where are the errors" without an external
+    /// analytics tool — PG IS the engine. Signature-only by construction (the
+    /// rollup never held argument content). avg latency cast to float8 so the
+    /// sql-gateway renders it (numeric would hit REQ-AXO-901905's sentinel).
+    pub(crate) fn axon_mcp_telemetry_report(&self, args: &Value) -> Option<Value> {
+        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20).max(1);
+        let window_hours = args
+            .get("window_hours")
+            .and_then(Value::as_i64)
+            .unwrap_or(168) // 7 days
+            .max(1);
+
+        let rows = self
+            .graph_store
+            .query_json_param(
+                // sum(bigint) → numeric, which the sql-gateway renderer can't
+                // decode yet (REQ-AXO-901905) — cast counts to ::bigint and the
+                // average to ::float8 so every cell renders as a readable scalar.
+                "SELECT tool,
+                        sum(call_count)::bigint AS calls,
+                        COALESCE(sum(call_count) FILTER (WHERE status='error'), 0)::bigint AS errors,
+                        round((sum(latency_sum_ms)::numeric / nullif(sum(call_count),0)), 1)::float8 AS avg_ms,
+                        max(latency_max_ms) AS max_ms
+                 FROM axon.mcp_call_stat
+                 WHERE bucket_hour > now() - make_interval(hours => ?)
+                   AND (? = '' OR project_code = ?)
+                 GROUP BY tool
+                 ORDER BY calls DESC
+                 LIMIT ?",
+                &json!([window_hours, project_code, project_code, limit]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        let cell = |r: &[Value], i: usize| -> String {
+            r.get(i)
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default()
+        };
+        let to_i = |s: &str| s.parse::<i64>().unwrap_or(0);
+
+        let mut total_calls = 0i64;
+        let mut total_errors = 0i64;
+        let mut lines = String::new();
+        let tools: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let tool = cell(r, 0);
+                let calls = to_i(&cell(r, 1));
+                let errors = to_i(&cell(r, 2));
+                let avg_ms = cell(r, 3);
+                let max_ms = cell(r, 4);
+                total_calls += calls;
+                total_errors += errors;
+                let err_pct = if calls > 0 {
+                    (errors as f64) * 100.0 / (calls as f64)
+                } else {
+                    0.0
+                };
+                lines.push_str(&format!(
+                    "| {tool} | {calls} | {errors} ({err_pct:.0}%) | {avg_ms} | {max_ms} |\n"
+                ));
+                json!({
+                    "tool": tool, "calls": calls, "errors": errors,
+                    "avg_latency_ms": avg_ms, "max_latency_ms": max_ms,
+                })
+            })
+            .collect();
+
+        let overall_err_pct = if total_calls > 0 {
+            (total_errors as f64) * 100.0 / (total_calls as f64)
+        } else {
+            0.0
+        };
+        let report = format!(
+            "## 📊 MCP Telemetry (last {window_hours}h{})\n\n**Total calls:** {total_calls} · **errors:** {total_errors} ({overall_err_pct:.1}%)\n\n| tool | calls | errors | avg ms | max ms |\n|---|---|---|---|---|\n{lines}\n_Signature-only (tool + ok/error + project) — no argument content. PG-native rollup._",
+            if project_code.is_empty() { String::new() } else { format!(", project {project_code}") },
+        );
+
+        Some(json!({
+            "content": [{ "type": "text", "text": format_standard_contract(
+                "ok",
+                "mcp usage + latency analytics assembled",
+                "scope:mcp_surface",
+                &report,
+                &["filter by project_code, or widen window_hours, to drill down"],
+                "high",
+            )}],
+            "data": {
+                "tools": tools,
+                "total_calls": total_calls,
+                "total_errors": total_errors,
+                "window_hours": window_hours,
+                "privacy": "signature-only — no argument content is ever stored",
+            }
+        }))
+    }
 }

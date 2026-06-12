@@ -198,6 +198,34 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
         ))
         .unwrap();
     assert_eq!(err_count, 1, "the error call is recorded under status=error");
+
+    // S4 — mcp_telemetry_report projects the rollup into usage+latency analytics.
+    let report = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_telemetry_report",
+                "arguments": { "project_code": proj, "window_hours": 24 }
+            })),
+            id: Some(json!(961)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.contains(tool), "report must list the probed tool: {text}");
+    assert!(
+        report["data"]["total_calls"].as_i64() == Some(3),
+        "report aggregates the 3 calls: {}",
+        report["data"]
+    );
+    // avg ok latency (10ms) appears in the structured per-tool data.
+    let tools = report["data"]["tools"].as_array().expect("tools array");
+    assert!(
+        tools.iter().any(|t| t["tool"].as_str() == Some(tool)),
+        "probed tool present in telemetry data: {tools:?}"
+    );
 }
 
 #[test]

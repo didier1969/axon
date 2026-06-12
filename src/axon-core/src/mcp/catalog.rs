@@ -940,6 +940,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_telemetry_report",
+                "description": "[SYSTEM] REQ-AXO-901961 — MCP usage + latency analytics over the per-call rollup (axon.mcp_call_stat). Returns per-tool call volume, error rate, average + max latency over a window. Signature-only (tool + ok/error + project) — NEVER any argument content. PG-native (no external analytics tool). Args: optional `project_code` (tenant filter), `window_hours` (default 168 = 7d), `limit` (default 20).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Filter to one tenant; omit for the cross-tenant aggregate." },
+                        "window_hours": { "type": "integer", "description": "Look-back window in hours (default 168 = 7 days)." },
+                        "limit": { "type": "integer", "description": "Max tools returned, busiest first (default 20)." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "sql",
                 "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough.",
                 // REQ-AXO-901949 — inputSchema derived from tool_contracts::SqlInput

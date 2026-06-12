@@ -1402,6 +1402,8 @@ impl McpServer {
             "query_examples" => self.axon_query_examples(arguments),
             // REQ-AXO-901957 — closed-loop friction report + resolution.
             "mcp_friction_report" => self.axon_mcp_friction_report(arguments),
+            // REQ-AXO-901961 — usage + latency analytics over the call-stat rollup.
+            "mcp_telemetry_report" => self.axon_mcp_telemetry_report(arguments),
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
             // REQ-AXO-901676 — proportionate recovery: force delta / full rescan

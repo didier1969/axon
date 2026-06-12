@@ -33,6 +33,7 @@ Live 44127-44132 / dev 44137-44142. Brain = MCP + SOLL writer. Indexer = IST wri
 | SOLL batch / single | `soll_apply_plan` (`dry_run=true`) / `soll_manager` |
 | Methodology surface (REQ-AXO-91580/81/82) | `skill_list` → `skill_invoke` ; `prompt_template_get` ; `re_anchor reason=<signal>` for single-call context refresh |
 | MCP friction priorities (REQ-AXO-901957) | `mcp_friction_report` — top OPEN signatures by frequency = rollout priorities ; `mark_resolved={id,resolved_by_req,resolved_by_val}` closes the loop. Signature-only (no arg content). |
+| MCP usage + latency analytics (REQ-AXO-901961) | `mcp_telemetry_report` — per-tool call volume / error-rate / avg+max latency over `window_hours` (default 168), optional `project_code` filter. Projected from the `axon.mcp_call_stat` per-call rollup (every call, ok+error, signature-only). PG-native, no external tool. |
 
 ## Recovery
 
