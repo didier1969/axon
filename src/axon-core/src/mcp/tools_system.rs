@@ -811,8 +811,20 @@ impl McpServer {
                 // agent can emit the corrected query without a second probe.
                 let raw = e.to_string();
                 let repair = self.pg_error_repair(q, &raw);
+                // REQ-AXO-901949 inv.2 — fold the repair into the text channel so
+                // the real columns are visible in the same response (clients that
+                // render only `content[0].text`, incl. the HTTP/curl path, never
+                // saw `data.parameter_repair`). The structured copy stays in `data`.
+                let text = match &repair {
+                    Some(r) => format!(
+                        "SQL Error: {}{}",
+                        raw,
+                        super::tool_contracts::render_pg_repair_text(r)
+                    ),
+                    None => format!("SQL Error: {}", raw),
+                };
                 Some(json!({
-                    "content": [{ "type": "text", "text": format!("SQL Error: {}", raw) }],
+                    "content": [{ "type": "text", "text": text }],
                     "isError": true,
                     "data": {
                         "status": "input_invalid",

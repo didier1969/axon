@@ -227,6 +227,56 @@ pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
     relations
 }
 
+/// REQ-AXO-901949 inv.2 — render a `pg_error_repair` envelope into the inline
+/// text channel.
+///
+/// The repair object is already attached to `data.parameter_repair`, but most
+/// MCP client renderings (including the bare HTTP/curl path) surface only
+/// `content[0].text`. Without this the agent reads `SQL Error: column "x" does
+/// not exist` and has to probe `schema_overview` anyway — the exact second
+/// round-trip AC4 promised to remove. Folding the real columns into the text
+/// makes the corrected call self-sufficient in the same response. Pure (takes
+/// the already-built repair `Value`) so it is unit-testable without a DB.
+pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
+    let problem = repair
+        .get("problem_class")
+        .and_then(Value::as_str)
+        .unwrap_or("input_invalid");
+    let mut out = format!("\n\nRepair ({problem}):");
+
+    match repair.get("referenced_relations").and_then(Value::as_array) {
+        Some(rels) if !rels.is_empty() => {
+            for rel in rels {
+                let name = rel.get("relation").and_then(Value::as_str).unwrap_or("?");
+                let cols: Vec<&str> = rel
+                    .get("real_columns")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let exists = rel
+                    .get("exists")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(!cols.is_empty());
+                if exists && !cols.is_empty() {
+                    out.push_str(&format!("\n  {name} columns: {}", cols.join(", ")));
+                } else {
+                    out.push_str(&format!(
+                        "\n  {name} does not exist — run `schema_overview` for the table list"
+                    ));
+                }
+            }
+        }
+        _ => out.push_str(
+            "\n  (no schema-qualified relation parsed — run `schema_overview` for the table list)",
+        ),
+    }
+
+    if let Some(hint) = repair.get("hint").and_then(Value::as_str) {
+        out.push_str(&format!("\n  Hint: {hint}"));
+    }
+    out
+}
+
 /// Derived JSON Schema for a tracer-bullet tool, or `None` for any tool still
 /// served by the hand-written catalog literal (slice-2 rollout).
 pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
@@ -445,6 +495,54 @@ mod tests {
         // Bare table names (no schema prefix) are not extracted — the repair
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
+    }
+
+    #[test]
+    fn render_repair_inlines_real_columns() {
+        // The repair built by `pg_error_repair` for the exact session-75 friction:
+        // `SELECT ... priority ... FROM soll.Node` → 42703. The rendered text MUST
+        // carry the real columns so the agent self-corrects in one shot, never
+        // forced into a second `schema_overview` probe.
+        let repair = serde_json::json!({
+            "problem_class": "undefined_column",
+            "referenced_relations": [{
+                "relation": "soll.node",
+                "real_columns": ["id", "title", "type", "status", "description"],
+                "exists": true
+            }],
+            "hint": "Use only `real_columns` for each relation; re-run `sql`."
+        });
+        let text = render_pg_repair_text(&repair);
+        assert!(text.contains("undefined_column"));
+        assert!(
+            text.contains("soll.node columns: id, title, type, status, description"),
+            "real columns must be inline in the text channel, got: {text}"
+        );
+        // The bad guess (`priority`) is absent from the real columns — the agent
+        // can see that directly.
+        assert!(!text.contains("priority"));
+        assert!(text.contains("Hint:"));
+    }
+
+    #[test]
+    fn render_repair_flags_missing_relation_and_empty_set() {
+        // A schema-qualified relation that does not exist → explicit pointer.
+        let missing = serde_json::json!({
+            "problem_class": "undefined_table",
+            "referenced_relations": [{ "relation": "soll.foo", "real_columns": [], "exists": false }]
+        });
+        let text = render_pg_repair_text(&missing);
+        assert!(text.contains("soll.foo does not exist"));
+        assert!(text.contains("schema_overview"));
+
+        // No schema-qualified relation parsed (bare table) → fallback pointer.
+        let bare = serde_json::json!({
+            "problem_class": "undefined_column",
+            "referenced_relations": []
+        });
+        let text = render_pg_repair_text(&bare);
+        assert!(text.contains("no schema-qualified relation parsed"));
+        assert!(text.contains("schema_overview"));
     }
 
     #[test]
