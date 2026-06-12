@@ -327,6 +327,15 @@ impl IstGraph {
                 idx
             };
 
+        // REQ-AXO-140 — name → UNIQUE function/method node, used to resolve a
+        // synthetic CALLS target (`caller_file::name`, no node of its own) to the
+        // canonical callee node at projection-build time. PG keeps the raw parse
+        // (PIL-AXO-9004 immutable journal); the RAM graph does the interpretation
+        // (PIL-AXO-9002). `(idx, ambiguous)` — a name with ≥2 defs stays
+        // unresolved (phantom), exactly like the retired PG name-suffix workaround
+        // (REQ-AXO-134) which only matched when the callee name was unique.
+        let mut name_to_func: HashMap<String, (u32, bool)> = HashMap::new();
+
         for record in nodes {
             let proj_idx = intern_project(
                 record.project_code.clone(),
@@ -335,6 +344,14 @@ impl IstGraph {
             );
             let idx = u32::try_from(ids.len()).expect("ist_snapshot exceeds u32 capacity");
             id_to_idx.insert(record.id.clone(), idx);
+            if matches!(record.kind, NodeKind::Function | NodeKind::Method) {
+                if let Some(name) = record.id.rsplit("::").next() {
+                    name_to_func
+                        .entry(name.to_string())
+                        .and_modify(|e| e.1 = true)
+                        .or_insert((idx, false));
+                }
+            }
             ids.push(record.id);
             kinds.push(record.kind as u8);
             flags.push(record.flags.0);
@@ -344,6 +361,10 @@ impl IstGraph {
         let mut sources: Vec<u32> = Vec::with_capacity(edges.len());
         let mut targets: Vec<u32> = Vec::with_capacity(edges.len());
         let mut rels: Vec<u8> = Vec::with_capacity(edges.len());
+        // REQ-AXO-140 — dedupe (source, target, rel) so a canonical edge and a
+        // synthetic edge that resolves to the SAME canonical target collapse to
+        // one. The PG name-suffix workaround returned both shapes → duplicates.
+        let mut seen_edges: HashSet<(u32, u32, u8)> = HashSet::new();
 
         for edge in edges {
             let src_idx = match id_to_idx.get(&edge.source) {
@@ -365,22 +386,41 @@ impl IstGraph {
             let tgt_idx = match id_to_idx.get(&edge.target) {
                 Some(&i) => i,
                 None => {
-                    let idx = u32::try_from(ids.len()).expect("ist_snapshot exceeds u32 capacity");
-                    id_to_idx.insert(edge.target.clone(), idx);
-                    ids.push(edge.target);
-                    kinds.push(NodeKind::Other as u8);
-                    flags.push(0);
-                    project_indices.push(intern_project(
-                        String::new(),
-                        &mut project_codes,
-                        &mut project_to_idx,
-                    ));
-                    idx
+                    // REQ-AXO-140 — resolve a synthetic target to the UNIQUE
+                    // canonical function/method node of that name before falling
+                    // back to a phantom. This is the whole REQ-AXO-134 workaround,
+                    // moved from per-query PG SQL into the canonical RAM projection.
+                    let resolved = edge
+                        .target
+                        .rsplit("::")
+                        .next()
+                        .and_then(|name| name_to_func.get(name))
+                        .and_then(|&(idx, ambiguous)| (!ambiguous).then_some(idx));
+                    match resolved {
+                        Some(i) => i,
+                        None => {
+                            let idx = u32::try_from(ids.len())
+                                .expect("ist_snapshot exceeds u32 capacity");
+                            id_to_idx.insert(edge.target.clone(), idx);
+                            ids.push(edge.target);
+                            kinds.push(NodeKind::Other as u8);
+                            flags.push(0);
+                            project_indices.push(intern_project(
+                                String::new(),
+                                &mut project_codes,
+                                &mut project_to_idx,
+                            ));
+                            idx
+                        }
+                    }
                 }
             };
-            sources.push(src_idx);
-            targets.push(tgt_idx);
-            rels.push(edge.rel as u8);
+            let rel_u8 = edge.rel as u8;
+            if seen_edges.insert((src_idx, tgt_idx, rel_u8)) {
+                sources.push(src_idx);
+                targets.push(tgt_idx);
+                rels.push(rel_u8);
+            }
         }
 
         let node_count = ids.len();
@@ -733,6 +773,67 @@ mod tests {
         let a = g.index_of("a").unwrap();
         assert_eq!(g.forward_neighbors(a).count(), 1);
         assert_eq!(g.reverse_neighbors(a).count(), 1);
+    }
+
+    #[test]
+    fn synthetic_call_target_resolves_to_unique_canonical_node() {
+        // REQ-AXO-140 — a CALLS edge whose target is a synthetic `caller::name`
+        // (no node of its own) resolves to the UNIQUE canonical function node of
+        // that name instead of spawning a phantom. The PG name-suffix workaround
+        // (REQ-AXO-134) now lives in this RAM projection.
+        let nodes = vec![
+            node("p::a.rs::caller", "P", NodeKind::Function),
+            node("p::b.rs::callee", "P", NodeKind::Function),
+        ];
+        // Indexer emitted the caller-file id `p::a.rs::callee` (no such node).
+        let edges = vec![edge("p::a.rs::caller", "p::a.rs::callee", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let caller = g.index_of("p::a.rs::caller").unwrap();
+        let callee = g.index_of("p::b.rs::callee").unwrap();
+        assert_eq!(
+            g.index_of("p::a.rs::callee"),
+            None,
+            "synthetic id must NOT become a phantom node"
+        );
+        let fwd: Vec<_> = g.forward_neighbors(caller).map(|(t, _)| t).collect();
+        assert_eq!(fwd, vec![callee], "synthetic target resolved to the canonical callee");
+        let rev: Vec<_> = g.reverse_neighbors(callee).map(|(s, _)| s).collect();
+        assert_eq!(rev, vec![caller], "callee now sees its real caller");
+    }
+
+    #[test]
+    fn ambiguous_synthetic_target_stays_phantom() {
+        // Two `dup` defs → ambiguous → never guess; the synthetic stays a phantom.
+        let nodes = vec![
+            node("p::a.rs::caller", "P", NodeKind::Function),
+            node("p::b.rs::dup", "P", NodeKind::Function),
+            node("p::c.rs::dup", "P", NodeKind::Function),
+        ];
+        let edges = vec![edge("p::a.rs::caller", "p::a.rs::dup", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        assert!(
+            g.index_of("p::a.rs::dup").is_some(),
+            "ambiguous name stays a phantom, never guessed"
+        );
+    }
+
+    #[test]
+    fn canonical_and_resolved_synthetic_edge_dedupe() {
+        // REQ-AXO-140 — a canonical edge AND a synthetic edge that resolves to the
+        // SAME (source, target, rel) collapse to ONE (no duplicate neighbor — the
+        // duplication the PG workaround produced).
+        let nodes = vec![
+            node("p::a.rs::caller", "P", NodeKind::Function),
+            node("p::b.rs::callee", "P", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("p::a.rs::caller", "p::b.rs::callee", RelationType::Calls), // canonical
+            edge("p::a.rs::caller", "p::a.rs::callee", RelationType::Calls), // synthetic → same
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let caller = g.index_of("p::a.rs::caller").unwrap();
+        let fwd: Vec<_> = g.forward_neighbors(caller).map(|(t, _)| t).collect();
+        assert_eq!(fwd.len(), 1, "canonical + resolved-synthetic dedupe to one edge");
     }
 
     #[test]
