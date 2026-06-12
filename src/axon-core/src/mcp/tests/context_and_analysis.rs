@@ -2332,6 +2332,99 @@ fn test_axon_query_with_project() {
     assert!(result.get("problem_class").is_none(), "{result}");
 }
 
+/// REQ-AXO-901949 inv.5 — `query` graph r=1 expansion is a detail surface:
+/// omitted under brief (default), included under verbose/full. Proves `mode` is
+/// a real knob for normal-sized results, not a no-op until the text cap.
+#[test]
+fn test_axon_query_mode_gates_graph_r1_expansion() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    // Two symbols with file_path (via Chunk) + a CALLS edge caller -> callee.
+    for (sid, name, file) in [
+        ("prj::caller_fn", "caller_fn", "prj/caller.rs"),
+        ("prj::callee_fn", "callee_fn", "prj/callee.rs"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{sid}', 'symbol', '{sid}', 'PRJ', '{file}', 'hash-{sid}')"
+            ))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sid}', '{name}', 'function', false, true, false, 'PRJ')"
+            ))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file}', '{sid}', 'CONTAINS', 'PRJ', 0)"
+            ))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::caller_fn', 'prj::callee_fn', 'CALLS', 'PRJ', 0)")
+        .unwrap();
+
+    let run = |mode: Option<&str>| {
+        let mut arguments = json!({ "query": "caller_fn", "project": "PRJ" });
+        if let Some(m) = mode {
+            arguments["mode"] = json!(m);
+        }
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "query", "arguments": arguments })),
+            id: Some(json!(7)),
+        };
+        server.handle_request(req).unwrap().result.expect("result")
+    };
+
+    // Brief (default): the expansion is empty — neighbour not computed.
+    let brief = run(None);
+    let brief_neighbours = brief["data"]["context"]["related_symbols_via_graph"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        brief_neighbours.is_empty(),
+        "brief must omit graph r=1 expansion, got {brief_neighbours:?}"
+    );
+
+    // Verbose: the CALLS neighbour `callee_fn` surfaces in the expansion.
+    let verbose = run(Some("verbose"));
+    let verbose_neighbours: Vec<String> = verbose["data"]["context"]
+        ["related_symbols_via_graph"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        verbose_neighbours.iter().any(|n| n == "callee_fn"),
+        "verbose must include the CALLS neighbour callee_fn, got {verbose_neighbours:?}"
+    );
+
+    // The `full` alias behaves like verbose (LLM-natural opt-in token).
+    let full = run(Some("full"));
+    let full_neighbours: Vec<String> = full["data"]["context"]["related_symbols_via_graph"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        full_neighbours.iter().any(|n| n == "callee_fn"),
+        "`full` alias must behave like verbose, got {full_neighbours:?}"
+    );
+}
+
 #[test]
 fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbors() {
     let _guard = env_lock();

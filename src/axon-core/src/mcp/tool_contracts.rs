@@ -43,7 +43,10 @@ pub(crate) struct QueryInput {
     /// Project code scope (e.g. "AXO"). Auto-resolved from cwd when omitted.
     #[serde(default)]
     pub project: Option<String>,
-    /// Output verbosity (default: brief).
+    /// Output verbosity (default: brief/terse). `brief` returns the ranked
+    /// results + `next` links only. `verbose` (alias `full`) ADDS the graph r=1
+    /// neighbour expansion (`data.context.related_symbols_via_graph`) and lifts
+    /// the text cap.
     #[serde(default)]
     pub mode: Option<QueryMode>,
 }
@@ -184,6 +187,26 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
             use_when: "use when the next step is an exact canonical mutation",
         },
         _ => return None,
+    })
+}
+
+/// REQ-AXO-901949 inv.5 — the "terse default" decision for read tools, in one
+/// place so the rollout to the other reads reuses the same rule. `verbose` is
+/// opt-in (`mode=verbose`, case-insensitive); everything else — including the
+/// omitted/`brief` default — is terse. A normal-sized result is identical under
+/// brief and verbose UNTIL a tool gates a *detail surface* on this (e.g. `query`
+/// skips the graph r=1 expansion in brief), which is what makes the knob real
+/// rather than a no-op for the common case.
+pub(crate) fn read_mode_is_verbose(mode: Option<&str>) -> bool {
+    // `verbose` is the canonical token (QueryInput schema), but AC5's own
+    // language is "detail=full" — an LLM will reasonably guess `full`/`detail`.
+    // Be liberal in what we accept (Postel) so the natural guess works instead
+    // of silently degrading to terse.
+    mode.is_some_and(|m| {
+        let m = m.trim();
+        m.eq_ignore_ascii_case("verbose")
+            || m.eq_ignore_ascii_case("full")
+            || m.eq_ignore_ascii_case("detail")
     })
 }
 
@@ -509,6 +532,22 @@ mod tests {
         // Bare table names (no schema prefix) are not extracted — the repair
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
+    }
+
+    #[test]
+    fn read_mode_verbose_is_opt_in_and_case_insensitive() {
+        // Terse is the default: omitted / brief / anything-not-verbose → false.
+        assert!(!read_mode_is_verbose(None));
+        assert!(!read_mode_is_verbose(Some("brief")));
+        assert!(!read_mode_is_verbose(Some("")));
+        assert!(!read_mode_is_verbose(Some("terse")));
+        // Detail opt-in: canonical `verbose` + the AC5-natural synonyms
+        // `full`/`detail`, case-insensitive, trimmed.
+        assert!(read_mode_is_verbose(Some("verbose")));
+        assert!(read_mode_is_verbose(Some("VERBOSE")));
+        assert!(read_mode_is_verbose(Some("Verbose")));
+        assert!(read_mode_is_verbose(Some("full")));
+        assert!(read_mode_is_verbose(Some(" detail ")));
     }
 
     #[test]

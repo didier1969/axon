@@ -601,6 +601,10 @@ impl McpServer {
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
+        // REQ-AXO-901949 inv.5 — terse default / detail opt-in (single-source
+        // decision; accepts verbose|full|detail). Brief skips the graph r=1
+        // expansion detail surface below.
+        let verbose = super::tool_contracts::read_mode_is_verbose(mode);
         // REQ-AXO-089 — extend cwd auto-resolution from retrieve_context
         // to query: when the caller omits `project`, try AXON_PROJECT_ROOT
         // or current_dir against the registry. Exact one match returns
@@ -798,7 +802,14 @@ impl McpServer {
                     degraded_note.clone().unwrap_or_default(),
                     table
                 );
-                let evidence = evidence_by_mode(&evidence, mode);
+                let evidence = evidence_by_mode(
+                    &evidence,
+                    if super::tool_contracts::read_mode_is_verbose(mode) {
+                        Some("verbose")
+                    } else {
+                        Some("brief")
+                    },
+                );
                 let report = format!(
                     "### Search results: '{}'\n\n{}",
                     query_text,
@@ -898,7 +909,16 @@ impl McpServer {
                     .iter()
                     .filter_map(|r| r.get("name").and_then(Value::as_str).map(String::from))
                     .collect();
-                let graph_neighbors = self.query_graph_r1_neighbors(&direct_names, project, 10);
+                // REQ-AXO-901949 inv.5 — the graph r=1 expansion is a *detail*
+                // surface: computed only on verbose/full/detail. Brief skips the
+                // extra graph query entirely (latency + token win) and reports an
+                // empty expansion, so `mode` is a real knob for normal-sized
+                // results, not a no-op until the 4000-char text cap.
+                let graph_neighbors = if verbose {
+                    self.query_graph_r1_neighbors(&direct_names, project, 10)
+                } else {
+                    Vec::new()
+                };
                 let graph_lane_active = !graph_neighbors.is_empty();
                 let related_via_graph: Vec<String> = graph_neighbors
                     .iter()
@@ -1594,7 +1614,14 @@ impl McpServer {
                     degraded_note.clone().unwrap_or_default(),
                     table
                 );
-                let evidence = evidence_by_mode(&evidence, mode);
+                let evidence = evidence_by_mode(
+                    &evidence,
+                    if super::tool_contracts::read_mode_is_verbose(mode) {
+                        Some("verbose")
+                    } else {
+                        Some("brief")
+                    },
+                );
                 let tested = rows
                     .first()
                     .and_then(|row| row.get(2))
