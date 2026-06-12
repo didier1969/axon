@@ -8689,6 +8689,14 @@ fn test_axon_impact_traces_through_soll_architecture() {
     // 3. Create Traceability Bridge (Code -> Intent)
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-001', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
+    // REQ-AXO-901952 — impact now reads the in-memory IST + SOLL snapshots
+    // (RAM-only). These raw SQL inserts bypass the cache invalidation that
+    // soll_manager / the indexer perform in production, so evict the BKS
+    // snapshots to force a fresh reload before the impact call (otherwise a
+    // stale cache populated by an earlier BKS test hides these rows).
+    crate::ist_snapshot::evict_process_snapshot("BKS");
+    server.soll_cache().invalidate("BKS");
+
     // 4. Query Impact on the deep code function
     let impact_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
