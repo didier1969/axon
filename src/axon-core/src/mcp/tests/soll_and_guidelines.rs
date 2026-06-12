@@ -275,6 +275,122 @@ fn test_mcp_call_stat_retention_prunes_stale_buckets_on_telemetry_report() {
 }
 
 #[test]
+fn test_sql_tool_is_read_only_rejects_mutations() {
+    // REQ-AXO-901966 — the `sql` tool must refuse writes (contract = read-only);
+    // it runs on the writer-capable pool, so the guard is load-bearing.
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sql",
+                "arguments": { "sql": "INSERT INTO axon.llm_feedback (problem) VALUES ('UNIQ_SHOULD_NOT_PERSIST')" }
+            })),
+            id: Some(json!(9663)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let text = resp["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("rejected_write") || text.contains("READ-ONLY"),
+        "mutation must be rejected: {text}"
+    );
+    assert_eq!(
+        resp["data"]["rejected"].as_bool(),
+        Some(true),
+        "rejected flag set: {}",
+        resp["data"]
+    );
+    let n = server
+        .graph_store
+        .query_count("SELECT count(*) FROM axon.llm_feedback WHERE problem='UNIQ_SHOULD_NOT_PERSIST'")
+        .unwrap();
+    assert_eq!(n, 0, "the INSERT must NOT have executed");
+
+    // a read still works through the same tool.
+    let ok = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "sql", "arguments": { "sql": "SELECT 1" } })),
+            id: Some(json!(9666)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(
+        ok["data"]["rejected"].as_bool() != Some(true),
+        "SELECT must not be rejected: {}",
+        ok["data"]
+    );
+}
+
+#[test]
+fn test_mcp_feedback_records_voluntary_doleance() {
+    // REQ-AXO-901966 — voluntary content-rich LLM feedback persists one row;
+    // a missing `problem` is rejected without writing.
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback",
+                "arguments": {
+                    "problem": "UNIQ_DOLEANCE_PROBE inspect was too verbose",
+                    "category": "too_verbose",
+                    "tool": "inspect",
+                    "proposed_solution": "add a brief mode",
+                    "satisfaction": 3,
+                    "llm_identity": "Claude Opus 4.8",
+                    "project_code": "AXO"
+                }
+            })),
+            id: Some(json!(9664)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        resp["data"]["recorded"].as_bool(),
+        Some(true),
+        "feedback recorded: {}",
+        resp["data"]
+    );
+
+    let row = server
+        .graph_store
+        .query_json(
+            "SELECT category||'|'||tool||'|'||satisfaction||'|'||llm_identity \
+             FROM axon.llm_feedback WHERE problem='UNIQ_DOLEANCE_PROBE inspect was too verbose'",
+        )
+        .unwrap();
+    assert!(
+        row.contains("too_verbose|inspect|3|Claude Opus 4.8"),
+        "row persisted with all fields: {row}"
+    );
+
+    let bad = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "mcp_feedback", "arguments": { "category": "bug" } })),
+            id: Some(json!(9665)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        bad["data"]["recorded"].as_bool(),
+        Some(false),
+        "missing `problem` must be rejected: {}",
+        bad["data"]
+    );
+}
+
+#[test]
 fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
     // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic

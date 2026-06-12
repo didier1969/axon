@@ -783,6 +783,19 @@ impl McpServer {
         let q = sql.trim();
         let ql = q.to_ascii_lowercase();
 
+        // REQ-AXO-901966 — the `sql` tool is READ-ONLY by contract. It runs on
+        // the single writer-capable PG pool (query_json → query_json_on_writer),
+        // so without this guard an INSERT/UPDATE/DELETE/DDL would mutate live
+        // data. Reject mutations with a clear redirect instead of executing them.
+        if !crate::graph_query::is_read_only_sql(q) {
+            let next = super::tool_contracts::next_links("sql");
+            return Some(json!({
+                "content": [{ "type": "text", "text":
+                    "Status: rejected_write\nThe `sql` tool is READ-ONLY (SELECT / WITH / EXPLAIN / SHOW / DESCRIBE / PRAGMA only); mutations are refused to protect live data.\n- Intent (vision / requirement / decision): use `soll_manager` or `document_intent`.\n- Runtime / index state: use the dedicated tools (status, rescan_project, …).\n- Report a problem / friction with a tool: use `mcp_feedback`." }],
+                "data": { "rejected": true, "reason": "sql_tool_is_read_only", "next": next }
+            }));
+        }
+
         // REQ-AXO-271 slice 2d invariant : `skip_legacy_relations` is
         // always true under PG canonical (the SQL relation tables
         // CALLS / CALLS_NIF are dropped — `ist.Edge` + the

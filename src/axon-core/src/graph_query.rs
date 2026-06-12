@@ -510,7 +510,7 @@ impl GraphStore {
     }
 }
 
-fn is_read_only_sql(query: &str) -> bool {
+pub(crate) fn is_read_only_sql(query: &str) -> bool {
     let trimmed = query.trim_start();
     let lowered = trimmed.to_ascii_lowercase();
     matches!(

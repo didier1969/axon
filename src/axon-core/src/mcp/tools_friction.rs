@@ -105,6 +105,77 @@ impl McpServer {
         );
     }
 
+    /// REQ-AXO-901966 — voluntary LLM feedback / doléance. The friction log
+    /// (`record_mcp_friction`) is SILENT + signature-only; this is the VOLUNTARY,
+    /// content-rich complement an LLM calls to self-report a problem it hit
+    /// (bug / unclear doc / undocumented / too slow / incomplete / too verbose),
+    /// its proposed fix, and its satisfaction. One row per call (append-only,
+    /// PIL-AXO-9004); the server stamps `created_at`. NOT a write-to-SOLL path.
+    pub(crate) fn axon_mcp_feedback(&self, args: &Value) -> Option<Value> {
+        let problem = args
+            .get("problem")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if problem.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "Status: input_invalid\n`problem` is required — describe what was wrong / unclear / slow / missing / too verbose." }],
+                "data": { "recorded": false, "reason": "problem_required" }
+            }));
+        }
+        const CATEGORIES: &[&str] = &[
+            "bug",
+            "unclear_doc",
+            "undocumented",
+            "too_slow",
+            "incomplete",
+            "too_verbose",
+            "other",
+        ];
+        let category = args.get("category").and_then(Value::as_str).unwrap_or("other");
+        let category = if CATEGORIES.contains(&category) {
+            category
+        } else {
+            "other"
+        };
+        let llm_identity = args.get("llm_identity").and_then(Value::as_str).unwrap_or("");
+        let tool = args.get("tool").and_then(Value::as_str).unwrap_or("");
+        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let proposed_solution = args
+            .get("proposed_solution")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // optional 1..5; anything else → NULL. Inlined as a validated integer
+        // (never client text), every text field stays parameterised.
+        let satisfaction_sql = args
+            .get("satisfaction")
+            .and_then(Value::as_i64)
+            .filter(|n| (1..=5).contains(n))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+        let build_id =
+            std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+
+        let result = self.graph_store.execute_param(
+            &format!(
+                "INSERT INTO axon.llm_feedback \
+                    (llm_identity, category, tool, project_code, problem, proposed_solution, satisfaction, contract_version) \
+                 VALUES (?, ?, ?, ?, ?, ?, {satisfaction_sql}, ?)"
+            ),
+            &json!([llm_identity, category, tool, project_code, problem, proposed_solution, build_id]),
+        );
+        match result {
+            Ok(()) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Status: recorded\nThank you — your feedback (category={category}) is logged for product optimization. Keep them coming: bugs, unclear docs, slow / verbose / incomplete tools.") }],
+                "data": { "recorded": true, "category": category }
+            })),
+            Err(e) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Status: writer_failed\nFeedback not stored: {e}") }],
+                "data": { "recorded": false, "reason": "writer_failed" }
+            })),
+        }
+    }
+
     /// REQ-AXO-901957 — `mcp_friction_report`: top OPEN friction signatures by
     /// frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links
     /// (traceability), regressions surfaced (resolved but observed since).

@@ -119,6 +119,14 @@ pub fn load_canonical_ddl_files() -> Vec<String> {
             "10_mcp_friction.sql",
             include_str!("../../../../db/ddl/10_mcp_friction.sql"),
         ),
+        (
+            "11_mcp_telemetry.sql",
+            include_str!("../../../../db/ddl/11_mcp_telemetry.sql"),
+        ),
+        (
+            "12_llm_feedback.sql",
+            include_str!("../../../../db/ddl/12_llm_feedback.sql"),
+        ),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {

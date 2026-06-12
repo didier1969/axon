@@ -953,8 +953,25 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_feedback",
+                "description": "[SYSTEM] REQ-AXO-901966 — voluntary LLM feedback / doléance. Call this whenever an Axon MCP tool felt buggy, under-documented, unclear, too slow, incomplete, or too verbose. Content-rich + voluntary (complements the silent, signature-only friction log). Tell us who you are, what you hit, your proposed fix, and your satisfaction — it directly drives product optimization. Args: `problem` (required), optional `category` (bug|unclear_doc|undocumented|too_slow|incomplete|too_verbose|other), `tool`, `proposed_solution`, `satisfaction` (1-5), `llm_identity`, `project_code`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "problem": { "type": "string", "description": "What went wrong / was unclear / slow / missing / too verbose. Required." },
+                        "category": { "type": "string", "enum": ["bug", "unclear_doc", "undocumented", "too_slow", "incomplete", "too_verbose", "other"], "description": "Kind of friction (default 'other')." },
+                        "tool": { "type": "string", "description": "Which Axon tool the feedback is about (optional)." },
+                        "proposed_solution": { "type": "string", "description": "How you'd fix or improve it (optional)." },
+                        "satisfaction": { "type": "integer", "description": "Satisfaction with the tool, 1 (poor) to 5 (excellent), optional." },
+                        "llm_identity": { "type": "string", "description": "Who you are, e.g. 'Claude Opus 4.8' (optional but encouraged)." },
+                        "project_code": { "type": "string", "description": "Project scope (optional)." }
+                    },
+                    "required": ["problem"]
+                }
+            },
+            {
                 "name": "sql",
-                "description": "[LLM/ADVANCED] Raw read-only SQL query interface (PG-only backend post-MIL-AXO-017). Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough.",
+                "description": "[LLM/ADVANCED] Raw READ-ONLY SQL query interface (SELECT / WITH / EXPLAIN / SHOW / DESCRIBE / PRAGMA only — mutations are rejected). PG-only backend post-MIL-AXO-017. Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough. To write intent use `soll_manager`; to report a tool problem use `mcp_feedback`.",
                 // REQ-AXO-901949 — inputSchema derived from tool_contracts::SqlInput
                 // (single source); the override pass injects it post-build.
                 "inputSchema": { "$comment": "derived from tool_contracts::SqlInput — injected post-build" }
