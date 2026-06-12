@@ -154,6 +154,42 @@ mod tests {
     }
 
     #[test]
+    fn loader_resolves_synthetic_call_target_via_unique_name() {
+        // REQ-AXO-140 — end-to-end via the production load_snapshot path: a CALLS
+        // edge whose target is a synthetic `caller_file::callee` (no node of its
+        // own) resolves to the UNIQUE canonical method node of that name in the
+        // built RAM graph. Proves the IstGraph::build resolution fires on
+        // PG-loaded rows, not just on hand-built unit fixtures.
+        let store = FakeStore {
+            nodes_json: r#"[
+              ["AXO::a.rs::caller", "function", "AXO", "f", "t", "f", "f"],
+              ["AXO::b.rs::callee", "method", "AXO", "f", "t", "f", "f"]
+            ]"#
+            .to_string(),
+            // Synthetic target `AXO::a.rs::callee` — no such node; last `::` segment `callee`.
+            edges_json: r#"[
+              ["AXO::a.rs::caller", "AXO::a.rs::callee", "CALLS"]
+            ]"#
+            .to_string(),
+            calls: RefCell::new(Vec::new()),
+        };
+        let (g, _stats) = load_snapshot(&store, "AXO").unwrap();
+        let caller = g.index_of("AXO::a.rs::caller").unwrap();
+        let callee = g.index_of("AXO::b.rs::callee").unwrap();
+        assert_eq!(
+            g.index_of("AXO::a.rs::callee"),
+            None,
+            "synthetic target must NOT become a phantom node"
+        );
+        let rev: Vec<_> = g.reverse_neighbors(callee).map(|(s, _)| s).collect();
+        assert_eq!(
+            rev,
+            vec![caller],
+            "synthetic CALLS resolved to the canonical callee in the loaded graph"
+        );
+    }
+
+    #[test]
     fn loader_tolerates_empty_edges() {
         let store = FakeStore {
             nodes_json: r#"[
