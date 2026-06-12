@@ -130,14 +130,6 @@ impl GpuB2Embedder {
         });
     }
 
-    /// Test-only inspector — true iff the inner session is loaded.
-    #[cfg(test)]
-    pub(crate) fn is_session_loaded(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some()
-    }
 }
 
 impl B2Embedder for GpuB2Embedder {

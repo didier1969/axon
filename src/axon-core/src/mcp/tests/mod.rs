@@ -2,22 +2,15 @@
 
 use super::guidance;
 use super::*;
-use crate::embedder::{embedding_lane_config_from_env, embedding_provider_diagnostics};
-use crate::embedding_contract::{
-    CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
-};
+use crate::embedding_contract::DIMENSION;
 use crate::graph::GraphStore;
-use crate::parser;
-use crate::queue::ProcessingMode;
 use crate::runtime_boot::RuntimeBootProfile;
 use crate::runtime_topology::AxonProcessRole;
-use crate::service_guard::{self, ServiceKind};
+use crate::service_guard;
 use crate::vector_control::{
     current_utility_first_scheduler_diagnostics, reset_utility_first_scheduler_for_tests,
-    reset_vector_batch_controller_for_tests,
 };
-use std::ffi::CString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};

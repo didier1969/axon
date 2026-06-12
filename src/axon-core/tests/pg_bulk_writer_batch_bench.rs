@@ -107,7 +107,9 @@ fn build_batch() -> PgBulkBatch {
         contains,
         calls,
         calls_nif,
+        other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        project_code: "AXO".to_string(),
     }
 }
 

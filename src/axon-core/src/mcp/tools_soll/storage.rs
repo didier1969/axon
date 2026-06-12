@@ -260,12 +260,6 @@ pub(super) fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
-pub(super) fn parse_numeric_suffix(value: &str) -> Option<u64> {
-    let head = value.split(':').next()?.trim();
-    head.rsplit('-').next()?.parse::<u64>().ok()
-}
-
 pub(super) fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
 }

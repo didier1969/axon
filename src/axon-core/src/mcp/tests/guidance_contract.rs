@@ -186,7 +186,7 @@ fn guidance_shadow_is_additive_and_preserves_existing_payload() {
 
 #[test]
 fn query_guidance_facts_capture_exact_symbol_miss_with_suggestion() {
-    let tempdir = tempdir().unwrap();
+    let _tempdir = tempdir().unwrap();
     let server = create_test_server();
     let candidates = GuidanceCandidates {
         symbols: vec!["Axon.Scanner.scan".to_string()],

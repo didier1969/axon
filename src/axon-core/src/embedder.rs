@@ -2173,9 +2173,8 @@ mod tests {
         build_token_aware_micro_batches, configured_embedding_max_length,
         cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
         current_runtime_tuning_state, embedding_lane_config_from_env, embedding_model_cache_dir,
-        embedding_provider_diagnostics, gpu_memory_soft_limit_mb, load_runtime_embedding_tokenizer,
-        query_embedding_allowed, request_query_embedding, EmbeddingLaneConfig, GpuMemorySnapshot,
-        QueryEmbeddingRequest,
+        gpu_memory_soft_limit_mb, query_embedding_allowed, request_query_embedding,
+        EmbeddingLaneConfig, QueryEmbeddingRequest,
     };
     use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
@@ -2187,7 +2186,7 @@ mod tests {
         VectorBatchControllerObservation, VectorBatchControllerState, VectorDrainState,
         AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD, CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD,
     };
-    use crossbeam_channel::{bounded, unbounded};
+    use crossbeam_channel::unbounded;
     use fastembed::{InitOptions, TextEmbedding};
     use std::path::PathBuf;
     use std::sync::Mutex;

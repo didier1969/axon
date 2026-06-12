@@ -4373,7 +4373,6 @@ impl McpServer {
 mod tests {
     use super::ChunkCandidate;
     use super::McpServer;
-    use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 

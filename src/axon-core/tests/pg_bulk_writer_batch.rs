@@ -157,7 +157,9 @@ fn flush_batch_cross_table_round_trip() {
         contains: contains.clone(),
         calls: calls.clone(),
         calls_nif: calls_nif.clone(),
+        other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        project_code: "AXO".to_string(),
     };
 
     bulk_writer::flush_batch(&batch).expect("first flush_batch should succeed");
@@ -253,7 +255,9 @@ fn flush_batch_cross_table_round_trip() {
         contains: vec![],
         calls: vec![],
         calls_nif: vec![],
+        other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        project_code: "AXO".to_string(),
     };
     bulk_writer::flush_batch(&partial_batch).expect("partial-bucket batch should succeed");
 

@@ -142,8 +142,6 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub last_consumed_batch_lane: String,
     pub active_small_max_tokens: u64,
     pub active_medium_max_tokens: u64,
-    pub ready_replenishment_deficit_current: u64,
-    pub oldest_ready_batch_age_ms_current: u64,
     pub last_embed_attempt_wall_ms: u64,
     pub avg_embed_attempt_wall_ms: f64,
     pub max_embed_attempt_wall_ms: u64,
@@ -1240,8 +1238,6 @@ pub(crate) fn runtime_telemetry_snapshot(
         last_consumed_batch_lane: vector_runtime.last_consumed_batch_lane.as_str().to_string(),
         active_small_max_tokens: vector_runtime.active_small_max_tokens,
         active_medium_max_tokens: vector_runtime.active_medium_max_tokens,
-        ready_replenishment_deficit_current: vector_runtime.ready_replenishment_deficit_current,
-        oldest_ready_batch_age_ms_current: vector_runtime.oldest_ready_batch_age_ms_current,
         last_embed_attempt_wall_ms: vector_runtime.last_embed_attempt_wall_ms,
         avg_embed_attempt_wall_ms: vector_runtime.avg_embed_attempt_wall_ms,
         max_embed_attempt_wall_ms: vector_runtime.max_embed_attempt_wall_ms,
@@ -1273,8 +1269,6 @@ pub(crate) fn runtime_telemetry_snapshot(
 struct ClaimPolicy {
     mode: ClaimMode,
     claim_count: usize,
-    #[cfg(test)]
-    sleep: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1309,8 +1303,6 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Paused,
                 claim_count: 0,
-                #[cfg(test)]
-                sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
             };
         }
         InteractivePriority::InteractivePriority => {
@@ -1318,8 +1310,6 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Guarded,
                 claim_count: 50,
-                #[cfg(test)]
-                sleep: quiescent_scaled_claim_sleep(750, queue_len),
             };
         }
         InteractivePriority::BackgroundNormal => {}
@@ -1348,8 +1338,6 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Paused,
             claim_count: 0,
-            #[cfg(test)]
-            sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
         };
     }
 
@@ -1360,8 +1348,6 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Guarded),
-            #[cfg(test)]
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Guarded, queue_len),
         };
     }
 
@@ -1369,8 +1355,6 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
-            #[cfg(test)]
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
 
@@ -1378,16 +1362,12 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
-            #[cfg(test)]
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
 
     ClaimPolicy {
         mode: ClaimMode::Fast,
         claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Fast),
-        #[cfg(test)]
-        sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Fast, queue_len),
     }
 }
 
@@ -1434,36 +1414,6 @@ fn host_state_label(
     } else {
         "healthy"
     }
-}
-
-#[cfg(test)]
-fn dynamic_claim_sleep(
-    pressure: f64,
-    mode: ClaimMode,
-    graph_backlog_depth: usize,
-) -> std::time::Duration {
-    let pressure = pressure.clamp(0.0, 1.0);
-    let base_sleep_ms = match mode {
-        ClaimMode::Fast => 100 + (pressure * 200.0).round() as u64,
-        ClaimMode::Slow => 250 + (pressure * 300.0).round() as u64,
-        ClaimMode::Guarded => 500 + (pressure * 400.0).round() as u64,
-        ClaimMode::Paused => 1_000,
-    };
-    quiescent_scaled_claim_sleep(base_sleep_ms, graph_backlog_depth)
-}
-
-#[cfg(test)]
-fn quiescent_scaled_claim_sleep(
-    base_sleep_ms: u64,
-    graph_backlog_depth: usize,
-) -> std::time::Duration {
-    std::time::Duration::from_millis(service_guard::scale_interval_for_quiescent(
-        base_sleep_ms,
-        service_guard::current_runtime_quiescent_state(graph_backlog_depth as u64, 0),
-        quiescent_interval_scale_pct(),
-        50,
-        4_000,
-    ))
 }
 
 #[cfg(test)]

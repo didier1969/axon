@@ -880,7 +880,7 @@ fn test_status_graph_only_reports_semantic_drain_not_applicable() {
             "test_status_graph_only_reports_semantic_drain_not_applicable",
         );
     }
-    let tempdir = tempdir().unwrap();
+    let _tempdir = tempdir().unwrap();
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1623,7 +1623,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         );
     }
     service_guard::record_runtime_truth_bridge_dispatch(None);
-    let tempdir = tempdir().unwrap();
+    let _tempdir = tempdir().unwrap();
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
@@ -2288,7 +2288,7 @@ fn test_status_reports_brain_and_indexer_authorities() {
     let _guard = env_lock();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
-    let tempdir = tempdir().unwrap();
+    let _tempdir = tempdir().unwrap();
     let server = create_test_server();
 
     unsafe {
@@ -2410,7 +2410,7 @@ fn test_status_exposes_tensorrt_ready_vector_pipeline_telemetry() {
     service_guard::record_vector_finalize_send_wait_ms(37);
     service_guard::record_vector_finalize_queue_wait_ms(41);
 
-    let tempdir = tempdir().unwrap();
+    let _tempdir = tempdir().unwrap();
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
