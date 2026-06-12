@@ -3,6 +3,12 @@ use serde_json::{json, Value};
 use super::format::format_standard_contract;
 use super::McpServer;
 
+/// REQ-AXO-901961 S2 — retention window for the `axon.mcp_call_stat` rollup.
+/// The per-(tool,project,status,bucket_hour) UPSERT is bounded per hour, but
+/// `bucket_hour` advances forever; `mcp_telemetry_report` prunes buckets older
+/// than this so the table can never grow unbounded over time.
+const MCP_CALL_STAT_RETENTION_DAYS: i64 = 90;
+
 impl McpServer {
     /// REQ-AXO-901957 — best-effort friction capture, called for EVERY tool
     /// response on the dispatch chokepoint. Records ONLY the problem SHAPE
@@ -230,6 +236,14 @@ impl McpServer {
     /// rollup never held argument content). avg latency cast to float8 so the
     /// sql-gateway renders it (numeric would hit REQ-AXO-901905's sentinel).
     pub(crate) fn axon_mcp_telemetry_report(&self, args: &Value) -> Option<Value> {
+        // REQ-AXO-901961 S2 — bound the rollup over TIME. Prune buckets older
+        // than the retention window here, on the operator-invoked report (OFF
+        // the per-call hot path). Best-effort: a failed prune never blocks the
+        // report.
+        let _ = self.graph_store.execute_param(
+            "DELETE FROM axon.mcp_call_stat WHERE bucket_hour < now() - make_interval(days => ?)",
+            &json!([MCP_CALL_STAT_RETENTION_DAYS]),
+        );
         let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
         let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20).max(1);
         let window_hours = args

@@ -229,6 +229,52 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
 }
 
 #[test]
+fn test_mcp_call_stat_retention_prunes_stale_buckets_on_telemetry_report() {
+    // REQ-AXO-901961 S2 — buckets older than the retention window are pruned
+    // when mcp_telemetry_report runs (operator-invoked, off the per-call hot
+    // path); recent buckets survive. Isolated by a unique project_code.
+    let server = create_test_server();
+    let proj = "TLMRET901961";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO axon.mcp_call_stat \
+                (tool, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version) \
+             VALUES \
+                ('stale_probe','{proj}','ok', date_trunc('hour', now() - interval '200 days'), 1, 5, 5, 'v'), \
+                ('fresh_probe','{proj}','ok', date_trunc('hour', now() - interval '1 hour'), 1, 5, 5, 'v')"
+        ))
+        .expect("seed stale + fresh buckets");
+
+    // Huge window so the report query itself filters nothing — the prune (not
+    // the window predicate) must be what removes the stale bucket.
+    let _ = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "mcp_telemetry_report",
+            "arguments": { "project_code": proj, "window_hours": 1_000_000 }
+        })),
+        id: Some(json!(9612)),
+    });
+
+    let stale = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='stale_probe'"
+        ))
+        .unwrap();
+    assert_eq!(stale, 0, "bucket older than the retention window must be pruned");
+    let fresh = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='fresh_probe'"
+        ))
+        .unwrap();
+    assert_eq!(fresh, 1, "recent bucket must survive the prune");
+}
+
+#[test]
 fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
     // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic
