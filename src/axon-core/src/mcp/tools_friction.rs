@@ -54,6 +54,51 @@ impl McpServer {
         );
     }
 
+    /// REQ-AXO-901961 — best-effort per-call telemetry, called for EVERY tool
+    /// response at the dispatch chokepoint (S1). Upserts ONE time-bucketed
+    /// aggregate row per (tool, project, ok/error, hour) — signature-only, never
+    /// argument content (PIL-AXO-9003). Bounded by construction (the rollup IS
+    /// the table). Failure-tolerant: a telemetry write must never affect the
+    /// tool response (`let _`). Average latency derives from latency_sum_ms /
+    /// call_count; latency_max_ms keeps the tail outlier. The observability
+    /// surfaces themselves are skipped so they never self-inflate the stats.
+    pub(crate) fn record_mcp_call(&self, tool: &str, response: &Value, latency_ms: i64) {
+        if tool == "mcp_friction_report" || tool == "mcp_telemetry_report" {
+            return;
+        }
+        let data = response.get("data");
+        let problem_class = data
+            .and_then(|d| {
+                d.pointer("/operator_guidance/problem_class")
+                    .or_else(|| d.get("problem_class"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let is_error = response
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || (!problem_class.is_empty() && problem_class != "ok");
+        let status = if is_error { "error" } else { "ok" };
+        let project_code = data
+            .and_then(|d| d.get("project_code"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let build_id =
+            std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let lm = latency_ms.max(0);
+        let _ = self.graph_store.execute_param(
+            "INSERT INTO axon.mcp_call_stat (tool, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version)
+             VALUES (?, ?, ?, date_trunc('hour', now()), 1, ?, ?, ?)
+             ON CONFLICT (tool, project_code, status, bucket_hour)
+             DO UPDATE SET call_count = axon.mcp_call_stat.call_count + 1,
+                           latency_sum_ms = axon.mcp_call_stat.latency_sum_ms + EXCLUDED.latency_sum_ms,
+                           latency_max_ms = greatest(axon.mcp_call_stat.latency_max_ms, EXCLUDED.latency_max_ms),
+                           contract_version = EXCLUDED.contract_version",
+            &json!([tool, project_code, status, lm, lm, build_id]),
+        );
+    }
+
     /// REQ-AXO-901957 — `mcp_friction_report`: top OPEN friction signatures by
     /// frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links
     /// (traceability), regressions surfaced (resolved but observed since).

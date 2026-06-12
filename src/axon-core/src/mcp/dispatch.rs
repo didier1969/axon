@@ -68,6 +68,9 @@ impl McpServer {
             });
         }
 
+        // REQ-AXO-901961 S1 — time the whole tool execution for per-call
+        // telemetry (recorded best-effort below, never affects the response).
+        let started = std::time::Instant::now();
         let response = if Self::mcp_mutation_jobs_enabled()
             && Self::is_async_job_tool(normalized_name)
         {
@@ -218,6 +221,13 @@ impl McpServer {
         // only the problem SHAPE (never arg content), only when the response
         // carries a non-null problem_class.
         self.record_mcp_friction(normalized_name, &final_response);
+        // REQ-AXO-901961 S1 — per-call telemetry (every call, ok or error) with
+        // latency, at the same chokepoint. Best-effort, signature-only.
+        self.record_mcp_call(
+            normalized_name,
+            &final_response,
+            started.elapsed().as_millis() as i64,
+        );
         Some(final_response)
     }
 }

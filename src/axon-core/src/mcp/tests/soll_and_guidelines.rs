@@ -142,6 +142,65 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
+    // REQ-AXO-901961 S1 — every call records a time-bucketed stat (ok + error),
+    // signature-only, latency aggregated. Isolated by a synthetic tool + project
+    // so concurrent telemetry writes from sibling tests don't collide.
+    let server = create_test_server();
+    let proj = "TLM901961";
+    let tool = "synthetic_telemetry_probe";
+    let ok = json!({ "data": { "project_code": proj } });
+    // An error response whose received_arguments carry a SECRET — never stored.
+    let err = json!({
+        "isError": true,
+        "data": {
+            "operator_guidance": { "problem_class": "invalid_arguments" },
+            "project_code": proj,
+            "received_arguments": { "x": "SUPER_SECRET_TELEMETRY_VALUE" }
+        }
+    });
+    // 2 ok (5ms + 15ms) into one bucket, 1 error (10ms) into another.
+    server.record_mcp_call(tool, &ok, 5);
+    server.record_mcp_call(tool, &ok, 15);
+    server.record_mcp_call(tool, &err, 10);
+
+    // Privacy: no argument content may appear anywhere in the table.
+    let dump = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT tool||'|'||status||'|'||call_count||'|'||latency_sum_ms FROM axon.mcp_call_stat WHERE project_code='{proj}'"
+        ))
+        .unwrap();
+    assert!(!dump.contains("SUPER_SECRET"), "no arg content may be stored: {dump}");
+
+    // ok bucket aggregates: 2 calls, sum=20 (avg=10), max=15.
+    let avg_ok = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT (latency_sum_ms / call_count)::BIGINT FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='ok'"
+        ))
+        .unwrap();
+    assert_eq!(avg_ok, 10, "avg ok latency = 20/2 = 10ms");
+    let max_ok = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT latency_max_ms::BIGINT FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='ok'"
+        ))
+        .unwrap();
+    assert_eq!(max_ok, 15, "ok tail outlier kept");
+    let err_count = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT call_count FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='error'"
+        ))
+        .unwrap();
+    assert_eq!(err_count, 1, "the error call is recorded under status=error");
+}
+
+#[test]
 fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
     // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic
