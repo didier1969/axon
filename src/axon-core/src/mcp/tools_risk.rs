@@ -271,42 +271,62 @@ impl McpServer {
 
                 impacted_symbol_ids.insert(target_id.clone());
                 impacted_symbol_names.insert(symbol.to_string());
-                let ids_sql = impacted_symbol_ids
-                    .iter()
-                    .map(|id| format!("'{}'", id.replace('\'', "''")))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let names_sql = impacted_symbol_names
-                    .iter()
-                    .map(|name| format!("'{}'", name.replace('\'', "''")))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let soll_query = format!(
-                    "WITH RECURSIVE soll_entry_points AS (
-                        SELECT DISTINCT t.soll_entity_id as id
-                        FROM soll.Traceability t
-                        WHERE t.artifact_type = 'Symbol'
-                          AND (t.artifact_ref IN ({ids_sql}) OR t.artifact_ref IN ({names_sql}))
-                    ),
-                    soll_traverse(id, depth) AS (
-                        SELECT id, 1 as depth FROM soll_entry_points
-                        UNION ALL
-                        SELECT e.target_id, st.depth + 1
-                        FROM soll.Edge e
-                        JOIN soll_traverse st ON e.source_id = st.id
-                        WHERE st.depth < 10
-                    )
-                    SELECT DISTINCT n.id, n.type, n.title
-                    FROM soll_traverse st
-                    JOIN soll.Node n ON st.id = n.id
-                    ORDER BY n.type DESC, n.id"
-                );
-                let soll_raw = self
-                    .graph_store
-                    .query_json(&soll_query)
-                    .unwrap_or_else(|_| "[]".to_string());
-                let soll_rows: Vec<Vec<Value>> =
-                    serde_json::from_str(&soll_raw).unwrap_or_default();
+                // REQ-AXO-901952 (gap C) — SOLL impact via the in-memory SOLL
+                // snapshot instead of WITH RECURSIVE over soll.Traceability +
+                // soll.Edge. Find the SOLL entry points whose Symbol
+                // traceability matches an impacted symbol (id or name), then
+                // BFS forward over the SOLL graph (depth < 10) collecting the
+                // reachable intent nodes. Per-project scope (the RAM snapshot
+                // is per-project) ; the impacted symbols all live in proj_key.
+                let mut soll_rows: Vec<Vec<Value>> = Vec::new();
+                if let Ok(snap) = self.soll_cache().snapshot(proj_key) {
+                    use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+                    let mut seen: HashSet<String> = HashSet::new();
+                    let mut depth_of: StdHashMap<String, u32> = StdHashMap::new();
+                    let mut queue: VecDeque<String> = VecDeque::new();
+                    for t in &snap.traceability {
+                        if t.artifact_type == "Symbol"
+                            && (impacted_symbol_ids.contains(&t.artifact_ref)
+                                || impacted_symbol_names.contains(&t.artifact_ref))
+                            && seen.insert(t.soll_entity_id.clone())
+                        {
+                            depth_of.insert(t.soll_entity_id.clone(), 1);
+                            queue.push_back(t.soll_entity_id.clone());
+                        }
+                    }
+                    while let Some(id) = queue.pop_front() {
+                        let d = depth_of.get(&id).copied().unwrap_or(1);
+                        if d >= 10 {
+                            continue;
+                        }
+                        let targets: Vec<String> = snap
+                            .outgoing_edges(&id)
+                            .map(|(tgt, _rel)| tgt.to_string())
+                            .collect();
+                        for tgt in targets {
+                            if seen.insert(tgt.clone()) {
+                                depth_of.insert(tgt.clone(), d + 1);
+                                queue.push_back(tgt);
+                            }
+                        }
+                    }
+                    let mut collected: Vec<(String, String, String)> = seen
+                        .iter()
+                        .filter_map(|id| {
+                            snap.nodes
+                                .get(id)
+                                .map(|n| (n.id.clone(), n.entity_type.clone(), n.title.clone()))
+                        })
+                        .collect();
+                    // ORDER BY n.type DESC, n.id
+                    collected.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    soll_rows = collected
+                        .into_iter()
+                        .map(|(id, t, title)| {
+                            vec![Value::from(id), Value::from(t), Value::from(title)]
+                        })
+                        .collect();
+                }
 
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entity | Type | Title |\n| --- | --- | --- |\n");
