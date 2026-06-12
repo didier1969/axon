@@ -28,6 +28,9 @@ struct Args {
     project: String,
     probes: usize,
     output: Output,
+    // REQ-AXO-140 demo — print the reverse callers (resolved via the RAM
+    // projection) of this symbol name, proving synthetic CALLS targets resolve.
+    symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +44,7 @@ impl Args {
         let mut project = None;
         let mut probes: usize = 1000;
         let mut output = Output::Human;
+        let mut symbol: Option<String> = None;
         let raw = std::env::args().skip(1).collect::<Vec<_>>();
         let mut i = 0;
         while i < raw.len() {
@@ -72,6 +76,14 @@ impl Args {
                     println!("axon-bench-ist-snapshot --project CODE [--probes N] [--human|--csv]");
                     std::process::exit(0);
                 }
+                "--symbol" => {
+                    symbol = Some(
+                        raw.get(i + 1)
+                            .ok_or_else(|| anyhow::anyhow!("--symbol requires value"))?
+                            .clone(),
+                    );
+                    i += 2;
+                }
                 other => {
                     return Err(anyhow::anyhow!("unknown arg: {}", other));
                 }
@@ -81,6 +93,7 @@ impl Args {
             project: project.ok_or_else(|| anyhow::anyhow!("--project is required"))?,
             probes,
             output,
+            symbol,
         })
     }
 }
@@ -115,6 +128,42 @@ fn run(args: Args) -> anyhow::Result<()> {
     };
     let (graph, stats) = load_snapshot(&store, &args.project)
         .map_err(|e| anyhow::anyhow!("load_snapshot failed: {}", e))?;
+
+    // REQ-AXO-140 demo — show the reverse callers of a symbol, resolved via the
+    // RAM projection (synthetic CALLS targets resolved at IstGraph::build). This
+    // is what `bidi_trace`/`impact` traverse; on the pre-fix live brain it
+    // returns 0 for cross-module callees.
+    if let Some(sym) = &args.symbol {
+        let needle = format!("::{}", sym);
+        let mut found = None;
+        for idx in 0..graph.node_count() as u32 {
+            let id = graph.id_of(idx);
+            if id == sym.as_str() || id.ends_with(&needle) {
+                found = Some(idx);
+                break;
+            }
+        }
+        match found {
+            Some(idx) => {
+                let id = graph.id_of(idx).to_string();
+                let mut callers: Vec<String> = graph
+                    .reverse_neighbors(idx)
+                    .map(|(s, _)| graph.id_of(s).to_string())
+                    .collect();
+                callers.sort();
+                callers.dedup();
+                println!(
+                    "\n=== REQ-AXO-140 — reverse callers of `{}` (id={}) via RAM resolution ===",
+                    sym, id
+                );
+                println!("resolved callers: {}", callers.len());
+                for c in &callers {
+                    println!("  <- {}", c);
+                }
+            }
+            None => println!("symbol `{}` not found in snapshot", sym),
+        }
+    }
 
     let mut samples_us: Vec<u128> = Vec::with_capacity(args.probes);
     if graph.node_count() == 0 {
