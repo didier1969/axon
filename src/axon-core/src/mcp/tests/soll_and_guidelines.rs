@@ -341,6 +341,7 @@ fn test_mcp_feedback_records_voluntary_doleance() {
                 "arguments": {
                     "problem": "UNIQ_DOLEANCE_PROBE inspect was too verbose",
                     "category": "too_verbose",
+                    "severity": "blocking",
                     "tool": "inspect",
                     "proposed_solution": "add a brief mode",
                     "satisfaction": 3,
@@ -363,13 +364,13 @@ fn test_mcp_feedback_records_voluntary_doleance() {
     let row = server
         .graph_store
         .query_json(
-            "SELECT category||'|'||tool||'|'||satisfaction||'|'||llm_identity \
+            "SELECT category||'|'||severity||'|'||tool||'|'||satisfaction||'|'||llm_identity \
              FROM axon.llm_feedback WHERE problem='UNIQ_DOLEANCE_PROBE inspect was too verbose'",
         )
         .unwrap();
     assert!(
-        row.contains("too_verbose|inspect|3|Claude Opus 4.8"),
-        "row persisted with all fields: {row}"
+        row.contains("too_verbose|blocking|inspect|3|Claude Opus 4.8"),
+        "row persisted with all fields incl severity: {row}"
     );
 
     let bad = server

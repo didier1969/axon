@@ -20,9 +20,19 @@ CREATE TABLE IF NOT EXISTS axon.llm_feedback (
     problem           TEXT        NOT NULL,
     proposed_solution TEXT        NOT NULL DEFAULT '',
     satisfaction      INTEGER,  -- optional 1..5
+    -- How serious is it (for triage / prioritisation):
+    --   blocking    = the LLM could NOT complete its task
+    --   token_cost  = it worked, but cost significant extra tokens / turns / effort
+    --   minor       = cosmetic / small annoyance
+    severity          TEXT        NOT NULL DEFAULT 'minor',
     contract_version  TEXT        NOT NULL DEFAULT ''
 );
 
--- Recent-window scans for the future feedback report.
+-- REQ-AXO-901966 follow-up — `severity` added after the initial ship; ALTER (with
+-- IF NOT EXISTS, idempotent) brings pre-existing tables (test template, any
+-- unpromoted dev instance) to the new shape without a drop.
+ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'minor';
+
+-- Recent-window + severity scans for the feedback report / triage.
 CREATE INDEX IF NOT EXISTS llm_feedback_recent_idx
-    ON axon.llm_feedback (created_at DESC, category);
+    ON axon.llm_feedback (created_at DESC, severity, category);

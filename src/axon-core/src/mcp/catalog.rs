@@ -954,11 +954,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_feedback",
-                "description": "[SYSTEM] REQ-AXO-901966 — voluntary LLM feedback / doléance. Call this whenever an Axon MCP tool felt buggy, under-documented, unclear, too slow, incomplete, or too verbose. Content-rich + voluntary (complements the silent, signature-only friction log). Tell us who you are, what you hit, your proposed fix, and your satisfaction — it directly drives product optimization. Args: `problem` (required), optional `category` (bug|unclear_doc|undocumented|too_slow|incomplete|too_verbose|other), `tool`, `proposed_solution`, `satisfaction` (1-5), `llm_identity`, `project_code`.",
+                "description": "[SYSTEM] REQ-AXO-901966 — voluntary LLM feedback / doléance. Call this whenever an Axon MCP tool felt buggy, under-documented, unclear, too slow, incomplete, or too verbose. Content-rich + voluntary (complements the silent, signature-only friction log). Tell us who you are, what you hit, how serious it was, your proposed fix, and your satisfaction — it directly drives product optimization. Args: `problem` (required), optional `severity` (blocking|token_cost|minor — is it a hard blocker, or does it only cost extra tokens?), `category` (bug|unclear_doc|undocumented|too_slow|incomplete|too_verbose|other), `tool`, `proposed_solution`, `satisfaction` (1-5), `llm_identity`, `project_code`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "problem": { "type": "string", "description": "What went wrong / was unclear / slow / missing / too verbose. Required." },
+                        "severity": { "type": "string", "enum": ["blocking", "token_cost", "minor"], "description": "How serious: 'blocking' (could NOT complete the task), 'token_cost' (worked but wasted significant tokens/turns), or 'minor' (cosmetic). Default 'minor'. Lets us triage graver problems first." },
                         "category": { "type": "string", "enum": ["bug", "unclear_doc", "undocumented", "too_slow", "incomplete", "too_verbose", "other"], "description": "Kind of friction (default 'other')." },
                         "tool": { "type": "string", "description": "Which Axon tool the feedback is about (optional)." },
                         "proposed_solution": { "type": "string", "description": "How you'd fix or improve it (optional)." },

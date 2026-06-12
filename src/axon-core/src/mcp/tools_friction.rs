@@ -138,6 +138,18 @@ impl McpServer {
         } else {
             "other"
         };
+        // Severity for triage / prioritisation (operator request): a hard blocker
+        // is a graver problem than something that merely wastes tokens.
+        //   blocking   = the LLM could NOT complete its task
+        //   token_cost = it worked, but cost significant extra tokens / turns
+        //   minor      = cosmetic / small annoyance (default)
+        const SEVERITIES: &[&str] = &["blocking", "token_cost", "minor"];
+        let severity = args.get("severity").and_then(Value::as_str).unwrap_or("minor");
+        let severity = if SEVERITIES.contains(&severity) {
+            severity
+        } else {
+            "minor"
+        };
         let llm_identity = args.get("llm_identity").and_then(Value::as_str).unwrap_or("");
         let tool = args.get("tool").and_then(Value::as_str).unwrap_or("");
         let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
@@ -159,15 +171,15 @@ impl McpServer {
         let result = self.graph_store.execute_param(
             &format!(
                 "INSERT INTO axon.llm_feedback \
-                    (llm_identity, category, tool, project_code, problem, proposed_solution, satisfaction, contract_version) \
-                 VALUES (?, ?, ?, ?, ?, ?, {satisfaction_sql}, ?)"
+                    (llm_identity, category, severity, tool, project_code, problem, proposed_solution, satisfaction, contract_version) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, {satisfaction_sql}, ?)"
             ),
-            &json!([llm_identity, category, tool, project_code, problem, proposed_solution, build_id]),
+            &json!([llm_identity, category, severity, tool, project_code, problem, proposed_solution, build_id]),
         );
         match result {
             Ok(()) => Some(json!({
-                "content": [{ "type": "text", "text": format!("Status: recorded\nThank you — your feedback (category={category}) is logged for product optimization. Keep them coming: bugs, unclear docs, slow / verbose / incomplete tools.") }],
-                "data": { "recorded": true, "category": category }
+                "content": [{ "type": "text", "text": format!("Status: recorded\nThank you — your feedback (category={category}, severity={severity}) is logged for product optimization. Keep them coming: bugs, unclear docs, slow / verbose / incomplete tools.") }],
+                "data": { "recorded": true, "category": category, "severity": severity }
             })),
             Err(e) => Some(json!({
                 "content": [{ "type": "text", "text": format!("Status: writer_failed\nFeedback not stored: {e}") }],
