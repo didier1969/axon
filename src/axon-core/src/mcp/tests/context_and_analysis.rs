@@ -955,21 +955,26 @@ fn test_change_safety_rejects_unregistered_project_code() {
 #[test]
 fn test_path_returns_bounded_call_path_between_symbols() {
     let server = create_test_server();
-    // REQ-AXO-91562 workaround — tests share live PG, wipe fixture ids
-    // before INSERT to avoid PK collisions from prior runs.
-    super::delete_fixture_symbols(&server, &["bks::source", "bks::mid", "bks::sink"]);
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::source', 'source_fn', 'function', true, true, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::mid', 'mid_fn', 'function', true, false, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::sink', 'sink_fn', 'function', true, true, false, 'BKS')").unwrap();
+    // REQ-AXO-901721 (Batch D) — per-test IST isolation: a process-unique
+    // project code + id prefixes so a sibling test reusing a hardcoded code
+    // (the old `BKS`) can no longer poison this path's RAM/PG state. Root cause
+    // of the order-dependent flakiness that surfaced during REQ-AXO-140.
+    let code = super::scoped_test_ist_code(&server);
+    let src = format!("{code}::source");
+    let mid = format!("{code}::mid");
+    let sink = format!("{code}::sink");
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{src}', 'source_fn', 'function', true, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{mid}', 'mid_fn', 'function', true, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sink}', 'sink_fn', 'function', true, true, false, '{code}')")).unwrap();
     // MIL-AXO-017 / REQ-AXO-216 — legacy CALLS table dropped, edges
     // now live in unified ist.Edge with relation_type='CALLS'.
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::source', 'bks::mid', 'CALLS', 'BKS', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{src}', '{mid}', 'CALLS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('bks::mid', 'bks::sink', 'CALLS', 'BKS', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{mid}', '{sink}', 'CALLS', '{code}', 0)"))
         .unwrap();
 
     let response = server
@@ -981,7 +986,7 @@ fn test_path_returns_bounded_call_path_between_symbols() {
                 "arguments": {
                     "source": "source_fn",
                     "sink": "sink_fn",
-                    "project": "BKS",
+                    "project": code,
                     "depth": 4
                 }
             })),

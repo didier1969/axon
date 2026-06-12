@@ -124,6 +124,34 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         .execute(&format!("DELETE FROM ist.Symbol WHERE id IN ({list})"));
 }
 
+/// REQ-AXO-901721 (Batch D) — per-test IST isolation. Returns a process-unique
+/// project code and wipes any leftover rows under it first: the counter resets
+/// per `cargo test` invocation, so a recycled code (`T00`, …) can still carry
+/// stale rows from a previous run in the shared live PG. Tests prefix their
+/// Symbol/Edge/Chunk ids with the returned code so the global PKs never collide
+/// across sibling tests — the root cause of the order-dependent flakiness.
+#[allow(dead_code)]
+pub(crate) fn scoped_test_ist_code(server: &McpServer) -> String {
+    let code = crate::tests::test_helpers::unique_test_project_code();
+    // One batch, FK-safe order: embeddings → chunks → edges → symbols → nodes.
+    let wipe = format!(
+        "DELETE FROM ist.ChunkEmbedding WHERE chunk_id IN (SELECT id FROM ist.Chunk WHERE project_code = '{code}');\n\
+         DELETE FROM ist.Chunk WHERE project_code = '{code}';\n\
+         DELETE FROM ist.Edge WHERE project_code = '{code}';\n\
+         DELETE FROM ist.Symbol WHERE project_code = '{code}';\n\
+         DELETE FROM soll.Node WHERE project_code = '{code}';"
+    );
+    let _ = server.graph_store.execute(&wipe);
+    // Register the code so project_status / snapshot / audit treat it as a real
+    // project rather than rejecting an unknown scope.
+    let _ = server.graph_store.sync_project_registry_entry(
+        &code,
+        Some(&format!("Test {code}")),
+        Some(&format!("/tmp/{code}")),
+    );
+    code
+}
+
 fn create_test_server() -> McpServer {
     let temp = tempdir().unwrap();
     let db_root = temp.path().to_str().unwrap().to_string();
