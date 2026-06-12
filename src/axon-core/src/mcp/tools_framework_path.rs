@@ -21,24 +21,6 @@ fn build_name_lookup_sql(ids: &[String]) -> String {
     )
 }
 
-/// REQ-AXO-299 / MIL-AXO-017 slice 5 : build the SQL that wraps
-/// `ist.path` and LEFT-JOINs Symbol to materialize names alongside
-/// hops. Pure formatter — extracted so the SQL-escape contract is unit
-/// testable without a live PG backend.
-fn build_path_sql(source_id: &str, sink_id: &str, depth: u64, project: &str) -> String {
-    format!(
-        "SELECT p.hop, p.node_id, COALESCE(s.name, p.node_id) AS name, \
-                COALESCE(p.relation_type, 'anchor') AS relation_type \
-         FROM ist.path('{src}', '{snk}', {depth}, '{proj}') p \
-         LEFT JOIN ist.Symbol s ON s.id = p.node_id \
-         ORDER BY p.hop",
-        src = source_id.replace('\'', "''"),
-        snk = sink_id.replace('\'', "''"),
-        depth = depth,
-        proj = project.replace('\'', "''"),
-    )
-}
-
 impl McpServer {
     pub(super) fn axon_path_impl(&self, args: &Value) -> Option<Value> {
         let source = args.get("source")?.as_str()?.trim();
@@ -129,98 +111,69 @@ impl McpServer {
         // auto-populate it) so the BFS runs in RAM instead of falling to the
         // PG `ist.path` fallback. `view` reads the cache live per call, so
         // warming before traversal is sufficient.
+        // REQ-AXO-901952 — RAM is the SINGLE source for path traversal.
+        // Requires a project-scoped, warmed snapshot ; cold cache or an
+        // unscoped (project=None) query → loud degraded error, never a PG
+        // fallback and never a silent "no path".
         let ram_attempted = project
             .map(|p| self.ensure_ram_snapshot_warm(p))
             .unwrap_or(false);
+        if !ram_attempted {
+            let why = if project.is_none() {
+                "path requires an explicit `project` scope : the RAM IST snapshot is per-project (REQ-AXO-901952, no PG fallback)"
+            } else {
+                "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
+            };
+            return Some(Self::path_ram_unavailable_error(source, sink, depth, why));
+        }
         let view = process_view();
-        let ram_result = if ram_attempted {
-            view.shortest_path(
-                project.unwrap_or_default(),
-                &source_id,
-                &sink_id,
-                depth as u32,
-                &[],
-            )
-        } else {
-            None
-        };
+        let ram_result = view.shortest_path(
+            project.unwrap_or_default(),
+            &source_id,
+            &sink_id,
+            depth as u32,
+            &[],
+        );
 
-        let mut surfaces_used: Vec<&'static str> = Vec::new();
-        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+        let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
+        let surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        let resolved_path: Option<(Vec<String>, Vec<String>)> = if ram_attempted {
-            // Authoritative answer from the in-memory IST snapshot.
-            surfaces_used.push("graph_ram");
-            ram_result.map(|(ids, rels)| {
-                let kinds: Vec<String> = rels
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| {
-                        if i == 0 {
-                            "anchor".to_string()
-                        } else {
-                            r.as_db().to_lowercase()
-                        }
-                    })
-                    .collect();
-                // Materialize names via a single batch SELECT on
-                // ist.Symbol ; the BFS itself ran in RAM (CSR
-                // snapshot) so the per-edge traversal cost stays
-                // RAM-bound. One round-trip for display is acceptable
-                // and far cheaper than the previous WITH RECURSIVE.
-                let lookup_sql = build_name_lookup_sql(&ids);
-                let raw = self
-                    .graph_store
-                    .query_json(&lookup_sql)
-                    .unwrap_or_else(|_| "[]".to_string());
-                let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-                let mut name_by_id: HashMap<String, String> = HashMap::new();
-                for row in &lookup_rows {
-                    if let (Some(id), Some(name)) = (
-                        row.first().and_then(Value::as_str),
-                        row.get(1).and_then(Value::as_str),
-                    ) {
-                        name_by_id.insert(id.to_string(), name.to_string());
+        // Authoritative answer from the in-memory IST snapshot. The BFS ran
+        // in RAM (CSR) ; one batch SELECT on ist.Symbol materializes display
+        // names for the resolved ids.
+        let resolved_path: Option<(Vec<String>, Vec<String>)> = ram_result.map(|(ids, rels)| {
+            let kinds: Vec<String> = rels
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    if i == 0 {
+                        "anchor".to_string()
+                    } else {
+                        r.as_db().to_lowercase()
                     }
-                }
-                let displayed: Vec<String> = ids
-                    .iter()
-                    .map(|id| name_by_id.get(id).cloned().unwrap_or_else(|| id.clone()))
-                    .collect();
-                (displayed, kinds)
-            })
-        } else {
-            // RAM unavailable (cache cold or unscoped query) → PG fallback.
-            surfaces_used.push("graph_pg");
-            surfaces_degraded.push("graph_ram_unavailable");
-            let sql = build_path_sql(&source_id, &sink_id, depth, project.unwrap_or_default());
+                })
+                .collect();
+            let lookup_sql = build_name_lookup_sql(&ids);
             let raw = self
                 .graph_store
-                .query_json(&sql)
+                .query_json(&lookup_sql)
                 .unwrap_or_else(|_| "[]".to_string());
-            let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-            if rows.is_empty() {
-                None
-            } else {
-                let mut path_names: Vec<String> = Vec::with_capacity(rows.len());
-                let mut edge_kinds: Vec<String> = Vec::with_capacity(rows.len());
-                for row in &rows {
-                    let name = row
-                        .get(2)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let rel = row
-                        .get(3)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("anchor")
-                        .to_string();
-                    path_names.push(name);
-                    edge_kinds.push(rel);
+            let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+            let mut name_by_id: HashMap<String, String> = HashMap::new();
+            for row in &lookup_rows {
+                if let (Some(id), Some(name)) = (
+                    row.first().and_then(Value::as_str),
+                    row.get(1).and_then(Value::as_str),
+                ) {
+                    name_by_id.insert(id.to_string(), name.to_string());
                 }
-                Some((path_names, edge_kinds))
             }
-        };
+            let displayed: Vec<String> = ids
+                .iter()
+                .map(|id| name_by_id.get(id).cloned().unwrap_or_else(|| id.clone()))
+                .collect();
+            (displayed, kinds)
+        });
 
         let Some((path, edges)) = resolved_path else {
             return Some(json!({
@@ -318,11 +271,7 @@ impl McpServer {
         // inflate the bench `name`-key denominator without helping
         // LLM consumers.
         let path_len = path.len() as u64;
-        let provenance = if surfaces_used.iter().any(|s| *s == "graph_ram") {
-            "IstGraph::bfs_shortest_path (RAM CSR snapshot, PIL-AXO-9002)"
-        } else {
-            "ist.path SQL function (WITH RECURSIVE on ist.Edge) — RAM cache cold"
-        };
+        let provenance = "IstGraph::bfs_shortest_path (RAM CSR snapshot, PIL-AXO-9002)";
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -369,35 +318,41 @@ impl McpServer {
             }
         }))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::build_path_sql;
-
-    #[test]
-    fn build_path_sql_wraps_public_path_with_symbol_join() {
-        let sql = build_path_sql("foo", "bar", 5, "AXO");
-        assert!(
-            sql.contains("FROM ist.path('foo', 'bar', 5, 'AXO')"),
-            "must call ist.path SQL fn with positional args: {sql}"
-        );
-        assert!(
-            sql.contains("LEFT JOIN ist.Symbol s ON s.id = p.node_id"),
-            "must JOIN ist.Symbol to materialize names: {sql}"
-        );
-        assert!(
-            sql.contains("ORDER BY p.hop"),
-            "must order rows by hop: {sql}"
-        );
-    }
-
-    #[test]
-    fn build_path_sql_escapes_single_quotes_and_unscoped_when_project_empty() {
-        let sql = build_path_sql("o'brien", "ba'r", 3, "");
-        assert!(
-            sql.contains("ist.path('o''brien', 'ba''r', 3, '')"),
-            "must double single quotes for SQL safety and pass '' for unscoped: {sql}"
-        );
+    /// REQ-AXO-901952 — loud degraded error when the RAM IST snapshot cannot
+    /// serve `path` (cold cache or unscoped query). No PG fallback, never a
+    /// silent "no path".
+    fn path_ram_unavailable_error(source: &str, sink: &str, depth: u64, why: &str) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": format!("path unavailable : {why}") }],
+            "isError": true,
+            "data": {
+                "status": "degraded",
+                "surfaces_used": [],
+                "surfaces_degraded": ["graph_ram_unavailable"],
+                "total_available": Value::Null,
+                "next_call_hint": "ist_snapshot_warm project_code=<project>",
+                "source": source,
+                "sink": sink,
+                "depth": depth,
+                "path_found": false,
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "ist_ram_snapshot_unavailable",
+                        "severity": "high",
+                        "recommended_action": why
+                    }],
+                    "follow_up_tools": ["ist_snapshot_warm", "status"],
+                    "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" }
+                },
+                "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" },
+                "parameter_repair": {
+                    "invalid_field": "project",
+                    "follow_up_tools": ["ist_snapshot_warm", "status"],
+                    "hint": why
+                }
+            }
+        })
     }
 }

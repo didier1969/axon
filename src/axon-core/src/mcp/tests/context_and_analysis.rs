@@ -1034,10 +1034,9 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         .collect::<Vec<_>>();
     assert_eq!(rendered, vec!["source_fn", "mid_fn", "sink_fn"]);
 
-    // REQ-AXO-91510 — tri-modal envelope conformance (GUI-AXO-1003).
-    // Cache is cold in this test → PG fallback surface = "graph_pg" +
-    // "graph_ram_unavailable" in degraded. RAM-warm case is covered by
-    // test_path_uses_ram_snapshot_when_warm below.
+    // REQ-AXO-91510 / REQ-AXO-901952 — tri-modal envelope conformance
+    // (GUI-AXO-1003). `path` is RAM-only : the lazy warm loads the snapshot
+    // from the PG rows inserted above, so surfaces_used = "graph_ram".
     let surfaces: Vec<&str> = data["surfaces_used"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
