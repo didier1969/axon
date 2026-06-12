@@ -190,6 +190,77 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
     })
 }
 
+/// REQ-AXO-901949 inv.3 — evaluate the schema's per-action `allOf` if/then
+/// conditionals against the supplied args, returning the nested fields that the
+/// matched action requires but the caller omitted, as `(dotted_path,
+/// expected_type)`.
+///
+/// Why: the dispatch validator only knows top-level `required`
+/// (`[action, entity, data]` for soll_manager) — all present in a `{action:
+/// "update", data:{description}}` call, so the missing `data.id` slips through
+/// and the repair envelope is empty/unhelpful. The per-action requiredness IS
+/// already encoded in the derived schema (augment_soll_manager_conditionals);
+/// this reads it back so the repair `corrected_call` can stub the real missing
+/// field. Single source: the schema, not a second hand-maintained table.
+pub(crate) fn conditional_missing_fields(schema: &Value, args: &Value) -> Vec<(String, String)> {
+    fn type_label(spec: Option<&Value>) -> String {
+        match spec.and_then(|s| s.get("type")) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|t| *t != "null")
+                .unwrap_or("value")
+                .to_string(),
+            _ => "value".to_string(),
+        }
+    }
+    let mut out = Vec::new();
+    let Some(clauses) = schema.get("allOf").and_then(Value::as_array) else {
+        return out;
+    };
+    for clause in clauses {
+        // `if.properties.<k>.const == args[k]` for every constrained key.
+        let Some(cond) = clause
+            .get("if")
+            .and_then(|i| i.get("properties"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let matched = !cond.is_empty()
+            && cond.iter().all(|(k, spec)| {
+                spec.get("const").is_some_and(|want| args.get(k) == Some(want))
+            });
+        if !matched {
+            continue;
+        }
+        let Some(required) = clause
+            .get("then")
+            .and_then(|t| t.get("properties"))
+            .and_then(|p| p.get("data"))
+            .and_then(|d| d.get("required"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let data_obj = args.get("data").and_then(Value::as_object);
+        for field in required.iter().filter_map(Value::as_str) {
+            let present = data_obj.is_some_and(|d| d.contains_key(field));
+            if present {
+                continue;
+            }
+            let spec = schema
+                .get("properties")
+                .and_then(|p| p.get("data"))
+                .and_then(|d| d.get("properties"))
+                .and_then(|p| p.get(field));
+            out.push((format!("data.{field}"), type_label(spec)));
+        }
+    }
+    out
+}
+
 /// REQ-AXO-901949 inv.5 — the "terse default" decision for read tools, in one
 /// place so the rollout to the other reads reuses the same rule. `verbose` is
 /// opt-in (`mode=verbose`, case-insensitive); everything else — including the
@@ -532,6 +603,41 @@ mod tests {
         // Bare table names (no schema prefix) are not extracted — the repair
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
+    }
+
+    #[test]
+    fn conditional_missing_fields_reads_per_action_requiredness() {
+        let schema = derived_input_schema("soll_manager").expect("soll_manager schema");
+
+        // update without data.id → the conditional surfaces `data.id`.
+        let args = serde_json::json!({
+            "action": "update", "entity": "requirement", "data": { "description": "x" }
+        });
+        let missing = conditional_missing_fields(&schema, &args);
+        assert_eq!(missing.len(), 1, "got {missing:?}");
+        assert_eq!(missing[0].0, "data.id");
+        assert_eq!(missing[0].1, "string");
+
+        // update WITH id → nothing missing.
+        let ok = serde_json::json!({
+            "action": "update", "entity": "requirement", "data": { "id": "REQ-AXO-1" }
+        });
+        assert!(conditional_missing_fields(&schema, &ok).is_empty());
+
+        // create without attach_to/relation_type → both surface.
+        let create = serde_json::json!({
+            "action": "create", "entity": "requirement", "data": { "title": "t" }
+        });
+        let paths: Vec<String> = conditional_missing_fields(&schema, &create)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert!(paths.contains(&"data.attach_to".to_string()), "got {paths:?}");
+        assert!(paths.contains(&"data.relation_type".to_string()), "got {paths:?}");
+
+        // A non-matching action contributes nothing; a tool with no allOf is empty.
+        let sql_schema = derived_input_schema("sql").unwrap();
+        assert!(conditional_missing_fields(&sql_schema, &serde_json::json!({})).is_empty());
     }
 
     #[test]

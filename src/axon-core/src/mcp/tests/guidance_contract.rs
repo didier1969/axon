@@ -633,6 +633,61 @@ fn test_invalid_arguments_returns_parameter_repair_with_input_schema_reference()
 }
 
 #[test]
+fn test_invalid_arguments_surfaces_per_action_conditional_field() {
+    // REQ-AXO-901949 inv.3 — top-level `required` (action/entity/data) is
+    // satisfied, but `soll_manager update` without `data.id` still hits the
+    // None-path. The dispatcher must read the schema's allOf conditionals so the
+    // real missing field (`data.id`) is reported AND stubbed nested, instead of
+    // an empty/unhelpful repair envelope.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "update",
+                    "entity": "requirement",
+                    "data": { "description": "no id supplied" }
+                }
+            })),
+            id: Some(json!(91392)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["data"]["problem_class"], "invalid_arguments");
+    let repair = result["data"]
+        .get("parameter_repair")
+        .expect("parameter_repair payload required");
+
+    let missing_names: Vec<&str> = repair["missing_required_fields"]
+        .as_array()
+        .expect("missing_required_fields array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        missing_names.contains(&"data.id"),
+        "per-action conditional must surface `data.id`: {missing_names:?}"
+    );
+    // The corrected call stubs the missing field NESTED under data, ready to fill.
+    assert!(
+        repair["corrected_call"]["arguments"]["data"]["id"]
+            .as_str()
+            .is_some_and(|v| v.contains("<FILL")),
+        "corrected_call must stub the nested `data.id`: {repair}"
+    );
+    // The originally-supplied data is preserved alongside the stub.
+    assert_eq!(
+        repair["corrected_call"]["arguments"]["data"]["description"].as_str(),
+        Some("no id supplied"),
+        "corrected_call must preserve supplied fields: {repair}"
+    );
+}
+
+#[test]
 fn invalid_arguments_authoritative_guidance_includes_micro_instruction_and_contract() {
     let _guard = env_lock();
     unsafe {

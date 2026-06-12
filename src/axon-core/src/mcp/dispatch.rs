@@ -112,10 +112,25 @@ impl McpServer {
                     .and_then(|r| r.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
-                let missing_required: Vec<String> = required_fields
+                let top_level_missing: Vec<String> = required_fields
                     .iter()
                     .filter(|f| !supplied_keys.contains(*f))
                     .cloned()
+                    .collect();
+                // REQ-AXO-901949 inv.3 — top-level `required` is satisfied by
+                // `{action, entity, data}` even when the per-action field
+                // (data.id for update, data.source_id for link, …) is absent.
+                // Read the schema's own allOf if/then conditionals so the real
+                // missing field is surfaced + stubbed, not lost.
+                let conditional_missing: Vec<(String, String)> = schema
+                    .as_ref()
+                    .map(|s| super::tool_contracts::conditional_missing_fields(s, arguments))
+                    .unwrap_or_default();
+                // Combined view for reporting (`data.id` paths included).
+                let missing_required: Vec<String> = top_level_missing
+                    .iter()
+                    .cloned()
+                    .chain(conditional_missing.iter().map(|(p, _)| p.clone()))
                     .collect();
                 let first_invalid_field = missing_required
                     .first()
@@ -128,7 +143,7 @@ impl McpServer {
                 // with a typed placeholder pulled from the (now schemars-derived)
                 // input schema, so a single field-fill round-trip succeeds.
                 let mut corrected_arguments = arguments.as_object().cloned().unwrap_or_default();
-                for field in &missing_required {
+                for field in &top_level_missing {
                     let expected_type = schema
                         .as_ref()
                         .and_then(|s| s.get("properties"))
@@ -139,6 +154,19 @@ impl McpServer {
                     corrected_arguments
                         .entry(field.clone())
                         .or_insert_with(|| Value::String(format!("<FILL:{expected_type}>")));
+                }
+                // Nested stubs for per-action conditional fields (`data.<field>`).
+                for (path, expected_type) in &conditional_missing {
+                    let Some(field) = path.strip_prefix("data.") else {
+                        continue;
+                    };
+                    let data_entry = corrected_arguments
+                        .entry("data".to_string())
+                        .or_insert_with(|| json!({}));
+                    if let Some(obj) = data_entry.as_object_mut() {
+                        obj.entry(field.to_string())
+                            .or_insert_with(|| Value::String(format!("<FILL:{expected_type}>")));
+                    }
                 }
                 let corrected_call = json!({
                     "tool": normalized_name,
