@@ -64,21 +64,36 @@ pub fn unique_test_project_code() -> String {
     format!("T{}{}", base36(first), base36(second))
 }
 
+/// Process-lifetime parking lot for per-test databases created via
+/// `create_test_db`. The `TestDb` `Drop` never runs from a `static`, so the
+/// canonical reclamation is the `libc::atexit` hook armed inside `TestDb::create`
+/// (force-drops every db this process created). Parking here keeps the database
+/// alive for the test's duration; the returned `GraphStore` (and its native
+/// pool) is owned by the caller and dropped per-test, releasing connections.
+fn parked_test_dbs() -> &'static Mutex<Vec<crate::test_support::test_db::TestDb>> {
+    static PARKED: OnceLock<Mutex<Vec<crate::test_support::test_db::TestDb>>> = OnceLock::new();
+    PARKED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 pub fn create_test_db() -> Result<GraphStore> {
     let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db_path = format!("/tmp/axon_test_db_{}_{}_{}", pid, now, count);
-    // REQ-AXO-901882 — harness guard: never resolve to the production
-    // axon_live/axon_dev SOLL. `GraphStore::new` would fall through to
-    // `resolve_database_url(None)` (defaults `AXON_INSTANCE=live`); route via
-    // an explicit URL to a process-shared disposable clone of
-    // `axon_test_template` instead. Per-test isolation of these sites is the
-    // follow-up REQ-AXO-901877.
-    let url = crate::test_support::test_db::shared_test_db_url();
+    // REQ-AXO-901877 — per-test PostgreSQL isolation. Each call gets a fresh
+    // `createdb -T axon_test_template` clone (same canonical DDL + global seed +
+    // auto-seed triggers) instead of the process-SHARED database, so non-mcp
+    // tests (graph_bootstrap, pipeline_v2 stage_a3/orchestrator, …) no longer
+    // pollute one another through shared IST/SOLL state. The store's native pool
+    // (REQ-AXO-901959) writes the bulk graph COPY into THIS database, so the
+    // pipeline tests read back what they wrote. The TestDb is parked
+    // process-lifetime and force-dropped at exit (its Drop never fires from a
+    // static; the atexit hook reclaims it). Mirrors `create_test_server`.
+    let test_db = crate::test_support::test_db::TestDb::create();
+    let url = test_db.url();
+    parked_test_dbs()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(test_db);
+    let db_path = format!("/tmp/axon_test_db_unused_{}_{}", pid, count);
     let store = GraphStore::new_with_database(&db_path, &url)?;
     let _ = store.sync_project_registry_entry(
         "BKS",
