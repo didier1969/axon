@@ -2877,108 +2877,66 @@ impl McpServer {
         let total_cap: usize = cap_per_anchor * 2;
         let mut selected = Vec::new();
         let mut seen = HashSet::new();
-        let radius = if matches!(route, RetrievalRoute::Impact) {
-            2
-        } else {
-            1
-        };
 
         for anchor in entry_candidates.iter().take(2) {
             if anchor.kind == "file" {
                 continue;
             }
-            if !anchor.project_code.is_empty() && ram_view.is_warm(&anchor.project_code) {
-                let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) {
-                    10
-                } else {
-                    5
-                };
-                // REQ-AXO-901869 A3 — for the Impact route the relevant
-                // neighbours are the *callers* (who breaks if the anchor
-                // changes), i.e. reverse adjacency. Other routes want
-                // forward dependencies (callees). The PG fallback below
-                // (`query_graph_projection`) UNIONs both directions.
-                let ram_ids = if matches!(route, RetrievalRoute::Impact) {
-                    ram_view.reverse_at_radius(
-                        &anchor.project_code,
-                        &anchor.id,
-                        ram_radius,
-                        cap_per_anchor,
-                        &[],
-                    )
-                } else {
-                    ram_view.forward_at_radius(
-                        &anchor.project_code,
-                        &anchor.id,
-                        ram_radius,
-                        cap_per_anchor,
-                        &[],
-                    )
-                };
-                if let Some(ids) = ram_ids {
-                    for target_id in ids {
-                        if target_id == anchor.id {
-                            continue;
-                        }
-                        let key = format!("{}:{target_id}", anchor.id);
-                        if !seen.insert(key) {
-                            continue;
-                        }
-                        selected.push(json!({
-                            "anchor_symbol": anchor.name,
-                            "target_type": "symbol",
-                            "target_id": target_id,
-                            "edge_kind": "ram_csr",
-                            "distance": 0,
-                            "label": target_id,
-                            "uri": "",
-                            "evidence_class": "derived_ist_ram_snapshot",
-                        }));
-                        if selected.len() >= total_cap {
-                            return selected;
-                        }
-                    }
-                    continue;
-                }
-            }
-            let Ok(Some(anchor_id)) = self
-                .graph_store
-                .refresh_symbol_projection(&anchor.id, radius)
-            else {
+            // REQ-AXO-901952 (gap D) — RAM-only structural neighbours. Warm
+            // the anchor's per-project snapshot ; if it can't warm, skip this
+            // anchor (best-effort — retrieve_context still has FTS + vector).
+            // No query_graph_projection PG fallback.
+            if anchor.project_code.is_empty()
+                || !self.ensure_ram_snapshot_warm(&anchor.project_code)
+            {
                 continue;
+            }
+            let ram_radius: u32 = if matches!(route, RetrievalRoute::Impact) {
+                10
+            } else {
+                5
             };
-            let raw = self
-                .graph_store
-                .query_graph_projection("symbol", &anchor_id, radius)
-                .unwrap_or_else(|_| "[]".to_string());
-            let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-            for row in rows {
-                let Some(target_id) = row.get(1).and_then(|value| value.as_str()) else {
-                    continue;
-                };
-                let edge_kind = row
-                    .get(2)
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("unknown");
-                if target_id == anchor.id || edge_kind == "anchor" {
-                    continue;
-                }
-                let key = format!("{}:{target_id}", anchor.id);
-                if !seen.insert(key) {
-                    continue;
-                }
-                selected.push(json!({
-                    "anchor_symbol": anchor.name,
-                    "target_type": row.first().and_then(|value| value.as_str()).unwrap_or("unknown"),
-                    "target_id": target_id,
-                    "edge_kind": edge_kind,
-                    "distance": row.get(3).and_then(|value| value.as_i64()).unwrap_or(0),
-                    "label": row.get(4).and_then(|value| value.as_str()).unwrap_or(target_id),
-                    "uri": row.get(5).and_then(|value| value.as_str()).unwrap_or(""),
-                    "evidence_class": "derived_graph_projection",
-                }));
-                if selected.len() >= 2 {
-                    return selected;
+            // Impact route wants callers (reverse adjacency — who breaks if the
+            // anchor changes) ; other routes want forward dependencies (callees).
+            let ram_ids = if matches!(route, RetrievalRoute::Impact) {
+                ram_view.reverse_at_radius(
+                    &anchor.project_code,
+                    &anchor.id,
+                    ram_radius,
+                    cap_per_anchor,
+                    &[],
+                )
+            } else {
+                ram_view.forward_at_radius(
+                    &anchor.project_code,
+                    &anchor.id,
+                    ram_radius,
+                    cap_per_anchor,
+                    &[],
+                )
+            };
+            if let Some(ids) = ram_ids {
+                for target_id in ids {
+                    if target_id == anchor.id {
+                        continue;
+                    }
+                    let key = format!("{}:{target_id}", anchor.id);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    selected.push(json!({
+                        "anchor_symbol": anchor.name,
+                        "target_type": "symbol",
+                        "target_id": target_id,
+                        "edge_kind": "ram_csr",
+                        "distance": 0,
+                        "label": target_id,
+                        "uri": "",
+                        "evidence_class": "derived_ist_ram_snapshot",
+                    }));
+                    if selected.len() >= total_cap {
+                        return selected;
+                    }
                 }
             }
         }

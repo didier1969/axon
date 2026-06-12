@@ -2481,6 +2481,12 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axon::consumer_b', 'axon::parse_batch', 'CALLS', 'AXO', 0)")
         .unwrap();
 
+    // REQ-AXO-901952 — structural neighbours are RAM-only now. Evict any
+    // cached AXO snapshot so the warm path reloads the rows inserted above
+    // (in production the indexer refreshes the snapshot on change ; a direct
+    // PG insert in a test bypasses that, leaving a stale cache otherwise).
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
