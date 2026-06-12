@@ -1893,50 +1893,45 @@ impl McpServer {
             }));
         };
 
-        // REQ-AXO-91511 — RAM-first traversal via IstGraphView (PIL-AXO-9002,
-        // feedback_trimodal_use_ram_graph_not_pg). The `WITH RECURSIVE` PG
-        // path remains as the degraded fallback when the cache is cold or
-        // the query is project-unscoped (cache is per-project).
-        let view = process_view();
-        // REQ-AXO-901922 — lazy-warm the RAM snapshot (brain start does not
-        // auto-populate it). Without this the cold cache forced the dead PG
-        // fallback below (hardcoded empty since CALLS tables were dropped).
+        // REQ-AXO-901952 — RAM is the SINGLE source for the bidirectional
+        // trace (PIL-AXO-9002). Cold cache or an unscoped (project=None)
+        // query → loud degraded error, never a PG fallback and never silent
+        // empty caller/callee lists (which an LLM misreads as "no callers").
         let ram_attempted = project
             .map(|p| self.ensure_ram_snapshot_warm(p))
             .unwrap_or(false);
-        let mut surfaces_used: Vec<&'static str> = Vec::new();
-        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
+        if !ram_attempted {
+            let why = if project.is_none() {
+                "bidi_trace requires an explicit `project` scope : the RAM IST snapshot is per-project (REQ-AXO-901952, no PG fallback)"
+            } else {
+                "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
+            };
+            return Some(Self::traversal_ram_unavailable_error(
+                symbol,
+                project,
+                depth,
+                "bidirectional_trace",
+                why,
+            ));
+        }
+        let view = process_view();
+        let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
+        let surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        let (up_res, down_res) = if ram_attempted {
-            surfaces_used.push("graph_ram");
-            let project_key = project.unwrap_or("");
-            let depth_u32 = depth as u32;
-            // max_neighbors is bounded above by the depth-budget cap ; we
-            // honour the historical SQL behaviour of unbounded breadth
-            // within depth by setting a high ceiling (10_000) — far higher
-            // than any realistic project produces but cheap on a CSR walk.
-            let callers_ids = view
-                .reverse_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
-                .unwrap_or_default();
-            let callees_ids = view
-                .forward_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
-                .unwrap_or_default();
-            (
-                materialize_symbol_rows(self, &callers_ids),
-                materialize_symbol_rows(self, &callees_ids),
-            )
-        } else {
-            // MIL-AXO-019 vague 1d : the legacy `WITH RECURSIVE` PG
-            // fallback over `public.CALLS` is dead under PG canonical
-            // (REQ-AXO-271 slice 2d : the CALLS / CALLS_NIF tables are
-            // dropped, `skip_legacy_relations` invariantly true). When
-            // the IstGraphView cache is cold the bidi_trace surface
-            // returns empty + flags the degraded surface so the LLM
-            // sees the truth instead of silently empty results.
-            surfaces_used.push("graph_pg");
-            surfaces_degraded.push("graph_ram_unavailable");
-            ("[]".to_string(), "[]".to_string())
-        };
+        let project_key = project.unwrap_or("");
+        let depth_u32 = depth as u32;
+        // max_neighbors high ceiling (10_000) honours the historical
+        // unbounded-breadth-within-depth behaviour ; cheap on a CSR walk.
+        let callers_ids = view
+            .reverse_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
+            .unwrap_or_default();
+        let callees_ids = view
+            .forward_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
+            .unwrap_or_default();
+        let (up_res, down_res) = (
+            materialize_symbol_rows(self, &callers_ids),
+            materialize_symbol_rows(self, &callees_ids),
+        );
 
         let up_rows: Vec<Vec<Value>> = serde_json::from_str(&up_res).unwrap_or_default();
         let down_rows: Vec<Vec<Value>> = serde_json::from_str(&down_res).unwrap_or_default();
@@ -2012,6 +2007,47 @@ impl McpServer {
                 "canonical_sources": crate::mcp::McpServer::canonical_sources_snapshot()
             }
         }))
+    }
+
+    /// REQ-AXO-901952 — loud degraded error for RAM-only traversal tools
+    /// (bidi_trace) when the IST snapshot cannot serve the query (cold cache
+    /// or unscoped). No PG fallback, never a silent empty caller/callee list.
+    fn traversal_ram_unavailable_error(
+        symbol: &str,
+        project: Option<&str>,
+        depth: u64,
+        path_type: &str,
+        why: &str,
+    ) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": format!("{path_type} unavailable : {why}") }],
+            "isError": true,
+            "data": {
+                "status": "degraded",
+                "surfaces_used": [],
+                "surfaces_degraded": ["graph_ram_unavailable"],
+                "total_available": Value::Null,
+                "next_call_hint": "ist_snapshot_warm project_code=<project>",
+                "symbol": symbol,
+                "project": project.unwrap_or("*"),
+                "depth": depth,
+                "path_found": false,
+                "path_type": path_type,
+                "caller_count": Value::Null,
+                "callee_count": Value::Null,
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "ist_ram_snapshot_unavailable",
+                        "severity": "high",
+                        "recommended_action": why
+                    }],
+                    "follow_up_tools": ["ist_snapshot_warm", "status"],
+                    "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" }
+                },
+                "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" }
+            }
+        })
     }
 
     pub(crate) fn axon_api_break_check(&self, args: &Value) -> Option<Value> {
