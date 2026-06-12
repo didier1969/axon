@@ -1154,8 +1154,6 @@ fn test_path_uses_ram_snapshot_when_warm() {
     ];
     let graph = Arc::new(IstGraph::build(nodes, edges));
     crate::ist_snapshot::publish_process_snapshot("RAM".into(), graph);
-    std::env::set_var("AXON_IST_RAM_ENABLED", "1");
-
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1174,8 +1172,6 @@ fn test_path_uses_ram_snapshot_when_warm() {
         .unwrap()
         .result
         .unwrap();
-
-    std::env::remove_var("AXON_IST_RAM_ENABLED");
     crate::ist_snapshot::evict_process_snapshot("RAM");
 
     let data = response.get("data").unwrap();
@@ -2281,8 +2277,6 @@ fn test_axon_architectural_drift() {
         "PRJ".into(),
         Arc::new(IstGraph::build(nodes, edges)),
     );
-    std::env::set_var("AXON_IST_RAM_ENABLED", "1");
-
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
@@ -2294,8 +2288,6 @@ fn test_axon_architectural_drift() {
     };
 
     let response = server.handle_request(req);
-
-    std::env::remove_var("AXON_IST_RAM_ENABLED");
     crate::ist_snapshot::evict_process_snapshot("PRJ");
 
     let result = response.unwrap().result.expect("Expected result");

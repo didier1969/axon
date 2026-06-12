@@ -440,15 +440,11 @@ fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
 }
 
 /// REQ-AXO-901869 A1 — warm the RAM IST snapshot for every IST-bearing
-/// project at brain boot. Best-effort: no-op when the cache is disabled
-/// (`AXON_IST_RAM_ENABLED`), and per-project failures log + leave the PG
-/// fallback in place (correct post REQ-AXO-901869 A3). Runs on a blocking
-/// thread so it never stalls the async runtime during boot.
+/// project at brain boot. REQ-AXO-901952 made RAM unconditional (no opt-out),
+/// so boot always warms ; per-project failures log and leave that project's
+/// snapshot cold (callers then surface a loud degraded error, never a silent
+/// 0). Runs on a blocking thread so it never stalls the async runtime at boot.
 fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
-    if !crate::ist_snapshot::IstSnapshotCache::is_enabled() {
-        info!("REQ-AXO-901869 A1: IST RAM cache disabled — skipping boot warm");
-        return;
-    }
     tokio::task::spawn_blocking(move || {
         let store = BootWarmSqlStore(&graph_store);
         let raw = match store.0.query_json(

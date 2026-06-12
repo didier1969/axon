@@ -2,9 +2,9 @@
 //
 // One ArcSwap per process holds the per-project snapshots. Readers grab the
 // current Arc<HashMap<project_code, Arc<IstGraph>>> lock-free ; writers
-// publish a new map atomically when a load lands. AXON_IST_RAM_ENABLED gates
-// the cache so the call-site bascule in REQ-AXO-91486 can flip cleanly
-// (disabled → PG fallback unchanged ; enabled → cache lookup first).
+// publish a new map atomically when a load lands. REQ-AXO-901952 made the
+// RAM snapshot the SINGLE source for structural graph queries — the former
+// `AXON_IST_RAM_ENABLED` client opt-out toggle is removed (RAM unconditional).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,20 +38,14 @@ impl IstSnapshotCache {
         }
     }
 
-    /// Activation gate. REQ-AXO-901951 aligns the default with PIL-AXO-9002
-    /// ("IST RAM snapshot défaut ON ; désactivable client" — DEC-AXO-097):
-    /// **absence → enabled**. Only an explicit `0`/`false`/`off`/`no` disables
-    /// it (the client opt-out), in which case the call-site fallback (PG) is
-    /// used. The previous absence-→-off default contradicted the pillar and
-    /// left live with the RAM snapshot dark → slow PG-fallback retrieval.
+    /// REQ-AXO-901952 — the IST RAM snapshot is the SINGLE source for
+    /// structural graph queries (operator directive session 77, repeated 5×):
+    /// no PG fallback, one query method. The former client opt-out toggle
+    /// `AXON_IST_RAM_ENABLED` is removed — RAM is unconditional. Retained as a
+    /// status reporter (always `true`) for the `ram_enabled` field surfaced by
+    /// the ist_snapshot tools. Supersedes DEC-AXO-097 (IST RAM disable path).
     pub fn is_enabled() -> bool {
-        match std::env::var("AXON_IST_RAM_ENABLED") {
-            Ok(value) => !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            ),
-            Err(_) => true,
-        }
+        true
     }
 
     pub fn get(&self, project_code: &str) -> Option<Arc<IstGraph>> {

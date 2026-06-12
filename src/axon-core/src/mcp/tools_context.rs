@@ -2863,8 +2863,8 @@ impl McpServer {
         entry_candidates: &[EntryCandidate],
         route: RetrievalRoute,
     ) -> Vec<Value> {
-        // REQ-AXO-91486 slice 2 — RAM fast-path : when AXON_IST_RAM_ENABLED=1
-        // and the cache is warm for the anchor's project, expand to radius
+        // REQ-AXO-91486 slice 2 — RAM fast-path : when the cache is warm for
+        // the anchor's project (RAM unconditional, REQ-AXO-901952), expand to radius
         // 5-10 (Impact: 10) with neighbor cap 20-50 (Impact: 50), sub-µs
         // CSR traversal. Cache miss / disabled → silent fallback to the
         // legacy radius 1-2 / cap 2 SQL CTE path below.

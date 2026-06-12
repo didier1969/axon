@@ -234,16 +234,14 @@ impl McpServer {
 }
 
 fn ist_cache_miss_error(tool: &str, project: &str) -> Value {
+    // REQ-AXO-901952 — RAM is unconditional (no opt-out) ; `is_enabled()` is a
+    // status reporter that is always true. A cache miss means the snapshot is
+    // cold, not disabled : the only remedy is to warm it.
     let enabled = IstSnapshotCache::is_enabled();
-    let hint = if enabled {
-        format!(
-            "call `ist_snapshot_warm project_code={}` first ; then retry",
-            project
-        )
-    } else {
-        "set AXON_IST_RAM_ENABLED=1 in the brain env, restart, then call `ist_snapshot_warm`"
-            .to_string()
-    };
+    let hint = format!(
+        "call `ist_snapshot_warm project_code={}` first ; then retry",
+        project
+    );
     json!({
         "content": [{
             "type": "text",

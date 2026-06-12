@@ -30,7 +30,7 @@ impl McpServer {
     /// header: REQ-AXO-91487 LISTEN/NOTIFY sync unshipped), so without this
     /// every fresh session saw empty traversals until an operator called
     /// `ist_snapshot_warm` by hand. Returns the TRUE warmth after the attempt
-    /// (honours AXON_IST_RAM_ENABLED via `is_warm`): one-time O(snapshot) load,
+    /// (true warmth via `is_warm`; RAM unconditional per REQ-AXO-901952): one-time O(snapshot) load,
     /// subsequent calls hit the cache. On load error the caller transparently
     /// falls back to its PG path.
     pub(crate) fn ensure_ram_snapshot_warm(&self, project_code: &str) -> bool {

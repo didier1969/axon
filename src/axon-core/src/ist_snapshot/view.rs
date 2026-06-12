@@ -1,14 +1,13 @@
 // REQ-AXO-91486 — IstGraphView dispatcher.
 //
 // Façade over IstSnapshotCache. Callers invoke the same method ; the view
-// returns RAM results when the cache holds a snapshot for the project AND
-// AXON_IST_RAM_ENABLED is on. Otherwise the view returns None and the
-// caller falls back to its existing PG path (preserving GraphProjection
-// CTE behaviour per REQ-AXO-91486 invariants).
+// returns RAM results when the cache holds a snapshot for the project.
+// REQ-AXO-901952 removed the `AXON_IST_RAM_ENABLED` opt-out, so the only
+// gate is cache presence — a cold cache returns None and the caller must
+// surface a loud degraded error (never a silent 0 / PG fallback).
 //
 // `freshness_lag_ms` gating (LISTEN/NOTIFY threshold) lives in slice 3 ;
-// the v1 view trusts the cache contents as fresh-enough until slice 3
-// ships, so the only gates are AXON_IST_RAM_ENABLED + cache presence.
+// the v1 view trusts the cache contents as fresh-enough until slice 3 ships.
 
 use std::sync::Arc;
 
@@ -26,9 +25,9 @@ impl IstGraphView {
     }
 
     fn try_snapshot(&self, project: &str) -> Option<Arc<IstGraph>> {
-        if !IstSnapshotCache::is_enabled() {
-            return None;
-        }
+        // REQ-AXO-901952 — RAM is unconditional ; the only gate is cache
+        // presence. A cold cache returns None → caller surfaces a loud
+        // degraded error.
         self.cache.get(project)
     }
 
@@ -108,7 +107,7 @@ impl IstGraphView {
     }
 
     pub fn is_warm(&self, project: &str) -> bool {
-        IstSnapshotCache::is_enabled() && self.cache.get(project).is_some()
+        self.cache.get(project).is_some()
     }
 
     pub fn cache_handle(&self) -> Arc<IstSnapshotCache> {
@@ -215,43 +214,20 @@ mod tests {
         cache
     }
 
-    #[test]
-    fn forward_returns_none_when_disabled_env() {
-        // REQ-AXO-901951 — the RAM snapshot is now ON by default (PIL-9002), so
-        // "disabled" is the explicit client opt-out, not absence of the var.
-        std::env::set_var("AXON_IST_RAM_ENABLED", "0");
-        let view = IstGraphView::new(warm_cache());
-        assert!(view
-            .forward_at_radius("AXO", "AXO::a", 1, 10, &[])
-            .is_none());
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
-    }
+    // REQ-AXO-901952 — the `AXON_IST_RAM_ENABLED` opt-out is removed ; RAM is
+    // unconditional. The only gate is cache presence (warm → Some, cold → None).
 
     #[test]
-    fn forward_returns_results_when_default_absent_env() {
-        // REQ-AXO-901951 — absence of the var → enabled (default ON).
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
-        let view = IstGraphView::new(warm_cache());
-        let r = view
-            .forward_at_radius("AXO", "AXO::a", 1, 10, &[RelationType::Calls])
-            .expect("default-on (absent env) + warm cache should return Some");
-        assert_eq!(r, vec!["AXO::b".to_string()]);
-    }
-
-    #[test]
-    fn forward_returns_results_when_enabled_and_warm() {
-        std::env::set_var("AXON_IST_RAM_ENABLED", "1");
+    fn forward_returns_results_when_warm() {
         let view = IstGraphView::new(warm_cache());
         let r = view
             .forward_at_radius("AXO", "AXO::a", 1, 10, &[RelationType::Calls])
             .expect("warm cache should return Some");
         assert_eq!(r, vec!["AXO::b".to_string()]);
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
     }
 
     #[test]
     fn reverse_collects_callers() {
-        std::env::set_var("AXON_IST_RAM_ENABLED", "1");
         let view = IstGraphView::new(warm_cache());
         let r = view
             .reverse_at_radius("AXO", "AXO::c", 2, 10, &[RelationType::Calls])
@@ -259,22 +235,25 @@ mod tests {
         let set: std::collections::HashSet<&str> = r.iter().map(String::as_str).collect();
         assert!(set.contains("AXO::a"));
         assert!(set.contains("AXO::b"));
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
     }
 
     #[test]
     fn reciprocal_count_zero_for_dag() {
-        std::env::set_var("AXON_IST_RAM_ENABLED", "1");
         let view = IstGraphView::new(warm_cache());
         assert_eq!(view.reciprocal_calls_cycle_count("AXO"), Some(0));
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
     }
 
     #[test]
     fn is_warm_returns_false_when_cache_empty() {
-        std::env::set_var("AXON_IST_RAM_ENABLED", "1");
         let view = IstGraphView::new(Arc::new(IstSnapshotCache::new()));
         assert!(!view.is_warm("AXO"));
-        std::env::remove_var("AXON_IST_RAM_ENABLED");
+    }
+
+    #[test]
+    fn cold_cache_returns_none() {
+        // REQ-AXO-901952 — cold cache (no snapshot published) → None, so the
+        // caller can surface a loud degraded error instead of a silent 0.
+        let view = IstGraphView::new(Arc::new(IstSnapshotCache::new()));
+        assert!(view.forward_at_radius("AXO", "AXO::a", 1, 10, &[]).is_none());
     }
 }

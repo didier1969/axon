@@ -461,7 +461,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "ist_snapshot_warm",
-                "description": "[IST] REQ-AXO-91486 — cold-load the IST CSR snapshot for one project and publish it into the process cache. Subsequent calls to migrated call-sites (impact / collect_structural_neighbors / get_circular_dependency_count_fast) dispatch to RAM when AXON_IST_RAM_ENABLED=1. Returns nodes_loaded / edges_loaded / approximate_bytes / load_ms.",
+                "description": "[IST] REQ-AXO-91486 — cold-load the IST CSR snapshot for one project and publish it into the process cache. Subsequent calls to migrated call-sites (impact / collect_structural_neighbors / get_circular_dependency_count_fast) dispatch to RAM unconditionally (REQ-AXO-901952 — RAM is the single source, no opt-out). Returns nodes_loaded / edges_loaded / approximate_bytes / load_ms.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

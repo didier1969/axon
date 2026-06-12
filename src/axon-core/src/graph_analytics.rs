@@ -794,12 +794,12 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
-        // REQ-AXO-91486 slice 2 — RAM fast-path. When AXON_IST_RAM_ENABLED=1
-        // and the cache holds a snapshot for the project, count reciprocal
-        // CALLS cycles in-memory (linear scan over CSR) instead of running
-        // the SQL self-join. Cache miss / env disabled → silent fallback
-        // to the canonical PG path below. `project="*"` (workspace-wide)
-        // skips the fast-path because the cache is per-project.
+        // REQ-AXO-91486 slice 2 — RAM fast-path. When the cache holds a
+        // snapshot for the project (RAM unconditional, REQ-AXO-901952), count
+        // reciprocal CALLS cycles in-memory (linear scan over CSR) instead of
+        // running the SQL self-join. Cache miss → fallback to the canonical PG
+        // path below. `project="*"` (workspace-wide) skips the fast-path
+        // because the cache is per-project.
         if project != "*" {
             if let Some(count) =
                 crate::ist_snapshot::process_view().reciprocal_calls_cycle_count(project)

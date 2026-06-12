@@ -1534,7 +1534,8 @@ impl McpServer {
         // IstGraphView (above). SQL base returns 0/0; warm RAM counts
         // are patched in downstream.
         // REQ-AXO-901869 A2 / REQ-AXO-140 — PG fallback callers/callees when the
-        // RAM IstGraphView is cold (brain_only / tests / AXON_IST_RAM_ENABLED=0).
+        // RAM IstGraphView is cold (brain_only / tests — REQ-AXO-901952 removed
+        // the opt-out, so cold means "snapshot not yet warmed", never disabled).
         // CANONICAL-ONLY: synthetic-target resolution now lives in the RAM
         // projection (IstGraph::build), so the cold fallback counts only edges
         // whose target_id IS the canonical Symbol.id. The downstream merge always
