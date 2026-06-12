@@ -1500,21 +1500,13 @@ impl McpServer {
             });
         };
 
-        // REQ-AXO-134 — IST callee/caller projection accepts both canonical
-        // Symbol.id matches AND name-suffix matches against CALLS.target_id /
-        // CALLS.source_id. Reason: the IST indexer currently emits CALLS
-        // edges with synthetic target_ids of the form
-        // `<caller_file>::<callee_name>` rather than the canonical Symbol.id
-        // for cross-module Rust impl method calls. Until that indexer pass
-        // resolves to canonical IDs (see REQ-AXO-134 follow-up), inspect
-        // augments the join so callers/callees counts surface the real
-        // dependency graph instead of always reporting zero.
-        //
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS table is
-        // empty/dropped — the callers/callees subqueries return 0 cleanly
-        // (canonical caller/callee facts live in AGE; this tool falls back to
-        // the AGE-aware path/impact tools for full traversal). Skip the join
-        // shape entirely so the query stays valid against both backends.
+        // REQ-AXO-140 — synthetic CALLS targets (`<caller_file>::<name>`) are now
+        // resolved to the canonical callee node in the RAM projection
+        // (IstGraph::build), so the WARM RAM path below already counts the real
+        // dependency graph. The retired REQ-AXO-134 PG name-suffix workaround
+        // (`target_id LIKE '%::' || s.name`) is gone — it duplicated edges and
+        // belonged in a per-query SQL join, not the canonical surface. The PG
+        // fallback (cold RAM) counts canonical edges only.
         // REQ-AXO-901594 — RAM-first callers/callees count via IstGraphView
         // (PIL-AXO-9002). When the in-memory CSR snapshot is warm for this
         // project we compute the 1-hop reverse / forward CALLS reachability
@@ -1541,16 +1533,15 @@ impl McpServer {
         // Post-MIL-AXO-017: caller/callee counts come from RAM
         // IstGraphView (above). SQL base returns 0/0; warm RAM counts
         // are patched in downstream.
-        // REQ-AXO-901869 A2 — vrai fallback PG callers/callees quand le snapshot
-        // RAM IstGraphView est froid (brain_only / tests / AXON_IST_RAM_ENABLED=0).
-        // Remplace l'ancien `0 AS callers/callees` menteur. Compte les arêtes
-        // CALLS/CALLS_NIF sur `ist.Edge` canonique, en restaurant la compensation
-        // cible-synthétique (`target_id LIKE '%::' || s.name`, REQ-AXO-134) perdue
-        // à la migration AGE→RAM. Le merge en aval préfère toujours les comptes
-        // RAM quand le snapshot est chaud.
+        // REQ-AXO-901869 A2 / REQ-AXO-140 — PG fallback callers/callees when the
+        // RAM IstGraphView is cold (brain_only / tests / AXON_IST_RAM_ENABLED=0).
+        // CANONICAL-ONLY: synthetic-target resolution now lives in the RAM
+        // projection (IstGraph::build), so the cold fallback counts only edges
+        // whose target_id IS the canonical Symbol.id. The downstream merge always
+        // prefers the warm RAM counts (which DO resolve synthetic targets).
         let edge_counts = "(SELECT count(*) FROM ist.Edge e \
               WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
-                AND (e.target_id = s.id OR e.target_id LIKE '%::' || s.name) \
+                AND e.target_id = s.id \
                 AND e.project_code = s.project_code) AS callers, \
              (SELECT count(*) FROM ist.Edge e \
               WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
@@ -1576,15 +1567,44 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                let mut rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 if rows.is_empty() {
                     return Some(json!({
                         "content": [{ "type": "text", "text": format!("Symbol '{}' not found in current scope", symbol) }],
                         "isError": true
                     }));
                 }
-                let table =
-                    format_table_from_json(&res, &["Name", "Type", "Tested", "Callers", "Callees"]);
+                // REQ-AXO-140 — the rendered table must reflect the RAM-MERGED
+                // caller/callee counts. The warm RAM path resolves synthetic CALLS
+                // targets to the canonical callee; the SQL columns are canonical-
+                // only. Compute the merge HERE (was done after the table, so the
+                // table silently rendered the raw SQL counts — masked while the
+                // REQ-134 workaround inflated the SQL columns to match). Patch the
+                // first row's Callers/Callees before rendering so the table never
+                // diverges from the structured `callers`/`callees` data below.
+                let callers = ram_callers_count.unwrap_or_else(|| {
+                    rows.first()
+                        .and_then(|row| row.get(3))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                });
+                let callees = ram_callees_count.unwrap_or_else(|| {
+                    rows.first()
+                        .and_then(|row| row.get(4))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                });
+                if let Some(first) = rows.first_mut() {
+                    if first.len() > 4 {
+                        first[3] = Value::from(callers);
+                        first[4] = Value::from(callees);
+                    }
+                }
+                let patched_res = serde_json::to_string(&rows).unwrap_or_else(|_| res.clone());
+                let table = format_table_from_json(
+                    &patched_res,
+                    &["Name", "Type", "Tested", "Callers", "Callees"],
+                );
                 let scope = project
                     .map(|p| format!("project:{}", p))
                     .unwrap_or_else(|| "workspace:*".to_string());
@@ -1627,18 +1647,6 @@ impl McpServer {
                     .and_then(|row| row.get(2))
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let callers = ram_callers_count.unwrap_or_else(|| {
-                    rows.first()
-                        .and_then(|row| row.get(3))
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
-                });
-                let callees = ram_callees_count.unwrap_or_else(|| {
-                    rows.first()
-                        .and_then(|row| row.get(4))
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
-                });
                 let kind = rows
                     .first()
                     .and_then(|row| row.get(1))
@@ -2203,7 +2211,87 @@ mod inspect_callers_query_tests {
     use serde_json::json;
 
     #[test]
-    fn callers_count_combines_canonical_and_synthetic_target_ids() {
+    fn ram_reverse_at_radius_resolves_synthetic_callers_directly() {
+        // REQ-AXO-140 bisection — query reverse_at_radius DIRECTLY on the warmed
+        // snapshot. 3 ⇒ resolution + RAM lookup work end-to-end, so any inspect
+        // mismatch is in the inspect merge layer (not the projection).
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .symbol(
+                    SymbolFixture::new(
+                        "axon::wrong_project_scope_response",
+                        "wrong_project_scope_response",
+                        "method",
+                        "AXO",
+                    )
+                    .tested(true),
+                )
+                .symbol(SymbolFixture::new(
+                    "axon::caller_canonical",
+                    "caller_canonical",
+                    "function",
+                    "AXO",
+                ))
+                .symbol(SymbolFixture::new(
+                    "axon::caller_synthetic_a",
+                    "caller_synthetic_a",
+                    "function",
+                    "AXO",
+                ))
+                .symbol(SymbolFixture::new(
+                    "axon::caller_synthetic_b",
+                    "caller_synthetic_b",
+                    "function",
+                    "AXO",
+                ))
+                .call(CallFixture::canonical(
+                    "axon::caller_canonical",
+                    "axon::wrong_project_scope_response",
+                    "AXO",
+                ))
+                .call(CallFixture::synthetic(
+                    "axon::caller_synthetic_a",
+                    "tools_dx",
+                    "wrong_project_scope_response",
+                    "AXO",
+                ))
+                .call(CallFixture::synthetic(
+                    "axon::caller_synthetic_b",
+                    "tools_soll",
+                    "wrong_project_scope_response",
+                    "AXO",
+                )),
+        )
+        .unwrap();
+
+        assert!(
+            harness.server.ensure_ram_snapshot_warm("AXO"),
+            "snapshot must warm"
+        );
+        let rels = [
+            crate::ist_snapshot::RelationType::Calls,
+            crate::ist_snapshot::RelationType::CallsNif,
+        ];
+        let callers = crate::ist_snapshot::process_view().reverse_at_radius(
+            "AXO",
+            "axon::wrong_project_scope_response",
+            1,
+            10_000,
+            &rels,
+        );
+        let n = callers.as_ref().map(|v| v.len());
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("AXO");
+        assert_eq!(
+            n,
+            Some(3),
+            "RAM reverse must resolve all 3 callers (1 canonical + 2 synthetic), got {callers:?}"
+        );
+    }
+
+    #[test]
+    fn callers_count_resolves_synthetic_target_ids_via_ram() {
         let harness = create_test_server_with_ist_seed(
             IstSeed::new()
                 .symbol(
@@ -2263,6 +2351,18 @@ mod inspect_callers_query_tests {
             3,
         );
 
+        // REQ-AXO-140 — force a FRESH RAM snapshot from this seed (evict any stale
+        // sibling-test snapshot first; ensure_ram_snapshot_warm is a no-op when
+        // already warm), so inspect takes the canonical RAM path where the 2
+        // synthetic targets resolve to the canonical callee node.
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("AXO");
+        assert!(
+            harness.server.ensure_ram_snapshot_warm("AXO"),
+            "RAM snapshot must warm for the canonical-resolution path"
+        );
+
         let response = harness
             .server
             .handle_request(JsonRpcRequest {
@@ -2270,7 +2370,7 @@ mod inspect_callers_query_tests {
                 method: "tools/call".to_string(),
                 params: Some(json!({
                     "name": "inspect",
-                    "arguments": { "symbol": "wrong_project_scope_response", "project": "AXO" }
+                    "arguments": { "symbol": "axon::wrong_project_scope_response", "project": "AXO" }
                 })),
                 id: Some(json!(13401)),
             })
@@ -2280,10 +2380,13 @@ mod inspect_callers_query_tests {
             .as_str()
             .expect("inspect content[0].text is a string");
         assert!(text.contains("wrong_project_scope_response"), "{text}");
-        // The canonical + 2 synthetic callers must surface as 3 in the table.
+        // The canonical + 2 synthetic callers, all resolved in RAM, surface as 3.
         assert!(
             text.contains(" 3 "),
             "expected callers count 3 in inspect output, got: {text}"
         );
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("AXO");
     }
 }
