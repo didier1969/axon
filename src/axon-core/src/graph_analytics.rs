@@ -53,10 +53,16 @@ impl GraphStore {
                 WHERE (c.relation_type = 'CALLS' OR c.relation_type = 'CALLS_NIF'){scope}
             ),
             indirect AS (
+                -- REQ-AXO-901721 — cross-language taint: the indirect (2-hop)
+                -- walk must follow CALLS_NIF, not just CALLS, or an
+                -- elixir -CALLS_NIF-> rust_nif -CALLS-> unsafe chain (the
+                -- canonical cross-language taint) is silently undetected. The
+                -- `direct` CTE already accepts both relation kinds; indirect now
+                -- matches, so a NIF boundary on either hop is traversed.
                 SELECT s1.name AS name, s2.name AS target_name
                 FROM ist.Edge c2
-                JOIN dangerous d ON d.id = c2.target_id AND c2.relation_type = 'CALLS'
-                JOIN ist.Edge c1 ON c1.target_id = c2.source_id AND c1.relation_type = 'CALLS'
+                JOIN dangerous d ON d.id = c2.target_id AND c2.relation_type IN ('CALLS', 'CALLS_NIF')
+                JOIN ist.Edge c1 ON c1.target_id = c2.source_id AND c1.relation_type IN ('CALLS', 'CALLS_NIF')
                 JOIN Symbol s1 ON s1.id = c1.source_id
                 JOIN Symbol s2 ON s2.id = c2.target_id
                 WHERE true{scope}

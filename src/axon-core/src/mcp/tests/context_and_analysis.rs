@@ -564,33 +564,44 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         history_dir.path().to_string_lossy().to_string(),
     );
     let server = create_test_server();
+    // REQ-AXO-901721 (Batch D) — per-test IST isolation: snapshot/diff over a
+    // unique code instead of the shared real `AXO`, whose metrics drift under
+    // concurrent sibling mutations AND whose RAM staleness used to mask the very
+    // change this test injects (the old delta=0 asserts only passed when the
+    // snapshot didn't observe the inserted orphan — order/timing dependent).
+    let code = super::scoped_test_ist_code(&server);
+    let (target, wrapper, lib) = (
+        format!("{code}::target"),
+        format!("{code}::wrapper"),
+        format!("{code}/lib.rs"),
+    );
     server
         .graph_store
-        .execute(
-            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
-        )
+        .execute(&format!(
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-lib', 'symbol', '{wrapper}', '{code}', '{lib}', 'hash-{lib}')",
+        ))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::target', 'target_fn', 'function', true, true, false, 'AXO')")
+        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{target}', 'target_fn', 'function', true, true, false, '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::wrapper', 'wrapper_fn', 'function', false, false, false, 'AXO')")
+        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{wrapper}', 'wrapper_fn', 'function', false, false, false, '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute(
-            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
-        )
+        .execute(&format!(
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{lib}', '{wrapper}', 'CONTAINS', '{code}', 0)",
+        ))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wrapper}', '{target}', 'CALLS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-{code}-001', 'Vision', '{code}', 'Axon Vision', 'Build from project vision', 'current', '{{}}')"))
         .unwrap();
 
     let first = server
@@ -599,7 +610,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "project_status",
-                "arguments": { "project_code": "AXO", "mode": "brief" }
+                "arguments": { "project_code": code, "mode": "brief" }
             })),
             id: Some(json!(23001)),
         })
@@ -613,11 +624,11 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
 
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::orphan', 'orphan_fn', 'function', false, false, false, 'AXO')")
+        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{code}::orphan', 'orphan_fn', 'function', false, false, false, '{code}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{lib}', '{code}::orphan', 'CONTAINS', '{code}', 0)"))
         .unwrap();
 
     let second = server
@@ -626,7 +637,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "project_status",
-                "arguments": { "project_code": "AXO", "mode": "brief" }
+                "arguments": { "project_code": code, "mode": "brief" }
             })),
             id: Some(json!(23002)),
         })
@@ -644,7 +655,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "snapshot_history",
-                "arguments": { "project_code": "AXO", "limit": 10 }
+                "arguments": { "project_code": code, "limit": 10 }
             })),
             id: Some(json!(23003)),
         })
@@ -673,7 +684,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
             params: Some(json!({
                 "name": "snapshot_diff",
                 "arguments": {
-                    "project_code": "AXO",
+                    "project_code": code,
                     "from_snapshot_id": first_snapshot,
                     "to_snapshot_id": second_snapshot
                 }
@@ -691,9 +702,14 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         diff["data"]["to_snapshot_id"].as_str(),
         Some(second_snapshot.as_str())
     );
+    // The orphan inserted between the two snapshots IS a structural orphan
+    // (non-public, no callers), so the diff must observe orphan_code +1 — proof
+    // the diff machinery detects a real change. The old assert expected 0, which
+    // only held when shared-`AXO` RAM staleness hid the insert (the flake root).
+    // No wrapper was added between snapshots, so wrapper_count is unchanged.
     assert_eq!(
         diff["data"]["metric_delta"]["orphan_code_count_delta"].as_i64(),
-        Some(0)
+        Some(1)
     );
     assert_eq!(
         diff["data"]["metric_delta"]["wrapper_count_delta"].as_i64(),
@@ -3694,36 +3710,46 @@ fn test_axon_audit_secrets_detection() {
 fn test_axon_audit_cross_language_taint() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    // REQ-AXO-901860 — enroll project + IndexedFile rows so audit isn't gated
-    // as unindexed (taint findings derive from Symbol+Edge once past the gate).
+    // REQ-AXO-901721 (Batch D) — per-test IST isolation: unique code + id/path
+    // prefixes, and scope the audit to that code (was `project:"*"`, which
+    // scanned the whole shared live PG and diluted/masked the taint chain so the
+    // assert was non-deterministic). REQ-AXO-901860 — enroll project +
+    // IndexedFile so audit isn't gated as unindexed.
+    let code = super::scoped_test_ist_code(&server);
+    let (ef, rn, ub) = (
+        format!("{code}::elixir_func"),
+        format!("{code}::rust_nif"),
+        format!("{code}::unsafe_block"),
+    );
+    let (api, dummy) = (format!("{code}/api.ex"), format!("{code}/api_dummy.ex"));
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute(&format!("INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"))
         .unwrap();
-    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.ex', 'PRJ', 'hash-src/api.ex', 0), ('src/api_dummy.ex', 'PRJ', 'hash-src/api_dummy.ex', 0) ON CONFLICT (path) DO NOTHING").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('{api}', '{code}', 'hash-{api}', 0), ('{dummy}', '{code}', 'hash-{dummy}', 0) ON CONFLICT (path) DO NOTHING")).unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.ex', 'symbol', 'sym-src/api.ex', 'PRJ', 'src/api.ex', 'hash-src/api.ex')")
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-api', 'symbol', '{ef}', '{code}', '{api}', 'hash-{api}')"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.ex', 'symbol', 'sym-src/api_dummy.ex', 'PRJ', 'src/api_dummy.ex', 'hash-src/api_dummy.ex')")
+        .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-dummy', 'symbol', '{rn}', '{code}', '{dummy}', 'hash-{dummy}')"))
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::elixir_func', 'elixir_func', 'function', false, true, false, false, 'PRJ')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::rust_nif', 'rust_nif', 'function', false, true, true, false, 'PRJ')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::unsafe_block', 'unsafe_block', 'function', false, true, false, true, 'PRJ')").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('{ef}', 'elixir_func', 'function', false, true, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('{rn}', 'rust_nif', 'function', false, true, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('{ub}', 'unsafe_block', 'function', false, true, false, true, '{code}')")).unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/api.ex', 'prj::elixir_func', 'CONTAINS', 'PRJ', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{api}', '{ef}', 'CONTAINS', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::elixir_func', 'prj::rust_nif', 'CALLS_NIF', 'PRJ', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{ef}', '{rn}', 'CALLS_NIF', '{code}', 0)"))
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::rust_nif', 'prj::unsafe_block', 'CALLS', 'PRJ', 0)")
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{rn}', '{ub}', 'CALLS', '{code}', 0)"))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3732,7 +3758,7 @@ fn test_axon_audit_cross_language_taint() {
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "*"
+                "project": code
             }
         })),
         id: Some(json!(13)),
