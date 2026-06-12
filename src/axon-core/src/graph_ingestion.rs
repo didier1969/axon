@@ -1123,7 +1123,11 @@ impl GraphStore {
             )],
             project_code: project_code.to_string(),
         };
-        crate::postgres::bulk_writer::flush_batch(&batch)?;
+        // REQ-AXO-901959 — route the live graph write through THIS store's
+        // native pool (correct DB + lifetime-scoped), not bulk_writer's global
+        // env-resolved pool. Unblocks per-test DB isolation for the pipeline_v2
+        // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
+        self.pool.native.flush_batch_copy(&batch)?;
         Ok(chunk_ids_emitted)
     }
 
@@ -1399,7 +1403,11 @@ impl GraphStore {
             indexed_files: indexed_file_rows,
             project_code: project_code.to_string(),
         };
-        crate::postgres::bulk_writer::flush_batch(&batch)?;
+        // REQ-AXO-901959 — route the live graph write through THIS store's
+        // native pool (correct DB + lifetime-scoped), not bulk_writer's global
+        // env-resolved pool. Unblocks per-test DB isolation for the pipeline_v2
+        // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
+        self.pool.native.flush_batch_copy(&batch)?;
         Ok(chunk_ids_per_file)
     }
 

@@ -311,6 +311,31 @@ impl NativePgCtx {
         })
     }
 
+    /// REQ-AXO-901959 — flush a `PgBulkBatch` (graph half: Symbol/Chunk/
+    /// IndexedFile/CALLS/CONTAINS) through THIS store's native pool, so the rows
+    /// land in the same database the GraphStore reads from — NOT bulk_writer's
+    /// global env-resolved pool. Closes the graph half of the linchpin
+    /// (REQ-AXO-901877); the embedding half is `flush_chunk_embeddings_copy`
+    /// above. The COPY/INSERT path is schema-qualified, so no `search_path`
+    /// setup is required. The bulk_writer async core is pool-agnostic (takes a
+    /// `&mut Client`), so this is pure routing — the write logic is unchanged.
+    pub fn flush_batch_copy(
+        &self,
+        batch: &crate::postgres::bulk_writer::PgBulkBatch,
+    ) -> anyhow::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool.clone();
+        let batch = batch.clone();
+        run_blocking(async move {
+            let mut client = pool.get().await.map_err(|e| {
+                anyhow::anyhow!("flush_batch_copy: native pool acquire failed: {e}")
+            })?;
+            crate::postgres::bulk_writer::flush_batch_async(&mut client, &batch).await
+        })
+    }
+
     /// Execute a (possibly multi-statement) SQL string. Mirrors the plugin's
     /// `pg_execute`: returns `true` on success, `false` on any error.
     pub fn run_execute(&self, sql: &str) -> bool {

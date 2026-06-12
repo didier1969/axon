@@ -503,7 +503,11 @@ pub fn flush_batch(batch: &PgBulkBatch) -> Result<()> {
     })
 }
 
-async fn flush_batch_async(
+// REQ-AXO-901959 — exposed to the GraphStore's native ctx so the live graph
+// write routes through the STORE's own pool (correct DB + lifetime-scoped),
+// not this module's global env-resolved `POOL`. Mirrors the embedding half
+// already closed by `NativePgCtx::flush_chunk_embeddings_copy`.
+pub(crate) async fn flush_batch_async(
     client: &mut deadpool_postgres::Client,
     batch: &PgBulkBatch,
 ) -> Result<()> {
