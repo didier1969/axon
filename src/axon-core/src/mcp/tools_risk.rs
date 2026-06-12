@@ -900,36 +900,34 @@ impl McpServer {
                 }));
             }
         };
-        // REQ-AXO-91515 (MIL-AXO-019 vague 1d) — RAM-first via
-        // IstGraphView. The blast-radius probe is a reverse BFS of
-        // CALLS edges up to `depth`; the in-memory CSR walks that
-        // in O(N+M) without a PG roundtrip, then falls back to
-        // `ist.callers_of` SQL when the per-project cache is cold.
+        // REQ-AXO-901952 — RAM-only blast-radius probe (reverse BFS of CALLS
+        // edges) via IstGraphView. Derive the project from the resolved symbol
+        // when unscoped ; a cold cache yields a 0 radius with the degraded
+        // surface flagged (this is a what-if estimate, not an authoritative
+        // count) — no PG `ist.callers_of` fallback.
         let view = crate::ist_snapshot::process_view();
-        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
+        let effective_project: Option<String> = match project {
+            Some(p) => Some(p.to_string()),
+            None => self.symbol_project_code(&target_id),
+        };
+        let ram_warm = effective_project
+            .as_deref()
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
         let mut surfaces_used: Vec<&'static str> = Vec::new();
         let mut surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        let count: i64 = if ram_attempted {
+        let count: i64 = if ram_warm {
             surfaces_used.push("graph_ram");
-            let project_key = project.unwrap_or("");
+            let project_key = effective_project.as_deref().unwrap_or("");
             let depth_u32 = depth.clamp(1, 10) as u32;
             let callers = view
                 .reverse_at_radius(project_key, &target_id, depth_u32, 10_000, &[])
                 .unwrap_or_default();
             callers.len() as i64
         } else {
-            // REQ-AXO-271 slice 2d : legacy CALLS table dropped ;
-            // ist.Edge is canonical. `ist.callers_of` SQL
-            // function (MIL-AXO-017 slice 4) wraps the WITH RECURSIVE
-            // walk over `ist.Edge WHERE relation_type='CALLS'`.
-            surfaces_used.push("graph_pg");
             surfaces_degraded.push("graph_ram_unavailable");
-            let depth_i = depth.clamp(1, 10) as i64;
-            let safe_target = target_id.replace('\'', "''");
-            let sql =
-                format!("SELECT count(*) FROM ist.callers_of('{safe_target}', {depth_i}, NULL)");
-            self.graph_store.query_count(&sql).unwrap_or(0)
+            0
         };
 
         let report = format!(
