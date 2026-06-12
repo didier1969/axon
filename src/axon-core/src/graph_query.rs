@@ -566,21 +566,23 @@ mod tests {
                    '2026-06-12T13:00:00Z'::timestamptz AS ts, \
                    '2026-06-12 13:00:00'::timestamp AS tsn, \
                    '2026-06-12'::date AS d, \
-                   '13:00:00'::time AS t",
+                   '13:00:00'::time AS t, \
+                   '3.14'::numeric AS n, \
+                   sum(x)::numeric AS s FROM (VALUES (1::bigint),(2)) v(x)",
             )
             .unwrap();
         assert!(
             !res.contains("<unsupported type"),
-            "sentinel leaked for a temporal value: {res}"
+            "sentinel leaked for a temporal/numeric value: {res}"
         );
         assert!(
             res.contains("2026-06-12"),
             "timestamptz/timestamp/date value missing: {res}"
         );
-        assert!(
-            res.contains("13:00:00"),
-            "time value missing: {res}"
-        );
+        assert!(res.contains("13:00:00"), "time value missing: {res}");
+        // REQ-AXO-901905 — numeric (literal + sum(bigint)) renders natively now.
+        assert!(res.contains("3.14"), "numeric literal value missing: {res}");
+        assert!(res.contains('3'), "sum(bigint)::numeric value missing: {res}");
     }
 
     /// REQ-AXO-129 — `query_on_ctx` must convert plugin error

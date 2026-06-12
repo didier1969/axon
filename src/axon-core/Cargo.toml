@@ -158,6 +158,11 @@ tokio-postgres = { version = "0.7", features = [
     "with-serde_json-1",
     "with-uuid-1",
 ] }
+# REQ-AXO-901905 — decode PG `numeric` so the sql-gateway renders decimals
+# natively instead of the `<unsupported type numeric>` sentinel (removes the
+# recurring ::bigint/::float8 cast workaround). rust_decimal ships its OWN
+# tokio-postgres FromSql/ToSql via the `db-tokio-postgres` feature.
+rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 deadpool-postgres = "0.14"
 postgres-types = { version = "0.2", features = ["derive"] }
 # pgvector crate: provides pgvector::Vector type with tokio-postgres

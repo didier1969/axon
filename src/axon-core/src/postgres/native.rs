@@ -678,5 +678,13 @@ fn render_pg_value(row: &tokio_postgres::Row, col: usize) -> String {
             return v.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
         }
     }
+    // REQ-AXO-901905 — PG `numeric` (e.g. sum(bigint), avg, money math) rendered
+    // as `<unsupported type numeric>`, forcing a ::bigint/::float8 cast at every
+    // call site. Decoded natively via tokio-postgres' `with-rust_decimal-1`.
+    if ty == Type::NUMERIC {
+        if let Ok(v) = row.try_get::<_, Option<rust_decimal::Decimal>>(col) {
+            return v.map(|d| d.to_string()).unwrap_or_else(|| "null".into());
+        }
+    }
     format!("<unsupported type {}>", ty.name())
 }
