@@ -177,22 +177,37 @@ impl McpServer {
         // not represented in the IST snapshot ; when RAM serves the
         // query, `inferred_bridge_edges` is reported as 0 and a
         // `surfaces_degraded` hint flags the gap.
-        let view = process_view();
-        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
-        let mut surfaces_used: Vec<&'static str> = Vec::new();
-        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
-
-        let query_outcome: Result<String, anyhow::Error> = if ram_attempted {
-            surfaces_used.push("graph_ram");
-            surfaces_degraded.push("inferred_bridge_edges_unavailable_in_ram_v1");
-            Ok(self.build_impact_rows_from_ram(&view, project.unwrap_or(""), &target_id, depth))
-        } else {
-            surfaces_used.push("graph_pg");
-            surfaces_degraded.push("graph_ram_unavailable");
-            self.impact_callers_via_ist_edge(&target_id, project, depth)
-                .map(Ok)
-                .unwrap_or_else(|| Ok("[]".to_string()))
+        // REQ-AXO-901952 — RAM is the SINGLE source for the caller traversal
+        // (PIL-AXO-9002). Cold cache or an unscoped (project=None) query →
+        // loud degraded error, never a PG fallback. The text-matching
+        // `bridge_name` inference (PG-only, false-positive-prone) is dropped
+        // by design : the structural RAM graph reports only real edges.
+        // The RAM snapshot is per-project ; when the caller omits `project`,
+        // derive it from the resolved symbol's metadata so an unscoped
+        // (workspace-wide) impact still serves from RAM. The graph traversal
+        // stays in RAM ; only this metadata lookup touches PG.
+        let effective_project: Option<String> = match project {
+            Some(p) => Some(p.to_string()),
+            None => self.symbol_project_code(&target_id),
         };
+        let ram_attempted = effective_project
+            .as_deref()
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
+        if !ram_attempted {
+            let why = if effective_project.is_none() {
+                "impact could not resolve the symbol's project for the RAM IST snapshot ; pass an explicit `project` (REQ-AXO-901952, no PG fallback)"
+            } else {
+                "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
+            };
+            return Some(Self::impact_ram_unavailable_error(symbol, project, depth, why));
+        }
+        let view = process_view();
+        let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
+        let surfaces_degraded: Vec<&'static str> = Vec::new();
+        let proj_key = effective_project.as_deref().unwrap_or("");
+        let query_outcome: Result<String, anyhow::Error> =
+            Ok(self.build_impact_rows_from_ram(&view, proj_key, &target_id, depth));
 
         match query_outcome {
             Ok(res) => {
@@ -202,7 +217,6 @@ impl McpServer {
                 let mut impacted_symbol_names = BTreeSet::<String>::new();
                 let mut direct_edges = 0_i64;
                 let mut nif_edges = 0_i64;
-                let mut inferred_edges = 0_i64;
 
                 for row in &rows {
                     let caller_id = row
@@ -239,7 +253,6 @@ impl McpServer {
                     match edge_type {
                         "calls" => direct_edges += 1,
                         "calls_nif" => nif_edges += 1,
-                        "bridge_name" => inferred_edges += 1,
                         _ => {}
                     }
                 }
@@ -319,8 +332,6 @@ impl McpServer {
 
                 let confidence_label = if direct_edges + nif_edges > 0 {
                     "high"
-                } else if inferred_edges > 0 {
-                    "medium"
                 } else {
                     "low"
                 };
@@ -341,8 +352,8 @@ impl McpServer {
                     depth, impact_radius
                 ));
                 evidence.push_str(&format!(
-                    "**Coverage:** confidence={} (direct_calls={}, calls_nif={}, inferred_bridge={})\n\n",
-                    confidence_label, direct_edges, nif_edges, inferred_edges
+                    "**Coverage:** confidence={} (direct_calls={}, calls_nif={})\n\n",
+                    confidence_label, direct_edges, nif_edges
                 ));
                 evidence.push_str(&table);
                 if let Some(section) =
@@ -369,14 +380,10 @@ impl McpServer {
                     )
                 );
 
-                let mut blocking_factors = Vec::<Value>::new();
-                if direct_edges + nif_edges == 0 && inferred_edges > 0 {
-                    blocking_factors.push(json!({
-                        "factor": "impact_inferred_from_bridge_edges",
-                        "severity": "medium",
-                        "recommended_action": "treat the impact graph as partially inferred and confirm critical hops with inspect/path before mutation"
-                    }));
-                }
+                // REQ-AXO-901952 — the inferred `bridge_name` concept is
+                // removed ; the RAM graph reports only real edges, so there is
+                // no "partially inferred" blocking factor to raise.
+                let blocking_factors = Vec::<Value>::new();
                 let remediation_actions = blocking_factors
                     .iter()
                     .filter_map(|factor| {
@@ -417,8 +424,7 @@ impl McpServer {
                         "summary": {
                             "confidence": confidence_label,
                             "direct_edges": direct_edges,
-                            "calls_nif_edges": nif_edges,
-                            "inferred_bridge_edges": inferred_edges
+                            "calls_nif_edges": nif_edges
                         },
                         "operator_guidance": {
                             "actionable_now": blocking_factors.is_empty(),
@@ -1074,68 +1080,57 @@ impl McpServer {
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// PG fallback (REQ-AXO-296 / REQ-AXO-901869 A3) for `axon_impact`'s
-    /// reverse-traversal callers. Used ONLY when the canonical RAM
-    /// `IstGraphView` snapshot is cold (brain_only boot, RAM disabled,
-    /// tests). The warm/prod path is `build_impact_rows_from_ram`
-    /// (PIL-AXO-9002 — the in-memory graph is canonical; PG is the
-    /// degraded fallback, not the source of truth). Wraps
-    /// `ist.callers_of` (WITH RECURSIVE on `ist.Edge`) and joins
-    /// `ist.Symbol` + `ist.Chunk` to surface the 5-column row shape
-    /// `axon_impact` parses: (caller_id, edge_type, origin, name, kind).
-    /// Returns `None` on empty / error so the caller degrades to
-    /// `axon_impact_without_calls`.
-    fn impact_callers_via_ist_edge(
-        &self,
-        target_id: &str,
-        project: Option<&str>,
-        depth: u64,
-    ) -> Option<String> {
-        let depth_clamped = depth.clamp(1, 10) as i32;
-        let project_code_param = project.unwrap_or("");
-        // REQ-AXO-901869 A3 root cause: the prior SQL used `\`
-        // line-continuations, which strip the next line's leading
-        // whitespace and glued `relation_type` to `WHEN` →
-        // `relation_typeWHEN` → "syntax error at or near THEN" →
-        // every cold-cache impact silently returned `[]`. We now use a
-        // plain multi-line literal (newlines kept) so no two SQL tokens
-        // can ever be welded together. Named params (`$target`/`$proj`)
-        // are inlined as escaped literals by `expand_named_params`.
+    /// REQ-AXO-901952 — resolve a symbol's project_code (the RAM snapshot
+    /// cache key) from PG metadata when the caller didn't scope the query.
+    /// Metadata lookup only — the graph traversal stays in RAM.
+    fn symbol_project_code(&self, symbol_id: &str) -> Option<String> {
         let sql = format!(
-            "WITH callers AS (
-                 SELECT source_id, distance, relation_type
-                 FROM ist.callers_of($target, {depth_clamped}::INT, $proj)
-             ),
-             enriched AS (
-                 SELECT c.source_id AS caller_id,
-                        CASE c.relation_type
-                            WHEN 'CALLS' THEN 'calls'
-                            WHEN 'CALLS_NIF' THEN 'calls_nif'
-                            ELSE lower(c.relation_type)
-                        END AS edge_type,
-                        COALESCE(s.name, '-') AS name,
-                        COALESCE(s.kind, '-') AS kind,
-                        COALESCE(MIN(ch.file_path), '-') AS origin
-                 FROM callers c
-                 LEFT JOIN ist.Symbol s ON s.id = c.source_id
-                 LEFT JOIN ist.Chunk ch ON ch.source_id = c.source_id AND ch.source_type = 'symbol'
-                 GROUP BY c.source_id, c.relation_type, s.name, s.kind
-             )
-             SELECT caller_id, edge_type, origin, name, kind FROM enriched"
+            "SELECT project_code FROM ist.Symbol WHERE id = '{}' LIMIT 1",
+            symbol_id.replace('\'', "''")
         );
-        let params = serde_json::json!({ "target": target_id, "proj": project_code_param });
-        let raw = match self.graph_store.query_json_param(&sql, &params) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("impact_callers_via_ist_edge: SQL query failed: {}", e);
-                return None;
-            }
-        };
-        if raw.trim() == "[]" {
-            return None;
-        }
-        Some(raw)
+        let raw = self.graph_store.query_json(&sql).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+        rows.first()
+            .and_then(|r| r.first())
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
     }
 
-    // MIL-AXO-017 slice 6B: AGE helper impact_callers_via_age removed ; ist.callers_of is canonical.
+    /// REQ-AXO-901952 — loud degraded error when the RAM IST snapshot cannot
+    /// serve `impact` (cold cache or unscoped query). No PG fallback, never a
+    /// silent empty impact radius. Replaces the removed PG fallback
+    /// `impact_callers_via_ist_edge` (ist.callers_of WITH RECURSIVE).
+    fn impact_ram_unavailable_error(
+        symbol: &str,
+        project: Option<&str>,
+        depth: u64,
+        why: &str,
+    ) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": format!("impact unavailable : {why}") }],
+            "isError": true,
+            "data": {
+                "status": "degraded",
+                "surfaces_used": [],
+                "surfaces_degraded": ["graph_ram_unavailable"],
+                "total_available": Value::Null,
+                "next_call_hint": "ist_snapshot_warm project_code=<project>",
+                "symbol": symbol,
+                "project": project,
+                "depth": depth,
+                "impact_radius": Value::Null,
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "ist_ram_snapshot_unavailable",
+                        "severity": "high",
+                        "recommended_action": why
+                    }],
+                    "follow_up_tools": ["ist_snapshot_warm", "status"],
+                    "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" }
+                },
+                "next_action": { "kind": "warm_ram_snapshot", "tool": "ist_snapshot_warm", "when": "now" }
+            }
+        })
+    }
 }
