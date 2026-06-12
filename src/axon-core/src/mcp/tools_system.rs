@@ -794,12 +794,15 @@ impl McpServer {
 
         match self.graph_store.query_json(q) {
             Ok(result) => {
+                // REQ-AXO-901949 inv.5 — auto-continue: surface the valid next
+                // moves from the single-source tool_routing record.
+                let next = super::tool_contracts::next_links("sql");
                 if result.trim() == "[]" && ql.contains("match") {
                     let note =
                         "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use the SQL graph functions in `ist.path` or `query_examples`.";
-                    Some(json!({ "content": [{ "type": "text", "text": note }] }))
+                    Some(json!({ "content": [{ "type": "text", "text": note }], "data": { "next": next } }))
                 } else {
-                    Some(json!({ "content": [{ "type": "text", "text": result }] }))
+                    Some(json!({ "content": [{ "type": "text", "text": result }], "data": { "next": next } }))
                 }
             }
             Err(e) => {

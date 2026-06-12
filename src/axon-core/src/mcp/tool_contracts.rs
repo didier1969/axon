@@ -187,6 +187,20 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
     })
 }
 
+/// REQ-AXO-901949 inv.5 — the "auto-continue" property: every tracer-tool
+/// response carries its valid next moves, sourced from the SAME `tool_routing`
+/// record that feeds the routing tests (single source, no drift). `None` for
+/// non-tracer tools so callers can inject unconditionally without a per-tool
+/// branch. Returns `{tools, reason}` rather than a bare list so the agent gets
+/// the token-economy rationale inline (why follow the link before fanning out).
+pub(crate) fn next_links(name: &str) -> Option<Value> {
+    let routing = tool_routing(name)?;
+    Some(serde_json::json!({
+        "tools": routing.follow_ups,
+        "reason": routing.token_hint,
+    }))
+}
+
 /// REQ-AXO-901949 — classify a PG execution error as undefined-column (42703)
 /// or undefined-table/relation (42P01) so `sql` can answer with the real
 /// columns/tables instead of the opaque passthrough string. Returns `None` for
@@ -495,6 +509,44 @@ mod tests {
         // Bare table names (no schema prefix) are not extracted — the repair
         // falls back to schema_overview rather than guessing a schema.
         assert!(extract_sql_relations("SELECT 1 FROM mytable").is_empty());
+    }
+
+    #[test]
+    fn next_links_single_source_for_tracer_tools() {
+        // The `next` envelope is derived from the SAME tool_routing record the
+        // routing test asserts — proving single-source (no second list to drift).
+        let sql = next_links("sql").expect("sql next");
+        assert_eq!(
+            sql["tools"].as_array().unwrap(),
+            &[
+                serde_json::json!("schema_overview"),
+                serde_json::json!("query_examples")
+            ]
+        );
+        assert!(sql["reason"].as_str().unwrap().len() > 10);
+
+        let query = next_links("query").expect("query next");
+        assert_eq!(
+            query["tools"].as_array().unwrap(),
+            &[
+                serde_json::json!("inspect"),
+                serde_json::json!("retrieve_context"),
+                serde_json::json!("impact")
+            ]
+        );
+
+        let soll = next_links("soll_manager").expect("soll_manager next");
+        assert_eq!(
+            soll["tools"].as_array().unwrap(),
+            &[
+                serde_json::json!("soll_validate"),
+                serde_json::json!("soll_query_context")
+            ]
+        );
+
+        // Non-tracer tools yield None → callers inject unconditionally, no-op.
+        assert!(next_links("impact").is_none());
+        assert!(next_links("status").is_none());
     }
 
     #[test]

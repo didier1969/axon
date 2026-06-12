@@ -802,6 +802,12 @@ impl McpServer {
                             );
                         }
 
+                        // REQ-AXO-901949 inv.5 — auto-continue links from the
+                        // single-source tool_routing record (alongside the
+                        // entity-aware canonical_next_links already present).
+                        if let Some(next) = crate::mcp::tool_contracts::next_links("soll_manager") {
+                            response_data["next"] = next;
+                        }
                         Some(json!({
                             "content": [{ "type": "text", "text": report }],
                             "data": response_data
@@ -925,6 +931,10 @@ impl McpServer {
                                 "project_code": project_code.as_deref().unwrap_or(""),
                             }
                         });
+                        // REQ-AXO-901949 inv.5 — auto-continue (single source).
+                        if let Some(next) = crate::mcp::tool_contracts::next_links("soll_manager") {
+                            payload["data"]["next"] = next;
+                        }
                         if let (Some(code), Some(before), Ok(after)) = (
                             project_code.as_deref(),
                             before_snapshot.as_ref(),
@@ -1207,6 +1217,10 @@ impl McpServer {
                                         "auto_canonized_from": auto_canonized_from,
                                     }
                                 });
+                                // REQ-AXO-901949 inv.5 — auto-continue (single source).
+                                if let Some(next) = crate::mcp::tool_contracts::next_links("soll_manager") {
+                                    payload["data"]["next"] = next;
+                                }
                                 if inserted {
                                     if let (Some(before), Some(code), Ok(after)) = (
                                         before_snapshot.as_ref(),

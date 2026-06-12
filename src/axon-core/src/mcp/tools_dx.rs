@@ -935,6 +935,7 @@ impl McpServer {
                         "surfaces_degraded": surfaces_degraded,
                         "total_available": total_available,
                         "next_call_hint": next_call_hint,
+                        "next": super::tool_contracts::next_links("query"),
                         "pagination": {
                             "offset": 0,
                             "limit": query_limit,
