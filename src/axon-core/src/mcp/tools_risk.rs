@@ -1071,8 +1071,9 @@ impl McpServer {
 
     /// REQ-AXO-901952 — resolve a symbol's project_code (the RAM snapshot
     /// cache key) from PG metadata when the caller didn't scope the query.
-    /// Metadata lookup only — the graph traversal stays in RAM.
-    fn symbol_project_code(&self, symbol_id: &str) -> Option<String> {
+    /// Metadata lookup only — the graph traversal stays in RAM. `pub(super)`
+    /// so sibling tool modules (api_break_check) share the same derive logic.
+    pub(super) fn symbol_project_code(&self, symbol_id: &str) -> Option<String> {
         let sql = format!(
             "SELECT project_code FROM ist.Symbol WHERE id = '{}' LIMIT 1",
             symbol_id.replace('\'', "''")

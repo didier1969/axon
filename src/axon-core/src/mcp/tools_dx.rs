@@ -2076,51 +2076,39 @@ impl McpServer {
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         };
 
-        // REQ-AXO-91513 (MIL-AXO-019 vague 1d) — RAM-first via IstGraphView.
-        // Direct callers (depth=1, reverse_at_radius) of the resolved
-        // symbol = the surface of API consumers. Fallback to
-        // `ist.callers_of` SQL function when the cache is cold.
-        let view = crate::ist_snapshot::process_view();
-        let ram_attempted = project.map(|p| view.is_warm(p)).unwrap_or(false);
-        let mut surfaces_used: Vec<&'static str> = Vec::new();
-        let mut surfaces_degraded: Vec<&'static str> = Vec::new();
-
-        let consumer_ids: Vec<String> = if ram_attempted {
-            surfaces_used.push("graph_ram");
-            view.reverse_at_radius(project.unwrap_or(""), &target_id, 1, 10_000, &[])
-                .unwrap_or_default()
-        } else {
-            surfaces_used.push("graph_pg");
-            surfaces_degraded.push("graph_ram_unavailable");
-            // REQ-AXO-901869 A3 — `ist.callers_of` RETURNS (source_id,
-            // distance, relation_type) : the prior `SELECT caller_id`
-            // referenced a non-existent column (SQL error → silently no
-            // consumers). The 3rd arg is `p_project_code TEXT DEFAULT ''`
-            // — passing `NULL` made `e.project_code = NULL` NULL-out
-            // every row. Use the empty-string unscoped sentinel (or the
-            // scoped code) and the real `source_id` column.
-            let safe_target = target_id.replace('\'', "''");
-            let proj_param = project.unwrap_or("").replace('\'', "''");
-            let sql =
-                format!("SELECT source_id FROM ist.callers_of('{safe_target}', 1, '{proj_param}')");
-            self.graph_store
-                .query_json(&sql)
-                .ok()
-                .and_then(|raw| {
-                    serde_json::from_str::<Vec<Vec<Value>>>(&raw)
-                        .ok()
-                        .map(|rows| {
-                            rows.into_iter()
-                                .filter_map(|r| {
-                                    r.into_iter()
-                                        .next()
-                                        .and_then(|v| v.as_str().map(String::from))
-                                })
-                                .collect()
-                        })
-                })
-                .unwrap_or_default()
+        // REQ-AXO-901952 — RAM is the SINGLE source for the consumer
+        // (direct-caller) surface. Derive the project from the resolved
+        // symbol when unscoped ; cold cache → loud degraded error, no PG
+        // `ist.callers_of` fallback.
+        let effective_project: Option<String> = match project {
+            Some(p) => Some(p.to_string()),
+            None => self.symbol_project_code(&target_id),
         };
+        let ram_attempted = effective_project
+            .as_deref()
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
+        if !ram_attempted {
+            let why = if effective_project.is_none() {
+                "api_break_check could not resolve the symbol's project for the RAM IST snapshot ; pass an explicit `project` (REQ-AXO-901952, no PG fallback)"
+            } else {
+                "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
+            };
+            return Some(Self::traversal_ram_unavailable_error(
+                symbol,
+                project,
+                1,
+                "api_break_check",
+                why,
+            ));
+        }
+        let view = crate::ist_snapshot::process_view();
+        let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
+        let surfaces_degraded: Vec<&'static str> = Vec::new();
+        let proj_key = effective_project.as_deref().unwrap_or("");
+        let consumer_ids: Vec<String> = view
+            .reverse_at_radius(proj_key, &target_id, 1, 10_000, &[])
+            .unwrap_or_default();
 
         // Materialise display rows : [caller_name, caller_kind, caller_project_code]
         let res = if consumer_ids.is_empty() {
