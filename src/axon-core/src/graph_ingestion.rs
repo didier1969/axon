@@ -249,6 +249,32 @@ impl GraphStore {
         }
     }
 
+    /// REQ-AXO-140 — resolve a CALLS/CALLS_NIF target to the callee's canonical
+    /// Symbol.id instead of the synthetic `<caller_file>::<name>` that assumes
+    /// the callee is co-located with the caller.
+    ///
+    /// `name_index` maps a bare callee name to every callable definition
+    /// (function/method) in the current batch. A name with exactly one
+    /// definition resolves to that canonical id (its real defining file);
+    /// 0 (callee in a previously-indexed file outside this batch) or >1
+    /// (ambiguous) falls back to the file-local synthetic id, which the REQ-134
+    /// query projection still matches by name-suffix. Globally-qualified names
+    /// (already carrying a `::`/`.` path) keep their direct mapping.
+    fn resolve_call_target_id(
+        project_code: &str,
+        caller_path: &str,
+        callee_name: &str,
+        name_index: &std::collections::HashMap<String, Vec<String>>,
+    ) -> String {
+        if Self::is_globally_qualified_symbol(callee_name) {
+            return Self::symbol_id(project_code, caller_path, callee_name);
+        }
+        match name_index.get(callee_name) {
+            Some(ids) if ids.len() == 1 => ids[0].clone(),
+            _ => Self::symbol_id(project_code, caller_path, callee_name),
+        }
+    }
+
     fn relation_table(rel_type: &str) -> Option<&'static str> {
         match rel_type.to_lowercase().as_str() {
             "calls" | "calls_otp" => Some("CALLS"),
@@ -1174,6 +1200,30 @@ impl GraphStore {
         // REQ-AXO-901653 slice-5a: `file_rows` accumulator (REQ-AXO-345
         // public.file UPSERT) deleted ; legacy state-machine table.
 
+        // REQ-AXO-140 — batch-wide callee-name → canonical-id index, built in a
+        // pre-pass over EVERY file's symbols so a CALLS edge in the first file
+        // can resolve a callee defined in the last file of the same batch. Only
+        // callable definitions participate; a symbol_id is recorded once so a
+        // duplicate parse does not look like ambiguity.
+        let mut call_target_index: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut indexed_call_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for parsed in files {
+            let path_str = parsed.path.to_string_lossy();
+            for sym in &parsed.symbols {
+                if matches!(sym.kind.as_str(), "function" | "method") {
+                    let id = Self::symbol_id(project_code, &path_str, &sym.name);
+                    if indexed_call_targets.insert(id.clone()) {
+                        call_target_index
+                            .entry(sym.name.clone())
+                            .or_default()
+                            .push(id);
+                    }
+                }
+            }
+        }
+
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
             let mut chunk_ids_emitted: Vec<(String, String, String)> = Vec::new();
@@ -1282,7 +1332,19 @@ impl GraphStore {
                     continue;
                 };
                 let source_id = Self::symbol_id(project_code, &path_str, &relation.from);
-                let target_id = Self::symbol_id(project_code, &path_str, &relation.to);
+                // REQ-AXO-140 — call edges resolve the callee to its canonical
+                // defining-file id when unambiguous in the batch; every other
+                // edge kind keeps the file-local id (source/containment edges are
+                // always co-located with their file).
+                let target_id = match table {
+                    "CALLS" | "CALLS_NIF" => Self::resolve_call_target_id(
+                        project_code,
+                        &path_str,
+                        &relation.to,
+                        &call_target_index,
+                    ),
+                    _ => Self::symbol_id(project_code, &path_str, &relation.to),
+                };
                 let row = RelationRow {
                     source_id,
                     target_id,
@@ -1678,4 +1740,74 @@ impl GraphStore {
     // GraphProjectionQueue/FileVectorizationQueue. The pipeline-v2
     // canonical writer (`upsert_graph_v2_batch`) does not stage rows
     // into public.File any more.
+}
+
+#[cfg(test)]
+mod req_axo_140_call_resolution {
+    use super::GraphStore;
+    use std::collections::HashMap;
+
+    fn index(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, id) in pairs {
+            m.entry((*name).to_string()).or_default().push((*id).to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn unique_cross_file_callee_resolves_to_canonical_defining_id() {
+        let callee_id = GraphStore::symbol_id("PRJ", "prj/b.rs", "callee");
+        let idx = index(&[("callee", &callee_id)]);
+        // Caller lives in a.rs; the synthetic id would have been prj/a.rs::callee.
+        let resolved =
+            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "callee", &idx);
+        assert_eq!(resolved, callee_id, "cross-file unique callee must be canonical");
+        assert_ne!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "callee"),
+            "must NOT keep the caller-file synthetic id"
+        );
+    }
+
+    #[test]
+    fn absent_callee_falls_back_to_synthetic() {
+        let idx = index(&[("other", &GraphStore::symbol_id("PRJ", "prj/b.rs", "other"))]);
+        let resolved =
+            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "unknown", &idx);
+        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "unknown"));
+    }
+
+    #[test]
+    fn ambiguous_callee_falls_back_to_synthetic() {
+        let idx = index(&[
+            ("dup", &GraphStore::symbol_id("PRJ", "prj/b.rs", "dup")),
+            ("dup", &GraphStore::symbol_id("PRJ", "prj/c.rs", "dup")),
+        ]);
+        let resolved = GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "dup", &idx);
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "dup"),
+            "ambiguous name (2 defs) must stay synthetic, never guess"
+        );
+    }
+
+    #[test]
+    fn globally_qualified_callee_keeps_direct_mapping() {
+        // A `::`-qualified name bypasses the name index entirely.
+        let idx = index(&[("foo", &GraphStore::symbol_id("PRJ", "prj/b.rs", "foo"))]);
+        let resolved =
+            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "modx::foo", &idx);
+        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "modx::foo"));
+    }
+
+    #[test]
+    fn same_file_unique_callee_is_unchanged() {
+        // When the unique definition is the caller's own file, canonical ==
+        // synthetic — no behavioural change for intra-file calls.
+        let id = GraphStore::symbol_id("PRJ", "prj/a.rs", "local");
+        let idx = index(&[("local", &id)]);
+        let resolved = GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "local", &idx);
+        assert_eq!(resolved, id);
+    }
 }
