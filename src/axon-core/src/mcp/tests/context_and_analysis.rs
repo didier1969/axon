@@ -245,6 +245,15 @@ fn test_why_marks_script_artifacts_as_correlated_weak_support() {
         .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-refund-probe', 'symbol', 'bks::refund_probe', 'BKS', 'body', 'refund_probe scans refund timing and prints local diagnostics', 'hash-why-refund-probe', 1, 4)")
         .unwrap();
 
+    // REQ-AXO-901952 — `why` resolves the symbol's script provenance through the
+    // BKS IST snapshot; these rows were seeded via raw SQL (bypassing the
+    // soll_manager/indexer invalidation). Evict the BKS process snapshots so a
+    // stale BKS snapshot left warm by an earlier full-suite test (e.g. the impact
+    // SOLL-architecture test) doesn't hide refund_probe. Same pattern as commit
+    // 31d415fd (impact SOLL-architecture test).
+    crate::ist_snapshot::evict_process_snapshot("BKS");
+    server.soll_cache().invalidate("BKS");
+
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
