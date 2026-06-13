@@ -268,19 +268,6 @@ CREATE TABLE IF NOT EXISTS ist.GraphEmbedding (
     PRIMARY KEY (anchor_type, anchor_id, radius, model_id, project_code)
 );
 
--- ── Optimiser reward observation log ─────────────────────────────────
-CREATE TABLE IF NOT EXISTS ist.RewardObservationLog (
-    decision_id                TEXT NOT NULL,
-    observed_at_ms             BIGINT,
-    window_start_ms            BIGINT,
-    window_end_ms              BIGINT,
-    reward_json                TEXT,
-    throughput_chunks_per_hour DOUBLE PRECISION,
-    throughput_files_per_hour  DOUBLE PRECISION,
-    constraint_violations_json TEXT,
-    pressure_summary_json      TEXT
-);
-
 -- ── Per-file lifecycle event log (fail-loud ledger) ──────────────────
 -- REQ-AXO-901831: every stage transition incl. exclusion (reason) so the
 -- eligible→enrolled gap is observable, never silent.

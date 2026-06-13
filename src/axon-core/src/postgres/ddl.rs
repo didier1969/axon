@@ -403,7 +403,6 @@ mod tests {
             "ist.GraphProjection",
             "ist.GraphProjectionState",
             "ist.GraphEmbedding",
-            "ist.RewardObservationLog",
         ] {
             assert!(
                 joined.contains(tbl),
@@ -437,7 +436,6 @@ mod tests {
         let joined = generate_global_schema().join("\n");
         assert!(joined.contains("CREATE SCHEMA IF NOT EXISTS axon_runtime"));
         for tbl in [
-            "axon_runtime.OptimizerDecisionLog",
             "axon_runtime.VectorWorkerFault",
             "axon_runtime.VectorLaneState",
             "axon_runtime.VectorPersistOutbox",

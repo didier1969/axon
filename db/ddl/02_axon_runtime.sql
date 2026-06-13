@@ -7,24 +7,6 @@ CREATE SCHEMA IF NOT EXISTS axon_runtime;
 
 -- ── Tables ───────────────────────────────────────────────────────────
 
--- Post-batch optimisation telemetry. One row per scheduler decision.
-CREATE TABLE IF NOT EXISTS axon_runtime.OptimizerDecisionLog (
-    decision_id                TEXT PRIMARY KEY,
-    at_ms                      BIGINT,
-    mode                       TEXT,
-    host_snapshot_json         TEXT,
-    policy_snapshot_json       TEXT,
-    signal_snapshot_json       TEXT,
-    analytics_snapshot_json    TEXT,
-    action_profile_id          TEXT,
-    decision_json              TEXT,
-    constraints_triggered_json TEXT,
-    would_apply                BOOLEAN,
-    applied                    BOOLEAN,
-    evaluation_window_start_ms BIGINT,
-    evaluation_window_end_ms   BIGINT
-);
-
 -- Vector lane fatal-fault log. Captures stage + reason + provider so
 -- the optimiser can rate-limit retries on a specific lane/worker.
 CREATE TABLE IF NOT EXISTS axon_runtime.VectorWorkerFault (

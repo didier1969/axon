@@ -131,13 +131,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         // pool (MVCC). Kept as a distinct closure for call-site readability.
         server.graph_store.query_count(query).unwrap_or(0)
     };
-    let snapshot_json = |query: &str| -> String {
-        server
-            .graph_store
-            .query_json(query)
-            .unwrap_or_else(|_| "[]".to_string())
-    };
-
     let runtime_mode = AxonRuntimeMode::from_env();
     let graph_runtime_enabled = runtime_mode.ingestion_enabled();
     let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
@@ -360,28 +353,10 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     let stage_counts = parse_reason_count_rows(&stage_rows);
     let backlog_reason_rows = "[]".to_string();
     let vector_queue_status_rows = "[]".to_string();
-    let latest_optimizer_decision_row = snapshot_json(
-        "SELECT decision_id, mode, action_profile_id, at_ms, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms \
-         FROM axon_runtime.OptimizerDecisionLog \
-         ORDER BY at_ms DESC \
-         LIMIT 1",
-    );
-    let latest_optimizer_reward_row = snapshot_json(
-        "SELECT decision_id, observed_at_ms, throughput_chunks_per_hour, throughput_files_per_hour \
-         FROM ist.RewardObservationLog \
-         ORDER BY observed_at_ms DESC \
-         LIMIT 1",
-    );
+    // DEC-AXO-901631 — OptimizerDecisionLog / RewardObservationLog retired with
+    // the predictive optimizer; no decision/reward rows to surface.
     let vector_queue_statuses = parse_reason_count_rows(&vector_queue_status_rows);
     let backlog_reasons = parse_reason_count_rows(&backlog_reason_rows);
-    let latest_optimizer_decision =
-        serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&latest_optimizer_decision_row)
-            .ok()
-            .and_then(|rows| rows.into_iter().next());
-    let latest_optimizer_reward =
-        serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&latest_optimizer_reward_row)
-            .ok()
-            .and_then(|rows| rows.into_iter().next());
     let backlog_reason_section = if backlog_reasons.is_empty() {
         if pending_count + indexing_count > 0 {
             format!(
@@ -532,16 +507,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         *   Window embed calls : {}\n\
         *   Window chunks : {}\n\
         *   Window files touched : {}\n\n\
-        **Shadow Optimizer:**\n\
-        *   Latest decision id : {}\n\
-        *   Latest decision mode : {}\n\
-        *   Latest action profile : {}\n\
-        *   Latest decision at ms : {}\n\
-        *   Latest would_apply/applied : {}/{}\n\
-        *   Latest reward decision id : {}\n\
-        *   Latest reward at ms : {}\n\
-        *   Latest throughput chunks/hour : {:.2}\n\
-        *   Latest throughput files/hour : {:.2}\n\n\
         *Note to AI Agents: any 'TCP auth closed' error observed in Elixir logs is unrelated to this MCP server. Axon Core V2 is 100% autonomous.*",
         format_bytes_human(memory.rss_bytes),
         format_bytes_human(memory.rss_anon_bytes),
@@ -661,56 +626,6 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         vector_controller.window_embed_calls,
         vector_controller.window_chunks,
         vector_controller.window_files_touched,
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_str())
-            .unwrap_or("none"),
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.get(1))
-            .and_then(|value| value.as_str())
-            .unwrap_or("none"),
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.get(2))
-            .and_then(|value| value.as_str())
-            .unwrap_or("hold"),
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.get(3))
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0),
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.get(4))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        latest_optimizer_decision
-            .as_ref()
-            .and_then(|row| row.get(5))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        latest_optimizer_reward
-            .as_ref()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_str())
-            .unwrap_or("none"),
-        latest_optimizer_reward
-            .as_ref()
-            .and_then(|row| row.get(1))
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0),
-        latest_optimizer_reward
-            .as_ref()
-            .and_then(|row| row.get(2))
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0),
-        latest_optimizer_reward
-            .as_ref()
-            .and_then(|row| row.get(3))
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0),
     );
     // REQ-AXO-901870 — the reader-replica diagnostics block (commit/reader
     // epoch lag, refresh counters) is retired: reads share the single PG
@@ -961,23 +876,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
                 "host_snapshot": serde_json::to_value(&optimizer_host_snapshot).unwrap_or_else(|_| json!({})),
                 "policy_snapshot": serde_json::to_value(&optimizer_policy_snapshot).unwrap_or_else(|_| json!({})),
                 "runtime_signals_window": serde_json::to_value(&optimizer_runtime_signals).unwrap_or_else(|_| json!({})),
-                "recent_analytics_window": serde_json::to_value(&optimizer_recent_analytics).unwrap_or_else(|_| json!({})),
-                "latest_optimizer_decision": latest_optimizer_decision.as_ref().map(|row| json!({
-                    "decision_id": row.first().and_then(|value| value.as_str()),
-                    "mode": row.get(1).and_then(|value| value.as_str()),
-                    "action_profile_id": row.get(2).and_then(|value| value.as_str()),
-                    "at_ms": row.get(3).and_then(|value| value.as_i64()),
-                    "would_apply": row.get(4).and_then(|value| value.as_bool()),
-                    "applied": row.get(5).and_then(|value| value.as_bool()),
-                    "evaluation_window_start_ms": row.get(6).and_then(|value| value.as_i64()),
-                    "evaluation_window_end_ms": row.get(7).and_then(|value| value.as_i64())
-                })),
-                "latest_reward_observation": latest_optimizer_reward.as_ref().map(|row| json!({
-                    "decision_id": row.first().and_then(|value| value.as_str()),
-                    "observed_at_ms": row.get(1).and_then(|value| value.as_i64()),
-                    "throughput_chunks_per_hour": row.get(2).and_then(|value| value.as_f64()),
-                    "throughput_files_per_hour": row.get(3).and_then(|value| value.as_f64())
-                }))
+                "recent_analytics_window": serde_json::to_value(&optimizer_recent_analytics).unwrap_or_else(|_| json!({}))
             },
             "vector_lane_state_record": serde_json::to_value(&vector_lane_state_record).unwrap_or_else(|_| json!(null)),
             "latest_vector_worker_fault": serde_json::to_value(&latest_vector_worker_fault).unwrap_or_else(|_| json!(null))

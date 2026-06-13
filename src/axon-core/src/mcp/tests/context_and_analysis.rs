@@ -2249,43 +2249,12 @@ fn test_soll_work_plan_counts_decision_evidence() {
 // list_labels_tables tool removed (post-MIL-AXO-017 legacy cleanup).
 
 #[test]
-fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
+fn test_status_exposes_traceability_snapshots() {
+    // DEC-AXO-901631 — the predictive optimizer + its decision/reward logs were
+    // retired. status(mode=full) still exposes the four observable signal
+    // snapshots (host / policy / runtime-signals / recent-analytics).
     let _guard = env_lock();
     let server = create_test_server();
-
-    server
-        .graph_store
-        .log_optimizer_decision(
-            "opt-1",
-            1000,
-            "shadow",
-            "{\"host\":true}",
-            "{\"policy\":true}",
-            "{\"signals\":true}",
-            "{\"analytics\":true}",
-            "hold",
-            "{\"decision\":true}",
-            "[\"cpu\"]",
-            false,
-            false,
-            1000,
-            2000,
-        )
-        .unwrap();
-    server
-        .graph_store
-        .log_reward_observation(
-            "opt-1",
-            2000,
-            1000,
-            2000,
-            "{\"reward\":1}",
-            123.0,
-            4.0,
-            "{\"cpu\":0}",
-            "{\"pressure\":\"low\"}",
-        )
-        .unwrap();
 
     let response = server
         .axon_status(&json!({"mode": "full"}))
@@ -2296,14 +2265,6 @@ fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
     assert!(traceability["policy_snapshot"].is_object());
     assert!(traceability["runtime_signals_window"].is_object());
     assert!(traceability["recent_analytics_window"].is_object());
-    assert_eq!(
-        traceability["latest_optimizer_decision"]["decision_id"].as_str(),
-        Some("opt-1")
-    );
-    assert_eq!(
-        traceability["latest_reward_observation"]["decision_id"].as_str(),
-        Some("opt-1")
-    );
 }
 
 #[test]

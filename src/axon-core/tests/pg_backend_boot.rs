@@ -285,7 +285,6 @@ fn graphstore_boots_under_postgres_backend() {
         "axon_runtime schema should exist"
     );
     for table in [
-        "OptimizerDecisionLog",
         "VectorWorkerFault",
         "VectorLaneState",
         "VectorPersistOutbox",
