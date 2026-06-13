@@ -127,12 +127,12 @@ impl McpServer {
             .as_ref()
             .map(|snapshot| snapshot.canonical_orphan_intent_ids())
             .unwrap_or_default();
-        // REQ-AXO-901595 — RAM-first reciprocal-CALLS cycle count via
-        // IstGraphView (PIL-AXO-9002). When the per-project CSR cache is
-        // warm, `view.reciprocal_calls_cycle_count` walks the in-memory
-        // graph in O(N+M) without a PG roundtrip ; falls back to the
-        // existing `get_circular_dependency_count_fast` SQL when cold OR
-        // when `project == "*"` (the RAM walk is per-project scoped).
+        // REQ-AXO-901595 / REQ-AXO-901970 — RAM-only reciprocal-CALLS cycle
+        // count via IstGraphView (PIL-AXO-9002). When the per-project CSR cache
+        // is warm, `view.reciprocal_calls_cycle_count` walks the in-memory graph
+        // in O(N+M). The `get_circular_dependency_count_fast` fallback below is
+        // now ALSO RAM-only (the PG self-join was removed) — it returns the same
+        // count, or 0 when cold / `project == "*"` (the walk is per-project).
         let ram_cycle_count: Option<usize> = if project != "*" {
             let view = crate::ist_snapshot::process_view();
             if view.is_warm(project) {

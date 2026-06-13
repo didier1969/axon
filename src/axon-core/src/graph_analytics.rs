@@ -180,50 +180,17 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(0);
         }
-        // REQ-AXO-91486 slice 2 — RAM fast-path. When the cache holds a
-        // snapshot for the project (RAM unconditional, REQ-AXO-901952), count
-        // reciprocal CALLS cycles in-memory (linear scan over CSR) instead of
-        // running the SQL self-join. Cache miss → fallback to the canonical PG
-        // path below. `project="*"` (workspace-wide) skips the fast-path
-        // because the cache is per-project.
-        if project != "*" {
-            if let Some(count) =
-                crate::ist_snapshot::process_view().reciprocal_calls_cycle_count(project)
-            {
-                return Ok(count as i64);
-            }
+        // REQ-AXO-901970 — RAM-only reciprocal CALLS cycle count (linear scan
+        // over the CSR snapshot). Replaces the last PG `ist.Edge` self-join in
+        // graph_analytics. Workspace-wide ("*") and a cold cache surface 0 — the
+        // per-project cache can't aggregate the workspace, and there is no PG
+        // fallback (the whole point of REQ-AXO-901952/901970).
+        if project == "*" {
+            return Ok(0);
         }
-        // REQ-AXO-350 : ist.Edge self-join replaces legacy CALLS (MIL-AXO-017).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let query = format!(
-            "
-            SELECT count(*)
-            FROM (
-                SELECT
-                    least(c1.source_id, c1.target_id) AS left_id,
-                    greatest(c1.source_id, c1.target_id) AS right_id
-                FROM ist.Edge c1
-                JOIN ist.Edge c2
-                  ON c1.source_id = c2.target_id
-                 AND c1.target_id = c2.source_id
-                 AND c2.relation_type = 'CALLS'
-                WHERE c1.relation_type = 'CALLS'
-                  AND c1.source_id != c1.target_id
-                  {}
-                GROUP BY 1, 2
-            ) reciprocal_cycles
-            ",
-            if scoped {
-                format!(
-                    "AND c1.project_code = '{}' AND c2.project_code = '{}'",
-                    escaped, escaped
-                )
-            } else {
-                String::new()
-            }
-        );
-        Ok(self.query_count(&query).unwrap_or(0))
+        Ok(crate::ist_snapshot::process_view()
+            .reciprocal_calls_cycle_count(project)
+            .unwrap_or(0) as i64)
     }
 
     // MIL-AXO-017 slice 6B Phase C: AGE cycle detection helpers
@@ -309,13 +276,19 @@ mod migration_guard_tests {
         assert!(code.contains("telemetry_log_call_count"), "routed through RAM");
     }
 
+    // REQ-AXO-901970 — the reciprocal-cycle count is now RAM-only (linear scan
+    // over the CSR snapshot); the last PG `ist.Edge` self-join in this file is
+    // gone. Guard the no-PG-fallback invariant on CODE.
     #[test]
-    fn batch_a_get_circular_dependency_count_fast_uses_public_edge() {
-        let body = extract_fn_body(SOURCE, "pub fn get_circular_dependency_count_fast");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("c1.relation_type = 'CALLS'"));
-        assert!(body.contains("c2.relation_type = 'CALLS'"));
+    fn batch_a_get_circular_dependency_count_fast_is_ram_only() {
+        let code = code_only(SOURCE, "pub fn get_circular_dependency_count_fast");
+        assert!(!code.contains("skip_legacy_relations"));
+        assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!code.contains("query_count"), "no SQL round-trip");
+        assert!(
+            code.contains("process_view()") && code.contains("reciprocal_calls_cycle_count"),
+            "routed through the RAM reciprocal-cycle count"
+        );
     }
 
     // REQ-AXO-350 batch (b) — CALLS+CONTAINS mixed gates.
