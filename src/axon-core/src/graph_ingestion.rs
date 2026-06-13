@@ -249,16 +249,6 @@ impl GraphStore {
         }
     }
 
-    /// REQ-AXO-140 slice 2 — `upsert_graph_v2_batch` enriches the callee-name
-    /// index with a PG lookup ONLY when the batch carries at most this many
-    /// files, i.e. an incremental update rather than a mass index. A3 buffers up
-    /// to `A3_BATCH_SIZE_DEFAULT` (32) files per homogeneous-project call; a
-    /// half-or-less group signals an incremental flush whose callees may live in
-    /// files already indexed outside the batch. A full mass-index group skips
-    /// the lookup — those callees are co-present in-batch and a per-batch PG
-    /// round-trip would tax the hot path (PIL-AXO-007).
-    const REQ140_PG_LOOKUP_MAX_FILES: usize = 16;
-
     /// REQ-AXO-140 — resolve a CALLS/CALLS_NIF target to the callee's canonical
     /// Symbol.id instead of the synthetic `<caller_file>::<name>` that assumes
     /// the callee is co-located with the caller.
@@ -283,46 +273,6 @@ impl GraphStore {
             Some(ids) if ids.len() == 1 => ids[0].clone(),
             _ => Self::symbol_id(project_code, caller_path, callee_name),
         }
-    }
-
-    /// REQ-AXO-140 slice 2 — fetch persisted `(callee_name, canonical Symbol.id)`
-    /// pairs for `names` in `project_code`, so an incremental-update batch can
-    /// resolve CALLS edges to callees defined in files indexed OUTSIDE the
-    /// current batch (the in-batch pre-pass cannot see them). One grouped read;
-    /// returns EVERY (name, id) row so the caller treats >1 id per name as
-    /// ambiguous, exactly like the in-batch index. Only callable kinds match.
-    fn lookup_call_targets_by_name(
-        &self,
-        project_code: &str,
-        names: &[String],
-    ) -> Result<Vec<(String, String)>> {
-        if names.is_empty() {
-            return Ok(Vec::new());
-        }
-        let safe_project = Self::escape_sql(project_code);
-        let names_sql = names
-            .iter()
-            .map(|n| format!("'{}'", Self::escape_sql(n)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT name, id FROM ist.Symbol \
-             WHERE project_code = '{safe_project}' \
-               AND kind IN ('function', 'method') \
-               AND name IN ({names_sql})"
-        );
-        let raw = self.query_json(&sql)?;
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            if let (Some(name), Some(id)) = (
-                row.first().and_then(|v| v.as_str()),
-                row.get(1).and_then(|v| v.as_str()),
-            ) {
-                out.push((name.to_string(), id.to_string()));
-            }
-        }
-        Ok(out)
     }
 
     fn relation_table(rel_type: &str) -> Option<&'static str> {
@@ -1278,53 +1228,14 @@ impl GraphStore {
             }
         }
 
-        // REQ-AXO-140 slice 2 — on a SMALL (incremental-update) batch, the
-        // callee may live in a file already indexed OUTSIDE this batch, so the
-        // in-batch pre-pass above never recorded it and `resolve_call_target_id`
-        // would fall back to the file-local synthetic id. Enrich the index with
-        // ONE grouped PG read over the unresolved callee names. Skipped on LARGE
-        // (mass-index) groups (> REQ140_PG_LOOKUP_MAX_FILES): there the callee is
-        // overwhelmingly co-present in-batch and a per-batch PG round-trip would
-        // tax the hot path (PIL-AXO-007). Over-triggering on a small mass-index
-        // tail group is harmless (still correct, marginally slower); the gate is
-        // biased to cover real updates. The same `indexed_call_targets` dedup
-        // guards against a name looking ambiguous when PG returns an id the
-        // pre-pass already recorded (e.g. the file's own prior persisted version).
-        if files.len() <= Self::REQ140_PG_LOOKUP_MAX_FILES {
-            let mut wanted: HashSet<String> = HashSet::new();
-            for parsed in files {
-                for relation in &parsed.relations {
-                    if matches!(
-                        Self::relation_table(&relation.rel_type),
-                        Some("CALLS") | Some("CALLS_NIF")
-                    ) && !Self::is_globally_qualified_symbol(&relation.to)
-                    {
-                        wanted.insert(relation.to.clone());
-                    }
-                }
-            }
-            if !wanted.is_empty() {
-                let names: Vec<String> = wanted.into_iter().collect();
-                match self.lookup_call_targets_by_name(project_code, &names) {
-                    Ok(found) => {
-                        for (name, id) in found {
-                            if indexed_call_targets.insert(id.clone()) {
-                                call_target_index.entry(name).or_default().push(id);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "REQ-AXO-140 slice 2: PG callee lookup failed for {} \
-                             ({} names); falling back to in-batch resolution: {}",
-                            project_code,
-                            names.len(),
-                            err
-                        );
-                    }
-                }
-            }
-        }
+        // REQ-AXO-140 — cross-file/cross-batch CALLS resolution is NOT done here
+        // at ingestion time: the synthetic `<caller_file>::<name>` target is
+        // written as-is and the RAM IST projection (`IstGraph::build`,
+        // `name_to_func`) resolves it to the unique canonical callee node over
+        // the WHOLE project graph at snapshot-build time (PIL-AXO-9002). The
+        // former slice-2 per-batch PG callee lookup (≤16-file gate) was redundant
+        // with that RAM resolution and added a PG round-trip per A3 micro-flush
+        // against the full ist.Symbol table — removed (REQ-AXO-140 / session 76).
 
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
@@ -1915,154 +1826,5 @@ mod req_axo_140_call_resolution {
         let idx = index(&[("local", &id)]);
         let resolved = GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "local", &idx);
         assert_eq!(resolved, id);
-    }
-}
-
-#[cfg(test)]
-mod req_axo_140_slice2_pg_lookup {
-    use super::GraphStore;
-    use crate::parser::{Relation, Symbol};
-    use crate::pipeline_v2::types::ParsedFile;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    fn mk_sym(name: &str) -> Symbol {
-        Symbol {
-            name: name.to_string(),
-            kind: "function".into(),
-            start_line: 1,
-            end_line: 2,
-            docstring: None,
-            is_entry_point: false,
-            is_public: false,
-            tested: false,
-            is_nif: false,
-            is_unsafe: false,
-            properties: std::collections::HashMap::new(),
-            embedding: None,
-        }
-    }
-
-    fn parsed(path: &str, content: &str, hash: &str, symbols: Vec<&str>, relations: Vec<Relation>) -> ParsedFile {
-        ParsedFile {
-            path: PathBuf::from(path),
-            content: content.to_string(),
-            content_hash: hash.to_string(),
-            mtime_ms: 1_700_000_000_000,
-            size_bytes: content.len() as u64,
-            symbols: symbols.into_iter().map(mk_sym).collect(),
-            relations,
-        }
-    }
-
-    fn calls(from: &str, to: &str) -> Relation {
-        Relation {
-            from: from.to_string(),
-            to: to.to_string(),
-            rel_type: "calls".to_string(),
-            properties: std::collections::HashMap::new(),
-        }
-    }
-
-    /// REQ-AXO-140 slice 2 — file B (callee `target_fn`) is indexed in its OWN
-    /// batch and committed. A later INCREMENTAL batch carrying only file A
-    /// (caller_fn → target_fn) must resolve the CALLS edge to B's canonical
-    /// Symbol.id via the PG lookup, NOT the caller-file synthetic id. Before
-    /// slice 2 the in-batch pre-pass could not see B → synthetic fallback.
-    #[test]
-    fn incremental_batch_resolves_callee_in_previously_indexed_file() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().expect("create test db"));
-        let proj = "AXO";
-        let b_path = "/tmp/req140_slice2_b.rs";
-        let a_path = "/tmp/req140_slice2_a.rs";
-
-        // Batch 1: persist callee file B alone (committed before A is indexed).
-        store
-            .upsert_graph_v2_batch(&[parsed(b_path, "fn target_fn() {}\n", "h-b", vec!["target_fn"], vec![])], proj)
-            .expect("index B");
-
-        // Batch 2 (incremental, len==1 ≤ threshold): file A alone, calling target_fn.
-        store
-            .upsert_graph_v2_batch(
-                &[parsed(
-                    a_path,
-                    "fn caller_fn() { target_fn(); }\n",
-                    "h-a",
-                    vec!["caller_fn"],
-                    vec![calls("caller_fn", "target_fn")],
-                )],
-                proj,
-            )
-            .expect("index A");
-
-        let caller_id = GraphStore::symbol_id(proj, a_path, "caller_fn");
-        let canonical_target = GraphStore::symbol_id(proj, b_path, "target_fn");
-        let synthetic_target = GraphStore::symbol_id(proj, a_path, "target_fn");
-
-        let canonical_edges = store
-            .query_count(&format!(
-                "SELECT count(*) FROM ist.Edge WHERE source_id = '{caller_id}' \
-                 AND target_id = '{canonical_target}' AND relation_type = 'CALLS'"
-            ))
-            .expect("query canonical edge");
-        assert_eq!(
-            canonical_edges, 1,
-            "incremental batch must resolve CALLS to B's canonical id via PG lookup"
-        );
-
-        let synthetic_edges = store
-            .query_count(&format!(
-                "SELECT count(*) FROM ist.Edge WHERE source_id = '{caller_id}' \
-                 AND target_id = '{synthetic_target}' AND relation_type = 'CALLS'"
-            ))
-            .expect("query synthetic edge");
-        assert_eq!(
-            synthetic_edges, 0,
-            "must NOT keep the caller-file synthetic id once PG resolves the callee"
-        );
-    }
-
-    /// Guard the gate: a LARGE batch (> REQ140_PG_LOOKUP_MAX_FILES) skips the PG
-    /// lookup. Here the callee IS co-present in the same large batch, so
-    /// resolution still works via the in-batch pre-pass alone — proving the skip
-    /// does not regress mass-index resolution.
-    #[test]
-    fn large_batch_resolves_via_in_batch_prepass_without_pg_lookup() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().expect("create test db"));
-        let proj = "AXO";
-        let n = GraphStore::REQ140_PG_LOOKUP_MAX_FILES + 4;
-
-        let mut files: Vec<ParsedFile> = Vec::with_capacity(n);
-        // File 0 is the caller; file 1 defines the callee; the rest are filler so
-        // the batch exceeds the gate threshold.
-        let caller_path = "/tmp/req140_big_caller.rs";
-        let callee_path = "/tmp/req140_big_callee.rs";
-        files.push(parsed(
-            caller_path,
-            "fn big_caller() { big_callee(); }\n",
-            "h-c0",
-            vec!["big_caller"],
-            vec![calls("big_caller", "big_callee")],
-        ));
-        files.push(parsed(callee_path, "fn big_callee() {}\n", "h-c1", vec!["big_callee"], vec![]));
-        for i in 2..n {
-            let p = format!("/tmp/req140_big_filler_{i}.rs");
-            files.push(parsed(&p, "fn filler() {}\n", &format!("h-f{i}"), vec!["filler"], vec![]));
-        }
-
-        store.upsert_graph_v2_batch(&files, proj).expect("index large batch");
-
-        let caller_id = GraphStore::symbol_id(proj, caller_path, "big_caller");
-        let canonical_target = GraphStore::symbol_id(proj, callee_path, "big_callee");
-        let canonical_edges = store
-            .query_count(&format!(
-                "SELECT count(*) FROM ist.Edge WHERE source_id = '{caller_id}' \
-                 AND target_id = '{canonical_target}' AND relation_type = 'CALLS'"
-            ))
-            .expect("query canonical edge");
-        assert_eq!(
-            canonical_edges, 1,
-            "large batch must still resolve a co-present callee via the in-batch pre-pass"
-        );
     }
 }
