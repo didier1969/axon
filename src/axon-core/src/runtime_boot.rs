@@ -987,7 +987,9 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         }
     }
 
-    main_background::spawn_shadow_optimizer(graph_store.clone());
+    // DEC-AXO-901631 — the predictive shadow optimizer was retired (the
+    // sorted-drain makes embed throughput correct-by-construction). Only the
+    // runtime trace telemetry logger remains.
     main_background::spawn_runtime_trace_logger(graph_store.clone(), queue_store.clone());
 
     if let Some(tel_listener) = tel_listener {

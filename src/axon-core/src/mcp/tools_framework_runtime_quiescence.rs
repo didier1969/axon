@@ -92,9 +92,10 @@ impl McpServer {
             now_ms.saturating_sub(vector_runtime.vector_lane_last_success_at_ms);
         let vector_lane_last_fault_age_ms =
             now_ms.saturating_sub(vector_runtime.vector_lane_last_fault_at_ms);
-        let shadow_optimizer_enabled = crate::main_background::shadow_optimizer_enabled();
-        let optimizer_loop_interval_ms =
-            Self::env_interval_ms("AXON_OPT_LOOP_INTERVAL_MS", 15_000, 1);
+        // DEC-AXO-901631 — the predictive shadow optimizer was retired; the
+        // sorted-drain makes embed throughput correct-by-construction.
+        let shadow_optimizer_enabled = false;
+        let optimizer_loop_interval_ms = 0_u64;
         let runtime_trace_interval_ms =
             Self::env_interval_ms("AXON_RUNTIME_TRACE_INTERVAL_MS", 5_000, 1_000);
         let watcher_promoter_poll_interval_ms = 50_u64;
