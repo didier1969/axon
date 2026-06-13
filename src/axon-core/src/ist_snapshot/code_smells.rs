@@ -540,6 +540,41 @@ pub fn cross_file_call_flows(
     (flows, total)
 }
 
+/// REQ-AXO-901970 — symbol ids whose CONTAINING FILE name matches the query,
+/// either as a `%`-separated wildcard or a plain substring (lowercased). Used by
+/// `query`'s chunk-search `path_match` to find content-chunks (NULL file_path)
+/// whose file NAME matches — replacing the PG `EXISTS(CONTAINS …)` subquery with
+/// a precomputed `c.source_id IN (…)` arm. Empty `normalized` ⇒ no matches
+/// (avoids matching every file).
+pub fn symbols_in_matching_files(
+    graph: &IstGraph,
+    project: &str,
+    normalized: &str,
+    wildcard: &str,
+) -> Vec<String> {
+    use std::collections::HashSet;
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for file_idx in 0..(graph.node_count() as u32) {
+        let file_lower = graph.id_of(file_idx).to_ascii_lowercase();
+        if !(file_lower.contains(normalized) || matches_wildcard(&file_lower, wildcard)) {
+            continue;
+        }
+        for (sym, rel) in graph.forward_neighbors(file_idx) {
+            if matches!(rel, RelationType::Contains) && project_matches(graph, sym, project) {
+                let id = graph.id_of(sym);
+                if seen.insert(id.to_string()) {
+                    out.push(id.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,6 +1080,34 @@ mod tests {
             !out.iter().any(|s| s.starts_with("shallow_nif")),
             "shallow nif (depth 1) must not be flagged: {out:?}"
         );
+    }
+
+    // REQ-AXO-901970 — symbols_in_matching_files: symbols whose containing file
+    // name matches the query (substring or wildcard); empty query → no matches.
+    #[test]
+    fn symbols_in_matching_files_matches_by_containing_file_name() {
+        let nodes = vec![
+            file("src/overlay.rs"),
+            func("src/overlay.rs::render", true),
+            file("src/other.rs"),
+            func("src/other.rs::helper", true),
+        ];
+        let edges = vec![
+            edge("src/overlay.rs", "src/overlay.rs::render", RelationType::Contains),
+            edge("src/other.rs", "src/other.rs::helper", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(
+            symbols_in_matching_files(&g, "AXO", "overlay", "overlay"),
+            vec!["src/overlay.rs::render".to_string()]
+        );
+        // wildcard form (separator → %) still matches the file name.
+        assert_eq!(
+            symbols_in_matching_files(&g, "AXO", "over lay", "over%lay"),
+            vec!["src/overlay.rs::render".to_string()]
+        );
+        assert!(symbols_in_matching_files(&g, "AXO", "nomatch", "nomatch").is_empty());
+        assert!(symbols_in_matching_files(&g, "AXO", "", "").is_empty());
     }
 
     // REQ-AXO-901970 — cross_file_call_flows: only CALLS edges crossing a file

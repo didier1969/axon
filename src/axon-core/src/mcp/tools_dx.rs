@@ -305,24 +305,22 @@ impl McpServer {
          AND position($normalized in lower(c.content)) > position('\n\n' in c.content)"
     }
 
-    // REQ-AXO-901875 — a chunk's file matches when the raw `c.file_path`
-    // matches OR the canonical `ist.Edge` CONTAINS relation points a
-    // matching file at the chunk's symbol. Content-chunks carry NULL
-    // file_path, so without the CONTAINS arm a symbol whose FILE NAME
-    // matches the query (e.g. `..._overlay.rs`) but whose content does not
-    // was invisible. The CONTAINS arm is an indexed EXISTS probe (on
-    // target_id), evaluated only for rows the content predicate did not
-    // already accept. `$wildcard` %-separates tokens so it matches
-    // underscore-separated file names (REQ-AXO-088). Same URI-resolution
-    // family as REQ-AXO-901869 A3.
-    fn chunk_path_match_expression() -> &'static str {
-        "lower(c.file_path) LIKE '%' || $wildcard || '%' \
-         OR lower(c.file_path) LIKE '%' || $normalized || '%' \
-         OR EXISTS (SELECT 1 FROM ist.Edge ce_path \
-                    WHERE ce_path.target_id = c.source_id \
-                      AND ce_path.relation_type = 'CONTAINS' \
-                      AND (lower(ce_path.source_id) LIKE '%' || $wildcard || '%' \
-                           OR lower(ce_path.source_id) LIKE '%' || $normalized || '%'))"
+    // REQ-AXO-901875 — a chunk's file matches when the raw `c.file_path` matches
+    // OR the canonical CONTAINS relation points a matching file at the chunk's
+    // symbol. Content-chunks carry NULL file_path, so without the CONTAINS arm a
+    // symbol whose FILE NAME matches the query (e.g. `..._overlay.rs`) but whose
+    // content does not was invisible. REQ-AXO-901970 — the CONTAINS arm is now
+    // RAM-only: `file_match_in_clause` is a precomputed `c.source_id IN (…)`
+    // (symbols whose containing-file name matches, resolved from the RAM snapshot
+    // by `IstGraphView::symbols_in_matching_files`), or `1=0` when empty / cold.
+    // No PG EXISTS(CONTAINS). `c.file_path` LIKE stays (chunk metadata, not a
+    // graph edge). `$wildcard` %-separates tokens (REQ-AXO-088).
+    fn chunk_path_match_expression(file_match_in_clause: &str) -> String {
+        format!(
+            "lower(c.file_path) LIKE '%' || $wildcard || '%' \
+             OR lower(c.file_path) LIKE '%' || $normalized || '%' \
+             OR ({file_match_in_clause})"
+        )
     }
 
     fn classify_query_intent(query_text: &str) -> QueryIntent {
@@ -1056,7 +1054,40 @@ impl McpServer {
         let predicate = Self::chunk_search_predicate();
         let docstring_match = Self::chunk_docstring_match_expression();
         let body_match = Self::chunk_body_match_expression();
-        let path_match = Self::chunk_path_match_expression();
+        // REQ-AXO-901970 — RAM-only file-NAME match for the path_match arm:
+        // resolve symbols whose containing-file name matches the query in the RAM
+        // snapshot, inject as a `c.source_id IN (…)` clause (replaces the PG
+        // EXISTS(CONTAINS) subquery). Scoped only (per-project snapshot); "*" or
+        // a cold cache → `1=0` (the c.file_path LIKE arm still matches indexed
+        // chunks). Ids are canonical IST ids — no user input, but escape defensively.
+        let file_match_in_clause = {
+            let normalized = params
+                .get("normalized")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let wildcard = params
+                .get("wildcard")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let ids = if project != "*" && self.ensure_ram_snapshot_warm(project) {
+                process_view()
+                    .symbols_in_matching_files(project, normalized, wildcard)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if ids.is_empty() {
+                "1=0".to_string()
+            } else {
+                let list = ids
+                    .iter()
+                    .map(|id| format!("'{}'", id.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("c.source_id IN ({list})")
+            }
+        };
+        let path_match = Self::chunk_path_match_expression(&file_match_in_clause);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));

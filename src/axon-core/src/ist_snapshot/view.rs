@@ -148,6 +148,21 @@ impl IstGraphView {
         snap.node_kind(id).map(|k| k.as_db())
     }
 
+    /// REQ-AXO-901970 — symbol ids whose containing file name matches the query
+    /// (wildcard or substring). `None` ⇒ cold cache. Backs `query`'s chunk-search
+    /// file-name `path_match` without a PG EXISTS(CONTAINS) subquery.
+    pub fn symbols_in_matching_files(
+        &self,
+        project: &str,
+        normalized: &str,
+        wildcard: &str,
+    ) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::symbols_in_matching_files(
+            &snap, project, normalized, wildcard,
+        ))
+    }
+
     /// REQ-AXO-901970 — count edges of the given relation types in the project
     /// snapshot. `None` ⇒ cold cache (caller surfaces 0, never a PG count).
     pub fn count_edges_with_relation(
