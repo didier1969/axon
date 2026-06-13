@@ -526,6 +526,55 @@ mod tests {
         );
     }
 
+    /// REQ-AXO-901959 acceptance #4 — explicit routing proof: the bulk graph
+    /// COPY (a3_enroll → flush_batch_copy → store native pool) lands in the
+    /// store's OWN isolated DB and is INVISIBLE to a second, independently
+    /// isolated store. The linchpin bug (s73 revert) was the process-global
+    /// `static POOL` bound once to `resolve_database_url(None)` — every store's
+    /// COPY went to that one DB, so under per-test isolation store A's write
+    /// either polluted the global DB or vanished from A's own DB. This test
+    /// fails loudly if the global-pool routing ever regresses: store B (a
+    /// different DB) must NOT see store A's rows.
+    #[tokio::test]
+    async fn a3_enroll_bulk_copy_routes_to_owning_store_db_not_a_shared_pool() {
+        let store_a = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let store_b = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+
+        let parsed = parsed_with(
+            "/tmp/routing_proof.rs",
+            "fn routed_symbol() {}",
+            "hash-routing",
+            vec!["routed_symbol"],
+        );
+
+        // Write ONLY through store A's pipeline.
+        a3_enroll(parsed, store_a.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
+
+        let in_a = store_a
+            .query_count(
+                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'routed_symbol'",
+            )
+            .unwrap();
+        assert_eq!(
+            in_a, 1,
+            "the bulk COPY must land in the OWNING store's DB (store A)"
+        );
+
+        let in_b = store_b
+            .query_count(
+                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'routed_symbol'",
+            )
+            .unwrap();
+        assert_eq!(
+            in_b, 0,
+            "store A's bulk COPY must be INVISIBLE to store B — proving the write \
+             routes through each store's own native pool, not a process-global \
+             static POOL (REQ-AXO-901959 linchpin)"
+        );
+    }
+
     #[tokio::test]
     async fn a3_enroll_full_content_text_persists_for_fts() {
         // REQ-AXO-901624: A3 must persist full `Chunk.content` text so the

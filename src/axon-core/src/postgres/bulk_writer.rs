@@ -7,18 +7,29 @@
 //! bottleneck under PG; bulk-loading 10K embeddings in one COPY
 //! removes most of the per-row overhead.
 //!
-//! Surface (sync):
-//! - [`bulk_writer_enabled`]: reads `AXON_BULK_WRITER_ENABLED`.
-//! - [`flush_chunk_embeddings`]: blocks the caller until the COPY +
-//!   merge transaction commits. Internally drives a private
-//!   `tokio::Runtime` + `deadpool_postgres::Pool`. Both are lazy
-//!   `OnceLock`s so the first call pays the construction cost; later
-//!   calls reuse the same pool.
+//! ## Two routing paths (REQ-AXO-901959)
 //!
-//! The pool reads `AXON_LIVE_DATABASE_URL` first, then
-//! `AXON_DEV_DATABASE_URL`, then `DATABASE_URL`. Mirrors the
-//! plugin's resolution order so the bulk_writer connects to the same
-//! instance the FFI plugin already targets.
+//! - **Live pipeline (canonical):** the A3/B3 hot path writes via
+//!   `NativePgCtx::flush_batch_copy` / `flush_chunk_embeddings_copy`
+//!   (postgres/native.rs), which acquire a client from the GRAPHSTORE'S OWN
+//!   native pool and call the client-based `flush_*_async` cores here. The
+//!   pool is lifetime-scoped to the store, so the COPY lands in the same DB
+//!   the store reads from (correct under per-test isolation) and is dropped
+//!   with the store (no connection leak). This is the only path the indexer
+//!   uses; it never touches the `static POOL` below.
+//! - **Standalone (bench + integration tests):** the sync `flush_*`
+//!   entrypoints drive a process-global `OnceLock<Runtime>` + `OnceLock<Pool>`
+//!   resolved once from the env (`AXON_LIVE_DATABASE_URL` → `AXON_DEV_…` →
+//!   `DATABASE_URL`, via `postgres::resolve_database_url`). Used only by
+//!   `axon-bench-writer` (sets its own URL) and the `tests/pg_bulk_writer*.rs`
+//!   integration tests (single shared test DB), which legitimately have no
+//!   GraphStore. NOT the live write path — do not route store writes here.
+//!
+//! Surface (sync, standalone):
+//! - [`bulk_writer_enabled`]: reads `AXON_BULK_WRITER_ENABLED`.
+//! - [`flush_chunk_embeddings`] / [`flush_symbols`] / [`flush_chunks`] /
+//!   [`flush_batch`]: block the caller until the COPY + merge transaction
+//!   commits, over the global `OnceLock` pool described above.
 //!
 //! pgvector's `vector` type has a runtime-assigned OID, so the type
 //! is looked up via `pg_type` once per pool initialisation and cached
