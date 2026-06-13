@@ -525,6 +525,32 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-901970 — RAM-only containing-file resolution by symbol NAME,
+    /// scoped to `project`. Backfills an empty `uri` (the display
+    /// `COALESCE(file_path, CONTAINS subquery)` is gone) via the reverse CONTAINS
+    /// edge. Returns "" for workspace ("*"), unknown name, or cold cache. Name
+    /// resolves to the first matching id (the rare NULL-file_path display case).
+    fn containing_file_by_name_ram(&self, project: &str, name: &str) -> String {
+        if project == "*" || name.is_empty() || !self.ensure_ram_snapshot_warm(project) {
+            return String::new();
+        }
+        let view = process_view();
+        let Some(ids) = view.ids_for_short_name(project, name) else {
+            return String::new();
+        };
+        for id in ids {
+            if let Some(file) = view
+                .reverse_at_radius(project, &id, 1, 1, &[RelationType::Contains])
+                .and_then(|files| files.into_iter().next())
+            {
+                if !file.is_empty() {
+                    return file;
+                }
+            }
+        }
+        String::new()
+    }
+
     /// REQ-AXO-91508 — graph r=1 neighbor expansion lane (single-lookup
     /// category per CPT-AXO-90007). Given the set of direct-hit symbol
     /// names from the symbol_index lane, look up their canonical ids
@@ -658,7 +684,7 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, {cosine_expr} as score \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, {cosine_expr} as score \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} \
                                 OR {cosine_expr} < 0.5 \
@@ -670,11 +696,11 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, {cosine_expr} as score \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, {cosine_expr} as score \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE s.project_code = $proj AND ( {} \
                                 OR {cosine_expr} < 0.5 \
-                             ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) \
+                             ) \
                              ORDER BY score ASC LIMIT {}",
                             base_predicate, query_limit
                         ),
@@ -687,7 +713,7 @@ impl McpServer {
                 if project == "*" {
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                              WHERE {} LIMIT {}",
                             base_predicate, query_limit
@@ -697,9 +723,9 @@ impl McpServer {
                 } else {
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
+                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
-                             WHERE s.project_code = $proj AND ( {} ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) LIMIT {}",
+                             WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
                             base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
@@ -709,7 +735,7 @@ impl McpServer {
         } else if project == "*" {
             (
                 format!(
-                    "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
+                    "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                      FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
                      WHERE {} \
                      LIMIT {}",
@@ -720,9 +746,9 @@ impl McpServer {
         } else {
             (
                 format!(
-                    "SELECT s.name, s.kind, COALESCE(ch.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri \
+                    "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                      FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
-                     WHERE s.project_code = $proj AND ( {} ) AND (ch.file_path IS NOT NULL OR EXISTS (SELECT 1 FROM ist.Edge ce2 WHERE ce2.target_id = s.id AND ce2.relation_type = 'CONTAINS' AND ce2.project_code = s.project_code)) LIMIT {}",
+                     WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
                     base_predicate, query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
@@ -737,11 +763,37 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, &params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> = Self::rerank_symbol_rows(
-                    serde_json::from_str(&res).unwrap_or_default(),
-                    query_text,
-                    query_intent,
-                );
+                let mut parsed: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                // REQ-AXO-901970 — RAM-only file_path enrichment (the display
+                // CONTAINS subquery was removed): backfill empty uris via the RAM
+                // reverse CONTAINS edge. For scoped queries, dropping rows whose
+                // uri is still empty after resolution reproduces the removed
+                // `(file_path IS NOT NULL OR EXISTS CONTAINS)` WHERE filter.
+                for row in &mut parsed {
+                    let uri_empty = row
+                        .get(2)
+                        .and_then(Value::as_str)
+                        .map(str::is_empty)
+                        .unwrap_or(false);
+                    if uri_empty {
+                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string) {
+                            let file = self.containing_file_by_name_ram(project, &name);
+                            if !file.is_empty() {
+                                row[2] = json!(file);
+                            }
+                        }
+                    }
+                }
+                if project != "*" {
+                    parsed.retain(|row| {
+                        row.get(2)
+                            .and_then(Value::as_str)
+                            .map(|u| !u.is_empty())
+                            .unwrap_or(false)
+                    });
+                }
+                let rows: Vec<Vec<Value>> =
+                    Self::rerank_symbol_rows(parsed, query_text, query_intent);
                 if rows.is_empty() {
                     return self.axon_query_from_chunks(
                         query_text,
@@ -1013,7 +1065,7 @@ impl McpServer {
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, \
+                    SELECT s.name, s.kind, COALESCE(c.file_path, '') AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1027,7 +1079,7 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) \
+                               WHEN {path_match} THEN COALESCE(c.file_path, '') \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
@@ -1052,7 +1104,7 @@ impl McpServer {
         } else {
             format!(
                 "WITH chunk_matches AS ( \
-                    SELECT s.name, s.kind, COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) AS uri, \
+                    SELECT s.name, s.kind, COALESCE(c.file_path, '') AS uri, \
                            CASE \
                                WHEN {docstring_match} THEN 'docstring' \
                                WHEN {body_match} THEN 'chunk body' \
@@ -1066,7 +1118,7 @@ impl McpServer {
                                ELSE 2 \
                            END AS match_rank, \
                            CASE \
-                               WHEN {path_match} THEN COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = s.id AND ce.relation_type = 'CONTAINS' AND ce.project_code = s.project_code ORDER BY ce.source_id LIMIT 1)) \
+                               WHEN {path_match} THEN COALESCE(c.file_path, '') \
                                ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
                            END AS evidence \
                     FROM Chunk c \
@@ -1092,11 +1144,40 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> = Self::rerank_chunk_rows(
-                    serde_json::from_str(&res).unwrap_or_default(),
-                    query_text,
-                    query_intent,
-                );
+                let mut parsed: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                // REQ-AXO-901970 — RAM-only file_path enrichment (display CONTAINS
+                // subquery removed): backfill empty uri via reverse CONTAINS; for
+                // a `file path` match its evidence column is the same file.
+                for row in &mut parsed {
+                    let uri_empty = row
+                        .get(2)
+                        .and_then(Value::as_str)
+                        .map(str::is_empty)
+                        .unwrap_or(false);
+                    if uri_empty {
+                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string) {
+                            let file = self.containing_file_by_name_ram(project, &name);
+                            if !file.is_empty() {
+                                row[2] = json!(file.clone());
+                                let is_path_match = row
+                                    .get(3)
+                                    .and_then(Value::as_str)
+                                    .map(|r| r == "file path")
+                                    .unwrap_or(false);
+                                let evidence_empty = row
+                                    .get(4)
+                                    .and_then(Value::as_str)
+                                    .map(str::is_empty)
+                                    .unwrap_or(false);
+                                if is_path_match && evidence_empty {
+                                    row[4] = json!(file);
+                                }
+                            }
+                        }
+                    }
+                }
+                let rows: Vec<Vec<Value>> =
+                    Self::rerank_chunk_rows(parsed, query_text, query_intent);
                 if rows.is_empty() {
                     return self.axon_query_without_contains(
                         query_text,
