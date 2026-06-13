@@ -3,7 +3,10 @@ use crate::indexing_policy::{classify_path, classify_subtree_hint_path, PathDisp
 use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
 use anyhow::Result;
-use ignore::{gitignore::Gitignore, WalkBuilder};
+use ignore::{
+    gitignore::{Gitignore, GitignoreBuilder},
+    WalkBuilder,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -246,7 +249,7 @@ impl Scanner {
         let mut decision: Option<bool> = None;
         for dir in ancestor_chain(root, &absolute) {
             if let Some(matcher) =
-                self.cached_matcher_for(&self.gitignore_cache, &dir.join(".gitignore"))
+                self.cached_matcher_for(&self.gitignore_cache, &dir, &dir.join(".gitignore"))
             {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() {
@@ -255,9 +258,11 @@ impl Scanner {
                     decision = Some(false);
                 }
             }
-            if let Some(matcher) =
-                self.cached_matcher_for(&self.git_exclude_cache, &dir.join(".git/info/exclude"))
-            {
+            if let Some(matcher) = self.cached_matcher_for(
+                &self.git_exclude_cache,
+                &dir,
+                &dir.join(".git/info/exclude"),
+            ) {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() {
                     decision = Some(true);
@@ -284,7 +289,7 @@ impl Scanner {
         let mut included = false;
         for dir in ancestor_chain(root, &absolute) {
             if let Some(matcher) =
-                self.cached_matcher_for(&self.axoninclude_cache, &dir.join(".axoninclude"))
+                self.cached_matcher_for(&self.axoninclude_cache, &dir, &dir.join(".axoninclude"))
             {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() || matched.is_whitelist() {
@@ -317,7 +322,7 @@ impl Scanner {
                 (&self.axonignore_cache, ".axonignore"),
                 (&self.axonignore_local_cache, ".axonignore.local"),
             ] {
-                if let Some(matcher) = self.cached_matcher_for(cache, &dir.join(ignore_name)) {
+                if let Some(matcher) = self.cached_matcher_for(cache, &dir, &dir.join(ignore_name)) {
                     let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                     if matched.is_ignore() {
                         decision = Some(true);
@@ -476,9 +481,21 @@ impl Scanner {
         total_files
     }
 
+    /// Build (and cache) an ignore matcher for `matcher_path`, ROOTED at
+    /// `root_dir`. REQ-AXO-901893 — `Gitignore::new(path)` roots the matcher at
+    /// `path.parent()`, which is correct for `<dir>/.gitignore` (parent == dir)
+    /// but WRONG for `<dir>/.git/info/exclude` (parent == `<dir>/.git/info`).
+    /// Querying such a matcher with a repo-relative file path under `<dir>` then
+    /// panics inside the `ignore` crate ("path is expected to be under the
+    /// root") and the indexer task that called it dies, silently DROPPING the
+    /// file. Git's exclude patterns are relative to the repo root, so the
+    /// matcher must be rooted at `root_dir` (== `dir`) regardless of how deeply
+    /// the rule file is nested. `GitignoreBuilder::new(root_dir).add(file)`
+    /// roots explicitly; we pass `dir` at every call site.
     fn cached_matcher_for(
         &self,
         cache: &MatcherCache,
+        root_dir: &Path,
         matcher_path: &Path,
     ) -> Option<Arc<Gitignore>> {
         let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -487,8 +504,14 @@ impl Scanner {
         }
 
         let matcher = if matcher_path.exists() {
-            let (matcher, _err) = Gitignore::new(matcher_path);
-            Some(Arc::new(matcher))
+            let mut builder = GitignoreBuilder::new(root_dir);
+            // `add` returns Some(Error) on a malformed pattern line; the other
+            // lines still load, so we keep the partial matcher (best-effort
+            // filtering, matching the old `Gitignore::new` tolerance). A hard
+            // build failure → None (treat as "no rules" — index the file, the
+            // safe default; never drop on a matcher we cannot construct).
+            let _ = builder.add(matcher_path);
+            builder.build().ok().map(Arc::new)
         } else {
             None
         };
@@ -930,6 +953,41 @@ mod tests {
             .is_empty());
         assert!(parsed.indexing.subtree_hint_cooldown_ms >= 1);
         assert!(parsed.indexing.subtree_hint_retry_budget >= 1);
+    }
+
+    /// REQ-AXO-901893 — a `<repo>/.git/info/exclude` rule file is rooted at the
+    /// REPO dir, NOT `<repo>/.git/info`. Before the fix the matcher was built via
+    /// `Gitignore::new(.git/info/exclude)`, which the `ignore` crate roots at the
+    /// file's parent (`.git/info`); querying a repo-relative file path then
+    /// panicked ("path is expected to be under the root"), killing the indexer
+    /// task and silently DROPPING the file. Every git repo with an exclude file
+    /// under the watch root tripped it once inotify forced the scanner path.
+    /// This locks: no panic + the exclude pattern is honoured at the repo root.
+    #[test]
+    fn git_info_exclude_rooted_at_repo_does_not_panic_and_is_honoured() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
+
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "*.log\n").unwrap();
+
+        let ignored = repo.join("debug.log");
+        std::fs::write(&ignored, "x").unwrap();
+        let kept = repo.join("main.rs");
+        std::fs::write(&kept, "fn main() {}").unwrap();
+
+        // The assertion that matters is that NEITHER call panics. The exclude
+        // rule, now rooted at `repo`, must also actually match.
+        assert!(
+            scanner.is_ignored_by_git_rules(&ignored, false),
+            "*.log must be ignored by .git/info/exclude rooted at the repo dir"
+        );
+        assert!(
+            !scanner.is_ignored_by_git_rules(&kept, false),
+            "main.rs must not be ignored"
+        );
     }
 
     // ───────────────────────────────────────────────────────────────────
