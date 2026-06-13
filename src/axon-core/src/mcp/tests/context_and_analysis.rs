@@ -837,6 +837,14 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
     assert!(data["operator_guidance"]["blocking_factors"]
         .as_array()
         .is_some());
+
+    // REQ-AXO-901952 (gap B) — change_safety warmed the AXO process snapshots
+    // (IST + SOLL) from this test's raw-SQL fixtures. Evict them so the warm-but-
+    // stale snapshot does not leak into later AXO tests whose RAM fast-paths
+    // (project_status deltas, why evidence) would then read this test's symbols
+    // instead of their own (the documented stale-cache test-isolation pattern).
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 }
 
 // REQ-AXO-043 — conception_view and change_safety must adopt the

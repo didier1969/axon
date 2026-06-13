@@ -1199,20 +1199,31 @@ mod migration_guard_tests {
     // `WITH RECURSIVE`, no `ist.Edge` SQL, routed through `process_view()`.
     #[test]
     fn batch_c_get_circular_dependencies_is_ram_only_no_pg_recursion() {
-        let body = extract_fn_body(SOURCE, "pub fn get_circular_dependencies");
+        // Strip `//` comment tails before introspecting: the explanatory
+        // comments in the migrated body legitimately mention "WITH RECURSIVE"
+        // (describing what was removed), so the guard must inspect CODE only.
+        let raw = extract_fn_body(SOURCE, "pub fn get_circular_dependencies");
+        let code: String = raw
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !body.contains("WITH RECURSIVE"),
+            !code.contains("WITH RECURSIVE"),
             "no PG recursive cycle enumeration"
         );
-        assert!(!body.contains("FROM ist.Edge"), "no IST graph SQL");
-        assert!(!body.contains("query_json"), "no SQL round-trip at all");
+        assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!code.contains("query_json"), "no SQL round-trip at all");
         assert!(
-            body.contains("process_view()") && body.contains("structural_sccs"),
+            code.contains("process_view()") && code.contains("structural_sccs"),
             "routed through the RAM Tarjan SCC path"
         );
         // DuckDB residue must stay gone.
-        assert!(!body.contains("list_append"));
-        assert!(!body.contains("list_contains"));
+        assert!(!code.contains("list_append"));
+        assert!(!code.contains("list_contains"));
     }
 
     #[test]
