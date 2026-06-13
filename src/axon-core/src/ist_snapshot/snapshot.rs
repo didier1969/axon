@@ -110,6 +110,27 @@ impl NodeKind {
             _ => Self::Other,
         }
     }
+
+    /// REQ-AXO-901970 — inverse of `from_db`: the canonical lowercase kind
+    /// string the `ist.symbol.kind` column stores (and that `query`/`inspect`
+    /// surface). `Other` maps to `""` to match `COALESCE(s.kind, '')`.
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Module => "module",
+            Self::Trait => "trait",
+            Self::Enum => "enum",
+            Self::Field => "field",
+            Self::Section => "section",
+            Self::Element => "element",
+            Self::ConfigKey => "config_key",
+            Self::Other => "",
+        }
+    }
 }
 
 /// Bitfield matching ist.symbol bool columns (tested / is_public / is_nif
@@ -216,6 +237,24 @@ impl IstGraph {
     /// (callers must derive indices via [`index_of`] or by iterating).
     pub fn id_of(&self, idx: u32) -> &str {
         &self.ids[idx as usize]
+    }
+
+    /// REQ-AXO-901970 — canonical ids whose short name (last `::` segment)
+    /// equals `name`. Linear scan ; used by `query_graph_r1_neighbors` to
+    /// resolve anchor names to ALL matching symbols (parity with the SQL
+    /// `WHERE name IN (...)`, which an overloaded name expands to >1 id).
+    pub fn ids_with_short_name(&self, name: &str) -> Vec<&str> {
+        self.ids
+            .iter()
+            .filter(|id| id.rsplit("::").next() == Some(name))
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// REQ-AXO-901970 — `NodeKind` for a canonical id, if present.
+    pub fn node_kind(&self, id: &str) -> Option<NodeKind> {
+        let idx = self.index_of(id)?;
+        Some(NodeKind::from_u8(self.kinds[idx as usize]))
     }
 
     /// `(kind, project_code, flags)` for a node.

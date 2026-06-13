@@ -541,61 +541,70 @@ impl McpServer {
         if direct_names.is_empty() || project == "*" {
             return Vec::new();
         }
-        // SQL-escape names + project. Identifiers come from the bench
-        // dataset / LLM input ; treat as untrusted.
-        let names_sql = direct_names
-            .iter()
-            .map(|n| format!("'{}'", n.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(",");
-        let safe_project = project.replace('\'', "''");
-        let sql = format!(
-            "WITH anchors AS ( \
-                SELECT id FROM ist.Symbol \
-                WHERE project_code = '{safe_project}' AND name IN ({names_sql}) \
-             ), \
-             neighbor_edges AS ( \
-                SELECT e.target_id AS nid FROM ist.Edge e \
-                JOIN anchors a ON a.id = e.source_id \
-                WHERE e.project_code = '{safe_project}' \
-                  AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
-                UNION \
-                SELECT e.source_id AS nid FROM ist.Edge e \
-                JOIN anchors a ON a.id = e.target_id \
-                WHERE e.project_code = '{safe_project}' \
-                  AND e.relation_type IN ('CALLS', 'CALLS_NIF', 'CONTAINS') \
-             ) \
-             SELECT DISTINCT s.name, COALESCE(s.kind, '') AS kind, \
-                    COALESCE((SELECT c.file_path FROM ist.Chunk c \
-                              WHERE c.source_id = s.id LIMIT 1), '') AS uri \
-             FROM ist.Symbol s \
-             JOIN neighbor_edges n ON n.nid = s.id \
-             WHERE s.project_code = '{safe_project}' \
-               AND s.name NOT IN ({names_sql}) \
-             LIMIT {limit}"
-        );
-        match self.graph_store.query_json(&sql) {
-            Ok(json_str) => serde_json::from_str::<Vec<Vec<Value>>>(&json_str)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|row| {
-                    let name = row.first().and_then(Value::as_str)?;
-                    if name.is_empty() {
-                        return None;
-                    }
-                    let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
-                    let uri = row.get(2).and_then(Value::as_str).unwrap_or("");
-                    Some(json!({
-                        "name": name,
-                        "kind": kind,
-                        "uri": uri,
-                        "surface": "graph_r1",
-                        "project": project,
-                    }))
-                })
-                .collect(),
-            Err(_) => Vec::new(),
+        // REQ-AXO-901970 — RAM-only 1-hop neighbor expansion (forward + reverse
+        // over CALLS / CALLS_NIF / CONTAINS) replacing the PG `ist.Edge`
+        // anchor/neighbor join. Cold cache → empty (best-effort surface, never
+        // a PG fallback). Parity notes vs the SQL it replaces:
+        //  - anchor names resolve to ALL matching ids (overloaded name → >1).
+        //  - file endpoints (raw paths, no `::`) are skipped, mirroring the SQL
+        //    `JOIN ist.Symbol` that dropped non-symbol CONTAINS endpoints.
+        //  - uri = containing file via reverse CONTAINS (≡ the Chunk.file_path
+        //    lookup for a symbol). No ORDER BY in the SQL → order is free.
+        if !self.ensure_ram_snapshot_warm(project) {
+            return Vec::new();
         }
+        let view = process_view();
+        let rels = [RelationType::Calls, RelationType::CallsNif, RelationType::Contains];
+        let fanout = limit.max(1) * 8;
+
+        let mut anchor_ids: Vec<String> = Vec::new();
+        for name in direct_names {
+            if let Some(ids) = view.ids_for_short_name(project, name) {
+                anchor_ids.extend(ids);
+            }
+        }
+
+        let mut seen_names: HashSet<String> = HashSet::new();
+        let mut out: Vec<Value> = Vec::new();
+        for anchor_id in &anchor_ids {
+            let mut neighbors: Vec<String> = Vec::new();
+            if let Some(fwd) = view.forward_at_radius(project, anchor_id, 1, fanout, &rels) {
+                neighbors.extend(fwd);
+            }
+            if let Some(rev) = view.reverse_at_radius(project, anchor_id, 1, fanout, &rels) {
+                neighbors.extend(rev);
+            }
+            for nid in neighbors {
+                // Skip file endpoints (CONTAINS sources are raw paths, no `::`)
+                // — the SQL dropped them via the ist.Symbol join.
+                if !nid.contains("::") {
+                    continue;
+                }
+                let nname = nid.rsplit("::").next().unwrap_or(nid.as_str());
+                if nname.is_empty() || direct_names.contains(nname) {
+                    continue;
+                }
+                if !seen_names.insert(nname.to_string()) {
+                    continue;
+                }
+                let kind = view.node_kind_db(project, &nid).unwrap_or("");
+                let uri = view
+                    .reverse_at_radius(project, &nid, 1, 1, &[RelationType::Contains])
+                    .and_then(|files| files.into_iter().next())
+                    .unwrap_or_default();
+                out.push(json!({
+                    "name": nname,
+                    "kind": kind,
+                    "uri": uri,
+                    "surface": "graph_r1",
+                    "project": project,
+                }));
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+        out
     }
 
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {

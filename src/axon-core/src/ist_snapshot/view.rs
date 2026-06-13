@@ -128,6 +128,26 @@ impl IstGraphView {
         Some(flags.tested())
     }
 
+    /// REQ-AXO-901970 — canonical ids whose short name matches `name`, owned
+    /// copies. `None` ⇒ cold cache (caller surfaces empty, never PG).
+    pub fn ids_for_short_name(&self, project: &str, name: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(
+            snap.ids_with_short_name(name)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    /// REQ-AXO-901970 — canonical lowercase kind string of a symbol id (matches
+    /// the `ist.symbol.kind` column / `COALESCE(s.kind,'')`). `None` ⇒ cold
+    /// cache or id absent.
+    pub fn node_kind_db(&self, project: &str, id: &str) -> Option<&'static str> {
+        let snap = self.try_snapshot(project)?;
+        snap.node_kind(id).map(|k| k.as_db())
+    }
+
     pub fn is_warm(&self, project: &str) -> bool {
         self.cache.get(project).is_some()
     }

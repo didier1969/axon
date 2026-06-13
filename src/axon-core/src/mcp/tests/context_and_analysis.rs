@@ -2403,6 +2403,12 @@ fn test_axon_query_mode_gates_graph_r1_expansion() {
         .graph_store
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::caller_fn', 'prj::callee_fn', 'CALLS', 'PRJ', 0)")
         .unwrap();
+    // REQ-AXO-901970 — query_graph_r1_neighbors now expands via the RAM IST
+    // snapshot. These rows were seeded with raw SQL (bypassing cache
+    // invalidation), so evict any stale PRJ process snapshot; the verbose query
+    // re-warms it fresh and the CALLS neighbour callee_fn resolves in RAM.
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
 
     let run = |mode: Option<&str>| {
         let mut arguments = json!({ "query": "caller_fn", "project": "PRJ" });
@@ -2459,6 +2465,70 @@ fn test_axon_query_mode_gates_graph_r1_expansion() {
         full_neighbours.iter().any(|n| n == "callee_fn"),
         "`full` alias must behave like verbose, got {full_neighbours:?}"
     );
+}
+
+// REQ-AXO-901970 — direct unit coverage of the RAM parity decisions in
+// query_graph_r1_neighbors: reverse CALLS callers surface, file endpoints
+// (CONTAINS sources, no `::`) are excluded, and the anchor name itself is
+// filtered out. Hand-built snapshot, no PG.
+#[test]
+fn query_graph_r1_neighbors_ram_excludes_files_and_anchor() {
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
+    use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
+    use std::collections::HashSet;
+
+    let code = "TR1";
+    let target = "TR1::f.rs::target".to_string();
+    let caller = "TR1::f.rs::caller".to_string();
+    let file = "f.rs".to_string();
+
+    let mk = |id: &str| NodeRecord {
+        id: id.to_string(),
+        project_code: code.to_string(),
+        kind: NodeKind::Function,
+        flags: NodeFlags::default(),
+    };
+    let nodes = vec![mk(&target), mk(&caller)];
+    let edges = vec![
+        // caller CALLS target → reverse from target yields caller.
+        EdgeTriple {
+            source: caller.clone(),
+            target: target.clone(),
+            rel: RelationType::Calls,
+        },
+        // file CONTAINS target → reverse from target yields the file (must be dropped).
+        EdgeTriple {
+            source: file.clone(),
+            target: target.clone(),
+            rel: RelationType::Contains,
+        },
+    ];
+    evict_process_snapshot(code);
+    publish_process_snapshot(code.to_string(), std::sync::Arc::new(IstGraph::build(nodes, edges)));
+
+    let server = create_test_server();
+    let direct: HashSet<String> = ["target".to_string()].into_iter().collect();
+    let result = server.query_graph_r1_neighbors(&direct, code, 10);
+
+    let names: Vec<&str> = result
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(names.contains(&"caller"), "reverse CALLS caller must surface: {names:?}");
+    assert!(!names.contains(&"target"), "anchor name must be excluded: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.contains("f.rs")),
+        "file endpoint must be excluded: {names:?}"
+    );
+    assert_eq!(
+        result[0]["kind"].as_str(),
+        Some("function"),
+        "kind resolves from RAM NodeKind"
+    );
+
+    evict_process_snapshot(code);
 }
 
 #[test]
