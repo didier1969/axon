@@ -195,6 +195,19 @@ impl IstGraphView {
         Some(code_smells::nif_blocking_risks(&snap, project))
     }
 
+    /// REQ-AXO-901970 — RAM cross-file CALLS flows for `conception_view`.
+    /// Returns `(flows[(src,src_file,dst,dst_file)], total_count)`. `None` ⇒
+    /// cold cache (caller surfaces empty flows + 0, never a PG join).
+    #[allow(clippy::type_complexity)]
+    pub fn cross_file_call_flows(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<(Vec<(String, String, String, String)>, usize)> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::cross_file_call_flows(&snap, project, limit))
+    }
+
     /// REQ-AXO-901595 — RAM structural orphan_code (no callers, non-public,
     /// non-test path). Strict superset of `GraphStore::get_orphan_code_symbols`
     /// which additionally excludes symbols carrying a soll.Traceability

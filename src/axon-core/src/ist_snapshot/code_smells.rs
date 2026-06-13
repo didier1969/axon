@@ -497,6 +497,49 @@ pub fn nif_blocking_risks(graph: &IstGraph, project: &str) -> Vec<String> {
     out
 }
 
+/// REQ-AXO-901970 — RAM equivalent of `conception_view`'s cross-file CALLS
+/// flow query. Returns `(flows, total_count)` where each flow is
+/// `(src_name, src_file, dst_name, dst_file)` for CALLS edges whose source and
+/// target live in different files, sorted by `(src_name, dst_name)` and capped
+/// at `limit`; `total_count` is the unbounded number of such edges. Mirrors the
+/// PG `JOIN ist.Edge ... WHERE COALESCE(src_file,'') != COALESCE(dst_file,'')`.
+#[allow(clippy::type_complexity)]
+pub fn cross_file_call_flows(
+    graph: &IstGraph,
+    project: &str,
+    limit: usize,
+) -> (Vec<(String, String, String, String)>, usize) {
+    let file_map = build_file_path_map(graph);
+    let mut flows: Vec<(String, String, String, String)> = Vec::new();
+
+    for src_idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, src_idx, project) {
+            continue;
+        }
+        let src_file = file_map.get(&src_idx).cloned().unwrap_or_default();
+        for (dst_idx, rel) in graph.forward_neighbors(src_idx) {
+            if !matches!(rel, RelationType::Calls) {
+                continue;
+            }
+            let dst_file = file_map.get(&dst_idx).cloned().unwrap_or_default();
+            if src_file == dst_file {
+                continue;
+            }
+            flows.push((
+                name_from_id(graph.id_of(src_idx)).to_string(),
+                src_file.clone(),
+                name_from_id(graph.id_of(dst_idx)).to_string(),
+                dst_file,
+            ));
+        }
+    }
+
+    let total = flows.len();
+    flows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    flows.truncate(limit);
+    (flows, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1044,42 @@ mod tests {
         assert!(
             !out.iter().any(|s| s.starts_with("shallow_nif")),
             "shallow nif (depth 1) must not be flagged: {out:?}"
+        );
+    }
+
+    // REQ-AXO-901970 — cross_file_call_flows: only CALLS edges crossing a file
+    // boundary count; same-file calls are excluded; total is unbounded, list is
+    // sorted+capped.
+    #[test]
+    fn cross_file_call_flows_excludes_same_file_calls() {
+        let nodes = vec![
+            file("AXO::a.rs"),
+            file("AXO::b.rs"),
+            func("AXO::a.rs::af", true),
+            func("AXO::a.rs::a2", true),
+            func("AXO::b.rs::bf", true),
+        ];
+        let edges = vec![
+            edge("AXO::a.rs", "AXO::a.rs::af", RelationType::Contains),
+            edge("AXO::a.rs", "AXO::a.rs::a2", RelationType::Contains),
+            edge("AXO::b.rs", "AXO::b.rs::bf", RelationType::Contains),
+            // cross-file: af -> bf
+            edge("AXO::a.rs::af", "AXO::b.rs::bf", RelationType::Calls),
+            // same-file: af -> a2 (excluded)
+            edge("AXO::a.rs::af", "AXO::a.rs::a2", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let (flows, count) = cross_file_call_flows(&g, "AXO", 5);
+        assert_eq!(count, 1, "only the cross-file call counts: {flows:?}");
+        assert_eq!(flows.len(), 1);
+        assert_eq!(
+            flows[0],
+            (
+                "af".to_string(),
+                "AXO::a.rs".to_string(),
+                "bf".to_string(),
+                "AXO::b.rs".to_string()
+            )
         );
     }
 }

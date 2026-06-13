@@ -96,36 +96,25 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
-        // REQ-AXO-251: under PG age-only-relations, the SQL CALLS / CONTAINS
-        // Post-MIL-AXO-017: flows via canonical ist.Edge + Chunk.file_path.
-        let flows_raw = self.graph_store
-            .query_json(&format!(
-                "SELECT src.name, COALESCE(src_ch.file_path, ''), dst.name, COALESCE(dst_ch.file_path, '')
-                 FROM ist.Edge e
-                 JOIN Symbol src ON src.id = e.source_id
-                 JOIN Symbol dst ON dst.id = e.target_id
-                 LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'
-                 LEFT JOIN Chunk dst_ch ON dst_ch.source_id = dst.id AND dst_ch.source_type = 'symbol'
-                 WHERE e.relation_type = 'CALLS'
-                   AND src.project_code = '{project}'
-                   AND dst.project_code = '{project}'
-                   AND e.project_code = '{project}'
-                   AND COALESCE(src_ch.file_path, '') != COALESCE(dst_ch.file_path, '')
-                 ORDER BY src.name ASC, dst.name ASC
-                 LIMIT 5",
-                project = escaped_project
-            ))
-            .unwrap_or_else(|_| "[]".to_string());
-        let flow_rows: Vec<Vec<Value>> = serde_json::from_str(&flows_raw).unwrap_or_default();
-        let flows = flow_rows
+        // REQ-AXO-901970 — cross-file CALLS flows + count RAM-only (forward CALLS
+        // over the process snapshot, file via reverse CONTAINS). Replaces the PG
+        // `ist.Edge` join. Cold cache → empty flows + 0 count (no PG fallback).
+        let (flow_tuples, flow_count) = if self.ensure_ram_snapshot_warm(project_code) {
+            crate::ist_snapshot::process_view()
+                .cross_file_call_flows(project_code, 5)
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), 0)
+        };
+        let flows = flow_tuples
             .iter()
-            .filter_map(|row| {
-                Some(json!({
-                    "from_symbol": row.first()?.as_str()?.to_string(),
-                    "from_path": row.get(1).and_then(|value| value.as_str()).unwrap_or("").to_string(),
-                    "to_symbol": row.get(2).and_then(|value| value.as_str()).unwrap_or("").to_string(),
-                    "to_path": row.get(3).and_then(|value| value.as_str()).unwrap_or("").to_string()
-                }))
+            .map(|(from_symbol, from_path, to_symbol, to_path)| {
+                json!({
+                    "from_symbol": from_symbol,
+                    "from_path": from_path,
+                    "to_symbol": to_symbol,
+                    "to_path": to_path,
+                })
             })
             .collect::<Vec<_>>();
 
@@ -146,22 +135,7 @@ impl McpServer {
                 escaped_project
             ))
             .unwrap_or(0);
-        let flow_count = self.graph_store
-            .query_count(&format!(
-                "SELECT count(*)
-                 FROM ist.Edge e
-                 JOIN Symbol src ON src.id = e.source_id
-                 JOIN Symbol dst ON dst.id = e.target_id
-                 LEFT JOIN Chunk src_ch ON src_ch.source_id = src.id AND src_ch.source_type = 'symbol'
-                 LEFT JOIN Chunk dst_ch ON dst_ch.source_id = dst.id AND dst_ch.source_type = 'symbol'
-                 WHERE e.relation_type = 'CALLS'
-                   AND src.project_code = '{project}'
-                   AND dst.project_code = '{project}'
-                   AND e.project_code = '{project}'
-                   AND COALESCE(src_ch.file_path, '') != COALESCE(dst_ch.file_path, '')",
-                project = escaped_project
-            ))
-            .unwrap_or(0);
+        // flow_count computed RAM-only above alongside the flows list.
 
         json!({
             "module_count": modules.len(),
