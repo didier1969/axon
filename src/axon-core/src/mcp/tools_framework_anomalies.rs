@@ -58,12 +58,9 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
-        // REQ-AXO-901595 — RAM-first analytics via IstGraphView when the
-        // per-project CSR cache is warm. Each `view.*_candidates` returns
-        // `Some(vec)` when the snapshot is warm (PIL-AXO-9002), else
-        // `None` and we fall through to the canonical PG path. `project="*"`
-        // (workspace-wide) bypasses RAM because the cache is per-project.
-        let ram_view = if project != "*" {
+        // REQ-AXO-901970 — RAM-EXCLUSIVE: warm the per-project CSR then read
+        // every structural sub-check from RAM (no PG fallback). "*" / cold → empty.
+        let ram_view = if project != "*" && self.ensure_ram_snapshot_warm(project) {
             Some(crate::ist_snapshot::process_view())
         } else {
             None
@@ -71,68 +68,57 @@ impl McpServer {
         let wrappers = ram_view
             .as_ref()
             .and_then(|view| view.wrapper_candidates(project, 20))
-            .unwrap_or_else(|| {
-                self.graph_store
-                    .get_wrapper_candidates(project)
-                    .unwrap_or_default()
-            });
+            .unwrap_or_default();
         let feature_envy = ram_view
             .as_ref()
             .and_then(|view| view.feature_envy_candidates(project, 20))
-            .unwrap_or_else(|| {
-                self.graph_store
-                    .get_feature_envy_candidates(project)
-                    .unwrap_or_default()
-            });
-        let detours = self
-            .graph_store
-            .get_detour_candidates(project)
             .unwrap_or_default();
-        let abstraction_detours = self
-            .graph_store
-            .get_abstraction_detour_candidates(project)
-            .unwrap_or_default();
-        // REQ-AXO-901599 / DEC-AXO-901593 (option B) — RAM-first orphan_code
-        // with lazy PG Traceability crosswalk. RAM scans IstGraph CSR in
-        // O(N+M) for structural candidates (no callers + non-public +
-        // non-test) without SOLL awareness. We then apply a batch
-        // `filter_orphans_by_traceability` PG query on JUST those
-        // candidates (small list, IN-clause), filtering out symbols
-        // already referenced by soll.Traceability. Cost : 1 small PG
-        // SELECT vs the full Symbol+Edge+Traceability scan in the
-        // legacy `get_orphan_code_symbols` path. Cold cache OR
-        // workspace-wide (project='*') falls back to canonical PG.
-        let ram_candidates: Option<Vec<String>> = ram_view
+        let detours = ram_view
             .as_ref()
-            .filter(|_| project != "*")
-            .and_then(|view| view.orphan_code_symbols(project, 20));
-        let orphan_code = match ram_candidates {
+            .and_then(|view| view.detour_candidates(project, 20))
+            .unwrap_or_default();
+        let abstraction_detours = ram_view
+            .as_ref()
+            .and_then(|view| view.abstraction_detour_candidates(project, 20))
+            .unwrap_or_default();
+        // RAM structural orphans, then a SOLL-layer Traceability filter via the
+        // SOLL RAM snapshot (soll.Traceability is intent, not IST graph). The
+        // candidate is a short name (name_from_id); match an artifact_ref that
+        // equals it OR ends with `::<candidate>` (canonical id form). Cold / "*"
+        // → empty (no PG IST full-scan fallback).
+        let orphan_code = match ram_view
+            .as_ref()
+            .and_then(|view| view.orphan_code_symbols(project, 20))
+        {
             Some(candidates) if candidates.is_empty() => Vec::new(),
-            Some(candidates) => self
-                .graph_store
-                .filter_orphans_by_traceability(project, &candidates)
-                .unwrap_or_else(|_| {
-                    // PG filter failed — fall back to canonical full scan
-                    self.graph_store
-                        .get_orphan_code_symbols(project)
-                        .unwrap_or_default()
-                }),
-            None => self
-                .graph_store
-                .get_orphan_code_symbols(project)
-                .unwrap_or_default(),
+            Some(candidates) => match self.soll_cache().snapshot(project).ok() {
+                Some(snap) => candidates
+                    .into_iter()
+                    .filter(|cand| {
+                        let suffix = format!("::{cand}");
+                        !snap.traceability.iter().any(|t| {
+                            t.artifact_type == "Symbol"
+                                && (t.artifact_ref == *cand || t.artifact_ref.ends_with(&suffix))
+                        })
+                    })
+                    .collect(),
+                None => candidates,
+            },
+            None => Vec::new(),
         };
+        // orphan_intent is a SOLL query (intent nodes without traceability), not
+        // an IST graph traversal — stays on the SOLL surface.
         let orphan_intent = self
             .graph_store
             .get_orphan_intent_nodes(project)
             .unwrap_or_default();
-        let phantom_dead_refs = self
-            .graph_store
-            .get_phantom_dead_refs(project)
+        let phantom_dead_refs = ram_view
+            .as_ref()
+            .and_then(|view| view.phantom_dead_refs(project))
             .unwrap_or_default();
-        let phantom_multi_declare = self
-            .graph_store
-            .get_phantom_multi_declare(project)
+        let phantom_multi_declare = ram_view
+            .as_ref()
+            .and_then(|view| view.phantom_multi_declare(project))
             .unwrap_or_default();
         let soll_snapshot = self
             .soll_completeness_snapshot(if project == "*" { None } else { Some(project) })
@@ -172,8 +158,7 @@ impl McpServer {
             let cycle_count = cycles.len();
             (cycles, cycle_count)
         };
-        // REQ-AXO-901595 — RAM-first god-objects via IstGraphView. Same
-        // warm-cache contract as the analytics above.
+        // REQ-AXO-901970 — RAM-only god-objects (no PG fallback; cold / "*" → empty).
         let god_objects = ram_view
             .as_ref()
             .and_then(|view| view.god_objects(project))
@@ -183,11 +168,7 @@ impl McpServer {
                     .map(|(name, count)| (name, serde_json::Value::Number((count as i64).into())))
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             })
-            .unwrap_or_else(|| {
-                self.graph_store
-                    .get_god_objects(project)
-                    .unwrap_or_default()
-            });
+            .unwrap_or_default();
         let validation_coverage_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
         let total_intent_nodes = if project == "*" {
             self.graph_store

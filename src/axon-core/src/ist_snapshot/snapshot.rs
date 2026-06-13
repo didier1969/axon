@@ -20,6 +20,9 @@ pub enum RelationType {
     Implements = 3,
     Imports = 4,
     Uses = 5,
+    // REQ-AXO-901970 — Reads / Declares back the phantom-reference analytics.
+    Reads = 6,
+    Declares = 7,
     Other = 255,
 }
 
@@ -36,6 +39,8 @@ impl RelationType {
             "IMPLEMENTS" => Self::Implements,
             "IMPORTS" => Self::Imports,
             "USES" => Self::Uses,
+            "READS" => Self::Reads,
+            "DECLARES" => Self::Declares,
             _ => Self::Other,
         }
     }
@@ -48,6 +53,8 @@ impl RelationType {
             Self::Implements => "IMPLEMENTS",
             Self::Imports => "IMPORTS",
             Self::Uses => "USES",
+            Self::Reads => "READS",
+            Self::Declares => "DECLARES",
             Self::Other => "OTHER",
         }
     }
@@ -71,6 +78,8 @@ pub enum NodeKind {
     Section = 9,
     Element = 10,
     ConfigKey = 11,
+    // REQ-AXO-901970 — Interface kind backs the abstraction-detour analytic.
+    Interface = 12,
     Other = 255,
 }
 
@@ -89,6 +98,7 @@ impl NodeKind {
             "section" => Self::Section,
             "element" => Self::Element,
             "config_key" => Self::ConfigKey,
+            "interface" => Self::Interface,
             _ => Self::Other,
         }
     }
@@ -107,6 +117,7 @@ impl NodeKind {
             9 => Self::Section,
             10 => Self::Element,
             11 => Self::ConfigKey,
+            12 => Self::Interface,
             _ => Self::Other,
         }
     }
@@ -128,6 +139,7 @@ impl NodeKind {
             Self::Section => "section",
             Self::Element => "element",
             Self::ConfigKey => "config_key",
+            Self::Interface => "interface",
             Self::Other => "",
         }
     }
@@ -737,6 +749,8 @@ fn relation_from_u8(value: u8) -> RelationType {
         3 => RelationType::Implements,
         4 => RelationType::Imports,
         5 => RelationType::Uses,
+        6 => RelationType::Reads,
+        7 => RelationType::Declares,
         _ => RelationType::Other,
     }
 }

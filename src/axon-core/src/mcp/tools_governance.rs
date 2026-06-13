@@ -376,6 +376,11 @@ impl McpServer {
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = requested_project;
 
+        // REQ-AXO-901970 — warm the RAM snapshot so the structural anti-pattern
+        // checks (circular / domain_leakage / unsafe_exposure / nif / dead_code /
+        // god_objects) resolve RAM-only. Cold / "*" → those checks surface empty.
+        let ram_warm = project != "*" && self.ensure_ram_snapshot_warm(project);
+
         let file_count = self.file_count_for_project(project);
 
         if file_count < 1 {
@@ -411,20 +416,11 @@ impl McpServer {
             .graph_store
             .get_technical_debt(project)
             .unwrap_or_default();
-        // REQ-AXO-901884 / feedback_trimodal — RAM-first god-objects
-        // (PIL-AXO-9002): consult the warm per-project CSR before the PG SQL
-        // traversal ; `project="*"` (workspace-wide) bypasses RAM (the cache
-        // is per-project). Mirrors the canonical pattern in
-        // tools_framework_anomalies.rs — RAM hit ⇒ no PG roundtrip.
-        let god_objects = {
-            let ram_view = if project != "*" {
-                Some(crate::ist_snapshot::process_view())
-            } else {
-                None
-            };
-            ram_view
-                .as_ref()
-                .and_then(|view| view.god_objects(project))
+        // REQ-AXO-901970 — RAM-only god-objects (warm the per-project CSR, no PG
+        // fallback; cold / "*" → empty).
+        let god_objects = if project != "*" && self.ensure_ram_snapshot_warm(project) {
+            crate::ist_snapshot::process_view()
+                .god_objects(project)
                 .map(|pairs| {
                     pairs
                         .into_iter()
@@ -433,14 +429,19 @@ impl McpServer {
                         })
                         .collect::<serde_json::Map<String, serde_json::Value>>()
                 })
-                .unwrap_or_else(|| {
-                    self.graph_store
-                        .get_god_objects(project)
-                        .unwrap_or_default()
-                })
+                .unwrap_or_default()
+        } else {
+            serde_json::Map::new()
         };
         let telemetry_score = self.graph_store.get_telemetry_score(project).unwrap_or(100);
-        let dead_code = self.graph_store.get_dead_code_count(project).unwrap_or(0);
+        // REQ-AXO-901970 — RAM-only dead-code count (no PG fallback; cold → 0).
+        let dead_code = if ram_warm {
+            crate::ist_snapshot::process_view()
+                .dead_code_count(project)
+                .unwrap_or(0) as i64
+        } else {
+            0
+        };
         let hygiene_score = (100 - (god_objects.len() as i64 * 10) - (dead_code * 2)).max(0);
 
         let mut evidence = String::new();
@@ -514,10 +515,14 @@ impl McpServer {
             .graph_store
             .get_circular_dependencies(project)
             .unwrap_or_default();
-        let domain_leaks = self
-            .graph_store
-            .get_domain_leakage(project, "domain", "infrastructure")
-            .unwrap_or_default();
+        // REQ-AXO-901970 — RAM-only domain leakage (no PG fallback; cold → empty).
+        let domain_leaks = if ram_warm {
+            crate::ist_snapshot::process_view()
+                .domain_leakage(project, "domain", "infrastructure")
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let unsafe_exposure = self
             .graph_store
             .get_unsafe_exposure(project)
@@ -687,20 +692,11 @@ impl McpServer {
         }
 
         let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        // REQ-AXO-901884 / feedback_trimodal — RAM-first god-objects
-        // (PIL-AXO-9002): consult the warm per-project CSR before the PG SQL
-        // traversal ; `project="*"` (workspace-wide) bypasses RAM (the cache
-        // is per-project). Mirrors the canonical pattern in
-        // tools_framework_anomalies.rs — RAM hit ⇒ no PG roundtrip.
-        let god_objects = {
-            let ram_view = if project != "*" {
-                Some(crate::ist_snapshot::process_view())
-            } else {
-                None
-            };
-            ram_view
-                .as_ref()
-                .and_then(|view| view.god_objects(project))
+        // REQ-AXO-901970 — RAM-only god-objects (warm the per-project CSR, no PG
+        // fallback; cold / "*" → empty).
+        let god_objects = if project != "*" && self.ensure_ram_snapshot_warm(project) {
+            crate::ist_snapshot::process_view()
+                .god_objects(project)
                 .map(|pairs| {
                     pairs
                         .into_iter()
@@ -709,11 +705,9 @@ impl McpServer {
                         })
                         .collect::<serde_json::Map<String, serde_json::Value>>()
                 })
-                .unwrap_or_else(|| {
-                    self.graph_store
-                        .get_god_objects(project)
-                        .unwrap_or_default()
-                })
+                .unwrap_or_default()
+        } else {
+            serde_json::Map::new()
         };
 
         let mut evidence = format!("Coverage {}%. Stability high.", coverage);

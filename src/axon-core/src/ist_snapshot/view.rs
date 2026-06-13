@@ -163,6 +163,43 @@ impl IstGraphView {
         ))
     }
 
+    /// REQ-AXO-901970 — RAM anomalies/audit sub-checks. `None` ⇒ cold cache.
+    pub fn detour_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::detour_candidates(&snap, project, limit))
+    }
+
+    pub fn abstraction_detour_candidates(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::abstraction_detour_candidates(
+            &snap, project, limit,
+        ))
+    }
+
+    pub fn domain_leakage(&self, project: &str, domain: &str, infra: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::domain_leakage(&snap, project, domain, infra))
+    }
+
+    pub fn dead_code_count(&self, project: &str) -> Option<usize> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::dead_code_count(&snap, project))
+    }
+
+    pub fn phantom_dead_refs(&self, project: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::phantom_dead_refs(&snap, project))
+    }
+
+    pub fn phantom_multi_declare(&self, project: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::phantom_multi_declare(&snap, project))
+    }
+
     /// REQ-AXO-901970 — count edges of the given relation types in the project
     /// snapshot. `None` ⇒ cold cache (caller surfaces 0, never a PG count).
     pub fn count_edges_with_relation(

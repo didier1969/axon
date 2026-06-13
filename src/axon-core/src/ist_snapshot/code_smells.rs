@@ -223,10 +223,11 @@ pub fn god_objects(graph: &IstGraph, project: &str) -> Vec<(String, usize)> {
         if !project_matches(graph, idx, project) {
             continue;
         }
-        let (kind_byte, _, _) = graph.node_meta(idx);
-        if !is_callable(kind_byte) {
-            continue;
-        }
+        // REQ-AXO-901970 — match PG `get_god_objects`: no kind filter. A god
+        // object is ANY symbol with high CALLS fan-out — classes/structs that
+        // orchestrate many collaborators, not just functions/methods (the old
+        // is_callable gate dropped `GodClass`-style types). File nodes carry no
+        // CALLS edges → never reach the threshold, so no kind guard is needed.
         let name = name_from_id(graph.id_of(idx));
         if name.len() < 3 {
             continue;
@@ -237,7 +238,7 @@ pub fn god_objects(graph: &IstGraph, project: &str) -> Vec<(String, usize)> {
             continue;
         }
 
-        // REQ-AXO-901924 — fan-OUT (distinct collaborators this callable
+        // REQ-AXO-901924 — fan-OUT (distinct collaborators this symbol
         // invokes), not fan-in. High fan-out = does-too-much = god object.
         let mut callees: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (target, rel) in graph.forward_neighbors(idx) {
@@ -389,6 +390,7 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Section => "section",
         NodeKind::Element => "element",
         NodeKind::ConfigKey => "config_key",
+        NodeKind::Interface => "interface",
         NodeKind::Other => "other",
     }
 }
@@ -538,6 +540,238 @@ pub fn cross_file_call_flows(
     flows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
     flows.truncate(limit);
     (flows, total)
+}
+
+/// REQ-AXO-901970 — RAM detour candidates: `src -> mid -> dst`, all same file,
+/// `mid` private with EXACTLY one inbound + one outbound CALLS, `src != dst`.
+pub fn detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+    let file_map = build_file_path_map(graph);
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for mid in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, mid, project) {
+            continue;
+        }
+        let (kind, _, flags) = graph.node_meta(mid);
+        if !is_callable(kind) || flags.public() {
+            continue;
+        }
+        let empty = String::new();
+        let mid_file = file_map.get(&mid).unwrap_or(&empty);
+        if mid_file.is_empty() || is_test_path(mid_file) {
+            continue;
+        }
+        let inbound: Vec<u32> = graph
+            .reverse_neighbors(mid)
+            .filter(|(_, r)| matches!(r, RelationType::Calls))
+            .map(|(s, _)| s)
+            .collect();
+        let outbound: Vec<u32> = graph
+            .forward_neighbors(mid)
+            .filter(|(_, r)| matches!(r, RelationType::Calls))
+            .map(|(t, _)| t)
+            .collect();
+        if inbound.len() != 1 || outbound.len() != 1 {
+            continue;
+        }
+        let (src, dst) = (inbound[0], outbound[0]);
+        if src == dst {
+            continue;
+        }
+        if file_map.get(&src) != Some(mid_file) || file_map.get(&dst) != Some(mid_file) {
+            continue;
+        }
+        out.push((
+            name_from_id(graph.id_of(src)).to_string(),
+            name_from_id(graph.id_of(mid)).to_string(),
+            name_from_id(graph.id_of(dst)).to_string(),
+        ));
+    }
+    out.sort();
+    out.into_iter()
+        .take(limit.max(1).min(ANALYTICS_LIMIT))
+        .map(|(s, m, d)| format!("{} -> {} -> {}", s, m, d))
+        .collect()
+}
+
+/// REQ-AXO-901970 — RAM abstraction-detour: an interface with EXACTLY one
+/// same-file impl (class/struct/module) named `<iface>impl|_impl|…adapter…`.
+pub fn abstraction_detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+    let file_map = build_file_path_map(graph);
+    let is_impl_kind = |k: u8| {
+        matches!(
+            NodeKind::from_u8(k),
+            NodeKind::Class | NodeKind::Struct | NodeKind::Module
+        )
+    };
+    let name_matches = |impl_lower: &str, iface_lower: &str| -> bool {
+        impl_lower == format!("{iface_lower}impl")
+            || impl_lower == format!("{iface_lower}_impl")
+            || (impl_lower.starts_with(iface_lower) && impl_lower.contains("adapter"))
+    };
+    let mut by_file: HashMap<String, Vec<u32>> = HashMap::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if let Some(path) = file_map.get(&idx) {
+            if !path.is_empty() && !is_test_path(path) {
+                by_file.entry(path.clone()).or_default().push(idx);
+            }
+        }
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for iface in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, iface, project) {
+            continue;
+        }
+        let (kind, _, _) = graph.node_meta(iface);
+        if !matches!(NodeKind::from_u8(kind), NodeKind::Interface) {
+            continue;
+        }
+        let Some(iface_file) = file_map.get(&iface).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let iface_lower = name_from_id(graph.id_of(iface)).to_ascii_lowercase();
+        let siblings = by_file.get(iface_file).map(Vec::as_slice).unwrap_or(&[]);
+        let impls: Vec<u32> = siblings
+            .iter()
+            .copied()
+            .filter(|&i| {
+                i != iface
+                    && is_impl_kind(graph.node_meta(i).0)
+                    && name_matches(
+                        &name_from_id(graph.id_of(i)).to_ascii_lowercase(),
+                        &iface_lower,
+                    )
+            })
+            .collect();
+        if impls.len() == 1 {
+            out.push((
+                name_from_id(graph.id_of(iface)).to_string(),
+                name_from_id(graph.id_of(impls[0])).to_string(),
+            ));
+        }
+    }
+    out.sort();
+    out.into_iter()
+        .take(limit.max(1).min(ANALYTICS_LIMIT))
+        .map(|(i, m)| format!("{} -> {}", i, m))
+        .collect()
+}
+
+/// REQ-AXO-901970 — RAM domain leakage: CALLS from a `domain` file into an
+/// `infra` file. Output `"src (src_file) -> dst (dst_file)"`.
+pub fn domain_leakage(graph: &IstGraph, project: &str, domain: &str, infra: &str) -> Vec<String> {
+    let file_map = build_file_path_map(graph);
+    let mut out: Vec<String> = Vec::new();
+    for src in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, src, project) {
+            continue;
+        }
+        let Some(src_file) = file_map.get(&src) else {
+            continue;
+        };
+        if !src_file.contains(domain) {
+            continue;
+        }
+        for (dst, rel) in graph.forward_neighbors(src) {
+            if !matches!(rel, RelationType::Calls) {
+                continue;
+            }
+            let Some(dst_file) = file_map.get(&dst) else {
+                continue;
+            };
+            if dst_file.contains(infra) {
+                out.push(format!(
+                    "{} ({}) -> {} ({})",
+                    name_from_id(graph.id_of(src)),
+                    src_file,
+                    name_from_id(graph.id_of(dst)),
+                    dst_file
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// REQ-AXO-901970 — RAM dead-code count: private callables in a non-test file
+/// with NO inbound CALLS and NO inbound CALLS_NIF.
+pub fn dead_code_count(graph: &IstGraph, project: &str) -> usize {
+    let file_map = build_file_path_map(graph);
+    let mut count = 0usize;
+    for idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, idx, project) {
+            continue;
+        }
+        let (kind, _, flags) = graph.node_meta(idx);
+        if !is_callable(kind) || flags.public() {
+            continue;
+        }
+        let empty = String::new();
+        let path = file_map.get(&idx).unwrap_or(&empty);
+        if path.is_empty() || is_test_path(path) {
+            continue;
+        }
+        let has_inbound_call = graph
+            .reverse_neighbors(idx)
+            .any(|(_, r)| matches!(r, RelationType::Calls | RelationType::CallsNif));
+        if !has_inbound_call {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// REQ-AXO-901970 — RAM phantom dead refs: phantom-namespaced symbols READS-d
+/// but never DECLARES-d. Sorted, capped at 20.
+pub fn phantom_dead_refs(graph: &IstGraph, _project: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut read_targets: HashSet<u32> = HashSet::new();
+    let mut declared: HashSet<u32> = HashSet::new();
+    for src in 0..(graph.node_count() as u32) {
+        for (tgt, rel) in graph.forward_neighbors(src) {
+            match rel {
+                RelationType::Reads if graph.id_of(tgt).contains("::phantom::") => {
+                    read_targets.insert(tgt);
+                }
+                RelationType::Declares => {
+                    declared.insert(tgt);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out: Vec<String> = read_targets
+        .into_iter()
+        .filter(|t| !declared.contains(t))
+        .map(|t| graph.id_of(t).to_string())
+        .collect();
+    out.sort();
+    out.truncate(20);
+    out
+}
+
+/// REQ-AXO-901970 — RAM phantom multi-declare: phantom symbols DECLARES-d from
+/// >1 distinct source. Output `"target (N sources)"`, by N desc.
+pub fn phantom_multi_declare(graph: &IstGraph, _project: &str) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut sources: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for src in 0..(graph.node_count() as u32) {
+        for (tgt, rel) in graph.forward_neighbors(src) {
+            if matches!(rel, RelationType::Declares) && graph.id_of(tgt).contains("::phantom::") {
+                sources.entry(tgt).or_default().insert(src);
+            }
+        }
+    }
+    let mut scored: Vec<(usize, String)> = sources
+        .into_iter()
+        .map(|(t, s)| (s.len(), graph.id_of(t).to_string()))
+        .filter(|(n, _)| *n > 1)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(20)
+        .map(|(n, t)| format!("{} ({} sources)", t, n))
+        .collect()
 }
 
 /// REQ-AXO-901970 — symbol ids whose CONTAINING FILE name matches the query,
@@ -1084,6 +1318,104 @@ mod tests {
 
     // REQ-AXO-901970 — symbols_in_matching_files: symbols whose containing file
     // name matches the query (substring or wildcard); empty query → no matches.
+    fn typed_node(id: &str, kind: NodeKind) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            project_code: "AXO".to_string(),
+            kind,
+            flags: NodeFlags::default(),
+        }
+    }
+
+    #[test]
+    fn detour_candidates_flags_single_passthrough() {
+        let nodes = vec![
+            file("src/m.rs"),
+            func("src/m.rs::src", true),
+            func("src/m.rs::mid", false),
+            func("src/m.rs::dst", true),
+        ];
+        let edges = vec![
+            edge("src/m.rs", "src/m.rs::src", RelationType::Contains),
+            edge("src/m.rs", "src/m.rs::mid", RelationType::Contains),
+            edge("src/m.rs", "src/m.rs::dst", RelationType::Contains),
+            edge("src/m.rs::src", "src/m.rs::mid", RelationType::Calls),
+            edge("src/m.rs::mid", "src/m.rs::dst", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(detour_candidates(&g, "AXO", 10), vec!["src -> mid -> dst".to_string()]);
+    }
+
+    #[test]
+    fn abstraction_detour_flags_single_impl() {
+        let nodes = vec![
+            file("src/svc.rs"),
+            typed_node("src/svc.rs::Service", NodeKind::Interface),
+            typed_node("src/svc.rs::ServiceImpl", NodeKind::Struct),
+        ];
+        let edges = vec![
+            edge("src/svc.rs", "src/svc.rs::Service", RelationType::Contains),
+            edge("src/svc.rs", "src/svc.rs::ServiceImpl", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(
+            abstraction_detour_candidates(&g, "AXO", 10),
+            vec!["Service -> ServiceImpl".to_string()]
+        );
+    }
+
+    #[test]
+    fn domain_leakage_flags_cross_layer_call() {
+        let nodes = vec![
+            file("src/domain/order.rs"),
+            func("src/domain/order.rs::place", true),
+            file("src/infrastructure/db.rs"),
+            func("src/infrastructure/db.rs::write", true),
+        ];
+        let edges = vec![
+            edge("src/domain/order.rs", "src/domain/order.rs::place", RelationType::Contains),
+            edge("src/infrastructure/db.rs", "src/infrastructure/db.rs::write", RelationType::Contains),
+            edge("src/domain/order.rs::place", "src/infrastructure/db.rs::write", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let leaks = domain_leakage(&g, "AXO", "domain", "infrastructure");
+        assert_eq!(leaks.len(), 1);
+        assert!(leaks[0].contains("place") && leaks[0].contains("write"), "{leaks:?}");
+    }
+
+    #[test]
+    fn dead_code_count_counts_uncalled_private() {
+        let nodes = vec![
+            file("src/d.rs"),
+            func("src/d.rs::dead", false),
+            func("src/d.rs::live", false),
+            func("src/d.rs::caller", true),
+        ];
+        let edges = vec![
+            edge("src/d.rs", "src/d.rs::dead", RelationType::Contains),
+            edge("src/d.rs", "src/d.rs::live", RelationType::Contains),
+            edge("src/d.rs", "src/d.rs::caller", RelationType::Contains),
+            edge("src/d.rs::caller", "src/d.rs::live", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(dead_code_count(&g, "AXO"), 1);
+    }
+
+    #[test]
+    fn phantom_analytics_use_reads_and_declares() {
+        let nodes = vec![func("src/p.rs::reader", false), func("src/p.rs::decl_a", false)];
+        let edges = vec![
+            edge("src/p.rs::reader", "ENV::phantom::MISSING", RelationType::Reads),
+            edge("src/p.rs::reader", "ENV::phantom::DUP", RelationType::Declares),
+            edge("src/p.rs::decl_a", "ENV::phantom::DUP", RelationType::Declares),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(phantom_dead_refs(&g, "AXO"), vec!["ENV::phantom::MISSING".to_string()]);
+        let multi = phantom_multi_declare(&g, "AXO");
+        assert_eq!(multi.len(), 1);
+        assert!(multi[0].starts_with("ENV::phantom::DUP (2 sources)"), "{multi:?}");
+    }
+
     #[test]
     fn symbols_in_matching_files_matches_by_containing_file_name() {
         let nodes = vec![

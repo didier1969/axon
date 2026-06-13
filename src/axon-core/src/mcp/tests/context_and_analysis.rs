@@ -1315,6 +1315,10 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'planned', '{\"priority\":\"P2\"}')").unwrap();
+    // REQ-AXO-901970 — anomalies warms the RAM snapshot; evict so it warms fresh
+    // from this test's raw-SQL inserts (process-global cache is shared).
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1538,6 +1542,9 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
         .graph_store
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::bridge', 'axo::sink', 'CALLS', 'AXO', 0)")
         .unwrap();
+    // REQ-AXO-901970 — anomalies warms the RAM snapshot; evict so it warms fresh.
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1570,7 +1577,11 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
         data["summary"]["abstraction_detour_count"].as_u64(),
         Some(1)
     );
-    assert_eq!(data["summary"]["alignment_proxy_score"].as_f64(), Some(0.0));
+    // REQ-AXO-901970 — RAM-only orphan_code correctly excludes the 4 symbols
+    // that DO have inbound CALLS (foreign_a/foreign_b/bridge/sink); only `source`
+    // and `entry` are orphans (2/7) → alignment (7-2)/7 = 71.4. The prior 0.0
+    // reflected the legacy PG path flagging all 7 (it ignored the CALLS edges).
+    assert_eq!(data["summary"]["alignment_proxy_score"].as_f64(), Some(71.4));
     assert_eq!(
         data["summary"]["rectitude_proxy_score"].as_f64(),
         Some(57.1)
@@ -3937,14 +3948,22 @@ fn test_axon_health_god_objects() {
             .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::GodClass', 'prj::dep{}', 'CALLS', 'PRJ', 0)", i))
             .unwrap();
     }
+    // REQ-AXO-901970 — health god_objects reads the RAM snapshot; evict so it
+    // warms fresh from this test's raw-SQL inserts (fan-OUT god object).
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "health",
+            // REQ-AXO-901970 — scope to the fixture's project: god_objects is
+            // RAM-per-project (no cross-project "*" aggregation; that would need
+            // every project's snapshot warm). The PRJ GodClass (CALLS fan-out 20)
+            // is flagged once the PRJ snapshot is warm.
             "arguments": {
-                "project": "*"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(7)),
