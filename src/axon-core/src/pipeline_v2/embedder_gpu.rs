@@ -30,7 +30,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::embedder::lifecycle_machine::{process_lifecycle, spawn_idle_watchdog, EmbedderPhase};
-use crate::embedder::{embed_texts_with_breakdown_ort, OrtGpuFirstTextEmbedding};
+use crate::embedder::OrtGpuFirstTextEmbedding;
 
 use super::stage_b2::B2Embedder;
 
@@ -163,14 +163,9 @@ impl B2Embedder for GpuB2Embedder {
         let _was_sleeping = process_lifecycle().request_wake();
         // SAFETY of unwrap : we just ensured guard is Some.
         let model = guard.as_mut().expect("session just ensured Some");
-        let (
-            embeddings,
-            _tokenize_ms,
-            _host_prepare_ms,
-            _input_copy_ms,
-            _inference_ms,
-            _output_extract_ms,
-        ) = embed_texts_with_breakdown_ort(&mut *model, texts)?;
+        // DEC-AXO-901631 — one inference for the whole length-homogeneous
+        // batch (sorted-drain guarantees the ordering ; no micro-batching).
+        let embeddings = model.embed_texts(texts)?;
         // Belt-and-braces : after a successful embed, the phase must
         // be Ready. (The `request_wake` above already set it.)
         debug_assert_eq!(process_lifecycle().phase(), EmbedderPhase::Ready);

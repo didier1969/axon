@@ -17,8 +17,8 @@ use crate::pipeline_v2::channels::{
     B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT, B3_BATCH_SIZE_DEFAULT,
     B3_BATCH_TIMEOUT_MS_DEFAULT, INGRESS_DRAIN_BATCH_DEFAULT, INTERNAL_CHANNEL_CAP_DEFAULT,
 };
-use crate::pipeline_v2::demand_pull::{BACKOFF_INITIAL_MS, BACKOFF_MAX_MS};
 use crate::pipeline_v2::notify_listener::LISTEN_CHANNEL;
+use crate::pipeline_v2_runtime::{VECTOR_DRAIN_BACKOFF_INITIAL_MS, VECTOR_DRAIN_BACKOFF_MAX_MS};
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
@@ -83,10 +83,11 @@ pub fn compose_indexer_config() -> serde_json::Value {
         // listener — exposed as `pub const` from notify_listener so this
         // value isn't hardcoded in 3 separate places.
         "notify_channel": LISTEN_CHANNEL,
-        // Adaptive demand-pull cadence, from the pub consts in demand_pull —
-        // the dashboard reads these instead of a hardcoded "1s/30s".
-        "demand_pull_backoff_initial_ms": BACKOFF_INITIAL_MS,
-        "demand_pull_backoff_max_ms": BACKOFF_MAX_MS,
+        // Sorted-drain idle backoff cadence (DEC-AXO-901631), from the pub
+        // consts in pipeline_v2_runtime — the dashboard reads these instead
+        // of a hardcoded "200ms/30s".
+        "vector_drain_backoff_initial_ms": VECTOR_DRAIN_BACKOFF_INITIAL_MS,
+        "vector_drain_backoff_max_ms": VECTOR_DRAIN_BACKOFF_MAX_MS,
         "ingress_drain_batch": ingress_drain,
     })
 }
@@ -133,8 +134,8 @@ mod tests {
             v["notify_channel"],
             crate::pipeline_v2::notify_listener::LISTEN_CHANNEL
         );
-        assert!(v["demand_pull_backoff_initial_ms"].is_number());
-        assert!(v["demand_pull_backoff_max_ms"].is_number());
+        assert!(v["vector_drain_backoff_initial_ms"].is_number());
+        assert!(v["vector_drain_backoff_max_ms"].is_number());
         assert!(v["ingress_drain_batch"].is_number());
     }
 }

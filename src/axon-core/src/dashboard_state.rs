@@ -251,7 +251,7 @@ pub(crate) fn compute_pipeline_status(
     // Idle. Distinguish done from blocked by whether there's pending
     // work the pipeline should be draining.
     if pending_gt_zero {
-        ("indexer_idle_blocked", Some("demand_pull_b_stalled"))
+        ("indexer_idle_blocked", Some("vector_drain_stalled"))
     } else {
         ("indexer_idle_done", None)
     }
@@ -437,7 +437,7 @@ mod tests {
     fn pipeline_status_indexer_idle_blocked_when_idle_with_pending() {
         let (status, reason) = compute_pipeline_status("indexer_full", true, 17_252, None, false);
         assert_eq!(status, "indexer_idle_blocked");
-        assert_eq!(reason, Some("demand_pull_b_stalled"));
+        assert_eq!(reason, Some("vector_drain_stalled"));
     }
 
     #[test]

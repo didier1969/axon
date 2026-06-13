@@ -25,17 +25,17 @@
 //!     - [`stage_b3::b3_persist_embedding`] → `upsert_chunk_embedding_v2`.
 //!
 //! A1's output blocking-sends to A2; A2 to A3. A3 persists chunk_ids to PG
-//! and the `trg_chunk_notify_pending` trigger fires `pg_notify`. There is NO
+//! and `embed_status='pending'` is the durable B queue. There is NO
 //! cross-pipeline push channel and NO B1 worker pool (slice 4/5 SOTA,
 //! REQ-AXO-901746) — `try_send` is RETIRED. Pipeline B is fed EXCLUSIVELY by
-//! the demand-pull NOTIFY listener
-//! ([`demand_pull::spawn_pipeline_b_demand_pull`]), which SELECTs pending
-//! chunks (content included) and feeds B2 directly via the internal
-//! `b_chunks` mpsc (cap [`INTERNAL_CHANNEL_CAP_DEFAULT`]).
+//! the sorted-drain feeder ([`crate::pipeline_v2_runtime::spawn_vector_sorted_drain`],
+//! DEC-AXO-901631), which SELECTs token-sorted pending chunks (content
+//! included) and feeds B2 in order via the internal `b_chunks` mpsc
+//! (cap [`INTERNAL_CHANNEL_CAP_DEFAULT`]).
 //!
 //! # Read-after-write contract (critical, see commit 294e09c)
 //!
-//! demand_pull_b SELECTs chunk content microseconds after A3 commits. Under
+//! The sorted-drain SELECTs chunk content microseconds after A3 commits. Under
 //! the legacy embedded test backend the reader ctx serves a stale snapshot
 //! during this window, so the pull MUST read through the writer ctx
 //! (`query_json_writer`). Under PG MVCC the deadpool makes the distinction
@@ -51,7 +51,6 @@
 //! `cargo run --release --bin axon-bench-pipeline-v2 -- --source PATH --gpu`
 
 pub mod channels;
-pub mod demand_pull;
 pub mod embedder_gpu;
 pub mod in_flight;
 pub mod indexed_file_cache;

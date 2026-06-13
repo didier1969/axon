@@ -408,6 +408,28 @@ impl OrtGpuFirstTextEmbedding {
             stats,
         ))
     }
+
+    /// REQ-AXO-901975 / DEC-AXO-901631 — embed a whole batch as **one**
+    /// inference. No token-aware micro-batching: the sorted-drain
+    /// (`spawn_vector_sorted_drain`) feeds B2 in `token_count` order, so the
+    /// batch the worker hands here is already length-homogeneous. A single
+    /// `encode_batch` + `bucket_up` + `run_binding` is therefore optimal —
+    /// one stable GPU shape per batch, no padding waste, no kernel
+    /// reselection. Caller bounds the batch at `AXON_B2_BATCH_SIZE` (≤ TRT
+    /// max profile batch).
+    pub(crate) fn embed_texts(&mut self, texts: &[String]) -> AnyhowResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inputs = texts.iter().map(|text| text.as_str()).collect::<Vec<_>>();
+        let encodings = self
+            .tokenizer
+            .encode_batch(inputs, true)
+            .map_err(|err| anyhow!("Failed to encode the batch: {}", err))?;
+        let (embeddings, _host_ms, _copy_ms, _inference_ms, _extract_ms, _stats) =
+            self.transform_encoded_with_breakdown(&encodings)?;
+        Ok(embeddings)
+    }
 }
 
 /// REQ-AXO-262 — pure helper to parse

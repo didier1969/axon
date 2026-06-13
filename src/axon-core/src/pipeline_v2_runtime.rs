@@ -8,10 +8,11 @@
 //! 2. Spawns the Watchman file source ([`crate::watchman_source`], REQ-AXO-901893):
 //!    clock/cursor deltas feed pipeline A's `input_tx` directly. On a hard
 //!    Watchman failure it degrades to an explicit one-shot scanner walk + Blocker.
-//! 3. Spawns the DBQ-A claim feeder ([`crate::pipeline_v2::demand_pull`],
-//!    REQ-AXO-901897): atomically claims 'discovered' / stale-lease 'parsing'
-//!    rows from ist.IndexedFile into the SAME `input_tx`, draining the backlog
-//!    by construction. A3's idempotent UPSERTs are the sole persistence path.
+//! 3. Spawns the pipeline-B sorted-drain feeder ([`spawn_vector_sorted_drain`],
+//!    DEC-AXO-901631): pulls a token-sorted reservoir of `embed_status='pending'`
+//!    chunks and feeds B2 in order, so each fixed-size batch is length-homogeneous.
+//!    Channel backpressure paces it to B's throughput. Replaces the retired
+//!    demand_pull (s, Q) / NOTIFY machinery.
 //! 4. Spawns the durable bootstrap + periodic reconciliation walk
 //!    ([`crate::scanner::Scanner::scan`], REQ-AXO-901901): UPSERTs every eligible
 //!    file as status='discovered' so the claim feeder (3) has a backlog to drain.
@@ -41,37 +42,12 @@ use crate::pipeline_v2::{
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::scanner::Scanner;
 
-use crate::pipeline_v2::demand_pull::DemandPullMetrics;
-use std::sync::atomic::AtomicPtr;
+/// REQ-AXO-901975 / DEC-AXO-901631 — sorted-drain backoff bounds, surfaced
+/// in `runtime_config` for observability. When the pending queue is empty
+/// the drain sleeps with doubling backoff between these bounds.
+pub const VECTOR_DRAIN_BACKOFF_INITIAL_MS: u64 = 200;
+pub const VECTOR_DRAIN_BACKOFF_MAX_MS: u64 = 30_000;
 
-static DEMAND_PULL_METRICS_B: AtomicPtr<DemandPullMetrics> = AtomicPtr::new(std::ptr::null_mut());
-
-pub fn demand_pull_metrics_b() -> Option<Arc<DemandPullMetrics>> {
-    let ptr = DEMAND_PULL_METRICS_B.load(std::sync::atomic::Ordering::Acquire);
-    if ptr.is_null() {
-        return None;
-    }
-    unsafe {
-        Arc::increment_strong_count(ptr);
-        Some(Arc::from_raw(ptr))
-    }
-}
-
-// REQ-AXO-901808 (MIL-AXO-029 slice 1) — canonical (s, Q) env vars.
-//
-// DEC-AXO-901625 reframes the existing demand-pull as a classic
-// (s, Q) inventory policy : `s` = reorder point (= threshold), `Q`
-// = reorder quantity (= batch). The env var names match that
-// vocabulary exactly :
-//
-//   AXON_PIPELINE_A_REORDER_POINT      pipeline A reorder point (s)
-//   AXON_PIPELINE_A_REORDER_QUANTITY   pipeline A reorder quantity (Q)
-//   AXON_PIPELINE_B_REORDER_POINT      pipeline B reorder point (s)
-//   AXON_PIPELINE_B_REORDER_QUANTITY   pipeline B reorder quantity (Q)
-//
-// No legacy aliasing : grep confirmed nothing in the repo (scripts,
-// yaml, prod env, docs) ever consumed the older `AXON_DEMAND_PULL_*`
-// names. Keeping a fallback layer for unused names is dead code.
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -79,18 +55,72 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-// REQ-AXO-901891 — demand_pull A admission-controller helpers (reorder point /
-// quantity, REQ-AXO-901814) removed with the demand_pull A feeder. Pipeline A
-// is now fed by the backpressure bootstrap walk + the drain loop, which pace
-// to A's throughput directly — no reorder-band tuning to do.
-fn demand_pull_b_threshold_from_env() -> usize {
-    // Pipeline B (vector embedding) flows more items per file ; keep
-    // the 1500 default until bench (slice 8) ties it to a host metric.
-    env_usize("AXON_PIPELINE_B_REORDER_POINT", 1500)
+/// REQ-AXO-901975 / DEC-AXO-901631 — sorted-drain reservoir size: the
+/// number of token-sorted pending chunks pulled per drain wave. The
+/// SELECT already orders by `token_count`, so a fixed-size B2 batch carved
+/// from this reservoir is length-homogeneous → one GPU inference per batch.
+fn vector_drain_reservoir_from_env() -> usize {
+    env_usize("AXON_B2_RESERVOIR", 8192)
 }
 
-fn demand_pull_b_batch_from_env() -> usize {
-    env_usize("AXON_PIPELINE_B_REORDER_QUANTITY", 1500)
+/// REQ-AXO-901975 / DEC-AXO-901631 — sorted-drain feed for pipeline B.
+///
+/// Replaces the demand_pull (s, Q) / NOTIFY / stall-tracker machinery with a
+/// flat drain loop: pull a token-sorted reservoir of pending chunks (the
+/// SELECT does `ORDER BY token_count`), feed them to B2 **in order** so each
+/// fixed-size batch the B2 worker carves is length-homogeneous → one stable
+/// GPU shape per batch.
+///
+/// Correct-by-construction safety: the bounded `tx` channel provides
+/// backpressure — `send().await` blocks when B is saturated or stalled, so
+/// the loop physically cannot re-`SELECT` in a tight spin (the REQ-AXO-901862
+/// runaway). `embed_status='pending'` is the durable queue truth; B3 stamps
+/// `'embedded'` idempotently, so a restart resumes exactly where it left off.
+/// No dedup cache, no reorder band, no claim column.
+fn spawn_vector_sorted_drain(
+    store: Arc<GraphStore>,
+    tx: mpsc::Sender<crate::pipeline_v2::ChunkForEmbedding>,
+    reservoir: usize,
+) {
+    tokio::spawn(async move {
+        let mut backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
+        loop {
+            // Blocking PG SELECT off the tokio runtime.
+            let store_for_q = store.clone();
+            let rows = match tokio::task::spawn_blocking(move || {
+                store_for_q.select_chunks_with_content_needing_embedding(reservoir)
+            })
+            .await
+            {
+                Ok(Ok(rows)) => rows,
+                Ok(Err(err)) => {
+                    warn!(error = %err, "vector sorted-drain: pending SELECT failed");
+                    Vec::new()
+                }
+                Err(err) => {
+                    warn!(error = %err, "vector sorted-drain: blocking join failed");
+                    Vec::new()
+                }
+            };
+            if rows.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2).min(VECTOR_DRAIN_BACKOFF_MAX_MS);
+                continue;
+            }
+            backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
+            for (chunk_id, content, content_hash) in rows {
+                let payload = crate::pipeline_v2::ChunkForEmbedding {
+                    chunk_id,
+                    content,
+                    content_hash,
+                };
+                if tx.send(payload).await.is_err() {
+                    // B side closed — stop draining.
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn resolve_database_url_for_listener() -> String {
@@ -248,17 +278,16 @@ pub fn spawn_pipeline_v2_indexer(
     // freshness window so a single missed tick stays fresh.
     spawn_indexer_liveness_heartbeat(store.clone());
 
-    // Slice 5 SOTA — create the b_chunks channel here (was b1_inbox in
-    // orchestrator). demand_pull_b owns the tx ; spawn_pipeline_b_full_multi
-    // takes the rx. The channel carries ChunkForEmbedding (one
-    // round-trip SELECT-with-content per batch).
+    // Create the b_chunks channel here. The sorted-drain feeder owns the tx ;
+    // spawn_pipeline_b_full_multi takes the rx. The channel carries
+    // ChunkForEmbedding (one round-trip SELECT-with-content per drain wave).
     let (b_chunks_tx, b_chunks_rx) =
         mpsc::channel::<crate::pipeline_v2::ChunkForEmbedding>(caps.internal);
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
         info!(
-            "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — demand_pull_b feeds B2)",
+            "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — sorted-drain feeds B2)",
             counts_b.b2, counts_b.b3
         );
         let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> = match GpuB2Embedder::try_new_cuda(
@@ -360,26 +389,14 @@ pub fn spawn_pipeline_v2_indexer(
             std::mem::replace(&mut handles_b.output_rx, tokio::sync::mpsc::channel(1).1);
         tokio::spawn(async move { while output_rx_b.recv().await.is_some() {} });
 
-        // DEC-AXO-901620 + slice 5 SOTA — demand-pull B feeds
-        // ChunkForEmbedding directly to the b_chunks channel (one PG
-        // round-trip with content). LISTEN chunk_pending_embed wakes
-        // the puller ; 30s safety-net poll catches lost notifications.
-        let demand_pull_b_threshold = demand_pull_b_threshold_from_env();
-        let demand_pull_b_batch = demand_pull_b_batch_from_env();
-        let db_url_b = resolve_database_url_for_listener();
-        let _metrics_b = crate::pipeline_v2::demand_pull::spawn_pipeline_b_demand_pull(
-            store.clone(),
-            db_url_b,
-            b_chunks_tx,
-            demand_pull_b_threshold,
-            demand_pull_b_batch,
-        );
-        DEMAND_PULL_METRICS_B.store(
-            Arc::into_raw(_metrics_b) as *mut _,
-            std::sync::atomic::Ordering::Release,
-        );
+        // DEC-AXO-901631 — sorted-drain feed (replaces demand_pull (s, Q)).
+        // Pulls token-sorted pending chunks and feeds B2 in order so each
+        // fixed-size batch is length-homogeneous → one GPU inference. Channel
+        // backpressure paces the drain to B's throughput (no spin on stall).
+        let reservoir = vector_drain_reservoir_from_env();
+        spawn_vector_sorted_drain(store.clone(), b_chunks_tx, reservoir);
     } else {
-        // No B side — drop the b_chunks tx so demand_pull won't be
+        // No B side — drop the b_chunks tx so the sorted-drain won't be
         // spawned. The unused rx is also dropped here.
         drop(b_chunks_tx);
         drop(b_chunks_rx);

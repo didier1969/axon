@@ -557,22 +557,13 @@ impl McpServer {
         // status='discovered' work queue were retired. Pipeline A is now fed
         // directly by the scanner/Watchman walk into a bounded in-process
         // channel, so there is no DB 'discovered' stock and no A feeder metrics.
-        // stock_a=0, replenish_a=null. Pipeline B (demand_pull_b) is unchanged.
+        // stock_a=0, replenish_a=null. DEC-AXO-901631 — pipeline B is now fed
+        // by the flat sorted-drain (no demand_pull feeder, no (s,Q) metrics) ;
+        // the B backlog is already surfaced as the top-level `pending_chunks`
+        // field, so replenish_b=null.
         let stock_a: i64 = 0;
         let replenish_a = json!(null);
-        let replenish_b = {
-            let snap_b = crate::pipeline_v2_runtime::demand_pull_metrics_b().map(|m| m.snapshot());
-            match snap_b {
-                Some(s) => json!({
-                    "pulls_total": s.pulls_total,
-                    "items_fed_total": s.items_fed_total,
-                    "empty_pulls_total": s.empty_pulls_total,
-                    "try_send_failures_total": s.try_send_failures_total,
-                    "skipped_above_threshold": s.skipped_above_threshold,
-                }),
-                None => json!(null),
-            }
-        };
+        let replenish_b = json!(null);
 
         // REQ-AXO-90009 Slice 3A — lifecycle phase telemetry. Surfaces the
         // sleep/wake state machine so operators see when the GPU session is
@@ -696,12 +687,11 @@ impl McpServer {
              ### Pipeline A — CPU (graph + chunks + FTS)\n\
              - Workers:           a1={a1}  a2={a2}  a3={a3}\n\
              - A3 batch:          {a3_batch} chunks, timeout {a3_timeout} ms\n\n\
-             ### Pipeline B — GPU embedding (no B1 pool ; demand_pull_b feeds B2)\n\
+             ### Pipeline B — GPU embedding (no B1 pool ; sorted-drain feeds B2)\n\
              - Workers:           b2={b2}  b3={b3}\n\
              - B2 batch:          {b2_batch} chunks, timeout {b2_timeout} ms\n\
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
-             - B fed via:        demand_pull_b LISTEN chunk_pending_embed + adaptive 200ms→30s backoff\n\
-             - NOTIFY channel:    chunk_pending_embed\n\
+             - B fed via:        sorted-drain (ORDER BY token_count, reservoir + channel backpressure, 200ms→30s idle backoff) — DEC-AXO-901631\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
              - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\n\
