@@ -106,6 +106,16 @@ impl IstGraphView {
         Some(snap.reciprocal_calls_cycle_count())
     }
 
+    /// REQ-AXO-901952 — Tarjan strongly-connected components (size > 1 = a
+    /// circular-dependency cluster), ordered by descending size. Migrates the
+    /// `get_circular_dependencies` cycle LISTING off the PG `WITH RECURSIVE`
+    /// path-enumeration onto the RAM snapshot. `None` ⇒ cold cache (caller
+    /// surfaces empty, never a PG fallback — the count stays the RAM heartbeat).
+    pub fn structural_sccs(&self, project: &str) -> Option<Vec<Vec<String>>> {
+        let snap = self.try_snapshot(project)?;
+        Some(crate::ist_snapshot::algorithms::structural_sccs(&snap))
+    }
+
     pub fn is_warm(&self, project: &str) -> bool {
         self.cache.get(project).is_some()
     }

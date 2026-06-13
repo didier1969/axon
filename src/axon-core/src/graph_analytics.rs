@@ -730,63 +730,34 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS ; DuckDB array
-        // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`, array_length).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let base_calls = if scoped {
-            format!(
-                "SELECT c.source_id, c.target_id
-                 FROM ist.Edge c
-                 JOIN Symbol s ON s.id = c.source_id
-                 WHERE c.relation_type = 'CALLS' AND s.project_code = '{}'",
-                escaped
-            )
-        } else {
-            "SELECT source_id, target_id FROM ist.Edge WHERE relation_type = 'CALLS'".to_string()
-        };
-
-        let query = format!(
-            "
-            WITH RECURSIVE call_paths(source_id, target_id, path_ids, path_names, is_cycle) AS (
-                SELECT
-                    c.source_id,
-                    c.target_id,
-                    ARRAY[c.source_id],
-                    ARRAY[s.name],
-                    false
-                FROM ({}) c
-                JOIN Symbol s ON s.id = c.source_id
-
-                UNION ALL
-
-                SELECT
-                    p.source_id,
-                    c.target_id,
-                    p.path_ids || ARRAY[c.source_id],
-                    p.path_names || ARRAY[s.name],
-                    c.target_id = ANY(p.path_ids)
-                FROM call_paths p
-                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
-                JOIN Symbol s ON s.id = c.source_id
-                WHERE NOT p.is_cycle AND array_length(p.path_ids, 1) < 10
-            )
-            SELECT array_to_string(p.path_names || ARRAY[s_target.name], ' -> ') AS cycle_path
-            FROM call_paths p
-            JOIN Symbol s_target ON s_target.id = p.target_id
-            WHERE p.is_cycle = true AND array_length(p.path_ids, 1) > 1
-            ",
-            base_calls
-        );
-
-        let res = self.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        let mut findings = Vec::new();
-        for row in rows {
-            if !row.is_empty() {
-                findings.push(row[0].clone());
-            }
+        // REQ-AXO-901952 — RAM-only cycle LISTING. Each non-trivial Tarjan SCC
+        // (size > 1) in the per-project snapshot is a circular-dependency
+        // cluster; render its members (short names = canonical id tail) joined
+        // by " -> " and closed back to the first, mirroring the legacy
+        // `WITH RECURSIVE` path-string output. Workspace-wide ("*") and a cold
+        // cache surface empty — the per-project reciprocal-cycle count
+        // (`get_circular_dependency_count_fast`) stays the RAM heartbeat. No PG
+        // `WITH RECURSIVE` fallback (the whole point of REQ-AXO-901952).
+        if project == "*" {
+            return Ok(Vec::new());
         }
+        let Some(sccs) = crate::ist_snapshot::process_view().structural_sccs(project) else {
+            return Ok(Vec::new());
+        };
+        let findings = sccs
+            .into_iter()
+            .map(|members| {
+                let mut names: Vec<&str> = members
+                    .iter()
+                    .map(|id| id.rsplit("::").next().unwrap_or(id.as_str()))
+                    .collect();
+                // Close the loop so the rendering reads as a cycle (a -> b -> a).
+                if let Some(first) = names.first().copied() {
+                    names.push(first);
+                }
+                names.join(" -> ")
+            })
+            .collect();
         Ok(findings)
     }
 
@@ -1222,20 +1193,26 @@ mod migration_guard_tests {
         );
     }
 
+    // REQ-AXO-901952 — the cycle LISTING is now RAM-only (Tarjan SCC over the
+    // process snapshot); the legacy PG `WITH RECURSIVE` path enumeration is
+    // gone. Body-introspection guards the no-PG-fallback invariant: no
+    // `WITH RECURSIVE`, no `ist.Edge` SQL, routed through `process_view()`.
     #[test]
-    fn batch_c_get_circular_dependencies_uses_public_edge_and_pg_syntax() {
+    fn batch_c_get_circular_dependencies_is_ram_only_no_pg_recursion() {
         let body = extract_fn_body(SOURCE, "pub fn get_circular_dependencies");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("c.relation_type = 'CALLS'"));
-        assert!(body.contains("ARRAY[c.source_id]"));
-        assert!(body.contains("|| ARRAY["));
-        assert!(body.contains("= ANY(p.path_ids)"));
-        assert!(body.contains("array_length(p.path_ids, 1)"));
-        // DuckDB residue
+        assert!(
+            !body.contains("WITH RECURSIVE"),
+            "no PG recursive cycle enumeration"
+        );
+        assert!(!body.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!body.contains("query_json"), "no SQL round-trip at all");
+        assert!(
+            body.contains("process_view()") && body.contains("structural_sccs"),
+            "routed through the RAM Tarjan SCC path"
+        );
+        // DuckDB residue must stay gone.
         assert!(!body.contains("list_append"));
         assert!(!body.contains("list_contains"));
-        assert!(!body.contains("len(p.path_ids)"));
     }
 
     #[test]
