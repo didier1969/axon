@@ -645,12 +645,23 @@ impl McpServer {
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CALLS_NIF.
-        let calls_count = self
-            .graph_store
-            .query_count(
-                "SELECT count(*) FROM ist.Edge WHERE relation_type IN ('CALLS', 'CALLS_NIF')",
-            )
+        // REQ-AXO-901970 — RAM-only "does the call graph have data" sentinel.
+        // Derive the project from the param or the resolved symbol's project_code,
+        // warm its snapshot, count CALLS+CALLS_NIF edges in RAM. No PG ist.Edge.
+        let sentinel_project = project.map(str::to_string).or_else(|| {
+            symbol_rows
+                .first()
+                .and_then(|row| row.get(2))
+                .and_then(Value::as_str)
+                .filter(|code| *code != "unknown")
+                .map(str::to_string)
+        });
+        let calls_count = sentinel_project
+            .filter(|code| self.ensure_ram_snapshot_warm(code))
+            .and_then(|code| {
+                process_view()
+                    .count_edges_with_relation(&code, &[RelationType::Calls, RelationType::CallsNif])
+            })
             .unwrap_or(0);
         if calls_count > 0 {
             return Some(json!({

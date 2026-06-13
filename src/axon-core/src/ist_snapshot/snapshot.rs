@@ -228,6 +228,15 @@ impl IstGraph {
         self.fwd_targets.len()
     }
 
+    /// REQ-AXO-901970 — count directed edges whose relation_type is in `rels`.
+    /// O(E) over the forward CSR relation column.
+    pub fn count_edges_with_relation(&self, rels: &[RelationType]) -> usize {
+        self.fwd_rel
+            .iter()
+            .filter(|&&byte| rels.contains(&relation_from_u8(byte)))
+            .count()
+    }
+
     /// Resolve a canonical id to its CSR index, if present.
     pub fn index_of(&self, id: &str) -> Option<u32> {
         self.id_to_idx.get(id).copied()
@@ -1002,6 +1011,31 @@ mod tests {
         let g = IstGraph::build(nodes, edges);
         let reach = g.bfs_forward("n0", 5, 3, &[]);
         assert_eq!(reach.len(), 3);
+    }
+
+    // REQ-AXO-901970 — count_edges_with_relation counts only the requested
+    // relation types over the forward CSR.
+    #[test]
+    fn count_edges_with_relation_counts_requested_types() {
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+            edge("a", "c", RelationType::CallsNif),
+            edge("a", "b", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(g.count_edges_with_relation(&[RelationType::Calls]), 2);
+        assert_eq!(g.count_edges_with_relation(&[RelationType::CallsNif]), 1);
+        assert_eq!(
+            g.count_edges_with_relation(&[RelationType::Calls, RelationType::CallsNif]),
+            3
+        );
+        assert_eq!(g.count_edges_with_relation(&[RelationType::Implements]), 0);
     }
 
     #[test]

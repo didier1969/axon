@@ -148,6 +148,17 @@ impl IstGraphView {
         snap.node_kind(id).map(|k| k.as_db())
     }
 
+    /// REQ-AXO-901970 — count edges of the given relation types in the project
+    /// snapshot. `None` ⇒ cold cache (caller surfaces 0, never a PG count).
+    pub fn count_edges_with_relation(
+        &self,
+        project: &str,
+        rels: &[crate::ist_snapshot::snapshot::RelationType],
+    ) -> Option<usize> {
+        let snap = self.try_snapshot(project)?;
+        Some(snap.count_edges_with_relation(rels))
+    }
+
     pub fn is_warm(&self, project: &str) -> bool {
         self.cache.get(project).is_some()
     }
