@@ -402,7 +402,7 @@ impl McpServer {
     /// `project_path` via the registry. Used by `axon_commit_work` to
     /// set the git command's `current_dir` so cross-project commits
     /// land in the correct tree.
-    fn lookup_project_path_by_code(&self, code: &str) -> Option<std::path::PathBuf> {
+    pub(crate) fn lookup_project_path_by_code(&self, code: &str) -> Option<std::path::PathBuf> {
         let escaped = escape_sql(code);
         let raw = self
             .graph_store

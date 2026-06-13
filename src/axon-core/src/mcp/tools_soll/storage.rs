@@ -12,6 +12,15 @@ impl McpServer {
 
     pub(super) fn canonical_project_root_for_entity(&self, entity_id: &str) -> Option<PathBuf> {
         let project_code = project_code_from_canonical_entity_id(entity_id)?;
+        // REQ-AXO-901971 — registre DB AUTORITATIF d'abord : `project_path` déterministe (peuplé par
+        // axon_init_project). Immunise la résolution contre le scan filesystem fragile de
+        // `resolve_canonical_project_identity` (candidate_directories → `fs::read_dir` avalé sous pression
+        // ressources → un projet pourtant ENREGISTRÉ devient transitoirement « introuvable » → un
+        // artifact_ref RELATIF est rejeté à tort alors que l'entity_id nomme le projet sans ambiguïté).
+        if let Some(path) = self.lookup_project_path_by_code(&project_code) {
+            return Some(path);
+        }
+        // Fallback découverte filesystem (.axon/meta.json) : bootstrap / projet pas encore enregistré.
         resolve_canonical_project_identity(&project_code)
             .ok()
             .map(|identity| identity.project_path)
