@@ -102,7 +102,18 @@ _axon_try_raise_sysctl() {
     # the exit code alone is not proof — claiming success on it falsely reports
     # "raised 128 → 1024" while the kernel stays at 128. Only declare success
     # when the kernel itself now reports >= min.
-    sysctl -w "${key}=${min}" >/dev/null 2>&1 || true
+    #
+    # The raise needs root. WSL2 does NOT auto-apply /etc/sysctl.d/* unless
+    # systemd is enabled, so the persisted limit reverts to the kernel default
+    # (128) on every restart and this guard is the launch-time self-heal. Prefer
+    # passwordless `sudo -n` (the indexer host is provisioned with NOPASSWD for
+    # exactly this); fall back to a bare `sysctl -w` when already root or when
+    # sudo would prompt (verification below decides success either way).
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo -n sysctl -w "${key}=${min}" >/dev/null 2>&1 || true
+    else
+        sysctl -w "${key}=${min}" >/dev/null 2>&1 || true
+    fi
     local after
     after="$(_axon_read_sysctl "$key")"
     if [[ "$after" =~ ^[0-9]+$ ]] && (( after >= min )); then
