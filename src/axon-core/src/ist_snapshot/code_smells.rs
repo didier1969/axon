@@ -393,6 +393,110 @@ fn kind_label(kind: NodeKind) -> &'static str {
     }
 }
 
+const UNSAFE_EXPOSURE_MAX_DEPTH: usize = 10;
+const NIF_BLOCKING_MAX_DEPTH: usize = 20;
+const NIF_BLOCKING_DEPTH_THRESHOLD: usize = 5;
+
+/// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_unsafe_exposure`. From
+/// each PUBLIC callable, BFS forward over CALLS (depth ≤ 10, cycle-avoiding); if
+/// any reachable node is unsafe (`NodeFlags::unsafe_` OR name == "unwrap"), emit
+/// `"initial_name -> ... -> unsafe_name"`. Deduplicated + sorted — mirrors the
+/// PG `WITH RECURSIVE` + `SELECT DISTINCT` shape.
+pub fn unsafe_exposure(graph: &IstGraph, project: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut out: HashSet<String> = HashSet::new();
+
+    for start in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, start, project) {
+            continue;
+        }
+        let (kind_byte, _, flags) = graph.node_meta(start);
+        if !is_callable(kind_byte) || !flags.public() {
+            continue;
+        }
+        let start_name = name_from_id(graph.id_of(start)).to_string();
+        let mut visited: HashSet<u32> = HashSet::from([start]);
+        let mut frontier: Vec<u32> = vec![start];
+        for _depth in 1..=UNSAFE_EXPOSURE_MAX_DEPTH {
+            let mut next: Vec<u32> = Vec::new();
+            for &node in &frontier {
+                for (tgt, rel) in graph.forward_neighbors(node) {
+                    if !matches!(rel, RelationType::Calls) || !visited.insert(tgt) {
+                        continue;
+                    }
+                    let (_, _, tflags) = graph.node_meta(tgt);
+                    let tname = name_from_id(graph.id_of(tgt));
+                    if tflags.unsafe_() || tname.eq_ignore_ascii_case("unwrap") {
+                        out.insert(format!("{} -> ... -> {}", start_name, tname));
+                    }
+                    next.push(tgt);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+    }
+
+    let mut sorted: Vec<String> = out.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+/// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_nif_blocking_risks`.
+/// From each CALLS_NIF target (a NIF function), BFS forward over CALLS (depth ≤
+/// 20, cycle-avoiding) tracking the deepest reachable chain; emit
+/// `"nif_name (profondeur: D)"` for NIFs whose max depth exceeds 5 — mirrors the
+/// PG `WITH RECURSIVE` + `GROUP BY ... HAVING max(depth) > 5`.
+pub fn nif_blocking_risks(graph: &IstGraph, project: &str) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut max_depth: HashMap<u32, usize> = HashMap::new();
+    let mut nif_names: HashMap<u32, String> = HashMap::new();
+
+    for caller in 0..(graph.node_count() as u32) {
+        for (nif, rel) in graph.forward_neighbors(caller) {
+            if !matches!(rel, RelationType::CallsNif) || !project_matches(graph, nif, project) {
+                continue;
+            }
+            nif_names
+                .entry(nif)
+                .or_insert_with(|| name_from_id(graph.id_of(nif)).to_string());
+            // depth 1 = the CALLS_NIF edge itself; each forward CALLS hop adds 1.
+            let mut visited: HashSet<u32> = HashSet::from([caller, nif]);
+            let mut frontier: Vec<u32> = vec![nif];
+            let mut depth = 1usize;
+            while !frontier.is_empty() && depth < NIF_BLOCKING_MAX_DEPTH {
+                let mut next: Vec<u32> = Vec::new();
+                for &node in &frontier {
+                    for (tgt, r) in graph.forward_neighbors(node) {
+                        if matches!(r, RelationType::Calls) && visited.insert(tgt) {
+                            next.push(tgt);
+                        }
+                    }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                depth += 1;
+                frontier = next;
+            }
+            let entry = max_depth.entry(nif).or_insert(0);
+            if depth > *entry {
+                *entry = depth;
+            }
+        }
+    }
+
+    let mut out: Vec<String> = max_depth
+        .into_iter()
+        .filter(|(_, d)| *d > NIF_BLOCKING_DEPTH_THRESHOLD)
+        .map(|(nif, d)| format!("{} (profondeur: {})", nif_names[&nif], d))
+        .collect();
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,5 +930,77 @@ mod tests {
         let edges = vec![];
         let g = IstGraph::build(nodes, edges);
         assert!(lexical_symbol_search(&g, "AXO", "foo", 10).is_empty());
+    }
+
+    fn func_flags(id: &str, public: bool, unsafe_: bool) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(false, public, false, unsafe_),
+        }
+    }
+
+    // REQ-AXO-901970 — unsafe_exposure: public fn reaching an unsafe target
+    // (flag) OR a function named `unwrap`, via a transitive CALLS chain.
+    #[test]
+    fn unsafe_exposure_traces_public_to_unsafe_and_unwrap() {
+        let nodes = vec![
+            func_flags("AXO::f.rs::pub_fn", true, false),
+            func_flags("AXO::f.rs::mid", false, false),
+            func_flags("AXO::f.rs::danger", false, true),
+            func_flags("AXO::f.rs::unwrap", false, false),
+            // a private root must NOT seed exposure.
+            func_flags("AXO::f.rs::priv_root", false, false),
+        ];
+        let edges = vec![
+            edge("AXO::f.rs::pub_fn", "AXO::f.rs::mid", RelationType::Calls),
+            edge("AXO::f.rs::mid", "AXO::f.rs::danger", RelationType::Calls),
+            edge("AXO::f.rs::pub_fn", "AXO::f.rs::unwrap", RelationType::Calls),
+            edge("AXO::f.rs::priv_root", "AXO::f.rs::danger", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let out = unsafe_exposure(&g, "AXO");
+        assert!(out.contains(&"pub_fn -> ... -> danger".to_string()), "{out:?}");
+        assert!(out.contains(&"pub_fn -> ... -> unwrap".to_string()), "{out:?}");
+        // The private root never appears as an initial.
+        assert!(!out.iter().any(|s| s.starts_with("priv_root")), "{out:?}");
+    }
+
+    // REQ-AXO-901970 — nif_blocking_risks: a NIF whose downstream CALLS chain
+    // exceeds depth 5 is flagged with its max depth; a shallow NIF is not.
+    #[test]
+    fn nif_blocking_risks_flags_deep_chain_only() {
+        let mut nodes = vec![
+            func_flags("AXO::f.rs::caller", false, false),
+            func_flags("AXO::f.rs::deep_nif", false, false),
+            func_flags("AXO::f.rs::shallow_nif", false, false),
+            func_flags("AXO::f.rs::caller2", false, false),
+        ];
+        // deep chain: deep_nif -> a -> b -> c -> d -> e -> f  (depth 1..7)
+        let chain = ["a", "b", "c", "d", "e", "f"];
+        for n in chain {
+            nodes.push(func_flags(&format!("AXO::f.rs::{n}"), false, false));
+        }
+        let mut edges = vec![
+            edge("AXO::f.rs::caller", "AXO::f.rs::deep_nif", RelationType::CallsNif),
+            edge("AXO::f.rs::caller2", "AXO::f.rs::shallow_nif", RelationType::CallsNif),
+        ];
+        let mut prev = "AXO::f.rs::deep_nif".to_string();
+        for n in chain {
+            let cur = format!("AXO::f.rs::{n}");
+            edges.push(edge(&prev, &cur, RelationType::Calls));
+            prev = cur;
+        }
+        let g = IstGraph::build(nodes, edges);
+        let out = nif_blocking_risks(&g, "AXO");
+        assert!(
+            out.iter().any(|s| s.starts_with("deep_nif (profondeur: 7)")),
+            "deep nif must be flagged at depth 7: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|s| s.starts_with("shallow_nif")),
+            "shallow nif (depth 1) must not be flagged: {out:?}"
+        );
     }
 }

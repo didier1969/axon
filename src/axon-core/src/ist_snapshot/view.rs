@@ -181,6 +181,20 @@ impl IstGraphView {
         Some(code_smells::god_objects(&snap, project))
     }
 
+    /// REQ-AXO-901970 — RAM unsafe-exposure call paths (public → unsafe).
+    /// `None` ⇒ cold cache (caller surfaces empty, never a PG WITH RECURSIVE).
+    pub fn unsafe_exposure(&self, project: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::unsafe_exposure(&snap, project))
+    }
+
+    /// REQ-AXO-901970 — RAM NIF-blocking risks (deep CALLS chain from a NIF).
+    /// `None` ⇒ cold cache (caller surfaces empty, never a PG WITH RECURSIVE).
+    pub fn nif_blocking_risks(&self, project: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::nif_blocking_risks(&snap, project))
+    }
+
     /// REQ-AXO-901595 — RAM structural orphan_code (no callers, non-public,
     /// non-test path). Strict superset of `GraphStore::get_orphan_code_symbols`
     /// which additionally excludes symbols carrying a soll.Traceability

@@ -871,114 +871,32 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS ; DuckDB array
-        // syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let scope = if scoped {
-            format!(" AND s_src.project_code = '{}'", escaped)
-        } else {
-            String::new()
-        };
-
-        let query = format!(
-            "
-            WITH RECURSIVE call_paths(source_id, target_id, depth, path_ids, initial_name) AS (
-                SELECT
-                    c.source_id,
-                    c.target_id,
-                    1,
-                    ARRAY[c.source_id],
-                    s_src.name
-                FROM ist.Edge c
-                JOIN Symbol s_src ON s_src.id = c.source_id
-                WHERE c.relation_type = 'CALLS'
-                  AND COALESCE(s_src.is_public, false) = true
-                {scope}
-
-                UNION ALL
-
-                SELECT
-                    p.source_id,
-                    c.target_id,
-                    p.depth + 1,
-                    p.path_ids || ARRAY[c.target_id],
-                    p.initial_name
-                FROM call_paths p
-                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
-                WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 10
-            )
-            SELECT DISTINCT p.initial_name || ' -> ... -> ' || s_tgt.name
-            FROM call_paths p
-            JOIN Symbol s_tgt ON s_tgt.id = p.target_id
-            WHERE COALESCE(s_tgt.is_unsafe, false) = true OR lower(s_tgt.name) = 'unwrap'
-            ",
-            scope = scope
-        );
-
-        let res = self.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| row.first().cloned())
-            .collect())
+        // REQ-AXO-901970 — RAM-only. From each public callable, BFS forward CALLS
+        // (depth ≤ 10) to any unsafe target (NodeFlags.unsafe_ OR name='unwrap').
+        // Replaces the PG `WITH RECURSIVE`. Workspace-wide ("*") and a cold cache
+        // surface empty (no PG fallback — the whole point of REQ-AXO-901952/901970).
+        if project == "*" {
+            return Ok(Vec::new());
+        }
+        Ok(crate::ist_snapshot::process_view()
+            .unsafe_exposure(project)
+            .unwrap_or_default())
     }
 
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS_NIF / CALLS ;
-        // DuckDB array syntax rewritten to PG (ARRAY[x], `||`, `= ANY(arr)`).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let scope = if scoped {
-            format!(" AND s_nif.project_code = '{}'", escaped)
-        } else {
-            String::new()
-        };
-
-        let query = format!(
-            "
-            WITH RECURSIVE call_depths(source_id, target_id, depth, path_ids, initial_target_id, initial_name) AS (
-                SELECT
-                    c.source_id,
-                    c.target_id,
-                    1,
-                    ARRAY[c.source_id],
-                    c.target_id,
-                    s_nif.name
-                FROM ist.Edge c
-                JOIN Symbol s_nif ON s_nif.id = c.target_id
-                WHERE c.relation_type = 'CALLS_NIF' {scope}
-
-                UNION ALL
-
-                SELECT
-                    p.source_id,
-                    c.target_id,
-                    p.depth + 1,
-                    p.path_ids || ARRAY[c.target_id],
-                    p.initial_target_id,
-                    p.initial_name
-                FROM call_depths p
-                JOIN ist.Edge c ON p.target_id = c.source_id AND c.relation_type = 'CALLS'
-                WHERE NOT (c.target_id = ANY(p.path_ids)) AND p.depth < 20
-            )
-            SELECT initial_name || ' (profondeur: ' || max(depth) || ')'
-            FROM call_depths
-            GROUP BY initial_target_id, initial_name
-            HAVING max(depth) > 5;
-            ",
-            scope = scope
-        );
-
-        let res = self.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| row.first().cloned())
-            .collect())
+        // REQ-AXO-901970 — RAM-only. From each CALLS_NIF target, BFS forward CALLS
+        // (depth ≤ 20) tracking the deepest chain; report NIFs whose max depth
+        // exceeds 5. Replaces the PG `WITH RECURSIVE`. Workspace-wide ("*") and a
+        // cold cache surface empty (no PG fallback).
+        if project == "*" {
+            return Ok(Vec::new());
+        }
+        Ok(crate::ist_snapshot::process_view()
+            .nif_blocking_risks(project)
+            .unwrap_or_default())
     }
 
     /// REQ-AXO-901772 — Phantom symbols that are READS-referenced but never
@@ -1226,28 +1144,36 @@ mod migration_guard_tests {
         assert!(!code.contains("list_contains"));
     }
 
-    #[test]
-    fn batch_c_get_unsafe_exposure_uses_public_edge_and_pg_syntax() {
-        let body = extract_fn_body(SOURCE, "pub fn get_unsafe_exposure");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("c.relation_type = 'CALLS'"));
-        assert!(body.contains("ARRAY[c.source_id]"));
-        assert!(body.contains("c.target_id = ANY(p.path_ids)"));
-        assert!(!body.contains("list_append"));
-        assert!(!body.contains("list_contains"));
+    // REQ-AXO-901970 — get_unsafe_exposure / get_nif_blocking_risks are now
+    // RAM-only (BFS over the process snapshot); the legacy PG `WITH RECURSIVE`
+    // call-path enumeration is gone. Guard the no-PG-fallback invariant on CODE
+    // (comment tails stripped — comments legitimately mention WITH RECURSIVE).
+    fn code_only(src: &str, sig: &str) -> String {
+        extract_fn_body(src, sig)
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn batch_c_get_nif_blocking_risks_uses_public_edge_and_pg_syntax() {
-        let body = extract_fn_body(SOURCE, "pub fn get_nif_blocking_risks");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("c.relation_type = 'CALLS_NIF'"));
-        assert!(body.contains("c.relation_type = 'CALLS'"));
-        assert!(body.contains("ARRAY[c.source_id]"));
-        assert!(body.contains("c.target_id = ANY(p.path_ids)"));
-        assert!(!body.contains("list_append"));
-        assert!(!body.contains("list_contains"));
+    fn batch_c_get_unsafe_exposure_is_ram_only_no_pg_recursion() {
+        let code = code_only(SOURCE, "pub fn get_unsafe_exposure");
+        assert!(!code.contains("WITH RECURSIVE"));
+        assert!(!code.contains("FROM ist.Edge"));
+        assert!(!code.contains("query_json"));
+        assert!(code.contains("process_view()") && code.contains("unsafe_exposure"));
+    }
+
+    #[test]
+    fn batch_c_get_nif_blocking_risks_is_ram_only_no_pg_recursion() {
+        let code = code_only(SOURCE, "pub fn get_nif_blocking_risks");
+        assert!(!code.contains("WITH RECURSIVE"));
+        assert!(!code.contains("FROM ist.Edge"));
+        assert!(!code.contains("query_json"));
+        assert!(code.contains("process_view()") && code.contains("nif_blocking_risks"));
     }
 }
