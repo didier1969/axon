@@ -24,6 +24,10 @@ use retrieval_model::{
 
 const DEFAULT_TOKEN_BUDGET: usize = 1400;
 const DEFAULT_TOP_K: usize = 8;
+/// REQ-AXO-901952 — upper bound on symbols pulled per file when resolving
+/// forward CONTAINS from the RAM snapshot (replaces the unbounded SQL `IN`
+/// scan). Generous: a single source file rarely declares more symbols.
+const CONTAINS_SYMBOL_CAP: usize = 10_000;
 
 impl McpServer {
     #[cfg(not(test))]
@@ -1773,42 +1777,72 @@ impl McpServer {
             .collect()
     }
 
+    /// REQ-AXO-901952 — RAM-only forward CONTAINS (file → contained symbols).
+    /// `file_project_pairs` carries `(file_path, project_code)` so the lookup
+    /// scopes to the file's own per-project snapshot (derive-project pattern),
+    /// never the legacy unscoped `ist.Edge` SQL. Returns `(symbol_id, file_path)`
+    /// — same shape the superseded SQL emitted as `(target_id, source_id)`.
+    /// Cold snapshot → that file is skipped (best-effort: retrieve_context
+    /// still has FTS + vector arms), never a silent PG fallback.
     fn resolve_file_symbol_bindings(
         &self,
-        project: Option<&str>,
-        file_paths: &[String],
+        file_project_pairs: &[(String, String)],
     ) -> Vec<(String, String)> {
-        if file_paths.is_empty() {
+        if file_project_pairs.is_empty() {
             return Vec::new();
         }
-        // REQ-AXO-299 / MIL-AXO-017 slice 5 : CONTAINS legacy table superseded
-        // by ist.Edge (REQ-AXO-295) with relation_type='contains'. A3
-        // dual-writes the relation since REQ-AXO-297 slice 3.
-        let values = file_paths
-            .iter()
-            .map(|path| format!("'{}'", Self::escape_sql(path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT target_id, source_id \
-             FROM ist.Edge \
-             WHERE relation_type = 'CONTAINS' \
-               AND source_id IN ({values}){project_filter}",
-            project_filter = Self::sql_project_filter_for_fields(project, &["project_code"]),
-        );
-        let raw = self
-            .graph_store
-            .query_json(&query)
-            .unwrap_or_else(|_| "[]".to_string());
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        rows.into_iter()
-            .filter_map(|row| {
-                Some((
-                    row.first()?.as_str()?.to_string(),
-                    row.get(1)?.as_str()?.to_string(),
-                ))
-            })
-            .collect()
+        let ram_view = crate::ist_snapshot::process_view();
+        let mut bindings = Vec::new();
+        let mut seen_files = HashSet::new();
+        for (file_path, project_code) in file_project_pairs {
+            if file_path.is_empty()
+                || project_code.is_empty()
+                || !seen_files.insert((file_path.clone(), project_code.clone()))
+                || !self.ensure_ram_snapshot_warm(project_code)
+            {
+                continue;
+            }
+            let Some(symbols) = ram_view.forward_at_radius(
+                project_code,
+                file_path,
+                1,
+                CONTAINS_SYMBOL_CAP,
+                &[crate::ist_snapshot::snapshot::RelationType::Contains],
+            ) else {
+                continue;
+            };
+            for symbol_id in symbols {
+                if symbol_id == *file_path {
+                    continue;
+                }
+                bindings.push((symbol_id, file_path.clone()));
+            }
+        }
+        bindings
+    }
+
+    /// REQ-AXO-901952 — RAM-only reverse CONTAINS (symbol → containing file).
+    /// Replaces the per-row `(SELECT ce.source_id FROM ist.Edge … CONTAINS)`
+    /// SQL fallback used when `Chunk.file_path` is NULL. Resolves from the
+    /// row's own project snapshot; empty when cold / absent (display-only
+    /// enrichment, so a miss is non-fatal — never a silent PG fallback).
+    fn resolve_containing_file_ram(&self, project_code: &str, symbol_id: &str) -> String {
+        if project_code.is_empty()
+            || symbol_id.is_empty()
+            || !self.ensure_ram_snapshot_warm(project_code)
+        {
+            return String::new();
+        }
+        crate::ist_snapshot::process_view()
+            .reverse_at_radius(
+                project_code,
+                symbol_id,
+                1,
+                1,
+                &[crate::ist_snapshot::snapshot::RelationType::Contains],
+            )
+            .and_then(|files| files.into_iter().next())
+            .unwrap_or_default()
     }
 
     fn rerank_entry_candidates(
@@ -2000,7 +2034,7 @@ impl McpServer {
                  FROM merged m \
              ) \
              SELECT r.id, r.source_id, COALESCE(r.project_code, 'unknown'), \
-                    COALESCE(r.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = r.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = r.project_code ORDER BY ce.source_id LIMIT 1), ''), \
+                    COALESCE(r.file_path, ''), \
                     r.content, COALESCE(r.chunk_part_index, 1), COALESCE(r.chunk_part_count, 1), COALESCE(r.chunk_path, '1/1'), \
                     CASE r.src_rank \
                         WHEN 0 THEN 'entry_anchor' \
@@ -2097,10 +2131,15 @@ impl McpServer {
         if Self::route_prefers_operational_code(route)
             && (!entry_ids.is_empty() || !entry_uris.is_empty())
         {
-            let file_bindings = self.resolve_file_symbol_bindings(
-                project,
-                &entry_uris.iter().cloned().collect::<Vec<_>>(),
-            );
+            // REQ-AXO-901952 — derive each file's project from its own entry
+            // candidate so the RAM forward-CONTAINS lookup scopes correctly,
+            // even when the retrieval is unscoped (project == None).
+            let file_project_pairs = entry_candidates
+                .iter()
+                .filter(|candidate| !candidate.uri.is_empty() && !candidate.project_code.is_empty())
+                .map(|candidate| (candidate.uri.clone(), candidate.project_code.clone()))
+                .collect::<Vec<_>>();
+            let file_bindings = self.resolve_file_symbol_bindings(&file_project_pairs);
             let mut source_to_uri = entry_candidates
                 .iter()
                 .filter(|candidate| !candidate.uri.is_empty())
@@ -2242,7 +2281,7 @@ impl McpServer {
             )
         } else {
             format!(
-                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
+                "SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), COALESCE(c.file_path, ''), c.content, \
                         COALESCE(c.chunk_part_index, 1), COALESCE(c.chunk_part_count, 1), COALESCE(c.chunk_path, '1/1'), \
                         CASE \
                             WHEN ({entry_id_match}) THEN 'entry_anchor' \
@@ -2306,7 +2345,12 @@ impl McpServer {
                 let chunk_id = row.first()?.as_str()?.to_string();
                 let source_id = row.get(1)?.as_str()?.to_string();
                 let project_code = row.get(2)?.as_str()?.to_string();
-                let uri = row.get(3)?.as_str().unwrap_or_default().to_string();
+                let mut uri = row.get(3)?.as_str().unwrap_or_default().to_string();
+                // REQ-AXO-901952 — RAM-only file_path enrichment when the chunk
+                // row carries no file_path (replaces the inline CONTAINS subquery).
+                if uri.is_empty() {
+                    uri = self.resolve_containing_file_ram(&project_code, &source_id);
+                }
                 let content = row.get(4)?.as_str()?.to_string();
                 let chunk_part_index = Self::parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
                 let chunk_part_count = Self::parse_usize_value(row.get(6)?).unwrap_or(1).max(1);
@@ -2420,7 +2464,7 @@ impl McpServer {
         let query = format!(
             "WITH q AS (SELECT websearch_to_tsquery('english', '{q}') AS tsq) \
              SELECT c.id, c.source_id, COALESCE(c.project_code, 'unknown'), \
-                    COALESCE(c.file_path, (SELECT ce.source_id FROM ist.Edge ce WHERE ce.target_id = c.source_id AND ce.relation_type = 'CONTAINS' AND ce.project_code = c.project_code ORDER BY ce.source_id LIMIT 1), ''), c.content, \
+                    COALESCE(c.file_path, ''), c.content, \
                     COALESCE(c.chunk_part_index, 1), \
                     COALESCE(c.chunk_part_count, 1), \
                     COALESCE(c.chunk_path, '1/1'), \
@@ -2444,7 +2488,12 @@ impl McpServer {
                 let chunk_id = row.first()?.as_str()?.to_string();
                 let source_id = row.get(1)?.as_str().unwrap_or("").to_string();
                 let project_code = row.get(2)?.as_str().unwrap_or("unknown").to_string();
-                let uri = row.get(3)?.as_str().unwrap_or("").to_string();
+                let mut uri = row.get(3)?.as_str().unwrap_or("").to_string();
+                // REQ-AXO-901952 — RAM-only file_path enrichment when the chunk
+                // row carries no file_path (replaces the inline CONTAINS subquery).
+                if uri.is_empty() {
+                    uri = self.resolve_containing_file_ram(&project_code, &source_id);
+                }
                 let content = row.get(4)?.as_str().unwrap_or("").to_string();
                 let chunk_part_index = row
                     .get(5)
@@ -4360,6 +4409,65 @@ mod tests {
             reasons: Vec::new(),
             fts_rank: None,
         }
+    }
+
+    // REQ-AXO-901952 — the CONTAINS file_path enrichment is RAM-only. A
+    // hand-built snapshot (no PG round-trip) proves both directions resolve:
+    // forward CONTAINS (file → symbols) for resolve_file_symbol_bindings, and
+    // reverse CONTAINS (symbol → containing file) for resolve_containing_file_ram.
+    // The file node is auto-registered from the edge source (snapshot::build),
+    // so it need not be a declared ist.symbol node.
+    #[test]
+    fn contains_file_path_resolves_from_ram_snapshot_both_directions() {
+        use crate::ist_snapshot::snapshot::{
+            EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType,
+        };
+        use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
+
+        let code = "TCF"; // test-contains-file ; single-threaded --lib run, evicted below.
+        let symbol_id = "TCF::widget.rs::render".to_string();
+        let file_path = "src/widget.rs".to_string();
+
+        let nodes = vec![NodeRecord {
+            id: symbol_id.clone(),
+            project_code: code.to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+        }];
+        let edges = vec![EdgeTriple {
+            source: file_path.clone(),
+            target: symbol_id.clone(),
+            rel: RelationType::Contains,
+        }];
+        evict_process_snapshot(code);
+        publish_process_snapshot(code.to_string(), Arc::new(IstGraph::build(nodes, edges)));
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+
+        // Reverse CONTAINS: symbol → containing file.
+        assert_eq!(
+            server.resolve_containing_file_ram(code, &symbol_id),
+            file_path,
+            "reverse CONTAINS must resolve the containing file from RAM"
+        );
+        // Forward CONTAINS: file → contained symbols.
+        let bindings = server
+            .resolve_file_symbol_bindings(&[(file_path.clone(), code.to_string())]);
+        assert_eq!(
+            bindings,
+            vec![(symbol_id.clone(), file_path.clone())],
+            "forward CONTAINS must bind the file's symbols from RAM"
+        );
+        // Cold project → empty (loud-by-absence, never a silent PG fallback).
+        assert_eq!(
+            server.resolve_containing_file_ram("ZZZ", &symbol_id),
+            "",
+            "unknown project must not resolve via any PG fallback"
+        );
+
+        evict_process_snapshot(code);
+        evict_process_snapshot("ZZZ");
     }
 
     #[test]
