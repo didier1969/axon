@@ -6,11 +6,11 @@
 # accidental run against axon_live.
 #
 # Tables truncated (CASCADE) on PG public schema:
-#   public.chunkembedding
-#   public.chunk
-#   public.symbol
-#   public.edge
-#   public.indexedfile
+#   ist.chunkembedding
+#   ist.chunk
+#   ist.symbol
+#   ist.edge
+#   ist.indexedfile
 #
 # Env:
 #   AXON_DEV_DATABASE_URL   default postgres://axon@127.0.0.1:44144/axon_dev
@@ -69,15 +69,15 @@ fi
 echo "[clean_axon_dev] target DB: $db_name"
 echo "[clean_axon_dev] pre-state:"
 psql "$DB_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS size,
-  (SELECT count(*) FROM public.chunkembedding) AS embeddings,
-  (SELECT count(*) FROM public.chunk) AS chunks,
-  (SELECT count(*) FROM public.symbol) AS symbols,
-  (SELECT count(*) FROM public.edge) AS edges,
-  (SELECT count(*) FROM public.indexedfile) AS files;"
+  (SELECT count(*) FROM ist.chunkembedding) AS embeddings,
+  (SELECT count(*) FROM ist.chunk) AS chunks,
+  (SELECT count(*) FROM ist.symbol) AS symbols,
+  (SELECT count(*) FROM ist.edge) AS edges,
+  (SELECT count(*) FROM ist.indexedfile) AS files;"
 
 if [[ $dry_run -eq 1 ]]; then
   echo "[clean_axon_dev] --dry-run set, would run:"
-  echo "  TRUNCATE TABLE public.chunkembedding, public.chunk, public.symbol, public.edge, public.indexedfile CASCADE;"
+  echo "  TRUNCATE TABLE ist.chunkembedding, ist.chunk, ist.symbol, ist.edge, ist.indexedfile CASCADE;"
   exit 0
 fi
 
@@ -91,15 +91,15 @@ fi
 
 # --- TRUNCATE ---
 echo "[clean_axon_dev] truncating pipeline_v2 tables…"
-psql "$DB_URL" -c "TRUNCATE TABLE public.chunkembedding, public.chunk, public.symbol, public.edge, public.indexedfile CASCADE;"
+psql "$DB_URL" -c "TRUNCATE TABLE ist.chunkembedding, ist.chunk, ist.symbol, ist.edge, ist.indexedfile CASCADE;"
 
 # --- Post-state ---
 echo "[clean_axon_dev] post-state:"
 psql "$DB_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS size,
-  (SELECT count(*) FROM public.chunkembedding) AS embeddings,
-  (SELECT count(*) FROM public.chunk) AS chunks,
-  (SELECT count(*) FROM public.symbol) AS symbols,
-  (SELECT count(*) FROM public.edge) AS edges,
-  (SELECT count(*) FROM public.indexedfile) AS files;"
+  (SELECT count(*) FROM ist.chunkembedding) AS embeddings,
+  (SELECT count(*) FROM ist.chunk) AS chunks,
+  (SELECT count(*) FROM ist.symbol) AS symbols,
+  (SELECT count(*) FROM ist.edge) AS edges,
+  (SELECT count(*) FROM ist.indexedfile) AS files;"
 
 echo "[clean_axon_dev] done."
