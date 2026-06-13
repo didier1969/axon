@@ -29,7 +29,7 @@ pub trait JsonSqlStore {
     fn query_json(&self, sql: &str) -> Result<String, String>;
 }
 
-const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text FROM ist.symbol WHERE project_code = '{P}'";
+const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text, name FROM ist.symbol WHERE project_code = '{P}'";
 const EDGE_SQL: &str =
     "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
 
@@ -53,8 +53,16 @@ pub fn load_snapshot<S: JsonSqlStore>(
             if row.len() < 7 {
                 return None;
             }
+            // REQ-AXO-901970 — `name` (col 8) carries the canonical display name;
+            // fall back to the id suffix if absent (older snapshots / NULL name).
+            let name = row
+                .get(7)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| row[0].rsplit("::").next().unwrap_or(&row[0]).to_string());
             Some(NodeRecord {
                 id: row[0].clone(),
+                name,
                 kind: NodeKind::from_db(&row[1]),
                 project_code: row[2].clone(),
                 flags: NodeFlags::new(

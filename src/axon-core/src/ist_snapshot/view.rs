@@ -200,6 +200,22 @@ impl IstGraphView {
         Some(code_smells::phantom_multi_declare(&snap, project))
     }
 
+    /// REQ-AXO-901970 — RAM audit-score sub-checks. `None` ⇒ cold cache.
+    pub fn security_audit_paths(&self, project: &str) -> Option<Vec<(String, String)>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::security_audit_paths(&snap, project))
+    }
+
+    pub fn technical_debt(&self, project: &str) -> Option<Vec<(String, String)>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::technical_debt(&snap, project))
+    }
+
+    pub fn telemetry_log_call_count(&self, project: &str) -> Option<usize> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::telemetry_log_call_count(&snap, project))
+    }
+
     /// REQ-AXO-901970 — count edges of the given relation types in the project
     /// snapshot. `None` ⇒ cold cache (caller surfaces 0, never a PG count).
     pub fn count_edges_with_relation(
@@ -308,18 +324,21 @@ mod tests {
         let nodes = vec![
             NodeRecord {
                 id: "AXO::a".to_string(),
+                name: "a".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
             },
             NodeRecord {
                 id: "AXO::b".to_string(),
+                name: "b".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
             },
             NodeRecord {
                 id: "AXO::c".to_string(),
+                name: "c".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
@@ -382,12 +401,14 @@ mod tests {
         let nodes = vec![
             NodeRecord {
                 id: "AXO::covered".to_string(),
+                name: "covered".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::new(true, false, false, false),
             },
             NodeRecord {
                 id: "AXO::uncovered".to_string(),
+                name: "uncovered".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::new(false, false, false, false),

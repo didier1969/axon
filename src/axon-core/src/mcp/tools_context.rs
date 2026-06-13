@@ -4430,6 +4430,7 @@ mod tests {
 
         let nodes = vec![NodeRecord {
             id: symbol_id.clone(),
+            name: "render".to_string(),
             project_code: code.to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),

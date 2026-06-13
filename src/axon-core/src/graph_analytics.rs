@@ -19,71 +19,21 @@ fn structural_graph_analytics_available() -> bool {
 
 impl GraphStore {
     pub fn get_security_audit(&self, project: &str) -> Result<(i64, String)> {
-        if !structural_graph_analytics_available() {
+        // REQ-AXO-901970 — RAM-only taint walk (no PG fallback). 1+2-hop reverse
+        // CALLS/CALLS_NIF from the dangerous set (unsafe / eval / unwrap) over the
+        // process snapshot. "*"/cold → no findings (score 100). Same score formula
+        // (saturates at 5 findings) and `[[caller,target],…]` evidence shape.
+        if project == "*" {
             return Ok((100, "[]".to_string()));
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS / CALLS_NIF (MIL-AXO-017).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let scope = if scoped {
-            format!(" AND s1.project_code = '{}' ", escaped)
-        } else {
-            String::new()
-        };
-        // REQ-AXO-901923 — target-first walk. The previous query expanded
-        // CALLS forward over the whole edge set (Edge⋈Symbol⋈Edge⋈Symbol on
-        // 390k edges) with the danger filter applied AFTER the 2-hop join.
-        // `unwrap` (ubiquitous in Rust, huge fan-in) made that O(E²) and blew
-        // the MCP gateway timeout. We instead start from the SMALL `dangerous`
-        // set and walk BACKWARD via the index on Edge.target_id, bounded by
-        // `LIMIT` (the score saturates at 5 findings anyway, so a sample is
-        // sufficient and the result stays a cheap streamed index scan).
-        let query = format!(
-            "
-            WITH dangerous AS (
-                SELECT id FROM Symbol
-                WHERE is_unsafe = true OR lower(name) IN ('eval', 'unwrap')
-            ),
-            direct AS (
-                SELECT s1.name AS name, s2.name AS target_name
-                FROM ist.Edge c
-                JOIN dangerous d ON d.id = c.target_id
-                JOIN Symbol s1 ON s1.id = c.source_id
-                JOIN Symbol s2 ON s2.id = c.target_id
-                WHERE (c.relation_type = 'CALLS' OR c.relation_type = 'CALLS_NIF'){scope}
-            ),
-            indirect AS (
-                -- REQ-AXO-901721 — cross-language taint: the indirect (2-hop)
-                -- walk must follow CALLS_NIF, not just CALLS, or an
-                -- elixir -CALLS_NIF-> rust_nif -CALLS-> unsafe chain (the
-                -- canonical cross-language taint) is silently undetected. The
-                -- `direct` CTE already accepts both relation kinds; indirect now
-                -- matches, so a NIF boundary on either hop is traversed.
-                SELECT s1.name AS name, s2.name AS target_name
-                FROM ist.Edge c2
-                JOIN dangerous d ON d.id = c2.target_id AND c2.relation_type IN ('CALLS', 'CALLS_NIF')
-                JOIN ist.Edge c1 ON c1.target_id = c2.source_id AND c1.relation_type IN ('CALLS', 'CALLS_NIF')
-                JOIN Symbol s1 ON s1.id = c1.source_id
-                JOIN Symbol s2 ON s2.id = c2.target_id
-                WHERE true{scope}
-            )
-            SELECT name, target_name FROM (
-                SELECT name, target_name FROM direct
-                UNION ALL
-                SELECT name, target_name FROM indirect
-            ) dangerous_paths
-            LIMIT 100
-        ",
-            scope = scope
-        );
-
-        let res = self.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        if rows.is_empty() {
+        let pairs = crate::ist_snapshot::process_view()
+            .security_audit_paths(project)
+            .unwrap_or_default();
+        if pairs.is_empty() {
             return Ok((100, "[]".to_string()));
         }
-
-        let score = (100 - (rows.len() as i64 * 20)).max(0);
+        let score = (100 - (pairs.len() as i64 * 20)).max(0);
+        let rows: Vec<Vec<String>> = pairs.into_iter().map(|(a, b)| vec![a, b]).collect();
         Ok((
             score,
             serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
@@ -125,73 +75,31 @@ impl GraphStore {
         if !structural_graph_analytics_available() {
             return Ok(serde_json::Map::new());
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CONTAINS / CALLS (MIL-AXO-017).
-        // REQ-AXO-901653 slice-5c : public.File retired ; ist.IndexedFile is
-        // the canonical per-file pivot. IndexedFile has no `project_code`
-        // column ; the scoping happens via Symbol.project_code on the
-        // CONTAINS edge target.
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let query = format!(
-            "
-            SELECT f.path, s.name
-            FROM ist.IndexedFile f
-            JOIN ist.Edge c ON c.source_id = f.path AND c.relation_type = 'CONTAINS'
-            JOIN ist.Symbol s ON s.id = c.target_id
-            WHERE (lower(s.name) LIKE '%todo%'
-               OR lower(s.name) LIKE '%fixme%'
-               OR lower(s.name) LIKE '%secret%'
-               OR lower(s.name) LIKE '%hardcoded credential%'
-               OR EXISTS (
-                    SELECT 1 FROM ist.Edge call
-                    JOIN ist.Symbol target ON target.id = call.target_id
-                    WHERE call.relation_type = 'CALLS'
-                      AND call.source_id = s.id
-                      AND lower(target.name) IN ('unwrap', 'eval')
-               ))
-            {}
-        ",
-            if scoped {
-                format!(" AND s.project_code = '{}'", escaped)
-            } else {
-                String::new()
-            }
-        );
-
-        let res = self.query_json(&query)?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        // REQ-AXO-901970 — RAM-only (no PG). Project symbols whose name carries a
+        // debt fragment OR that CALL unwrap/eval, mapped {file_path: name}.
+        // "*"/cold → empty.
+        if project == "*" {
+            return Ok(serde_json::Map::new());
+        }
         let mut findings = serde_json::Map::new();
-        for row in rows {
-            if row.len() >= 2 {
-                findings.insert(row[0].clone(), serde_json::Value::String(row[1].clone()));
-            }
+        for (file, name) in crate::ist_snapshot::process_view()
+            .technical_debt(project)
+            .unwrap_or_default()
+        {
+            findings.insert(file, serde_json::Value::String(name));
         }
         Ok(findings)
     }
 
     pub fn get_telemetry_score(&self, project: &str) -> Result<i64> {
-        if !structural_graph_analytics_available() {
+        // REQ-AXO-901970 — RAM-only count of CALLS to raw-logging functions (no
+        // PG). "*"/cold → 100 (no penalty; per-project cache can't aggregate "*").
+        if project == "*" {
             return Ok(100);
         }
-        // REQ-AXO-350 : ist.Edge replaces legacy CALLS table (MIL-AXO-017).
-        let scoped = project != "*";
-        let escaped = project.replace('\'', "''");
-        let query = format!(
-            "
-            SELECT count(*)
-            FROM ist.Edge call
-            JOIN Symbol target ON target.id = call.target_id
-            WHERE call.relation_type = 'CALLS'
-              AND lower(target.name) IN ('println!', 'dbg!', 'console.log', 'io.puts', 'print', 'printf')
-            {}
-            ",
-            if scoped {
-                format!(" AND call.source_id IN (SELECT id FROM Symbol WHERE project_code = '{}')", escaped)
-            } else {
-                String::new()
-            }
-        );
-        let bad_logs = self.query_count(&query).unwrap_or(0);
+        let bad_logs = crate::ist_snapshot::process_view()
+            .telemetry_log_call_count(project)
+            .unwrap_or(0) as i64;
         Ok((100 - (bad_logs * 5)).max(0))
     }
 
@@ -383,21 +291,22 @@ mod migration_guard_tests {
         &tail[..body_end_relative]
     }
 
+    // REQ-AXO-901970 — security_audit / telemetry are RAM-only (taint walk +
+    // log-call count over the process snapshot); no PG ist.Edge SQL.
     #[test]
-    fn batch_a_get_security_audit_uses_public_edge() {
-        let body = extract_fn_body(SOURCE, "pub fn get_security_audit");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("relation_type = 'CALLS'"));
-        assert!(body.contains("relation_type = 'CALLS_NIF'"));
+    fn batch_a_get_security_audit_is_ram_only() {
+        let code = code_only(SOURCE, "pub fn get_security_audit");
+        assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!code.contains("query_json"), "no SQL round-trip");
+        assert!(code.contains("security_audit_paths"), "routed through RAM");
     }
 
     #[test]
-    fn batch_a_get_telemetry_score_uses_public_edge() {
-        let body = extract_fn_body(SOURCE, "pub fn get_telemetry_score");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("FROM ist.Edge"));
-        assert!(body.contains("relation_type = 'CALLS'"));
+    fn batch_a_get_telemetry_score_is_ram_only() {
+        let code = code_only(SOURCE, "pub fn get_telemetry_score");
+        assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!code.contains("query_count"), "no SQL round-trip");
+        assert!(code.contains("telemetry_log_call_count"), "routed through RAM");
     }
 
     #[test]
@@ -411,12 +320,14 @@ mod migration_guard_tests {
 
     // REQ-AXO-350 batch (b) — CALLS+CONTAINS mixed gates.
 
+    // REQ-AXO-901970 — technical_debt is RAM-only (name fragments + CALLS to
+    // unwrap/eval over the process snapshot); no PG ist.Edge SQL.
     #[test]
-    fn batch_b_get_technical_debt_uses_public_edge() {
-        let body = extract_fn_body(SOURCE, "pub fn get_technical_debt");
-        assert!(!body.contains("skip_legacy_relations"));
-        assert!(body.contains("c.relation_type = 'CONTAINS'"));
-        assert!(body.contains("call.relation_type = 'CALLS'"));
+    fn batch_b_get_technical_debt_is_ram_only() {
+        let code = code_only(SOURCE, "pub fn get_technical_debt");
+        assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
+        assert!(!code.contains("query_json"), "no SQL round-trip");
+        assert!(code.contains("technical_debt"), "routed through RAM");
     }
 
 

@@ -203,6 +203,12 @@ pub struct EdgeTriple {
 #[derive(Clone, Debug)]
 pub struct NodeRecord {
     pub id: String,
+    /// REQ-AXO-901970 — canonical display name (`ist.symbol.name`). The RAM graph
+    /// stores it explicitly rather than re-deriving from the id suffix, because
+    /// some symbols (TODO/FIXME comments, secret findings, macro call targets)
+    /// carry a `name` that is NOT the last `::` segment of the id. Name-based
+    /// analytics (technical_debt, security taint, telemetry) match against this.
+    pub name: String,
     pub project_code: String,
     pub kind: NodeKind,
     pub flags: NodeFlags,
@@ -215,6 +221,9 @@ pub struct NodeRecord {
 /// when a fresh load lands.
 pub struct IstGraph {
     ids: Vec<String>,
+    /// REQ-AXO-901970 — canonical display names, index-aligned with `ids`.
+    /// Edge-implied phantom endpoints (no NodeRecord) fall back to the id suffix.
+    names: Vec<String>,
     id_to_idx: HashMap<String, u32>,
     project_indices: Vec<u8>,
     project_codes: Vec<String>,
@@ -258,6 +267,13 @@ impl IstGraph {
     /// (callers must derive indices via [`index_of`] or by iterating).
     pub fn id_of(&self, idx: u32) -> &str {
         &self.ids[idx as usize]
+    }
+
+    /// REQ-AXO-901970 — canonical display name of a node (`ist.symbol.name`),
+    /// distinct from the id suffix for TODO/secret/macro symbols. Phantom
+    /// endpoints fall back to the id suffix at build time.
+    pub fn name_of(&self, idx: u32) -> &str {
+        &self.names[idx as usize]
     }
 
     /// REQ-AXO-901970 — canonical ids whose short name (last `::` segment)
@@ -339,6 +355,7 @@ impl IstGraph {
             let (kind_byte, project, flags) = self.node_meta(idx);
             nodes.push(NodeRecord {
                 id: self.id_of(idx).to_string(),
+                name: self.name_of(idx).to_string(),
                 project_code: project.to_string(),
                 kind: NodeKind::from_u8(kind_byte),
                 flags,
@@ -369,6 +386,7 @@ impl IstGraph {
     /// edge-implied endpoints).
     pub fn build(nodes: Vec<NodeRecord>, edges: Vec<EdgeTriple>) -> Self {
         let mut ids: Vec<String> = Vec::with_capacity(nodes.len());
+        let mut names: Vec<String> = Vec::with_capacity(nodes.len());
         let mut id_to_idx: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
         let mut kinds: Vec<u8> = Vec::with_capacity(nodes.len());
         let mut flags: Vec<u8> = Vec::with_capacity(nodes.len());
@@ -413,6 +431,7 @@ impl IstGraph {
                 }
             }
             ids.push(record.id);
+            names.push(record.name);
             kinds.push(record.kind as u8);
             flags.push(record.flags.0);
             project_indices.push(proj_idx);
@@ -432,7 +451,14 @@ impl IstGraph {
                 None => {
                     let idx = u32::try_from(ids.len()).expect("ist_snapshot exceeds u32 capacity");
                     id_to_idx.insert(edge.source.clone(), idx);
+                    let phantom_name = edge
+                        .source
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&edge.source)
+                        .to_string();
                     ids.push(edge.source);
+                    names.push(phantom_name);
                     kinds.push(NodeKind::Other as u8);
                     flags.push(0);
                     project_indices.push(intern_project(
@@ -462,7 +488,14 @@ impl IstGraph {
                             let idx = u32::try_from(ids.len())
                                 .expect("ist_snapshot exceeds u32 capacity");
                             id_to_idx.insert(edge.target.clone(), idx);
+                            let phantom_name = edge
+                                .target
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(&edge.target)
+                                .to_string();
                             ids.push(edge.target);
+                            names.push(phantom_name);
                             kinds.push(NodeKind::Other as u8);
                             flags.push(0);
                             project_indices.push(intern_project(
@@ -489,6 +522,7 @@ impl IstGraph {
 
         Self {
             ids,
+            names,
             id_to_idx,
             project_indices,
             project_codes,
@@ -700,6 +734,8 @@ impl IstGraph {
     /// overhead. Used by the bench binary and ist_snapshot diagnostics.
     pub fn approximate_bytes(&self) -> usize {
         let ids_bytes: usize = self.ids.iter().map(String::len).sum();
+        let names_bytes: usize = self.names.iter().map(String::len).sum();
+        let names_overhead = self.names.capacity() * std::mem::size_of::<String>();
         let ids_overhead = self.ids.capacity() * std::mem::size_of::<String>();
         let id_to_idx_overhead = self.id_to_idx.capacity()
             * (std::mem::size_of::<String>() + std::mem::size_of::<u32>() + 16);
@@ -711,7 +747,14 @@ impl IstGraph {
             + self.rev_rel.len();
         let attr_bytes = self.kinds.len() + self.flags.len() + self.project_indices.len();
         let projects_bytes: usize = self.project_codes.iter().map(String::len).sum();
-        ids_bytes + ids_overhead + id_to_idx_overhead + csr_bytes + attr_bytes + projects_bytes
+        ids_bytes
+            + names_bytes
+            + names_overhead
+            + ids_overhead
+            + id_to_idx_overhead
+            + csr_bytes
+            + attr_bytes
+            + projects_bytes
     }
 }
 
@@ -762,6 +805,7 @@ mod tests {
     fn node(id: &str, project: &str, kind: NodeKind) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: project.to_string(),
             kind,
             flags: NodeFlags::default(),

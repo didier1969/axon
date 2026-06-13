@@ -725,6 +725,7 @@ mod tests {
     fn n(id: &str) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),

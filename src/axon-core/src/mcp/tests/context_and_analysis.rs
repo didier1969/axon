@@ -1177,18 +1177,21 @@ fn test_path_uses_ram_snapshot_when_warm() {
     let nodes = vec![
         NodeRecord {
             id: "ram::source".into(),
+            name: "ram_source_fn".into(),
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
         },
         NodeRecord {
             id: "ram::mid".into(),
+            name: "ram_mid_fn".into(),
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
         },
         NodeRecord {
             id: "ram::sink".into(),
+            name: "ram_sink_fn".into(),
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
@@ -2322,12 +2325,14 @@ fn test_axon_architectural_drift() {
     let nodes = vec![
         NodeRecord {
             id: "ui/app.js".into(),
+            name: "ui/app.js".into(),
             project_code: "PRJ".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
         },
         NodeRecord {
             id: "db/repo.rs".into(),
+            name: "db/repo.rs".into(),
             project_code: "PRJ".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
@@ -2528,6 +2533,7 @@ fn query_graph_r1_neighbors_ram_excludes_files_and_anchor() {
 
     let mk = |id: &str| NodeRecord {
         id: id.to_string(),
+        name: id.rsplit("::").next().unwrap_or(id).to_string(),
         project_code: code.to_string(),
         kind: NodeKind::Function,
         flags: NodeFlags::default(),
@@ -3669,13 +3675,19 @@ fn test_axon_audit_taint_analysis() {
         )
         .unwrap();
 
+    // REQ-AXO-901970 — taint/security audit reads the RAM snapshot; evict so it
+    // warms fresh from this test's raw-SQL inserts, and scope to the fixture's
+    // project (security_audit is RAM-per-project, no cross-project "*").
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "*"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(6)),
@@ -3720,13 +3732,19 @@ fn test_axon_audit_technical_debt() {
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::risky_func', 'prj::unwrap', 'CALLS', 'PRJ', 0)")
         .unwrap();
 
+    // REQ-AXO-901970 — technical_debt audit reads the RAM snapshot; evict so it
+    // warms fresh from this test's raw-SQL inserts, and scope to the fixture's
+    // project (technical_debt is RAM-per-project, no cross-project "*").
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "*"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(10)),
@@ -3768,13 +3786,19 @@ fn test_axon_audit_technical_debt_comments() {
         )
         .unwrap();
 
+    // REQ-AXO-901970 — technical_debt audit reads the RAM snapshot; evict so it
+    // warms fresh from this test's raw-SQL inserts, and scope to the fixture's
+    // project (technical_debt is RAM-per-project, no cross-project "*").
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "*"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(11)),
@@ -3814,13 +3838,19 @@ fn test_axon_audit_secrets_detection() {
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/config.rs', 'prj::secret1', 'CONTAINS', 'PRJ', 0)")
         .unwrap();
 
+    // REQ-AXO-901970 — secrets audit reads the RAM snapshot; evict so it warms
+    // fresh from this test's raw-SQL inserts, and scope to the fixture's project
+    // (technical_debt/secrets is RAM-per-project, no cross-project "*").
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "*"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(12)),
@@ -3884,6 +3914,11 @@ fn test_axon_audit_cross_language_taint() {
         .graph_store
         .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{rn}', '{ub}', 'CALLS', '{code}', 0)"))
         .unwrap();
+
+    // REQ-AXO-901970 — cross-language taint audit reads the RAM snapshot; evict
+    // so it warms fresh from this test's raw-SQL inserts (scoped unique code).
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    server.soll_cache().invalidate(&code);
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

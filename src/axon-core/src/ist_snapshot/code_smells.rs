@@ -542,6 +542,115 @@ pub fn cross_file_call_flows(
     (flows, total)
 }
 
+const DANGEROUS_NAMES: &[&str] = &["eval", "unwrap"];
+const LOG_CALL_NAMES: &[&str] = &[
+    "println!", "dbg!", "console.log", "io.puts", "print", "printf",
+];
+const DEBT_NAME_FRAGMENTS: &[&str] = &["todo", "fixme", "secret", "hardcoded credential"];
+
+fn is_dangerous(graph: &IstGraph, idx: u32) -> bool {
+    let (_, _, flags) = graph.node_meta(idx);
+    if flags.unsafe_() {
+        return true;
+    }
+    // REQ-AXO-901970 — match the canonical name (ist.symbol.name), not the id
+    // suffix : a macro/method call target's display name is authoritative.
+    let name = graph.name_of(idx).to_ascii_lowercase();
+    DANGEROUS_NAMES.contains(&name.as_str())
+}
+
+/// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_security_audit` taint
+/// walk. `(caller_name, dangerous_name)` pairs where a project symbol reaches a
+/// dangerous symbol (unsafe / `eval` / `unwrap`) via 1 or 2 CALLS/CALLS_NIF hops
+/// (reverse walk from the small dangerous set, mirroring the PG target-first
+/// query). Capped at 100 (the score saturates at 5 findings anyway).
+pub fn security_audit_paths(graph: &IstGraph, project: &str) -> Vec<(String, String)> {
+    let rels = |r: &RelationType| matches!(r, RelationType::Calls | RelationType::CallsNif);
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for d in 0..(graph.node_count() as u32) {
+        if !is_dangerous(graph, d) {
+            continue;
+        }
+        let dname = graph.name_of(d).to_string();
+        for (src, rel) in graph.reverse_neighbors(d) {
+            if !rels(&rel) {
+                continue;
+            }
+            if project_matches(graph, src, project) {
+                pairs.push((graph.name_of(src).to_string(), dname.clone()));
+                if pairs.len() >= 100 {
+                    return pairs;
+                }
+            }
+            // indirect (2-hop): callers of the direct caller.
+            for (src2, rel2) in graph.reverse_neighbors(src) {
+                if rels(&rel2) && project_matches(graph, src2, project) {
+                    pairs.push((graph.name_of(src2).to_string(), dname.clone()));
+                    if pairs.len() >= 100 {
+                        return pairs;
+                    }
+                }
+            }
+        }
+    }
+    pairs
+}
+
+/// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_technical_debt`.
+/// `(file_path, symbol_name)` for project symbols whose name carries a debt
+/// fragment (todo/fixme/secret/hardcoded credential) OR that CALL `unwrap`/`eval`.
+pub fn technical_debt(graph: &IstGraph, project: &str) -> Vec<(String, String)> {
+    let file_map = build_file_path_map(graph);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, idx, project) {
+            continue;
+        }
+        let Some(file) = file_map.get(&idx).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        // REQ-AXO-901970 — match + return the canonical name (ist.symbol.name) :
+        // a TODO/secret symbol's name is the comment/finding text, NOT the id
+        // suffix (which is a slug). Same for the CALLS-target dangerous check.
+        let name = graph.name_of(idx);
+        let name_lower = name.to_ascii_lowercase();
+        let name_hit = DEBT_NAME_FRAGMENTS.iter().any(|f| name_lower.contains(f));
+        let calls_dangerous = name_hit
+            || graph.forward_neighbors(idx).any(|(tgt, rel)| {
+                matches!(rel, RelationType::Calls) && {
+                    let t = graph.name_of(tgt).to_ascii_lowercase();
+                    t == "unwrap" || t == "eval"
+                }
+            });
+        if calls_dangerous {
+            out.push((file.clone(), name.to_string()));
+        }
+    }
+    out
+}
+
+/// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_telemetry_score`'s count:
+/// number of CALLS edges (from a project symbol) targeting a raw-logging
+/// function (println!/dbg!/console.log/...).
+pub fn telemetry_log_call_count(graph: &IstGraph, project: &str) -> usize {
+    let mut count = 0usize;
+    for src in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, src, project) {
+            continue;
+        }
+        for (tgt, rel) in graph.forward_neighbors(src) {
+            if matches!(rel, RelationType::Calls) {
+                // REQ-AXO-901970 — canonical name, not the id suffix.
+                let t = graph.name_of(tgt).to_ascii_lowercase();
+                if LOG_CALL_NAMES.iter().any(|l| l.to_ascii_lowercase() == t) {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// REQ-AXO-901970 — RAM detour candidates: `src -> mid -> dst`, all same file,
 /// `mid` private with EXACTLY one inbound + one outbound CALLS, `src != dst`.
 pub fn detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
@@ -819,6 +928,7 @@ mod tests {
     fn func(id: &str, public: bool) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(false, public, false, false),
@@ -828,6 +938,7 @@ mod tests {
     fn file(id: &str) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: "AXO".to_string(),
             kind: NodeKind::File,
             flags: NodeFlags::default(),
@@ -1205,12 +1316,14 @@ mod tests {
             file("OPT::src/b.rs"),
             NodeRecord {
                 id: "AXO::src/a.rs::foo".to_string(),
+                name: "foo".to_string(),
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
             },
             NodeRecord {
                 id: "OPT::src/b.rs::foo".to_string(),
+                name: "foo".to_string(),
                 project_code: "OPT".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
@@ -1247,6 +1360,7 @@ mod tests {
     fn func_flags(id: &str, public: bool, unsafe_: bool) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(false, public, false, unsafe_),
@@ -1321,6 +1435,7 @@ mod tests {
     fn typed_node(id: &str, kind: NodeKind) -> NodeRecord {
         NodeRecord {
             id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
             project_code: "AXO".to_string(),
             kind,
             flags: NodeFlags::default(),
@@ -1475,6 +1590,82 @@ mod tests {
                 "bf".to_string(),
                 "AXO::b.rs".to_string()
             )
+        );
+    }
+
+    // REQ-AXO-901970 — NodeRecord with a canonical `name` DECOUPLED from the id
+    // suffix : the regression these three tests lock in. The indexer slugs the id
+    // (`file::todo_7`) but keeps the real text in `ist.symbol.name`. Name-based
+    // analytics must read `name_of`, never `name_from_id(id_of(..))`.
+    fn named(id: &str, name: &str, kind: NodeKind) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            project_code: "AXO".to_string(),
+            kind,
+            flags: NodeFlags::new(false, true, false, false),
+        }
+    }
+
+    #[test]
+    fn technical_debt_matches_canonical_name_not_id_suffix() {
+        // id suffix is an opaque slug ("todo_7") ; the TODO text lives in `name`.
+        let nodes = vec![
+            file("src/parser.rs"),
+            named("AXO::src/parser.rs::todo_7", "// TODO: fix the parser", NodeKind::Other),
+            named("AXO::src/cfg.rs::sec_1", "SECRET_API_KEY hardcoded credential", NodeKind::Other),
+            file("src/cfg.rs"),
+        ];
+        let edges = vec![
+            edge("src/parser.rs", "AXO::src/parser.rs::todo_7", RelationType::Contains),
+            edge("src/cfg.rs", "AXO::src/cfg.rs::sec_1", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let debt = technical_debt(&g, "AXO");
+        // The returned name is the canonical comment/secret text, NOT the slug.
+        assert!(
+            debt.iter().any(|(f, n)| f == "src/parser.rs" && n == "// TODO: fix the parser"),
+            "TODO text must be matched + returned via name_of: {debt:?}"
+        );
+        assert!(
+            debt.iter().any(|(f, n)| f == "src/cfg.rs" && n.contains("hardcoded credential")),
+            "secret finding must be matched via name_of: {debt:?}"
+        );
+    }
+
+    #[test]
+    fn security_audit_matches_dangerous_by_canonical_name() {
+        // The dangerous callee's id suffix is a slug ; its NAME is "eval".
+        let nodes = vec![
+            named("AXO::f.rs::caller", "caller", NodeKind::Function),
+            named("AXO::f.rs::n42", "eval", NodeKind::Function),
+        ];
+        let edges = vec![edge("AXO::f.rs::caller", "AXO::f.rs::n42", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let pairs = security_audit_paths(&g, "AXO");
+        assert!(
+            pairs.iter().any(|(c, d)| c == "caller" && d == "eval"),
+            "dangerous callee must be recognised by name_of, not id suffix: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn telemetry_counts_log_calls_by_canonical_name() {
+        // The log target's id suffix is a slug ; its NAME is "println!".
+        let nodes = vec![
+            named("AXO::f.rs::worker", "worker", NodeKind::Function),
+            named("AXO::std::m99", "println!", NodeKind::Function),
+            named("AXO::f.rs::quiet", "compute", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("AXO::f.rs::worker", "AXO::std::m99", RelationType::Calls),
+            edge("AXO::f.rs::quiet", "AXO::std::m99", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(
+            telemetry_log_call_count(&g, "AXO"),
+            2,
+            "both CALLS to the println!-named target count via name_of"
         );
     }
 }
