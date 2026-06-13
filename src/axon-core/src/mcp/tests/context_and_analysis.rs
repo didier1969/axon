@@ -310,9 +310,22 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
         .graph_store
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
         .unwrap();
+    // REQ-AXO-901970 — conception flow_count is now RAM-only and derives each
+    // symbol's file from the CONTAINS edge (consistent with the other RAM
+    // analytics), not Chunk.file_path. In production every symbol has a CONTAINS
+    // file; give axo::target one so wrapper→target is correctly same-file (not a
+    // cross-file flow → flow_count stays 0).
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::target', 'CONTAINS', 'AXO', 0)")
+        .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{\"goal\":\"Vision first\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'planned', '{\"priority\":\"P1\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', 'Use Rust as the authoritative runtime', 'current', '{\"context\":\"\",\"rationale\":\"\"}')").unwrap();
+    // RAM-only reads (project_status → conception/orphan) were seeded via raw SQL,
+    // bypassing cache invalidation: evict so this read warms fresh.
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -507,6 +520,13 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .graph_store
         .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
         .unwrap();
+    // REQ-AXO-901970 — project_status → conception/orphan now read the RAM
+    // snapshot; raw-SQL inserts bypass invalidation, so evict before each capture
+    // so the baseline (no orphan) and the second read (with the orphan inserted
+    // below) each warm fresh — otherwise the orphan delta is hidden by a stale
+    // snapshot warmed at the first call.
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 
     let first = server
         .handle_request(JsonRpcRequest {
@@ -534,6 +554,10 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .graph_store
         .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
         .unwrap();
+    // Evict again so the second capture warms a snapshot that includes axo::orphan
+    // (raw insert bypassed invalidation).
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
 
     let second = server
         .handle_request(JsonRpcRequest {
@@ -612,6 +636,11 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-{code}-001', 'Vision', '{code}', 'Axon Vision', 'Build from project vision', 'current', '{{}}')"))
         .unwrap();
+    // REQ-AXO-901970 — project_status reads the RAM snapshot; evict before each
+    // capture so the baseline and the post-orphan read each warm fresh from the
+    // raw-SQL inserts (which bypass cache invalidation).
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    server.soll_cache().invalidate(&code);
 
     let first = server
         .handle_request(JsonRpcRequest {
@@ -639,6 +668,8 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .graph_store
         .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{lib}', '{code}::orphan', 'CONTAINS', '{code}', 0)"))
         .unwrap();
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    server.soll_cache().invalidate(&code);
 
     let second = server
         .handle_request(JsonRpcRequest {
