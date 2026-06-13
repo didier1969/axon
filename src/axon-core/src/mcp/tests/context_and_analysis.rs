@@ -789,6 +789,13 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .is_some_and(|items| !items.is_empty()));
     assert!(conception["data"]["flows"].as_array().is_some());
 
+    // REQ-AXO-901952 (gap B) — change_safety now reads `tested` + traceability
+    // from the RAM snapshots. These rows were inserted via raw SQL (bypassing
+    // soll_manager/indexer invalidation), so evict any stale process snapshot
+    // first; change_safety re-warms both caches from the fresh PG rows.
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    server.soll_cache().invalidate("AXO");
+
     let change_safety = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),

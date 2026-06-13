@@ -116,6 +116,18 @@ impl IstGraphView {
         Some(crate::ist_snapshot::algorithms::structural_sccs(&snap))
     }
 
+    /// REQ-AXO-901952 (gap B) — coverage `tested` flag from RAM NodeFlags
+    /// (the loader carries `tested::text` since REQ-AXO-91485). Migrates
+    /// `change_safety` off the `SELECT … FROM Symbol … tested=true` PG count.
+    /// `None` ⇒ cold cache OR symbol absent from the snapshot (caller treats
+    /// as not-tested, the conservative change-safety default).
+    pub fn node_tested(&self, project: &str, symbol_id: &str) -> Option<bool> {
+        let snap = self.try_snapshot(project)?;
+        let idx = snap.index_of(symbol_id)?;
+        let (_, _, flags) = snap.node_meta(idx);
+        Some(flags.tested())
+    }
+
     pub fn is_warm(&self, project: &str) -> bool {
         self.cache.get(project).is_some()
     }
@@ -251,6 +263,35 @@ mod tests {
     fn reciprocal_count_zero_for_dag() {
         let view = IstGraphView::new(warm_cache());
         assert_eq!(view.reciprocal_calls_cycle_count("AXO"), Some(0));
+    }
+
+    // REQ-AXO-901952 (gap B) — node_tested reads the `tested` NodeFlag from RAM,
+    // backing change_safety's coverage signal without the PG Symbol count.
+    #[test]
+    fn node_tested_reads_ram_nodeflags() {
+        let nodes = vec![
+            NodeRecord {
+                id: "AXO::covered".to_string(),
+                project_code: "AXO".to_string(),
+                kind: NodeKind::Function,
+                flags: NodeFlags::new(true, false, false, false),
+            },
+            NodeRecord {
+                id: "AXO::uncovered".to_string(),
+                project_code: "AXO".to_string(),
+                kind: NodeKind::Function,
+                flags: NodeFlags::new(false, false, false, false),
+            },
+        ];
+        let cache = Arc::new(IstSnapshotCache::new());
+        cache.publish("AXO".to_string(), Arc::new(IstGraph::build(nodes, vec![])));
+        let view = IstGraphView::new(cache);
+        assert_eq!(view.node_tested("AXO", "AXO::covered"), Some(true));
+        assert_eq!(view.node_tested("AXO", "AXO::uncovered"), Some(false));
+        // Absent symbol → None (caller treats as not-tested).
+        assert_eq!(view.node_tested("AXO", "AXO::ghost"), None);
+        // Cold project → None.
+        assert_eq!(view.node_tested("ZZZ", "AXO::covered"), None);
     }
 
     #[test]

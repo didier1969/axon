@@ -569,8 +569,6 @@ impl McpServer {
             .get("target_type")
             .and_then(|value| value.as_str())
             .unwrap_or("symbol");
-        let escaped_project = project_code.replace('\'', "''");
-        let escaped_target = target.replace('\'', "''");
         let resolved_symbol_id = if target_type == "symbol" {
             self.resolve_scoped_symbol_id_canonical(target, Some(project_code))
         } else {
@@ -579,34 +577,35 @@ impl McpServer {
         let validation_signals = match target_type {
             "intent" => self.intent_validation_signals(project_code, target),
             "symbol" => {
-                let tested = self
-                    .graph_store
-                    .query_count(&format!(
-                        "SELECT count(*) FROM Symbol WHERE project_code = '{}' AND name = '{}' AND tested = true",
-                        escaped_project, escaped_target
-                    ))
-                    .unwrap_or(0)
-                    > 0;
-                let traceability_links = if let Some(symbol_id) = resolved_symbol_id.as_deref() {
-                    self.graph_store
-                        .query_count(&format!(
-                            "SELECT count(*) FROM soll.Traceability
-                             WHERE artifact_type = 'Symbol'
-                               AND (artifact_ref = '{name}' OR artifact_ref = '{id}')",
-                            name = escaped_target,
-                            id = symbol_id.replace('\'', "''")
-                        ))
-                        .unwrap_or(0)
-                } else {
-                    self.graph_store
-                        .query_count(&format!(
-                            "SELECT count(*) FROM soll.Traceability
-                             WHERE artifact_type = 'Symbol'
-                               AND artifact_ref = '{}'",
-                            escaped_target
-                        ))
-                        .unwrap_or(0)
-                };
+                // REQ-AXO-901952 (gap B) — both signals RAM-only. `tested` from
+                // IST NodeFlags (the loader carries it since REQ-AXO-91485, so the
+                // historical "RAM doesn't carry tested" claim was stale); resolved
+                // via the canonical symbol id (conservative `false` when the symbol
+                // can't be resolved / the snapshot is cold). No PG `Symbol` count.
+                let tested = resolved_symbol_id
+                    .as_deref()
+                    .filter(|_| self.ensure_ram_snapshot_warm(project_code))
+                    .and_then(|id| {
+                        crate::ist_snapshot::process_view().node_tested(project_code, id)
+                    })
+                    .unwrap_or(false);
+                // Traceability link count from the SOLL RAM snapshot, matching the
+                // legacy `artifact_type='Symbol' AND artifact_ref IN (name,id)`.
+                // No PG `soll.Traceability` count.
+                let traceability_links = self
+                    .soll_cache()
+                    .snapshot(project_code)
+                    .ok()
+                    .map(|snap| {
+                        let mut refs: Vec<&str> = vec![target];
+                        if let Some(id) = resolved_symbol_id.as_deref() {
+                            if id != target {
+                                refs.push(id);
+                            }
+                        }
+                        snap.traceability_count_for_artifact("Symbol", &refs) as i64
+                    })
+                    .unwrap_or(0);
                 json!({
                     "tested": tested,
                     "traceability_links": traceability_links,
@@ -674,11 +673,12 @@ impl McpServer {
         // REQ-AXO-91514 — tri-modal envelope per GUI-AXO-1003. `change_safety`
         // is an impact-context tool that joins two surfaces : the IST
         // Symbol index (coverage signal `tested`) and the SOLL Traceability
-        // table (link count). Both are PG-backed today ; the RAM IST
-        // snapshot doesn't carry the `tested` flag, so a RAM-only path
-        // would lose signal — surfacing the PG provenance honestly via
-        // `surfaces_used = ["symbol_index","soll_traceability"]`. No
-        // results[] array : the response shape is already a single
+        // table (link count). REQ-AXO-901952 (gap B) moved BOTH onto RAM — the
+        // IST snapshot carries `tested` in NodeFlags and the SOLL snapshot
+        // carries the Traceability rows — so `surfaces_used` names the logical
+        // provenance (`["symbol_index","soll_traceability"]`), now served from
+        // the in-memory snapshots, not PG. No results[] array : the response
+        // shape is already a single
         // verdict (`change_safety`+`reasoning`) ; adding a parallel
         // results[] would inflate bench precision denominators without
         // helping LLM consumers (same logic as inspect REQ-AXO-91509).

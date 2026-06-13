@@ -309,6 +309,25 @@ impl SollSnapshot {
             .unwrap_or(0)
     }
 
+    /// REQ-AXO-901952 (gap B) — count traceability rows of `artifact_type`
+    /// whose `artifact_ref` matches any of `artifact_refs`. Migrates
+    /// `change_safety`'s `SELECT count(*) FROM soll.Traceability WHERE
+    /// artifact_type='Symbol' AND artifact_ref IN (…)` onto the RAM snapshot.
+    /// Linear over the (~hundreds) traceability rows — single-call, not hot.
+    pub fn traceability_count_for_artifact(
+        &self,
+        artifact_type: &str,
+        artifact_refs: &[&str],
+    ) -> usize {
+        self.traceability
+            .iter()
+            .filter(|row| {
+                row.artifact_type == artifact_type
+                    && artifact_refs.iter().any(|r| row.artifact_ref == *r)
+            })
+            .count()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -396,6 +415,51 @@ mod tests {
         assert_eq!(snap.traceability_count_for("milestone", "MIL-AXO-001"), 1);
         assert_eq!(snap.traceability_count_for("requirement", "REQ-AXO-001"), 1);
         assert_eq!(snap.traceability_count_for("decision", "DEC-AXO-999"), 0);
+    }
+
+    // REQ-AXO-901952 (gap B) — change_safety's RAM traceability count: rows of a
+    // given artifact_type whose artifact_ref matches any of the supplied refs
+    // (symbol name OR canonical id).
+    #[test]
+    fn traceability_count_for_artifact_matches_type_and_refs() {
+        let nodes = HashMap::new();
+        let trace = vec![
+            SnapshotTraceability {
+                id: "T1".into(),
+                soll_entity_type: "Requirement".into(),
+                soll_entity_id: "REQ-AXO-001".into(),
+                artifact_type: "Symbol".into(),
+                artifact_ref: "render".into(),
+                artifact_status: "ok".into(),
+            },
+            SnapshotTraceability {
+                id: "T2".into(),
+                soll_entity_type: "Decision".into(),
+                soll_entity_id: "DEC-AXO-001".into(),
+                artifact_type: "Symbol".into(),
+                artifact_ref: "AXO::widget.rs::render".into(),
+                artifact_status: "ok".into(),
+            },
+            // artifact_type mismatch — excluded.
+            SnapshotTraceability {
+                id: "T3".into(),
+                soll_entity_type: "Requirement".into(),
+                soll_entity_id: "REQ-AXO-002".into(),
+                artifact_type: "file".into(),
+                artifact_ref: "render".into(),
+                artifact_status: "ok".into(),
+            },
+        ];
+        let snap = SollSnapshot::build("AXO", 1, nodes, vec![], trace);
+        // name + canonical id both match → 2 Symbol rows.
+        assert_eq!(
+            snap.traceability_count_for_artifact("Symbol", &["render", "AXO::widget.rs::render"]),
+            2
+        );
+        // only the bare name → 1 (the file-typed row is excluded).
+        assert_eq!(snap.traceability_count_for_artifact("Symbol", &["render"]), 1);
+        // no match.
+        assert_eq!(snap.traceability_count_for_artifact("Symbol", &["nope"]), 0);
     }
 
     #[test]
