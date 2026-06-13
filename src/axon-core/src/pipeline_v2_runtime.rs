@@ -294,32 +294,10 @@ pub fn spawn_pipeline_v2_indexer(
             "indexer-pipeline-v2",
             0,
         ) {
-            Ok(e) => {
-                // REQ-AXO-90009 Slice 3 — spawn idle watchdog. After
-                // T_idle=5min (DEC-AXO-086 default) without activity and
-                // with an empty runtime pending set, the watchdog flips
-                // EmbedderLifecycle to Sleeping and calls
-                // `release_session()` on this exact embedder — frees
-                // ~5-7 GB VRAM + ~3-4 GB host heap. The next embed call
-                // wakes the session in 1-3 s warm via TensorRT engine
-                // cache on disk. Override via env (TODO: AXON_EMBEDDER_
-                // {TICK,IDLE,GRACE}_SECS knobs in a follow-up).
-                let arc_embedder: Arc<GpuB2Embedder> = Arc::new(e);
-                GpuB2Embedder::spawn_lifecycle_watchdog(
-                    &arc_embedder,
-                    std::time::Duration::from_secs(5),
-                    std::time::Duration::from_secs(20),
-                    std::time::Duration::from_secs(2),
-                );
-                // REQ-AXO-901874 — the indexer liveness heartbeat is now
-                // published unconditionally at the top of this function
-                // (see `spawn_indexer_liveness_heartbeat` below), decoupled
-                // from this GPU-Ok branch. Previously it spawned ONLY here,
-                // so graph-only / CPU / NoOp indexers never wrote a row and
-                // the brain reported `indexer_ready=False` despite a live,
-                // indexing process.
-                arc_embedder as Arc<dyn crate::pipeline_v2::B2Embedder>
-            }
+            // DEC-AXO-901631 — the GPU session stays resident for the worker's
+            // lifetime (no idle watchdog / sleep-wake). Single-GPU live↔dev
+            // cohabitation is handled at the process level (PIL-AXO-004).
+            Ok(e) => Arc::new(e) as Arc<dyn crate::pipeline_v2::B2Embedder>,
             Err(err) => {
                 // REQ-AXO-901630 — fail-fast when the operator has
                 // explicitly requested a GPU provider. Silent NoOp

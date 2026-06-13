@@ -100,13 +100,6 @@ impl EmbedderRuntimeState {
         self.pending.write().remove(chunk_id);
     }
 
-    /// Return `true` when no chunks are pending. Used by Slice 3's
-    /// `EmbedderLifecycle` to decide whether the GPU session can be
-    /// dropped on `T_idle` expiry.
-    pub fn is_empty(&self) -> bool {
-        self.pending.read().is_empty()
-    }
-
     /// Snapshot of the pending count. Heartbeat / `embedding_status` use
     /// this for the operator-visible backlog metric (Slice 2).
     pub fn pending_count(&self) -> usize {
@@ -136,7 +129,7 @@ mod tests {
     #[test]
     fn new_state_starts_empty() {
         let state = EmbedderRuntimeState::new();
-        assert!(state.is_empty());
+        assert!(state.pending_count() == 0);
         assert_eq!(state.pending_count(), 0);
     }
 
@@ -144,10 +137,10 @@ mod tests {
     fn mark_pending_then_mark_embedded_roundtrip() {
         let state = EmbedderRuntimeState::new();
         state.mark_pending("chunk-a");
-        assert!(!state.is_empty());
+        assert!(state.pending_count() > 0);
         assert_eq!(state.pending_count(), 1);
         state.mark_embedded("chunk-a");
-        assert!(state.is_empty());
+        assert!(state.pending_count() == 0);
     }
 
     #[test]
@@ -193,12 +186,12 @@ mod tests {
             state.mark_pending(format!("phantom-{i}"));
         }
         assert_eq!(state.pending_count(), 200);
-        assert!(!state.is_empty());
+        assert!(state.pending_count() > 0);
         // DB says nothing is orphaned → wholesale replace with empty truth.
         state.hydrate_from_db_rows(Vec::<String>::new());
         assert_eq!(state.pending_count(), 0);
         assert!(
-            state.is_empty(),
+            state.pending_count() == 0,
             "phantom pending must be purged so should_sleep can fire"
         );
     }
