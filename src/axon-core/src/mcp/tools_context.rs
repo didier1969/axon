@@ -290,7 +290,12 @@ impl McpServer {
 
         let stage_started_at = Instant::now();
         let mut runtime = RetrievalRuntimeState::new(self);
-        let semantic_allowed = runtime.allow_semantic_search(has_strong_anchor);
+        // REQ-AXO-901978 (A) — `semantic=lexical|off` disables the semantic CHUNK
+        // lane too (not just the up-front entry-ranking embed), so the escape-hatch
+        // genuinely avoids the embedding round-trip end-to-end. Short-circuits
+        // before `allow_semantic_search` so no embed is attempted.
+        let semantic_allowed =
+            !semantic_lexical_off && runtime.allow_semantic_search(has_strong_anchor);
         if let Some(reason) = runtime.degraded_reason.clone() {
             excluded_because.push(reason);
         }
