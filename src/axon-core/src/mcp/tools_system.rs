@@ -802,7 +802,7 @@ impl McpServer {
                 let next = super::tool_contracts::next_links("sql");
                 if result.trim() == "[]" && ql.contains("match") {
                     let note =
-                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. Backend accepts SQL first; for multi-hop CALLS, use the SQL graph functions in `ist.path` or `query_examples`.";
+                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.";
                     Some(json!({ "content": [{ "type": "text", "text": note }], "data": { "next": next } }))
                 } else {
                     Some(json!({ "content": [{ "type": "text", "text": result }], "data": { "next": next } }))
