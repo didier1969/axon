@@ -13,6 +13,16 @@ const OTP_ENTRY_POINTS: &[&str] = &[
 
 const IMPORT_DIRECTIVES: &[&str] = &["alias", "import", "use", "require"];
 
+// REQ-AXO-901969 — Elixir control-flow special forms are themselves parsed as
+// tree-sitter `call` nodes (e.g. `case x do … end`). They are NOT function
+// calls: emitting a `Caller -> Module.case` edge is noise, and—worse—treating
+// them as leaf calls hides every real call nested in their clauses/body. We
+// must instead descend into them. `fn` is parsed as `anonymous_function`
+// (already recursed via the non-call branch) so it is not listed here.
+const CONTROL_FLOW_FORMS: &[&str] = &[
+    "case", "cond", "with", "if", "unless", "for", "try", "receive", "quote",
+];
+
 pub struct ElixirParser {
     wasm_bytes: &'static [u8],
 }
@@ -429,8 +439,34 @@ impl ElixirParser {
                     if IMPORT_DIRECTIVES.contains(&ident.as_str()) {
                         continue;
                     }
+                    // REQ-AXO-901969 — control-flow special form: not a call.
+                    // Don't emit a bogus edge; descend into its clauses/body so
+                    // the calls nested inside (the real callees) are captured.
+                    if CONTROL_FLOW_FORMS.contains(&ident.as_str()) {
+                        Self::extract_calls_from_block(
+                            child,
+                            source_bytes,
+                            result,
+                            module_name,
+                            aliases,
+                        );
+                        continue;
+                    }
                 }
                 Self::extract_generic_call(child, source_bytes, result, module_name, aliases);
+                // REQ-AXO-901969 — recurse into the call's arguments so calls
+                // passed as arguments or wrapped in anonymous functions
+                // (e.g. `Enum.map(xs, fn x -> prepare_dataset(x) end)`) are not
+                // lost. extract_generic_call only handles the call head.
+                if let Some(args) = Self::find_child_by_type(child, "arguments") {
+                    Self::extract_calls_from_block(
+                        args,
+                        source_bytes,
+                        result,
+                        module_name,
+                        aliases,
+                    );
+                }
             } else {
                 Self::extract_calls_from_block(child, source_bytes, result, module_name, aliases);
             }
@@ -787,6 +823,130 @@ mod tests {
         assert_eq!(
             symbol.properties.get("body_split_lines"),
             Some(&"4,5,6".to_string())
+        );
+    }
+
+    // REQ-AXO-901969 — calls wrapped in control-flow special forms
+    // (case/with/cond/if/for/...) or passed as arguments / inside anonymous
+    // functions were dropped: the special form is itself a tree-sitter `call`
+    // node, so the resolver (a) emitted a bogus `Caller -> Module.case` edge and
+    // (b) never descended into its body. Result: impact/inspect/path reported
+    // "0 callers" for real callees (the TE2 prepare_dataset case).
+
+    #[test]
+    fn test_elixir_parser_resolves_calls_inside_case() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def run(x) do
+            case x do
+              :a -> prepare_dataset(x)
+              _ -> :skip
+            end
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.prepare_dataset"
+                && rel.rel_type == "CALLS"),
+            "call inside `case` missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            !result
+                .relations
+                .iter()
+                .any(|rel| rel.to.ends_with(".case") && rel.rel_type == "CALLS"),
+            "bogus CALLS edge to the `case` special form emitted: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_resolves_calls_inside_with() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def run(p) do
+            with {:ok, ds} <- prepare_dataset(p) do
+              label_multi_horizon(ds)
+            end
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.prepare_dataset"
+                && rel.rel_type == "CALLS"),
+            "call inside `with` head missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.label_multi_horizon"
+                && rel.rel_type == "CALLS"),
+            "call inside `with` body missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            !result
+                .relations
+                .iter()
+                .any(|rel| rel.to.ends_with(".with") && rel.rel_type == "CALLS"),
+            "bogus CALLS edge to the `with` special form emitted: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_resolves_calls_in_pipe_chain() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def run(p) do
+            p
+            |> prepare_dataset()
+            |> label_multi_horizon()
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.prepare_dataset"
+                && rel.rel_type == "CALLS"),
+            "piped call prepare_dataset missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.label_multi_horizon"
+                && rel.rel_type == "CALLS"),
+            "piped call label_multi_horizon missing; got: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_resolves_calls_in_anonymous_fn_argument() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def run(xs) do
+            Enum.map(xs, fn x -> prepare_dataset(x) end)
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
+                && rel.to == "Axon.Sample.prepare_dataset"
+                && rel.rel_type == "CALLS"),
+            "call inside anonymous fn argument missing; got: {:?}",
+            result.relations
         );
     }
 }
