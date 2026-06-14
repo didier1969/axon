@@ -52,8 +52,10 @@ pub(super) struct EntryCandidate {
     pub(super) score: f64,
     pub(super) reasons: Vec<String>,
     // REQ-AXO-901937 / DEC-AXO-901632 — cosine distance of this candidate's
-    // Symbol embedding to the question vector (`s.embedding <=> qvec`), filled
-    // before entry reranking when semantic capacity allows. `None` for file /
+    // CHUNK embeddings to the question vector (MIN over the symbol's chunks via
+    // ist.Chunk + ist.ChunkEmbedding ; `ist.Symbol.embedding` is never populated,
+    // see REQ-AXO-901977), filled before entry reranking when semantic capacity
+    // allows. `None` for file /
     // repo-literal candidates (no symbol embedding) and when the semantic lane
     // is degraded. Open-question routes (Hybrid / SollHybrid) order primarily by
     // this distance so the semantically-relevant entrypoint wins over a bare

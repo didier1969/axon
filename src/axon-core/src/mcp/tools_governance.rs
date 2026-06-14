@@ -763,21 +763,51 @@ impl McpServer {
         // Over-fetch from vector layer so VF2 has more candidates to confirm.
         let pre_filter_k = (limit + offset).saturating_mul(4).max(20);
 
-        // REQ-AXO-271 slice 2b : PG canonical only.
-        // Symbol.embedding is `vector(N)` ; pgvector `<=>` returns cosine distance.
-        let cosine_expr = "(s.embedding <=> other.embedding)";
-        let project_filter = match project {
+        // REQ-AXO-901977 / REQ-AXO-901952 — `ist.Symbol.embedding` is NEVER
+        // populated by the canonical pipeline (only chunks are embedded), so the
+        // historical `s.embedding <=> other.embedding` arm was permanently dead
+        // and semantic_clones always returned nothing. Rank candidate symbols by
+        // the MIN cosine distance between their embedded chunks and the SOURCE
+        // symbol's representative chunk embedding (ANN over ist.ChunkEmbedding →
+        // owning symbol) — the same chunk signal `query`/`retrieve_context` use.
+        // Empty source embedding (no chunk) → no rows (graceful, never an error).
+        let name_sql = symbol.replace('\'', "''");
+        let proj_pred_other = match project {
             Some(p) if !p.is_empty() && p != "*" => {
                 format!(" AND other.project_code = '{}'", p.replace('\'', "''"))
             }
             _ => String::new(),
         };
+        let proj_pred_src = match project {
+            Some(p) if !p.is_empty() && p != "*" => {
+                format!(" AND project_code = '{}'", p.replace('\'', "''"))
+            }
+            _ => String::new(),
+        };
         let query = format!(
-            "SELECT other.id, other.name, other.kind, {cosine_expr} as score \
-             FROM Symbol s, Symbol other \
-             WHERE s.name = '{}' AND s.name <> other.name{project_filter} AND {cosine_expr} < 0.10 \
+            "WITH src AS (SELECT id FROM Symbol WHERE name = '{name}'{proj_pred_src} LIMIT 1), \
+             src_emb AS ( \
+                 SELECT ce.embedding AS emb FROM ist.Chunk c \
+                 JOIN ist.ChunkEmbedding ce ON ce.chunk_id = c.id \
+                 WHERE c.source_type = 'symbol' AND c.source_id = (SELECT id FROM src) \
+                 LIMIT 1 \
+             ), \
+             ann AS ( \
+                 SELECT ce.chunk_id, (ce.embedding <=> (SELECT emb FROM src_emb)) AS dist \
+                 FROM ist.ChunkEmbedding ce \
+                 WHERE (SELECT emb FROM src_emb) IS NOT NULL \
+                 ORDER BY ce.embedding <=> (SELECT emb FROM src_emb) \
+                 LIMIT 400 \
+             ) \
+             SELECT other.id, other.name, other.kind, MIN(a.dist)::float8 AS score \
+             FROM ann a \
+             JOIN ist.Chunk c ON c.id = a.chunk_id AND c.source_type = 'symbol' \
+                 AND c.source_id <> (SELECT id FROM src) \
+             JOIN Symbol other ON other.id = c.source_id{proj_pred_other} \
+             GROUP BY other.id, other.name, other.kind \
+             HAVING MIN(a.dist) < 0.10 \
              ORDER BY score ASC LIMIT {pre_filter_k}",
-            symbol.replace('\'', "''")
+            name = name_sql,
         );
         let raw = match self.graph_store.query_json(&query) {
             Ok(r) => r,
