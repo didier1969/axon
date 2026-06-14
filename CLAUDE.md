@@ -43,6 +43,10 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | SOLL intent | `soll_query_context` |
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
 | Hybrid retrieval (FTS+vector+graph) | `retrieve_context` / `retrieve_context_layered` |
+| Toggle query-embed provider (runtime) | `embed_provider` |
+
+## Query-embed provider (REQ-AXO-901978/901984)
+Query/`why`/`retrieve_context` embed the NL question. `start.sh` provisions the GPU ORT artifact whenever a GPU is detected — **including `brain_only`** — so the punctual query embed runs on the idle GPU (~ms vs ~s on CPU). `query`/`retrieve_context`/`_layered` accept `semantic=auto|lexical|semantic` (auto = single-token symbol → lexical/no-embed, NL → embed). Toggle the provider at RUNTIME without a restart via `embed_provider` (action=set, provider=cpu|gpu|auto) — use `cpu` to release the GPU for Axon Live / another service, `gpu` to re-grab it. `status`/`embedding_status` report the true worker compute (GPU/CPU).
 
 ## Pipeline v2 bench
 ```

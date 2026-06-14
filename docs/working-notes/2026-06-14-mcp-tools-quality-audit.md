@@ -1,6 +1,8 @@
 # Audit qualité de la surface MCP — état actuel (MAJ 2026-06-14, post REQ-AXO-901952 + 901977 + GUI-AXO-1027)
 
-**Périmètre** : 71 entrées du catalogue canonique (`catalog.rs`) = 70 publiques + `resume_vectorization` (non-publique en `brain_only`).
+> **MAJ session 78 (post-latence)** : catalogue désormais **72 outils** (+`embed_provider`, REQ-AXO-901984). Latence sémantique corrigée (REQ-AXO-901978 B1/A/B2/B3 — GPU query-embed, `semantic=auto`, cache) ; honnêteté status (REQ-AXO-901979). Les latences du tableau ci-dessous = **ancien binaire live** (avant promote) ; mesure réelle post-promote via `mcp_telemetry_report`. **Insight friction** (axon.mcp_friction) : top OPEN = `query/degraded` ×35 (adressé par 901978), `soll_attach_evidence/artifact_ref` ×34 + `sql/input_invalid` ×27 + `soll_manager/forbidden_relation` ×11 (→ REQ-AXO-901947 Guided MCP). **Re-éval une-à-une complète** : backlog REQ-AXO-901983.
+
+**Périmètre** : 71 entrées du catalogue canonique (`catalog.rs`) = 70 publiques + `resume_vectorization` (non-publique en `brain_only`). *(72 depuis REQ-901984 / embed_provider.)*
 
 **⚠️ Déploiement** : les correctifs de cette session (901952 reliquat + 901977 classe + alignement petgraph) sont **commités sur `main` local, validés en dev (brain `g82eaa8c1`), NON promus en live et NON poussés**. Les latences/taux d'erreur ci-dessous proviennent de la télémétrie live (fenêtre 720 h) = **ancien binaire** ; ex. `query` 3453 ms/33 % err reflète l'ancien code, pas le `query` tri-modal corrigé.
 
