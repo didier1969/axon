@@ -1373,6 +1373,7 @@ impl McpServer {
             "soll_generate_docs" => self.axon_soll_generate_docs(arguments),
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
             "embedding_status" => self.axon_embedding_status(arguments),
+            "embed_provider" => self.axon_embed_provider(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),

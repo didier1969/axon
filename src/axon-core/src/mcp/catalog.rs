@@ -705,6 +705,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "mode": { "type": "string", "enum": ["brief", "verbose"] },
                         "token_budget": { "type": "integer" },
                         "top_k": { "type": "integer" },
+                        "semantic": { "type": "string", "enum": ["auto", "lexical", "semantic"], "description": "REQ-AXO-901978 — `lexical` skips the question embedding (FTS + structural only, fastest); default embeds. Propagated to the inner retrieve_context." },
                         "bands": {
                             "type": "object",
                             "properties": {
@@ -755,6 +756,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project": { "type": "string", "description": "Project code or '*' for global (default '*')." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "embed_provider",
+                "description": "[SYSTEM] REQ-AXO-901984 — get/set the query-embed provider at RUNTIME without a restart. action=get (default) reports override + effective provider + live worker compute. action=set, provider=cpu|gpu|auto flips it (rebuilds the query worker model on the next query). Use `cpu` to release the GPU for Axon Live / another service, `gpu` to re-grab it, `auto` for GPU-when-free.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["get", "set"], "description": "Default get." },
+                        "provider": { "type": "string", "enum": ["cpu", "gpu", "auto"], "description": "Required for action=set." }
                     },
                     "required": []
                 }

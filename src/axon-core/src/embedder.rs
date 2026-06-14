@@ -151,6 +151,60 @@ pub(crate) fn query_worker_compute_label() -> Option<&'static str> {
     }
 }
 
+/// REQ-AXO-901984 — runtime override of the query-embed provider, settable
+/// WITHOUT restarting the indexer/brain. The GPU is often needed by Axon Live
+/// or another service ; dev can release it (`cpu`) and re-grab it (`gpu`) on the
+/// fly. 0 = unset (env + auto), 1 = cpu, 2 = gpu, 3 = auto (force GPU-detect,
+/// ignore env). The query worker rebuilds its model lazily on the next request
+/// when the reload generation changes.
+static QUERY_EMBED_PROVIDER_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+static QUERY_RELOAD_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Set the runtime query-embed provider override and bump the reload generation
+/// so the worker rebuilds with the new provider on its next request. Returns the
+/// normalised label on success.
+pub(crate) fn set_query_embed_provider_override(value: &str) -> Result<&'static str, String> {
+    let (code, label) = match value.trim().to_ascii_lowercase().as_str() {
+        "cpu" => (1u8, "cpu"),
+        "gpu" | "cuda" | "tensorrt" => (2u8, "gpu"),
+        "auto" => (3u8, "auto"),
+        other => {
+            return Err(format!(
+                "invalid query-embed provider `{other}` (expected cpu|gpu|auto)"
+            ))
+        }
+    };
+    QUERY_EMBED_PROVIDER_OVERRIDE.store(code, std::sync::atomic::Ordering::Relaxed);
+    QUERY_RELOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(label)
+}
+
+fn query_embed_provider_override() -> Option<&'static str> {
+    match QUERY_EMBED_PROVIDER_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some("cpu"),
+        2 => Some("gpu"),
+        3 => Some("auto"),
+        _ => None,
+    }
+}
+
+/// `unset` | `cpu` | `gpu` | `auto` — the current runtime override (for status).
+pub(crate) fn query_embed_provider_override_label() -> &'static str {
+    query_embed_provider_override().unwrap_or("unset")
+}
+
+fn query_reload_generation() -> u64 {
+    QUERY_RELOAD_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// REQ-AXO-901984 — the provider the query lane WOULD resolve to right now
+/// (override → env → GPU-detect), for the `embed_provider`/status surfaces.
+pub(crate) fn query_embed_effective_provider() -> String {
+    effective_provider_request_for_lane("query")
+}
+
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -602,6 +656,29 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
     )
     .to_ascii_lowercase();
     if normalized_lane == "query" {
+        let gpu_query_available =
+            provider_runtime::current_gpu_present() && ort_cuda_provider_library_available();
+        // REQ-AXO-901984 — runtime override (toggle GPU↔CPU without restart) beats
+        // the env. `gpu` → CUDA when available else CPU ; `auto` → GPU-detect
+        // (ignores env) ; `cpu` → always CPU (release the GPU for Live/others).
+        match query_embed_provider_override() {
+            Some("cpu") => return "cpu".to_string(),
+            Some("gpu") => {
+                return if gpu_query_available {
+                    "cuda".to_string()
+                } else {
+                    "cpu".to_string()
+                }
+            }
+            Some("auto") => {
+                return if gpu_query_available {
+                    "cuda".to_string()
+                } else {
+                    canonical_provider
+                }
+            }
+            _ => {}
+        }
         if let Some(explicit) = std::env::var("AXON_QUERY_EMBED_PROVIDER")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -762,6 +839,10 @@ impl SemanticWorkerPool {
         );
 
         let mut slot: Option<TextEmbedding> = Some(model);
+        // REQ-AXO-901984 — track the provider-override reload generation so a
+        // runtime toggle (embed_provider set ...) drops the model and rebuilds
+        // it with the new provider on the next request, without a restart.
+        let mut local_reload_gen = query_reload_generation();
         loop {
             // When the model is loaded, wait at most `idle_timeout` so an
             // idle gap drops it. When already dropped, block indefinitely
@@ -772,6 +853,20 @@ impl SemanticWorkerPool {
             };
             match recv_result {
                 Ok(request) => {
+                    // REQ-AXO-901984 — a runtime provider toggle bumped the reload
+                    // generation: drop the current model so it rebuilds with the
+                    // new provider below (reuses the wake/reload path).
+                    let current_reload_gen = query_reload_generation();
+                    if current_reload_gen != local_reload_gen {
+                        local_reload_gen = current_reload_gen;
+                        if slot.is_some() {
+                            info!(
+                                "Semantic Query Worker [{}]: provider override changed — dropping model to rebuild",
+                                worker_idx
+                            );
+                            slot = None;
+                        }
+                    }
                     if slot.is_none() {
                         info!(
                             "Semantic Query Worker [{}]: waking — reloading BGE-Large model after idle drop",
@@ -2349,6 +2444,19 @@ mod tests {
         assert_eq!(super::query_worker_compute_label(), Some("GPU"));
         super::set_query_worker_compute_gpu(false);
         assert_eq!(super::query_worker_compute_label(), Some("CPU"));
+    }
+
+    // REQ-AXO-901984 — runtime query-embed provider override: set/get + reload bump.
+    #[test]
+    fn query_embed_provider_override_set_get_and_bumps_reload() {
+        let gen0 = super::query_reload_generation();
+        assert_eq!(super::set_query_embed_provider_override("cpu"), Ok("cpu"));
+        assert_eq!(super::query_embed_provider_override_label(), "cpu");
+        assert!(super::query_reload_generation() > gen0);
+        assert_eq!(super::set_query_embed_provider_override("GPU"), Ok("gpu"));
+        assert_eq!(super::query_embed_provider_override_label(), "gpu");
+        assert_eq!(super::set_query_embed_provider_override("auto"), Ok("auto"));
+        assert!(super::set_query_embed_provider_override("bogus").is_err());
     }
 
     #[test]

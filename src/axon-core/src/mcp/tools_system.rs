@@ -270,6 +270,54 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": examples }] }))
     }
 
+    /// REQ-AXO-901984 — runtime toggle of the query-embed provider WITHOUT a
+    /// restart. `action=get` (default) reports the override + effective resolved
+    /// provider + the worker's live compute. `action=set` with
+    /// `provider=cpu|gpu|auto` flips it; the query worker rebuilds its model on
+    /// the next request. Frees the GPU for Live (`cpu`) or re-grabs it (`gpu`).
+    pub(crate) fn axon_embed_provider(&self, args: &Value) -> Option<Value> {
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("get");
+        let current_override = crate::embedder::query_embed_provider_override_label();
+        let worker_compute = crate::embedder::query_worker_compute_label().unwrap_or("unknown");
+        if action == "set" {
+            let Some(provider) = args.get("provider").and_then(|v| v.as_str()) else {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "embed_provider action=set requires `provider` = cpu | gpu | auto." }],
+                    "isError": true,
+                    "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "provider", "accepted_values": ["cpu", "gpu", "auto"] } }
+                }));
+            };
+            return match crate::embedder::set_query_embed_provider_override(provider) {
+                Ok(label) => {
+                    let effective = crate::embedder::query_embed_effective_provider();
+                    Some(json!({
+                        "content": [{ "type": "text", "text": format!(
+                            "Query-embed provider override set to `{}` (was `{}`). Effective lane provider now resolves to `{}`. The query worker rebuilds its model on the NEXT query — no restart. Use `cpu` to release the GPU for Live, `gpu` to re-grab it, `auto` for GPU-when-free.",
+                            label, current_override, effective
+                        ) }],
+                        "data": { "status": "ok", "override": label, "effective_provider": effective, "reload": "lazy_on_next_query" }
+                    }))
+                }
+                Err(e) => Some(json!({
+                    "content": [{ "type": "text", "text": format!("embed_provider set failed: {}", e) }],
+                    "isError": true,
+                    "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "provider", "accepted_values": ["cpu", "gpu", "auto"] } }
+                })),
+            };
+        }
+        let effective = crate::embedder::query_embed_effective_provider();
+        Some(json!({
+            "content": [{ "type": "text", "text": format!(
+                "Query-embed provider — override: `{}` ; effective (resolved): `{}` ; live worker compute: `{}`. Toggle with action=set, provider=cpu|gpu|auto (no restart; rebuilds on next query).",
+                current_override, effective, worker_compute
+            ) }],
+            "data": { "status": "ok", "override": current_override, "effective_provider": effective, "worker_compute": worker_compute }
+        }))
+    }
+
     pub(crate) fn axon_truth_check(&self, _args: &Value) -> Option<Value> {
         let canonical_count = |query: &str| -> i64 {
             self.graph_store
