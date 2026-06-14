@@ -125,9 +125,21 @@ impl McpServer {
                 // (data.id for update, data.source_id for link, …) is absent.
                 // Read the schema's own allOf if/then conditionals so the real
                 // missing field is surfaced + stubbed, not lost.
+                // REQ-AXO-901990 — per-action clauses now come from the dedicated
+                // `conditional_clauses_for` source (the advertised schema is flat
+                // so every client can bind soll_manager). `schema` still supplies
+                // type labels for the repair stubs.
+                let conditional_clauses =
+                    super::tool_contracts::conditional_clauses_for(normalized_name);
                 let conditional_missing: Vec<(String, String)> = schema
                     .as_ref()
-                    .map(|s| super::tool_contracts::conditional_missing_fields(s, arguments))
+                    .map(|s| {
+                        super::tool_contracts::conditional_missing_fields(
+                            s,
+                            &conditional_clauses,
+                            arguments,
+                        )
+                    })
                     .unwrap_or_default();
                 // Combined view for reporting (`data.id` paths included).
                 let missing_required: Vec<String> = top_level_missing

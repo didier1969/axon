@@ -207,10 +207,15 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
 /// (`[action, entity, data]` for soll_manager) — all present in a `{action:
 /// "update", data:{description}}` call, so the missing `data.id` slips through
 /// and the repair envelope is empty/unhelpful. The per-action requiredness IS
-/// already encoded in the derived schema (augment_soll_manager_conditionals);
-/// this reads it back so the repair `corrected_call` can stub the real missing
-/// field. Single source: the schema, not a second hand-maintained table.
-pub(crate) fn conditional_missing_fields(schema: &Value, args: &Value) -> Vec<(String, String)> {
+/// encoded in the dedicated `conditional_clauses_for` source (NOT the advertised
+/// schema, which is flat per REQ-AXO-901990); this evaluates those clauses so the
+/// repair `corrected_call` can stub the real missing field. Single source: the
+/// clauses function, not a second hand-maintained table.
+pub(crate) fn conditional_missing_fields(
+    schema: &Value,
+    clauses: &Value,
+    args: &Value,
+) -> Vec<(String, String)> {
     fn type_label(spec: Option<&Value>) -> String {
         match spec.and_then(|s| s.get("type")) {
             Some(Value::String(s)) => s.clone(),
@@ -224,7 +229,10 @@ pub(crate) fn conditional_missing_fields(schema: &Value, args: &Value) -> Vec<(S
         }
     }
     let mut out = Vec::new();
-    let Some(clauses) = schema.get("allOf").and_then(Value::as_array) else {
+    // REQ-AXO-901990 — clauses come from `conditional_clauses_for` (a dedicated
+    // source), NOT the advertised schema, which is now flat. `schema` is still
+    // used for type labels (properties.data.properties.<field>.type).
+    let Some(clauses) = clauses.as_array() else {
         return out;
     };
     for clause in clauses {
@@ -419,23 +427,28 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         obj.remove("$defs");
         obj.remove("definitions");
     }
-    // REQ-AXO-901949 inv.2 — correct-by-construction: express soll_manager's
-    // per-action requiredness in the schema itself (if/then) so a wrong-shaped
-    // call is structurally invalid, not merely flagged in prose.
-    if name == "soll_manager" {
-        augment_soll_manager_conditionals(&mut value);
-    }
+    // REQ-AXO-901990 — the ADVERTISED schema stays FLAT. The per-action
+    // requiredness used to be injected here as a top-level `allOf` if/then
+    // (REQ-AXO-901949 inv.2), which made soll_manager the ONLY tool with a
+    // conditional schema. Several MCP clients / LLM harnesses drop a tool whose
+    // inputSchema they can't bind, so soll_manager was advertised in tools/list
+    // yet uncallable for those agents (operator: "tous les autres LLM ont des
+    // problèmes"). The per-action validation is preserved at dispatch via
+    // `conditional_clauses_for` + `conditional_missing_fields` (read from a
+    // dedicated source, NOT the advertised schema) and at runtime by the handler
+    // (attach_required / forbidden_relation / …).
     Some(value)
 }
 
-/// REQ-AXO-901949 inv.2 — per-action `required` constraints for `soll_manager`,
-/// co-located with the struct (single source). create needs attach_to +
-/// relation_type ; link/unlink need source_id + target_id + relation_type ;
-/// update needs id. Encoded as JSON-Schema `allOf` if/then so a validator (inv.3)
-/// rejects the malformed call at dispatch instead of the handler discovering it
-/// late.
-fn augment_soll_manager_conditionals(schema: &mut Value) {
-    let conditionals = serde_json::json!([
+/// REQ-AXO-901949 inv.2 / REQ-AXO-901990 — per-action `required` constraints for
+/// `soll_manager`, kept OUT of the advertised inputSchema (which must stay flat
+/// so every MCP client can bind the tool — see `derived_input_schema`). create
+/// needs attach_to + relation_type ; link/unlink need source_id + target_id +
+/// relation_type ; update needs id. Returned as JSON-Schema `if/then` clauses so
+/// the dispatch validator (inv.3, `conditional_missing_fields`) still rejects a
+/// malformed call early — single source, consumed only at dispatch.
+fn soll_manager_conditional_clauses() -> Value {
+    serde_json::json!([
         { "if": { "properties": { "action": { "const": "create" } } },
           "then": { "properties": { "data": { "required": ["attach_to", "relation_type"] } } } },
         { "if": { "properties": { "action": { "const": "link" } } },
@@ -444,9 +457,17 @@ fn augment_soll_manager_conditionals(schema: &mut Value) {
           "then": { "properties": { "data": { "required": ["source_id", "target_id", "relation_type"] } } } },
         { "if": { "properties": { "action": { "const": "update" } } },
           "then": { "properties": { "data": { "required": ["id"] } } } }
-    ]);
-    if let Some(obj) = schema.as_object_mut() {
-        obj.insert("allOf".to_string(), conditionals);
+    ])
+}
+
+/// REQ-AXO-901990 — per-tool conditional clauses for the dispatch validator.
+/// Returns `Value::Null` for tools without per-action requiredness (all but
+/// `soll_manager` today). Kept separate from the advertised schema so the
+/// advertised schema stays flat and bindable by every client.
+pub(crate) fn conditional_clauses_for(name: &str) -> Value {
+    match name {
+        "soll_manager" => soll_manager_conditional_clauses(),
+        _ => Value::Null,
     }
 }
 
@@ -532,10 +553,13 @@ mod tests {
 
     #[test]
     fn soll_manager_schema_encodes_per_action_required() {
-        // REQ-AXO-901949 inv.2 — correct-by-construction: create requires
+        // REQ-AXO-901949 inv.2 / REQ-AXO-901990 — create requires
         // attach_to+relation_type, link/unlink require source_id+target_id, etc.
-        let schema = derived_input_schema("soll_manager").unwrap();
-        let all_of = schema["allOf"].as_array().expect("allOf conditionals");
+        // These clauses now live in the dedicated `conditional_clauses_for`
+        // source (NOT the advertised schema, which stays flat so clients can bind
+        // the tool — see soll_manager_advertised_schema_is_flat_no_conditionals).
+        let clauses = conditional_clauses_for("soll_manager");
+        let all_of = clauses.as_array().expect("per-action clauses");
         // create branch
         let create = all_of
             .iter()
@@ -616,12 +640,13 @@ mod tests {
     #[test]
     fn conditional_missing_fields_reads_per_action_requiredness() {
         let schema = derived_input_schema("soll_manager").expect("soll_manager schema");
+        let clauses = conditional_clauses_for("soll_manager");
 
         // update without data.id → the conditional surfaces `data.id`.
         let args = serde_json::json!({
             "action": "update", "entity": "requirement", "data": { "description": "x" }
         });
-        let missing = conditional_missing_fields(&schema, &args);
+        let missing = conditional_missing_fields(&schema, &clauses, &args);
         assert_eq!(missing.len(), 1, "got {missing:?}");
         assert_eq!(missing[0].0, "data.id");
         assert_eq!(missing[0].1, "string");
@@ -630,22 +655,48 @@ mod tests {
         let ok = serde_json::json!({
             "action": "update", "entity": "requirement", "data": { "id": "REQ-AXO-1" }
         });
-        assert!(conditional_missing_fields(&schema, &ok).is_empty());
+        assert!(conditional_missing_fields(&schema, &clauses, &ok).is_empty());
 
         // create without attach_to/relation_type → both surface.
         let create = serde_json::json!({
             "action": "create", "entity": "requirement", "data": { "title": "t" }
         });
-        let paths: Vec<String> = conditional_missing_fields(&schema, &create)
+        let paths: Vec<String> = conditional_missing_fields(&schema, &clauses, &create)
             .into_iter()
             .map(|(p, _)| p)
             .collect();
         assert!(paths.contains(&"data.attach_to".to_string()), "got {paths:?}");
         assert!(paths.contains(&"data.relation_type".to_string()), "got {paths:?}");
 
-        // A non-matching action contributes nothing; a tool with no allOf is empty.
+        // A tool with no clauses (Null) contributes nothing.
         let sql_schema = derived_input_schema("sql").unwrap();
-        assert!(conditional_missing_fields(&sql_schema, &serde_json::json!({})).is_empty());
+        assert!(conditional_missing_fields(
+            &sql_schema,
+            &conditional_clauses_for("sql"),
+            &serde_json::json!({})
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn soll_manager_advertised_schema_is_flat_no_conditionals() {
+        // REQ-AXO-901990 regression guard — the advertised inputSchema MUST NOT
+        // carry allOf/if/then/anyOf/oneOf. soll_manager was the only tool with a
+        // conditional schema, which several MCP clients drop at bind time, making
+        // the tool advertised-but-uncallable. Per-action validation lives at
+        // dispatch via conditional_clauses_for, not in the advertised schema.
+        let schema = derived_input_schema("soll_manager").expect("soll_manager schema");
+        for forbidden in ["allOf", "anyOf", "oneOf", "if", "then", "else", "not"] {
+            assert!(
+                schema.get(forbidden).is_none(),
+                "advertised soll_manager schema must be flat, found `{forbidden}`"
+            );
+        }
+        // …but the dispatch-side clauses still exist for early validation.
+        assert!(
+            conditional_clauses_for("soll_manager").as_array().is_some(),
+            "soll_manager must still expose per-action clauses for the dispatch validator"
+        );
     }
 
     #[test]
