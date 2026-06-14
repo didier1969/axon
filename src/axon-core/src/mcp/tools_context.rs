@@ -234,6 +234,27 @@ impl McpServer {
             top_k * 4,
             &mut diagnostics,
         );
+        // REQ-AXO-901937 / DEC-AXO-901632 — embed the question once, up front,
+        // when service pressure permits, and attach each symbol candidate's
+        // cosine distance so `rerank_entry_candidates` can order open-question
+        // routes by relevance (semantic-primary) instead of bare lexical name
+        // matches. The vector is threaded into the chunk lane below so the
+        // question is embedded at most once per call.
+        let question_vector: Option<Vec<f32>> = if matches!(
+            crate::service_guard::current_pressure(),
+            ServicePressure::Healthy | ServicePressure::Recovering
+        ) {
+            crate::embedder::batch_embed(vec![question.to_string()])
+                .ok()
+                .and_then(|vectors| vectors.into_iter().next())
+        } else {
+            None
+        };
+        if let Some(qvec) = question_vector.as_ref() {
+            if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
+                self.fill_entry_semantic_distances(&mut entry_candidates, &qvec_literal);
+            }
+        }
         self.rerank_entry_candidates(
             &mut entry_candidates,
             route,
@@ -269,6 +290,7 @@ impl McpServer {
             self.find_chunk_candidates(
                 project,
                 question,
+                question_vector.as_deref(),
                 &terms_for_reasoning,
                 &path_hints,
                 &entry_candidates,
@@ -1587,6 +1609,7 @@ impl McpServer {
                 exact_match: true,
                 score: 4.0 + f64::from(base_rank.max(0)),
                 reasons: reasons.clone(),
+                semantic_distance: None,
             });
             chunks.push(ChunkCandidate {
                 chunk_id: format!("repo_literal::{path_str}::{match_term}"),
@@ -1664,6 +1687,7 @@ impl McpServer {
                 exact_match,
                 score: 0.0,
                 reasons: Vec::new(),
+                semantic_distance: None,
             })
         }));
         candidates
@@ -1720,6 +1744,7 @@ impl McpServer {
                     exact_match: true,
                     score: 0.0,
                     reasons: vec!["exact_symbol_lookup".to_string()],
+                    semantic_distance: None,
                 })
             })
             .collect()
@@ -1772,6 +1797,7 @@ impl McpServer {
                     exact_match,
                     score: 0.0,
                     reasons: Vec::new(),
+                    semantic_distance: None,
                 })
             })
             .collect()
@@ -1914,13 +1940,97 @@ impl McpServer {
             }
             candidate.score = score;
         }
-        candidates.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.uri.cmp(&right.uri))
-        });
+        // REQ-AXO-901937 / DEC-AXO-901632 — open-question routes order primarily
+        // by semantic relevance (cosine distance ASC) so the semantically-correct
+        // entrypoint beats a bare lexical name match; the lexical/structural score
+        // is the secondary key. Activates only when at least one candidate clears
+        // the relevance threshold (else lexical noise would reshuffle the order),
+        // and never for precise routes (ExactLookup / Wiring / Impact), which keep
+        // lexical anchor primacy. Degraded semantic lane → all distances `None` →
+        // graceful fall-back to the historical lexical sort.
+        const ENTRY_SEMANTIC_RELEVANCE_MAX: f64 = 0.5;
+        let semantic_primary = matches!(route, RetrievalRoute::Hybrid | RetrievalRoute::SollHybrid)
+            && candidates
+                .iter()
+                .any(|c| c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX));
+        if semantic_primary {
+            candidates.sort_by(|left, right| {
+                let ld = left.semantic_distance.unwrap_or(f64::INFINITY);
+                let rd = right.semantic_distance.unwrap_or(f64::INFINITY);
+                ld.partial_cmp(&rd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        right
+                            .score
+                            .partial_cmp(&left.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.uri.cmp(&right.uri))
+            });
+            if let Some(first) = candidates.first_mut() {
+                first.reasons.push("semantic_primary_order".to_string());
+            }
+        } else {
+            candidates.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.uri.cmp(&right.uri))
+            });
+        }
+    }
+
+    /// REQ-AXO-901937 / DEC-AXO-901632 — fill each *symbol* entry candidate's
+    /// cosine distance (`s.embedding <=> qvec`) to the question vector, in one
+    /// batched `IN (...)` query. File / repo-literal candidates carry no symbol
+    /// embedding and are skipped (left `None`). Robust to the JSON bridge
+    /// returning the distance as either a number or a numeric string.
+    fn fill_entry_semantic_distances(&self, candidates: &mut [EntryCandidate], qvec_literal: &str) {
+        let ids: Vec<String> = candidates
+            .iter()
+            .filter(|c| !matches!(c.kind.as_str(), "file" | "repo_literal"))
+            .map(|c| c.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let in_list = ids
+            .iter()
+            .map(|id| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT s.id, (s.embedding <=> {qvec}) AS dist \
+             FROM Symbol s \
+             WHERE s.id IN ({in_list}) AND s.embedding IS NOT NULL",
+            qvec = qvec_literal,
+        );
+        let raw = self
+            .graph_store
+            .query_json(&sql)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut dist_by_id: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let id = match row.first().and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let dist = row.get(1).and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            });
+            if let Some(dist) = dist {
+                dist_by_id.insert(id, dist);
+            }
+        }
+        for candidate in candidates.iter_mut() {
+            if let Some(dist) = dist_by_id.get(&candidate.id) {
+                candidate.semantic_distance = Some(*dist);
+            }
+        }
     }
 
     fn select_entry_candidates(
@@ -2061,10 +2171,12 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn find_chunk_candidates(
         &self,
         project: Option<&str>,
         question: &str,
+        precomputed_question_vector: Option<&[f32]>,
         terms: &[String],
         path_hints: &[String],
         entry_candidates: &[EntryCandidate],
@@ -2109,18 +2221,26 @@ impl McpServer {
         let lexical_uri_match = Self::term_match_sql(terms, "c.file_path");
 
         let semantic = if semantic_allowed {
-            match crate::embedder::batch_embed(vec![question.to_string()]) {
-                Ok(vectors) => {
-                    runtime.semantic_search_used = true;
-                    vectors.into_iter().next()
-                }
-                Err(err) => {
-                    excluded_because.push("semantic_chunk_search_unavailable".to_string());
-                    excluded_because.push(format!(
-                        "semantic_chunk_search_error:{}",
-                        Self::truncate(&err.to_string(), 120)
-                    ));
-                    None
+            // REQ-AXO-901937 — reuse the question vector already embedded for the
+            // entry-ranking lane when present (at most one embed per call); only
+            // fall back to a fresh `batch_embed` if the up-front embed was skipped.
+            if let Some(precomputed) = precomputed_question_vector {
+                runtime.semantic_search_used = true;
+                Some(precomputed.to_vec())
+            } else {
+                match crate::embedder::batch_embed(vec![question.to_string()]) {
+                    Ok(vectors) => {
+                        runtime.semantic_search_used = true;
+                        vectors.into_iter().next()
+                    }
+                    Err(err) => {
+                        excluded_because.push("semantic_chunk_search_unavailable".to_string());
+                        excluded_because.push(format!(
+                            "semantic_chunk_search_error:{}",
+                            Self::truncate(&err.to_string(), 120)
+                        ));
+                        None
+                    }
                 }
             }
         } else {
@@ -4525,6 +4645,7 @@ mod tests {
             exact_match: true,
             score: 1.0,
             reasons: vec!["exact".to_string()],
+            semantic_distance: None,
         }];
         let mut candidates = vec![
             candidate(
@@ -4578,6 +4699,140 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "multipart_late_chunk_penalty"));
+    }
+
+    /// REQ-AXO-901937 / DEC-AXO-901632 — NL→entrypoint precision eval.
+    ///
+    /// Deterministic guard for the semantic-primary entry ordering. Semantic
+    /// distances are injected (rather than embedded live) so the reranker's
+    /// ordering contract is asserted in isolation, free of HNSW approximation.
+    /// The repro case mirrors the AXO RCA: a bare `soll` table (exact lexical
+    /// anchor, weak semantics) must NOT outrank the real target method
+    /// (`insert_validated_relation`, no lexical hit because of the FR↔EN gap,
+    /// but strong semantics) on an open-question route.
+    #[test]
+    fn entry_rerank_semantic_primary_on_open_questions() {
+        fn entry(
+            name: &str,
+            kind: &str,
+            uri: &str,
+            lexical_hits: usize,
+            exact_match: bool,
+            semantic_distance: Option<f64>,
+        ) -> super::EntryCandidate {
+            super::EntryCandidate {
+                id: format!("AXO::{uri}::{name}"),
+                name: name.to_string(),
+                kind: kind.to_string(),
+                project_code: "AXO".to_string(),
+                uri: uri.to_string(),
+                lexical_hits,
+                exact_match,
+                score: 0.0,
+                reasons: Vec::new(),
+                semantic_distance,
+            }
+        }
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+
+        let scope = vec!["AXO".to_string()];
+        let terms = vec![
+            "soll".to_string(),
+            "relations".to_string(),
+            "validés".to_string(),
+        ];
+        let no_hints: Vec<String> = Vec::new();
+
+        let soll = entry(
+            "soll",
+            "table",
+            "/repo/db/ddl/01_soll_schema.sql",
+            1,
+            true,
+            Some(0.46),
+        );
+        let target = entry(
+            "insert_validated_relation",
+            "method",
+            "/repo/src/axon-core/src/mcp/tools_soll/completeness_relations.rs",
+            0,
+            false,
+            Some(0.18),
+        );
+
+        // Case 1 (repro) — open question: semantic relevance wins over bare lexical.
+        let mut hybrid = vec![soll.clone(), target.clone()];
+        server.rerank_entry_candidates(
+            &mut hybrid,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            hybrid[0].name, "insert_validated_relation",
+            "open-question route must pick the semantically-relevant entrypoint, not the bare lexical match"
+        );
+        assert!(hybrid[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "semantic_primary_order"));
+
+        // Case 2 (non-regression) — precise route keeps exact lexical primacy.
+        let mut exact = vec![soll.clone(), target.clone()];
+        server.rerank_entry_candidates(
+            &mut exact,
+            super::RetrievalRoute::ExactLookup,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            exact[0].name, "soll",
+            "precise routes must keep exact lexical anchor primacy"
+        );
+
+        // Case 3 — open question, nothing clears the relevance threshold:
+        // no semantic reshuffle on noise, lexical order preserved.
+        let mut noisy = vec![
+            entry("soll", "table", "/repo/db/ddl/01_soll_schema.sql", 1, true, Some(0.55)),
+            entry("unrelated_fn", "method", "/repo/x.rs", 0, false, Some(0.6)),
+        ];
+        server.rerank_entry_candidates(
+            &mut noisy,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            noisy[0].name, "soll",
+            "no semantic-primary reshuffle when nothing clears the relevance threshold"
+        );
+
+        // Case 4 — a relevant semantic hit outranks a lexically-stronger candidate
+        // that has no embedding (`None` sorts last under semantic-primary).
+        let mut mixed = vec![
+            entry("soll_registry", "table", "/repo/reg.sql", 3, true, None),
+            entry("relation_policy", "method", "/repo/policy.rs", 0, false, Some(0.2)),
+        ];
+        server.rerank_entry_candidates(
+            &mut mixed,
+            super::RetrievalRoute::SollHybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            mixed[0].name, "relation_policy",
+            "relevant semantic hit outranks a lexically-strong candidate with no embedding"
+        );
     }
 
     /// REQ-AXO-901883 — the semantic-lane SQL hits the HNSW index (criterion 1).

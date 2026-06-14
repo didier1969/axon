@@ -51,6 +51,14 @@ pub(super) struct EntryCandidate {
     pub(super) exact_match: bool,
     pub(super) score: f64,
     pub(super) reasons: Vec<String>,
+    // REQ-AXO-901937 / DEC-AXO-901632 — cosine distance of this candidate's
+    // Symbol embedding to the question vector (`s.embedding <=> qvec`), filled
+    // before entry reranking when semantic capacity allows. `None` for file /
+    // repo-literal candidates (no symbol embedding) and when the semantic lane
+    // is degraded. Open-question routes (Hybrid / SollHybrid) order primarily by
+    // this distance so the semantically-relevant entrypoint wins over a bare
+    // lexical name match.
+    pub(super) semantic_distance: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
