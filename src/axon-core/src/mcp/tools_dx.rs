@@ -1680,54 +1680,53 @@ impl McpServer {
         // sets entirely in RAM (~O(degree) per node) and skip the PG
         // subquery roundtrip. PG fallback preserves the existing behaviour
         // when the cache is cold OR the project is unspecified.
-        let inspect_view = process_view();
-        let ram_attempted_inspect = project.map(|p| inspect_view.is_warm(p)).unwrap_or(false);
-        let inspect_call_rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
-        let (ram_callers_count, ram_callees_count): (Option<i64>, Option<i64>) =
-            if ram_attempted_inspect {
-                let project_key = project.unwrap_or("");
-                let callers = inspect_view
-                    .reverse_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
-                    .map(|v| v.len() as i64);
-                let callees = inspect_view
-                    .forward_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
-                    .map(|v| v.len() as i64);
-                (callers, callees)
+        // REQ-AXO-901952 — RAM IstGraphView is the SINGLE source for the
+        // caller/callee counts (PIL-AXO-9002). Cold cache or an unscoped
+        // (project=None) inspect → loud degraded error, never a PG `edge_counts`
+        // fallback and never a silent 0 (which an LLM misreads as "no callers").
+        let ram_attempted_inspect = project
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
+        if !ram_attempted_inspect {
+            let why = if project.is_none() {
+                "inspect requires an explicit `project` scope : the RAM IST snapshot is per-project (REQ-AXO-901952, no PG fallback)"
             } else {
-                (None, None)
+                "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
             };
+            return Some(Self::traversal_ram_unavailable_error(
+                symbol,
+                project,
+                1,
+                "symbol_inspection",
+                why,
+            ));
+        }
+        let inspect_view = process_view();
+        let inspect_call_rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
+        let project_key = project.unwrap_or("");
+        let ram_callers_count = inspect_view
+            .reverse_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+        let ram_callees_count = inspect_view
+            .forward_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
 
-        // Post-MIL-AXO-017: caller/callee counts come from RAM
-        // IstGraphView (above). SQL base returns 0/0; warm RAM counts
-        // are patched in downstream.
-        // REQ-AXO-901869 A2 / REQ-AXO-140 — PG fallback callers/callees when the
-        // RAM IstGraphView is cold (brain_only / tests — REQ-AXO-901952 removed
-        // the opt-out, so cold means "snapshot not yet warmed", never disabled).
-        // CANONICAL-ONLY: synthetic-target resolution now lives in the RAM
-        // projection (IstGraph::build), so the cold fallback counts only edges
-        // whose target_id IS the canonical Symbol.id. The downstream merge always
-        // prefers the warm RAM counts (which DO resolve synthetic targets).
-        let edge_counts = "(SELECT count(*) FROM ist.Edge e \
-              WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
-                AND e.target_id = s.id \
-                AND e.project_code = s.project_code) AS callers, \
-             (SELECT count(*) FROM ist.Edge e \
-              WHERE e.relation_type IN ('CALLS','CALLS_NIF') \
-                AND e.source_id = s.id \
-                AND e.project_code = s.project_code) AS callees";
+        // REQ-AXO-901952 — the SQL row carries node ATTRIBUTES only
+        // (name/kind/tested = canonical Symbol lookup, not graph traversal).
+        // Caller/callee counts come exclusively from the RAM IstGraphView above ;
+        // the legacy PG `edge_counts` cold-fallback subquery is removed.
         let query = if project.is_some() {
             format!(
-                "SELECT s.name, s.kind, s.tested, {} \
+                "SELECT s.name, s.kind, s.tested \
                  FROM Symbol s WHERE s.id = $sym OR s.name = $sym{}",
-                edge_counts,
                 Self::sql_project_filter_for_fields(project, &["s.project_code"])
             )
         } else {
-            format!(
-                "SELECT s.name, s.kind, s.tested, {} \
-                 FROM Symbol s WHERE s.id = $sym OR s.name = $sym",
-                edge_counts
-            )
+            "SELECT s.name, s.kind, s.tested \
+             FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
+                .to_string()
         };
         let params = json!({"sym": symbol_id});
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
@@ -1750,23 +1749,14 @@ impl McpServer {
                 // REQ-134 workaround inflated the SQL columns to match). Patch the
                 // first row's Callers/Callees before rendering so the table never
                 // diverges from the structured `callers`/`callees` data below.
-                let callers = ram_callers_count.unwrap_or_else(|| {
-                    rows.first()
-                        .and_then(|row| row.get(3))
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
-                });
-                let callees = ram_callees_count.unwrap_or_else(|| {
-                    rows.first()
-                        .and_then(|row| row.get(4))
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
-                });
+                // REQ-AXO-901952 — callers/callees are RAM-only ; the SQL row
+                // carries name/kind/tested only. Append the RAM counts so the
+                // 5-column table renders from the single canonical source.
+                let callers = ram_callers_count;
+                let callees = ram_callees_count;
                 if let Some(first) = rows.first_mut() {
-                    if first.len() > 4 {
-                        first[3] = Value::from(callers);
-                        first[4] = Value::from(callees);
-                    }
+                    first.push(Value::from(callers));
+                    first.push(Value::from(callees));
                 }
                 let patched_res = serde_json::to_string(&rows).unwrap_or_else(|_| res.clone());
                 let table = format_table_from_json(
@@ -1888,20 +1878,11 @@ impl McpServer {
                 if graph_lane_active {
                     surfaces_used.push("graph_r1");
                 }
-                // REQ-AXO-901594 — surface the RAM vs PG decision so qualify
-                // tools can verify the IST-first migration without grepping
-                // the response text.
-                let mut surfaces_degraded: Vec<&str> = Vec::new();
-                if ram_callers_count.is_some() || ram_callees_count.is_some() {
-                    surfaces_used.push("graph_ram");
-                } else if ram_attempted_inspect {
-                    // Cache warm but BFS returned None for both directions —
-                    // very rare ; record the degraded surface for telemetry.
-                    surfaces_degraded.push("graph_ram_partial");
-                } else {
-                    surfaces_used.push("graph_pg");
-                    surfaces_degraded.push("graph_ram_unavailable");
-                }
+                // REQ-AXO-901952 — RAM-only : the cold/unscoped path returned a
+                // loud degraded error above, so reaching here means the warm RAM
+                // IstGraphView is the single source for callers/callees.
+                let surfaces_degraded: Vec<&str> = Vec::new();
+                surfaces_used.push("graph_ram");
                 // REQ-AXO-91509 — GUI-AXO-1003 mandates 4 envelope
                 // fields (pagination, surfaces_used, total_available,
                 // next_call_hint) PLUS graph r=1 context. Note: the
