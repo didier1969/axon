@@ -5,10 +5,10 @@
 //! counting, neighbor iteration) run natively in RAM without re-deriving
 //! adjacency on every call.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::{EdgeFiltered, EdgeRef};
+use petgraph::visit::{Bfs, EdgeFiltered, EdgeRef, NodeFiltered};
 use petgraph::Direction;
 
 #[derive(Clone, Debug)]
@@ -250,31 +250,26 @@ impl SollSnapshot {
     /// BFS forward from `source_id` over the subgraph induced by
     /// `allowed`. Returns the count of *open* descendants reachable.
     /// The seed node itself is not counted.
+    ///
+    /// Uses petgraph's `NodeFiltered` + `Bfs` (GUI-AXO graph-representation
+    /// alignment : the SOLL graph IS a petgraph, so its tested traversals are
+    /// the canonical choice — no hand-rolled BFS). The filter keeps the seed
+    /// plus every node in `allowed`, so traversal stays inside the induced
+    /// subgraph exactly as the previous manual walk did.
     pub fn count_descendants_in(&self, source_id: &str, allowed: &HashSet<String>) -> usize {
         let Some(start) = self.node_index.get(source_id).copied() else {
             return 0;
         };
-        let mut visited: HashSet<NodeIndex> = HashSet::new();
-        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
-        queue.push_back(start);
-        visited.insert(start);
-        let mut count = 0usize;
-        while let Some(node) = queue.pop_front() {
-            for e in self.graph.edges_directed(node, Direction::Outgoing) {
-                let nxt = e.target();
-                if visited.contains(&nxt) {
-                    continue;
-                }
-                let nxt_id = &self.graph[nxt];
-                if !allowed.contains(nxt_id) {
-                    continue;
-                }
-                visited.insert(nxt);
-                queue.push_back(nxt);
-                count += 1;
-            }
+        let filtered = NodeFiltered::from_fn(&self.graph, |n| {
+            n == start || allowed.contains(&self.graph[n])
+        });
+        let mut bfs = Bfs::new(&filtered, start);
+        let mut visited = 0usize;
+        while bfs.next(&filtered).is_some() {
+            visited += 1;
         }
-        count
+        // Exclude the seed node itself.
+        visited.saturating_sub(1)
     }
 
     /// REQ-AXO-901952 — forward reachability over the subgraph induced by
