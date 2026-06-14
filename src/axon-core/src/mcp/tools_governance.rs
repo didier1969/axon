@@ -803,7 +803,8 @@ impl McpServer {
              FROM ann a \
              JOIN ist.Chunk c ON c.id = a.chunk_id AND c.source_type = 'symbol' \
                  AND c.source_id <> (SELECT id FROM src) \
-             JOIN Symbol other ON other.id = c.source_id{proj_pred_other} \
+             JOIN Symbol other ON other.id = c.source_id \
+                 AND other.name <> '{name}'{proj_pred_other} \
              GROUP BY other.id, other.name, other.kind \
              HAVING MIN(a.dist) < 0.10 \
              ORDER BY score ASC LIMIT {pre_filter_k}",
