@@ -883,6 +883,79 @@ impl McpServer {
                     }
                 }
 
+                // REQ-AXO-901962 — the EFFECTIVE status written by the UPDATE is the
+                // supplied one (validated above) OR, when the caller edits only
+                // title/description, the row's PRE-EXISTING status. A legacy
+                // pre-existing value is silently re-asserted and trips
+                // `soll_node_status_canonical`, surfacing only as an opaque
+                // `writer_failed`. Pre-validate the effective status here and NAME
+                // the offending legacy value so the LLM can retry with a canonical
+                // one instead of guessing.
+                if data.get("status").and_then(|v| v.as_str()).is_none() {
+                    if let Ok(existing) = self.query_named_row(
+                        &format!("SELECT status FROM soll.Node WHERE id = '{}'", escape_sql(id)),
+                        1,
+                    ) {
+                        let existing_status = existing.first().map(String::as_str).unwrap_or("");
+                        const ACCEPTED_STATUS: [&str; 5] =
+                            ["current", "planned", "delivered", "superseded", "rejected"];
+                        if !existing_status.is_empty()
+                            && !ACCEPTED_STATUS.contains(&existing_status)
+                        {
+                            let normalization_hint = match existing_status {
+                                "completed" | "done" | "passed" | "closed" | "archived" => {
+                                    "delivered"
+                                }
+                                "accepted" | "in_progress" | "active" | "open" | "partial"
+                                | "pending" => "current",
+                                "proposed" | "draft" => "planned",
+                                "failed" => "rejected",
+                                _ => "current",
+                            };
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "Update blocked: this node's existing status `{}` is non-canonical (legacy) and would violate soll_node_status_canonical. Re-issue the update with an explicit canonical `status` (DEC-PRO-100 = [{}]). Suggested: `{}`.",
+                                        existing_status,
+                                        ACCEPTED_STATUS.join(", "),
+                                        normalization_hint,
+                                    ),
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "input_invalid",
+                                    "operator_guidance": {
+                                        "problem_class": "input_invalid",
+                                        "likely_cause": "preexisting_legacy_status_blocks_update",
+                                        "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                        "confidence": "high",
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_manager",
+                                        "category": "status",
+                                        "invalid_field": "node.status (pre-existing)",
+                                        "supplied_value": existing_status,
+                                        "accepted_values": ACCEPTED_STATUS,
+                                        "normalization_hint": normalization_hint,
+                                        "canonical_source": "DEC-PRO-100",
+                                        "follow_up_tools": ["soll_manager"],
+                                        "hint": format!(
+                                            "retry the update including status=`{}`",
+                                            normalization_hint,
+                                        ),
+                                    },
+                                    "example_valid_call": {
+                                        "action": "update",
+                                        "entity": entity,
+                                        "data": { "id": id, "status": normalization_hint },
+                                    },
+                                },
+                            }));
+                        }
+                    }
+                }
+
                 let update_res: anyhow::Result<()> = (|| {
                     let current = self.query_named_row(
                         &format!("SELECT title, description, status, metadata FROM soll.Node WHERE id = '{}'", escape_sql(id)),
