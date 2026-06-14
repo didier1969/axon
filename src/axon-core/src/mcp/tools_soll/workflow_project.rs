@@ -1234,6 +1234,18 @@ impl McpServer {
             project_name, project_code
         );
 
+        // REQ-AXO-901985 — be contract-honest about LIVE indexing. The registry
+        // write emits `axon_registry_changed`; a running indexer enrols the new
+        // project and indexes it live. But if the runtime is brain_only there is
+        // NO indexer to consume the signal — say so explicitly so the operator
+        // isn't surprised that nothing got indexed (the observed bug).
+        response_text.push_str(
+            "📡 **Live indexing** : an enrolment signal (`axon_registry_changed`) was emitted. \
+             If an indexer is running, this project is being indexed live now. \
+             If the runtime is `brain_only` (no indexer — check `status`), start one with \
+             `./scripts/axon-live start --indexer-full`; the project enrols via the registry signal (REQ-AXO-901985).\n\n",
+        );
+
         // REQ-AXO-901606 — Vision auto-seed messaging. The legacy text
         // « Extract the Vision and Pillars, then use `soll_manager` to
         // create them » was misleading because soll_manager.create vision

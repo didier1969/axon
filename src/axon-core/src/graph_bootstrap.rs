@@ -565,6 +565,36 @@ impl GraphStore {
             &serde_json::json!([normalized_code, normalized_name, normalized_path]),
         )?;
 
+        // REQ-AXO-901985 — ring the live-enrolment bell. A running indexer's
+        // `axon_registry_changed` LISTENer (watchman_source::spawn_registry_discovery)
+        // resolves the project_path into a Watchman root and starts indexing the
+        // new project LIVE. Without this NOTIFY the listener never wakes for a
+        // freshly-registered project — the original emit was lost in the
+        // ingress_buffer purge (REQ-AXO-901893 / regression noted in REQ-AXO-901899),
+        // so `axon_init_project` registered the project but nothing got indexed.
+        // Best-effort: a NOTIFY failure must NOT fail registration. No-op without a
+        // path (the listener requires a non-empty project_path). When the runtime
+        // is brain_only (no indexer), the NOTIFY simply has no consumer — the init
+        // response tells the caller to start an indexer.
+        if let Some(path) = normalized_path.as_deref() {
+            let payload = serde_json::json!({
+                "op": "registry_sync",
+                "project_code": normalized_code,
+                "project_path": path,
+            })
+            .to_string();
+            if let Err(e) = self.execute_param(
+                "SELECT pg_notify('axon_registry_changed', ?)",
+                &serde_json::json!([payload]),
+            ) {
+                tracing::warn!(
+                    project_code = %normalized_code,
+                    error = %e,
+                    "REQ-AXO-901985: registry-changed NOTIFY emit failed (non-fatal)"
+                );
+            }
+        }
+
         Ok(())
     }
 
