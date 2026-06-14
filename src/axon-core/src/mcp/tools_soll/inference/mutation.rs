@@ -593,7 +593,10 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "Nuance entrenched across {} canonical node(s).",
+                    "Recorded the nuance in metadata.nuances[] on {} canonical node(s). \
+                     This does NOT modify the node body/description — it appends an \
+                     annotation. To edit the canonical body, use \
+                     soll_manager(action=update, data={{id, description}}).",
                     changed_entities.len()
                 )
             }],
@@ -602,6 +605,13 @@ impl McpServer {
                 "statement": inference.statement,
                 "target_ids": target_ids,
                 "changed_entities": changed_entities,
+                // REQ-AXO-901992 B1 — honest contract: entrench appends to
+                // metadata.nuances[], it never rewrites `description`. The old
+                // "Nuance entrenched" wording read as a body-update success and
+                // cost the HYC consumer a wasted round (false success).
+                "body_modified": false,
+                "wrote_fields": ["metadata.nuances", "metadata.updated_at"],
+                "body_edit_tool": "soll_manager(action=update, data={id, description})",
                 "mutation_feedback": mutation_feedback
             }
         }))

@@ -1112,6 +1112,59 @@ fn test_soll_apply_plan_dry_run_true_surfaces_applied_false_flag() {
 }
 
 #[test]
+fn test_soll_apply_plan_dry_run_surfaces_commit_blockers_for_missing_attach_to() {
+    // REQ-AXO-901992 B2 — a non-Vision create lacking attach_to + relation_type
+    // dry-runs as "ready" but FAILS at commit. The dry-run must surface those
+    // commit invariants as data.commit_blockers (the HYC consumer hit a false
+    // "DRY-RUN ready" then a cascade of commit failures). Additive: the preview
+    // contract (applied=false) is preserved.
+    let _guard = env_lock();
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-901992-b2-missing-attach",
+                        "title": "Missing attach_to and relation_type"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(901_992_02)),
+    };
+
+    let result = server.handle_request(req).unwrap().result.unwrap();
+    // Preview contract preserved.
+    assert_eq!(result["data"]["applied"].as_bool(), Some(false));
+    // …but the dry-run is now honest about the commit-time invariants.
+    let blockers = result["data"]["commit_blockers"]
+        .as_array()
+        .expect("commit_blockers present in dry-run");
+    assert!(
+        !blockers.is_empty(),
+        "dry-run must surface the missing attach_to/relation_type as a commit blocker: {result}"
+    );
+    let missing: Vec<&str> = blockers[0]["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        missing.contains(&"attach_to") && missing.contains(&"relation_type"),
+        "blocker must name both missing fields: {missing:?}"
+    );
+}
+
+#[test]
 fn test_soll_apply_plan_rejects_relations_nested_inside_plan() {
     // REQ-AXO-901625 — guard against the schema-drift mistake observed
     // in the Pollux Cuisine session : `relations` nested inside `plan`

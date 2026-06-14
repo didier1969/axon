@@ -526,6 +526,22 @@ impl McpServer {
                 n = modified_since,
             ));
         }
+        // REQ-AXO-901992 B4 — backend-LIVENESS note, distinct from freshness. The
+        // HYC consumer saw "valid/usable" while `query` timed out twice on the
+        // graph backend before recovering on the 3rd call. Freshness (the lines
+        // above) is NOT liveness: surface transient backend pressure as an
+        // explicit, retryable note WITHOUT flipping the freshness verdict — so
+        // REQ-AXO-901871's usable-by-default contract (anti-grep) is preserved
+        // while the agent is no longer surprised by a transient timeout.
+        if matches!(
+            crate::service_guard::current_pressure(),
+            crate::service_guard::ServicePressure::Degraded
+                | crate::service_guard::ServicePressure::Critical
+        ) {
+            evidence.push_str(
+                "**Structural backend:** under pressure — query/retrieve_context may be transiently slow or time out; retry once before concluding unavailable (this is liveness, not staleness).\n",
+            );
+        }
         // REQ-AXO-901963 — PUSH code-intel availability (scope completeness N/N)
         // so an LLM never assumes query/inspect/impact return empty and falls back
         // to grep. Availability ≠ process-liveness (CPT-AXO-029): the N/N derives

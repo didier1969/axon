@@ -217,20 +217,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "dry_run": { "type": "boolean", "description": "If true, makes no changes and only produces the action plan. Default `false` (REQ-AXO-901625): `succeeded` means applied, mirroring `soll_manager` contract. Opt-in to preview by passing `dry_run=true` explicitly." },
                         "plan": {
                             "type": "object",
-                            "description": "Optional collections by type. Each item accepts `logical_key`, `title`, `description`, `status`, `metadata`, and type-specific business fields. `logical_key` makes the operation idempotent.",
+                            "description": "Collections by type. Each item accepts `logical_key`, `title`, `description`, `status`, `metadata`, and type-specific business fields. `logical_key` makes the operation idempotent. REQ-AXO-901992 B3 — EVERY non-Vision item ALSO REQUIRES `attach_to` + `relation_type` (the commit composes soll_manager(create) which enforces both). `attach_to` MUST be an ALREADY-PERSISTED canonical id (e.g. PIL-AXO-001) — it does NOT accept a `logical_key` from the same plan, so you cannot create a parent and its child in one plan: persist the parent first, then attach children in a second call. To wire two nodes created in the SAME plan, use top-level `relations` (which DOES accept same-plan logical_keys), not `attach_to`.",
                             "properties": {
-                                "pillars": { "type": "array", "items": { "type": "object" } },
-                                "requirements": { "type": "array", "items": { "type": "object" } },
-                                "decisions": { "type": "array", "items": { "type": "object" } },
-                                "milestones": { "type": "array", "items": { "type": "object" } },
-                                "visions": { "type": "array", "items": { "type": "object" } },
-                                "concepts": { "type": "array", "items": { "type": "object" } }
+                                "pillars": { "type": "array", "items": { "type": "object", "description": "Non-Vision item: requires logical_key/title + attach_to (existing canonical id) + relation_type." } },
+                                "requirements": { "type": "array", "items": { "type": "object", "description": "Non-Vision item: requires logical_key/title + attach_to (existing canonical id) + relation_type." } },
+                                "decisions": { "type": "array", "items": { "type": "object", "description": "Non-Vision item: requires logical_key/title + attach_to (existing canonical id) + relation_type." } },
+                                "milestones": { "type": "array", "items": { "type": "object", "description": "Non-Vision item: requires logical_key/title + attach_to (existing canonical id) + relation_type." } },
+                                "visions": { "type": "array", "items": { "type": "object", "description": "Vision items are exempt from attach_to/relation_type (seeded by axon_init_project)." } },
+                                "concepts": { "type": "array", "items": { "type": "object", "description": "Non-Vision item: requires logical_key/title + attach_to (existing canonical id) + relation_type." } }
                             }
                         },
                         "relations": {
                             "type": "array",
                             "items": { "type": "object" },
-                            "description": "Links to create: `{source_id,target_id,relation_type}`. `source_id`/`target_id` can reference a `logical_key` created in the same plan."
+                            "description": "Links to create: `{source_id,target_id,relation_type}`. UNLIKE plan-item `attach_to`, `source_id`/`target_id` here CAN reference a `logical_key` created in the same plan — use `relations` to wire two same-plan nodes."
                         },
                         "reserved_preview_id": {
                             "type": "string",

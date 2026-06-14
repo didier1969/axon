@@ -229,13 +229,26 @@ impl McpServer {
             // preview from a real commit without re-reading the
             // human-readable content blob. Includes the next-step tool
             // call to flip the preview into a revision.
+            // REQ-AXO-901992 B2 — surface the commit invariants (attach_to +
+            // relation_type, parent existence) the bare preview used to hide, so
+            // dry-run is honest about what will fail at commit.
+            let commit_blockers = self.plan_commit_blockers(&operations);
+            let blocker_note = if commit_blockers.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ⚠️ {} item(s) WILL FAIL at commit (missing attach_to/relation_type or non-existent parent) — see data.commit_blockers; fix before dry_run=false.",
+                    commit_blockers.len()
+                )
+            };
             return Some(json!({
-                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}). To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, preview_id)}],
+                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}).{} To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, blocker_note, preview_id)}],
                 "data": {
                     "preview_id": preview_id,
                     "applied": false,
                     "dry_run": true,
                     "counts": {"create": counts.0, "update": counts.1},
+                    "commit_blockers": commit_blockers,
                     "operations": operations,
                     "result_contract": result_contract,
                     "next_action": {
@@ -249,6 +262,78 @@ impl McpServer {
         }
 
         self.axon_soll_commit_revision(&json!({ "preview_id": preview_id, "author": author }))
+    }
+
+    /// REQ-AXO-901992 B2 — the invariants the COMMIT enforces (via composed
+    /// soll_manager(create)) that a bare dry-run preview did NOT surface: every
+    /// non-Vision create needs `attach_to` (an EXISTING canonical id) +
+    /// `relation_type`. The HYC consumer got "DRY-RUN ready" then a cascade of
+    /// commit failures. Surfacing these as `commit_blockers` in the dry-run keeps
+    /// the REQ-AXO-901625 preview contract intact while making the dry-run honest
+    /// about what will fail at commit.
+    pub(crate) fn plan_commit_blockers(&self, operations: &[Value]) -> Vec<Value> {
+        let mut blockers = Vec::new();
+        // (logical_key, entity, attach_to) for ops that passed the presence check
+        // — checked for existence in a second pass.
+        let mut to_check: Vec<(String, String, String)> = Vec::new();
+        for op in operations {
+            if op.get("kind").and_then(Value::as_str) != Some("create") {
+                continue;
+            }
+            let entity = op.get("entity").and_then(Value::as_str).unwrap_or("");
+            if entity == "vision" || entity == "relation" {
+                continue;
+            }
+            let logical_key = op.get("logical_key").and_then(Value::as_str).unwrap_or("");
+            let payload = op.get("payload");
+            let attach_to = payload
+                .and_then(|p| p.get("attach_to"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let relation_type = payload
+                .and_then(|p| p.get("relation_type"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let mut missing: Vec<&str> = Vec::new();
+            if attach_to.is_none() {
+                missing.push("attach_to");
+            }
+            if relation_type.is_none() {
+                missing.push("relation_type");
+            }
+            if !missing.is_empty() {
+                blockers.push(json!({
+                    "logical_key": logical_key,
+                    "entity": entity,
+                    "missing": missing,
+                    "reason": "non-Vision create requires attach_to (an EXISTING canonical id, not a same-plan logical_key) + relation_type"
+                }));
+            } else if let Some(a) = attach_to {
+                to_check.push((logical_key.to_string(), entity.to_string(), a.to_string()));
+            }
+        }
+        // Existence pass: attach_to must point at an already-persisted node
+        // (the 3rd failure HYC hit: "attach_to <logical_key> does not exist").
+        for (logical_key, entity, attach_to) in to_check {
+            let exists = self
+                .graph_store
+                .query_count(&format!(
+                    "SELECT count(*) FROM soll.Node WHERE id = '{}'",
+                    attach_to.replace('\'', "''")
+                ))
+                .unwrap_or(0)
+                > 0;
+            if !exists {
+                blockers.push(json!({
+                    "logical_key": logical_key,
+                    "entity": entity,
+                    "missing": ["attach_to_target"],
+                    "attach_to": attach_to,
+                    "reason": "attach_to target does not exist — it must be an already-persisted canonical id (persist the parent first, or wire same-plan nodes via top-level `relations`)"
+                }));
+            }
+        }
+        blockers
     }
 
     pub(crate) fn axon_soll_commit_revision(&self, args: &Value) -> Option<Value> {
