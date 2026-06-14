@@ -413,6 +413,13 @@ impl IstGraph {
         // unresolved (phantom), exactly like the retired PG name-suffix workaround
         // (REQ-AXO-134) which only matched when the callee name was unique.
         let mut name_to_func: HashMap<String, (u32, bool)> = HashMap::new();
+        // REQ-AXO-901986 — short name → all is_nif function/method nodes of that
+        // name. Used ONLY to resolve a CALLS_NIF edge across the Elixir↔Rust NIF
+        // boundary: the Elixir stub `Mod.foo` (is_nif) and the Rust
+        // `#[rustler::nif] fn foo` (is_nif) share the bare name `foo`, so the
+        // generic unique-name resolver (name_to_func) bails as ambiguous. The NIF
+        // edge resolves to the is_nif node of that name that ISN'T the caller.
+        let mut name_to_nif: HashMap<String, Vec<u32>> = HashMap::new();
 
         for record in nodes {
             let proj_idx = intern_project(
@@ -428,6 +435,9 @@ impl IstGraph {
                         .entry(name.to_string())
                         .and_modify(|e| e.1 = true)
                         .or_insert((idx, false));
+                    if record.flags.nif() {
+                        name_to_nif.entry(name.to_string()).or_default().push(idx);
+                    }
                 }
             }
             ids.push(record.id);
@@ -481,7 +491,22 @@ impl IstGraph {
                         .rsplit("::")
                         .next()
                         .and_then(|name| name_to_func.get(name))
-                        .and_then(|&(idx, ambiguous)| (!ambiguous).then_some(idx));
+                        .and_then(|&(idx, ambiguous)| (!ambiguous).then_some(idx))
+                        // REQ-AXO-901986 — CALLS_NIF cross-language fallback: when
+                        // the bare nif name is ambiguous (Elixir stub + Rust
+                        // #[rustler::nif] share it), resolve to the is_nif node of
+                        // that name that isn't the caller (the stub→impl hop).
+                        .or_else(|| {
+                            if edge.rel != RelationType::CallsNif {
+                                return None;
+                            }
+                            let name = edge.target.rsplit("::").next()?;
+                            name_to_nif
+                                .get(name)?
+                                .iter()
+                                .copied()
+                                .find(|&i| i != src_idx)
+                        });
                     match resolved {
                         Some(i) => i,
                         None => {
@@ -841,6 +866,55 @@ mod tests {
         assert_eq!(kind_a, NodeKind::File as u8);
         let (kind_b, _, _) = g.node_meta(1);
         assert_eq!(kind_b, NodeKind::Other as u8);
+    }
+
+    fn nif_node(id: &str) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            // tested=false, public=true, nif=true, unsafe=false
+            flags: NodeFlags::new(false, true, true, false),
+        }
+    }
+
+    #[test]
+    fn build_resolves_calls_nif_across_elixir_rust_boundary() {
+        // REQ-AXO-901986 — the Elixir stub `Native.add` (is_nif) calls the Rust
+        // `#[rustler::nif] fn add` (is_nif). They share the bare name `add`, so
+        // the generic unique-name resolver bails as ambiguous. The CALLS_NIF edge
+        // must still resolve across the language boundary to the Rust impl —
+        // never a phantom, never the stub itself.
+        let nodes = vec![
+            nif_node("AXO::lib/native.ex::Native.add"),
+            nif_node("AXO::native/src/lib.rs::add"),
+        ];
+        // Elixir parser emits calls_nif with a synthetic target under the Elixir
+        // file path (bare callee name), exactly like the local-call shape.
+        let edges = vec![edge(
+            "AXO::lib/native.ex::Native.add",
+            "AXO::lib/native.ex::add",
+            RelationType::CallsNif,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let stub = g.index_of("AXO::lib/native.ex::Native.add").unwrap();
+        let rust = g.index_of("AXO::native/src/lib.rs::add").unwrap();
+        // The synthetic target must NOT become a phantom node.
+        assert_eq!(
+            g.index_of("AXO::lib/native.ex::add"),
+            None,
+            "synthetic NIF target must not become a phantom"
+        );
+        let fwd: Vec<_> = g.forward_neighbors(stub).map(|(t, _)| t).collect();
+        assert_eq!(
+            fwd,
+            vec![rust],
+            "CALLS_NIF must resolve cross-language to the Rust impl (not phantom/self)"
+        );
+        // And impact (reverse) on the Rust impl now sees the Elixir caller.
+        let rev: Vec<_> = g.reverse_neighbors(rust).map(|(s, _)| s).collect();
+        assert_eq!(rev, vec![stub]);
     }
 
     #[test]
