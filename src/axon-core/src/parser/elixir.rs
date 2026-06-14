@@ -304,9 +304,16 @@ impl ElixirParser {
             properties.insert("nif_loader".to_string(), "true".to_string());
         }
 
-        if node_content.contains(":erlang.nif_error(:nif_not_loaded)") {
+        // REQ-AXO-901969 follow-up — emit a CALLS_NIF edge for ANY NIF stub
+        // (was gated on the exact ":erlang.nif_error(:nif_not_loaded)" string,
+        // so variant stubs like ":erlang.nif_error(:not_loaded)" produced
+        // calls_nif=0 on real Rustler codebases). Anchor it on the canonical
+        // function symbol `full_name` (not the bare module) so impact/inspect
+        // resolve the source end. Full Elixir->Rust cross-language resolution
+        // (traversing into the matching rustler::nif fn) is tracked separately.
+        if is_nif {
             result.relations.push(Relation {
-                from: module_name.to_string(),
+                from: full_name.clone(),
                 to: func_name.clone(),
                 rel_type: "calls_nif".to_string(),
                 properties: std::collections::HashMap::new(),
@@ -927,6 +934,47 @@ mod tests {
                 && rel.rel_type == "CALLS"),
             "piped call label_multi_horizon missing; got: {:?}",
             result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_emits_anchored_calls_nif_for_rustler_stubs() {
+        // REQ-AXO-901969 follow-up — calls_nif was emitted only for the exact
+        // ":erlang.nif_error(:nif_not_loaded)" string and anchored on the bare
+        // MODULE (to = bare func_name, dangling). Real Rustler codebases used
+        // variant stubs / resolved nothing -> client saw calls_nif=0. Now: emit
+        // for any NIF stub, anchored on the canonical function symbol.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Native do
+          use Rustler, otp_app: :my_app, crate: "myapp_native"
+          def add(_a, _b), do: :erlang.nif_error(:nif_not_loaded)
+          def sub(_a, _b), do: :erlang.nif_error(:not_loaded)
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "calls_nif" && r.from == "MyApp.Native.add"),
+            "calls_nif edge not anchored on the function symbol; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "calls_nif" && r.from == "MyApp.Native.sub"),
+            "variant nif_error stub not detected (under-emission); got: {:?}",
+            result.relations
+        );
+        assert!(
+            result
+                .symbols
+                .iter()
+                .any(|s| s.name == "MyApp.Native.add" && s.is_nif),
+            "is_nif flag missing on the NIF stub symbol"
         );
     }
 
