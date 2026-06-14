@@ -2464,6 +2464,9 @@ mod tests {
         assert_eq!(super::query_worker_compute_label(), Some("GPU"));
         super::set_query_worker_compute_gpu(false);
         assert_eq!(super::query_worker_compute_label(), Some("CPU"));
+        // Reset process-global state to `unknown` so this test does not pollute
+        // status/embedding_status compute fallbacks in later serial tests.
+        super::QUERY_WORKER_COMPUTE.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     // REQ-AXO-901984 — runtime query-embed provider override: set/get + reload bump.
@@ -2477,6 +2480,11 @@ mod tests {
         assert_eq!(super::query_embed_provider_override_label(), "gpu");
         assert_eq!(super::set_query_embed_provider_override("auto"), Ok("auto"));
         assert!(super::set_query_embed_provider_override("bogus").is_err());
+        // Reset the PROCESS-GLOBAL override so this test does not pollute others
+        // (the suite runs single-threaded in one process; a leftover override is
+        // read first by effective_provider_request_for_lane and broke
+        // test_effective_provider_request_for_query_lane_respects_explicit_override).
+        super::QUERY_EMBED_PROVIDER_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
