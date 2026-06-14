@@ -277,6 +277,14 @@ pub fn orphan_code_symbols(graph: &IstGraph, project: &str, limit: usize) -> Vec
         if NodeFlags(flags.0).public() {
             continue;
         }
+        // REQ-AXO-901958 — a `#[test]`/fixture function is a private callable with
+        // no inbound CALLS edge (the harness invokes it via attribute, not a call
+        // expression), so it would be mis-reported as orphan/dead. The `tested`
+        // flag is already persisted; skip these (kills the dominant false-positive
+        // class — ~71% of AXO's reported dead set were the test fns themselves).
+        if NodeFlags(flags.0).tested() {
+            continue;
+        }
         let empty = String::new();
         let path = file_map.get(&idx).unwrap_or(&empty);
         if !path.is_empty() && is_test_path(path) {
@@ -811,7 +819,10 @@ pub fn dead_code_count(graph: &IstGraph, project: &str) -> usize {
             continue;
         }
         let (kind, _, flags) = graph.node_meta(idx);
-        if !is_callable(kind) || flags.public() {
+        // REQ-AXO-901958 — exclude `#[test]`/fixture callables (the `tested` flag
+        // is persisted): they are private + have no inbound CALLS edge, so they
+        // were the dominant dead-code false positive.
+        if !is_callable(kind) || flags.public() || flags.tested() {
             continue;
         }
         let empty = String::new();
