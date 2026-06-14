@@ -526,6 +526,32 @@ impl McpServer {
                 n = modified_since,
             ));
         }
+        // REQ-AXO-901963 — PUSH code-intel availability (scope completeness N/N)
+        // so an LLM never assumes query/inspect/impact return empty and falls back
+        // to grep. Availability ≠ process-liveness (CPT-AXO-029): the N/N derives
+        // from indexed ist.Chunk rows, present whether or not the indexer is live.
+        if let Some(code_intel_project) = self.auto_resolve_project_code_str() {
+            if let Some(scope) = self.project_scope_summary(Some(&code_intel_project)) {
+                if scope.total_files > 0 {
+                    if scope.backlog_files == 0 {
+                        evidence.push_str(&format!(
+                            "**Code-intel:** LIVE — `{}` {}/{} files indexed, backlog 0 (query/inspect/impact/why operational — prefer over grep)\n",
+                            code_intel_project, scope.completed_files, scope.total_files,
+                        ));
+                    } else {
+                        evidence.push_str(&format!(
+                            "**Code-intel:** DEGRADED — `{}` scope {}/{} files, backlog {} (`pending`: {}, `indexing`: {})\n",
+                            code_intel_project,
+                            scope.completed_files,
+                            scope.total_files,
+                            scope.backlog_files,
+                            scope.pending_files,
+                            scope.indexing_files,
+                        ));
+                    }
+                }
+            }
+        }
         if !indexed_projection_fresh {
             if let Some(cmd) = recovery_command {
                 evidence.push_str(&format!("**Optional refresh (live reads):** `{}`\n", cmd));

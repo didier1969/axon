@@ -853,6 +853,27 @@ impl McpServer {
         } else {
             serde_json::json!([])
         };
+        // REQ-AXO-901963 — PUSH code-intel availability into the kickoff bundle so
+        // a cold-start LLM knows query/inspect/impact are live (N/N indexed) and
+        // does not default to grep.
+        let code_intel = match self.project_scope_summary(Some(project_code)) {
+            Some(s) if s.total_files > 0 => serde_json::json!({
+                "status": if s.backlog_files == 0 { "live" } else { "degraded" },
+                "files_indexed": s.completed_files,
+                "files_total": s.total_files,
+                "backlog": s.backlog_files,
+                "tools": ["query", "inspect", "impact", "why", "path", "anomalies"],
+                "signal": format!(
+                    "CODE-INTEL {} — {}/{} files indexed, backlog {} (query/inspect/impact/why operational; prefer structural tools over grep/cat)",
+                    if s.backlog_files == 0 { "LIVE" } else { "DEGRADED" },
+                    s.completed_files, s.total_files, s.backlog_files,
+                ),
+            }),
+            _ => serde_json::json!({
+                "status": "unknown",
+                "signal": "Code-intel scope not resolvable for this project",
+            }),
+        };
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -867,6 +888,7 @@ impl McpServer {
             "recent_soll_writes": recent_soll_writes,
             "bootstrap_required": bootstrap_required,
             "input_documents": input_documents,
+            "code_intel": code_intel,
         })
     }
 
