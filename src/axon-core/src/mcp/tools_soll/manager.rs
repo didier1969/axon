@@ -1083,20 +1083,22 @@ impl McpServer {
                             None
                         };
                         if let Some(set) = cycle_set {
-                            let in_list = set
-                                .iter()
-                                .map(|r| format!("'{}'", r))
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            let cycle_query = format!(
-                                "WITH RECURSIVE ancestors(reachable) AS (SELECT target_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ({inl}) UNION SELECT e.target_id FROM soll.Edge e JOIN ancestors a ON e.source_id = a.reachable WHERE e.relation_type IN ({inl})) SELECT COUNT(*) FROM ancestors WHERE reachable = ?",
-                                inl = in_list
-                            );
-                            let cycle_hit = self
-                                .graph_store
-                                .query_count_param(&cycle_query, &json!([tgt, src]))
-                                .unwrap_or(0);
-                            if cycle_hit > 0 {
+                            // REQ-AXO-901952 — cycle pre-check via the SOLL RAM
+                            // snapshot (PIL-AXO-9002), NOT a PG `WITH RECURSIVE
+                            // soll.Edge` traversal. The cache is invalidated on
+                            // every SOLL write, so `snapshot()` reflects all
+                            // committed edges ; the link being checked is not yet
+                            // persisted, so this is a correct pre-write guard.
+                            // "tgt already reaches src via the family" == adding
+                            // src→tgt would close a cycle.
+                            let family: std::collections::HashSet<String> =
+                                set.iter().map(|r| r.to_string()).collect();
+                            let cycle_hit = project_code
+                                .as_deref()
+                                .and_then(|code| self.soll_cache().snapshot(code).ok())
+                                .map(|snap| snap.reaches_via_relations(tgt, src, &family))
+                                .unwrap_or(false);
+                            if cycle_hit {
                                 return Some(json!({
                                     "content": [{
                                         "type": "text",

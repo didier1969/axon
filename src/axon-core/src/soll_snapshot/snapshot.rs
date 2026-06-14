@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeFiltered, EdgeRef};
 use petgraph::Direction;
 
 #[derive(Clone, Debug)]
@@ -275,6 +275,31 @@ impl SollSnapshot {
             }
         }
         count
+    }
+
+    /// REQ-AXO-901952 — forward reachability over the subgraph induced by
+    /// `relations` (edge relation_type ∈ `relations`). Returns true if `to` is
+    /// reachable from `from` following only those relation types. This is the
+    /// RAM-snapshot replacement for the PG `WITH RECURSIVE soll.Edge` cycle
+    /// pre-check: "would linking `to`→`from` close a cycle?" == `from` already
+    /// reaches `to`. The seed edge being checked is not yet persisted, so the
+    /// snapshot (refreshed on every SOLL write) gives the correct pre-write view.
+    ///
+    /// Uses petgraph's `EdgeFiltered` + `has_path_connecting` (same idiom as
+    /// `planning_work_plan.rs`) rather than a hand-rolled BFS : the SOLL graph
+    /// IS a `petgraph::Graph`, so its tested algorithms are the canonical choice.
+    pub fn reaches_via_relations(&self, from: &str, to: &str, relations: &HashSet<String>) -> bool {
+        if from == to {
+            return true;
+        }
+        let (Some(from_idx), Some(to_idx)) =
+            (self.node_index.get(from).copied(), self.node_index.get(to).copied())
+        else {
+            return false;
+        };
+        let filtered =
+            EdgeFiltered::from_fn(&self.graph, |e| relations.contains(e.weight()));
+        petgraph::algo::has_path_connecting(&filtered, from_idx, to_idx, None)
     }
 
     /// Traceability rows for a given (lowercase entity_type, entity_id).
