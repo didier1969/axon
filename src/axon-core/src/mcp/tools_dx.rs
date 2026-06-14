@@ -2420,6 +2420,25 @@ mod inspect_callers_query_tests {
     };
     use serde_json::json;
 
+    // REQ-AXO-901978 (A) — guard the semantic=auto routing decision (pure fn, no PG).
+    #[test]
+    fn query_is_symbol_lookup_routes_lexical_vs_semantic() {
+        use crate::mcp::McpServer;
+        // Single bareword identifier / dotted key / path → lexical lane (skip embed).
+        assert!(McpServer::query_is_symbol_lookup("tarjan_scc_iterative"));
+        assert!(McpServer::query_is_symbol_lookup("a.b.c"));
+        assert!(McpServer::query_is_symbol_lookup("src/foo/bar.rs"));
+        assert!(McpServer::query_is_symbol_lookup("Foo::bar"));
+        // Multi-token / natural-language → semantic lane (embed).
+        assert!(!McpServer::query_is_symbol_lookup(
+            "how does cycle detection work"
+        ));
+        assert!(!McpServer::query_is_symbol_lookup("two words"));
+        // Empty / whitespace → not a symbol lookup.
+        assert!(!McpServer::query_is_symbol_lookup(""));
+        assert!(!McpServer::query_is_symbol_lookup("   "));
+    }
+
     #[test]
     fn ram_reverse_at_radius_resolves_synthetic_callers_directly() {
         // REQ-AXO-140 bisection — query reverse_at_radius DIRECTLY on the warmed

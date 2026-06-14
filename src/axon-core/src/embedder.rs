@@ -2325,6 +2325,32 @@ mod tests {
         crate::service_guard::lock_for_tests()
     }
 
+    // REQ-AXO-901978 (B3) — query→vector cache: hit, miss, idempotent put.
+    #[test]
+    fn query_vec_cache_stores_hit_miss_and_is_idempotent() {
+        super::query_vec_cache_put("rc-cache-key-a".to_string(), vec![1.0, 2.0]);
+        assert_eq!(
+            super::query_vec_cache_get("rc-cache-key-a"),
+            Some(vec![1.0, 2.0])
+        );
+        assert_eq!(super::query_vec_cache_get("rc-cache-key-absent"), None);
+        // Re-put with the same key must NOT overwrite (contains_key early return).
+        super::query_vec_cache_put("rc-cache-key-a".to_string(), vec![9.0]);
+        assert_eq!(
+            super::query_vec_cache_get("rc-cache-key-a"),
+            Some(vec![1.0, 2.0])
+        );
+    }
+
+    // REQ-AXO-901979 — query worker self-reported compute label (GPU/CPU truth).
+    #[test]
+    fn query_worker_compute_label_reflects_provider() {
+        super::set_query_worker_compute_gpu(true);
+        assert_eq!(super::query_worker_compute_label(), Some("GPU"));
+        super::set_query_worker_compute_gpu(false);
+        assert_eq!(super::query_worker_compute_label(), Some("CPU"));
+    }
+
     #[test]
     fn query_embed_idle_timeout_parses_default_disable_and_override() {
         // REQ-AXO-901945 — default 20 min when unset / unparseable.
