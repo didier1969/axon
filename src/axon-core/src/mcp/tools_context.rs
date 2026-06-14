@@ -240,10 +240,19 @@ impl McpServer {
         // routes by relevance (semantic-primary) instead of bare lexical name
         // matches. The vector is threaded into the chunk lane below so the
         // question is embedded at most once per call.
-        let question_vector: Option<Vec<f32>> = if matches!(
-            crate::service_guard::current_pressure(),
-            ServicePressure::Healthy | ServicePressure::Recovering
-        ) {
+        // REQ-AXO-901978 (A) — `semantic=lexical|off` lets the caller skip the
+        // question-embedding entirely (FTS + structural lanes only) when it wants
+        // the fastest answer. Default (absent / auto / semantic) embeds, since
+        // retrieve_context is question-oriented.
+        let semantic_lexical_off = matches!(
+            args.get("semantic").and_then(|v| v.as_str()),
+            Some("lexical") | Some("off")
+        );
+        let question_vector: Option<Vec<f32>> = if !semantic_lexical_off
+            && matches!(
+                crate::service_guard::current_pressure(),
+                ServicePressure::Healthy | ServicePressure::Recovering
+            ) {
             crate::embedder::batch_embed(vec![question.to_string()])
                 .ok()
                 .and_then(|vectors| vectors.into_iter().next())

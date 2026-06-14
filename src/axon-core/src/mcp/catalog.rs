@@ -688,7 +688,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "token_budget": { "type": "integer" },
                         "top_k": { "type": "integer" },
                         "include_soll": { "type": "boolean" },
-                        "include_graph": { "type": "boolean" }
+                        "include_graph": { "type": "boolean" },
+                        "semantic": { "type": "string", "enum": ["auto", "lexical", "semantic"], "description": "REQ-AXO-901978 — `lexical` skips the question embedding (FTS + structural only, fastest); default embeds (question-oriented)." }
                     },
                     "required": ["question"]
                 }

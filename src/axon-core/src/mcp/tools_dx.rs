@@ -345,6 +345,23 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-901978 (A) — a single bareword identifier (symbol / dotted config
+    /// key / path, no whitespace, identifier chars only) is a structural lookup
+    /// the lexical lane answers exactly, so embedding it is wasted latency.
+    /// Anything multi-token is treated as a natural-language question that needs
+    /// the semantic lane. Used by `query` semantic=auto routing.
+    fn query_is_symbol_lookup(query_text: &str) -> bool {
+        let trimmed = query_text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let token_count = trimmed.split_whitespace().count();
+        let identifier_chars = trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-' | '/'));
+        token_count == 1 && identifier_chars
+    }
+
     fn is_operational_file_path(path: &str) -> bool {
         let lower = path.to_ascii_lowercase();
         lower.ends_with("/mix.exs")
@@ -656,9 +673,29 @@ impl McpServer {
         let degraded_note =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
 
-        let embedding_attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
-        let semantic_fallback_reason = embedding_attempt.as_ref().err().map(|err| err.to_string());
-        let embedding = embedding_attempt.ok().and_then(|v| v.into_iter().next());
+        // REQ-AXO-901978 (A) — semantic-lane routing. `semantic` = auto (default)
+        // | lexical | semantic. `auto` skips the query-embedding for a single
+        // bareword identifier (a symbol lookup the lexical lane answers exactly —
+        // no wasted embed latency) and embeds multi-token / NL queries ; `lexical`
+        // forces no embed ; `semantic` forces embed. The diagnostic `query_path`
+        // already reports the lane (symbol_index_semantic vs _structural).
+        let semantic_arg = args
+            .get("semantic")
+            .and_then(|v| v.as_str())
+            .unwrap_or("auto");
+        let want_semantic = match semantic_arg {
+            "lexical" | "off" => false,
+            "semantic" | "on" => true,
+            _ => !Self::query_is_symbol_lookup(query_text),
+        };
+        let (embedding, semantic_fallback_reason): (Option<Vec<f32>>, Option<String>) =
+            if want_semantic {
+                let attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
+                let reason = attempt.as_ref().err().map(|err| err.to_string());
+                (attempt.ok().and_then(|v| v.into_iter().next()), reason)
+            } else {
+                (None, None)
+            };
         let backend_pressure =
             !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let query_limit = if query_intent == QueryIntent::ConfigLookupExact {

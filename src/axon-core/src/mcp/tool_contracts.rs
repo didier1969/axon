@@ -49,6 +49,14 @@ pub(crate) struct QueryInput {
     /// the text cap.
     #[serde(default)]
     pub mode: Option<QueryMode>,
+    /// REQ-AXO-901978 — semantic lane control. `auto` (default): a single
+    /// bareword identifier (symbol lookup) is answered lexically with NO
+    /// embedding (fast, <100ms); a multi-token / natural-language query is
+    /// embedded for semantic ranking. `lexical`: never embed (fastest).
+    /// `semantic`: always embed (force the semantic lane). Use `lexical` for a
+    /// known symbol/path, `semantic` for a conceptual question.
+    #[serde(default)]
+    pub semantic: Option<String>,
 }
 
 /// `soll_manager` operation.
