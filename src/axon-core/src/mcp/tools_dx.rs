@@ -836,10 +836,19 @@ impl McpServer {
             )
         };
 
-        let mode_label = if sql.contains("score") {
-            "hybrid (structure + semantic similarity)"
+        // REQ-AXO-901993 R1 — honest mode label. The old flat "real-time
+        // embedding unavailable" fired even when the embed was SKIPPED by design
+        // (semantic=auto routed a single-token symbol lookup to lexical), which
+        // contradicted embed_provider=GPU and read as "Axon is broken". Distinguish
+        // the three real cases from the in-scope routing state.
+        let mode_label: String = if sql.contains("score") {
+            "hybrid (structure + semantic similarity)".to_string()
+        } else if !want_semantic {
+            "lexical (symbol lookup — embedding skipped by semantic=auto; pass semantic=semantic to force the embed)".to_string()
+        } else if let Some(reason) = semantic_fallback_reason.as_deref() {
+            format!("structural (semantic embed unavailable: {reason})")
         } else {
-            "structural (real-time embedding unavailable)"
+            "structural (semantic lane returned no usable vector)".to_string()
         };
 
         match self.graph_store.query_json_param(&sql, &params) {

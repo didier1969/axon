@@ -111,7 +111,13 @@ pub(super) fn change_safety_operator_guidance(
         blocking_factors.push(json!({
             "factor": "missing_traceability_links",
             "severity": "high",
-            "recommended_action": "link the target to canonical SOLL intent or evidence before mutation"
+            // REQ-AXO-901999 — name the EXACT write path. change_safety/why score
+            // symbol-level traceability by counting soll.Traceability rows of
+            // artifact_type='Symbol' for this symbol; FILE/document evidence does
+            // NOT raise it (the NEX consumer attached file evidence and stayed at
+            // traceability_links=0). The symbol-evidence path already exists — it
+            // just wasn't discoverable.
+            "recommended_action": "attach a SYMBOL artifact tying the governing REQ to this code: soll_attach_evidence(entity_type=Requirement, entity_id=<REQ>, artifacts=[{artifact_type:\"symbol\", artifact_ref:\"<this symbol id, e.g. Module::function>\"}]). File/document evidence does NOT establish symbol-level traceability."
         }));
     }
     if validation_nodes == 0 && verifies_edges == 0 {
