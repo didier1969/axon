@@ -470,6 +470,7 @@ impl McpServer {
             &governing_requirements,
             &governing_decisions,
             &supporting_guidelines,
+            &terms_for_reasoning,
         );
         let answer_sketch = self.build_answer_sketch(
             question,
@@ -4211,13 +4212,54 @@ impl McpServer {
         states
     }
 
+    /// REQ-AXO-901976 critère #3 — a governing entity is *relevant* to the
+    /// question when it shares at least one overlap signal with it:
+    ///   - **anchor**: it was selected via direct symbol/file traceability
+    ///     (`evidence_class == "soll_traceability"`); since the entrypoint is now
+    ///     semantic-primary (DEC-AXO-901632), that relevance is transitive.
+    ///   - **term**: its title contains a question term of length ≥ 4 (same
+    ///     `len >= 4` convention as `collect_soll_entities`).
+    /// Entities pulled in *only* via `soll_concept_bridge` with neither anchor
+    /// nor term overlap (an off-topic sibling sharing a Concept) are NOT relevant
+    /// and must not crown the packet `strong`. Semantic overlap (cosine
+    /// question↔node) is deliberately deferred: embedding every SOLL node per
+    /// call is the cost the author flagged — lexical+anchor is the measured first
+    /// pass, mirroring the rank-based lexical/structural choice of DEC-AXO-901632.
+    fn governing_overlaps_question(entity: &Value, question_terms: &[String]) -> bool {
+        if entity.get("evidence_class").and_then(|value| value.as_str())
+            == Some("soll_traceability")
+        {
+            return true;
+        }
+        let title = entity
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if title.is_empty() {
+            return false;
+        }
+        question_terms
+            .iter()
+            .filter(|term| term.len() >= 4)
+            .any(|term| title.contains(&term.to_ascii_lowercase()))
+    }
+
     fn build_rationale_quality(
         evidence_states: &[Value],
         governing_requirements: &[Value],
         governing_decisions: &[Value],
         supporting_guidelines: &[Value],
+        question_terms: &[String],
     ) -> Value {
         let has_governing = !governing_requirements.is_empty() || !governing_decisions.is_empty();
+        // REQ-AXO-901976 critère #3 — `strong` requires not just the PRESENCE of
+        // governing intent but its RELEVANCE to the question. A governing entity
+        // with zero overlap (term/anchor) downgrades the verdict to `mixed`.
+        let has_relevant_governing = governing_requirements
+            .iter()
+            .chain(governing_decisions.iter())
+            .any(|entity| Self::governing_overlaps_question(entity, question_terms));
         let has_missing_governing = evidence_states.iter().any(|row| {
             row.get("state").and_then(|value| value.as_str()) == Some("missing_governing_intent")
         });
@@ -4227,7 +4269,7 @@ impl McpServer {
         let has_correlation_only = evidence_states.iter().any(|row| {
             row.get("state").and_then(|value| value.as_str()) == Some("correlation_only")
         });
-        let level = if has_governing && evidence_states.is_empty() {
+        let level = if has_governing && evidence_states.is_empty() && has_relevant_governing {
             "strong"
         } else if has_missing_governing || has_no_direct_traceability || has_correlation_only {
             "weak"
@@ -4240,6 +4282,8 @@ impl McpServer {
             "governing intent is missing, so the packet should be read as non-canonical rationale"
         } else if has_no_direct_traceability {
             "supporting evidence exists, but no direct traceability was found for the current anchor"
+        } else if has_governing && !has_relevant_governing {
+            "governing intent is present but shares no overlap with the question, so read it as partial support, not a direct answer"
         } else if has_governing {
             "governing intent is present, but downstream support may still be partial"
         } else if has_correlation_only {
@@ -4652,7 +4696,7 @@ mod tests {
         // be self-explanatory as a fixable proof_gap (with remediation tools),
         // not read as a tool limitation.
         let states = vec![json!({"state": "no_direct_traceability", "severity": "medium"})];
-        let q = McpServer::build_rationale_quality(&states, &[], &[], &[]);
+        let q = McpServer::build_rationale_quality(&states, &[], &[], &[], &[]);
         assert_eq!(q["level"], "weak");
         assert_eq!(q["proof_gap"], true);
         let remediation = q["remediation"].as_str().unwrap_or("");
@@ -4667,10 +4711,49 @@ mod tests {
     fn rationale_quality_no_proof_gap_when_governing_intent_present() {
         // Governing intent present, no evidence-gap states → not a proof_gap,
         // remediation null.
-        let governing = vec![json!({"id": "REQ-AXO-1"})];
-        let q = McpServer::build_rationale_quality(&[], &governing, &[], &[]);
+        let governing = vec![json!({"id": "REQ-AXO-1", "title": "relation schema"})];
+        let terms = vec!["relation".to_string()];
+        let q = McpServer::build_rationale_quality(&[], &governing, &[], &[], &terms);
         assert_eq!(q["proof_gap"], false);
         assert!(q["remediation"].is_null());
+    }
+
+    #[test]
+    fn rationale_quality_gates_strong_when_governing_irrelevant_to_question() {
+        // REQ-AXO-901976 critère #3 — a governing requirement that shares NO
+        // overlap (term / anchor) with the question must NOT yield `strong`.
+        // Repro: a concept-bridge sibling REQ (off-topic, no code anchor, title
+        // disjoint from the question terms) was crowning the packet `strong`.
+        let terms = vec!["relation".to_string(), "schema".to_string()];
+
+        // (a) Relevant governing req (title overlaps a question term) → strong preserved.
+        let relevant = vec![json!({
+            "id": "REQ-AXO-2",
+            "title": "SOLL relation schema validation",
+            "evidence_class": "soll_concept_bridge",
+        })];
+        let q = McpServer::build_rationale_quality(&[], &relevant, &[], &[], &terms);
+        assert_eq!(q["level"], "strong", "term overlap must keep strong");
+
+        // (b) Off-topic governing req (no term overlap, no anchor) → downgraded to mixed.
+        let irrelevant = vec![json!({
+            "id": "REQ-AXO-901631",
+            "title": "embed throughput drain batching",
+            "evidence_class": "soll_concept_bridge",
+        })];
+        let q = McpServer::build_rationale_quality(&[], &irrelevant, &[], &[], &terms);
+        assert_eq!(q["level"], "mixed", "irrelevant governing must not be strong");
+        assert_eq!(q["proof_gap"], false);
+
+        // (c) Direct traceability anchor (entrypoint-traced) → relevant by anchor,
+        //     even when the title shares no term with the question → strong preserved.
+        let anchored = vec![json!({
+            "id": "REQ-AXO-3",
+            "title": "completeness enforcement",
+            "evidence_class": "soll_traceability",
+        })];
+        let q = McpServer::build_rationale_quality(&[], &anchored, &[], &[], &terms);
+        assert_eq!(q["level"], "strong", "anchor overlap must keep strong");
     }
 
     fn candidate(
