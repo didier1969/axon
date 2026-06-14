@@ -1475,6 +1475,34 @@ impl GraphStore {
 }
 
 fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
+    query_embedding_allowed_for(
+        service_pressure,
+        embedding_provider_requested_is_gpu(),
+        current_gpu_memory_pressure_active(),
+    )
+}
+
+/// Decide whether the punctual query embed may run, gated on the resource it
+/// actually competes for.
+///
+/// REQ-AXO-901978 / NEX client report — `ServicePressure` is derived from
+/// SQL + MCP latency (the CPU path that serves the brain). When the query embed
+/// runs on a dedicated GPU (provisioned even in `brain_only`), that signal is
+/// IRRELEVANT: a slow SQL or a slow prior MCP call — including the semantic
+/// tools' OWN latency — must not pause the GPU embed. The old gate coupled them,
+/// creating a self-reinforcing lexical-fallback loop (client observed "paused
+/// under Critical service pressure" while the GPU sat idle, corpus 100% embedded).
+/// So: the GPU lane backs off only under genuine GPU memory pressure (e.g. the
+/// indexer vectorizing contends for VRAM); the CPU lane keeps the original
+/// CPU-pressure gate since it genuinely competes with the brain for CPU.
+fn query_embedding_allowed_for(
+    service_pressure: ServicePressure,
+    gpu_backed: bool,
+    gpu_memory_pressure: bool,
+) -> bool {
+    if gpu_backed {
+        return !gpu_memory_pressure;
+    }
     matches!(
         service_pressure,
         ServicePressure::Healthy | ServicePressure::Recovering
@@ -2406,7 +2434,7 @@ mod tests {
         build_token_aware_micro_batches, configured_embedding_max_length,
         cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
         current_runtime_tuning_state, embedding_lane_config_from_env, embedding_model_cache_dir,
-        gpu_memory_soft_limit_mb, query_embedding_allowed, request_query_embedding,
+        gpu_memory_soft_limit_mb, query_embedding_allowed_for, request_query_embedding,
         EmbeddingLaneConfig, QueryEmbeddingRequest,
     };
     use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
@@ -2629,15 +2657,53 @@ mod tests {
     }
 
     #[test]
-    fn test_query_embedding_allowed_while_healthy_or_recovering() {
-        assert!(query_embedding_allowed(ServicePressure::Healthy));
-        assert!(query_embedding_allowed(ServicePressure::Recovering));
+    fn test_query_embedding_cpu_lane_gated_by_service_pressure() {
+        // CPU-backed query worker competes with the brain for CPU → keep the
+        // original SQL/MCP-pressure gate.
+        assert!(query_embedding_allowed_for(
+            ServicePressure::Healthy,
+            false,
+            false
+        ));
+        assert!(query_embedding_allowed_for(
+            ServicePressure::Recovering,
+            false,
+            false
+        ));
+        assert!(!query_embedding_allowed_for(
+            ServicePressure::Degraded,
+            false,
+            false
+        ));
+        assert!(!query_embedding_allowed_for(
+            ServicePressure::Critical,
+            false,
+            false
+        ));
     }
 
     #[test]
-    fn test_query_embedding_disallowed_under_degraded_or_critical_pressure() {
-        assert!(!query_embedding_allowed(ServicePressure::Degraded));
-        assert!(!query_embedding_allowed(ServicePressure::Critical));
+    fn test_query_embedding_gpu_lane_ignores_cpu_pressure() {
+        // REQ-AXO-901978 / NEX — a dedicated GPU embed is independent of the
+        // CPU/SQL/MCP latency that drives ServicePressure. Even under Critical
+        // CPU pressure the GPU embed runs (no self-reinforcing lexical fallback).
+        assert!(query_embedding_allowed_for(
+            ServicePressure::Critical,
+            true,
+            false
+        ));
+        assert!(query_embedding_allowed_for(
+            ServicePressure::Degraded,
+            true,
+            false
+        ));
+        // …but it DOES back off under genuine GPU memory pressure (VRAM
+        // contention with the indexer vectorization lane).
+        assert!(!query_embedding_allowed_for(
+            ServicePressure::Healthy,
+            true,
+            true
+        ));
     }
 
     #[test]
