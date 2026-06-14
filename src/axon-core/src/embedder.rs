@@ -178,6 +178,19 @@ pub(crate) fn set_query_embed_provider_override(value: &str) -> Result<&'static 
     };
     QUERY_EMBED_PROVIDER_OVERRIDE.store(code, std::sync::atomic::Ordering::Relaxed);
     QUERY_RELOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // REQ-AXO-901984 — PROACTIVELY wake the worker to drop+rebuild NOW, so
+    // `set cpu` actually FREES the GPU for Live (not lazily on the next query).
+    // An empty-texts request flows through the loop's reload-generation check
+    // (drops the old model, rebuilds with the new provider) then embeds nothing.
+    // try_send is non-blocking ; if the queue is full a real query carries the
+    // reload instead. Reply is discarded.
+    if let Some(sender) = current_query_embedding_sender() {
+        let (reply_tx, _reply_rx) = bounded(1);
+        let _ = sender.try_send(QueryEmbeddingRequest {
+            texts: Vec::new(),
+            reply: reply_tx,
+        });
+    }
     Ok(label)
 }
 
@@ -1352,6 +1365,13 @@ fn current_query_embedding_sender() -> Option<Sender<QueryEmbeddingRequest>> {
 }
 
 fn serve_query_embedding_request(model: &mut TextEmbedding, request: QueryEmbeddingRequest) {
+    // REQ-AXO-901984 — empty texts = a reload-trigger control request (provider
+    // toggle): the model rebuild already happened in the loop's gen-check, so
+    // just reply empty without an embed call.
+    if request.texts.is_empty() {
+        let _ = request.reply.send(Ok(Vec::new()));
+        return;
+    }
     let result = model.embed(request.texts, None);
     let _ = request.reply.send(result);
 }
