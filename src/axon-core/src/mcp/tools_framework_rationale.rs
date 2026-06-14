@@ -45,7 +45,13 @@ impl McpServer {
             .and_then(|value| value.as_str())
             .unwrap_or("AXO");
 
+        // REQ-AXO-901982 — per-stage timing so the next measurement pinpoints
+        // the occasional multi-second spike (telemetry shows project_status avg
+        // ~11.5s driven by rare ~60s runs, while each sub-call is individually
+        // fast). Observability before optimization (PIL-AXO-9006, TOC discipline).
+        let t_status = std::time::Instant::now();
         let status = self.axon_status(&json!({ "mode": mode.unwrap_or("brief") }))?;
+        let ms_status = t_status.elapsed().as_millis() as u64;
         let status_data = status.get("data").cloned().unwrap_or_else(|| json!({}));
 
         // REQ-AXO-901926 — the anomalies tool is RAM-first (PIL-AXO-9002) +
@@ -53,22 +59,29 @@ impl McpServer {
         // forced the structural counts to 0/0/0 even though `anomalies` returns
         // them instantly) is obsolete. Pull the real summary; fall back to an
         // empty summary only if the call fails.
+        let t_anomalies = std::time::Instant::now();
         let anomalies_data = self
             .axon_anomalies(&json!({ "project": project_code, "mode": "brief" }))
             .and_then(|resp| resp.get("data").cloned())
             .unwrap_or_else(|| json!({ "summary": {}, "findings": [], "recommendations": [] }));
+        let ms_anomalies = t_anomalies.elapsed().as_millis() as u64;
+        let t_soll = std::time::Instant::now();
         let soll_context = self.axon_soll_query_context(&json!({
             "project_code": project_code,
             "limit": 5
         }))?;
+        let ms_soll_context = t_soll.elapsed().as_millis() as u64;
         let soll_data = soll_context
             .get("data")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let t_conception = std::time::Instant::now();
         let conception = self.cached_conception_view(project_code);
+        let ms_conception = t_conception.elapsed().as_millis() as u64;
         // REQ-AXO-901926 — canonical current Vision first (robust against
         // rejected/test-fixture visions); fall back to the soll_query_context
         // list only if the direct lookup yields nothing.
+        let t_vision = std::time::Instant::now();
         let vision = self
             .canonical_current_vision(project_code)
             .or_else(|| {
@@ -88,6 +101,7 @@ impl McpServer {
                     "source": "SOLL"
                 })
             });
+        let ms_vision = t_vision.elapsed().as_millis() as u64;
 
         // REQ-AXO-901948 — canonical Validation count as the authoritative
         // fallback for coverage. The IST-derived `validation_coverage_score`
@@ -96,6 +110,7 @@ impl McpServer {
         // holds the Validation nodes. project_status must never assert
         // "unknown"/absence when a canonical read contradicts it — same
         // contract the Vision line already honours (REQ-AXO-901926).
+        let t_validation = std::time::Instant::now();
         let canonical_validation_count = self
             .graph_store
             .query_count(&format!(
@@ -103,11 +118,13 @@ impl McpServer {
                 project_code.replace('\'', "''")
             ))
             .unwrap_or(0);
+        let ms_validation = t_validation.elapsed().as_millis() as u64;
 
         let anomaly_summary = anomalies_data
             .get("summary")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let t_snapshot = std::time::Instant::now();
         let previous_snapshot = load_structural_snapshots(project_code).into_iter().last();
         let previous_summary = previous_snapshot
             .as_ref()
@@ -156,6 +173,18 @@ impl McpServer {
                 })
             }
         };
+        let ms_snapshot = t_snapshot.elapsed().as_millis() as u64;
+        let ms_total = t_status.elapsed().as_millis() as u64;
+        let stage_timings_ms = json!({
+            "status": ms_status,
+            "anomalies": ms_anomalies,
+            "soll_context": ms_soll_context,
+            "conception": ms_conception,
+            "vision": ms_vision,
+            "validation_count": ms_validation,
+            "snapshot_io": ms_snapshot,
+            "total": ms_total
+        });
         let operator_guidance =
             project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision);
         let next_best_action = operator_guidance
@@ -342,7 +371,8 @@ impl McpServer {
                     "decisions": soll_data.get("decisions").cloned().unwrap_or_else(|| json!([])),
                     "revisions": soll_data.get("revisions").cloned().unwrap_or_else(|| json!([]))
                 },
-                "canonical_sources": Self::canonical_sources_snapshot()
+                "canonical_sources": Self::canonical_sources_snapshot(),
+                "stage_timings_ms": stage_timings_ms
             }
         }))
     }
