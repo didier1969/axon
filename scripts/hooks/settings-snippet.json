@@ -1,0 +1,16 @@
+{
+  "//": "Axon MCP-first guard (GUI-PRO-112). Merge this into your project's .claude/settings.json. Blocks grep/rg/find code-search when Axon MCP is up; fail-open when Axon is down. Escapes: AXON_OK=1 inline, AXON_MCP_ENFORCE=0 global off. Optional: set AXON_MCP_URL if the brain is not on 127.0.0.1:44129.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/axon-mcp-first-guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
