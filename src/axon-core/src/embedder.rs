@@ -122,6 +122,35 @@ pub(super) struct QueryEmbeddingRequest {
 static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
     OnceLock::new();
 
+/// REQ-AXO-901979 — process-local effective-compute of THIS process's in-process
+/// query embedding worker (cpu_query_service). 0 = unknown, 1 = CPU, 2 = GPU.
+/// The worker KNOWS its provider at model-build time (it loaded the CUDA EP or
+/// not), so for self-observation this is strictly more precise than the
+/// cross-process `nvidia-smi --query-compute-apps` verdict (which masks
+/// per-process memory as [N/A] on WSL2 and reads the INDEXER's heartbeat — absent
+/// in brain_only → the stale `compute:CPU` lie after REQ-AXO-901978 B1). NOT the
+/// cross-process slot DEC-AXO-901626 retired: this is the brain reporting ITSELF.
+static QUERY_WORKER_COMPUTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn set_query_worker_compute_gpu(is_gpu: bool) {
+    QUERY_WORKER_COMPUTE.store(
+        if is_gpu { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// `Some("GPU")` / `Some("CPU")` once this process's query worker has built its
+/// model ; `None` before the first build (unknown). Read by status /
+/// embedding_status to report the brain's OWN embedder compute in brain_only,
+/// where no indexer heartbeat exists.
+pub(crate) fn query_worker_compute_label() -> Option<&'static str> {
+    match QUERY_WORKER_COMPUTE.load(std::sync::atomic::Ordering::Relaxed) {
+        2 => Some("GPU"),
+        1 => Some("CPU"),
+        _ => None,
+    }
+}
+
 pub struct SemanticWorkerPool {
     _query_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -846,6 +875,12 @@ impl SemanticWorkerPool {
                     "✅ Semantic {} Worker [{}]: BGE-Large model loaded successfully (provider={}).",
                     lane, worker_idx, provider_label
                 );
+                // REQ-AXO-901979 — publish THIS query worker's effective compute
+                // so status/embedding_status report it accurately in brain_only
+                // (where no indexer nvidia-smi heartbeat exists). "cuda" = GPU.
+                if lane == "query" {
+                    set_query_worker_compute_gpu(provider_label == "cuda");
+                }
                 Some(model)
             }
             Err(e) => {

@@ -815,14 +815,30 @@ impl McpServer {
         // indexer (self nvidia-smi → EmbedderLifecycleHeartbeat.compute). The
         // brain is a pure reader here: no remote pid, no nvidia-smi. Defaults
         // to CPU/unknown when no fresh indexer heartbeat exists.
-        let embedder_compute = embedder_lifecycle_heartbeat
+        // REQ-AXO-901979 — when no indexer heartbeat exists (brain_only), the
+        // cross-process nvidia-smi verdict is absent and the old default lied
+        // `CPU` even when the brain's OWN query worker ran on GPU (post-901978
+        // B1). Fall back to the worker's self-reported provider (it knows whether
+        // it loaded the CUDA EP) before defaulting CPU.
+        let embedder_compute = match embedder_lifecycle_heartbeat
             .as_ref()
             .and_then(|row| row.compute.as_deref())
-            .unwrap_or("CPU");
-        let embedder_compute_source = embedder_lifecycle_heartbeat
+        {
+            Some(c) => c.to_string(),
+            None => crate::embedder::query_worker_compute_label()
+                .unwrap_or("CPU")
+                .to_string(),
+        };
+        let embedder_compute_source = match embedder_lifecycle_heartbeat
             .as_ref()
             .and_then(|row| row.compute_source.as_deref())
-            .unwrap_or("unknown");
+        {
+            Some(s) => s.to_string(),
+            None => crate::embedder::query_worker_compute_label()
+                .map(|_| "brain_query_worker_self")
+                .unwrap_or("unknown")
+                .to_string(),
+        };
         let embedder_runtime_snapshot = json!({
             "compute": embedder_compute,
             "compute_source": embedder_compute_source,

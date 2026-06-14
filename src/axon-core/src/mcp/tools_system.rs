@@ -599,14 +599,29 @@ impl McpServer {
         // the PG heartbeat). LLM callers get the GPU/CPU truth + how it was
         // determined, without a separate probe. Defaults CPU/unknown when no
         // fresh indexer heartbeat is present.
-        let observed_compute = indexer_heartbeat
+        // REQ-AXO-901979 — in brain_only there is no indexer heartbeat, so the
+        // cross-process verdict is absent and this used to default `CPU` even
+        // when the brain's OWN query worker ran on GPU (post-901978 B1). Fall
+        // back to the worker's self-reported provider before defaulting CPU.
+        let observed_compute = match indexer_heartbeat
             .as_ref()
             .and_then(|row| row.compute.as_deref())
-            .unwrap_or("CPU");
-        let observed_compute_source = indexer_heartbeat
+        {
+            Some(c) => c.to_string(),
+            None => crate::embedder::query_worker_compute_label()
+                .unwrap_or("CPU")
+                .to_string(),
+        };
+        let observed_compute_source = match indexer_heartbeat
             .as_ref()
             .and_then(|row| row.compute_source.as_deref())
-            .unwrap_or("unknown");
+        {
+            Some(s) => s.to_string(),
+            None => crate::embedder::query_worker_compute_label()
+                .map(|_| "brain_query_worker_self")
+                .unwrap_or("unknown")
+                .to_string(),
+        };
         let indexer_build_id = indexer_heartbeat
             .as_ref()
             .and_then(|row| row.build_id.clone());
