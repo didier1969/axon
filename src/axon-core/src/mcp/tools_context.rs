@@ -253,6 +253,15 @@ impl McpServer {
         if let Some(qvec) = question_vector.as_ref() {
             if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
                 self.fill_entry_semantic_distances(&mut entry_candidates, &qvec_literal);
+                // Pool expansion: guarantee the semantically-closest symbols are
+                // present even when the lexical arm + arbitrary LIMIT missed them.
+                self.add_semantic_entry_candidates(
+                    &mut entry_candidates,
+                    &qvec_literal,
+                    project,
+                    200,
+                    top_k * 4,
+                );
             }
         }
         self.rerank_entry_candidates(
@@ -1949,12 +1958,30 @@ impl McpServer {
         // lexical anchor primacy. Degraded semantic lane → all distances `None` →
         // graceful fall-back to the historical lexical sort.
         const ENTRY_SEMANTIC_RELEVANCE_MAX: f64 = 0.5;
+        // Doc / prose candidates (markdown headings indexed as symbols) embed
+        // closer to a natural-language question than English code identifiers,
+        // so pure semantic distance would crown a working-note section as the
+        // "primary entrypoint" of a *code* retrieval tool. When a code-bearing
+        // candidate is itself relevant, demote docs below it; otherwise (no
+        // relevant code) the best doc may still anchor the packet.
+        let is_doc_kind =
+            |c: &EntryCandidate| matches!(c.kind.as_str(), "section" | "document" | "doc");
         let semantic_primary = matches!(route, RetrievalRoute::Hybrid | RetrievalRoute::SollHybrid)
             && candidates
                 .iter()
                 .any(|c| c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX));
         if semantic_primary {
+            let code_relevant = candidates.iter().any(|c| {
+                !is_doc_kind(c) && c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
+            });
             candidates.sort_by(|left, right| {
+                if code_relevant {
+                    // false (code) sorts before true (doc)
+                    let ordering = is_doc_kind(left).cmp(&is_doc_kind(right));
+                    if ordering != std::cmp::Ordering::Equal {
+                        return ordering;
+                    }
+                }
                 let ld = left.semantic_distance.unwrap_or(f64::INFINITY);
                 let rd = right.semantic_distance.unwrap_or(f64::INFINITY);
                 ld.partial_cmp(&rd)
@@ -1982,10 +2009,16 @@ impl McpServer {
     }
 
     /// REQ-AXO-901937 / DEC-AXO-901632 — fill each *symbol* entry candidate's
-    /// cosine distance (`s.embedding <=> qvec`) to the question vector, in one
-    /// batched `IN (...)` query. File / repo-literal candidates carry no symbol
-    /// embedding and are skipped (left `None`). Robust to the JSON bridge
-    /// returning the distance as either a number or a numeric string.
+    /// semantic distance to the question vector, in one batched `IN (...)` query.
+    ///
+    /// The distance is the MIN cosine distance over the candidate symbol's
+    /// embedded chunks (`ist.Chunk.source_id = symbol_id` → `ist.ChunkEmbedding`).
+    /// `ist.Symbol.embedding` is NOT populated in the canonical pipeline (only
+    /// chunks are embedded — verified empirically on dev session 78), so a
+    /// `s.embedding <=> qvec` query returns nothing; the live signal lives on the
+    /// chunks. File / repo-literal candidates carry no symbol chunks and are
+    /// skipped (left `None`). Robust to the JSON bridge returning the distance as
+    /// either a number or a numeric string.
     fn fill_entry_semantic_distances(&self, candidates: &mut [EntryCandidate], qvec_literal: &str) {
         let ids: Vec<String> = candidates
             .iter()
@@ -2001,9 +2034,11 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT s.id, (s.embedding <=> {qvec}) AS dist \
-             FROM Symbol s \
-             WHERE s.id IN ({in_list}) AND s.embedding IS NOT NULL",
+            "SELECT c.source_id, MIN((ce.embedding <=> {qvec})::float8) AS dist \
+             FROM ist.Chunk c \
+             JOIN ist.ChunkEmbedding ce ON ce.chunk_id = c.id \
+             WHERE c.source_id IN ({in_list}) AND c.source_type = 'symbol' \
+             GROUP BY c.source_id",
             qvec = qvec_literal,
         );
         let raw = self
@@ -2030,6 +2065,84 @@ impl McpServer {
             if let Some(dist) = dist_by_id.get(&candidate.id) {
                 candidate.semantic_distance = Some(*dist);
             }
+        }
+    }
+
+    /// REQ-AXO-901937 / DEC-AXO-901632 — expand the entry-candidate pool with the
+    /// symbols whose chunks are semantically closest to the question.
+    ///
+    /// The lexical pool (`find_symbol_candidates`) is keyed on name / file-path
+    /// substring matches under an arbitrary `LIMIT`, so the semantically-correct
+    /// entrypoint can be absent from the pool entirely (a method the reranker
+    /// never sees can never win). This arm runs the HNSW ANN path
+    /// (`query_ann_json`) over `ist.ChunkEmbedding`, maps the closest chunks back
+    /// to their owning symbols, and appends any not already present — each
+    /// carrying its best-chunk cosine distance so the semantic-primary sort can
+    /// rank it. Pure semantic candidates get `lexical_hits = 0`, `exact = false`.
+    fn add_semantic_entry_candidates(
+        &self,
+        candidates: &mut Vec<EntryCandidate>,
+        qvec_literal: &str,
+        project: Option<&str>,
+        ann_pool: usize,
+        limit: usize,
+    ) {
+        let project_filter = Self::sql_project_filter_for_fields(project, &["c.project_code"]);
+        let sql = format!(
+            "WITH ann AS ( \
+                 SELECT ce.chunk_id, (ce.embedding <=> {qvec}) AS dist \
+                 FROM ist.ChunkEmbedding ce \
+                 ORDER BY ce.embedding <=> {qvec} \
+                 LIMIT {ann_pool} \
+             ) \
+             SELECT c.source_id, s.name, s.kind, COALESCE(c.project_code, 'unknown'), \
+                    COALESCE(c.file_path, ''), MIN(a.dist)::float8 AS dist \
+             FROM ann a \
+             JOIN ist.Chunk c ON c.id = a.chunk_id AND c.source_type = 'symbol' \
+             JOIN ist.Symbol s ON s.id = c.source_id \
+             WHERE TRUE{project_filter} \
+             GROUP BY c.source_id, s.name, s.kind, c.project_code, c.file_path \
+             ORDER BY dist ASC \
+             LIMIT {limit}",
+            qvec = qvec_literal,
+        );
+        let ef_search = ann_pool.max(40) as u32;
+        let raw = self
+            .graph_store
+            .query_ann_json(&sql, ef_search)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let existing: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.id.clone()).collect();
+        for row in rows {
+            let id = match row.first().and_then(|v| v.as_str()) {
+                Some(id) if !existing.contains(id) => id.to_string(),
+                _ => continue,
+            };
+            let name = row.get(1).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let kind = row.get(2).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let project_code = row
+                .get(3)
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let uri = row.get(4).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let dist = row.get(5).and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            });
+            candidates.push(EntryCandidate {
+                id,
+                name,
+                kind,
+                project_code,
+                uri,
+                lexical_hits: 0,
+                exact_match: false,
+                score: 0.0,
+                reasons: vec!["semantic_entry_candidate".to_string()],
+                semantic_distance: dist,
+            });
         }
     }
 
@@ -4832,6 +4945,43 @@ mod tests {
         assert_eq!(
             mixed[0].name, "relation_policy",
             "relevant semantic hit outranks a lexically-strong candidate with no embedding"
+        );
+
+        // Case 5 — a doc/prose section embeds closest to the NL question but must
+        // NOT outrank a relevant code candidate (code-retrieval tool intent).
+        let mut doc_vs_code = vec![
+            entry("4.1 Règles minimales", "section", "/repo/docs/notes.md", 0, false, Some(0.10)),
+            entry("insert_validated_relation", "method", "/repo/x.rs", 0, false, Some(0.30)),
+        ];
+        server.rerank_entry_candidates(
+            &mut doc_vs_code,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            doc_vs_code[0].name, "insert_validated_relation",
+            "a relevant code candidate must outrank a semantically-closer doc section"
+        );
+
+        // Case 6 — but with NO relevant code candidate, the best doc still anchors.
+        let mut doc_only = vec![
+            entry("4.1 Règles minimales", "section", "/repo/docs/notes.md", 0, false, Some(0.10)),
+            entry("far_method", "method", "/repo/x.rs", 0, false, Some(0.62)),
+        ];
+        server.rerank_entry_candidates(
+            &mut doc_only,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            doc_only[0].name, "4.1 Règles minimales",
+            "with no relevant code candidate, the best doc may anchor the packet"
         );
     }
 
