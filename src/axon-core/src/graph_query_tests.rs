@@ -15,7 +15,37 @@ fn expand_named_params_handles_question_mark_in_string_value() {
     let expanded = GraphStore::expand_named_params(query, &params).unwrap();
     assert_eq!(
         expanded,
-        "INSERT INTO soll.Node (id, title, description) VALUES ('REQ-AXO-XYZ', 'Title with ?', 'Does this fail? Yes or no?')"
+        "INSERT INTO soll.Node (id, title, description) VALUES ($axp$REQ-AXO-XYZ$axp$, $axp$Title with ?$axp$, $axp$Does this fail? Yes or no?$axp$)"
+    );
+}
+
+#[test]
+fn expand_named_params_dollar_quotes_apostrophes_backslashes_backticks() {
+    // REQ-AXO-901995 — string values are dollar-quoted, so apostrophes,
+    // backslashes and backticks pass through verbatim (no escaping). The old
+    // single-quote escaping broke entrench_nuance's metadata UPDATE on such text.
+    let query = "UPDATE soll.Node SET metadata = ? WHERE id = ?";
+    let params = serde_json::json!([
+        r#"{"nuances":[{"statement":"don't `panic` over a \\path\\ now"}]}"#,
+        "REQ-NEX-001"
+    ]);
+    let expanded = GraphStore::expand_named_params(query, &params).unwrap();
+    assert_eq!(
+        expanded,
+        "UPDATE soll.Node SET metadata = $axp${\"nuances\":[{\"statement\":\"don't `panic` over a \\\\path\\\\ now\"}]}$axp$ WHERE id = $axp$REQ-NEX-001$axp$"
+    );
+}
+
+#[test]
+fn expand_named_params_grows_dollar_tag_on_collision() {
+    // If the value itself contains the default tag, the tag grows so the literal
+    // stays well-formed.
+    let query = "UPDATE soll.Node SET description = ? WHERE id = ?";
+    let params = serde_json::json!(["mentions $axp$ literally", "REQ-AXO-1"]);
+    let expanded = GraphStore::expand_named_params(query, &params).unwrap();
+    assert!(
+        expanded.contains("$axp1$mentions $axp$ literally$axp1$"),
+        "tag must grow past a collision: {expanded}"
     );
 }
 
@@ -26,7 +56,7 @@ fn expand_named_params_skips_question_mark_inside_string_literal() {
     let expanded = GraphStore::expand_named_params(query, &params).unwrap();
     assert_eq!(
         expanded,
-        "SELECT * FROM Node WHERE comment = 'is it ?' AND id = 'abc'"
+        "SELECT * FROM Node WHERE comment = 'is it ?' AND id = $axp$abc$axp$"
     );
 }
 
@@ -37,7 +67,7 @@ fn expand_named_params_handles_escaped_quote_inside_literal() {
     let expanded = GraphStore::expand_named_params(query, &params).unwrap();
     assert_eq!(
         expanded,
-        "SELECT * FROM Node WHERE title = 'don''t worry ?' AND id = 'abc'"
+        "SELECT * FROM Node WHERE title = 'don''t worry ?' AND id = $axp$abc$axp$"
     );
 }
 

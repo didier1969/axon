@@ -372,6 +372,28 @@ impl GraphStore {
         Ok(res)
     }
 
+    /// REQ-AXO-901995 — render a string value as a PG literal via dollar quoting,
+    /// which needs NO escaping of apostrophes, backslashes OR backticks. The old
+    /// `'{}'.replace('\'', "''")` only escaped apostrophes; JSON payloads
+    /// (entrench `metadata.nuances`, acceptance_criteria with backticks/escapes)
+    /// also carry backslashes, which broke `entrench_nuance(confirm=true)` with a
+    /// Writer Error on very common text. The dollar tag is grown until it does not
+    /// occur in the value, so the literal is always well-formed.
+    fn pg_str_literal(v: &str) -> String {
+        let mut n = 0u32;
+        loop {
+            let tag = if n == 0 {
+                "$axp$".to_string()
+            } else {
+                format!("$axp{n}$")
+            };
+            if !v.contains(&tag) {
+                return format!("{tag}{v}{tag}");
+            }
+            n += 1;
+        }
+    }
+
     fn expand_named_params(query: &str, params: &serde_json::Value) -> Result<String> {
         if let Some(arr) = params.as_array() {
             // REQ-AXO-091 — single-pass scan that consumes one positional
@@ -408,9 +430,7 @@ impl GraphStore {
                             serde_json::Value::Null => "NULL".to_string(),
                             serde_json::Value::Bool(v) => v.to_string(),
                             serde_json::Value::Number(v) => v.to_string(),
-                            serde_json::Value::String(v) => {
-                                format!("'{}'", v.replace('\'', "''"))
-                            }
+                            serde_json::Value::String(v) => Self::pg_str_literal(v),
                             _ => {
                                 return Err(anyhow!(
                                     "Unsupported positional parameter type: {}",
@@ -440,7 +460,7 @@ impl GraphStore {
                 serde_json::Value::Null => "NULL".to_string(),
                 serde_json::Value::Bool(v) => v.to_string(),
                 serde_json::Value::Number(v) => v.to_string(),
-                serde_json::Value::String(v) => format!("'{}'", v.replace('\'', "''")),
+                serde_json::Value::String(v) => Self::pg_str_literal(v),
                 _ => {
                     return Err(anyhow!(
                         "Unsupported parameter type for ${}: {}",
