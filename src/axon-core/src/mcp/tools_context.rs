@@ -4247,9 +4247,24 @@ impl McpServer {
         } else {
             "no governing intent was found; only local support evidence is available"
         };
+        // REQ-AXO-901989 / NEX client report — a `weak` verdict caused by
+        // missing governing intent or no direct traceability is a PROOF_GAP
+        // (evidence not yet linked to this anchor), NOT a tool limitation. The
+        // client read low why/change_safety scores as an Axon defect when in
+        // fact no evidence had been attached. Surface the gap as fixable + name
+        // the exact remediation tools so the verdict is self-explanatory
+        // (PIL-AXO-002 machine-actionable, REQ-AXO-088 guidance-must-deliver).
+        let proof_gap = has_missing_governing || has_no_direct_traceability;
+        let remediation = if proof_gap {
+            json!("proof_gap, not a tool limitation: link governing intent with soll_manager(action=link, relation_type=SOLVES|REFINES) and/or attach evidence with soll_attach_evidence to this anchor — confidence rises mechanically once intent/evidence is wired.")
+        } else {
+            Value::Null
+        };
         json!({
             "level": level,
             "confidence_reason": confidence_reason,
+            "proof_gap": proof_gap,
+            "remediation": remediation,
             "automation_contract": "informational_only"
         })
     }
@@ -4627,8 +4642,36 @@ impl McpServer {
 mod tests {
     use super::ChunkCandidate;
     use super::McpServer;
+    use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+
+    #[test]
+    fn rationale_quality_flags_no_direct_traceability_as_fixable_proof_gap() {
+        // REQ-AXO-901989 / NEX — a weak verdict from no_direct_traceability must
+        // be self-explanatory as a fixable proof_gap (with remediation tools),
+        // not read as a tool limitation.
+        let states = vec![json!({"state": "no_direct_traceability", "severity": "medium"})];
+        let q = McpServer::build_rationale_quality(&states, &[], &[], &[]);
+        assert_eq!(q["level"], "weak");
+        assert_eq!(q["proof_gap"], true);
+        let remediation = q["remediation"].as_str().unwrap_or("");
+        assert!(
+            remediation.contains("soll_attach_evidence")
+                && remediation.contains("soll_manager"),
+            "remediation must name the fix tools; got: {remediation}"
+        );
+    }
+
+    #[test]
+    fn rationale_quality_no_proof_gap_when_governing_intent_present() {
+        // Governing intent present, no evidence-gap states → not a proof_gap,
+        // remediation null.
+        let governing = vec![json!({"id": "REQ-AXO-1"})];
+        let q = McpServer::build_rationale_quality(&[], &governing, &[], &[]);
+        assert_eq!(q["proof_gap"], false);
+        assert!(q["remediation"].is_null());
+    }
 
     fn candidate(
         source_id: &str,
