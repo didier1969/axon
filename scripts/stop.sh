@@ -7,6 +7,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
+# REQ-AXO-901968 — cross-project control-plane governance. Enforced BEFORE
+# axon_clear_inherited_env so the AXON_ALLOW_FOREIGN_CONTROL override survives
+# env sanitization. Internal callers (restart, promote_live_safe.sh, axonctl)
+# run from the repo and pass naturally; a foreign-project agent's cwd is refused.
+# shellcheck source=scripts/lib/axon-lifecycle-guard.sh
+source "$PROJECT_ROOT/scripts/lib/axon-lifecycle-guard.sh"
+axon_assert_lifecycle_authorized "stop" "$PROJECT_ROOT"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 # Preserve AXON_INSTANCE_KIND across env sanitization (same fix as start.sh).
