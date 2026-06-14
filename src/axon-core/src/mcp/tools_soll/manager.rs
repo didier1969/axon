@@ -684,12 +684,39 @@ impl McpServer {
                             .as_ref()
                             .map(|p| p.allowed.to_vec())
                             .unwrap_or_default();
+                        // REQ-AXO-901992 / REQ-AXO-901997 — when the (source,target)
+                        // pair admits no relation, "Allowed: []" reads as "nothing
+                        // is possible from this node", which is false and cost the
+                        // HYC/NEX consumers an extra soll_relation_schema round-trip.
+                        // Surface what the SOURCE kind CAN legally reach (the same
+                        // data soll_relation_schema returns) so the error is
+                        // self-sufficient.
+                        let source_can_reach =
+                            allowed_relation_targets_from_source(source_prefix);
+                        let reach_summary: String = source_can_reach
+                            .iter()
+                            .filter_map(|e| {
+                                let tk = e.get("target_kind")?.as_str()?;
+                                let rels: Vec<&str> = e
+                                    .get("allowed_relations")?
+                                    .as_array()?
+                                    .iter()
+                                    .filter_map(|r| r.as_str())
+                                    .collect();
+                                Some(format!("{tk} via {}", rels.join("/")))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let reverse_hint =
+                            reverse_relation_hint_payload(source_prefix, &target_prefix);
                         return Some(json!({
                             "content": [{
                                 "type": "text",
                                 "text": format!(
-                                    "relation_type `{}` is not canonical for {} → {}. Allowed: {:?}.",
-                                    relation_type, source_prefix, target_prefix, allowed
+                                    "relation_type `{}` is not canonical for {} → {} (pair-allowed: {:?}). {} can legally reach: {}. Either pick a relation_type valid for an existing target of one of those kinds, or change attach_to.",
+                                    relation_type, source_prefix, target_prefix, allowed,
+                                    source_prefix,
+                                    if reach_summary.is_empty() { "nothing (terminal kind)".to_string() } else { reach_summary }
                                 )
                             }],
                             "isError": true,
@@ -708,7 +735,9 @@ impl McpServer {
                                     "accepted_values": allowed,
                                     "source_type": source_prefix,
                                     "target_type": target_prefix,
-                                    "hint": "pick an allowed relation_type for this (source_type, target_type) pair, or change attach_to to a target whose type fits your relation",
+                                    "source_can_reach": source_can_reach,
+                                    "reverse_direction": reverse_hint,
+                                    "hint": "pick an allowed relation_type for this (source_type, target_type) pair, or change attach_to to a target whose type fits one of `source_can_reach`",
                                     "follow_up_tools": ["soll_relation_schema"],
                                 },
                                 "canonical_source": "MIL-AXO-020",

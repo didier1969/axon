@@ -599,6 +599,14 @@ impl McpServer {
                 public_tool_names.len()
             ));
         }
+        // REQ-AXO-901994 — the server tool list is authoritative; client bindings
+        // do NOT auto-refresh when the server adds tools (e.g. on promote). A
+        // capability present server-side but stale in the client reads to an LLM
+        // as "capability absent" and triggers grep fallback + wasted tokens.
+        // Surface the rule so the LLM reconnects instead of concluding absence.
+        evidence.push_str(
+            "**Client registry note:** this count is the SERVER truth. If a documented tool (e.g. `soll_manager`) is missing/uncallable in your client, your session registry is STALE (the server adds tools on promote; client bindings don't auto-refresh) — reconnect MCP to refresh; `mcp_surface_diagnostics` confirms server vs client.\n",
+        );
         let report = format!(
             "## 📌 Axon Status\n\n{}",
             format_standard_contract(

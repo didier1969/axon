@@ -108,8 +108,8 @@ impl McpServer {
                                 "content": [{
                                     "type": "text",
                                     "text": format!(
-                                        "soll_apply_plan rejected: plan.{}[{}] carries explicit id `{}`. Use logical_key for idempotence; the server allocates canonical ids.",
-                                        collection, index, id
+                                        "soll_apply_plan rejected: plan.{}[{}] carries explicit id `{}`. apply_plan is create-only (idempotent by logical_key). To UPDATE an EXISTING node by its canonical id, use soll_manager(action=update, data={{id:\"{}\", …}}) — supplying a known id as logical_key here would CREATE A DUPLICATE.",
+                                        collection, index, id, id
                                     )
                                 }],
                                 "isError": true,
@@ -133,8 +133,9 @@ impl McpServer {
                                             "status",
                                             "metadata"
                                         ],
-                                        "hint": "remove the id field; supply logical_key + title and the server returns the allocated id in the result_contract entry",
-                                        "follow_up_tools": ["soll_apply_plan"],
+                                        "hint": "To CREATE: remove the id, supply logical_key + title (server allocates the id). To UPDATE this existing node: call soll_manager(action=update, data={id, …}) — do NOT pass the id as logical_key (creates a duplicate).",
+                                        "update_path": "soll_manager(action=update, data={id, status|description|…})",
+                                        "follow_up_tools": ["soll_manager", "soll_apply_plan"],
                                     },
                                     "canonical_source": "MIL-AXO-020",
                                 },

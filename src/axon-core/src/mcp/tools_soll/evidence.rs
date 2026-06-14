@@ -75,13 +75,15 @@ impl McpServer {
                 root.join(raw_path)
             };
             if absolute.exists() {
-                if let Ok(relative) = absolute.strip_prefix(root) {
-                    diagnostics.push("resolved_existing_project_file".to_string());
-                    Some(relative.to_string_lossy().into_owned())
-                } else {
-                    diagnostics.push("resolved_existing_absolute_file".to_string());
-                    Some(absolute.to_string_lossy().into_owned())
-                }
+                // REQ-AXO-901996 — store the ABSOLUTE resolved path, not the
+                // project-relative form. A relative ref does not match
+                // `ist.IndexedFile.path` (which is absolute), so a relative-stored
+                // evidence row resolved fine at attach yet flagged
+                // `broken_file_evidence` at verify (the NEX consumer hit exactly
+                // this and had to re-attach with an absolute path). Absolute is
+                // unambiguous and matches the index + disk.
+                diagnostics.push("resolved_existing_absolute_file".to_string());
+                Some(absolute.to_string_lossy().into_owned())
             } else {
                 None
             }
