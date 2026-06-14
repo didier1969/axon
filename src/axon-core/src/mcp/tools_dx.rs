@@ -673,33 +673,79 @@ impl McpServer {
         // through to lexical-only.
         let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
-            let cosine_expr = match crate::postgres::vector::vector_literal(&emb) {
-                Ok(vec_lit) => Some(format!("(s.embedding <=> {vec_lit})")),
-                Err(_) => None,
-            };
+            let vec_literal = crate::postgres::vector::vector_literal(&emb).ok();
 
-            if let Some(cosine_expr) = cosine_expr.as_ref() {
+            if let Some(vec_lit) = vec_literal.as_ref() {
+                // REQ-AXO-901977 — `ist.Symbol.embedding` is NOT populated by the
+                // canonical pipeline (only chunks are embedded), so the historical
+                // `s.embedding <=> qvec` arm was permanently dead and `query`
+                // silently degraded to lexical. The live semantic signal lives on
+                // chunks: rank symbols by the MIN cosine distance over their
+                // embedded chunks (ANN over ist.ChunkEmbedding → owning symbol),
+                // keeping the lexical arm via LEFT JOIN so a symbol with no
+                // semantic hit still surfaces. `ORDER BY score ASC NULLS LAST`
+                // puts the semantically-relevant symbols first. The project filter
+                // is inlined inside the ANN pool (scoped queries) so AXO chunks are
+                // actually represented rather than crowded out by other tenants.
                 if project == "*" {
+                    let ann = format!(
+                        "WITH ann AS ( \
+                             SELECT ce.chunk_id, (ce.embedding <=> {vec}) AS dist \
+                             FROM ist.ChunkEmbedding ce \
+                             ORDER BY ce.embedding <=> {vec} \
+                             LIMIT 400 \
+                         ), \
+                         sym_sem AS ( \
+                             SELECT c.source_id, MIN(a.dist)::float8 AS dist \
+                             FROM ann a \
+                             JOIN ist.Chunk c ON c.id = a.chunk_id AND c.source_type = 'symbol' \
+                             GROUP BY c.source_id \
+                         ) ",
+                        vec = vec_lit,
+                    );
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, {cosine_expr} as score \
-                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                            "{ann}\
+                             SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, ss.dist AS score \
+                             FROM Symbol s \
+                             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             LEFT JOIN sym_sem ss ON ss.source_id = s.id \
                              WHERE {} \
-                                OR {cosine_expr} < 0.5 \
-                             ORDER BY score ASC LIMIT {}",
+                                OR ss.dist < 0.5 \
+                             ORDER BY score ASC NULLS LAST LIMIT {}",
                             base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
                 } else {
+                    let ann = format!(
+                        "WITH ann AS ( \
+                             SELECT ce.chunk_id, (ce.embedding <=> {vec}) AS dist \
+                             FROM ist.ChunkEmbedding ce \
+                             JOIN ist.Chunk c0 ON c0.id = ce.chunk_id AND c0.project_code = '{proj}' \
+                             ORDER BY ce.embedding <=> {vec} \
+                             LIMIT 400 \
+                         ), \
+                         sym_sem AS ( \
+                             SELECT c.source_id, MIN(a.dist)::float8 AS dist \
+                             FROM ann a \
+                             JOIN ist.Chunk c ON c.id = a.chunk_id AND c.source_type = 'symbol' \
+                             GROUP BY c.source_id \
+                         ) ",
+                        vec = vec_lit,
+                        proj = project.replace('\'', "''"),
+                    );
                     (
                         format!(
-                            "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, {cosine_expr} as score \
-                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                            "{ann}\
+                             SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, ss.dist AS score \
+                             FROM Symbol s \
+                             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             LEFT JOIN sym_sem ss ON ss.source_id = s.id \
                              WHERE s.project_code = $proj AND ( {} \
-                                OR {cosine_expr} < 0.5 \
+                                OR ss.dist < 0.5 \
                              ) \
-                             ORDER BY score ASC LIMIT {}",
+                             ORDER BY score ASC NULLS LAST LIMIT {}",
                             base_predicate, query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
