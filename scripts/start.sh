@@ -104,18 +104,25 @@ detect_gpu() {
     return 1
 }
 
-if [[ "$RUNTIME_MODE" == indexer_full || "$RUNTIME_MODE" == indexer_vector ]]; then
-    if detect_gpu; then
-        export AXON_EMBEDDING_PROVIDER="tensorrt"
-        for candidate in /usr/lib/wsl/lib/libnvidia-ml.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1; do
-            [[ -f "$candidate" ]] && export AXON_NVML_LIBRARY_PATH="$candidate" && break
-        done
-    else
-        export AXON_EMBEDDING_PROVIDER="cpu"
-        export AXON_VECTOR_WORKERS=1
-        export OMP_NUM_THREADS=4
-        export OMP_WAIT_POLICY=PASSIVE
-    fi
+if detect_gpu; then
+    # REQ-AXO-901978 (B1) — provision the GPU ORT artifact whenever a GPU is
+    # present, INCLUDING brain_only / indexer_graph. Those modes run no batch
+    # vectorization lane, but the brain's PUNCTUAL query embedding
+    # (cpu_query_service) uses the GPU when the CUDA provider library is
+    # available — the GPU is idle in those modes, so a 1-text inference is ~ms
+    # vs ~seconds on CPU (telemetry: why 24s / retrieve_context 10s / query 3.5s,
+    # all CPU-embed bound). The BATCH-lane provider policy stays cpu for
+    # non-semantic modes (canonical_embedding_provider_request_for_mode); only
+    # the query lane resolves to GPU (effective_provider_request_for_lane).
+    export AXON_EMBEDDING_PROVIDER="tensorrt"
+    for candidate in /usr/lib/wsl/lib/libnvidia-ml.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1; do
+        [[ -f "$candidate" ]] && export AXON_NVML_LIBRARY_PATH="$candidate" && break
+    done
+elif [[ "$RUNTIME_MODE" == indexer_full || "$RUNTIME_MODE" == indexer_vector ]]; then
+    export AXON_EMBEDDING_PROVIDER="cpu"
+    export AXON_VECTOR_WORKERS=1
+    export OMP_NUM_THREADS=4
+    export OMP_WAIT_POLICY=PASSIVE
 else
     export AXON_EMBEDDING_PROVIDER="cpu"
 fi

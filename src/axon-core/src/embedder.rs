@@ -22,7 +22,7 @@ use crate::vector_control::reset_vector_batch_controller_for_tests;
 use anyhow::{anyhow, Result as AnyhowResult};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{InitOptions, OutputKey, TextEmbedding};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -581,10 +581,22 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
             return explicit;
         }
 
-        // GPU is available for query embedding — no reason to force CPU.
-        // The two ORT sessions (indexer B2 + brain query) cohabit on the
-        // same GPU via CUDA time-sharing. Query embeddings are punctual
-        // (~50ms per request) so contention with the pipeline is negligible.
+        // REQ-AXO-901978 (B1) — the query lane embeds PUNCTUAL single texts.
+        // When a GPU is present and the ORT CUDA provider library is available,
+        // use it EVEN in brain_only / indexer_graph — where the BATCH-lane policy
+        // (`canonical_embedding_provider_request_for_mode`) forces `cpu` because
+        // semantic workers are disabled. In those modes the GPU is IDLE, so a
+        // 1-text inference is ~ms on GPU vs ~seconds on CPU (telemetry: why 24s,
+        // retrieve_context 10s, query 3.5s — all CPU-embed bound). fastembed's
+        // `TextEmbedding` exposes the CUDA EP (not TensorRT), so request `cuda`
+        // on this path. Falls through to the canonical (cpu) when no GPU or the
+        // provider library is missing (e.g. CPU-only host) — never a hard error.
+        if provider_runtime::current_gpu_present() && ort_cuda_provider_library_available() {
+            return "cuda".to_string();
+        }
+        // The two ORT sessions (indexer batch + brain query) cohabit on the same
+        // GPU via CUDA time-sharing in indexer modes; query embeds are punctual
+        // (~ms) so contention with the pipeline is negligible.
         return canonical_provider;
     }
 
@@ -1343,6 +1355,23 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         return Ok(Vec::new());
     }
 
+    // REQ-AXO-901978 (B3) — serve from the query-vector cache first ; only the
+    // cache MISSES are embedded. Query embedding is the dominant MCP latency
+    // (CPU BGE-large), and re-asks / retries / multi-tool flows repeat the same
+    // question — those now skip the embed entirely. Keyed by the RAW text (the
+    // BGE prefix is deterministic).
+    let mut results: Vec<Option<Vec<f32>>> =
+        texts.iter().map(|t| query_vec_cache_get(t)).collect();
+    let miss_indices: Vec<usize> = results
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    if miss_indices.is_empty() {
+        return Ok(results.into_iter().map(|r| r.unwrap_or_default()).collect());
+    }
+
     let pressure = service_guard::current_pressure();
     if !query_embedding_allowed(pressure) {
         return Err(anyhow::anyhow!(
@@ -1350,14 +1379,19 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
             pressure
         ));
     }
-    // BGE-Large-v1.5 query prefix for optimal retrieval quality.
-    let texts: Vec<String> = texts
-        .into_iter()
-        .map(|t| format!("Represent this sentence for searching relevant passages: {t}"))
+    // BGE-Large-v1.5 query prefix for optimal retrieval quality (miss texts only).
+    let prefixed: Vec<String> = miss_indices
+        .iter()
+        .map(|&i| {
+            format!(
+                "Represent this sentence for searching relevant passages: {}",
+                texts[i]
+            )
+        })
         .collect();
 
     // REQ-AXO-128 — under brain_only / indexer_graph the registered
-    // sender belongs to the in-process CPU worker spawned at boot
+    // sender belongs to the in-process query worker spawned at boot
     // (see cpu_query_service::spawn_brain_query_worker_if_needed).
     // Under indexer_vector / indexer_full the sender belongs to the
     // SemanticWorkerPool's GPU-backed worker. Either way, the routing
@@ -1369,7 +1403,56 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         ));
     };
 
-    request_query_embedding(&sender, texts)
+    let embedded = request_query_embedding(&sender, prefixed)?;
+    for (k, &idx) in miss_indices.iter().enumerate() {
+        if let Some(vector) = embedded.get(k) {
+            query_vec_cache_put(texts[idx].clone(), vector.clone());
+            results[idx] = Some(vector.clone());
+        }
+    }
+    results
+        .into_iter()
+        .map(|r| r.ok_or_else(|| anyhow::anyhow!("query embedding missing for a requested text")))
+        .collect()
+}
+
+/// REQ-AXO-901978 (B3) — bounded query→vector cache. Capacity bounds RAM
+/// (512 × 1024 f32 ≈ 2 MB) ; FIFO eviction at capacity. The embedding model is
+/// pinned for the process lifetime, so no invalidation is needed.
+const QUERY_VEC_CACHE_CAP: usize = 512;
+static QUERY_VEC_CACHE: OnceLock<Mutex<QueryVecCache>> = OnceLock::new();
+
+#[derive(Default)]
+struct QueryVecCache {
+    map: HashMap<String, Vec<f32>>,
+    order: VecDeque<String>,
+}
+
+fn query_vec_cache() -> &'static Mutex<QueryVecCache> {
+    QUERY_VEC_CACHE.get_or_init(|| Mutex::new(QueryVecCache::default()))
+}
+
+fn query_vec_cache_get(key: &str) -> Option<Vec<f32>> {
+    query_vec_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .map
+        .get(key)
+        .cloned()
+}
+
+fn query_vec_cache_put(key: String, vector: Vec<f32>) {
+    let mut cache = query_vec_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if cache.map.contains_key(&key) {
+        return;
+    }
+    if cache.map.len() >= QUERY_VEC_CACHE_CAP {
+        if let Some(evicted) = cache.order.pop_front() {
+            cache.map.remove(&evicted);
+        }
+    }
+    cache.order.push_back(key.clone());
+    cache.map.insert(key, vector);
 }
 
 /// REQ-AXO-176 — Public benchmarking facade for the in-process ORT
