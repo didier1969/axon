@@ -60,10 +60,11 @@ cargo run --manifest-path src/axon-core/Cargo.toml --release --bin axon-bench-pi
 ```
 Modes: `--gpu` (production), `--cpu` (ORT CPU EP), `--noop` (smoke, no GPU/PG). CSV output via `--csv`. Reports per-stage `items_in/out/err/bp` + Symbol/Chunk/IndexedFile/ChunkEmbedding row counts via writer ctx (reader ctx is stale during the shutdown window on the embedded test backend). See REQ-AXO-289 / CPT-AXO-054 for the topology.
 
-## Sub-Agent Policy
-- Forbidden for code exploration / symbol lookup / arch audit / codebase understanding (no MCP → 100-200K tokens wasted reconstructing IST).
-- Use Axon MCP from main thread: `query` → `inspect` → `retrieve_context` → `impact` → `anomalies` → `architectural_drift`.
-- Allowed only: shell exec (`cargo build/test`), doc writing (no source reading), MCP-independent tasks.
+## Sub-Agent Policy (GUI-PRO-027)
+- Sub-agents reach Axon MCP **first-class** (pass `project="AXO"` explicit; tools resolve via ToolSearch). Use them for parallel RCA / research / MCP reads. Caveat: each costs ~10-30K tokens, so spawn deliberately.
+- Rust **edits and builds stay serial orchestrator-side** (cargo = global lock); never run concurrent compiled-core builds across agents.
+- Never delegate: SOLL mutation, promote-live, or any destructive op.
+- Main-thread default for code nav: `query` → `inspect` → `retrieve_context` → `impact` → `anomalies` → `architectural_drift`.
 - Planning/docs → SOLL tools (`soll_manager`, `soll_work_plan`, `soll_query_context`). Never standalone markdown plans.
 
 ## Runtime — 4-verb canonical (DEC-AXO-060)
