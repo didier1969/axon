@@ -19,7 +19,13 @@ DECLARE r record;
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'axon_runtime') THEN
     FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'axon_runtime' LOOP
-      EXECUTE format('ALTER TABLE axon_runtime.%I SET SCHEMA axon', r.tablename);
+      IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'axon' AND tablename = r.tablename) THEN
+        -- axon.<table> already canonical (a prior migration moved it); the
+        -- axon_runtime copy is stale leftover — drop it, never the canonical one.
+        EXECUTE format('DROP TABLE axon_runtime.%I CASCADE', r.tablename);
+      ELSE
+        EXECUTE format('ALTER TABLE axon_runtime.%I SET SCHEMA axon', r.tablename);
+      END IF;
     END LOOP;
     DROP SCHEMA axon_runtime CASCADE;
   END IF;
