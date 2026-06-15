@@ -2612,7 +2612,6 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
         .sync_project_registry_entry(&code, Some("Test TST"), Some("/tmp/TST"))
         .unwrap();
     let req_id = format!("REQ-{code}-001");
-    let expected_stk = format!("STK-{code}-001");
     store
         .execute(&format!(
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Test Requirement', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
@@ -2646,12 +2645,20 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains(&expected_stk), "{content}");
+    assert!(content.contains("SOLL entity created"), "{content}");
+    // The allocator id is run-dependent on the SHARED dev PG (counter persists
+    // across `cargo test` invocations under a fixed scope), so assert against
+    // the ACTUAL created id from the response — never a hardcoded `STK-TST-001`,
+    // which is non-reproducible on a non-ephemeral backend (REQ-AXO-902001).
+    let created_id = result["data"]["created_id"]
+        .as_str()
+        .expect("created_id present")
+        .to_string();
 
     std::thread::sleep(std::time::Duration::from_millis(75));
 
     let count = store
-        .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Stakeholder' AND id = '{expected_stk}' AND title = 'Runtime Rust'"))
+        .query_count(&format!("SELECT count(*) FROM soll.Node WHERE type='Stakeholder' AND id = '{created_id}' AND title = 'Runtime Rust'"))
         .unwrap();
     assert_eq!(count, 1);
 }
