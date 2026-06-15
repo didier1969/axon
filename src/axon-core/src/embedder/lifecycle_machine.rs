@@ -108,7 +108,7 @@ pub fn process_lifecycle() -> &'static Arc<EmbedderLifecycle> {
 }
 
 /// Snapshot of the local `EmbedderLifecycle` state for cross-process
-/// publication via `axon_runtime.EmbedderLifecycleHeartbeat`
+/// publication via `axon.EmbedderLifecycleHeartbeat`
 /// (REQ-AXO-91572 option B). Captured at heartbeat tick by the
 /// indexer ; consumed by the brain `embedding_status` MCP tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +155,7 @@ impl LifecycleHeartbeatSnapshot {
 
 /// Spawn the heartbeat-publisher loop. Captures the local lifecycle
 /// state every `tick` and forwards it via `publish` (typically an
-/// UPSERT into `axon_runtime.EmbedderLifecycleHeartbeat`).
+/// UPSERT into `axon.EmbedderLifecycleHeartbeat`).
 ///
 /// Decoupled from `spawn_idle_watchdog` so the writer cadence + the
 /// sleep threshold can be tuned independently (REQ-AXO-91572 option

@@ -6,14 +6,14 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 /// REQ-AXO-901859 — canonical freshness window for the indexer lifecycle
-/// heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`). Shared by the
+/// heartbeat (`axon.EmbedderLifecycleHeartbeat`). Shared by the
 /// runtime status composer and the topology snapshot so both judge indexer
 /// liveness against the SAME threshold (PIL-AXO-001 single source of truth,
 /// no duplicated value). Tick is ~5 s; 30 s tolerates a few missed ticks.
 pub(crate) const EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
 
 /// REQ-AXO-901859 — the SINGLE canonical indexer liveness verdict, derived
-/// solely from the PG heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`).
+/// solely from the PG heartbeat (`axon.EmbedderLifecycleHeartbeat`).
 /// There is intentionally NO file/shadow-role fallback: under separate
 /// brain/indexer processes the file feed false-negatives, and that second
 /// source is exactly what let `status` and `embedding_status` disagree

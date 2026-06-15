@@ -12,7 +12,7 @@
 //!   missed FS event is *structurally impossible*: the old `notify` model
 //!   dropped events on inotify-queue overflow and they were gone forever.
 //!
-//! * The clock is persisted to `axon_runtime.watchman_clock` **after** each
+//! * The clock is persisted to `axon.watchman_clock` **after** each
 //!   batch is fed to pipeline A (checkpoint-after-commit). A crash between feed
 //!   and checkpoint replays the batch on restart — idempotent via the
 //!   IndexedFile dedup cache — and can never *skip* a delta.
@@ -740,7 +740,7 @@ async fn load_initial_clocks(database_url: &str, root_keys: &[String]) -> HashMa
     for key in root_keys {
         match client
             .query_opt(
-                "SELECT clock_json FROM axon_runtime.watchman_clock WHERE root = $1",
+                "SELECT clock_json FROM axon.watchman_clock WHERE root = $1",
                 &[key],
             )
             .await
@@ -799,7 +799,7 @@ async fn clock_writer_loop(mut rx: Receiver<ClockUpdate>, database_url: String) 
             .as_ref()
             .unwrap()
             .execute(
-                "INSERT INTO axon_runtime.watchman_clock (root, clock_json, is_fresh, updated_at) \
+                "INSERT INTO axon.watchman_clock (root, clock_json, is_fresh, updated_at) \
                  VALUES ($1, $2, $3, now()) \
                  ON CONFLICT (root) DO UPDATE \
                    SET clock_json = EXCLUDED.clock_json, \

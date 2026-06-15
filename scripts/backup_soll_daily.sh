@@ -2,7 +2,8 @@
 # Daily backup of the live SOLL + runtime intent schemas (axon_live).
 #
 # SCOPE (GUI-AXO-1025): dumps only the irreplaceable intent schemas
-# (soll ~7 MB, axon_runtime ~3 MB, axon) — NOT the `ist` (12 GB) or `pgmq`
+# (soll ~7 MB, axon ~3 MB — runtime telemetry consolidated into `axon` per
+# REQ-AXO-901854) — NOT the `ist` (12 GB) or `pgmq`
 # (300 MB+) schemas, which are rebuildable from source by the indexer.
 # Before this scoping the script dumped the entire 12 GB DB through gzip -9,
 # which never finished inside the window between brain restarts: the final
@@ -92,7 +93,7 @@ set -o pipefail
 # Intent schemas only — see SCOPE note in the header. `ist` and `pgmq` are
 # rebuildable and would balloon the dump to 12 GB / never finish.
 "${pg_dump_bin}" --no-owner --no-privileges --format=plain \
-  --schema=soll --schema=axon_runtime --schema=axon \
+  --schema=soll --schema=axon \
   "${DB_URL}" 2>"${tmp}.pgdump.err" | gzip -9 > "${tmp}"
 pipe_rc=("${PIPESTATUS[@]}")
 set +o pipefail

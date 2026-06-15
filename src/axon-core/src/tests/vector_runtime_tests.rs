@@ -1,13 +1,13 @@
 // REQ-AXO-901669 — coverage for LIVE vector_runtime methods.
 //
-// The `axon_runtime` schema (`VectorWorkerFault`, `VectorLaneState`, …) is
+// The `axon` schema (`VectorWorkerFault`, `VectorLaneState`, …) is
 // already bootstrapped by `GraphStore::new` → `bootstrap_global_pg_schema`
 // → `generate_global_schema` (which includes `db/ddl/02_axon_runtime.sql`
 // via `include_str!`). The schema is therefore present when tests run.
 //
 // The real failure mode for the prior `#[ignore]` round-trip tests was
 // **shared-PG contamination** : cargo runs `--lib` tests in parallel
-// against the same dev PG instance, and `axon_runtime.*` tables also
+// against the same dev PG instance, and `axon.*` tables also
 // accumulate state from live/indexer runs. Hardcoded `lane = "vector"`
 // labels collided both with sibling tests and with persisted telemetry.
 //
@@ -43,7 +43,7 @@ mod tests {
         let fault_new = format!("{lane}-new");
         let insert = |fault_id: &str, occurred: i64| {
             format!(
-                "INSERT INTO axon_runtime.VectorWorkerFault \
+                "INSERT INTO axon.VectorWorkerFault \
                  (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
                  VALUES ('{fault_id}', '{lane}', 1, 'stage_b2', 'demo', 'demo', 'cpu', 'b-x', 4, 1024, 0, {occurred}, 0)"
             )
@@ -67,7 +67,7 @@ mod tests {
         let fault_b = format!("{lane_b}-id");
         let insert = |fault_id: &str, lane: &str, occurred: i64| {
             format!(
-                "INSERT INTO axon_runtime.VectorWorkerFault \
+                "INSERT INTO axon.VectorWorkerFault \
                  (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
                  VALUES ('{fault_id}', '{lane}', 1, 'stage_b2', 'demo', 'demo', 'cpu', 'b-x', 4, 1024, 0, {occurred}, 0)"
             )
@@ -102,7 +102,7 @@ mod tests {
         let lane = unique_test_scope("vls-rt");
         store
             .execute(&format!(
-                "INSERT INTO axon_runtime.VectorLaneState \
+                "INSERT INTO axon.VectorLaneState \
                  (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
                  VALUES ('{lane}', 'running', NULL, 1, 1, 0, NULL, NULL)"
             ))

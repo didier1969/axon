@@ -18,12 +18,12 @@ SET search_path = ist, public, "$user";
 --
 -- The GPU/CPU half of the observation is OS-level (`nvidia-smi` cross-
 -- referenced with the indexer pid published in
--- axon_runtime.EmbedderLifecycleHeartbeat.pid) and lives in the Rust
+-- axon.EmbedderLifecycleHeartbeat.pid) and lives in the Rust
 -- `observed_gpu` module — it cannot be expressed in SQL.
 --
 -- Idempotent: CREATE OR REPLACE, safe to re-run on every startup.
 
-CREATE OR REPLACE FUNCTION axon_runtime.embedder_observed_state()
+CREATE OR REPLACE FUNCTION axon.embedder_observed_state()
 RETURNS jsonb
 LANGUAGE sql
 STABLE

@@ -11,7 +11,7 @@
 //! Data sources (PIL-AXO-009 PG canonical where it fits, RAM for
 //! high-frequency metrics):
 //!
-//! * `axon_runtime.dashboard_state_full(5)` — PG composite returning
+//! * `axon.dashboard_state_full(5)` — PG composite returning
 //!   `{totals, per_project, runtime_config}` in one round-trip.
 //!     - `totals` + `per_project`: TTL-cached aggregates (`db/ddl/08`).
 //!     - `runtime_config`: boot-time semi-static configs (worker
@@ -136,7 +136,7 @@ fn extract_first_cell(raw: &str) -> Value {
 /// 1 Hz brain push to a separate tokio task so the heavy SP call
 /// doesn't block /readyz, (c) bump TTL further (still ≤ 5 s).
 pub(crate) fn read_dashboard_state_full(store: &Arc<GraphStore>) -> Value {
-    match store.execute_raw_sql_gateway("SELECT axon_runtime.dashboard_state_full(3)") {
+    match store.execute_raw_sql_gateway("SELECT axon.dashboard_state_full(3)") {
         Ok(raw) => {
             let cell = extract_first_cell(&raw);
             if matches!(cell, Value::Null) {

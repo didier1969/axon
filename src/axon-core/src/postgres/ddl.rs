@@ -53,7 +53,7 @@ pub fn schema_name_for(project_code: &str) -> Result<String> {
 
 /// Global DDL: extensions + public registry + soll intent layer + IST
 /// multi-project tables (post-CPT-AXO-039 supersedure 2026-05-08) +
-/// axon_runtime indexer telemetry. Stable, byte-identical across calls
+/// axon indexer telemetry. Stable, byte-identical across calls
 /// for the same Axon binary build.
 ///
 /// REQ-AXO-91545 follow-up (MIL-AXO-020 closure): the canonical DDL
@@ -423,7 +423,7 @@ mod tests {
         assert!(joined.contains("vector_cosine_ops"));
         // create_graph assertion retired (MIL-AXO-017 Phase E).
         // No per-project schema artefacts left (with word boundaries
-        // so `axon_runtime` doesn't trigger the false-positive).
+        // so `axon` doesn't trigger the false-positive).
         assert!(!joined.contains("CREATE SCHEMA IF NOT EXISTS axo "));
         assert!(!joined.contains("CREATE SCHEMA IF NOT EXISTS axo\n"));
         assert!(!joined.contains("axo.File"));
@@ -431,19 +431,19 @@ mod tests {
     }
 
     #[test]
-    fn global_schema_includes_axon_runtime_tables() {
+    fn global_schema_includes_axon_tables() {
         // MIL-AXO-015 P4 4e seed: indexer hot-path tables must exist in PG.
         let joined = generate_global_schema().join("\n");
-        assert!(joined.contains("CREATE SCHEMA IF NOT EXISTS axon_runtime"));
+        assert!(joined.contains("CREATE SCHEMA IF NOT EXISTS axon"));
         for tbl in [
-            "axon_runtime.VectorWorkerFault",
-            "axon_runtime.VectorLaneState",
-            "axon_runtime.VectorPersistOutbox",
-            "axon_runtime.vector_batch_run",
+            "axon.VectorWorkerFault",
+            "axon.VectorLaneState",
+            "axon.VectorPersistOutbox",
+            "axon.vector_batch_run",
         ] {
             assert!(
                 joined.contains(tbl),
-                "expected axon_runtime schema to contain {tbl}"
+                "expected axon schema to contain {tbl}"
             );
         }
         // Idempotence: every CREATE TABLE statement (line-leading, not a

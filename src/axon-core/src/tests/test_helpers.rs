@@ -13,7 +13,7 @@ pub fn embedder_env_lock() -> std::sync::MutexGuard<'static, ()> {
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// REQ-AXO-901669 — per-invocation unique scope tag for tests that
-/// observe shared PG state (e.g. `axon_runtime.VectorWorkerFault`,
+/// observe shared PG state (e.g. `axon.VectorWorkerFault`,
 /// `VectorLaneState`).
 ///
 /// Cargo runs `--lib` tests in parallel against the same dev PG instance

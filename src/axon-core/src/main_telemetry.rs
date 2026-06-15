@@ -71,12 +71,19 @@ pub(crate) fn spawn_runtime_telemetry(
                 if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
                     if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
                         // Canonical, owner-observed (pipeline_v2). graph_workers_active
-                        // = Σ A-stage inflight; embed rate = indexer's own accessor.
+                        // = Σ A-stage inflight; embed rate = indexer's own accessor;
+                        // ready_queue_chunks = the dashboard funnel's backlog signal.
                         // graph_workers_started_total is left untouched — no canonical
-                        // owner source exists, so it is not fabricated here.
+                        // owner source exists, so it is not fabricated here. The
+                        // in-flight gauge (in_flight_count / oldest_in_flight_*) and
+                        // persist_queue_depth are published to the row (canonically
+                        // available cross-process) but have no existing dashboard field
+                        // to project onto — surfacing them is a presentation slice.
                         snapshot.graph_workers_active_current =
                             truth.graph_workers_active.max(0) as u64;
                         snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
+                        snapshot.ready_queue_chunks_current =
+                            truth.ready_queue_chunks.max(0) as u64;
                     }
                 }
             }

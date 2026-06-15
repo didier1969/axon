@@ -25,18 +25,18 @@ SET search_path = ist, public, "$user";
 
 -- ── Cache table ──────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS axon_runtime.dashboard_cache (
+CREATE TABLE IF NOT EXISTS axon.dashboard_cache (
     cache_key   TEXT PRIMARY KEY,
     data        JSONB NOT NULL,
     computed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
-COMMENT ON TABLE axon_runtime.dashboard_cache IS
+COMMENT ON TABLE axon.dashboard_cache IS
     'REQ-AXO-901806 — TTL-cached dashboard aggregates. Single-row-per-key cache backing dashboard_state_v1 event composition.';
 
 -- ── per-project counts function ──────────────────────────────────────
 
-CREATE OR REPLACE FUNCTION axon_runtime.dashboard_per_project_counts(ttl_secs INT DEFAULT 5)
+CREATE OR REPLACE FUNCTION axon.dashboard_per_project_counts(ttl_secs INT DEFAULT 5)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $func$
@@ -46,14 +46,14 @@ DECLARE
 BEGIN
     SELECT data, EXTRACT(EPOCH FROM (clock_timestamp() - computed_at))
     INTO cached, age_secs
-    FROM axon_runtime.dashboard_cache
+    FROM axon.dashboard_cache
     WHERE cache_key = 'per_project_counts';
 
     IF cached IS NOT NULL AND age_secs < ttl_secs THEN
         RETURN cached;
     END IF;
 
-    -- ── recompute: project the canonical ist.project_telemetry view ──
+    -- ── recompute: project the canonical axon.project_telemetry view ──
     -- Single source of truth (REQ-AXO-901865): totals + per_project + MCP
     -- tools all project THIS view, so they can never diverge. Per-project
     -- file counts ARE available (IndexedFile.project_code exists — the old
@@ -76,9 +76,9 @@ BEGIN
         '[]'::jsonb
     )
     INTO cached
-    FROM ist.project_telemetry;
+    FROM axon.project_telemetry;
 
-    INSERT INTO axon_runtime.dashboard_cache(cache_key, data, computed_at)
+    INSERT INTO axon.dashboard_cache(cache_key, data, computed_at)
     VALUES ('per_project_counts', cached, clock_timestamp())
     ON CONFLICT (cache_key) DO UPDATE
         SET data = EXCLUDED.data, computed_at = EXCLUDED.computed_at;
@@ -87,12 +87,12 @@ BEGIN
 END;
 $func$;
 
-COMMENT ON FUNCTION axon_runtime.dashboard_per_project_counts(INT) IS
+COMMENT ON FUNCTION axon.dashboard_per_project_counts(INT) IS
     'REQ-AXO-901806 — Per-project aggregates with TTL cache. Returns jsonb array.';
 
 -- ── totals function (sums across all projects) ───────────────────────
 
-CREATE OR REPLACE FUNCTION axon_runtime.dashboard_totals(ttl_secs INT DEFAULT 5)
+CREATE OR REPLACE FUNCTION axon.dashboard_totals(ttl_secs INT DEFAULT 5)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $func$
@@ -103,7 +103,7 @@ DECLARE
 BEGIN
     SELECT data, EXTRACT(EPOCH FROM (clock_timestamp() - computed_at))
     INTO cached, age_secs
-    FROM axon_runtime.dashboard_cache
+    FROM axon.dashboard_cache
     WHERE cache_key = 'totals';
 
     IF cached IS NOT NULL AND age_secs < ttl_secs THEN
@@ -112,10 +112,10 @@ BEGIN
 
     -- Re-use per_project cache (cheap if warm, expensive if cold) to
     -- compute totals — single source of truth ; rounding consistent.
-    pp := axon_runtime.dashboard_per_project_counts(ttl_secs);
+    pp := axon.dashboard_per_project_counts(ttl_secs);
 
     -- Canonical funnel (REQ-AXO-901865) — every sum projects the SAME
-    -- ist.project_telemetry rows (via pp), so totals and per_project can
+    -- axon.project_telemetry rows (via pp), so totals and per_project can
     -- never diverge, and the funnel is monotone by construction:
     --   files         = enrolled in IndexedFile (per-project sum)
     --   files_chunked = enrolled files with >=1 chunk (real A-pipeline
@@ -174,7 +174,7 @@ BEGIN
         ROUND((cached->>'embedded_60s')::numeric / 60.0, 2)
     );
 
-    INSERT INTO axon_runtime.dashboard_cache(cache_key, data, computed_at)
+    INSERT INTO axon.dashboard_cache(cache_key, data, computed_at)
     VALUES ('totals', cached, clock_timestamp())
     ON CONFLICT (cache_key) DO UPDATE
         SET data = EXCLUDED.data, computed_at = EXCLUDED.computed_at;
@@ -183,7 +183,7 @@ BEGIN
 END;
 $func$;
 
-COMMENT ON FUNCTION axon_runtime.dashboard_totals(INT) IS
+COMMENT ON FUNCTION axon.dashboard_totals(INT) IS
     'REQ-AXO-901806 — Aggregate totals across all projects with TTL cache. Returns jsonb object including coverage_pct and pending.';
 
 -- ── Runtime config snapshot (boot-written by indexer) ────────────────
@@ -197,13 +197,13 @@ COMMENT ON FUNCTION axon_runtime.dashboard_totals(INT) IS
 -- 15+ config args from main_telemetry.rs → compose_dashboard_state_v1
 -- on every 1 Hz tick.
 
-CREATE TABLE IF NOT EXISTS axon_runtime.runtime_config_snapshot (
+CREATE TABLE IF NOT EXISTS axon.runtime_config_snapshot (
     runtime_role  TEXT PRIMARY KEY,
     config        JSONB NOT NULL,
     written_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
-COMMENT ON TABLE axon_runtime.runtime_config_snapshot IS
+COMMENT ON TABLE axon.runtime_config_snapshot IS
     'REQ-AXO-901806 F2 — boot-time semi-static runtime configs (pipeline_a/b workers + batch sizes, notify_channel, coldstart_poll_interval_secs, a3_to_b1_buffer_cap, ingress_drain_batch). UPSERT by runtime_role at process startup.';
 
 -- ── Composite dashboard_state_full function ──────────────────────────
@@ -213,7 +213,7 @@ COMMENT ON TABLE axon_runtime.runtime_config_snapshot IS
 -- in-memory metrics (rates, queues, scheduler state, embedder state,
 -- identity) to assemble the full event.
 
-CREATE OR REPLACE FUNCTION axon_runtime.dashboard_state_full(p_ttl_secs INT DEFAULT 5)
+CREATE OR REPLACE FUNCTION axon.dashboard_state_full(p_ttl_secs INT DEFAULT 5)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $func$
@@ -222,17 +222,17 @@ DECLARE
 BEGIN
     SELECT config
     INTO cfg
-    FROM axon_runtime.runtime_config_snapshot
+    FROM axon.runtime_config_snapshot
     WHERE runtime_role = 'indexer'
     LIMIT 1;
 
     RETURN jsonb_build_object(
-        'totals',         axon_runtime.dashboard_totals(p_ttl_secs),
-        'per_project',    axon_runtime.dashboard_per_project_counts(p_ttl_secs),
+        'totals',         axon.dashboard_totals(p_ttl_secs),
+        'per_project',    axon.dashboard_per_project_counts(p_ttl_secs),
         'runtime_config', COALESCE(cfg, '{}'::jsonb)
     );
 END;
 $func$;
 
-COMMENT ON FUNCTION axon_runtime.dashboard_state_full(INT) IS
+COMMENT ON FUNCTION axon.dashboard_state_full(INT) IS
     'REQ-AXO-901806 — Composite dashboard state from TTL-cached aggregates + runtime config snapshot. Single round-trip for the brain 1 Hz tick.';

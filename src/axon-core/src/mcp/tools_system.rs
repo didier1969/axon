@@ -423,7 +423,7 @@ impl McpServer {
             .execute_raw_sql_gateway(&format!(
                 "SELECT project_code, files_total, files_chunked, symbols, \
                         chunks_total, chunks_embedded, chunks_pending, edges \
-                 FROM ist.project_telemetry{} ORDER BY chunks_total DESC",
+                 FROM axon.project_telemetry{} ORDER BY chunks_total DESC",
                 where_project
             ))
             .ok()

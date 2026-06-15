@@ -10,7 +10,7 @@
 //     versions, so a misconfigured client database fails fast at brain
 //     bootstrap.
 //   - `ddl::generate_global_schema` (P2; expanded 2026-05-08 to provision
-//     multi-project IST tables + axon_runtime telemetry + AGE labels).
+//     multi-project IST tables + axon telemetry + AGE labels).
 //   - `ddl::generate_project_schema(project_code)` (post-CPT-AXO-039
 //     supersedure 2026-05-08): no-op DDL, kept for API stability +
 //     project_code injection guard.

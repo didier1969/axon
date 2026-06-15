@@ -107,7 +107,7 @@ impl McpServer {
         }
 
         // REQ-AXO-901859 — SINGLE canonical liveness authority: the PG
-        // heartbeat (`axon_runtime.EmbedderLifecycleHeartbeat`), the same
+        // heartbeat (`axon.EmbedderLifecycleHeartbeat`), the same
         // source `embedding_status` trusts. No file/shadow-role fallback —
         // that second source is exactly what let `status` and
         // `embedding_status` disagree (one saw a frozen file feed, the other

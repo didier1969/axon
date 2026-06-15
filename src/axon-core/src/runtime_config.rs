@@ -2,7 +2,7 @@
 //!
 //! At indexer boot, read the env vars that drive worker counts, batch
 //! sizes and NOTIFY channel, then UPSERT a single row into
-//! `axon_runtime.runtime_config_snapshot` so the dashboard state
+//! `axon.runtime_config_snapshot` so the dashboard state
 //! composition (1 Hz) reads them via PG instead of receiving 15+ args
 //! from `main_telemetry`. Aligns with PIL-AXO-009 (PG canonical) without
 //! write amplification — the row is written once per process boot.
@@ -98,7 +98,7 @@ pub fn write_indexer_config_snapshot(store: &Arc<GraphStore>) -> Result<()> {
     let config = compose_indexer_config();
     let config_json = serde_json::to_string(&config)?.replace('\'', "''");
     let sql = format!(
-        "INSERT INTO axon_runtime.runtime_config_snapshot (runtime_role, config) \
+        "INSERT INTO axon.runtime_config_snapshot (runtime_role, config) \
          VALUES ('indexer', '{}'::jsonb) \
          ON CONFLICT (runtime_role) DO UPDATE \
             SET config = EXCLUDED.config, written_at = clock_timestamp()",

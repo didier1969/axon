@@ -1,15 +1,35 @@
 -- Axon canonical schema — runtime telemetry + audit.
 -- Indexer hot-path tables that don't belong to any project's IST namespace.
--- Isolated in `axon_runtime` so they're independent from SOLL + per-project schemas.
+-- They live in the `axon` schema (PIL-AXO-001 ownership: ist=code,
+-- soll=intent, axon=runtime). REQ-AXO-901854 consolidated the former
+-- `axon_runtime` schema into `axon` — the `_runtime` suffix was a naming
+-- smell (GUI-PRO-108) and runtime truth belongs to the `axon` namespace.
 -- Idempotent: safe to re-run on every startup.
 
-CREATE SCHEMA IF NOT EXISTS axon_runtime;
+CREATE SCHEMA IF NOT EXISTS axon;
+
+-- ── REQ-AXO-901854: one-time consolidation axon_runtime → axon ─────────
+-- Move any surviving tables into `axon` (preserving DATA — e.g. the
+-- watchman_clock reconciliation cursor), then drop the legacy schema with
+-- CASCADE (its functions/views are recreated in `axon` by 08/09 — the
+-- dashboard functions resolve their dependencies by name at call time, no
+-- hard catalog dependency). No-op once the schema is gone.
+DO $$
+DECLARE r record;
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'axon_runtime') THEN
+    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'axon_runtime' LOOP
+      EXECUTE format('ALTER TABLE axon_runtime.%I SET SCHEMA axon', r.tablename);
+    END LOOP;
+    DROP SCHEMA axon_runtime CASCADE;
+  END IF;
+END $$;
 
 -- ── Tables ───────────────────────────────────────────────────────────
 
 -- Vector lane fatal-fault log. Captures stage + reason + provider so
 -- the optimiser can rate-limit retries on a specific lane/worker.
-CREATE TABLE IF NOT EXISTS axon_runtime.VectorWorkerFault (
+CREATE TABLE IF NOT EXISTS axon.VectorWorkerFault (
     fault_id         TEXT PRIMARY KEY,
     lane             TEXT,
     worker_id        BIGINT,
@@ -27,7 +47,7 @@ CREATE TABLE IF NOT EXISTS axon_runtime.VectorWorkerFault (
 
 -- Per-lane current state (KV by lane). Touched by both the embedder
 -- and the optimiser.
-CREATE TABLE IF NOT EXISTS axon_runtime.VectorLaneState (
+CREATE TABLE IF NOT EXISTS axon.VectorLaneState (
     lane                TEXT PRIMARY KEY,
     state               TEXT,
     reason              TEXT,
@@ -40,7 +60,7 @@ CREATE TABLE IF NOT EXISTS axon_runtime.VectorLaneState (
 
 -- Persist outbox bridging GPU embedding output and the PG ChunkEmbedding
 -- writer. Lease columns implement single-writer claim semantics.
-CREATE TABLE IF NOT EXISTS axon_runtime.VectorPersistOutbox (
+CREATE TABLE IF NOT EXISTS axon.VectorPersistOutbox (
     outbox_id              TEXT PRIMARY KEY,
     run_id                 TEXT,
     model_id               TEXT,
@@ -64,7 +84,7 @@ CREATE TABLE IF NOT EXISTS axon_runtime.VectorPersistOutbox (
 
 -- Bench / production batch-run telemetry. Lower-case identifier matches
 -- the column naming used by axon-bench-pipeline-v2 CSV exporters.
-CREATE TABLE IF NOT EXISTS axon_runtime.vector_batch_run (
+CREATE TABLE IF NOT EXISTS axon.vector_batch_run (
     run_id                       TEXT   PRIMARY KEY,
     prepare_started_at_ms        BIGINT NOT NULL DEFAULT 0,
     prepare_finished_at_ms       BIGINT NOT NULL DEFAULT 0,
@@ -105,7 +125,7 @@ CREATE TABLE IF NOT EXISTS axon_runtime.vector_batch_run (
 -- needs to observe that state without sharing the process. Each role
 -- UPSERTs its row every `heartbeat_ms`; readers should treat rows older
 -- than ~2x heartbeat_ms as stale.
-CREATE TABLE IF NOT EXISTS axon_runtime.EmbedderLifecycleHeartbeat (
+CREATE TABLE IF NOT EXISTS axon.EmbedderLifecycleHeartbeat (
     process_role   TEXT   PRIMARY KEY,   -- 'indexer' | 'brain'
     phase          TEXT   NOT NULL,      -- 'ready' | 'sleeping'
     last_used_ms   BIGINT NOT NULL,
@@ -120,37 +140,61 @@ CREATE TABLE IF NOT EXISTS axon_runtime.EmbedderLifecycleHeartbeat (
 -- cross-references a remote pid. `compute` ∈ {GPU,CPU}; `compute_source` ∈
 -- {nvidia_smi,unknown}. `build_id` lets the brain confirm the paired indexer
 -- runs the same release. Idempotent for existing instances.
-ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS compute        TEXT;
-ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS compute_source TEXT;
-ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS build_id       TEXT;
 
--- REQ-AXO-901854 (additive foundation slice): cross-process indexer runtime
--- truth. Rates/workers were previously sourced from a brain-LOCAL telemetry
--- snapshot (empty under brain_only — the indexer, not the brain, runs the
--- pipeline). The indexer now publishes values observed at the OWNER every
--- heartbeat tick (~5 s, one UPSERT/role, NOT per-file); the brain READS this
--- row and projects it (PIL-AXO-001 — one canonical truth, observed at owner).
--- One row per process_role, like EmbedderLifecycleHeartbeat.
+-- REQ-AXO-901854: cross-process indexer runtime truth. Rates/workers/queues
+-- were previously sourced from a brain-LOCAL telemetry snapshot (empty under
+-- brain_only — the indexer, not the brain, runs the pipeline). The indexer
+-- now publishes values observed at the OWNER every heartbeat tick (~5 s, one
+-- UPSERT/role, NOT per-file); the brain READS this row and projects it
+-- (PIL-AXO-001 — one canonical truth, observed at owner). One row per
+-- process_role, like EmbedderLifecycleHeartbeat.
 --
 -- CANONICAL SOURCES ONLY (every column resolves to the real pipeline_v2 owner
 -- state, never a brain-local proxy or a dead v1 counter):
---   * graph_workers_active      = Σ inflight of pipeline A stages A1/A2/A3
---                                 (pipeline_v2 StageMetrics — busy graph workers).
+--   * graph_workers_active        = Σ inflight of pipeline A stages A1/A2/A3
+--                                   (pipeline_v2 StageMetrics — busy graph workers).
 --   * chunk_embeddings_per_second = the indexer's own embed-rate accessor.
+--   * in_flight_*                 = RAM in-flight registry (REQ-AXO-901919,
+--                                   commit 0b860166) — oldest item + count.
+--   * *_queue_depth               = pipeline_v2 owner channel depths.
 -- A cumulative "workers_started" gauge is intentionally NOT published: with
 -- fixed pipeline_v2 worker pools there is no canonical owner source for it
 -- (the legacy GRAPH_WORKERS_STARTED_TOTAL counter is dead under pipeline_v2),
--- so publishing it would be a non-canonical output. Queue depths, the in-flight
--- gauge (REQ-AXO-901919) and the axon_runtime→axon rename ride later slices.
-CREATE TABLE IF NOT EXISTS axon_runtime.indexer_runtime_truth (
-    process_role               TEXT   PRIMARY KEY,        -- 'indexer'
-    heartbeat_ms               BIGINT NOT NULL,           -- publish wall-clock; readers gate on freshness
-    graph_workers_active       BIGINT NOT NULL DEFAULT 0, -- Σ inflight of pipeline A (busy graph workers)
-    chunk_embeddings_per_second DOUBLE PRECISION NOT NULL DEFAULT 0  -- pipeline B embed throughput
+-- so publishing it would be a non-canonical output.
+CREATE TABLE IF NOT EXISTS axon.indexer_runtime_truth (
+    process_role                TEXT   PRIMARY KEY,        -- 'indexer'
+    heartbeat_ms                BIGINT NOT NULL,           -- publish wall-clock; readers gate on freshness
+    graph_workers_active        BIGINT NOT NULL DEFAULT 0, -- Σ inflight of pipeline A (busy graph workers)
+    chunk_embeddings_per_second DOUBLE PRECISION NOT NULL DEFAULT 0,  -- pipeline B embed throughput
+    -- REQ-AXO-901919 in-flight gauge (RAM registry, commit 0b860166)
+    in_flight_count             BIGINT NOT NULL DEFAULT 0, -- items currently in flight across A
+    oldest_in_flight_path       TEXT,                      -- path of the earliest-started item (NULL when idle)
+    oldest_in_flight_stage      TEXT,                      -- its stage (A1/A2/A3)
+    oldest_in_flight_age_ms     BIGINT NOT NULL DEFAULT 0, -- how long it has been in flight
+    -- REQ-AXO-901854 queue depths (pipeline_v2 owner gauges; ready_queue_chunks
+    -- is the dashboard funnel's canonical backlog signal)
+    ready_queue_chunks          BIGINT NOT NULL DEFAULT 0, -- chunks queued A→B (ready queue)
+    persist_queue_depth         BIGINT NOT NULL DEFAULT 0  -- queued VectorPersistOutbox rows
 );
+-- Additive column evolution for rows migrated from the foundation slice.
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS in_flight_count         BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS oldest_in_flight_path   TEXT;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS oldest_in_flight_stage  TEXT;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS oldest_in_flight_age_ms BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS ready_queue_chunks      BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS persist_queue_depth     BIGINT NOT NULL DEFAULT 0;
 
 -- REQ-AXO-901893: Watchman reconciliation cursor, one row per watched root.
 -- The indexer threads `clock_json` back into the next `since` subscription so
@@ -161,7 +205,7 @@ CREATE TABLE IF NOT EXISTS axon_runtime.indexer_runtime_truth (
 -- it can never SKIP a delta. Replaces the inotify event stream whose dropped
 -- events were unrecoverable. `clock` is an opaque Watchman clockspec string
 -- (`c:PID:N` / SCM-aware fat clock) — stored verbatim, never parsed.
-CREATE TABLE IF NOT EXISTS axon_runtime.watchman_clock (
+CREATE TABLE IF NOT EXISTS axon.watchman_clock (
     root        TEXT        PRIMARY KEY,            -- absolute resolved project root
     clock_json  JSONB       NOT NULL,               -- serialized watchman_client::Clock
     is_fresh    BOOLEAN     NOT NULL DEFAULT false,  -- last result was a fresh-instance rebuild
@@ -171,11 +215,11 @@ CREATE TABLE IF NOT EXISTS axon_runtime.watchman_clock (
 -- ── Indexes ──────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx
-    ON axon_runtime.VectorPersistOutbox (status, queued_at_ms);
+    ON axon.VectorPersistOutbox (status, queued_at_ms);
 CREATE INDEX IF NOT EXISTS vector_persist_outbox_lease_idx
-    ON axon_runtime.VectorPersistOutbox (lease_owner, lease_heartbeat_at_ms);
+    ON axon.VectorPersistOutbox (lease_owner, lease_heartbeat_at_ms);
 CREATE INDEX IF NOT EXISTS vector_persist_outbox_claim_idx
-    ON axon_runtime.VectorPersistOutbox (claim_token);
+    ON axon.VectorPersistOutbox (claim_token);
 
 CREATE INDEX IF NOT EXISTS vector_batch_run_kind_started_idx
-    ON axon_runtime.vector_batch_run (instance_kind, runtime_mode, started_at_ms);
+    ON axon.vector_batch_run (instance_kind, runtime_mode, started_at_ms);

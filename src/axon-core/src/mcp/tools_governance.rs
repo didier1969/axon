@@ -63,16 +63,16 @@ impl McpServer {
         // this fix; diagnose's three SUM()s had been missed (returned `known
         // files: 0` despite a populated IndexedFile).
         let known = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(files_chunked), 0)::BIGINT FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(files_chunked), 0)::BIGINT FROM axon.project_telemetry{}",
             where_project
         ));
         let global_known = self
-            .sql_scalar("SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM ist.project_telemetry");
+            .sql_scalar("SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry");
         let pending = 0i64;
         let indexing = 0i64;
         let completed = known;
         let symbols = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(symbols), 0)::BIGINT FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(symbols), 0)::BIGINT FROM axon.project_telemetry{}",
             where_project
         ));
         // Post-MIL-AXO-017: edge counts from canonical ist.Edge table.
@@ -288,7 +288,7 @@ impl McpServer {
         // and counts correctly. (The broader gateway numeric-render gap is
         // tracked separately for a class-level renderer fix.)
         let query = format!(
-            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM ist.project_telemetry{}",
+            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry{}",
             where_project
         );
 

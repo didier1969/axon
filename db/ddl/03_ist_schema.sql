@@ -391,7 +391,8 @@ CREATE OR REPLACE TRIGGER trg_chunk_notify_pending
 -- CASCADE is safe — the dashboard_state functions query this view by name
 -- at call time (no hard catalog dependency), so they are not dropped.
 DROP VIEW IF EXISTS ist.project_telemetry CASCADE;
-CREATE VIEW ist.project_telemetry AS
+DROP VIEW IF EXISTS axon.project_telemetry CASCADE;
+CREATE VIEW axon.project_telemetry AS
 SELECT
     p.code AS project_code,
     p.name,

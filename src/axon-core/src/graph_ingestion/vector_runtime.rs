@@ -11,13 +11,13 @@ use super::{
 
 impl GraphStore {
     /// REQ-AXO-271 slice 2e (PG canonical only, post-MIL-AXO-017) :
-    /// schema-qualify an `axon_runtime` table reference.
-    fn axon_runtime_table_ref(&self, table: &'static str) -> String {
-        format!("axon_runtime.{table}")
+    /// schema-qualify an `axon` table reference.
+    fn axon_table_ref(&self, table: &'static str) -> String {
+        format!("axon.{table}")
     }
 
     pub fn latest_vector_worker_fault(&self, lane: &str) -> Result<Option<VectorWorkerFault>> {
-        let table_ref = self.axon_runtime_table_ref("VectorWorkerFault");
+        let table_ref = self.axon_table_ref("VectorWorkerFault");
         let raw = self.query_json_writer(&format!(
             "SELECT fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt \
              FROM {table_ref} \
@@ -78,7 +78,7 @@ impl GraphStore {
     }
 
     pub fn vector_lane_state_record(&self, lane: &str) -> Result<Option<VectorLaneStateRecord>> {
-        let table_ref = self.axon_runtime_table_ref("VectorLaneState");
+        let table_ref = self.axon_table_ref("VectorLaneState");
         let raw = self.query_json_writer(&format!(
             "SELECT lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id \
              FROM {table_ref} \
@@ -123,7 +123,7 @@ impl GraphStore {
         &self,
         stale_before_ms: i64,
     ) -> Result<usize> {
-        let outbox_ref = self.axon_runtime_table_ref("VectorPersistOutbox");
+        let outbox_ref = self.axon_table_ref("VectorPersistOutbox");
         let recovered = usize::try_from(self.query_count(&format!(
             "SELECT count(*) FROM {outbox_ref} \
              WHERE status = 'inflight' \
@@ -179,7 +179,7 @@ impl GraphStore {
         &self,
         process_role: &str,
     ) -> Result<Option<EmbedderLifecycleHeartbeatRecord>> {
-        let table_ref = self.axon_runtime_table_ref("EmbedderLifecycleHeartbeat");
+        let table_ref = self.axon_table_ref("EmbedderLifecycleHeartbeat");
         let raw = self.query_json_writer(&format!(
             "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id \
              FROM {table_ref} \
@@ -228,10 +228,10 @@ impl GraphStore {
         }))
     }
 
-    /// REQ-AXO-901854 (additive foundation slice) — UPSERT the indexer's
-    /// observed worker + embed-rate counters into the cross-process truth
-    /// table. Called every heartbeat tick by the indexer (pipeline owner);
-    /// the brain reads the row via `latest_indexer_runtime_truth`.
+    /// REQ-AXO-901854 — UPSERT the indexer's observed worker + embed-rate +
+    /// in-flight + queue counters into the cross-process truth table. Called
+    /// every heartbeat tick by the indexer (pipeline owner); the brain reads
+    /// the row via `latest_indexer_runtime_truth`.
     pub fn record_indexer_runtime_truth(&self, row: &IndexerRuntimeTruthRecord) -> Result<()> {
         self.execute(&build_indexer_runtime_truth_upsert_sql(row))
     }
@@ -243,9 +243,11 @@ impl GraphStore {
         &self,
         process_role: &str,
     ) -> Result<Option<IndexerRuntimeTruthRecord>> {
-        let table_ref = self.axon_runtime_table_ref("indexer_runtime_truth");
+        let table_ref = self.axon_table_ref("indexer_runtime_truth");
         let raw = self.query_json_writer(&format!(
-            "SELECT process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second \
+            "SELECT process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
+                    in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
+                    oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -257,6 +259,11 @@ impl GraphStore {
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
+        };
+        let opt_str = |v: Option<&serde_json::Value>| {
+            v.and_then(|value| value.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
         };
         Ok(Some(IndexerRuntimeTruthRecord {
             process_role: row
@@ -270,11 +277,17 @@ impl GraphStore {
                 .get(3)
                 .and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
                 .unwrap_or_default(),
+            in_flight_count: row.get(4).and_then(parse_i64_field).unwrap_or_default(),
+            oldest_in_flight_path: opt_str(row.get(5)),
+            oldest_in_flight_stage: opt_str(row.get(6)),
+            oldest_in_flight_age_ms: row.get(7).and_then(parse_i64_field).unwrap_or_default(),
+            ready_queue_chunks: row.get(8).and_then(parse_i64_field).unwrap_or_default(),
+            persist_queue_depth: row.get(9).and_then(parse_i64_field).unwrap_or_default(),
         }))
     }
 
     /// DEC-AXO-901626 — PG-canonical embedder observation in one round-trip
-    /// via `axon_runtime.embedder_observed_state()`. Feeds the brain
+    /// via `axon.embedder_observed_state()`. Feeds the brain
     /// composer's `embedder_runtime` block (throughput + staleness) and the
     /// `pg_inferred` GPU fallback when `nvidia-smi` is unreachable.
     pub fn embedder_observed_state(&self) -> Result<EmbedderObservedState> {
@@ -282,7 +295,7 @@ impl GraphStore {
             "SELECT (s->>'embedded_60s')::bigint, \
                     (s->>'embedded_total')::bigint, \
                     (s->>'oldest_pending_age_s')::bigint \
-             FROM (SELECT axon_runtime.embedder_observed_state() AS s) q",
+             FROM (SELECT axon.embedder_observed_state() AS s) q",
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let Some(row) = rows.into_iter().next() else {
@@ -310,7 +323,7 @@ fn build_lifecycle_heartbeat_upsert_sql(
         None => "NULL".to_string(),
     };
     format!(
-        "INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat \
+        "INSERT INTO axon.EmbedderLifecycleHeartbeat \
          (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id) \
          VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
@@ -336,30 +349,49 @@ fn build_lifecycle_heartbeat_upsert_sql(
 /// `GraphStore`. `chunk_embeddings_per_second` is a float — formatted with a
 /// fixed precision so the literal is deterministic and locale-independent.
 fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> String {
+    // Optional oldest-in-flight identifiers: quoted string literal or NULL.
+    let opt_text_sql = |value: &Option<String>| match value.as_deref() {
+        Some(text) => format!("'{}'", GraphStore::escape_sql(text)),
+        None => "NULL".to_string(),
+    };
     format!(
-        "INSERT INTO axon_runtime.indexer_runtime_truth \
-         (process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second) \
-         VALUES ('{}', {}, {}, {:.6}) \
+        "INSERT INTO axon.indexer_runtime_truth \
+         (process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
+          in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
+          oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth) \
+         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             heartbeat_ms = EXCLUDED.heartbeat_ms, \
             graph_workers_active = EXCLUDED.graph_workers_active, \
-            chunk_embeddings_per_second = EXCLUDED.chunk_embeddings_per_second",
+            chunk_embeddings_per_second = EXCLUDED.chunk_embeddings_per_second, \
+            in_flight_count = EXCLUDED.in_flight_count, \
+            oldest_in_flight_path = EXCLUDED.oldest_in_flight_path, \
+            oldest_in_flight_stage = EXCLUDED.oldest_in_flight_stage, \
+            oldest_in_flight_age_ms = EXCLUDED.oldest_in_flight_age_ms, \
+            ready_queue_chunks = EXCLUDED.ready_queue_chunks, \
+            persist_queue_depth = EXCLUDED.persist_queue_depth",
         GraphStore::escape_sql(&row.process_role),
         row.heartbeat_ms,
         row.graph_workers_active,
         row.chunk_embeddings_per_second,
+        row.in_flight_count,
+        opt_text_sql(&row.oldest_in_flight_path),
+        opt_text_sql(&row.oldest_in_flight_stage),
+        row.oldest_in_flight_age_ms,
+        row.ready_queue_chunks,
+        row.persist_queue_depth,
     )
 }
 
 #[cfg(test)]
 mod tests {
     // MIL-AXO-015 P4 4e: SQL-shape contract tests for the writer
-    // branches that route to `axon_runtime.X` under PG. The methods
+    // branches that route to `axon.X` under PG. The methods
     // themselves require a live GraphStore; these tests mirror the
     // string composition so the dual-backend invariant is locked in.
 
     fn pg_fault_sql() -> String {
-        "INSERT INTO axon_runtime.VectorWorkerFault \
+        "INSERT INTO axon.VectorWorkerFault \
          (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
          VALUES ('f-1', 'vector', 1, 'init', 'reason', 'class', 'cuda', NULL, 0, 0, 0, 0, 0) \
          ON CONFLICT (fault_id) DO UPDATE SET \
@@ -371,7 +403,7 @@ mod tests {
     }
 
     fn pg_outbox_sql() -> String {
-        "INSERT INTO axon_runtime.VectorPersistOutbox \
+        "INSERT INTO axon.VectorPersistOutbox \
          (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
          VALUES ('outbox-1', 'run-1', 'code-1024', 'queued', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, '{}') \
          ON CONFLICT (outbox_id) DO UPDATE SET \
@@ -386,7 +418,7 @@ mod tests {
     }
 
     fn pg_lane_sql() -> String {
-        "INSERT INTO axon_runtime.VectorLaneState \
+        "INSERT INTO axon.VectorLaneState \
          (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
          VALUES ('vector', 'running', NULL, 0, NULL, 0, NULL, NULL) \
          ON CONFLICT (lane) DO UPDATE SET \
@@ -396,9 +428,9 @@ mod tests {
     }
 
     #[test]
-    fn pg_fault_sql_targets_axon_runtime_schema() {
+    fn pg_fault_sql_targets_axon_schema() {
         let sql = pg_fault_sql();
-        assert!(sql.contains("INSERT INTO axon_runtime.VectorWorkerFault"));
+        assert!(sql.contains("INSERT INTO axon.VectorWorkerFault"));
         assert!(sql.contains("ON CONFLICT (fault_id) DO UPDATE"));
         // Must update every non-key column on conflict.
         for col in [
@@ -423,9 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn pg_lane_sql_targets_axon_runtime_schema() {
+    fn pg_lane_sql_targets_axon_schema() {
         let sql = pg_lane_sql();
-        assert!(sql.contains("INSERT INTO axon_runtime.VectorLaneState"));
+        assert!(sql.contains("INSERT INTO axon.VectorLaneState"));
         assert!(sql.contains("ON CONFLICT (lane) DO UPDATE"));
         for col in [
             "state",
@@ -444,9 +476,9 @@ mod tests {
     }
 
     #[test]
-    fn pg_outbox_sql_targets_axon_runtime_schema() {
+    fn pg_outbox_sql_targets_axon_schema() {
         let sql = pg_outbox_sql();
-        assert!(sql.contains("INSERT INTO axon_runtime.VectorPersistOutbox"));
+        assert!(sql.contains("INSERT INTO axon.VectorPersistOutbox"));
         assert!(sql.contains("ON CONFLICT (outbox_id) DO UPDATE"));
         for col in [
             "run_id",
@@ -477,13 +509,13 @@ mod tests {
 
     #[test]
     fn pg_branches_use_explicit_schema_qualifier() {
-        // CPT-AXO-039 + axon_runtime invariant: every PG-branch SQL must
-        // qualify the table with `axon_runtime.` so PG can resolve it
+        // CPT-AXO-039 + axon invariant: every PG-branch SQL must
+        // qualify the table with `axon.` so PG can resolve it
         // outside the per-project IST schemas.
         for sql in [pg_fault_sql(), pg_lane_sql(), pg_outbox_sql()] {
             assert!(
-                sql.contains("axon_runtime."),
-                "PG SQL missing axon_runtime schema qualifier"
+                sql.contains("axon."),
+                "PG SQL missing axon schema qualifier"
             );
         }
     }
@@ -504,7 +536,7 @@ mod tests {
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // Shape contract.
-        assert!(sql.contains("INSERT INTO axon_runtime.EmbedderLifecycleHeartbeat"));
+        assert!(sql.contains("INSERT INTO axon.EmbedderLifecycleHeartbeat"));
         assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
         for col in [
             "phase",
@@ -540,14 +572,26 @@ mod tests {
             heartbeat_ms: 1_700_000_005_000,
             graph_workers_active: 7,
             chunk_embeddings_per_second: 124.5,
+            in_flight_count: 3,
+            oldest_in_flight_path: Some("/repo/src/big.rs".to_string()),
+            oldest_in_flight_stage: Some("A2".to_string()),
+            oldest_in_flight_age_ms: 4200,
+            ready_queue_chunks: 512,
+            persist_queue_depth: 9,
         };
         let sql = super::build_indexer_runtime_truth_upsert_sql(&row);
-        assert!(sql.contains("INSERT INTO axon_runtime.indexer_runtime_truth"));
+        assert!(sql.contains("INSERT INTO axon.indexer_runtime_truth"));
         assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
         for col in [
             "heartbeat_ms",
             "graph_workers_active",
             "chunk_embeddings_per_second",
+            "in_flight_count",
+            "oldest_in_flight_path",
+            "oldest_in_flight_stage",
+            "oldest_in_flight_age_ms",
+            "ready_queue_chunks",
+            "persist_queue_depth",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -562,6 +606,20 @@ mod tests {
         assert!(sql.contains("7"));
         // Float formatted with fixed precision (locale-independent).
         assert!(sql.contains("124.500000"), "{sql}");
+        // In-flight gauge + queues plumbed (REQ-AXO-901919 / queue depths).
+        assert!(sql.contains("'/repo/src/big.rs'"), "{sql}");
+        assert!(sql.contains("'A2'"), "{sql}");
+        assert!(sql.contains("4200"), "{sql}");
+        assert!(sql.contains("512"), "{sql}");
+        // Oldest-in-flight identifiers are NULL when idle, never empty string.
+        let idle = IndexerRuntimeTruthRecord {
+            oldest_in_flight_path: None,
+            oldest_in_flight_stage: None,
+            in_flight_count: 0,
+            ..row
+        };
+        let idle_sql = super::build_indexer_runtime_truth_upsert_sql(&idle);
+        assert!(idle_sql.contains("NULL"), "{idle_sql}");
     }
 
     #[test]

@@ -124,7 +124,7 @@ pub struct VectorWorkerFault {
 }
 
 /// REQ-AXO-91572 option B — cross-process embedder state row read from
-/// `axon_runtime.EmbedderLifecycleHeartbeat`. The brain consumes
+/// `axon.EmbedderLifecycleHeartbeat`. The brain consumes
 /// indexer-written rows in `embedding_status` so MCP callers see the
 /// real runtime state instead of the brain's own (unused) singleton.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,13 +147,13 @@ pub struct EmbedderLifecycleHeartbeatRecord {
     pub build_id: Option<String>,
 }
 
-/// REQ-AXO-901854 (additive foundation slice) — cross-process indexer runtime
-/// truth row read from / written to `axon_runtime.indexer_runtime_truth`. The
-/// indexer (pipeline owner) publishes its observed worker + embed-rate counters
-/// every heartbeat tick; the brain READS this row and projects it, so MCP/dash
-/// see values observed at the OWNER instead of the brain's own (empty under
-/// brain_only) telemetry snapshot. Same struct serves write input and read
-/// output — the fields are symmetric.
+/// REQ-AXO-901854 — cross-process indexer runtime truth row read from / written
+/// to `axon.indexer_runtime_truth`. The indexer (pipeline owner) publishes the
+/// values it OBSERVES every heartbeat tick; the brain READS this row and
+/// projects it, so MCP/dashboard see values observed at the OWNER instead of
+/// the brain's own (empty under brain_only) telemetry snapshot. Same struct
+/// serves write input and read output — the fields are symmetric. Every field
+/// resolves to a canonical pipeline_v2 owner source, never a brain-local proxy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexerRuntimeTruthRecord {
     pub process_role: String,
@@ -162,10 +162,21 @@ pub struct IndexerRuntimeTruthRecord {
     /// gauge sourced from pipeline_v2 `StageMetrics`, NOT the dead v1 counter.
     pub graph_workers_active: i64,
     pub chunk_embeddings_per_second: f64,
+    /// REQ-AXO-901919 in-flight gauge — RAM in-flight registry (commit 0b860166):
+    /// count of items currently in flight + the oldest one (NULL when idle).
+    pub in_flight_count: i64,
+    pub oldest_in_flight_path: Option<String>,
+    pub oldest_in_flight_stage: Option<String>,
+    pub oldest_in_flight_age_ms: i64,
+    /// Queue depths from `service_guard::vector_runtime_metrics()`:
+    /// `ready_queue_chunks` is the dashboard funnel's canonical backlog signal,
+    /// `persist_queue_depth` the queued VectorPersistOutbox rows.
+    pub ready_queue_chunks: i64,
+    pub persist_queue_depth: i64,
 }
 
 /// DEC-AXO-901626 — PG-canonical half of the observable embedder state,
-/// materialised by `axon_runtime.embedder_observed_state()`. The GPU/CPU
+/// materialised by `axon.embedder_observed_state()`. The GPU/CPU
 /// half is OS-level (`nvidia-smi`, see `crate::observed_gpu`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmbedderObservedState {

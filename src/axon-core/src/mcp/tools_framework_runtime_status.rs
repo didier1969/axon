@@ -769,7 +769,7 @@ impl McpServer {
         let vector_latency_summaries = service_guard::vector_runtime_latency_summaries();
         // REQ-AXO-91572 — surface embedder lifecycle (phase + last_used_ms
         // + counters) in framework runtime status. Prefers the indexer
-        // heartbeat row (`axon_runtime.EmbedderLifecycleHeartbeat`) over
+        // heartbeat row (`axon.EmbedderLifecycleHeartbeat`) over
         // the brain-local singleton so the JSON reflects the process that
         // actually owns the GPU session. Same freshness gate as
         // `embedding_status` (tools_system.rs). REQ-AXO-901859 — single
@@ -1203,7 +1203,7 @@ impl McpServer {
                     "vector_pipeline_telemetry": vector_pipeline_telemetry,
                     // REQ-AXO-91572 — embedder lifecycle observability.
                     // `source=indexer_heartbeat` means we read the indexer
-                    // process state via `axon_runtime.EmbedderLifecycleHeartbeat`
+                    // process state via `axon.EmbedderLifecycleHeartbeat`
                     // (cross-process, the brain reports the GPU owner's truth).
                     // `source=brain_local_singleton` means the indexer hasn't
                     // published a fresh heartbeat (or the table is empty) and

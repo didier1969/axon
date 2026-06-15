@@ -147,7 +147,7 @@ fn resolve_database_url_for_listener() -> String {
 /// under normal shutdown via SIGTERM).
 /// REQ-AXO-901874 — spawn the indexer liveness heartbeat publisher,
 /// decoupled from the GPU embedder lifecycle. Ticks every 5s and UPSERTs
-/// `axon_runtime.EmbedderLifecycleHeartbeat` (role="indexer"). The brain's
+/// `axon.EmbedderLifecycleHeartbeat` (role="indexer"). The brain's
 /// `resolve_indexer_liveness` derives `indexer_ready` from this row's
 /// freshness alone, so every indexing process — graph-only, CPU, NoOp, or
 /// GPU — is provably alive. Previously the publisher was spawned only in the
@@ -166,23 +166,40 @@ fn spawn_indexer_liveness_heartbeat(
                     "REQ-AXO-901874: failed to UPSERT EmbedderLifecycleHeartbeat row"
                 );
             }
-            // REQ-AXO-901854 (additive foundation slice) — publish runtime truth
-            // observed at the OWNER (PIL-AXO-001). Every field resolves to the
-            // canonical pipeline_v2 source, never a brain-local proxy or dead v1
-            // counter: graph_workers_active = Σ inflight of A1/A2/A3 (busy graph
-            // workers, from pipeline_v2 StageMetrics); chunk_embeddings_per_second
-            // = the indexer's own embed-rate accessor. The brain READS this row
-            // (empty under brain_only) and projects it.
+            // REQ-AXO-901854 — publish runtime truth observed at the OWNER
+            // (PIL-AXO-001). Every field resolves to a canonical pipeline_v2
+            // source, never a brain-local proxy or dead v1 counter:
+            //   * graph_workers_active = Σ inflight of A1/A2/A3 (busy graph
+            //     workers, from pipeline_v2 StageMetrics);
+            //   * chunk_embeddings_per_second = the indexer's embed-rate accessor;
+            //   * in_flight_* = RAM in-flight registry (REQ-AXO-901919);
+            //   * ready_queue_chunks / persist_queue_depth = vector_runtime_metrics
+            //     owner gauges.
+            // The brain READS this row (empty under brain_only) and projects it.
             let graph_workers_active: i64 = a_stage_metrics
                 .iter()
                 .map(|m| m.snapshot().inflight as i64)
                 .sum();
+            let in_flight = crate::pipeline_v2::in_flight::InFlightRegistry::global();
+            let in_flight_oldest = in_flight.snapshot();
+            let vector_metrics = crate::service_guard::vector_runtime_metrics();
             let truth = crate::graph_ingestion::IndexerRuntimeTruthRecord {
                 process_role: "indexer".to_string(),
                 heartbeat_ms: snapshot.heartbeat_ms,
                 graph_workers_active,
                 chunk_embeddings_per_second:
                     crate::service_guard::vector_chunk_embeddings_per_second(),
+                in_flight_count: in_flight.len() as i64,
+                oldest_in_flight_path: in_flight_oldest.as_ref().map(|s| s.path.clone()),
+                oldest_in_flight_stage: in_flight_oldest
+                    .as_ref()
+                    .map(|s| s.stage.to_string()),
+                oldest_in_flight_age_ms: in_flight_oldest
+                    .as_ref()
+                    .map(|s| s.age_ms as i64)
+                    .unwrap_or(0),
+                ready_queue_chunks: vector_metrics.ready_queue_chunks_current as i64,
+                persist_queue_depth: vector_metrics.persist_queue_depth_current as i64,
             };
             if let Err(err) = store.record_indexer_runtime_truth(&truth) {
                 warn!(
@@ -300,7 +317,7 @@ pub fn spawn_pipeline_v2_indexer(
     // publishing here — BEFORE and independent of the optional pipeline-B
     // GPU embedder — means a graph-only or CPU/NoOp indexer is still
     // provably alive to the brain (`resolve_indexer_liveness` reads the
-    // `axon_runtime.EmbedderLifecycleHeartbeat` row freshness, not the GPU
+    // `axon.EmbedderLifecycleHeartbeat` row freshness, not the GPU
     // state). Liveness ≠ GPU-up. Tick 5s sits well under the brain's ~30s
     // freshness window so a single missed tick stays fresh.
     spawn_indexer_liveness_heartbeat(

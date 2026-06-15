@@ -86,7 +86,7 @@ pub fn current_embedding_provider_diagnostics() -> EmbeddingProviderDiagnostics 
 
 /// Build the diagnostics struct from an explicit effective label. Pure: no
 /// stored state. `provider_init_error` is no longer tracked here — init
-/// failures surface via tracing logs + `axon_runtime.VectorWorkerFault`.
+/// failures surface via tracing logs + `axon.VectorWorkerFault`.
 pub fn embedding_provider_diagnostics(provider_effective: String) -> EmbeddingProviderDiagnostics {
     let gpu_present = current_gpu_present();
     let provider_requested =
