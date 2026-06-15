@@ -13,18 +13,15 @@ use arc_swap::ArcSwap;
 
 use crate::ist_snapshot::snapshot::IstGraph;
 
-/// REQ-AXO-902005 — per-project rebuild coordination + freshness, kept in a
-/// side map so the hot snapshot map value stays `Arc<IstGraph>` (zero churn on
-/// the read path / view methods). `in_flight`/`dirty` drive single-flight
-/// coalescing: while a rebuild runs, a fresh `ist_mutated` sets `dirty` instead
-/// of spawning a second loader; the running rebuild re-runs once on finish.
-/// `loaded_at_ms` lets readers compute an honest freshness lag on the
-/// serve-stale snapshot.
+/// REQ-AXO-902005 — per-project rebuild coordination, kept in a side map so the
+/// hot snapshot map value stays `Arc<IstGraph>` (zero churn on the read path /
+/// view methods). `in_flight`/`dirty` drive single-flight coalescing: while a
+/// rebuild runs, a fresh `ist_mutated` sets `dirty` instead of spawning a second
+/// loader; the running rebuild re-runs once on finish.
 #[derive(Default, Clone, Copy)]
 struct ProjectState {
     in_flight: bool,
     dirty: bool,
-    loaded_at_ms: u64,
 }
 
 /// Atomic per-project snapshot cache. Cloning the cache handle is cheap (one
@@ -126,23 +123,6 @@ impl IstSnapshotCache {
         }
     }
 
-    /// REQ-AXO-902005 — stamp the wall-clock at which `project`'s snapshot was
-    /// last (re)loaded, so `snapshot_age_ms` can report an honest freshness lag.
-    pub fn mark_loaded(&self, project: &str, now_ms: u64) {
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.entry(project.to_string()).or_default().loaded_at_ms = now_ms;
-    }
-
-    /// REQ-AXO-902005 — age (ms) of the currently-served snapshot for `project`,
-    /// or `None` if never loaded. During an async rebuild this keeps growing
-    /// against the stale snapshot until the swap lands — an honest lag.
-    pub fn snapshot_age_ms(&self, project: &str, now_ms: u64) -> Option<u64> {
-        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .get(project)
-            .filter(|st| st.loaded_at_ms > 0)
-            .map(|st| now_ms.saturating_sub(st.loaded_at_ms))
-    }
 }
 
 #[cfg(test)]
@@ -224,17 +204,5 @@ mod tests {
         assert!(cache.begin_rebuild("OPT"));
         assert!(!cache.finish_rebuild("AXO"));
         assert!(!cache.finish_rebuild("OPT"));
-    }
-
-    #[test]
-    fn snapshot_age_tracks_loaded_at() {
-        let cache = IstSnapshotCache::new();
-        assert_eq!(cache.snapshot_age_ms("AXO", 10_000), None, "never loaded → None");
-        cache.mark_loaded("AXO", 9_000);
-        assert_eq!(cache.snapshot_age_ms("AXO", 10_000), Some(1_000));
-        // Serve-stale: age keeps growing until the next mark_loaded (the swap).
-        assert_eq!(cache.snapshot_age_ms("AXO", 14_000), Some(5_000));
-        cache.mark_loaded("AXO", 14_000);
-        assert_eq!(cache.snapshot_age_ms("AXO", 14_000), Some(0), "swap resets the lag");
     }
 }

@@ -413,23 +413,13 @@ impl RuntimeBootProfile {
     }
 }
 
-/// REQ-AXO-901869 A1 — thin `JsonSqlStore` adapter so the brain can
-/// cold-load IST CSR snapshots at boot via `ist_snapshot::load_snapshot`.
-struct BootWarmSqlStore<'a>(&'a GraphStore);
+/// REQ-AXO-901869 / REQ-AXO-902005 — single owned (`Arc`-backed, `Send + Sync`)
+/// `JsonSqlStore` adapter over `GraphStore` for IST CSR cold-loads. Serves BOTH
+/// the boot warm path and the `ist_mutated` serve-stale listener (which moves it
+/// into a spawned task), so there is one adapter, not one per call-site.
+struct IstLoaderSqlStore(Arc<GraphStore>);
 
-impl crate::ist_snapshot::loader::JsonSqlStore for BootWarmSqlStore<'_> {
-    fn query_json(&self, sql: &str) -> Result<String, String> {
-        self.0.query_json(sql).map_err(|e| e.to_string())
-    }
-}
-
-/// REQ-AXO-902005 — owned (`Arc`-backed, `Send + Sync`) `JsonSqlStore` adapter
-/// for the `ist_mutated` listener's async serve-stale rebuild. Unlike the
-/// lifetime-bound `BootWarmSqlStore`, this moves into a spawned task and is
-/// shared across rebuilds.
-struct ListenerRefreshSqlStore(Arc<GraphStore>);
-
-impl crate::ist_snapshot::loader::JsonSqlStore for ListenerRefreshSqlStore {
+impl crate::ist_snapshot::loader::JsonSqlStore for IstLoaderSqlStore {
     fn query_json(&self, sql: &str) -> Result<String, String> {
         self.0.query_json(sql).map_err(|e| e.to_string())
     }
@@ -458,7 +448,7 @@ fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
 /// 0). Runs on a blocking thread so it never stalls the async runtime at boot.
 fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
     tokio::task::spawn_blocking(move || {
-        let store = BootWarmSqlStore(&graph_store);
+        let store = IstLoaderSqlStore(graph_store);
         let raw = match store.0.query_json(
             "SELECT DISTINCT project_code FROM ist.Symbol \
              WHERE project_code IS NOT NULL ORDER BY project_code",
@@ -983,7 +973,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             // rebuild + atomic swap) instead of evicting, so it needs a store
             // handle to cold-load the fresh CSR off the hot path.
             let refresh_store: Arc<dyn crate::ist_snapshot::loader::JsonSqlStore + Send + Sync> =
-                Arc::new(ListenerRefreshSqlStore(graph_store.clone()));
+                Arc::new(IstLoaderSqlStore(graph_store.clone()));
             crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(
                 _url.clone(),
                 refresh_store,

@@ -38,12 +38,8 @@ pub fn process_view() -> IstGraphView {
 
 /// REQ-AXO-91486 — populate (or refresh) the process cache for a project.
 /// Idempotent ; replaces the existing snapshot atomically via ArcSwap.
-/// REQ-AXO-902005 — stamps the load wall-clock so `snapshot_age_ms` reports an
-/// honest freshness lag (boot warm + every refresh swap go through here).
 pub fn publish_process_snapshot(project_code: String, snapshot: Arc<IstGraph>) {
-    let cache = process_cache();
-    cache.publish(project_code.clone(), snapshot);
-    cache.mark_loaded(&project_code, now_ms());
+    process_cache().publish(project_code, snapshot);
 }
 
 /// REQ-AXO-91486 — evict a project from the process cache (used by tests
@@ -51,13 +47,6 @@ pub fn publish_process_snapshot(project_code: String, snapshot: Arc<IstGraph>) {
 /// evicts on mutation — see `refresh_process_snapshot` (serve-stale).
 pub fn evict_process_snapshot(project_code: &str) {
     process_cache().evict(project_code);
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// REQ-AXO-902005 — serve-stale refresh on `ist_mutated`. Instead of evicting
@@ -102,9 +91,8 @@ fn refresh_snapshot_into(
             .await;
             match loaded {
                 Ok(Ok((graph, stats))) => {
-                    // Atomic swap (never a transient None) + freshness stamp.
+                    // Atomic swap — never a transient None for readers.
                     cache.publish(project_code.clone(), Arc::new(graph));
-                    cache.mark_loaded(&project_code, now_ms());
                     tracing::info!(
                         project = %project_code,
                         nodes = stats.nodes_loaded,
@@ -171,7 +159,6 @@ mod refresh_tests {
         let cache = Arc::new(IstSnapshotCache::new());
         // Warm with the stale 1-node graph.
         cache.publish("AXO".to_string(), one_node_graph());
-        cache.mark_loaded("AXO", 1);
         assert_eq!(cache.get("AXO").unwrap().node_count(), 1);
 
         refresh_snapshot_into(Arc::clone(&cache), "AXO".to_string(), Arc::new(FakeStore));
