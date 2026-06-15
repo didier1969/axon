@@ -7,16 +7,32 @@
 // `AXON_IST_RAM_ENABLED` client opt-out toggle is removed (RAM unconditional).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
 use crate::ist_snapshot::snapshot::IstGraph;
 
+/// REQ-AXO-902005 — per-project rebuild coordination + freshness, kept in a
+/// side map so the hot snapshot map value stays `Arc<IstGraph>` (zero churn on
+/// the read path / view methods). `in_flight`/`dirty` drive single-flight
+/// coalescing: while a rebuild runs, a fresh `ist_mutated` sets `dirty` instead
+/// of spawning a second loader; the running rebuild re-runs once on finish.
+/// `loaded_at_ms` lets readers compute an honest freshness lag on the
+/// serve-stale snapshot.
+#[derive(Default, Clone, Copy)]
+struct ProjectState {
+    in_flight: bool,
+    dirty: bool,
+    loaded_at_ms: u64,
+}
+
 /// Atomic per-project snapshot cache. Cloning the cache handle is cheap (one
 /// `Arc` clone) ; the snapshots themselves never move once published.
 pub struct IstSnapshotCache {
     inner: Arc<ArcSwap<HashMap<String, Arc<IstGraph>>>>,
+    /// REQ-AXO-902005 — rebuild single-flight + freshness, keyed by project.
+    state: Arc<Mutex<HashMap<String, ProjectState>>>,
 }
 
 impl Default for IstSnapshotCache {
@@ -29,12 +45,14 @@ impl IstSnapshotCache {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
+            state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn handle(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
         }
     }
 
@@ -71,6 +89,59 @@ impl IstSnapshotCache {
 
     pub fn project_codes(&self) -> Vec<String> {
         self.inner.load().keys().cloned().collect()
+    }
+
+    /// REQ-AXO-902005 — single-flight gate. Returns `true` when the caller wins
+    /// the right to rebuild `project` (no rebuild was in flight). Returns
+    /// `false` when a rebuild is already running — in that case the request is
+    /// recorded as `dirty` so the in-flight rebuild re-runs once on completion,
+    /// guaranteeing the snapshot reflects the latest mutation without spawning a
+    /// second concurrent loader (no thundering herd).
+    pub fn begin_rebuild(&self, project: &str) -> bool {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = guard.entry(project.to_string()).or_default();
+        if st.in_flight {
+            st.dirty = true;
+            false
+        } else {
+            st.in_flight = true;
+            st.dirty = false;
+            true
+        }
+    }
+
+    /// REQ-AXO-902005 — close out a rebuild. Returns `true` when a mutation
+    /// landed during the rebuild (`dirty`): the caller must re-run the load to
+    /// pick it up; `in_flight` is kept set so no other caller interleaves.
+    /// Returns `false` when clean: `in_flight` is cleared.
+    pub fn finish_rebuild(&self, project: &str) -> bool {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = guard.entry(project.to_string()).or_default();
+        if st.dirty {
+            st.dirty = false;
+            true
+        } else {
+            st.in_flight = false;
+            false
+        }
+    }
+
+    /// REQ-AXO-902005 — stamp the wall-clock at which `project`'s snapshot was
+    /// last (re)loaded, so `snapshot_age_ms` can report an honest freshness lag.
+    pub fn mark_loaded(&self, project: &str, now_ms: u64) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.entry(project.to_string()).or_default().loaded_at_ms = now_ms;
+    }
+
+    /// REQ-AXO-902005 — age (ms) of the currently-served snapshot for `project`,
+    /// or `None` if never loaded. During an async rebuild this keeps growing
+    /// against the stale snapshot until the swap lands — an honest lag.
+    pub fn snapshot_age_ms(&self, project: &str, now_ms: u64) -> Option<u64> {
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(project)
+            .filter(|st| st.loaded_at_ms > 0)
+            .map(|st| now_ms.saturating_sub(st.loaded_at_ms))
     }
 }
 
@@ -126,5 +197,44 @@ mod tests {
         let handle = cache.handle();
         cache.publish("AXO".to_string(), empty_snapshot());
         assert!(handle.get("AXO").is_some());
+    }
+
+    // REQ-AXO-902005 — single-flight coordinator.
+
+    #[test]
+    fn first_begin_rebuild_wins_second_marks_dirty() {
+        let cache = IstSnapshotCache::new();
+        assert!(cache.begin_rebuild("AXO"), "first caller wins the rebuild slot");
+        assert!(
+            !cache.begin_rebuild("AXO"),
+            "second caller loses (rebuild already in flight)"
+        );
+        // The lost caller recorded dirty → finish must request a re-run.
+        assert!(cache.finish_rebuild("AXO"), "dirty after concurrent request → re-run");
+        // No further mutation → finish clears in_flight, next begin wins again.
+        assert!(!cache.finish_rebuild("AXO"), "clean finish clears in_flight");
+        assert!(cache.begin_rebuild("AXO"), "slot freed after clean finish");
+    }
+
+    #[test]
+    fn rebuild_state_is_per_project() {
+        let cache = IstSnapshotCache::new();
+        assert!(cache.begin_rebuild("AXO"));
+        // A different project is independent — it can start its own rebuild.
+        assert!(cache.begin_rebuild("OPT"));
+        assert!(!cache.finish_rebuild("AXO"));
+        assert!(!cache.finish_rebuild("OPT"));
+    }
+
+    #[test]
+    fn snapshot_age_tracks_loaded_at() {
+        let cache = IstSnapshotCache::new();
+        assert_eq!(cache.snapshot_age_ms("AXO", 10_000), None, "never loaded → None");
+        cache.mark_loaded("AXO", 9_000);
+        assert_eq!(cache.snapshot_age_ms("AXO", 10_000), Some(1_000));
+        // Serve-stale: age keeps growing until the next mark_loaded (the swap).
+        assert_eq!(cache.snapshot_age_ms("AXO", 14_000), Some(5_000));
+        cache.mark_loaded("AXO", 14_000);
+        assert_eq!(cache.snapshot_age_ms("AXO", 14_000), Some(0), "swap resets the lag");
     }
 }

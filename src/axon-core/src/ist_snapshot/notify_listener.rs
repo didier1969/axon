@@ -1,18 +1,23 @@
 // REQ-AXO-91487 (MIL-AXO-019 slice 3) — LISTEN ist_mutated.
 //
 // Opens a dedicated `tokio_postgres` connection (outside the deadpool),
-// issues `LISTEN ist_mutated`, and evicts the affected project from the
-// process IstSnapshotCache on each notification. The next read for that
-// project triggers a fresh cold-load via `ist_snapshot_warm` (operator)
-// or whatever caller next hits a migrated call-site. v1 eviction-only ;
-// the LSM overlay path (CSR + Vec + tombstones) is a follow-up REQ once
-// mutation rate exceeds 5 % of the snapshot per cold-load window.
+// issues `LISTEN ist_mutated`, and refreshes the affected project in the
+// process IstSnapshotCache on each notification.
+//
+// REQ-AXO-902005 — serve-stale refresh (was: eviction). Eviction forced the
+// next reader to pay a synchronous full cold-load on the hot path (or surfaced
+// a degraded cold cache). Now `refresh_process_snapshot` keeps serving the
+// current snapshot and rebuilds asynchronously, swapping atomically when ready
+// — readers never block. The LSM-overlay incremental path (CSR + Vec +
+// tombstones, REQ-AXO-91487 follow-up) further cuts the rebuild COST; this REQ
+// removes the read-path LATENCY.
 //
 // Resilience : on connection drop / channel close, loops forever with
 // exponential backoff (200ms → 30s cap) — same shape as the existing
 // `chunk_pending_embed` listener in pipeline_v2/notify_listener.rs.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,7 +26,8 @@ use serde::Deserialize;
 use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::{info, warn};
 
-use crate::ist_snapshot::evict_process_snapshot;
+use crate::ist_snapshot::loader::JsonSqlStore;
+use crate::ist_snapshot::refresh_process_snapshot;
 
 const LISTEN_CHANNEL: &str = "ist_mutated";
 const BACKOFF_INITIAL_MS: u64 = 200;
@@ -42,11 +48,14 @@ struct IstNotifyPayload {
 /// errors. Activates only when [`IstSnapshotCache::is_enabled`] reports
 /// true at startup (the trigger fires regardless, the listener is the
 /// no-op short-circuit when RAM dispatch is off).
-pub fn spawn_ist_mutation_listener(database_url: String) {
+pub fn spawn_ist_mutation_listener(
+    database_url: String,
+    store: Arc<dyn JsonSqlStore + Send + Sync>,
+) {
     tokio::spawn(async move {
         let mut backoff_ms = BACKOFF_INITIAL_MS;
         loop {
-            match listen_once(&database_url).await {
+            match listen_once(&database_url, &store).await {
                 Ok(()) => {
                     warn!(
                         channel = LISTEN_CHANNEL,
@@ -69,7 +78,10 @@ pub fn spawn_ist_mutation_listener(database_url: String) {
     });
 }
 
-async fn listen_once(database_url: &str) -> Result<()> {
+async fn listen_once(
+    database_url: &str,
+    store: &Arc<dyn JsonSqlStore + Send + Sync>,
+) -> Result<()> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls)
         .await
         .context("LISTEN connect failed")?;
@@ -121,7 +133,7 @@ async fn listen_once(database_url: &str) -> Result<()> {
             }
         }
         for project in &projects {
-            evict_process_snapshot(project);
+            refresh_process_snapshot(project.clone(), Arc::clone(store));
         }
     }
     drop(client);

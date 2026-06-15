@@ -38,7 +38,10 @@ const EDGE_SQL: &str =
 /// untrusted input here. The function returns `Err` only if both queries
 /// fail or the JSON cannot be parsed ; partial data (e.g. zero edges) is
 /// valid and yields a snapshot.
-pub fn load_snapshot<S: JsonSqlStore>(
+// REQ-AXO-902005 — `?Sized` so the async serve-stale refresh can pass a
+// `&dyn JsonSqlStore` trait object (boxed/Arc'd store handle); all existing
+// `&ConcreteStore` callers are unaffected.
+pub fn load_snapshot<S: JsonSqlStore + ?Sized>(
     store: &S,
     project_code: &str,
 ) -> Result<(IstGraph, LoadStats), String> {

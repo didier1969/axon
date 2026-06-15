@@ -423,6 +423,18 @@ impl crate::ist_snapshot::loader::JsonSqlStore for BootWarmSqlStore<'_> {
     }
 }
 
+/// REQ-AXO-902005 — owned (`Arc`-backed, `Send + Sync`) `JsonSqlStore` adapter
+/// for the `ist_mutated` listener's async serve-stale rebuild. Unlike the
+/// lifetime-bound `BootWarmSqlStore`, this moves into a spawned task and is
+/// shared across rebuilds.
+struct ListenerRefreshSqlStore(Arc<GraphStore>);
+
+impl crate::ist_snapshot::loader::JsonSqlStore for ListenerRefreshSqlStore {
+    fn query_json(&self, sql: &str) -> Result<String, String> {
+        self.0.query_json(sql).map_err(|e| e.to_string())
+    }
+}
+
 /// REQ-AXO-901869 A1 — distinct project codes carrying IST symbols, parsed
 /// from the `query_json` 2-D array. Pure, so the parse is unit-tested
 /// without a live GraphStore.
@@ -967,8 +979,16 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         },
     ) {
         Ok(_url) => {
-            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(_url.clone());
-            info!("ist_mutated listener spawned (REQ-AXO-901658) — IST cache eviction wired");
+            // REQ-AXO-902005 — the listener now refreshes serve-stale (async
+            // rebuild + atomic swap) instead of evicting, so it needs a store
+            // handle to cold-load the fresh CSR off the hot path.
+            let refresh_store: Arc<dyn crate::ist_snapshot::loader::JsonSqlStore + Send + Sync> =
+                Arc::new(ListenerRefreshSqlStore(graph_store.clone()));
+            crate::ist_snapshot::notify_listener::spawn_ist_mutation_listener(
+                _url.clone(),
+                refresh_store,
+            );
+            info!("ist_mutated listener spawned (REQ-AXO-901658/902005) — IST cache serve-stale async refresh wired");
             // REQ-AXO-901893 (LEGACY FEED PURGE) — the axon_registry_changed
             // listener (REQ-AXO-901675) was RIPPED with ingress_buffer: it
             // pushed an IngressSource::Scan subtree hint into the in-memory
