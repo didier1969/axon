@@ -297,7 +297,62 @@ pub(crate) fn ensure_template_once(pg_port: &str) {
         apply_sql_dir(pg_port, &template, &db_dir.join("ddl"));
         apply_sql_dir(pg_port, &template, &db_dir.join("seed"));
         apply_test_autoseed_triggers(pg_port, &template);
+        seed_test_project_codes(pg_port, &template);
     });
+}
+
+/// REQ-AXO-902001 — seed the canonical fixed test project codes into the
+/// template registry so every `createdb -T` clone accepts them as a valid
+/// scope for `soll_manager` / `soll_apply_plan` without per-test registration.
+///
+/// The ephemeral clone already hands each test a pristine database
+/// (DEC-AXO-901634), so a fixed literal scope per test fully replaces the
+/// former unique-code + wipe scoping layer (the `scoped_test_project_code` /
+/// `scoped_test_ist_code` / `unique_test_project_code` helpers built for the
+/// SHARED dev PG). `TST` = the single-project tests; `PJA` / `PJB` = the
+/// cross-project isolation tests that assert two distinct scopes don't leak
+/// into each other. Test-template only — the production registry is untouched.
+/// Idempotent (`ON CONFLICT DO NOTHING`).
+fn seed_test_project_codes(pg_port: &str, dbname: &str) {
+    const SQL: &str = "\
+INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) VALUES\n\
+    ('TST', '/tmp/TST', 'Test TST'),\n\
+    ('PJA', '/tmp/PJA', 'Test PJA'),\n\
+    ('PJB', '/tmp/PJB', 'Test PJB')\n\
+ON CONFLICT (project_code) DO NOTHING;\n\
+INSERT INTO soll.Registry (project_code, id) VALUES\n\
+    ('TST', 'AXON_GLOBAL'),\n\
+    ('PJA', 'AXON_GLOBAL'),\n\
+    ('PJB', 'AXON_GLOBAL')\n\
+ON CONFLICT (project_code) DO NOTHING;\n";
+    let mut child = match std::process::Command::new("psql")
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            dbname,
+            "-X",
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        let _ = stdin.write_all(SQL.as_bytes());
+    }
+    let _ = child.wait();
 }
 
 /// REQ-AXO-91560 / REQ-AXO-901721 — install BEFORE INSERT auto-seed triggers

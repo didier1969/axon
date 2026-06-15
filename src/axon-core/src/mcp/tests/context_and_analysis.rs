@@ -602,7 +602,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     // concurrent sibling mutations AND whose RAM staleness used to mask the very
     // change this test injects (the old delta=0 asserts only passed when the
     // snapshot didn't observe the inserted orphan — order/timing dependent).
-    let code = super::scoped_test_ist_code(&server);
+    let code = "TST".to_string();
     let (target, wrapper, lib) = (
         format!("{code}::target"),
         format!("{code}::wrapper"),
@@ -1030,7 +1030,7 @@ fn test_path_returns_bounded_call_path_between_symbols() {
     // project code + id prefixes so a sibling test reusing a hardcoded code
     // (the old `BKS`) can no longer poison this path's RAM/PG state. Root cause
     // of the order-dependent flakiness that surfaced during REQ-AXO-140.
-    let code = super::scoped_test_ist_code(&server);
+    let code = "TST".to_string();
     let src = format!("{code}::source");
     let mid = format!("{code}::mid");
     let sink = format!("{code}::sink");
@@ -3839,7 +3839,7 @@ fn test_axon_audit_cross_language_taint() {
     // scanned the whole shared live PG and diluted/masked the taint chain so the
     // assert was non-deterministic). REQ-AXO-901860 — enroll project +
     // IndexedFile so audit isn't gated as unindexed.
-    let code = super::scoped_test_ist_code(&server);
+    let code = "TST".to_string();
     let (ef, rn, ub) = (
         format!("{code}::elixir_func"),
         format!("{code}::rust_nif"),

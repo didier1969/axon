@@ -1,43 +1,4 @@
 use super::*;
-use crate::tests::test_helpers::unique_test_project_code;
-
-/// REQ-AXO-91560 — allocate a unique canonical project_code for this
-/// test and register it in `soll.ProjectCodeRegistry` on the supplied
-/// server so subsequent `soll_manager` / `soll_apply_plan` calls accept
-/// it. Returns the 3-char code. Idempotent via `ON CONFLICT` in
-/// `sync_project_registry_entry`.
-///
-/// Also wipes any pre-existing rows in `soll.Node`, `soll.Edge`,
-/// `soll.Revision`, `soll.RevisionChange`, `soll.RevisionPreview`, and
-/// `soll.Registry` for the allocated code. The 1296-code base-36 space
-/// recycles across `cargo test` invocations; without an explicit purge
-/// a residual node like `PIL-T0E-001` from a prior run will collide on
-/// PK with the freshly-seeded fixture even though the code is "unique"
-/// inside the current process.
-fn scoped_test_project_code(server: &McpServer) -> String {
-    let code = unique_test_project_code();
-    let store = &server.graph_store;
-    // Delete edges first (FK to Node), then nodes, then registry rows.
-    // Cover edges where either endpoint references the recycled code.
-    // Combine all DELETEs into one batch so a single failure doesn't
-    // poison the transaction for the subsequent INSERTs that the caller
-    // is about to issue.
-    let wipe = format!(
-        "DELETE FROM soll.RevisionChange WHERE revision_id IN (SELECT revision_id FROM soll.Revision WHERE project_code = '{code}');\n\
-         DELETE FROM soll.Revision WHERE project_code = '{code}';\n\
-         DELETE FROM soll.RevisionPreview WHERE project_code = '{code}';\n\
-         DELETE FROM soll.Edge WHERE source_id LIKE '%-{code}-%' OR target_id LIKE '%-{code}-%' OR project_code = '{code}';\n\
-         DELETE FROM soll.Node WHERE project_code = '{code}' OR id LIKE '%-{code}-%';\n\
-         DELETE FROM soll.Registry WHERE project_code = '{code}';"
-    );
-    let _ = store.execute(&wipe);
-    let _ = store.sync_project_registry_entry(
-        &code,
-        Some(&format!("Test {code}")),
-        Some(&format!("/tmp/{code}")),
-    );
-    code
-}
 
 /// REQ-AXO-91560 — satisfy the `ist.Chunk` FK parents (`ist.Project` +
 /// `ist.IndexedFile`, both made NOT NULL by the FK-integrity hardening of
@@ -82,7 +43,7 @@ fn test_axon_soll_manager_auto_id() {
     // REQ-AXO-91560 — PG isolation via unique project_code + attach_to a
     // seeded Pillar so the MIL-AXO-020 create+attach invariant holds.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let expected_id = format!("CPT-{code}-011");
     let pillar_id = format!("PIL-{code}-001");
     server
@@ -497,7 +458,7 @@ fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
     // canonical relation is auto-applied (not rejected), and the substitution
     // is surfaced. A pair with MULTIPLE allowed relations stays a reject.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     server
         .graph_store
         .execute(&format!(
@@ -579,7 +540,7 @@ fn test_soll_manager_link_cycle_guard_filiation_and_inheritance() {
     // after the parametrization refactor) and the non-filiation guarded
     // relations (INHERITS_FROM/USES/...). DEC-AXO-098.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     server
         .graph_store
         .execute(&format!(
@@ -651,7 +612,7 @@ fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // attach_to seeding (Pillar).
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pillar_id = format!("PIL-{code}-001");
     let expected_id = format!("CPT-{code}-012");
     server
@@ -746,7 +707,7 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
 fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let title = format!("Preview Commit Requirement {code}");
 
     // Self-seed a canonical Pillar so the plan's requirement create can attach
@@ -821,7 +782,7 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
 fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -865,7 +826,7 @@ fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
     // already supports all three. Adding them to the iteration list closes
     // the gap and makes soll_apply_plan symmetric with soll_manager.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -1282,8 +1243,8 @@ fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
     // REQ-AXO-91560 — per-test project_code isolation. Two distinct
     // codes exercise the "same logical_key, different project" branch.
     let server = create_test_server();
-    let target = scoped_test_project_code(&server);
-    let other = scoped_test_project_code(&server);
+    let target = "PJA".to_string();
+    let other = "PJB".to_string();
     let other_req = format!("REQ-{other}-001");
     let shared_title = format!("Shared title {target}");
     let shared_key = format!("shared-key-{target}");
@@ -1381,7 +1342,7 @@ fn test_axon_soll_manager_create_without_project_code_auto_resolves_or_errors() 
 fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_a = format!("REQ-{code}-001");
     let req_b = format!("REQ-{code}-002");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
@@ -1420,7 +1381,7 @@ fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
 fn test_entrench_nuance_requires_confirmation_before_write() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_id = format!("REQ-{code}-001");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
@@ -1454,7 +1415,7 @@ fn test_entrench_nuance_requires_confirmation_before_write() {
 fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_id = format!("REQ-{code}-001");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
@@ -1632,7 +1593,7 @@ fn test_soll_manager_update_invalid_status_returns_parameter_repair() {
     // REQ-AXO-325 — same vocabulary enforcement on update path.
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_id = format!("REQ-{code}-91476");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'REQ-AXO-325 update test', 'fixture for status validation on update path', 'current', '{{}}')")).unwrap();
 
@@ -1671,8 +1632,8 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
     // surfaces structured `data.parameter_repair`.
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let target = scoped_test_project_code(&server);
-    let cross = scoped_test_project_code(&server);
+    let target = "PJA".to_string();
+    let cross = "PJB".to_string();
     let cross_req = format!("REQ-{cross}-901");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cross_req}', 'Requirement', '{cross}', 'Cross-project Req', 'Cross-project entrench rejection contract', 'current', '{{}}')")).unwrap();
 
@@ -1723,8 +1684,8 @@ fn test_entrench_nuance_cross_project_returns_parameter_repair() {
 fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let target = scoped_test_project_code(&server);
-    let cross = scoped_test_project_code(&server);
+    let target = "PJA".to_string();
+    let cross = "PJB".to_string();
     let cross_req = format!("REQ-{cross}-001");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{cross_req}', 'Requirement', '{cross}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
 
@@ -1756,7 +1717,7 @@ fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
 fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambiguous() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_a = format!("REQ-{code}-001");
     let req_b = format!("REQ-{code}-002");
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_a}', 'Requirement', '{code}', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{{}}')")).unwrap();
@@ -1787,7 +1748,7 @@ fn test_soll_manager_create_returns_mutation_feedback() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // attach_to/Pillar seeding.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pillar_id = format!("PIL-{code}-001");
     server
         .graph_store
@@ -2261,7 +2222,7 @@ fn test_soll_manager_create_guideline_lands_with_gui_prefix() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // attach_to a seeded Pillar.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pillar_id = format!("PIL-{code}-001");
     server
         .graph_store
@@ -2487,7 +2448,7 @@ fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // Vision seeded so the new pillar can EPITOMIZES it.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let vis_id = format!("VIS-{code}-001");
     let expected_pillar = format!("PIL-{code}-004");
     server
@@ -2539,7 +2500,7 @@ fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
     // REQ-AXO-91560 — per-test project_code isolation + MIL-AXO-020
     // attach_to a seeded Pillar.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pillar_id = format!("PIL-{code}-001");
     let req_existing = format!("REQ-{code}-007");
     let expected_req = format!("REQ-{code}-008");
@@ -2643,7 +2604,13 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
     let server = McpServer::new(store.clone());
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
+    // File-backed store targets the shared dev PG (not an ephemeral clone), so
+    // the template registry seed doesn't reach it — register the fixed scope at
+    // runtime (idiomatic, same as the AXO/BKS fixtures elsewhere in this module).
+    store
+        .sync_project_registry_entry(&code, Some("Test TST"), Some("/tmp/TST"))
+        .unwrap();
     let req_id = format!("REQ-{code}-001");
     let expected_stk = format!("STK-{code}-001");
     store
@@ -2699,7 +2666,7 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
     // inspection.
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let missing_id = format!("REQ-{code}-9999");
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2762,7 +2729,7 @@ fn test_soll_manager_update_unknown_id_returns_normalized_contract() {
 fn test_axon_export_soll() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let vis_id = format!("VIS-{code}-001");
     let cpt_id = format!("CPT-{code}-001");
     let test_vision_title = format!("Test Vision {code}");
@@ -2987,8 +2954,8 @@ fn test_axon_restore_soll() {
 fn test_axon_validate_soll_reports_orphan_invariants() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
-    let other = scoped_test_project_code(&server);
+    let code = "PJA".to_string();
+    let other = "PJB".to_string();
     let req_id = format!("REQ-{code}-001");
     let val_id = format!("VAL-{code}-001");
     let dec_id = format!("DEC-{code}-001");
@@ -3035,7 +3002,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
 fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_a = format!("REQ-{code}-010");
     let req_b = format!("REQ-{code}-011");
     let dec_a = format!("DEC-{code}-010");
@@ -3090,7 +3057,7 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
 fn test_axon_validate_soll_reports_clean_minimal_graph() {
     // REQ-AXO-91560 — per-test project_code isolation (PG shared instance).
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pillar_id = format!("PIL-{code}-001");
     let req_id = format!("REQ-{code}-001");
     let val_id = format!("VAL-{code}-001");
@@ -3164,7 +3131,7 @@ fn test_axon_validate_soll_exempts_archived_requirements_from_uncovered_list() {
     // violation count cannot reach zero by curation alone.
     // REQ-AXO-91560 — per-test project_code isolation (PG shared instance).
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let active_id = format!("REQ-{code}-900");
     let archived_id = format!("REQ-{code}-901");
     server
@@ -3210,8 +3177,8 @@ fn test_axon_validate_soll_can_scope_by_project_code() {
     // REQ-AXO-91560 — two unique project_codes per test run avoid
     // collisions on shared PG (`AXO`/`BKS` poisoned by prior live runs).
     let server = create_test_server();
-    let code_a = scoped_test_project_code(&server);
-    let code_b = scoped_test_project_code(&server);
+    let code_a = "PJA".to_string();
+    let code_b = "PJB".to_string();
     let req_a = format!("REQ-{code_a}-001");
     let req_b = format!("REQ-{code_b}-001");
     server
@@ -3298,7 +3265,7 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
 fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pil_id = format!("PIL-{code}-001");
     let req_id = format!("REQ-{code}-001");
     let val_id = format!("VAL-{code}-001");
@@ -3351,8 +3318,8 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
 fn test_axon_export_soll_can_scope_by_project_code() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let kept = scoped_test_project_code(&server);
-    let excluded = scoped_test_project_code(&server);
+    let kept = "PJA".to_string();
+    let excluded = "PJB".to_string();
     let vis_kept = format!("VIS-{kept}-001");
     let cpt_kept = format!("CPT-{kept}-001");
     let vis_excluded = format!("VIS-{excluded}-001");
@@ -3404,7 +3371,7 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let sym_trigger = format!("{code}::trigger_scan");
     let sym_global = format!("{code}::trigger_global_scan");
     let file_server = format!("src/dashboard/lib/{code}/axon/watcher/server.ex");
@@ -3458,7 +3425,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file = format!("src/runtime/{code}_watcher.rs");
     let sym = format!("{code}::opaque_worker");
     let chunk_id = format!("{sym}::chunk");
@@ -3505,7 +3472,7 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file_a = format!("src/runtime/{code}_requeue.rs");
     let file_b = format!("src/runtime/{code}_noise.rs");
     let sym_a = format!("{code}::worker_alpha");
@@ -3573,7 +3540,7 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file_path_only = format!("src/runtime/{code}_path_only_fake_indexing_overlay.rs");
     let file_truth = format!("src/runtime/{code}_docstring_truth.rs");
     let sym_path = format!("{code}::path_only_probe");
@@ -3643,7 +3610,7 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file_config = format!("config/{code}_runtime.exs");
     let file_doc = format!("docs/{code}_TEXT_PARSING_AUDIT.md");
     let sym_runtime = format!("{code}::runtime_config");
@@ -3715,7 +3682,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file_doc = format!("docs/{code}_TEXT_PARSING_AUDIT.md");
     let sym_audit = format!("{code}::audit_section");
     seed_ist_path(&server, &code, &file_doc);
@@ -3768,7 +3735,7 @@ fn test_axon_query_underscore_fragment_matches_underscore_symbol() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let file = format!("src/axon-core/src/{code}_queue.rs");
     let sym = format!("{code}::reserve_memory_budget");
     seed_ist_path(&server, &code, &file);
@@ -3818,7 +3785,7 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let sym = format!("{code}::Axon.Watcher.Server.trigger_scan");
     server
         .graph_store
@@ -3855,7 +3822,7 @@ fn test_axon_query_empty_fallback_returns_structured_recovery_without_empty_resu
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -3894,7 +3861,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
     // doesn't collide with rows left by other parallel tests.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let name_parse = format!("parse_batch_{code}");
     let name_a = format!("consumer_a_{code}");
     let name_b = format!("consumer_b_{code}");
@@ -3997,7 +3964,7 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let name = format!("parse_batch_{code}");
     let sym = format!("{code}::{name}");
     server
@@ -4042,8 +4009,8 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
     // those two scoped codes (which is what the test exercises).
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code_a = scoped_test_project_code(&server);
-    let code_b = scoped_test_project_code(&server);
+    let code_a = "PJA".to_string();
+    let code_b = "PJB".to_string();
     let name_parse = format!("parse_batch_{code_a}_{code_b}");
     let name_alpha = format!("consumer_alpha_{code_a}");
     let name_beta = format!("consumer_beta_{code_b}");
@@ -4138,8 +4105,8 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code_a = scoped_test_project_code(&server);
-    let code_b = scoped_test_project_code(&server);
+    let code_a = "PJA".to_string();
+    let code_b = "PJB".to_string();
     let name_parse = format!("parse_batch_{code_a}_{code_b}");
     let sym_a = format!("{code_a}::{name_parse}");
     let sym_b = format!("{code_b}::{name_parse}");
@@ -4193,8 +4160,8 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let code_a = scoped_test_project_code(&server);
-    let code_b = scoped_test_project_code(&server);
+    let code_a = "PJA".to_string();
+    let code_b = "PJB".to_string();
     let name_parse = format!("parse_batch_{code_a}_{code_b}");
     let sym_a = format!("{code_a}::{name_parse}");
     let sym_b = format!("{code_b}::{name_parse}");
@@ -4254,7 +4221,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     // namespace because the restore server is a different McpServer that
     // shares the same PG instance.
     let source_server = create_test_server();
-    let code = scoped_test_project_code(&source_server);
+    let code = "TST".to_string();
     let vision_id = format!("VIS-{code}-900");
     source_server
         .graph_store
@@ -4515,7 +4482,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
 fn test_soll_query_context_returns_project_visions_from_source() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let vis_id = format!("VIS-{code}-001");
     let req_id = format!("REQ-{code}-001");
     let rev_id = format!("REV-{code}-001");
@@ -4588,7 +4555,7 @@ fn test_soll_query_context_changed_since_returns_delta_and_cursor() {
     // REQ-AXO-901941 — `changed_since` returns only nodes whose updated_at is
     // newer than the cursor; the response carries a fresh `cursor`.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_id = format!("REQ-{code}-001");
     server
         .graph_store
@@ -4642,7 +4609,7 @@ fn test_soll_query_context_bounds_vision_body_to_digest() {
     // REQ-AXO-901935 — a list surface must render a bounded digest, never the
     // full Vision body (often >1 KB) on every call.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let vis_id = format!("VIS-{code}-001");
     let long_body = "X".repeat(500);
     server
@@ -4680,7 +4647,7 @@ fn test_soll_query_context_bounds_vision_body_to_digest() {
 fn test_axon_soll_manager_link_rejects_missing_endpoint() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let req_id = format!("REQ-{code}-001");
     let pil_missing = format!("PIL-{code}-404");
     server
@@ -4724,7 +4691,7 @@ fn test_axon_soll_manager_link_rejects_missing_endpoint() {
 fn test_axon_soll_manager_link_applies_default_relation() {
     // REQ-AXO-91560 — per-test project_code isolation.
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let dec_id = format!("DEC-{code}-001");
     let req_id = format!("REQ-{code}-001");
     server
@@ -6162,7 +6129,7 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
 #[test]
 fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_complete() {
     let server = create_test_server();
-    let code = scoped_test_project_code(&server);
+    let code = "TST".to_string();
     let pil_id = format!("PIL-{code}-001");
     let req_id = format!("REQ-{code}-001");
     let dec_id = format!("DEC-{code}-001");

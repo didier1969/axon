@@ -117,34 +117,6 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         .execute(&format!("DELETE FROM ist.Symbol WHERE id IN ({list})"));
 }
 
-/// REQ-AXO-901721 (Batch D) — per-test IST isolation. Returns a process-unique
-/// project code and wipes any leftover rows under it first: the counter resets
-/// per `cargo test` invocation, so a recycled code (`T00`, …) can still carry
-/// stale rows from a previous run in the shared live PG. Tests prefix their
-/// Symbol/Edge/Chunk ids with the returned code so the global PKs never collide
-/// across sibling tests — the root cause of the order-dependent flakiness.
-#[allow(dead_code)]
-pub(crate) fn scoped_test_ist_code(server: &McpServer) -> String {
-    let code = crate::tests::test_helpers::unique_test_project_code();
-    // One batch, FK-safe order: embeddings → chunks → edges → symbols → nodes.
-    let wipe = format!(
-        "DELETE FROM ist.ChunkEmbedding WHERE chunk_id IN (SELECT id FROM ist.Chunk WHERE project_code = '{code}');\n\
-         DELETE FROM ist.Chunk WHERE project_code = '{code}';\n\
-         DELETE FROM ist.Edge WHERE project_code = '{code}';\n\
-         DELETE FROM ist.Symbol WHERE project_code = '{code}';\n\
-         DELETE FROM soll.Node WHERE project_code = '{code}';"
-    );
-    let _ = server.graph_store.execute(&wipe);
-    // Register the code so project_status / snapshot / audit treat it as a real
-    // project rather than rejecting an unknown scope.
-    let _ = server.graph_store.sync_project_registry_entry(
-        &code,
-        Some(&format!("Test {code}")),
-        Some(&format!("/tmp/{code}")),
-    );
-    code
-}
-
 fn create_test_server() -> McpServer {
     let temp = tempdir().unwrap();
     let db_root = temp.path().to_str().unwrap().to_string();
@@ -161,7 +133,24 @@ fn create_test_server() -> McpServer {
         .push(test_db);
 
     let store = Arc::new(GraphStore::new_with_database(&db_root, &db_url).unwrap());
-    McpServer::new(store)
+    let server = McpServer::new(store);
+    evict_test_snapshots();
+    server
+}
+
+/// REQ-AXO-902001 — the IST RAM snapshot cache is process-global keyed by
+/// `project_code` (REQ-AXO-901952, no PG fallback). With fixed literal test
+/// scopes (`TST` / `PJA` / `PJB`) replacing the former unique-code scoping
+/// layer (DEC-AXO-901634), a sibling test's snapshot — built from a different
+/// ephemeral clone — would otherwise stay cached under the same code and be
+/// served stale. Evicting these codes at server creation forces
+/// `ensure_ram_snapshot_warm` to reload from THIS clone's PG. The ephemeral
+/// clone isolates PG state; this evict isolates the one piece of state the
+/// clone cannot — the process-global RAM cache.
+fn evict_test_snapshots() {
+    for code in ["TST", "PJA", "PJB"] {
+        crate::ist_snapshot::evict_process_snapshot(code);
+    }
 }
 
 static TEST_DBS: Mutex<Vec<TestDb>> = Mutex::new(Vec::new());

@@ -5159,7 +5159,7 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let server = McpServer::new(store);
 
-        let code = crate::tests::test_helpers::unique_test_project_code();
+        let code = "TST".to_string();
         let qvec_literal = unit_vector_literal(0);
         let cosine_expr = format!("(ce.embedding <=> {qvec_literal})");
         let project_filter =
@@ -5247,12 +5247,10 @@ mod tests {
         let server = McpServer::new(store);
         let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
 
-        // `--lib` tests run in parallel against the SAME shared dev PG instance
-        // (see test_helpers docs), so hardcoded ids collide with sibling tests
-        // and with rows left by prior runs. Allocate a per-invocation project +
-        // derive every fixture id from it for full isolation, and scope the
-        // query's project_filter to it so leftover/foreign rows can't leak in.
-        let code = crate::tests::test_helpers::unique_test_project_code();
+        // Each test runs against its own ephemeral clone (DEC-AXO-901634), so a
+        // fixed literal scope isolates the fixtures; derive every fixture id from
+        // it and scope the query's project_filter to it.
+        let code = "TST".to_string();
         let near_id = format!("chunk-near-{code}");
         let far_id = format!("chunk-far-{code}");
         let near_path = format!("src/near-{code}.rs");
@@ -5269,17 +5267,6 @@ mod tests {
                 "INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
             ))
             .unwrap();
-        // `unique_test_project_code` recycles codes per-process and the shared
-        // dev DB persists rows across runs, so defensively drop any leftover
-        // fixtures for THIS code first (FK cascade clears Chunk + ChunkEmbedding).
-        for path in [&near_path, &far_path] {
-            let _ = server.graph_store.execute(&format!(
-                "DELETE FROM ist.IndexedFile WHERE path = '{path}'"
-            ));
-        }
-        let _ = server.graph_store.execute(&format!(
-            "DELETE FROM ist.Chunk WHERE id IN ('{near_id}', '{far_id}')"
-        ));
         for path in [&near_path, &far_path] {
             server
                 .graph_store
