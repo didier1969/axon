@@ -153,7 +153,10 @@ fn resolve_database_url_for_listener() -> String {
 /// GPU — is provably alive. Previously the publisher was spawned only in the
 /// GPU-Ok branch of pipeline B, so graph-only / GPU-failed indexers were
 /// reported `indexer_ready=False` despite actively indexing (false negative).
-fn spawn_indexer_liveness_heartbeat(store: Arc<GraphStore>) {
+fn spawn_indexer_liveness_heartbeat(
+    store: Arc<GraphStore>,
+    a_stage_metrics: [Arc<crate::pipeline_v2::StageMetrics>; 3],
+) {
     crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
         std::time::Duration::from_secs(5),
         move |snapshot| {
@@ -161,6 +164,30 @@ fn spawn_indexer_liveness_heartbeat(store: Arc<GraphStore>) {
                 warn!(
                     error = %err,
                     "REQ-AXO-901874: failed to UPSERT EmbedderLifecycleHeartbeat row"
+                );
+            }
+            // REQ-AXO-901854 (additive foundation slice) — publish runtime truth
+            // observed at the OWNER (PIL-AXO-001). Every field resolves to the
+            // canonical pipeline_v2 source, never a brain-local proxy or dead v1
+            // counter: graph_workers_active = Σ inflight of A1/A2/A3 (busy graph
+            // workers, from pipeline_v2 StageMetrics); chunk_embeddings_per_second
+            // = the indexer's own embed-rate accessor. The brain READS this row
+            // (empty under brain_only) and projects it.
+            let graph_workers_active: i64 = a_stage_metrics
+                .iter()
+                .map(|m| m.snapshot().inflight as i64)
+                .sum();
+            let truth = crate::graph_ingestion::IndexerRuntimeTruthRecord {
+                process_role: "indexer".to_string(),
+                heartbeat_ms: snapshot.heartbeat_ms,
+                graph_workers_active,
+                chunk_embeddings_per_second:
+                    crate::service_guard::vector_chunk_embeddings_per_second(),
+            };
+            if let Err(err) = store.record_indexer_runtime_truth(&truth) {
+                warn!(
+                    error = %err,
+                    "REQ-AXO-901854: failed to UPSERT indexer_runtime_truth row"
                 );
             }
         },
@@ -276,7 +303,14 @@ pub fn spawn_pipeline_v2_indexer(
     // `axon_runtime.EmbedderLifecycleHeartbeat` row freshness, not the GPU
     // state). Liveness ≠ GPU-up. Tick 5s sits well under the brain's ~30s
     // freshness window so a single missed tick stays fresh.
-    spawn_indexer_liveness_heartbeat(store.clone());
+    spawn_indexer_liveness_heartbeat(
+        store.clone(),
+        [
+            handles_a.metrics_a1.clone(),
+            handles_a.metrics_a2.clone(),
+            handles_a.metrics_a3.clone(),
+        ],
+    );
 
     // Create the b_chunks channel here. The sorted-drain feeder owns the tx ;
     // spawn_pipeline_b_full_multi takes the rx. The channel carries

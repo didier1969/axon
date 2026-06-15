@@ -20,9 +20,9 @@ mod vector_runtime;
 // imports parse_i64_field + parse_u64_field directly from super::sql_helpers.
 pub use types::{
     EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, FileLifecycleEvent,
-    FileVectorizationLeaseSnapshot, FileVectorizationWork, IgnoreReconcileStats, VectorBatchRun,
-    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
-    VectorPersistOutboxWork, VectorWorkerFault,
+    FileVectorizationLeaseSnapshot, FileVectorizationWork, IgnoreReconcileStats,
+    IndexerRuntimeTruthRecord, VectorBatchRun, VectorLaneStateRecord, VectorPersistOutboxPayload,
+    VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
 };
 
 impl GraphStore {

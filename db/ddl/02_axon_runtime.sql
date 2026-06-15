@@ -127,6 +127,31 @@ ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
 ALTER TABLE axon_runtime.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS build_id       TEXT;
 
+-- REQ-AXO-901854 (additive foundation slice): cross-process indexer runtime
+-- truth. Rates/workers were previously sourced from a brain-LOCAL telemetry
+-- snapshot (empty under brain_only — the indexer, not the brain, runs the
+-- pipeline). The indexer now publishes values observed at the OWNER every
+-- heartbeat tick (~5 s, one UPSERT/role, NOT per-file); the brain READS this
+-- row and projects it (PIL-AXO-001 — one canonical truth, observed at owner).
+-- One row per process_role, like EmbedderLifecycleHeartbeat.
+--
+-- CANONICAL SOURCES ONLY (every column resolves to the real pipeline_v2 owner
+-- state, never a brain-local proxy or a dead v1 counter):
+--   * graph_workers_active      = Σ inflight of pipeline A stages A1/A2/A3
+--                                 (pipeline_v2 StageMetrics — busy graph workers).
+--   * chunk_embeddings_per_second = the indexer's own embed-rate accessor.
+-- A cumulative "workers_started" gauge is intentionally NOT published: with
+-- fixed pipeline_v2 worker pools there is no canonical owner source for it
+-- (the legacy GRAPH_WORKERS_STARTED_TOTAL counter is dead under pipeline_v2),
+-- so publishing it would be a non-canonical output. Queue depths, the in-flight
+-- gauge (REQ-AXO-901919) and the axon_runtime→axon rename ride later slices.
+CREATE TABLE IF NOT EXISTS axon_runtime.indexer_runtime_truth (
+    process_role               TEXT   PRIMARY KEY,        -- 'indexer'
+    heartbeat_ms               BIGINT NOT NULL,           -- publish wall-clock; readers gate on freshness
+    graph_workers_active       BIGINT NOT NULL DEFAULT 0, -- Σ inflight of pipeline A (busy graph workers)
+    chunk_embeddings_per_second DOUBLE PRECISION NOT NULL DEFAULT 0  -- pipeline B embed throughput
+);
+
 -- REQ-AXO-901893: Watchman reconciliation cursor, one row per watched root.
 -- The indexer threads `clock_json` back into the next `since` subscription so
 -- Watchman returns the exact cumulative delta since the last checkpoint (or a

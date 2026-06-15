@@ -147,6 +147,23 @@ pub struct EmbedderLifecycleHeartbeatRecord {
     pub build_id: Option<String>,
 }
 
+/// REQ-AXO-901854 (additive foundation slice) — cross-process indexer runtime
+/// truth row read from / written to `axon_runtime.indexer_runtime_truth`. The
+/// indexer (pipeline owner) publishes its observed worker + embed-rate counters
+/// every heartbeat tick; the brain READS this row and projects it, so MCP/dash
+/// see values observed at the OWNER instead of the brain's own (empty under
+/// brain_only) telemetry snapshot. Same struct serves write input and read
+/// output — the fields are symmetric.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexerRuntimeTruthRecord {
+    pub process_role: String,
+    pub heartbeat_ms: i64,
+    /// Σ inflight of pipeline A stages (A1/A2/A3) — canonical busy-graph-worker
+    /// gauge sourced from pipeline_v2 `StageMetrics`, NOT the dead v1 counter.
+    pub graph_workers_active: i64,
+    pub chunk_embeddings_per_second: f64,
+}
+
 /// DEC-AXO-901626 — PG-canonical half of the observable embedder state,
 /// materialised by `axon_runtime.embedder_observed_state()`. The GPU/CPU
 /// half is OS-level (`nvidia-smi`, see `crate::observed_gpu`).

@@ -44,7 +44,7 @@ pub(crate) fn spawn_runtime_telemetry(
 
         loop {
             interval.tick().await;
-            let snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
+            let mut snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
             let runtime_mode = AxonRuntimeMode::from_env();
             // REQ-AXO-901854 — pairing + runtime truth sourced from the
             // indexer's fresh PG lifecycle heartbeat (canonical; replaces the
@@ -62,6 +62,24 @@ pub(crate) fn spawn_runtime_telemetry(
                     (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS
                 });
             let indexer_paired = indexer_peer_hb.is_some();
+            // REQ-AXO-901854 (additive foundation slice) — when this brain does
+            // not run the pipeline (brain_only), its own telemetry snapshot has
+            // empty worker/embed-rate counters. Project the indexer's published
+            // truth (observed at the OWNER) over those fields when the row is
+            // fresh. The brain stays a pure reader (PIL-AXO-001).
+            if !runtime_mode.ingestion_enabled() {
+                if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
+                    if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
+                        // Canonical, owner-observed (pipeline_v2). graph_workers_active
+                        // = Σ A-stage inflight; embed rate = indexer's own accessor.
+                        // graph_workers_started_total is left untouched — no canonical
+                        // owner source exists, so it is not fabricated here.
+                        snapshot.graph_workers_active_current =
+                            truth.graph_workers_active.max(0) as u64;
+                        snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
+                    }
+                }
+            }
             let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
                 service_guard::record_runtime_truth_bridge_dispatch(None)
             } else if let Some(ref hb) = indexer_peer_hb {

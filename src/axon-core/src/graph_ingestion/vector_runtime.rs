@@ -5,8 +5,8 @@ use crate::service_guard;
 
 use super::sql_helpers::{parse_i64_field, parse_u64_field};
 use super::{
-    EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, VectorLaneStateRecord,
-    VectorWorkerFault,
+    EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, IndexerRuntimeTruthRecord,
+    VectorLaneStateRecord, VectorWorkerFault,
 };
 
 impl GraphStore {
@@ -228,6 +228,51 @@ impl GraphStore {
         }))
     }
 
+    /// REQ-AXO-901854 (additive foundation slice) — UPSERT the indexer's
+    /// observed worker + embed-rate counters into the cross-process truth
+    /// table. Called every heartbeat tick by the indexer (pipeline owner);
+    /// the brain reads the row via `latest_indexer_runtime_truth`.
+    pub fn record_indexer_runtime_truth(&self, row: &IndexerRuntimeTruthRecord) -> Result<()> {
+        self.execute(&build_indexer_runtime_truth_upsert_sql(row))
+    }
+
+    /// REQ-AXO-901854 — read the latest indexer runtime-truth row for a role.
+    /// Returns `None` if the indexer hasn't published since boot. Freshness is
+    /// the caller's job: compare `heartbeat_ms` against `now - 2 × tick`.
+    pub fn latest_indexer_runtime_truth(
+        &self,
+        process_role: &str,
+    ) -> Result<Option<IndexerRuntimeTruthRecord>> {
+        let table_ref = self.axon_runtime_table_ref("indexer_runtime_truth");
+        let raw = self.query_json_writer(&format!(
+            "SELECT process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second \
+             FROM {table_ref} \
+             WHERE process_role = '{}' \
+             LIMIT 1",
+            Self::escape_sql(process_role)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(IndexerRuntimeTruthRecord {
+            process_role: row
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            heartbeat_ms: row.get(1).and_then(parse_i64_field).unwrap_or_default(),
+            graph_workers_active: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
+            chunk_embeddings_per_second: row
+                .get(3)
+                .and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or_default(),
+        }))
+    }
+
     /// DEC-AXO-901626 — PG-canonical embedder observation in one round-trip
     /// via `axon_runtime.embedder_observed_state()`. Feeds the brain
     /// composer's `embedder_runtime` block (throughput + staleness) and the
@@ -283,6 +328,26 @@ fn build_lifecycle_heartbeat_upsert_sql(
         GraphStore::escape_sql(&snapshot.compute),
         GraphStore::escape_sql(&snapshot.compute_source),
         build_id_sql,
+    )
+}
+
+/// REQ-AXO-901854 — pure SQL builder for the indexer runtime-truth UPSERT.
+/// Module-scope so the SQL-shape contract test covers it without a live
+/// `GraphStore`. `chunk_embeddings_per_second` is a float — formatted with a
+/// fixed precision so the literal is deterministic and locale-independent.
+fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> String {
+    format!(
+        "INSERT INTO axon_runtime.indexer_runtime_truth \
+         (process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second) \
+         VALUES ('{}', {}, {}, {:.6}) \
+         ON CONFLICT (process_role) DO UPDATE SET \
+            heartbeat_ms = EXCLUDED.heartbeat_ms, \
+            graph_workers_active = EXCLUDED.graph_workers_active, \
+            chunk_embeddings_per_second = EXCLUDED.chunk_embeddings_per_second",
+        GraphStore::escape_sql(&row.process_role),
+        row.heartbeat_ms,
+        row.graph_workers_active,
+        row.chunk_embeddings_per_second,
     )
 }
 
@@ -465,6 +530,38 @@ mod tests {
         assert!(sql.contains("'GPU'"));
         assert!(sql.contains("'nvidia_smi'"));
         assert!(sql.contains("'v0.8.0-795-gf1cdab19'"));
+    }
+
+    #[test]
+    fn indexer_runtime_truth_upsert_sql_shape() {
+        use crate::graph_ingestion::IndexerRuntimeTruthRecord;
+        let row = IndexerRuntimeTruthRecord {
+            process_role: "indexer".to_string(),
+            heartbeat_ms: 1_700_000_005_000,
+            graph_workers_active: 7,
+            chunk_embeddings_per_second: 124.5,
+        };
+        let sql = super::build_indexer_runtime_truth_upsert_sql(&row);
+        assert!(sql.contains("INSERT INTO axon_runtime.indexer_runtime_truth"));
+        assert!(sql.contains("ON CONFLICT (process_role) DO UPDATE"));
+        for col in [
+            "heartbeat_ms",
+            "graph_workers_active",
+            "chunk_embeddings_per_second",
+        ] {
+            assert!(
+                sql.contains(&format!("{col} = EXCLUDED.{col}")),
+                "ON CONFLICT update should refresh column `{col}`"
+            );
+        }
+        // No fabricated cumulative "workers_started" column — there is no
+        // canonical pipeline_v2 source for it (REQ-AXO-901854 canonical-IO).
+        assert!(!sql.contains("graph_workers_started"), "{sql}");
+        assert!(sql.contains("'indexer'"));
+        assert!(sql.contains("1700000005000"));
+        assert!(sql.contains("7"));
+        // Float formatted with fixed precision (locale-independent).
+        assert!(sql.contains("124.500000"), "{sql}");
     }
 
     #[test]
