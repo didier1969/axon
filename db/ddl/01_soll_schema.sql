@@ -220,6 +220,17 @@ CREATE INDEX IF NOT EXISTS soll_node_project_idx
     ON soll.Node (project_code, type);
 CREATE INDEX IF NOT EXISTS soll_node_status_idx
     ON soll.Node (status) WHERE status IS NOT NULL;
+-- REQ-AXO-901757 slice A — Full-Text Search over SOLL title+description. Unlike
+-- the (deliberately absent) trigram GIN above, this serves a REAL new consumer:
+-- the `search` mode of soll_query_context, which uses `to_tsvector @@
+-- plainto_tsquery` + `ts_rank` (an expression the bare-column LIKE path can't,
+-- so this GIN is hit, not dead). Config `'simple'` = language-neutral, case-fold,
+-- no stemming — correct for the heavily mixed FR/EN SOLL corpus (EN+FR stemming
+-- is a deferred slice-A nuance). The expression here MUST match the query side
+-- byte-for-byte or the planner skips the index.
+CREATE INDEX IF NOT EXISTS soll_node_fts_idx
+    ON soll.Node
+    USING GIN (to_tsvector('simple', COALESCE(title,'') || ' ' || COALESCE(description,'')));
 -- No bare soll_node_type_idx: soll_node_project_idx (project_code, type) serves
 -- type filters via its leading prefix / bitmap scan. No title/description
 -- trigram GIN: the only lexical predicate is lower(title|description) LIKE,

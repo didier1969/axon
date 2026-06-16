@@ -647,6 +647,17 @@ impl McpServer {
             .and_then(|v| v.as_i64())
             .unwrap_or(25)
             .max(1);
+        // REQ-AXO-901757 slice A — FTS search mode. When `search` is supplied,
+        // return SOLL nodes ranked by ts_rank over title+description (served by
+        // the soll_node_fts_idx GIN) instead of the project overview.
+        if let Some(search) = args
+            .get("search")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(self.soll_fts_search(&project_code, search, limit));
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
@@ -824,6 +835,72 @@ impl McpServer {
         });
         Self::write_soll_context_cache(cache_key, now_ms, &response);
         Some(response)
+    }
+
+    /// REQ-AXO-901757 slice A — Full-Text Search over `soll.Node`
+    /// (title+description), ranked by `ts_rank`. The `to_tsvector('simple', …)`
+    /// expression is byte-identical to `soll_node_fts_idx` so the planner uses
+    /// the GIN. `plainto_tsquery` is injection-safe for the operator (parses raw
+    /// words into AND-tokens); the literal is still escaped defensively.
+    fn soll_fts_search(&self, project_code: &str, query: &str, limit: i64) -> Value {
+        let escaped_project = escape_sql(project_code);
+        let escaped_query = escape_sql(query);
+        let tsv = "to_tsvector('simple', COALESCE(title,'') || ' ' || COALESCE(description,''))";
+        let tsq = format!("plainto_tsquery('simple', '{escaped_query}')");
+        let rows = self
+            .query_single_column(&format!(
+                "SELECT id || '|' || type || '|' || COALESCE(title,'') || '|' \
+                     || COALESCE(status,'') || '|' || ts_rank({tsv}, {tsq})::text \
+                 FROM soll.Node \
+                 WHERE project_code = '{escaped_project}' AND {tsv} @@ {tsq} \
+                 ORDER BY ts_rank({tsv}, {tsq}) DESC, id DESC \
+                 LIMIT {limit}"
+            ))
+            .unwrap_or_default();
+        let matches: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                let p: Vec<&str> = row.splitn(5, '|').collect();
+                json!({
+                    "id": p.first().copied().unwrap_or(""),
+                    "type": p.get(1).copied().unwrap_or(""),
+                    "title": p.get(2).copied().unwrap_or(""),
+                    "status": p.get(3).copied().unwrap_or(""),
+                    "rank": p.get(4).copied().unwrap_or("0")
+                })
+            })
+            .collect();
+        let text = if matches.is_empty() {
+            format!("No SOLL node matches FTS \"{query}\" in {project_code}.")
+        } else {
+            let lines: Vec<String> = matches
+                .iter()
+                .map(|m| {
+                    format!(
+                        "- {} [{}] {}",
+                        m["id"].as_str().unwrap_or(""),
+                        m["status"].as_str().unwrap_or(""),
+                        m["title"].as_str().unwrap_or("")
+                    )
+                })
+                .collect();
+            format!(
+                "SOLL FTS \"{query}\" in {project_code} ({} match(es)):\n{}",
+                matches.len(),
+                lines.join("\n")
+            )
+        };
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "data": {
+                "project_code": project_code,
+                "search": query,
+                "matches": matches,
+                "surfaces_used": ["soll_fts"],
+                "total_available": matches.len() as u64,
+                "next_call_hint": "read a match body via sql SELECT description FROM soll.Node WHERE id='<ID>'"
+            }
+        })
     }
 }
 

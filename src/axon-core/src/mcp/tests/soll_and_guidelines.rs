@@ -10096,3 +10096,79 @@ fn test_soll_manager_unlink_protected_with_force() {
         "force=true must allow removal of the protected edge"
     );
 }
+
+/// REQ-AXO-901757 slice A — `soll_query_context(search=...)` returns SOLL nodes
+/// ranked by ts_rank over title+description (FTS), and excludes non-matches.
+/// Correctness holds with or without the soll_node_fts_idx GIN (the index is a
+/// latency optimization; PG computes to_tsvector on a seq-scan otherwise).
+#[test]
+fn test_soll_query_context_search_returns_fts_ranked_nodes() {
+    let server = create_test_server();
+    let code = "FTS";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path) \
+             VALUES ('{code}', 'FtsFixture', '/tmp/fts') ON CONFLICT (project_code) DO NOTHING"
+        ))
+        .unwrap();
+    let nodes = [
+        (
+            "REQ-FTS-001",
+            "GPU embedding throughput restoration",
+            "restore the embed rate on the vector lane",
+        ),
+        (
+            "REQ-FTS-002",
+            "Dashboard layout polish",
+            "phoenix liveview grid columns",
+        ),
+        (
+            "REQ-FTS-003",
+            "Chunker giant-line windowing",
+            "char windows bound the body budget",
+        ),
+    ];
+    for (id, title, desc) in nodes {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Requirement', '{code}', '{title}', '{desc}', 'planned', '{{}}') \
+                 ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_query_context",
+                "arguments": { "project_code": code, "search": "embedding throughput" }
+            })),
+            id: Some(json!(757)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("search data");
+    assert_eq!(data["search"].as_str(), Some("embedding throughput"));
+    assert_eq!(data["surfaces_used"][0].as_str(), Some("soll_fts"));
+    let matches = data["matches"].as_array().expect("matches array");
+    assert!(!matches.is_empty(), "expected an FTS match: {data}");
+    // Only the embedding node carries both 'embedding' AND 'throughput'.
+    assert_eq!(
+        matches[0]["id"].as_str(),
+        Some("REQ-FTS-001"),
+        "top match must be the embedding node: {data}"
+    );
+    assert!(
+        matches
+            .iter()
+            .all(|m| m["id"].as_str() != Some("REQ-FTS-002")),
+        "dashboard node must not match 'embedding throughput': {data}"
+    );
+}

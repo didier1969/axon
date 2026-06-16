@@ -303,12 +303,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready.",
+                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready. Pass `search` for FTS over SOLL title+description (ranked by ts_rank).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string" },
-                        "limit": { "type": "integer" }
+                        "limit": { "type": "integer" },
+                        "search": { "type": "string", "description": "REQ-AXO-901757: full-text search query. When set, returns SOLL nodes whose title+description match (to_tsvector @@ plainto_tsquery), ranked by ts_rank, instead of the project overview." }
                     },
                     "required": []
                 }
