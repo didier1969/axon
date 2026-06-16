@@ -47,6 +47,15 @@ pub fn set_counts(project_code: &str, disk_files: i64, eligible_files: i64) {
     );
 }
 
+/// Scanner full-walk publish of the authoritative eligible count for a project,
+/// leaving `disk_files` untouched (the walk skips ineligible files, so disk is
+/// maintained separately). Absolute set — only call from a FULL walk, never a
+/// subtree walk, which would overwrite the total with a fraction.
+pub fn set_eligible_count(project_code: &str, eligible_files: i64) {
+    let mut entry = registry().entry(project_code.to_string()).or_default();
+    entry.eligible_files = eligible_files.max(0);
+}
+
 /// Watcher CREATE: a new file appeared. `eligible` is the scanner's verdict for
 /// the path so the eligible counter only moves for indexable files.
 pub fn record_created(project_code: &str, eligible: bool) {
@@ -137,6 +146,15 @@ mod tests {
         let snap = snapshot("T-CLAMP").unwrap();
         assert_eq!(snap.disk_files, 0);
         assert_eq!(snap.eligible_files, 0);
+    }
+
+    #[test]
+    fn set_eligible_count_preserves_disk_files() {
+        set_counts("T-ELIG", 50, 20);
+        set_eligible_count("T-ELIG", 25);
+        let snap = snapshot("T-ELIG").unwrap();
+        assert_eq!(snap.disk_files, 50, "disk untouched by eligible publish");
+        assert_eq!(snap.eligible_files, 25);
     }
 
     #[test]
