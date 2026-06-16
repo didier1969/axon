@@ -417,11 +417,6 @@ impl Scanner {
     fn scan_path(&self, graph: Arc<GraphStore>, start: &Path) -> usize {
         let mut batch = Vec::new();
         let mut total_files = 0;
-        // REQ-AXO-901749 — tally eligible files per project during the walk
-        // (the project is already resolved per eligible file below, so this is
-        // free). Published to the per-project counter registry only for a FULL
-        // walk; see the publish guard after the loop.
-        let mut eligible_by_project: HashMap<String, i64> = HashMap::new();
         let walker = self.build_walker_from(start);
 
         for entry in walker.build().filter_map(|e| e.ok()) {
@@ -442,10 +437,6 @@ impl Scanner {
                         continue;
                     }
                 };
-
-                *eligible_by_project
-                    .entry(project_name.clone())
-                    .or_insert(0) += 1;
 
                 let path_str = if let Ok(abs_path) = fs::canonicalize(path) {
                     abs_path.to_string_lossy().to_string()
@@ -485,16 +476,6 @@ impl Scanner {
         if !batch.is_empty() {
             total_files += batch.len();
             let _ = dispatch_scanner_batch(&graph, &batch);
-        }
-
-        // REQ-AXO-901749 — publish authoritative per-project eligible counts, but
-        // ONLY from a full root walk: a subtree walk sees a fraction and must not
-        // overwrite the absolute count (the watcher maintains subtree deltas
-        // incrementally in a later slice).
-        if start == self.root.as_path() {
-            for (project, eligible) in &eligible_by_project {
-                crate::project_file_counters::set_eligible_count(project, *eligible);
-            }
         }
 
         total_files

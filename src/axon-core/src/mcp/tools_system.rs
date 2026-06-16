@@ -484,18 +484,11 @@ impl McpServer {
                     } else {
                         0.0
                     };
-                    // REQ-AXO-901749 — O(1) read of the per-project eligible
-                    // file count from the incremental registry (populated by the
-                    // scanner walk); -1 when this project has not been walked yet.
-                    let fs_eligible = crate::project_file_counters::snapshot(code)
-                        .map(|c| c.eligible_files)
-                        .unwrap_or(-1);
                     Some(json!({
                         "project_code": code,
                         "files_total": ft,
                         "files_chunked": fc,
                         "indexed_files": ft,
-                        "eligible_files": fs_eligible,
                         "chunks": ch,
                         "embeddings": emb,
                         "coverage_pct": (cov * 100.0).round() / 100.0,
