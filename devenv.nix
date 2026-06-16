@@ -17,6 +17,11 @@ in
   # Nix Sovereign Architect: Multi-language support with proper modularity
   languages.rust.enable = true;
   languages.rust.channel = "stable";
+  # REQ-AXO-902009 — musl target ships a self-contained std so the MCP tunnel
+  # (`bin/axon-mcp-tunnel-static`) is reproducibly rebuildable as a fully-static
+  # binary, portable to a fresh host. Additive: does not touch the default
+  # x86_64-unknown-linux-gnu build flags used by brain/indexer/axonctl.
+  languages.rust.targets = [ "x86_64-unknown-linux-musl" ];
 
   languages.python.enable = true;
   languages.python.package = pythonEnv;
