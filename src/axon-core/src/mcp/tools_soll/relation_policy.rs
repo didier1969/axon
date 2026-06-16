@@ -666,6 +666,74 @@ pub(super) fn incoming_relation_sources_for_target(target_type: &str) -> Vec<Val
         .collect()
 }
 
+/// REQ-AXO-902003 — render a source-only / target-only relation summary as a
+/// terse, LLM-visible matrix (mirrors the commit-error guidance), so
+/// `soll_relation_schema(source_type=X)` discloses the legal pairs in the
+/// rendered TEXT instead of hiding them in `data`. An LLM optimises on the
+/// rendered sentence and won't drill into the structured envelope, so the
+/// tool's promise ("discover valid links without trial and error") is only
+/// kept if the matrix is in the text. Returns `None` for a specific pair
+/// (handled by the caller's `canonical_direction` branch) or an empty policy.
+pub(super) fn render_kind_schema_matrix_text(data: &Value) -> Option<String> {
+    let routes_from = |entries: &[Value], kind_field: &str| -> Vec<String> {
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let kind = entry.get(kind_field).and_then(Value::as_str)?;
+                let rels = entry
+                    .get("allowed_relations")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .filter(|joined| !joined.is_empty())
+                    .or_else(|| {
+                        entry
+                            .get("default_relation")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })?;
+                Some(format!("{kind} via {rels}"))
+            })
+            .collect()
+    };
+
+    // Source-only: outgoing matrix — "DEC can legally reach: REQ via SOLVES/REFINES, CPT via REFINES".
+    if let (Some(source_kind), Some(targets)) = (
+        data.get("source_kind").and_then(Value::as_str),
+        data.get("allowed_targets").and_then(Value::as_array),
+    ) {
+        let routes = routes_from(targets, "target_kind");
+        if !routes.is_empty() {
+            return Some(format!(
+                "{source_kind} can legally reach: {}.",
+                routes.join(", ")
+            ));
+        }
+    }
+
+    // Target-only: incoming matrix — "VIS can be legally reached by: PIL via EPITOMIZES".
+    if data.get("allowed_targets").is_none() {
+        if let (Some(target_kind), Some(sources)) = (
+            data.get("target_kind").and_then(Value::as_str),
+            data.get("incoming_from_source_kinds").and_then(Value::as_array),
+        ) {
+            let routes = routes_from(sources, "source_kind");
+            if !routes.is_empty() {
+                return Some(format!(
+                    "{target_kind} can be legally reached by: {}.",
+                    routes.join(", ")
+                ));
+            }
+        }
+    }
+
+    None
+}
+
 pub(super) fn repair_guidance_entry(
     category: &str,
     ids: &[String],

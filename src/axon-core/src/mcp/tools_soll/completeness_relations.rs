@@ -700,7 +700,14 @@ impl McpServer {
                 }
                 lines.join(" ")
             }
-            _ => "Canonical SOLL relation policy resolved — inspect `data` for kind-scoped guidance.".to_string(),
+            // REQ-AXO-902003 — source-only / target-only lookups have no
+            // `canonical_direction`; render their full legal-pair matrix in the
+            // visible text (the data already holds it) instead of the opaque
+            // "inspect `data`" message that forced trial-and-error discovery.
+            _ => render_kind_schema_matrix_text(&data).unwrap_or_else(|| {
+                "Canonical SOLL relation policy resolved — inspect `data` for kind-scoped guidance."
+                    .to_string()
+            }),
         };
         Some(json!({
             "content": [{ "type": "text", "text": visible_text }],

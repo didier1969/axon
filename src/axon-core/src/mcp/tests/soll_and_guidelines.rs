@@ -5514,6 +5514,67 @@ fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar()
     assert!(pillar_data["forbidden_targets"].as_array().is_some());
 }
 
+/// REQ-AXO-902003 — a source-only / target-only lookup must render the legal
+/// pair matrix in the VISIBLE text, not just in `data`. An LLM optimises on the
+/// rendered sentence; the opaque "inspect `data`" message forced trial-and-error
+/// discovery at consumer bootstrap, defeating the tool's whole promise.
+#[test]
+fn test_soll_relation_schema_kind_only_renders_matrix_in_visible_text() {
+    let server = create_test_server();
+
+    // Source-only: outgoing matrix in the text.
+    let pillar = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": { "source_type": "PIL" }
+            })),
+            id: Some(json!(41091)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let pillar_text = pillar["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        pillar_text.contains("PIL can legally reach:"),
+        "source-only must render the outgoing matrix, got: {pillar_text}"
+    );
+    assert!(
+        pillar_text.contains("VIS via EPITOMIZES"),
+        "outgoing matrix must inline the PIL->VIS canonical relation, got: {pillar_text}"
+    );
+    assert!(
+        !pillar_text.contains("inspect `data`"),
+        "source-only must NOT fall back to the opaque message, got: {pillar_text}"
+    );
+
+    // Target-only: incoming matrix in the text.
+    let vision = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": { "target_type": "VIS" }
+            })),
+            id: Some(json!(41092)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let vision_text = vision["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        vision_text.contains("VIS can be legally reached by:"),
+        "target-only must render the incoming matrix, got: {vision_text}"
+    );
+    assert!(
+        vision_text.contains("PIL via EPITOMIZES"),
+        "incoming matrix must inline the PIL->VIS canonical relation, got: {vision_text}"
+    );
+}
+
 #[test]
 fn test_soll_relation_schema_pair_suggests_reverse_direction_when_pair_is_forbidden() {
     let server = create_test_server();
