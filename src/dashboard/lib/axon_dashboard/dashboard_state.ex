@@ -10,13 +10,12 @@ defmodule AxonDashboard.DashboardState do
 
   No business logic lives here — this is a thin DTO between the
   BridgeClient parsing layer and the LiveViews. The companion modules
-  `Totals`, `PipelineConfig`, `Lifecycle`, `Filesystem`, and
+  `Totals`, `PipelineConfig`, `Lifecycle`, and
   `PerProjectEntry` mirror the brain envelope sub-blocks.
   """
 
   alias AxonDashboard.DashboardState.{
     Embedder,
-    Filesystem,
     Lifecycle,
     PerProjectEntry,
     PipelineConfig,
@@ -31,7 +30,6 @@ defmodule AxonDashboard.DashboardState do
           runtime: Runtime.t() | nil,
           embedder: Embedder.t() | nil,
           telemetry: Telemetry.t() | nil,
-          filesystem: Filesystem.t() | nil,
           lifecycle: Lifecycle.t() | nil,
           totals: Totals.t() | nil,
           per_project: [PerProjectEntry.t()],
@@ -42,7 +40,6 @@ defmodule AxonDashboard.DashboardState do
             runtime: nil,
             embedder: nil,
             telemetry: nil,
-            filesystem: nil,
             lifecycle: nil,
             totals: nil,
             per_project: [],
@@ -63,7 +60,6 @@ defmodule AxonDashboard.DashboardState do
       runtime: Runtime.from_map(Map.get(m, "runtime")),
       embedder: Embedder.from_map(Map.get(m, "embedder")),
       telemetry: Telemetry.from_map(Map.get(m, "telemetry")),
-      filesystem: Filesystem.from_map(Map.get(m, "filesystem")),
       lifecycle: Lifecycle.from_map(Map.get(m, "lifecycle")),
       totals: Totals.from_map(Map.get(m, "totals")),
       per_project:
@@ -230,21 +226,6 @@ defmodule AxonDashboard.DashboardState do
         n when is_integer(n) -> n * 1.0
         _ -> 0.0
       end
-    end
-  end
-
-  defmodule Filesystem do
-    @moduledoc "Cached watcher walk counts (60 s TTL brain-side)."
-    @type t :: %__MODULE__{disk_files: integer(), eligible_files: integer()}
-    defstruct disk_files: -1, eligible_files: -1
-
-    def from_map(nil), do: nil
-
-    def from_map(%{} = m) do
-      %__MODULE__{
-        disk_files: Map.get(m, "disk_files", -1),
-        eligible_files: Map.get(m, "eligible_files", -1)
-      }
     end
   end
 

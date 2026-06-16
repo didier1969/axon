@@ -20,13 +20,10 @@
 //!       startup.
 //! * `graph_store.latest_lifecycle_heartbeat("indexer")` — PG-backed
 //!   lifecycle phase/wake/sleep counts.
-//! * `mcp::tools_system::cached_fs_counters()` — filesystem walk with
-//!   60 s TTL (`disk_files`, `eligible_files`).
 //! * In-memory snapshot from `main_telemetry` 1 Hz tick — live rates,
 //!   queues, scheduler, embedder identity, runtime mode.
 
 use crate::graph::GraphStore;
-use crate::mcp::tools_system::cached_fs_counters;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::broadcast;
@@ -259,15 +256,13 @@ pub(crate) fn compute_pipeline_status(
 
 /// Compose the `dashboard_state_v1` JSON envelope from live in-memory
 /// metrics + PG composite (totals, per_project, runtime_config) +
-/// lifecycle block + filesystem counters. Field naming matches what
+/// lifecycle block. Field naming matches what
 /// the dashboard LiveViews consume so the Elixir side can replace its
 /// three pollers with a single PubSub subscriber.
 pub(crate) fn compose_dashboard_state_v1(
     live: &LiveMetrics<'_>,
     pg_state: Value,
     lifecycle: Value,
-    disk_files: i64,
-    eligible_files: i64,
 ) -> Value {
     let totals = pg_state.get("totals");
     let pending_chunks = totals
@@ -343,10 +338,6 @@ pub(crate) fn compose_dashboard_state_v1(
             "service_pressure": live.service_pressure,
             "scheduler": live.scheduler_state,
         },
-        "filesystem": {
-            "disk_files": disk_files,
-            "eligible_files": eligible_files,
-        },
         "lifecycle": lifecycle,
         "totals": pg_state.get("totals").cloned().unwrap_or_else(|| json!({})),
         "per_project": pg_state.get("per_project").cloned().unwrap_or_else(|| json!([])),
@@ -370,9 +361,8 @@ pub(crate) fn compose_publish_and_emit(
 ) {
     let pg_state = read_dashboard_state_full(store);
     let lifecycle = compose_lifecycle_block(store);
-    let (disk_files, eligible_files) = cached_fs_counters();
 
-    let state = compose_dashboard_state_v1(&live, pg_state, lifecycle, disk_files, eligible_files);
+    let state = compose_dashboard_state_v1(&live, pg_state, lifecycle);
 
     // 1) Update the in-memory slot for HTTP /dashboard/state.
     publish_dashboard_state(state.clone());
@@ -535,7 +525,7 @@ mod tests {
             indexer_paired: false,
         };
 
-        let event = compose_dashboard_state_v1(&live, pg_state, lifecycle, 1_987_358, 23_894);
+        let event = compose_dashboard_state_v1(&live, pg_state, lifecycle);
 
         // Envelope contract — version + timestamp.
         assert_eq!(event["event"], "dashboard_state_v1");
@@ -548,9 +538,6 @@ mod tests {
         // Live telemetry passes through verbatim.
         assert_eq!(event["telemetry"]["scheduler"], "fast");
         assert_eq!(event["telemetry"]["service_pressure"], "healthy");
-        // Filesystem counters from cached scan.
-        assert_eq!(event["filesystem"]["disk_files"], 1_987_358);
-        assert_eq!(event["filesystem"]["eligible_files"], 23_894);
         // Lifecycle block embedded as-is.
         assert_eq!(event["lifecycle"]["phase"], "ready");
         // PG composite blocks extracted from pg_state (covers the F5
@@ -602,7 +589,7 @@ mod tests {
             runtime_idle: false,
             indexer_paired: false,
         };
-        let event = compose_dashboard_state_v1(&live, Value::Null, json!({}), -1, -1);
+        let event = compose_dashboard_state_v1(&live, Value::Null, json!({}));
         assert!(event.get("totals").is_some());
         assert!(event.get("per_project").is_some());
         assert!(event.get("runtime_config").is_some());

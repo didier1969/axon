@@ -6,133 +6,6 @@ use super::McpServer;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
-// ── Filesystem counters (background-refreshed, NEVER on the hot path) ──
-// `disk_files` + `eligible_files` are slow-moving totals over
-// `AXON_WATCH_DIR`. The walk is O(tree): on the operator host
-// AXON_WATCH_DIR=/home/dstadel/projects spans ~1.7 M files (~0.8 M of them
-// node_modules/.git/target/_build noise). The previous design walked
-// synchronously on the 1 Hz telemetry loop on every TTL miss, blocking the
-// loop — and therefore the runtime heartbeat — for 17-35 s, tripping the
-// watchdog (`no_telemetry_window_exceeded`) and making MCP + dashboard
-// appear dead (the stale "~284 k files / ~1 s walk" assumption was off by
-// an order of magnitude).
-//
-// Fix (responsiveness): `cached_fs_counters()` is now a PURE, non-blocking
-// read of a snapshot recomputed off-runtime by `spawn_fs_counter_refresher`
-// (spawn_blocking, started at brain boot). The walk also prunes build/dep/
-// VCS noise directories, so it is fast AND `disk_files` reflects the real
-// source tree instead of node_modules churn.
-// Long-term canonical target: per-project incremental counters fed by
-// watcher/PG (REQ-AXO-901749).
-const FS_COUNTER_REFRESH_SECS: u64 = 60;
-
-// Directories never worth descending into for source-file counts. Pruning
-// them keeps the walk cheap and keeps `disk_files` honest.
-const FS_COUNTER_PRUNE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "cargo-target",
-    "_build",
-    "deps",
-    ".axon",
-    ".axon-dev",
-    ".venv",
-    "__pycache__",
-    ".elixir_ls",
-    ".mypy_cache",
-];
-
-struct FsCounterSnapshot {
-    disk_files: i64,
-    eligible_files: i64,
-}
-
-static FS_COUNTER_CACHE: std::sync::Mutex<Option<FsCounterSnapshot>> = std::sync::Mutex::new(None);
-
-/// Walk `watch_root` once (pruning build/dep/VCS noise dirs) and return
-/// `(disk_files, eligible_files)`. CPU/IO-bound — callers MUST run this off
-/// the async runtime (see [`spawn_fs_counter_refresher`]).
-fn compute_fs_counters(watch_root: &str) -> (i64, i64) {
-    let scanner = crate::scanner::Scanner::new(watch_root, "");
-    let walker = ignore::WalkBuilder::new(watch_root)
-        .hidden(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .filter_entry(|entry| {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                if let Some(name) = entry.file_name().to_str() {
-                    return !FS_COUNTER_PRUNE_DIRS.contains(&name);
-                }
-            }
-            true
-        })
-        .build();
-    let mut disk: i64 = 0;
-    let mut eligible: i64 = 0;
-    for entry in walker.filter_map(|e| e.ok()) {
-        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            continue;
-        }
-        disk += 1;
-        if scanner.should_process_path(entry.path()) {
-            eligible += 1;
-        }
-    }
-    (disk, eligible)
-}
-
-/// Returns the latest `(disk_files, eligible_files)` snapshot — a PURE,
-/// non-blocking read. Returns `(-1, -1)` when `AXON_WATCH_DIR` is unset or
-/// no snapshot has been computed yet. NEVER walks the filesystem here; the
-/// walk runs off-runtime in [`spawn_fs_counter_refresher`].
-///
-/// REQ-AXO-901806 — exposed `pub(crate)` so `dashboard_state.rs` reads the
-/// same snapshot in the 1 Hz event composition.
-pub(crate) fn cached_fs_counters() -> (i64, i64) {
-    match std::env::var("AXON_WATCH_DIR") {
-        Ok(v) if !v.trim().is_empty() => {}
-        _ => return (-1, -1),
-    }
-    if let Ok(guard) = FS_COUNTER_CACHE.lock() {
-        if let Some(ref snap) = *guard {
-            return (snap.disk_files, snap.eligible_files);
-        }
-    }
-    (-1, -1)
-}
-
-/// Spawn the background filesystem-counter refresher (brain boot). Recomputes
-/// the snapshot every `FS_COUNTER_REFRESH_SECS` via `spawn_blocking`, so the
-/// multi-second walk over a large `AXON_WATCH_DIR` NEVER blocks the async
-/// runtime / 1 Hz telemetry loop / runtime heartbeat. No-op when
-/// `AXON_WATCH_DIR` is unset.
-pub(crate) fn spawn_fs_counter_refresher() {
-    let watch_root = match std::env::var("AXON_WATCH_DIR") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return,
-    };
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(FS_COUNTER_REFRESH_SECS));
-        loop {
-            interval.tick().await;
-            let root = watch_root.clone();
-            if let Ok((disk, eligible)) =
-                tokio::task::spawn_blocking(move || compute_fs_counters(&root)).await
-            {
-                if let Ok(mut guard) = FS_COUNTER_CACHE.lock() {
-                    *guard = Some(FsCounterSnapshot {
-                        disk_files: disk,
-                        eligible_files: eligible,
-                    });
-                }
-            }
-        }
-    });
-}
-
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
         let runtime_mode = AxonRuntimeMode::from_env();
@@ -464,10 +337,6 @@ impl McpServer {
             0.0
         };
 
-        // ── Filesystem scan counters (separate source — FS walk, not the
-        // IST funnel ; refreshed off-runtime). Surfaced as a diagnostic. ──
-        let (disk_files, eligible_files) = cached_fs_counters();
-
         // ── Per-project breakdown (global view only) — projected from the
         // same canonical view, so it reconciles with the totals above. ──
         let per_project_breakdown: Value = if project == "*" {
@@ -718,22 +587,8 @@ impl McpServer {
             String::new()
         };
 
-        let disk_files_str = if disk_files >= 0 {
-            format!("{disk_files}")
-        } else {
-            "n/a (no AXON_WATCH_DIR)".to_string()
-        };
-        let eligible_files_str = if eligible_files >= 0 {
-            format!("{eligible_files}")
-        } else {
-            "n/a".to_string()
-        };
-
         let report = format!(
             "## Axon Status (project={project})\n\n\
-             ### Filesystem (refreshed every {FS_COUNTER_REFRESH_SECS}s, off-runtime)\n\
-             - Disk files (total):    {disk_files_str}\n\
-             - Eligible files:        {eligible_files_str}\n\n\
              ### Storage\n\
              | Entity         | Count        |\n\
              |----------------|--------------|\n\
@@ -768,8 +623,6 @@ impl McpServer {
             "content": [{ "type": "text", "text": report }],
             "structuredContent": {
                 "project": project,
-                "disk_files": disk_files,
-                "eligible_files": eligible_files,
                 "symbols": symbols,
                 "total_chunks": total_chunks,
                 "embedded_chunks": embedded_chunks,

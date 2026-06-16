@@ -870,11 +870,6 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         queue_store.clone(),
         results_tx.clone(),
     );
-    // Recompute the AXON_WATCH_DIR filesystem counters off-runtime so the
-    // (potentially multi-second) tree walk never blocks the 1 Hz telemetry
-    // loop / runtime heartbeat — root cause of watchdog no_telemetry_window
-    // flips + apparent MCP/dashboard unresponsiveness.
-    crate::mcp::tools_system::spawn_fs_counter_refresher();
 
     let num_workers = runtime_profile.recommended_workers;
     info!(

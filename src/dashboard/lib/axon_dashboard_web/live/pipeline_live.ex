@@ -104,9 +104,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
              REQ-AXO-901865). Source unique PG, monotone par construction. Deux
              tiers : Fichiers (Enrolled → Chunkés → À traiter) + Contenu. Les % en
              sub matérialisent le rétrécissement de l'entonnoir ; invariants :
-             Chunkés + À traiter = Enrolled · Pending + Embeddings = Chunks.
-             FS scan / Eligible / Non-chunkable différés : compteurs FS-walk
-             globaux non-canoniques (REQ-AXO-901749 per-projet + 901831 gap). --%>
+             Chunkés + À traiter = Enrolled · Pending + Embeddings = Chunks. --%>
         <section class="col-span-12 space-y-3">
           <div>
             <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80 mb-2">Files</div>
