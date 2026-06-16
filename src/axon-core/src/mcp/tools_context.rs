@@ -1973,26 +1973,35 @@ impl McpServer {
         // lexical anchor primacy. Degraded semantic lane → all distances `None` →
         // graceful fall-back to the historical lexical sort.
         const ENTRY_SEMANTIC_RELEVANCE_MAX: f64 = 0.5;
-        // Doc / prose candidates (markdown headings indexed as symbols) embed
-        // closer to a natural-language question than English code identifiers,
-        // so pure semantic distance would crown a working-note section as the
-        // "primary entrypoint" of a *code* retrieval tool. When a code-bearing
-        // candidate is itself relevant, demote docs below it; otherwise (no
-        // relevant code) the best doc may still anchor the packet.
-        let is_doc_kind =
-            |c: &EntryCandidate| matches!(c.kind.as_str(), "section" | "document" | "doc");
+        // Docs, tests, benchmarks and scripts all embed closer to a natural-
+        // language question than production code identifiers (markdown headings,
+        // `test_*` assertions and prose mirror the question's vocabulary), so
+        // pure semantic distance would crown a test or a working-note section as
+        // the "primary entrypoint" of a *code* retrieval tool — observed live:
+        // `test_soll_relation_schema_resolves_pair_by_ids` beat the production
+        // `insert_validated_relation` (REQ-AXO-901937 criterion 1). Treat any
+        // non-production-code provenance as a SECONDARY entrypoint: when a
+        // production-code candidate is itself relevant it ranks first; otherwise
+        // (no relevant code) the best secondary candidate may still anchor the
+        // packet. Provenance reuses the canonical `evidence_provenance_for_uri`
+        // classifier (single source of truth, GUI-PRO-013).
+        let is_secondary_entry = |c: &EntryCandidate| {
+            matches!(c.kind.as_str(), "section" | "document" | "doc")
+                || !matches!(Self::evidence_provenance_for_uri(&c.uri), "code_chunk")
+        };
         let semantic_primary = matches!(route, RetrievalRoute::Hybrid | RetrievalRoute::SollHybrid)
             && candidates
                 .iter()
                 .any(|c| c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX));
         if semantic_primary {
-            let code_relevant = candidates.iter().any(|c| {
-                !is_doc_kind(c) && c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
+            let primary_relevant = candidates.iter().any(|c| {
+                !is_secondary_entry(c)
+                    && c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
             });
             candidates.sort_by(|left, right| {
-                if code_relevant {
-                    // false (code) sorts before true (doc)
-                    let ordering = is_doc_kind(left).cmp(&is_doc_kind(right));
+                if primary_relevant {
+                    // false (production code) sorts before true (doc/test/bench/script)
+                    let ordering = is_secondary_entry(left).cmp(&is_secondary_entry(right));
                     if ordering != std::cmp::Ordering::Equal {
                         return ordering;
                     }
@@ -5122,6 +5131,88 @@ mod tests {
         assert_eq!(
             doc_only[0].name, "4.1 Règles minimales",
             "with no relevant code candidate, the best doc may anchor the packet"
+        );
+
+        // Case 7 (REQ-AXO-901937 live regression) — a TEST embeds closest to the
+        // NL question (`test_*` mirrors its vocabulary) but must NOT outrank the
+        // relevant production definition site on an open-question route. Mirrors
+        // the live repro where `test_soll_relation_schema_resolves_pair_by_ids`
+        // crowned the entrypoint over `insert_validated_relation`.
+        let mut test_vs_code = vec![
+            entry(
+                "test_soll_relation_schema_resolves_pair_by_ids",
+                "function",
+                "/repo/src/axon-core/src/mcp/tests/soll_and_guidelines.rs",
+                2,
+                false,
+                Some(0.12),
+            ),
+            entry(
+                "insert_validated_relation",
+                "method",
+                "/repo/src/axon-core/src/mcp/tools_soll/completeness_relations.rs",
+                0,
+                false,
+                Some(0.20),
+            ),
+        ];
+        server.rerank_entry_candidates(
+            &mut test_vs_code,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            test_vs_code[0].name, "insert_validated_relation",
+            "a test must not outrank the relevant production definition site (provenance demotion)"
+        );
+
+        // Case 8 — the whole non-production-code provenance class is secondary,
+        // not just tests: a benchmark is likewise demoted below relevant
+        // production code, reusing the canonical `evidence_provenance_for_uri`.
+        let mut bench_vs_code = vec![
+            entry("bench_relation_throughput", "function", "/repo/benchmark/rel_bench.rs", 1, false, Some(0.11)),
+            entry("insert_validated_relation", "method", "/repo/src/x.rs", 0, false, Some(0.22)),
+        ];
+        server.rerank_entry_candidates(
+            &mut bench_vs_code,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            bench_vs_code[0].name, "insert_validated_relation",
+            "a benchmark must not outrank the relevant production definition site"
+        );
+
+        // Case 9 (symmetry) — with NO relevant production code, the best test
+        // still anchors the packet (graceful, mirrors the doc case 6).
+        let mut test_only = vec![
+            entry(
+                "test_relation_schema",
+                "function",
+                "/repo/src/axon-core/src/mcp/tests/soll_and_guidelines.rs",
+                1,
+                false,
+                Some(0.10),
+            ),
+            entry("far_method", "method", "/repo/src/x.rs", 0, false, Some(0.61)),
+        ];
+        server.rerank_entry_candidates(
+            &mut test_only,
+            super::RetrievalRoute::Hybrid,
+            &terms,
+            &no_hints,
+            &scope,
+            false,
+        );
+        assert_eq!(
+            test_only[0].name, "test_relation_schema",
+            "with no relevant production code, the best test may anchor the packet"
         );
     }
 
