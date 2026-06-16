@@ -224,6 +224,8 @@ pub fn load_runtime_embedding_tokenizer() -> AnyhowResult<Arc<Tokenizer>> {
 }
 
 pub fn token_count_for_text(text: &str) -> AnyhowResult<usize> {
+    #[cfg(test)]
+    encode_counter::bump();
     let tokenizer = load_runtime_embedding_tokenizer()?;
     let encoding = tokenizer
         .encode(text, true)
@@ -277,6 +279,8 @@ pub fn content_token_count(text: &str) -> usize {
 }
 
 fn content_token_count_uncached(text: &str) -> usize {
+    #[cfg(test)]
+    encode_counter::bump();
     match load_runtime_embedding_tokenizer() {
         Ok(tokenizer) => match tokenizer.encode(text, false) {
             Ok(encoding) => encoding.len(),
@@ -305,6 +309,32 @@ const TOKEN_COUNT_CACHE_MAX_ENTRIES: usize = 4_096;
 thread_local! {
     static TOKEN_COUNT_CACHE: std::cell::RefCell<std::collections::HashMap<String, usize>> =
         std::cell::RefCell::new(std::collections::HashMap::with_capacity(4096));
+}
+
+/// REQ-AXO-901895 item #3 — test-only encode tripwire. Every real tokenizer
+/// `encode` (both [`token_count_for_text`] and [`content_token_count_uncached`])
+/// bumps this global counter, letting a chunker regression test assert the
+/// encode COUNT is O(N) — an unambiguous O(N²) guard, unlike the flaky
+/// wall-clock bound it replaces. Global (not thread-local) so it captures
+/// encodes on the chunker's `spawn_blocking` threads too; deterministic only
+/// under `--test-threads=1` (already required for this crate's lib tests).
+#[cfg(test)]
+pub(crate) mod encode_counter {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ENCODES: AtomicUsize = AtomicUsize::new(0);
+
+    pub(crate) fn bump() {
+        ENCODES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reset() {
+        ENCODES.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get() -> usize {
+        ENCODES.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]

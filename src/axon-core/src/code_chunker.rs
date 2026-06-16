@@ -342,20 +342,16 @@ fn dp_segment_body(
     let body_budget = profile.target_chunk_tokens.saturating_sub(overhead).max(8);
 
     // --- GIANT-LINE fallback (minified / generated code): if the body is a
-    // single line, or any single line is so long that on its own it blows the
-    // budget, the DP's per-line granularity cannot help. Char-window the
-    // offending lines. Heuristic: ~3 chars/token (conservative for BGE on
-    // source), so a body_budget*3-char window stays under budget. ---
-    let char_per_token: usize = 3;
+    // single line, or any single line is so long (cheap char proxy) that on its
+    // own it blows the budget, the DP's per-line granularity cannot help.
+    // Char-window the offending lines. The char proxy is a fast pre-filter; the
+    // measured-cost gate below catches the dense lines it misses. ---
     let giant_char_threshold = body_budget.saturating_mul(4).max(1);
     let any_giant_line = body_lines
         .iter()
         .any(|line| line.chars().count() > giant_char_threshold);
     if n == 1 || any_giant_line {
-        return (
-            split_giant_lines(body_lines, body_start, body_budget, char_per_token),
-            false,
-        );
+        return (split_giant_lines(body_lines, body_start, body_budget), false);
     }
 
     // --- Per-line token costs: O(N) encodes (the core fix). The wall-clock
@@ -370,6 +366,20 @@ fn dp_segment_body(
             );
         }
         line_costs.push(content_token_count(line));
+    }
+
+    // REQ-AXO-901895 item #2 — a physical line whose MEASURED token cost alone
+    // exceeds `body_budget` cannot be placed by the line-granular DP: it would
+    // fall into the `!found` branch and be emitted WHOLE, then the embedder
+    // silently truncates it (content dropped from the index). The cheap
+    // char-proxy gate above misses DENSE lines (~1 token/char) shorter than
+    // `giant_char_threshold`. Now that per-line costs are measured (and cheap —
+    // the char gate already excluded the truly huge lines), route the body
+    // through the data-driven char-windower, which guarantees every emitted
+    // window fits the budget. This makes the DP `!found` branch below pure
+    // defense-in-depth (it can no longer fire for a reachable input).
+    if line_costs.iter().any(|cost| *cost > body_budget) {
+        return (split_giant_lines(body_lines, body_start, body_budget), false);
     }
 
     // Prefix sum P[k] = sum of line_costs[0..k]. body_cost(a,b) ≈
@@ -458,8 +468,11 @@ fn dp_segment_body(
             }
         }
         if !found {
-            // Single line at e-1 alone exceeds budget (giant line that slipped
-            // past the char-proxy gate). Emit it as its own oversized chunk.
+            // Defense-in-depth (REQ-AXO-901895 item #2): the measured-cost gate
+            // above already routed any over-budget line to the char-windower, so
+            // this is now unreachable for real input. Kept as a non-panicking
+            // floor — emit the line as its own oversized chunk — in case a future
+            // change weakens the gate.
             dp[e] = dp[e - 1] + large_finite;
             prev[e] = e - 1;
         }
@@ -480,16 +493,33 @@ fn dp_segment_body(
     (ranges, false)
 }
 
-/// REQ-AXO-901894 — Char-window fallback for minified / generated lines that
-/// individually exceed the body budget. Splits each over-long line's TEXT into
-/// `~budget*char_per_token`-char windows; short lines pass through whole.
+/// REQ-AXO-901894 / REQ-AXO-901895 item #1 — char-window fallback for minified
+/// / generated / dense lines that individually blow the body budget. Splits
+/// each over-long line into windows of at most `body_budget` CHARS; shorter
+/// lines pass through whole.
+///
+/// CORRECT-BY-CONSTRUCTION (kills the silent-truncation class): the WordPiece
+/// tokenizer used by BGE never emits more tokens than characters — every
+/// subword token spans >= 1 char — so a `body_budget`-char window can never
+/// exceed `body_budget` tokens. No measurement, no per-window tokenizer encode
+/// (this fallback path stays encode-free, so it never slows the B1 chunk-prep
+/// stage), and no heuristic to mis-tune. The pre-fix code sized windows at
+/// `body_budget * char_per_token` chars (~3 chars/token assumption) and emitted
+/// shorter lines whole; on a DENSE line (~1 token/char: hex, CJK, dense
+/// punctuation) that window encoded to up to `char_per_token × body_budget`
+/// tokens, overflowed the model window, and the embedder SILENTLY truncated it
+/// — content dropped from the index, hurting retrieval.
+///
+/// Trade-off: on SPARSE minified content (~3-4 chars/token) this emits more,
+/// smaller windows than the old heuristic. That is the deliberate cost of
+/// losslessness on a rare, low-retrieval-value fallback; the common code path
+/// (the line-granular DP) is untouched.
 fn split_giant_lines(
     body_lines: &[&str],
     body_start: usize,
     body_budget: usize,
-    char_per_token: usize,
 ) -> Vec<BodySegment> {
-    let window_chars = body_budget.saturating_mul(char_per_token).max(1);
+    let window_chars = body_budget.max(1);
     let mut segments = Vec::new();
     for (offset, line) in body_lines.iter().enumerate() {
         let abs = body_start + offset;
@@ -797,6 +827,13 @@ pub struct TaggedChunk {
 /// `target_tokens`. Large or multi-part chunks pass through unchanged.
 /// Within each fused group, contents are joined with `\n\n` and the
 /// chunk_id is derived from the first symbol in the group.
+///
+/// REQ-AXO-901895 item #4 — only genuinely tiny SINGLE-part symbols are fused.
+/// Multi-part chunks (`part_count > 1`, the output of the Knuth-Plass body DP)
+/// are deliberately NOT fused: each is already sized to the budget, and merging
+/// them would re-create the oversized spans the DP exists to split. Earlier
+/// notes that fusion "rescues tiny DP parts" were inaccurate — DP parts carry
+/// `part_count > 1` and never enter the fuse candidate set below.
 ///
 /// Returns `(chunk_id_suffix, content, estimated_tokens, start_line, end_line, source_symbol_id)`.
 pub fn fuse_small_chunks(mut tagged: Vec<TaggedChunk>, target_tokens: usize) -> Vec<TaggedChunk> {
@@ -1176,16 +1213,30 @@ mod tests {
         content_lines.push("}".to_string());
         let content = content_lines.join("\n");
 
+        // REQ-AXO-901895 item #3 — DETERMINISTIC O(N²) tripwire. The pre-fix
+        // wall-clock bound flaked under load and was a weak super-linearity
+        // signal. Count the actual tokenizer encodes instead: the linear DP
+        // costs each unique body line once (~N encodes via the memo), whereas
+        // the old divide-and-conquer re-encoded growing spans at every recursion
+        // node (~N²/2 ≈ 12.5M for N=5000). A `< 4·N` ceiling sits far above the
+        // linear cost and far below any super-linear reintroduction.
+        // Deterministic only under `--test-threads=1` (required for lib tests).
+        crate::embedding_profile::encode_counter::reset();
         let t0 = std::time::Instant::now();
         let chunks = build_symbol_chunks(&symbol, &content);
         let elapsed = t0.elapsed();
+        let encodes = crate::embedding_profile::encode_counter::get();
 
-        // O(N²)-regression guard. The Knuth-Plass DP is near-linear: a true
-        // O(N²) blowup over 5000 lines (~25M tokenizer-encode ops, the old
-        // recursion "took hours") cannot fit even the generous debug bound.
-        // The tight "sub-second class" target from REQ-AXO-901894 is a RELEASE
-        // claim; the unoptimized cargo-test build is ~2-3x slower, so make the
-        // ceiling profile-aware instead of flaking in debug.
+        assert!(
+            encodes < n * 4,
+            "tokenizer encode count {encodes} for N={n} lines suggests super-linear \
+             re-encoding (linear cost is ~N; O(N²) regression would be ~{}M)",
+            (n * n) / 2 / 1_000_000
+        );
+
+        // Coarse wall-clock net kept as defense-in-depth (the encode count is
+        // the authoritative guard). Profile-aware: the unoptimized cargo-test
+        // build is ~2-3x slower than the RELEASE "sub-second class" target.
         let max_elapsed = if cfg!(debug_assertions) {
             std::time::Duration::from_secs(12)
         } else {
@@ -1465,6 +1516,111 @@ mod tests {
                 "windowed chunk exceeds model window: {toks} > {}",
                 profile.model_max_tokens
             );
+        }
+    }
+
+    /// REQ-AXO-901895 item #1 — every giant-line window holds at most
+    /// `body_budget` CHARS, so by the WordPiece invariant (tokens <= chars) it
+    /// can never exceed `body_budget` tokens. The pre-fix code sized windows at
+    /// `body_budget * char_per_token` chars and emitted shorter lines whole, so
+    /// a dense (~1 token/char) line overflowed the model window and the embedder
+    /// silently truncated it. Hermetic — proves the bound structurally, no
+    /// tokenizer needed.
+    #[test]
+    fn giant_line_windows_never_exceed_budget_chars() {
+        let budget = 50usize;
+        // A long line (windowed into many slabs) + a short line the pre-fix code
+        // emitted whole (<= the old body_budget*3 window) — both must end up in
+        // windows of <= budget chars.
+        let long_line = "x".repeat(1000);
+        let short_line = "y".repeat(120);
+        let lines = [long_line.as_str(), short_line.as_str()];
+
+        let segments = split_giant_lines(&lines, 0, budget);
+
+        for seg in &segments {
+            let chars = seg.snippet(&lines).chars().count();
+            assert!(
+                chars <= budget,
+                "window holds {chars} chars > budget {budget}: {seg:?}"
+            );
+        }
+        // No content lost: each line's windows concatenate back to the line.
+        let reassembled = |line_1based: usize| -> String {
+            segments
+                .iter()
+                .filter(|s| s.start_line() == line_1based)
+                .map(|s| s.snippet(&lines))
+                .collect()
+        };
+        assert_eq!(reassembled(1), long_line, "line 0 windows must cover the line");
+        assert_eq!(reassembled(2), short_line, "line 1 windows must cover the line");
+    }
+
+    /// REQ-AXO-901895 item #2 — the measured-cost gate. A physical line SHORTER
+    /// than the char-proxy giant gate (so the cheap pre-filter misses it) but
+    /// whose MEASURED token cost exceeds the body budget must be char-windowed,
+    /// NOT left to the DP `!found` branch that emits it whole. Driven directly
+    /// against `dp_segment_body` with `body_budget` computed exactly as the code
+    /// does, so the line is sized deterministically into the (2×budget, 4×budget)
+    /// char band — over the budget, under the cheap gate — regardless of model.
+    /// Density is tokenizer-agnostic: space-separated single chars = 1 token each.
+    #[test]
+    fn measured_cost_gate_windows_dense_dp_line() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let profile = active_chunk_profile();
+        let symbol = synthetic_symbol("dense_dp", 100);
+        // Mirror dp_segment_body's budget math (empty repeated_context).
+        let overhead = content_token_count(&format_chunk_content(&symbol, "", "", 1, 2));
+        let body_budget = profile.target_chunk_tokens.saturating_sub(overhead).max(8);
+        // 1.5×budget single-char tokens → cost = 1.5×budget (> budget) and char
+        // length = 3×budget-1 (between 2×budget and the 4×budget cheap gate).
+        let n_tokens = body_budget + body_budget / 2;
+        let dense_line: String = (0..n_tokens)
+            .map(|i| ((b'a' + (i as u8 % 26)) as char).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            dense_line.chars().count() < body_budget * 4,
+            "dense line must stay under the cheap char gate"
+        );
+        // Multi-line body (n>1, no line over the cheap gate) so the cheap proxy
+        // and the n==1 path are both bypassed — only the measured-cost gate fires.
+        let lines_owned = vec![
+            "    let x = 1;".to_string(),
+            dense_line.clone(),
+            "    let y = 2;".to_string(),
+        ];
+        let lines: Vec<&str> = lines_owned.iter().map(|s| s.as_str()).collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let (segments, bailed) =
+            dp_segment_body(profile, &symbol, &lines, "", 0, lines.len(), deadline);
+
+        assert!(!bailed, "must not hit the wall-clock bail");
+        // The dense line (index 1) is split into CharWindows — proof the gate
+        // routed the body to the windower instead of the DP whole-line emit.
+        let windows: Vec<&BodySegment> = segments
+            .iter()
+            .filter(|s| matches!(s, BodySegment::CharWindow { line, .. } if *line == 1))
+            .collect();
+        assert!(
+            windows.len() >= 2,
+            "dense DP line must be char-windowed, got segments {segments:?}"
+        );
+        // Every window holds at most body_budget chars (=> <= body_budget tokens).
+        for w in &windows {
+            if let BodySegment::CharWindow {
+                char_start,
+                char_end,
+                ..
+            } = w
+            {
+                assert!(
+                    char_end - char_start <= body_budget,
+                    "window spans {} chars > budget {body_budget}",
+                    char_end - char_start
+                );
+            }
         }
     }
 
