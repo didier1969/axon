@@ -131,6 +131,48 @@ fn test_help_returns_compact_llm_routing_and_skill_pointer() {
     assert!(text.len() < 950, "{text}");
 }
 
+/// REQ-AXO-901908 — the authoring path must surface `soll_apply_plan` where it is
+/// consumed (help). An LLM bootstrapping a derived SOLL subtree previously fell
+/// back to N `soll_manager` round-trips because no init/help routing named the
+/// atomic-write tool. `help(intent=author_soll)` and the `soll` topic now carry
+/// that pointer.
+#[test]
+fn test_help_author_soll_intent_surfaces_soll_apply_plan() {
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "help",
+                "arguments": { "topic": "soll", "intent": "author_soll" }
+            })),
+            id: Some(json!(908)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("help data");
+    assert_eq!(data["protocol"]["intent"].as_str(), Some("author_soll"));
+    // The atomic-authoring tool is the spine of the protocol.
+    assert!(
+        data["protocol"]["minimal_sequence"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "soll_apply_plan")),
+        "author_soll protocol must name soll_apply_plan: {data}"
+    );
+    // The soll topic routing also points at it (the path that was missing).
+    assert!(
+        data["routing"]
+            .as_array()
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|s| s.contains("soll_apply_plan")))),
+        "soll topic must route to soll_apply_plan: {data}"
+    );
+}
+
 #[test]
 fn test_help_returns_tool_schema_and_examples_for_soll_apply_plan() {
     let server = create_test_server();

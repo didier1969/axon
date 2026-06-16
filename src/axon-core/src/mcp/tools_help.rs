@@ -59,6 +59,17 @@ impl McpServer {
                     {"if": "validation_fails", "do": "repair relation/schema issues before continuing"}
                 ]
             }),
+            "author_soll" => json!({
+                "intent": "author_soll",
+                "minimal_sequence": ["soll_query_context", "soll_apply_plan", "soll_commit_revision"],
+                "stop_rule": "write a derived multi-node SOLL subtree (vision->pillars->...->requirements) in ONE atomic idempotent soll_apply_plan, not N sequential soll_manager round-trips",
+                "avoid": ["N separate soll_manager calls for one subtree", "inventing canonical IDs (the server allocates them)"],
+                "requires_explicit_input_if": ["the subtree shape is still ambiguous (run /bootstrap-soll or grill-me first)"],
+                "fallbacks": [
+                    {"if": "plan_validation_fails", "do": "soll_apply_plan with dry_run=true to preview, fix relations, then soll_commit_revision"},
+                    {"if": "single_node_change", "do": "use soll_manager create/update for one node instead of a plan"}
+                ]
+            }),
             "runtime_check" => json!({
                 "intent": "runtime_check",
                 "minimal_sequence": ["status", "mcp_surface_diagnostics", "health"],
@@ -107,6 +118,7 @@ impl McpServer {
                     "check schema: soll_relation_schema",
                     "infer mutation: infer_soll_mutation",
                     "apply exact change: soll_manager or entrench_nuance",
+                    "author a multi-node subtree atomically: soll_apply_plan (logical_key, dry_run) -> soll_commit_revision",
                     "validate: soll_validate",
                 ],
                 vec![

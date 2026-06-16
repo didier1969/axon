@@ -53,7 +53,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         },
                         "intent": {
                             "type": "string",
-                            "enum": ["understand_symbol", "prepare_edit", "commit_work", "stabilize_soll", "runtime_check"],
+                            "enum": ["understand_symbol", "prepare_edit", "commit_work", "stabilize_soll", "author_soll", "runtime_check"],
                             "description": "Optional LLM intent. Returns a minimal machine-actionable protocol."
                         },
                         "tool": {
