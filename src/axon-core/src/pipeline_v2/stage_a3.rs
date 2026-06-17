@@ -204,7 +204,6 @@ pub fn spawn_a3_batched_worker(
                 groups.entry(code).or_default().push(parsed);
             }
 
-            let started = Instant::now();
             let total_items: usize = groups.values().map(|v| v.len()).sum();
             // REQ-AXO-344 — trace per-flush project_code distribution so we can
             // verify previously-unindexed projects (NBL, NEX, ODM, …) reach A3.
@@ -234,10 +233,27 @@ pub fn spawn_a3_batched_worker(
                 let group_len = group_batch.len();
                 let store_clone = store.clone();
                 let pc_for_block = pc_str.clone();
+                // REQ-AXO-902014 — register the batched A3 WRITE as in-flight so
+                // the watchdog can name a wedged write (the real pg-lock stall
+                // site). A1/A2 enter per file but A3 — where the write actually
+                // stalls — was never registered. Held across the spawn_blocking
+                // below; dropped when the iteration ends.
+                let _in_flight = super::in_flight::InFlightRegistry::global().enter(
+                    "A3",
+                    match receipt_meta.first() {
+                        Some(m) if group_len > 1 => format!("{} [+{}]", m.0, group_len - 1),
+                        Some(m) => m.0.clone(),
+                        None => pc_str.clone(),
+                    },
+                );
                 // REQ-AXO-901903 — `group_batch` (each ParsedFile's RAII budget
                 // guard) is moved into the blocking task and dropped when it
                 // returns, releasing the in-flight budget on every outcome
                 // (success, error, panic). No manual release needed.
+                // REQ-AXO-902014 — time THIS group's write, not the whole flush:
+                // a shared `started` made per_item_us for the 2nd+ project group
+                // include the prior groups' write time.
+                let group_started = Instant::now();
                 let join_result = tokio::task::spawn_blocking(move || {
                     store_clone.upsert_graph_v2_batch(&group_batch, &pc_for_block)
                 })
@@ -255,8 +271,8 @@ pub fn spawn_a3_batched_worker(
                             chunks_total
                         );
                         let elapsed_us =
-                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                        let per_item_us = elapsed_us / (total_items as u64).max(1);
+                            group_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let per_item_us = elapsed_us / (group_len as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
                         for (
                             (path, content_hash, sym_count, rel_count, mtime_ms, size_bytes),

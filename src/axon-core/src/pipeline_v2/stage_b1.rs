@@ -25,10 +25,10 @@ use crate::graph::GraphStore;
 
 /// Output of stage B1 — the payload B2 (GPU embedder) consumes.
 ///
-/// `chunk_id` is the PK in `ist.Chunk`. `content` is the raw text to
-/// embed (capped at the model's tokenizer max len upstream of B2 via the
-/// seq-len bucketing — REQ-AXO-262). `content_hash` lets B3 dedup
-/// embeddings against the same source revision.
+/// `chunk_id` is the PK in `ist.Chunk`. `content` is the raw text to embed;
+/// B2's tokenizer truncates it at the model's max length (the REQ-AXO-262
+/// seq-len bucketing PADS shorter inputs to a stable GPU shape — it does not
+/// truncate). `content_hash` lets B3 dedup embeddings against the same revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkForEmbedding {
     pub chunk_id: String,

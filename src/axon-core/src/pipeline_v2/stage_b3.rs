@@ -162,8 +162,6 @@ pub fn spawn_b3_batched_worker(
                 groups.entry(code).or_default().push(embedded);
             }
 
-            let started = Instant::now();
-            let total_items: usize = groups.values().map(|v| v.len()).sum();
             for (pc_str, group_batch) in groups {
                 let items: Vec<(String, String, Vec<f32>, i64)> = group_batch
                     .iter()
@@ -179,6 +177,9 @@ pub fn spawn_b3_batched_worker(
 
                 let store_clone = store.clone();
                 let pc_for_block = pc_str.clone();
+                // REQ-AXO-902014 — time THIS group's write (a shared `started`
+                // inflated per_item_us for the 2nd+ project group).
+                let group_started = Instant::now();
                 let join_result = tokio::task::spawn_blocking(move || {
                     store_clone.upsert_chunk_embedding_v2_batch(&pc_for_block, &items)
                 })
@@ -194,8 +195,8 @@ pub fn spawn_b3_batched_worker(
                         // set in one pass.
                         let state = embedder_state();
                         let elapsed_us =
-                            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                        let per_item_us = elapsed_us / (total_items as u64).max(1);
+                            group_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let per_item_us = elapsed_us / (group_len as u64).max(1);
                         for embedded in group_batch {
                             state.mark_embedded(&embedded.chunk_id);
                             metrics.record_finished(per_item_us);

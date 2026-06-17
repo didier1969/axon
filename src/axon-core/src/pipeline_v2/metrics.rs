@@ -24,8 +24,9 @@ use std::sync::Arc;
 /// * `errors_total` — cumulative items whose `work` closure returned `Err(_)`.
 /// * `inflight` — items currently being processed.
 /// * `backpressure_blocks_total` — bumped each time a worker had to wait on
-///   `send().await` because the downstream channel was full, OR a non-blocking
-///   `try_send` was dropped (cross-pipeline A3→B1 case).
+///   `send().await` because the downstream channel was full. (The legacy
+///   cross-pipeline A3→B1 `try_send`-drop case was retired with the demand-pull
+///   handoff — REQ-AXO-901746.)
 /// * `total_work_duration_us` — sum of per-item work durations in microseconds,
 ///   enabling running-mean latency without locking a histogram.
 /// * `t_recv_total_us` — cumulative time workers spent awaiting `recv().await`
