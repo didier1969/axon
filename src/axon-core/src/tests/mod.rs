@@ -15,3 +15,5 @@ pub mod vector_runtime_tests;
 pub mod pg_health_tests;
 // REQ-AXO-901676 — public MCP tool `rescan_project(project_code, full=false)`.
 pub mod rescan_project_tests;
+// REQ-AXO-902011 — re-index-safe orphan purge (audit 901896 finding).
+pub mod reindex_purge_tests;

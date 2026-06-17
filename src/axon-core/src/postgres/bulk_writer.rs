@@ -562,6 +562,10 @@ pub(crate) async fn flush_batch_async(
         .context("bulk_writer batch ensure ist.Project FK parent")?;
     }
     if !batch.indexed_files.is_empty() {
+        // REQ-AXO-902011 — re-index-safe purge BEFORE the COPY merge, same tx:
+        // an edited-in-place file (renamed/removed symbol, fewer chunk parts)
+        // must not leave orphan Symbol/Chunk/Edge/ChunkEmbedding behind.
+        purge_reindexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
         copy_indexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
     }
     if !batch.symbols.is_empty() {
@@ -598,6 +602,56 @@ pub(crate) async fn flush_batch_async(
     }
 
     tx.commit().await.context("bulk_writer batch commit")?;
+    Ok(())
+}
+
+/// REQ-AXO-902011 — purge a re-indexed file's OWNED graph rows inside the bulk
+/// tx so editing a file in place (renamed/removed symbol, fewer chunk parts)
+/// leaves no orphan rows. Owned = its Chunks (by `file_path`), their
+/// ChunkEmbeddings, this file's Symbols (CONTAINS targets) and OUTBOUND edges
+/// (`source_id = path`). Deliberately NOT deleted: inbound edges
+/// (`target_id IN <this file's symbols>` — owned by CALLER files absent from
+/// this batch, so deleting them would lose valid edges on every re-index) and
+/// IndexedFile (re-UPSERTed by `copy_indexed_files_in_tx` right after).
+/// `project_code` is included on the Chunk predicates so the delete rides
+/// `chunk_project_file_idx (project_code, file_path)` instead of a seq-scan on
+/// the hot write path; the Edge/Symbol deletes ride `edge_fwd_idx (source_id…)`.
+async fn purge_reindexed_files_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    indexed_files: &[(String, String, i64, i64, i64)],
+    project_code: &str,
+) -> Result<()> {
+    for (path, ..) in indexed_files {
+        let chunk_params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [path, &project_code];
+        tx.execute(
+            "DELETE FROM ist.ChunkEmbedding WHERE chunk_id IN \
+                 (SELECT id FROM ist.Chunk WHERE project_code = $2 AND file_path = $1)",
+            &chunk_params,
+        )
+        .await
+        .context("purge_reindexed: ChunkEmbedding")?;
+        tx.execute(
+            "DELETE FROM ist.Chunk WHERE project_code = $2 AND file_path = $1",
+            &chunk_params,
+        )
+        .await
+        .context("purge_reindexed: Chunk")?;
+        let path_params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [path];
+        tx.execute(
+            "DELETE FROM ist.Symbol WHERE id IN \
+                 (SELECT target_id FROM ist.Edge WHERE source_id = $1 \
+                  AND relation_type = 'CONTAINS')",
+            &path_params,
+        )
+        .await
+        .context("purge_reindexed: Symbol")?;
+        tx.execute(
+            "DELETE FROM ist.Edge WHERE source_id = $1",
+            &path_params,
+        )
+        .await
+        .context("purge_reindexed: Edge")?;
+    }
     Ok(())
 }
 
