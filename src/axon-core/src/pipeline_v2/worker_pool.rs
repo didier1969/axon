@@ -17,6 +17,11 @@ use tracing::warn;
 
 use super::metrics::StageMetrics;
 
+/// REQ-AXO-902014 — a downstream `send().await` slower than this is counted as a
+/// backpressure block. An immediate send (channel has room) returns in well
+/// under a microsecond; a blocked send waits on the consumer, i.e. >= 1 ms.
+const BACKPRESSURE_BLOCK_THRESHOLD_US: u64 = 1_000;
+
 /// Spawn `worker_count` tasks that drain `rx`, run `work` on each item, and
 /// push the result to `tx`. Stage lifecycle counters are updated through
 /// `metrics`.
@@ -30,7 +35,8 @@ use super::metrics::StageMetrics;
 ///   while this one runs the (potentially long) `work` future.
 /// * If `tx.send` is full, the worker awaits — the upstream stage's `send`
 ///   will then backpressure naturally. `backpressure_blocks_total` is bumped
-///   each time the worker observed a non-immediate `send`.
+///   each time a `send` actually had to WAIT (measured latency >=
+///   `BACKPRESSURE_BLOCK_THRESHOLD_US`), the ground-truth backpressure signal.
 /// * If the channel is closed (`recv` → `None` or `send` → `Err`), the worker
 ///   exits cleanly — the surrounding task will be joined or simply dropped by
 ///   the runtime when the receiver Arc dies.
@@ -77,9 +83,6 @@ pub fn spawn_stage_workers<I, O, F, Fut>(
                         let elapsed_us =
                             started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         metrics.record_finished(elapsed_us);
-                        if tx.capacity() == 0 {
-                            metrics.record_backpressure_block();
-                        }
                         // REQ-AXO-901608 — t_send accounting : capture how
                         // long this worker spent awaiting the downstream
                         // channel. High totals signal backpressure
@@ -89,6 +92,15 @@ pub fn spawn_stage_workers<I, O, F, Fut>(
                         let send_elapsed_us =
                             send_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                         metrics.record_send_wait(send_elapsed_us);
+                        // REQ-AXO-902014 — count a backpressure BLOCK from the
+                        // send that actually had to WAIT (measured latency), not
+                        // `tx.capacity() == 0` read BEFORE the send: that both
+                        // false-positived on a transiently-full channel that did
+                        // not block, and missed a channel that filled during
+                        // `work`. The send latency is the ground truth.
+                        if send_elapsed_us >= BACKPRESSURE_BLOCK_THRESHOLD_US {
+                            metrics.record_backpressure_block();
+                        }
                         if send_result.is_err() {
                             break;
                         }
