@@ -1459,6 +1459,45 @@ impl GraphStore {
             .collect())
     }
 
+    /// REQ-AXO-901757 slice B — ANN (HNSW) search over SOLL node-description
+    /// embeddings. Returns `(node_id, cosine_distance)` ranked nearest-first.
+    /// Runs through `query_ann_json` (SET LOCAL enable_seqscan=off +
+    /// hnsw.ef_search in a tx) so `soll_node_embedding_hnsw_idx` is used even on
+    /// a small SOLL table. The semantic counterpart to the slice-A FTS surface.
+    pub fn select_soll_nodes_by_ann(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>> {
+        let model_id = crate::embedding_contract::SOLL_MODEL_ID;
+        let qlit = crate::postgres::vector::vector_literal(query_embedding)
+            .map_err(|e| anyhow!("select_soll_nodes_by_ann: vector_literal failed: {e}"))?;
+        let sql = format!(
+            "SELECT node_id, (embedding <=> {q})::float8 AS dist \
+             FROM soll.NodeEmbedding \
+             WHERE model_id = '{mid}' \
+             ORDER BY embedding <=> {q} \
+             LIMIT {limit}",
+            q = qlit,
+            mid = Self::escape_sql(model_id),
+            limit = limit,
+        );
+        let raw = self.query_ann_json(&sql, 100)?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let id = r.first()?.as_str()?.to_string();
+                let dist = r
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(f64::MAX);
+                Some((id, dist))
+            })
+            .collect())
+    }
+
     /// REQ-AXO-295 — Batched variant of [`Self::upsert_chunk_embedding_v2`].
     ///
     /// Each item is `(chunk_id, source_hash, embedding, embedded_at_ms)`.
