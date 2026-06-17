@@ -483,6 +483,7 @@ pub fn spawn_pipeline_b_full_multi(
                 metrics_b2.clone(),
                 caps.b2_batch_size,
                 b2_timeout,
+                Some(store.clone()),
             );
         } else {
             let mut worker_txs: Vec<mpsc::Sender<ChunkForEmbedding>> = Vec::with_capacity(n_b2);
@@ -496,6 +497,7 @@ pub fn spawn_pipeline_b_full_multi(
                     metrics_b2.clone(),
                     caps.b2_batch_size,
                     b2_timeout,
+                    Some(store.clone()),
                 );
             }
             drop(b2_to_b3_tx);

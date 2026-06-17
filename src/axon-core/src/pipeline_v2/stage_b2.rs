@@ -128,6 +128,10 @@ pub fn spawn_b2_batched_worker(
     metrics: Arc<StageMetrics>,
     batch_size: usize,
     batch_timeout: Duration,
+    // REQ-AXO-902012 — store handle so a failed batch increments embed_attempts
+    // (and quarantines at the cap) instead of leaving the chunks re-drainable.
+    // `None` in pure batching tests that never hit the DB failure path.
+    store: Option<Arc<crate::graph::GraphStore>>,
 ) {
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
@@ -223,11 +227,17 @@ pub fn spawn_b2_batched_worker(
                     for _ in 0..batch.len() {
                         metrics.record_error();
                     }
+                    if let Some(s) = store.as_ref() {
+                        record_batch_failure(s, &batch).await;
+                    }
                 }
                 Ok(Err(err)) => {
                     warn!(stage = "B2", error = ?err, "embed_batch failed");
                     for _ in 0..batch.len() {
                         metrics.record_error();
+                    }
+                    if let Some(s) = store.as_ref() {
+                        record_batch_failure(s, &batch).await;
                     }
                 }
                 Err(join_err) => {
@@ -235,10 +245,38 @@ pub fn spawn_b2_batched_worker(
                     for _ in 0..batch.len() {
                         metrics.record_error();
                     }
+                    if let Some(s) = store.as_ref() {
+                        record_batch_failure(s, &batch).await;
+                    }
                 }
             }
         }
     });
+}
+
+/// REQ-AXO-902012 — embed-attempt cap. After this many consecutive B2 failures
+/// a chunk is quarantined (`embed_status='failed'`) so it leaves the sorted
+/// drain. Small: a chunk that fails deterministically fails fast; a transient
+/// GPU blip gets a couple of retries.
+const MAX_EMBED_ATTEMPTS: i32 = 3;
+
+/// REQ-AXO-902012 — increment `embed_attempts` (and quarantine at the cap) for a
+/// batch the embedder could not process, off the async worker thread. Best
+/// effort: a failure to record just means the chunk is retried again next loop,
+/// which is the pre-fix behaviour — no worse, and bounded once it records.
+async fn record_batch_failure(
+    store: &Arc<crate::graph::GraphStore>,
+    batch: &[ChunkForEmbedding],
+) {
+    let ids: Vec<String> = batch.iter().map(|p| p.chunk_id.clone()).collect();
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.record_embed_failure(&ids, MAX_EMBED_ATTEMPTS))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(stage = "B2", error = %err, "record_embed_failure failed"),
+        Err(join) => warn!(stage = "B2", error = %join, "record_embed_failure join failed"),
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +355,7 @@ mod tests {
             metrics.clone(),
             16,
             Duration::from_secs(1),
+            None,
         );
 
         for i in 0..16 {
@@ -383,6 +422,7 @@ mod tests {
             metrics.clone(),
             8,
             Duration::from_millis(80),
+            None,
         );
 
         for i in 0..3 {
@@ -460,6 +500,7 @@ mod tests {
             metrics.clone(),
             4,
             Duration::from_millis(50),
+            None,
         );
 
         // Send 4 chunks (fills one batch).
@@ -526,6 +567,7 @@ mod tests {
             metrics.clone(),
             4,
             Duration::from_millis(50),
+            None,
         );
 
         for i in 0..4 {

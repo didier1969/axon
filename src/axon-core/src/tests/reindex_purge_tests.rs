@@ -159,4 +159,53 @@ mod tests {
             "inbound CALLS edge from another file must survive re-index of the callee"
         );
     }
+
+    /// REQ-AXO-902012 — a chunk that fails embedding repeatedly is quarantined
+    /// at the attempt cap (embed_status='failed') and leaves the sorted drain,
+    /// instead of being re-`SELECT`ed forever (the poison-pill). Driven purely
+    /// at the DB layer (no mock embedder — GUI-PRO-004): a real chunk is created
+    /// via the ingest path, then `record_embed_failure` is exercised directly.
+    #[test]
+    fn embed_failure_quarantines_chunk_at_attempt_cap() {
+        let store = create_test_db().unwrap();
+        let path = "/tmp/embed_quarantine_test.rs";
+        store
+            .upsert_graph_v2_batch(
+                &[parsed_file(
+                    path,
+                    "fn embed_me() { let a = 1; let b = 2; let c = a + b; }",
+                    vec![sym("embed_me")],
+                )],
+                "AXO",
+            )
+            .unwrap();
+
+        let pending = store.select_chunks_needing_embedding(100).unwrap();
+        assert!(!pending.is_empty(), "ingest created a pending chunk");
+        let n = pending.len();
+
+        // Below the cap (3): the chunk stays 'pending' and drainable.
+        store.record_embed_failure(&pending, 3).unwrap();
+        store.record_embed_failure(&pending, 3).unwrap();
+        assert_eq!(
+            store.select_chunks_needing_embedding(100).unwrap().len(),
+            n,
+            "below the cap the chunk is still retried (drainable)"
+        );
+
+        // The cap-th failure quarantines it → gone from the drain.
+        store.record_embed_failure(&pending, 3).unwrap();
+        assert_eq!(
+            store.select_chunks_needing_embedding(100).unwrap().len(),
+            0,
+            "at the attempt cap the chunk leaves the drain (no poison-pill)"
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM ist.Chunk WHERE embed_status = 'failed'")
+                .unwrap() as usize,
+            n,
+            "quarantined chunk is marked failed"
+        );
+    }
 }

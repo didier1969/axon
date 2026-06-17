@@ -180,8 +180,16 @@ CREATE TABLE IF NOT EXISTS ist.Chunk (
     chunk_path       TEXT,
     token_count      INTEGER,
     embed_status     TEXT NOT NULL DEFAULT 'pending',
+    -- REQ-AXO-902012 — bounded embed retry. Incremented on each B2/B3 failure;
+    -- at the cap the chunk flips embed_status='failed' so the sorted drain
+    -- (WHERE embed_status='pending') stops re-feeding it (anti poison-pill).
+    embed_attempts   INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT chunk_embed_status_check CHECK (embed_status IN ('pending', 'embedded', 'failed'))
 );
+-- REQ-AXO-902012 — additive for live DBs whose ist.Chunk predates the column
+-- (CREATE TABLE IF NOT EXISTS above is a no-op when the table already exists).
+ALTER TABLE ist.Chunk
+    ADD COLUMN IF NOT EXISTS embed_attempts INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
     ON ist.Chunk (token_count) WHERE embed_status = 'pending';

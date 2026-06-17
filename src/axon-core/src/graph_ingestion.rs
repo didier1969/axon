@@ -1553,6 +1553,34 @@ impl GraphStore {
             .collect())
     }
 
+    /// REQ-AXO-902012 — record an embedding-attempt failure for a batch of
+    /// chunks (anti poison-pill). Increments `embed_attempts`; a chunk that
+    /// reaches `max_attempts` flips to `embed_status='failed'`, so the sorted
+    /// drain (`WHERE embed_status='pending'`) stops re-feeding it. Without this,
+    /// one deterministically-failing chunk sits at the head of the token-sorted
+    /// reservoir and is re-`SELECT`ed every loop, starving real throughput.
+    /// Scoped to `embed_status='pending'` so a chunk that already succeeded (or
+    /// was already quarantined) is never reopened.
+    pub fn record_embed_failure(&self, chunk_ids: &[String], max_attempts: i32) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        let list = chunk_ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.execute(&format!(
+            "UPDATE Chunk SET \
+                 embed_attempts = embed_attempts + 1, \
+                 embed_status = CASE WHEN embed_attempts + 1 >= {max} THEN 'failed' \
+                                     ELSE embed_status END \
+             WHERE id IN ({list}) AND embed_status = 'pending';",
+            max = max_attempts,
+            list = list,
+        ))
+    }
+
     /// Slice 5 SOTA — Pipeline-v2 demand-pull B: return chunks needing
     /// embedding **with their content** in a single round-trip.
     ///
