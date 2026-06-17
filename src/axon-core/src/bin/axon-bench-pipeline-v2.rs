@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline_v2::{
-    const_resolver, load_embedding_dedup_cache, spawn_pipeline_a, spawn_pipeline_b_full_multi,
+    const_resolver, spawn_pipeline_a, spawn_pipeline_b_full_multi,
     B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts,
     PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
 };
@@ -247,31 +247,12 @@ async fn run() -> Result<()> {
     // SELECT-with-content from PG (a chunk B2 just persisted via A3).
     let (b_chunks_tx, b_chunks_rx) = tokio::sync::mpsc::channel::<ChunkForEmbedding>(caps.internal);
 
-    // REQ-AXO-901748 — hydrate the dedup cache so the bench mirrors the
-    // production runtime path. demand_pull skips chunks whose hash is
-    // already in the cache.
-    let embedding_dedup = match load_embedding_dedup_cache(&store) {
-        Ok(cache) => {
-            eprintln!(
-                "axon-bench-pipeline-v2: embedding dedup cache hydrated with {} entries",
-                cache.len()
-            );
-            Some(cache)
-        }
-        Err(err) => {
-            eprintln!(
-                "axon-bench-pipeline-v2: dedup cache hydration failed ({err}); proceeding without cache"
-            );
-            None
-        }
-    };
     let mut handles_b = spawn_pipeline_b_full_multi(
         counts_b,
         caps,
         store.clone(),
         vec![embedder],
         b_chunks_rx,
-        embedding_dedup,
     );
 
     // Bench-local demand_pull feeder : poll PG for chunks needing

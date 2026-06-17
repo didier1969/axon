@@ -367,22 +367,6 @@ pub fn spawn_pipeline_v2_indexer(
                 Arc::new(NoOpEmbedder)
             }
         };
-        // REQ-AXO-901748 — hydrate embedding dedup cache so B1 skips
-        // chunks that already have a valid embedding with the same hash.
-        let embedding_dedup = match crate::pipeline_v2::stage_b1::load_embedding_dedup_cache(&store)
-        {
-            Ok(cache) => {
-                info!(
-                    "pipeline_v2: embedding dedup cache hydrated with {} entries",
-                    cache.len()
-                );
-                Some(cache)
-            }
-            Err(err) => {
-                warn!(error = %err, "pipeline_v2: failed to hydrate embedding dedup cache");
-                None
-            }
-        };
         // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT
         // session per worker for true CUDA double-buffering (no Mutex
         // contention). Each session has its own TensorRT engine cache.
@@ -408,7 +392,6 @@ pub fn spawn_pipeline_v2_indexer(
             store.clone(),
             embedders,
             b_chunks_rx,
-            embedding_dedup,
         );
         // REQ-AXO-314 — keep the receipt rx alive by draining it in a
         // background task. Dropping `handles_b.output_rx` immediately

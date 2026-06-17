@@ -84,7 +84,7 @@ pub use project_resolver::{
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;
 pub use stage_a3::EnrolledFile;
-pub use stage_b1::{load_embedding_dedup_cache, ChunkForEmbedding, EmbeddingDedupCache};
+pub use stage_b1::ChunkForEmbedding;
 pub use stage_b2::{spawn_b2_batched_worker, B2Embedder, EmbeddedChunk, NoOpEmbedder};
 pub use stage_b3::PersistedEmbedding;
 pub use tsv_worker::{spawn_tsv_workers, DrainStats, TsvWorkerConfig};

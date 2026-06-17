@@ -414,25 +414,7 @@ pub fn spawn_pipeline_b_full(
     embedder: Arc<dyn B2Embedder>,
     b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
 ) -> PipelineBFullHandles {
-    spawn_pipeline_b_full_with_dedup(counts, caps, store, embedder, b_chunks_rx, None)
-}
-
-pub fn spawn_pipeline_b_full_with_dedup(
-    counts: PipelineBWorkerCounts,
-    caps: PipelineChannelCaps,
-    store: Arc<GraphStore>,
-    embedder: Arc<dyn B2Embedder>,
-    b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
-    embedding_cache: super::stage_b1::EmbeddingDedupCache,
-) -> PipelineBFullHandles {
-    spawn_pipeline_b_full_multi(
-        counts,
-        caps,
-        store,
-        vec![embedder],
-        b_chunks_rx,
-        embedding_cache,
-    )
+    spawn_pipeline_b_full_multi(counts, caps, store, vec![embedder], b_chunks_rx)
 }
 
 /// REQ-AXO-901748 — multi-embedder variant. Each embedder in the vec
@@ -445,7 +427,6 @@ pub fn spawn_pipeline_b_full_multi(
     store: Arc<GraphStore>,
     embedders: Vec<Arc<dyn B2Embedder>>,
     b_chunks_rx: Receiver<super::stage_b1::ChunkForEmbedding>,
-    embedding_cache: super::stage_b1::EmbeddingDedupCache,
 ) -> PipelineBFullHandles {
     // DEC-AXO-081 — B3 self-extracts project_code from each chunk_id
     // prefix; no orchestrator-level project_code needed here.
@@ -456,12 +437,6 @@ pub fn spawn_pipeline_b_full_multi(
     let metrics_b2 = StageMetrics::new("B2");
     let metrics_b3 = StageMetrics::new("B3");
 
-    // Slice 5 SOTA — B1 stage worker eliminated. Demand_pull_b emits
-    // ChunkForEmbedding directly via SELECT-with-content (one
-    // round-trip). The embedding_cache dedup is applied inline in
-    // demand_pull's pull_and_feed_b before try_send.
-    let _ = embedding_cache;
-    let embedding_cache_for_b3 = None;
     let _ = counts; // PipelineBWorkerCounts unused here — B2 count derives from the embedder vec
 
     // REQ-AXO-901748 — B2 with per-worker embedder sessions. Each
@@ -525,28 +500,26 @@ pub fn spawn_pipeline_b_full_multi(
         let bto = std::time::Duration::from_millis(caps.b3_batch_timeout_ms);
         let n_workers = counts.b3.max(1);
         if n_workers == 1 {
-            super::stage_b3::spawn_b3_batched_worker_with_cache(
+            super::stage_b3::spawn_b3_batched_worker(
                 b2_to_b3_rx,
                 output_tx,
                 store.clone(),
                 metrics_b3.clone(),
                 bs,
                 bto,
-                embedding_cache_for_b3.clone(),
             );
         } else {
             let mut worker_txs: Vec<mpsc::Sender<EmbeddedChunk>> = Vec::with_capacity(n_workers);
             for _ in 0..n_workers {
                 let (wtx, wrx) = mpsc::channel::<EmbeddedChunk>(caps.internal);
                 worker_txs.push(wtx);
-                super::stage_b3::spawn_b3_batched_worker_with_cache(
+                super::stage_b3::spawn_b3_batched_worker(
                     wrx,
                     output_tx.clone(),
                     store.clone(),
                     metrics_b3.clone(),
                     bs,
                     bto,
-                    embedding_cache_for_b3.clone(),
                 );
             }
             drop(output_tx);

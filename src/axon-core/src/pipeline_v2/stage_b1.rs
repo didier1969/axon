@@ -6,41 +6,22 @@
 //!
 //! Remaining surface here :
 //! - `ChunkForEmbedding` payload struct consumed by B2
-//! - `EmbeddingDedupCache` + `load_embedding_dedup_cache` (dedup state
-//!   hydrated at boot, applied inline by demand_pull)
 //! - `b1_fetch_for_embedding` (test-only helper, exercises single-row
 //!   SELECT path through `fetch_chunk_for_embedding`)
+//!
+//! REQ-AXO-902013 — `EmbeddingDedupCache` + `load_embedding_dedup_cache`
+//! removed: the sorted-drain (DEC-AXO-901631) deduplicates via
+//! `embed_status='pending'`, so the boot-time full-scan hydration was dead
+//! (its result was discarded by the orchestrator) — audit 901896 finding.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
+#[cfg(test)]
 use crate::graph::GraphStore;
-
-/// Load all existing (chunk_id, source_hash) pairs from ChunkEmbedding
-/// for hydrating the embedding dedup cache at boot.
-pub fn load_embedding_dedup_cache(
-    store: &GraphStore,
-) -> Result<Arc<dashmap::DashMap<String, String>>> {
-    let model_id = crate::embedding_contract::CHUNK_MODEL_ID;
-    let safe = model_id.replace('\'', "''");
-    let raw = store.query_json_writer(&format!(
-        "SELECT chunk_id, source_hash FROM chunkembedding WHERE model_id = '{safe}'"
-    ))?;
-    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-    let map = dashmap::DashMap::with_capacity(rows.len());
-    for row in rows {
-        if let (Some(cid), Some(hash)) = (
-            row.first().and_then(|v| v.as_str()),
-            row.get(1).and_then(|v| v.as_str()),
-        ) {
-            map.insert(cid.to_string(), hash.to_string());
-        }
-    }
-    Ok(Arc::new(map))
-}
 
 /// Output of stage B1 — the payload B2 (GPU embedder) consumes.
 ///
@@ -81,15 +62,6 @@ pub async fn b1_fetch_for_embedding(
         content_hash,
     }))
 }
-
-/// REQ-AXO-901748 — set of `(chunk_id, content_hash)` pairs that
-/// already have a valid embedding in ChunkEmbedding. Demand-pull skips
-/// pending chunks that match, avoiding redundant GPU work on re-index.
-///
-/// Slice 5 SOTA — `spawn_b1_batched_worker*` deleted. The dedup logic
-/// now lives inline in `demand_pull::pull_and_feed_b` (single batched
-/// SELECT-with-content + dedup retain).
-pub type EmbeddingDedupCache = Option<Arc<dashmap::DashMap<String, String>>>;
 
 #[cfg(test)]
 mod tests {
