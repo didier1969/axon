@@ -10,6 +10,8 @@ pub const STORAGE_TYPE: &str = "float16";
 pub const SYMBOL_MODEL_ID: &str = "sym-bge-large-en-v1.5-1024";
 pub const CHUNK_MODEL_ID: &str = "chunk-bge-large-en-v1.5-1024";
 pub const GRAPH_MODEL_ID: &str = "graph-bge-large-en-v1.5-1024";
+/// REQ-AXO-901757 slice B — model id for SOLL node-description embeddings.
+pub const SOLL_MODEL_ID: &str = "soll-bge-large-en-v1.5-1024";
 
 pub fn fastembed_model() -> EmbeddingModel {
     EmbeddingModel::BGELargeENV15

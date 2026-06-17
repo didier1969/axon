@@ -17,3 +17,5 @@ pub mod pg_health_tests;
 pub mod rescan_project_tests;
 // REQ-AXO-902011 — re-index-safe orphan purge (audit 901896 finding).
 pub mod reindex_purge_tests;
+// REQ-AXO-901757 slice B — SOLL node-description embedding storage.
+pub mod soll_embedding_tests;

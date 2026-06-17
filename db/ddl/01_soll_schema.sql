@@ -267,6 +267,25 @@ CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx
 CREATE INDEX IF NOT EXISTS soll_mcp_job_project_idx
     ON soll.McpJob (project_code, status);
 
+-- REQ-AXO-901757 slice B — semantic embeddings of SOLL node descriptions
+-- (title+description), so retrieve_context can find intent by meaning, not just
+-- the slice-A FTS. Mirrors ist.ChunkEmbedding (pgvector 1024-d cosine, HNSW).
+-- PK (node_id, model_id) lets models co-exist during a migration; source_hash
+-- (over title+description) marks an embedding stale when the node body changes.
+CREATE TABLE IF NOT EXISTS soll.NodeEmbedding (
+    node_id        TEXT NOT NULL REFERENCES soll.Node(id) ON DELETE CASCADE,
+    model_id       TEXT NOT NULL,
+    project_code   TEXT NOT NULL DEFAULT '',
+    source_hash    TEXT NOT NULL,
+    embedding      vector(1024) NOT NULL,
+    embedded_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (node_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS soll_node_embedding_hnsw_idx
+    ON soll.NodeEmbedding USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS soll_node_embedding_project_idx
+    ON soll.NodeEmbedding (project_code);
+
 -- ── Functions ────────────────────────────────────────────────────────
 
 -- Atomic per-(type, project_code) canonical-id allocator. Bumps the

@@ -1388,6 +1388,77 @@ impl GraphStore {
         self.execute(&sql)
     }
 
+    /// REQ-AXO-901757 slice B — store a SOLL node-description embedding.
+    /// Idempotent on `(node_id, model_id)`. `source_hash` is over
+    /// title+description so a body edit re-embeds (the select below treats a
+    /// hash mismatch as stale).
+    pub fn upsert_soll_node_embedding(
+        &self,
+        node_id: &str,
+        project_code: &str,
+        source_hash: &str,
+        embedding: &[f32],
+        embedded_at_ms: i64,
+    ) -> Result<()> {
+        let model_id = crate::embedding_contract::SOLL_MODEL_ID;
+        let lit = crate::postgres::vector::vector_literal(embedding)
+            .map_err(|e| anyhow!("upsert_soll_node_embedding: vector_literal failed: {e}"))?;
+        self.execute(&format!(
+            "INSERT INTO soll.NodeEmbedding \
+                 (node_id, model_id, project_code, source_hash, embedding, embedded_at_ms) \
+             VALUES ('{nid}', '{mid}', '{pc}', '{sh}', {emb}, {ts}) \
+             ON CONFLICT (node_id, model_id) DO UPDATE SET \
+                 project_code = EXCLUDED.project_code, \
+                 source_hash = EXCLUDED.source_hash, \
+                 embedding = EXCLUDED.embedding, \
+                 embedded_at_ms = EXCLUDED.embedded_at_ms;",
+            nid = Self::escape_sql(node_id),
+            mid = Self::escape_sql(model_id),
+            pc = Self::escape_sql(project_code),
+            sh = Self::escape_sql(source_hash),
+            emb = lit,
+            ts = embedded_at_ms,
+        ))
+    }
+
+    /// REQ-AXO-901757 slice B — SOLL nodes whose description embedding is missing
+    /// or STALE (stored `source_hash` drifted from the current title+description).
+    /// Returns `(node_id, project_code, text_to_embed, source_hash)`; the hash is
+    /// computed in SQL (`md5(title||description)`) so the caller stores exactly
+    /// what the staleness predicate compares against — re-embed converges.
+    pub fn select_soll_nodes_needing_embedding(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let model_id = crate::embedding_contract::SOLL_MODEL_ID;
+        let raw = self.query_json(&format!(
+            "SELECT n.id, n.project_code, \
+                    COALESCE(n.title,'') || E'\\n' || COALESCE(n.description,''), \
+                    md5(COALESCE(n.title,'') || COALESCE(n.description,'')) \
+             FROM soll.Node n \
+             LEFT JOIN soll.NodeEmbedding e \
+                    ON e.node_id = n.id AND e.model_id = '{mid}' \
+             WHERE COALESCE(n.description,'') <> '' \
+               AND (e.node_id IS NULL \
+                    OR e.source_hash <> md5(COALESCE(n.title,'') || COALESCE(n.description,''))) \
+             ORDER BY n.id \
+             LIMIT {limit}",
+            mid = Self::escape_sql(model_id),
+            limit = limit,
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let id = r.first()?.as_str()?.to_string();
+                let pc = r.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let text = r.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let hash = r.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Some((id, pc, text, hash))
+            })
+            .collect())
+    }
+
     /// REQ-AXO-295 — Batched variant of [`Self::upsert_chunk_embedding_v2`].
     ///
     /// Each item is `(chunk_id, source_hash, embedding, embedded_at_ms)`.
