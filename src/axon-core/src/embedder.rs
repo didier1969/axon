@@ -1472,6 +1472,50 @@ impl GraphStore {
 
         self.execute_batch(&queries)
     }
+
+    /// REQ-AXO-901757 slice B2 — populate sweep: embed up to `limit` SOLL nodes
+    /// whose description embedding is missing or stale, persisting each vector
+    /// under its current staleness hash so the node drops out of the
+    /// needing-embedding set (convergence). Returns the count embedded this
+    /// pass. Passages route through [`batch_embed_passages`] (no query prefix),
+    /// so the in-process query worker must be up (brain role) — a worker/model
+    /// gap surfaces as `Err`, which the periodic sweep logs and retries.
+    pub fn embed_pending_soll_nodes(&self, limit: usize) -> anyhow::Result<usize> {
+        self.embed_pending_soll_nodes_with(limit, batch_embed_passages)
+    }
+
+    /// Testable seam for [`embed_pending_soll_nodes`]: the embedding function is
+    /// injected so the select→embed→upsert→converge orchestration is exercised
+    /// hermetically (GUI-PRO-004) with synthetic vectors, without the ONNX worker.
+    pub(crate) fn embed_pending_soll_nodes_with<F>(
+        &self,
+        limit: usize,
+        embed: F,
+    ) -> anyhow::Result<usize>
+    where
+        F: FnOnce(Vec<String>) -> anyhow::Result<Vec<Vec<f32>>>,
+    {
+        let pending = self.select_soll_nodes_needing_embedding(limit)?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let texts: Vec<String> = pending.iter().map(|(_, _, text, _)| text.clone()).collect();
+        let vectors = embed(texts)?;
+        if vectors.len() != pending.len() {
+            return Err(anyhow::anyhow!(
+                "embed_pending_soll_nodes: embedder returned {} vectors for {} texts",
+                vectors.len(),
+                pending.len()
+            ));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut embedded = 0usize;
+        for ((node_id, project_code, _text, source_hash), vector) in pending.iter().zip(vectors) {
+            self.upsert_soll_node_embedding(node_id, project_code, source_hash, &vector, now)?;
+            embedded += 1;
+        }
+        Ok(embedded)
+    }
 }
 
 fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
@@ -1592,6 +1636,37 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         .into_iter()
         .map(|r| r.ok_or_else(|| anyhow::anyhow!("query embedding missing for a requested text")))
         .collect()
+}
+
+/// REQ-AXO-901757 slice B2 — embed SOLL node descriptions as PASSAGES.
+///
+/// Unlike [`batch_embed`] (the query path) this adds NO BGE query prefix and
+/// does NOT touch the query→vector cache. SOLL descriptions are passages — the
+/// asymmetric counterpart of the prefixed question. Embedding them in the same
+/// (unprefixed) space as IST chunks (`embed_batch`, no prefix) keeps the
+/// retrieve_context RRF fusion (slice B3b) comparing one prefixed query vector
+/// against a single coherent passage space, instead of mixing query-space SOLL
+/// hits with passage-space chunk hits. Routes through the same in-process query
+/// worker (CPU brain_only worker or the GPU SemanticWorkerPool); preserves input
+/// order/length (the worker echoes one vector per text).
+pub fn batch_embed_passages(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pressure = service_guard::current_pressure();
+    if !query_embedding_allowed(pressure) {
+        return Err(anyhow::anyhow!(
+            "SOLL passage embedding paused under {:?} service pressure. Retry the sweep later.",
+            pressure
+        ));
+    }
+    let Some(sender) = current_query_embedding_sender() else {
+        return Err(anyhow::anyhow!(
+            "{}",
+            unavailable_embedding_reason(crate::runtime_mode::AxonRuntimeMode::from_env())
+        ));
+    };
+    request_query_embedding(&sender, texts)
 }
 
 /// REQ-AXO-901978 (B3) — bounded query→vector cache. Capacity bounds RAM

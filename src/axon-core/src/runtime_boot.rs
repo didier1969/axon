@@ -997,6 +997,13 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // runtime trace telemetry logger remains.
     main_background::spawn_runtime_trace_logger(graph_store.clone(), queue_store.clone());
 
+    // REQ-AXO-901757 slice B2 — brain owns the SOLL writer + the in-process query
+    // worker, so the periodic SOLL-description embedding sweep runs brain-side
+    // only. Indexer has no SOLL writer; spawning it there would be a no-op churn.
+    if profile.role == RuntimeBootRole::Brain {
+        main_background::spawn_soll_embedding_sweep(graph_store.clone());
+    }
+
     if let Some(tel_listener) = tel_listener {
         loop {
             let (mut socket, addr) = match tel_listener.accept().await {

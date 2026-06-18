@@ -100,6 +100,54 @@ mod tests {
         );
     }
 
+    /// REQ-AXO-901757 slice B2 — the populate-sweep orchestration
+    /// (select → embed → upsert → converge) via the injectable seam, with a
+    /// synthetic embedder (GUI-PRO-004, no ONNX worker).
+    #[test]
+    fn soll_embed_pending_sweep_embeds_then_converges() {
+        let store = create_test_db().unwrap();
+        let synth = |texts: Vec<String>| -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|_| vec![0.1f32; crate::embedding_contract::DIMENSION])
+                .collect())
+        };
+        // The test template pre-seeds SOLL nodes, so assert on convergence and on
+        // our own nodes rather than absolute counts.
+        let pending_before = store.select_soll_nodes_needing_embedding(1000).unwrap().len();
+        insert_node(&store, "REQ-TST-001", "alpha", "first body");
+        insert_node(&store, "REQ-TST-002", "beta", "second body");
+
+        // First pass embeds everything pending (baseline + our 2 nodes).
+        let n = store.embed_pending_soll_nodes_with(1000, synth).unwrap();
+        assert_eq!(n, pending_before + 2, "every pending node embedded this pass");
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM soll.NodeEmbedding \
+                     WHERE node_id IN ('REQ-TST-001','REQ-TST-002')"
+                )
+                .unwrap(),
+            2,
+            "both of our nodes got an embedding row"
+        );
+
+        // Convergence: a second pass finds nothing stale.
+        assert_eq!(
+            store.embed_pending_soll_nodes_with(1000, synth).unwrap(),
+            0,
+            "no nodes remain stale after a full sweep"
+        );
+
+        // A body edit re-stales exactly that node → next sweep embeds 1.
+        insert_node(&store, "REQ-TST-001", "alpha", "first body REVISED");
+        assert_eq!(
+            store.embed_pending_soll_nodes_with(1000, synth).unwrap(),
+            1,
+            "a body edit re-stales exactly one node"
+        );
+    }
+
     /// REQ-AXO-901757 slice B (sub-slice B3a) — ANN search returns the SOLL node
     /// whose embedding is nearest the query vector. Synthetic unit vectors on
     /// distinct axes (no embedder, GUI-PRO-004): a query on axis-k is closest to

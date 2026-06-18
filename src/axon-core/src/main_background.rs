@@ -191,6 +191,45 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
     });
 }
 
+/// REQ-AXO-901757 slice B2 — periodic brain sweep embedding SOLL nodes whose
+/// description embedding is missing or stale. Brain owns the SOLL writer AND the
+/// in-process query worker, so the sweep lives brain-side, off the request path.
+/// Each pass embeds up to `batch` nodes: an empty pass sleeps the idle interval;
+/// a productive pass loops promptly (brief yield) to drain a backlog — e.g. the
+/// one-shot embedding of an existing SOLL corpus on first boot after this lands.
+/// Best-effort: a worker-not-ready (boot race) or model-load error is logged and
+/// retried next tick, never fatal. Default ON so SOLL semantic retrieval (B3b)
+/// has vectors to fuse without any config.
+pub(crate) fn spawn_soll_embedding_sweep(store: Arc<GraphStore>) {
+    if !soll_embedding_sweep_enabled() {
+        info!("SOLL embedding sweep disabled via AXON_SOLL_EMBED_SWEEP_ENABLED (REQ-AXO-901757 B2)");
+        return;
+    }
+    let batch = soll_embedding_sweep_batch();
+    let idle = Duration::from_millis(soll_embedding_sweep_idle_interval_ms());
+    std::thread::spawn(move || {
+        info!(
+            "SOLL embedding sweep started (batch={batch}, idle={}ms, REQ-AXO-901757 B2)",
+            idle.as_millis()
+        );
+        loop {
+            match store.embed_pending_soll_nodes(batch) {
+                Ok(0) => std::thread::sleep(idle),
+                Ok(n) => {
+                    info!("SOLL embedding sweep: embedded {n} node(s) this pass (REQ-AXO-901757 B2)");
+                    // productive pass — yield briefly, then loop to drain backlog
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => {
+                    // worker not yet up (boot race) or model load gap — retry next tick
+                    warn!("SOLL embedding sweep deferred: {err:#}");
+                    std::thread::sleep(idle);
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn spawn_runtime_trace_logger(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
     if !runtime_trace_enabled() {
         return;
@@ -341,6 +380,36 @@ fn memory_reclaimer_poll_interval_ms() -> u64 {
         5_000,
         120_000,
     )
+}
+
+/// REQ-AXO-901757 slice B2 — sweep config. Enabled by default; disable with
+/// AXON_SOLL_EMBED_SWEEP_ENABLED in {0,false,no,off}.
+fn soll_embedding_sweep_enabled() -> bool {
+    !matches!(
+        std::env::var("AXON_SOLL_EMBED_SWEEP_ENABLED")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
+fn soll_embedding_sweep_batch() -> usize {
+    std::env::var("AXON_SOLL_EMBED_SWEEP_BATCH")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64)
+        .clamp(1, 512)
+}
+
+fn soll_embedding_sweep_idle_interval_ms() -> u64 {
+    let base_ms = std::env::var("AXON_SOLL_EMBED_SWEEP_IDLE_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1_000)
+        .unwrap_or(60_000);
+    quiescent_scaled_interval_ms(base_ms, 1_000, 600_000)
 }
 
 fn runtime_trace_enabled() -> bool {
