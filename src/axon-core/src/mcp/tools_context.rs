@@ -248,11 +248,19 @@ impl McpServer {
             args.get("semantic").and_then(|v| v.as_str()),
             Some("lexical") | Some("off")
         );
-        let question_vector: Option<Vec<f32>> = if !semantic_lexical_off
-            && matches!(
-                crate::service_guard::current_pressure(),
-                ServicePressure::Healthy | ServicePressure::Recovering
-            ) {
+        // REQ-AXO-901987 / REQ-AXO-902018 tier B (DEC-AXO-901642) — embed the
+        // question whenever the caller did not opt out; `batch_embed`'s own guard
+        // (GPU query-embed is decoupled from ServicePressure, REQ-AXO-901987)
+        // decides feasibility. The vector then powers two SEPARATE-cost paths: the
+        // CHEAP candidate re-rank (`fill_*_semantic_distances` over already-found
+        // rows, runnable under pressure) and the EXPENSIVE corpus-wide ANN pool
+        // expansion (kept gated on low pressure so a degraded backend never pays
+        // the seq-scan cost). The old binary gate conflated the two and threw the
+        // cheap signal away with the expensive one.
+        let pressure = crate::service_guard::current_pressure();
+        let semantic_corpus_allowed =
+            matches!(pressure, ServicePressure::Healthy | ServicePressure::Recovering);
+        let question_vector: Option<Vec<f32>> = if !semantic_lexical_off {
             crate::embedder::batch_embed(vec![question.to_string()])
                 .ok()
                 .and_then(|vectors| vectors.into_iter().next())
@@ -261,16 +269,20 @@ impl McpServer {
         };
         if let Some(qvec) = question_vector.as_ref() {
             if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
+                // CHEAP: fill cosine distances on the already-found symbol pool.
                 self.fill_entry_semantic_distances(&mut entry_candidates, &qvec_literal);
-                // Pool expansion: guarantee the semantically-closest symbols are
-                // present even when the lexical arm + arbitrary LIMIT missed them.
-                self.add_semantic_entry_candidates(
-                    &mut entry_candidates,
-                    &qvec_literal,
-                    project,
-                    200,
-                    top_k * 4,
-                );
+                if semantic_corpus_allowed {
+                    // EXPENSIVE corpus-wide ANN pool expansion — guarantees the
+                    // semantically-closest symbols are present even when the
+                    // lexical arm + arbitrary LIMIT missed them. Gated on pressure.
+                    self.add_semantic_entry_candidates(
+                        &mut entry_candidates,
+                        &qvec_literal,
+                        project,
+                        200,
+                        top_k * 4,
+                    );
+                }
             }
         }
         self.rerank_entry_candidates(
@@ -345,6 +357,22 @@ impl McpServer {
                         continue;
                     }
                     chunk_candidates.push(hit);
+                }
+            }
+        }
+        // REQ-AXO-902018 tier B (DEC-AXO-901642, ROOT) — when the corpus-wide
+        // semantic CHUNK ANN was skipped (pressure / backlog) but a question
+        // vector is available, re-rank the structural + FTS candidates already
+        // found with one cheap cosine pass over their existing embeddings. Recovers
+        // the essential win (right answer first) without the ANN's corpus scan,
+        // instead of degrading to a lexical-only ranking and a silent miss.
+        let mut semantic_rerank_applied = false;
+        if !semantic_allowed && !chunk_candidates.is_empty() {
+            if let Some(qvec) = question_vector.as_ref() {
+                if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
+                    self.fill_chunk_semantic_distances(&mut chunk_candidates, &qvec_literal);
+                    semantic_rerank_applied = true;
+                    runtime.semantic_search_used = true;
                 }
             }
         }
@@ -512,8 +540,11 @@ impl McpServer {
         timings.total_ms = started_at.elapsed().as_millis() as u64;
 
         // REQ-AXO-902018 tier A — fail-loud degradation notice (DEC-AXO-901642).
-        let degradation_notice =
-            Self::build_degradation_notice(runtime.degraded_reason.as_deref(), runtime.pressure);
+        let degradation_notice = Self::build_degradation_notice(
+            runtime.degraded_reason.as_deref(),
+            runtime.pressure,
+            semantic_rerank_applied,
+        );
         let mut packet = json!({
             "answer_sketch": answer_sketch,
             "direct_evidence": direct_evidence,
@@ -2127,6 +2158,57 @@ impl McpServer {
         }
         for candidate in candidates.iter_mut() {
             if let Some(dist) = dist_by_id.get(&candidate.id) {
+                candidate.semantic_distance = Some(*dist);
+            }
+        }
+    }
+
+    /// REQ-AXO-902018 tier B (DEC-AXO-901642, ROOT) — fill each chunk candidate's
+    /// cosine distance to the question from its EXISTING `ist.ChunkEmbedding` row.
+    /// This is the cheap, separable half of the semantic signal the binary
+    /// pressure gate used to discard along with the expensive corpus-wide ANN: a
+    /// single IN-list lookup over the ≤ `top_k*5` already-found chunk ids (indexed
+    /// PK, no corpus scan). Running it under pressure re-ranks the structural +
+    /// FTS candidates so the right answer surfaces first, instead of a lexical-only
+    /// ranking and a silent miss. `rerank_chunk_candidates` already rewards
+    /// `semantic_distance`, so filling it is sufficient.
+    fn fill_chunk_semantic_distances(&self, candidates: &mut [ChunkCandidate], qvec_literal: &str) {
+        if candidates.is_empty() {
+            return;
+        }
+        let in_list = candidates
+            .iter()
+            .map(|c| format!("'{}'", Self::escape_sql(&c.chunk_id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT ce.chunk_id, (ce.embedding <=> {qvec})::float8 AS dist \
+             FROM ist.ChunkEmbedding ce \
+             WHERE ce.chunk_id IN ({in_list})",
+            qvec = qvec_literal,
+        );
+        let raw = self
+            .graph_store
+            .query_json(&sql)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut dist_by_id: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let id = match row.first().and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let dist = row.get(1).and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            });
+            if let Some(dist) = dist {
+                dist_by_id.insert(id, dist);
+            }
+        }
+        for candidate in candidates.iter_mut() {
+            if let Some(dist) = dist_by_id.get(&candidate.chunk_id) {
                 candidate.semantic_distance = Some(*dist);
             }
         }
@@ -4045,23 +4127,39 @@ impl McpServer {
     fn build_degradation_notice(
         degraded_reason: Option<&str>,
         pressure: ServicePressure,
+        rerank_applied: bool,
     ) -> Option<Value> {
         let reason = degraded_reason?;
         if !reason.starts_with("semantic_chunk_search_skipped") {
             return None;
         }
         let backlog = reason.contains("vector_backlog");
-        let remediation = if backlog {
-            "Vector backlog: results improve once indexing catches up. Structural tools (query / inspect / impact / path) are unaffected."
+        // REQ-AXO-902018 tier B — when the cheap candidate re-rank ran, the result
+        // is materially better than lexical-only; say so instead of overstating
+        // the degradation.
+        let (impact, remediation) = if rerank_applied {
+            (
+                "Corpus-wide semantic search was skipped under service pressure, but the structural + lexical candidates were re-ranked with a single query embedding (lite semantic). Reliability is below a full ANN sweep yet well above lexical-only.",
+                "Transient: results are usable now; retry shortly for a full corpus sweep, or pass semantic=semantic to force it.",
+            )
+        } else if backlog {
+            (
+                "Corpus-wide semantic chunk search was skipped — evidence ranks by lexical + structural signals only. Reliability is reduced for capability / behaviour questions ('which component does X?').",
+                "Vector backlog: results improve once indexing catches up. Structural tools (query / inspect / impact / path) are unaffected.",
+            )
         } else {
-            "Transient under service pressure: retry shortly. Meanwhile rely on structural tools (query / inspect / impact / path); pass semantic=semantic to force the embed."
+            (
+                "Corpus-wide semantic chunk search was skipped — evidence ranks by lexical + structural signals only. Reliability is reduced for capability / behaviour questions ('which component does X?').",
+                "Transient under service pressure: retry shortly. Meanwhile rely on structural tools (query / inspect / impact / path); pass semantic=semantic to force the embed.",
+            )
         };
         Some(json!({
             "degraded": true,
             "class": "TRANSIENT_UNAVAILABILITY",
             "reason": reason,
             "service_pressure": format!("{pressure:?}"),
-            "impact": "Corpus-wide semantic chunk search was skipped — evidence ranks by lexical + structural signals only. Reliability is reduced for capability / behaviour questions ('which component does X?').",
+            "semantic_rerank_applied": rerank_applied,
+            "impact": impact,
             "remediation": remediation,
         }))
     }
@@ -5178,27 +5276,42 @@ mod tests {
         let crit = McpServer::build_degradation_notice(
             Some("semantic_chunk_search_skipped_due_to_pressure_critical"),
             ServicePressure::Critical,
+            false,
         )
         .expect("pressure skip emits a notice");
         assert_eq!(crit["class"], "TRANSIENT_UNAVAILABILITY");
         assert_eq!(crit["degraded"], true);
+        assert_eq!(crit["semantic_rerank_applied"], false);
         assert!(crit["remediation"].as_str().unwrap().contains("retry"));
 
         let backlog = McpServer::build_degradation_notice(
             Some("semantic_chunk_search_skipped_due_to_vector_backlog"),
             ServicePressure::Healthy,
+            false,
         )
         .expect("backlog skip emits a notice");
         assert!(backlog["remediation"].as_str().unwrap().contains("backlog"));
 
+        // REQ-AXO-902018 tier B — when the lite re-rank ran, the notice says so
+        // and the impact is framed as better-than-lexical-only.
+        let reranked = McpServer::build_degradation_notice(
+            Some("semantic_chunk_search_skipped_due_to_pressure_critical"),
+            ServicePressure::Critical,
+            true,
+        )
+        .expect("notice still emitted when re-rank applied");
+        assert_eq!(reranked["semantic_rerank_applied"], true);
+        assert!(reranked["impact"].as_str().unwrap().contains("re-ranked"));
+
         assert!(
-            McpServer::build_degradation_notice(None, ServicePressure::Healthy).is_none(),
+            McpServer::build_degradation_notice(None, ServicePressure::Healthy, false).is_none(),
             "no reason → no notice"
         );
         assert!(
             McpServer::build_degradation_notice(
                 Some("graph_expansion_disabled"),
-                ServicePressure::Critical
+                ServicePressure::Critical,
+                false,
             )
             .is_none(),
             "a non-semantic reason is not a retrieval-degradation notice"
