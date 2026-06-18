@@ -1424,8 +1424,9 @@ impl GraphStore {
     /// REQ-AXO-901757 slice B — SOLL nodes whose description embedding is missing
     /// or STALE (stored `source_hash` drifted from the current title+description).
     /// Returns `(node_id, project_code, text_to_embed, source_hash)`; the hash is
-    /// computed in SQL (`md5(title||description)`) so the caller stores exactly
-    /// what the staleness predicate compares against — re-embed converges.
+    /// computed in SQL (`md5(title || E'\n' || description)`, same separator as the
+    /// embedded text — REQ-AXO-902015) so the caller stores exactly what the
+    /// staleness predicate compares against — re-embed converges, no collision.
     pub fn select_soll_nodes_needing_embedding(
         &self,
         limit: usize,
@@ -1434,13 +1435,13 @@ impl GraphStore {
         let raw = self.query_json(&format!(
             "SELECT n.id, n.project_code, \
                     COALESCE(n.title,'') || E'\\n' || COALESCE(n.description,''), \
-                    md5(COALESCE(n.title,'') || COALESCE(n.description,'')) \
+                    md5(COALESCE(n.title,'') || E'\\n' || COALESCE(n.description,'')) \
              FROM soll.Node n \
              LEFT JOIN soll.NodeEmbedding e \
                     ON e.node_id = n.id AND e.model_id = '{mid}' \
              WHERE COALESCE(n.description,'') <> '' \
                AND (e.node_id IS NULL \
-                    OR e.source_hash <> md5(COALESCE(n.title,'') || COALESCE(n.description,''))) \
+                    OR e.source_hash <> md5(COALESCE(n.title,'') || E'\\n' || COALESCE(n.description,''))) \
              ORDER BY n.id \
              LIMIT {limit}",
             mid = Self::escape_sql(model_id),

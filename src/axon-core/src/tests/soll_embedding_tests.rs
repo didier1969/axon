@@ -69,6 +69,37 @@ mod tests {
         );
     }
 
+    /// REQ-AXO-902015 — the staleness `source_hash` must represent EXACTLY the
+    /// embedded text (title `\n` description), separator included. Two nodes whose
+    /// embedded texts differ must get distinct hashes. The pre-fix code hashed
+    /// `title||description` WITHOUT the separator, so `('ab','c')` and `('a','bc')`
+    /// both hashed `md5('abc')` while their embedded texts (`'ab\nc'` vs `'a\nbc'`)
+    /// differ — a hash collision that could suppress a legitimate re-embed.
+    #[test]
+    fn soll_staleness_hash_includes_embed_separator_no_collision() {
+        let store = create_test_db().unwrap();
+        insert_node(&store, "REQ-TST-001", "ab", "c");
+        insert_node(&store, "REQ-TST-002", "a", "bc");
+
+        let needing = store.select_soll_nodes_needing_embedding(100).unwrap();
+        let get = |id: &str| -> (String, String) {
+            needing
+                .iter()
+                .find(|(nid, ..)| nid == id)
+                .map(|(_, _, text, hash)| (text.clone(), hash.clone()))
+                .unwrap_or_else(|| panic!("{id} selected as needing embedding"))
+        };
+        let (text_a, hash_a) = get("REQ-TST-001");
+        let (text_b, hash_b) = get("REQ-TST-002");
+
+        assert_eq!(text_a, "ab\nc", "embedded text keeps the title/description separator");
+        assert_eq!(text_b, "a\nbc", "embedded text keeps the title/description separator");
+        assert_ne!(
+            hash_a, hash_b,
+            "distinct embedded texts must yield distinct staleness hashes (no separator-stripping collision)"
+        );
+    }
+
     /// REQ-AXO-901757 slice B (sub-slice B3a) — ANN search returns the SOLL node
     /// whose embedding is nearest the query vector. Synthetic unit vectors on
     /// distinct axes (no embedder, GUI-PRO-004): a query on axis-k is closest to
