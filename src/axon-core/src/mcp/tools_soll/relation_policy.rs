@@ -241,6 +241,33 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 999,
             },
         }),
+        // REQ-AXO-902016 — BLOCKED_BY to the EXTERNAL factor parking a REQ:
+        // a pending Decision (REQ→DEC, e.g. an operator model-swap call), a
+        // delivery gate (REQ→MIL), or an infra/key artifact (REQ→ART). These
+        // are dependency edges (Supporting role, never a tree parent); the
+        // work_plan classifies the source into blockers while the target is
+        // non-terminal. The reverse canonical edges (DEC -SOLVES-> REQ,
+        // MIL -TARGETS-> REQ) keep their own filiation semantics.
+        ("REQ", "DEC") => Some(RelationPolicy {
+            allowed: &["BLOCKED_BY"],
+            default: Some("BLOCKED_BY"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
+        }),
+        ("REQ", "MIL") => Some(RelationPolicy {
+            allowed: &["BLOCKED_BY"],
+            default: Some("BLOCKED_BY"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
+        }),
         ("DEC", "GUI") => Some(RelationPolicy {
             allowed: &["COMPLIES_WITH"],
             default: Some("COMPLIES_WITH"),
@@ -373,10 +400,16 @@ pub(super) fn relation_policy_for_pair(
         // replaced by a newer REQ carries the canonical edge (e.g.
         // REQ-AXO-207/208 → REQ-AXO-198 — P2 DDL generator duplicates).
         // Default stays REFINES (incremental specialization).
+        // REQ-AXO-902016 — BLOCKED_BY models a dependency/blocking edge: this
+        // REQ cannot proceed until the target (another REQ) is resolved.
+        // soll_work_plan reads it to auto-classify the source out of the
+        // actionable wave and into blockers while the target is non-terminal.
+        // allow_multiple_types so a REQ can REFINE one REQ and be BLOCKED_BY
+        // another in the same graph.
         ("REQ", "REQ") => Some(RelationPolicy {
-            allowed: &["REFINES", "BELONGS_TO", "SUPERSEDES"],
+            allowed: &["REFINES", "BELONGS_TO", "SUPERSEDES", "BLOCKED_BY"],
             default: Some("REFINES"),
-            allow_multiple_types: false,
+            allow_multiple_types: true,
             projection: RelationProjectionPolicy {
                 role: ProjectionRole::Lateral,
                 parent_preference_rank: 95,
@@ -426,7 +459,20 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 999,
             },
         }),
-        ("REQ", "ART") | ("VAL", "ART") => Some(RelationPolicy {
+        // REQ-AXO-902016 — a Requirement may be SUBSTANTIATES'd by an artifact
+        // (evidence) OR BLOCKED_BY one (an external infra/key/dependency artifact
+        // that parks the work). allow_multiple_types so both can coexist.
+        ("REQ", "ART") => Some(RelationPolicy {
+            allowed: &["SUBSTANTIATES", "BLOCKED_BY"],
+            default: Some("SUBSTANTIATES"),
+            allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 100,
+                child_order_rank: 999,
+            },
+        }),
+        ("VAL", "ART") => Some(RelationPolicy {
             allowed: &["SUBSTANTIATES"],
             default: Some("SUBSTANTIATES"),
             allow_multiple_types: false,
@@ -760,5 +806,45 @@ pub(super) fn relation_scope_matches(
             source_id.contains(&marker) || target_id.contains(&marker)
         }
         None => true,
+    }
+}
+
+#[cfg(test)]
+mod blocked_by_policy_tests {
+    use super::relation_policy_for_pair;
+
+    /// REQ-AXO-902016 — BLOCKED_BY is a canonical Requirement dependency edge to
+    /// the realistic blocker kinds (another REQ, a pending DEC, a delivery MIL,
+    /// an external ART). soll_work_plan reads it to auto-classify blockers.
+    #[test]
+    fn blocked_by_allowed_for_requirement_dependency_pairs() {
+        for target in ["REQ", "DEC", "MIL", "ART"] {
+            let policy = relation_policy_for_pair("REQ", target)
+                .unwrap_or_else(|| panic!("REQ -> {target} must have a relation policy"));
+            assert!(
+                policy.allowed.contains(&"BLOCKED_BY"),
+                "REQ -> {target} must allow BLOCKED_BY (allowed = {:?})",
+                policy.allowed
+            );
+        }
+    }
+
+    /// BLOCKED_BY must NOT bleed onto unrelated pairs (e.g. VAL -> ART evidence).
+    #[test]
+    fn blocked_by_not_allowed_on_validation_artifact() {
+        let policy = relation_policy_for_pair("VAL", "ART").expect("VAL -> ART policy exists");
+        assert!(
+            !policy.allowed.contains(&"BLOCKED_BY"),
+            "VAL -> ART must stay SUBSTANTIATES-only"
+        );
+    }
+
+    /// REQ -> ART keeps SUBSTANTIATES (evidence) alongside the new BLOCKED_BY.
+    #[test]
+    fn requirement_artifact_keeps_substantiates_and_adds_blocked_by() {
+        let policy = relation_policy_for_pair("REQ", "ART").expect("REQ -> ART policy exists");
+        assert!(policy.allowed.contains(&"SUBSTANTIATES"));
+        assert!(policy.allowed.contains(&"BLOCKED_BY"));
+        assert!(policy.allow_multiple_types);
     }
 }

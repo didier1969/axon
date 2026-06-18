@@ -175,6 +175,15 @@ BEGIN
 END
 $canonical_id$;
 
+-- NOTE (REQ-AXO-902016 / DEC-PRO-100): the `soll_node_status_canonical` CHECK
+-- constraint is DELIBERATELY NOT defined here. It is applied manually to the
+-- live PG only (NOT VALID), because test fixtures and legacy cross-project rows
+-- legitimately carry non-canonical statuses (`completed`/`active`/empty/…) that
+-- a bootstrap-enforced constraint would reject. The canonical vocabulary now
+-- includes `blocked`/`deferred`; widen the live constraint with the operator-
+-- gated ALTER documented in DEC-PRO-100. Server-side validation
+-- (CANONICAL_NODE_STATUSES in tools_soll) is the portable enforcement layer.
+
 -- project_code shape invariant across SOLL tables. McpJob allows NULL.
 DO $project_code_canonical$
 BEGIN

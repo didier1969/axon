@@ -453,12 +453,38 @@ impl McpServer {
         // counting so 'unblocks N descendants' reflects OPEN descendants only.
         // Terminal states across SOLL types: delivered/superseded (Decision),
         // completed/superseded (Requirement, Milestone), archived (any).
+        // REQ-AXO-902016 — a node with an outgoing BLOCKED_BY edge to a
+        // NON-TERMINAL target is parked on that dependency. Map id -> blocker id
+        // so the work_plan auto-classifies it out of the actionable wave and
+        // names the blocker in the blockers section. A terminal target = block
+        // lifted, so the node stays schedulable (the edge is historical).
+        let blocked_by_open_dep: HashMap<String, String> = nodes
+            .keys()
+            .filter_map(|id| {
+                snapshot
+                    .outgoing_edges(id)
+                    .find(|(target, rel)| {
+                        *rel == "BLOCKED_BY"
+                            && snapshot
+                                .nodes
+                                .get(*target)
+                                .map(|target_node| !is_terminal_status(&target_node.status))
+                                .unwrap_or(true)
+                    })
+                    .map(|(target, _)| (id.clone(), target.to_string()))
+            })
+            .collect();
+
         let schedulable_ids = nodes
             .iter()
             .filter(|(id, node)| {
                 !cycle_node_ids.contains(*id)
                     && !blocked_by_cycles.contains(*id)
                     && !is_terminal_status(&node.status)
+                    // REQ-AXO-902016 — `blocked`/`deferred` are parked on an
+                    // external factor: out of the actionable wave, into blockers.
+                    && !is_blocked_status(&node.status)
+                    && !blocked_by_open_dep.contains_key(*id)
             })
             .map(|(id, _)| id.clone())
             .collect::<HashSet<_>>();
@@ -533,6 +559,39 @@ impl McpServer {
                     id: node.id.clone(),
                     entity_type: node.entity_type.label().to_string(),
                     reason: "depends_on_cycle".to_string(),
+                }),
+        );
+        // REQ-AXO-902016 — surface `blocked`/`deferred` nodes as blockers so they
+        // are visible (not silently dropped) the same way cycle-blocked nodes
+        // are, while staying out of the actionable wave. Dedup against the
+        // cycle-derived blockers already collected above.
+        let mut already_blocked: HashSet<String> =
+            blockers.iter().map(|blocker| blocker.id.clone()).collect();
+        blockers.extend(
+            nodes
+                .values()
+                .filter(|node| {
+                    is_blocked_status(&node.status) && !already_blocked.contains(&node.id)
+                })
+                .map(|node| WorkPlanBlocker {
+                    id: node.id.clone(),
+                    entity_type: node.entity_type.label().to_string(),
+                    reason: format!("status_{}", node.status.trim().to_ascii_lowercase()),
+                }),
+        );
+        already_blocked.extend(blockers.iter().map(|blocker| blocker.id.clone()));
+        // REQ-AXO-902016 — nodes parked by an outgoing BLOCKED_BY edge: name the
+        // blocking target so the operator/LLM sees WHAT blocks the work.
+        blockers.extend(
+            blocked_by_open_dep
+                .iter()
+                .filter(|(id, _)| !already_blocked.contains(*id))
+                .filter_map(|(id, target)| {
+                    nodes.get(id).map(|node| WorkPlanBlocker {
+                        id: node.id.clone(),
+                        entity_type: node.entity_type.label().to_string(),
+                        reason: format!("blocked_by:{target}"),
+                    })
                 }),
         );
         blockers.sort_by(|a, b| a.id.cmp(&b.id));

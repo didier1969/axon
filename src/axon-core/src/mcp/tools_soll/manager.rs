@@ -502,9 +502,9 @@ impl McpServer {
                 // vocabulary (DEC-PRO-100). Mirror the entity-rejection envelope
                 // pattern above so the LLM gets a recoverable error BEFORE the
                 // DB CHECK constraint surfaces a cryptic message.
-                const ACCEPTED_STATUS: [&str; 5] =
-                    ["current", "planned", "delivered", "superseded", "rejected"];
-                if !status.is_empty() && !ACCEPTED_STATUS.contains(&status) {
+                // REQ-AXO-902016 — single source: CANONICAL_NODE_STATUSES.
+                let accepted_status = CANONICAL_NODE_STATUSES;
+                if !status.is_empty() && !accepted_status.contains(&status) {
                     let normalization_hint = match status {
                         "completed" | "done" | "passed" | "closed" | "archived" => "delivered",
                         "accepted" | "in_progress" | "active" | "open" | "partial" | "pending" => {
@@ -520,7 +520,7 @@ impl McpServer {
                             "text": format!(
                                 "Invalid status `{}`. Canonical vocabulary (DEC-PRO-100) = [{}]. Suggested: `{}`.",
                                 status,
-                                ACCEPTED_STATUS.join(", "),
+                                accepted_status.join(", "),
                                 normalization_hint,
                             ),
                         }],
@@ -538,13 +538,13 @@ impl McpServer {
                                 "category": "status",
                                 "invalid_field": "data.status",
                                 "supplied_value": status,
-                                "accepted_values": ACCEPTED_STATUS,
+                                "accepted_values": accepted_status,
                                 "normalization_hint": normalization_hint,
                                 "canonical_source": "DEC-PRO-100",
                                 "follow_up_tools": ["soll_manager", "soll_query_context"],
                                 "hint": format!(
                                     "retry with status in {:?} ; default `current` for newly-owned nodes",
-                                    ACCEPTED_STATUS,
+                                    accepted_status,
                                 ),
                             },
                             "example_valid_call": {
@@ -855,9 +855,9 @@ impl McpServer {
                 // REQ-AXO-325 — validate `status` if supplied. Mirrors the create
                 // path validation above; pre-empts the DB CHECK constraint.
                 if let Some(supplied_status) = data.get("status").and_then(|v| v.as_str()) {
-                    const ACCEPTED_STATUS: [&str; 5] =
-                        ["current", "planned", "delivered", "superseded", "rejected"];
-                    if !supplied_status.is_empty() && !ACCEPTED_STATUS.contains(&supplied_status) {
+                    // REQ-AXO-902016 — single source: CANONICAL_NODE_STATUSES.
+                    let accepted_status = CANONICAL_NODE_STATUSES;
+                    if !supplied_status.is_empty() && !accepted_status.contains(&supplied_status) {
                         let normalization_hint = match supplied_status {
                             "completed" | "done" | "passed" | "closed" | "archived" => "delivered",
                             "accepted" | "in_progress" | "active" | "open" | "partial"
@@ -872,7 +872,7 @@ impl McpServer {
                                 "text": format!(
                                     "Invalid status `{}`. Canonical vocabulary (DEC-PRO-100) = [{}]. Suggested: `{}`.",
                                     supplied_status,
-                                    ACCEPTED_STATUS.join(", "),
+                                    accepted_status.join(", "),
                                     normalization_hint,
                                 ),
                             }],
@@ -890,13 +890,13 @@ impl McpServer {
                                     "category": "status",
                                     "invalid_field": "data.status",
                                     "supplied_value": supplied_status,
-                                    "accepted_values": ACCEPTED_STATUS,
+                                    "accepted_values": accepted_status,
                                     "normalization_hint": normalization_hint,
                                     "canonical_source": "DEC-PRO-100",
                                     "follow_up_tools": ["soll_manager", "soll_query_context"],
                                     "hint": format!(
                                         "retry with status in {:?}",
-                                        ACCEPTED_STATUS,
+                                        accepted_status,
                                     ),
                                 },
                                 "example_valid_call": {
@@ -926,10 +926,10 @@ impl McpServer {
                         1,
                     ) {
                         let existing_status = existing.first().map(String::as_str).unwrap_or("");
-                        const ACCEPTED_STATUS: [&str; 5] =
-                            ["current", "planned", "delivered", "superseded", "rejected"];
+                        // REQ-AXO-902016 — single source: CANONICAL_NODE_STATUSES.
+                        let accepted_status = CANONICAL_NODE_STATUSES;
                         if !existing_status.is_empty()
-                            && !ACCEPTED_STATUS.contains(&existing_status)
+                            && !accepted_status.contains(&existing_status)
                         {
                             let normalization_hint = match existing_status {
                                 "completed" | "done" | "passed" | "closed" | "archived" => {
@@ -947,7 +947,7 @@ impl McpServer {
                                     "text": format!(
                                         "Update blocked: this node's existing status `{}` is non-canonical (legacy) and would violate soll_node_status_canonical. Re-issue the update with an explicit canonical `status` (DEC-PRO-100 = [{}]). Suggested: `{}`.",
                                         existing_status,
-                                        ACCEPTED_STATUS.join(", "),
+                                        accepted_status.join(", "),
                                         normalization_hint,
                                     ),
                                 }],
@@ -965,7 +965,7 @@ impl McpServer {
                                         "category": "status",
                                         "invalid_field": "node.status (pre-existing)",
                                         "supplied_value": existing_status,
-                                        "accepted_values": ACCEPTED_STATUS,
+                                        "accepted_values": accepted_status,
                                         "normalization_hint": normalization_hint,
                                         "canonical_source": "DEC-PRO-100",
                                         "follow_up_tools": ["soll_manager"],

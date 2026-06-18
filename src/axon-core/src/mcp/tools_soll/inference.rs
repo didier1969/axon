@@ -98,6 +98,37 @@ pub(super) fn is_terminal_status(status: &str) -> bool {
     )
 }
 
+/// REQ-AXO-902016 — single source of truth for the canonical `node.status`
+/// vocabulary (DEC-PRO-100). `blocked`/`deferred` join the original five so a
+/// REQ parked on an external factor has an honest status. Server-side
+/// validation (`soll_manager`) and the DB CHECK constraint
+/// (`soll_node_status_canonical`, 01_soll_schema.sql) must agree with THIS list.
+pub(super) const CANONICAL_NODE_STATUSES: &[&str] = &[
+    "current",
+    "planned",
+    "delivered",
+    "superseded",
+    "rejected",
+    "blocked",
+    "deferred",
+];
+
+/// REQ-AXO-902016 — a node that is neither delivered nor rejected but parked
+/// on an EXTERNAL factor (infra / keys / a pending human decision). Distinct
+/// from terminal (it is NOT done) AND from active (it is NOT schedulable):
+/// `soll_work_plan` must keep it OUT of the actionable wave (it was the
+/// false-actionable noise that made gated REQs reappear) and instead surface it
+/// in the blockers section. Coherence audits (`soll_validate`) already skip it
+/// via the default `['current','planned']` status filter, so it is not flagged
+/// for missing criteria/links while parked. `deferred` = self-blocked (we chose
+/// to wait); `blocked` = blocked by a named factor (ideally a BLOCKED_BY edge).
+pub(super) fn is_blocked_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "blocked" | "deferred"
+    )
+}
+
 // REQ-AXO-346 Slice 3 — the hand-rolled adjacency map, Tarjan SCC,
 // blocked-by-cycle BFS, filtered-adjacency view, and descendant counter
 // previously living here are replaced by the petgraph-native helpers in
@@ -333,7 +364,7 @@ pub(super) fn recommendation_reason(node: &WorkPlanNode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal_status;
+    use super::{is_blocked_status, is_terminal_status};
 
     /// REQ-AXO-346 Slice 1 — lock the terminal-status contract.
     /// `rejected` must be terminal (DEC-PRO-100 canonical vocabulary)
@@ -358,6 +389,36 @@ mod tests {
             assert!(
                 !is_terminal_status(status),
                 "`{status}` must NOT be terminal"
+            );
+        }
+    }
+
+    /// REQ-AXO-902016 — `blocked`/`deferred` are a third category: parked on an
+    /// external factor, neither terminal (done) nor schedulable.
+    #[test]
+    fn blocked_and_deferred_are_blocked_not_terminal() {
+        for status in ["blocked", "deferred", "BLOCKED", "  deferred  "] {
+            assert!(is_blocked_status(status), "`{status}` must be blocked");
+            assert!(
+                !is_terminal_status(status),
+                "`{status}` must NOT be terminal (it is not done)"
+            );
+        }
+    }
+
+    #[test]
+    fn active_and_terminal_statuses_are_not_blocked() {
+        for status in [
+            "current",
+            "planned",
+            "delivered",
+            "rejected",
+            "superseded",
+            "",
+        ] {
+            assert!(
+                !is_blocked_status(status),
+                "`{status}` must NOT be blocked"
             );
         }
     }
