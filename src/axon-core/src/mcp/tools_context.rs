@@ -223,6 +223,14 @@ impl McpServer {
             terms.clone()
         };
         let path_hints = Self::question_path_hints(question);
+        // REQ-AXO-902023 tier C.2 — detect a composed question (≥2 sub-questions).
+        // The lexical/FTS/structural lanes already read every word of the full
+        // question, so the split's value is SEMANTIC: each sub-question gets its
+        // own clean embed and candidates are re-ranked by their CLOSEST sub-
+        // question (a blended whole-question vector is muddy). None = single
+        // question → today's single-vector path, unchanged.
+        let sub_questions = Self::split_composed_question(question);
+        let is_composed = sub_questions.is_some();
         timings.planner_ms = stage_started_at.elapsed().as_millis() as u64;
 
         let mut excluded_because = Vec::new();
@@ -286,14 +294,22 @@ impl McpServer {
                 .push(format!("waited_{waited_for_semantic_ms}ms_for_semantic_pressure_recovery"));
         }
         let semantic_corpus_allowed = Self::semantic_corpus_pressure_ok(pressure);
-        let question_vector: Option<Vec<f32>> = if !semantic_lexical_off {
+        // REQ-AXO-902023 tier C.2 — embed per sub-question when composed (each
+        // clean), else the whole question once. The fills below keep the MIN
+        // distance across vectors, so a candidate is ranked by whichever sub-
+        // question it answers best. Single question → one vector → one iteration,
+        // identical to the prior single-embed path.
+        let question_vectors: Vec<Vec<f32>> = if semantic_lexical_off {
+            Vec::new()
+        } else if let Some(parts) = sub_questions.as_ref() {
+            crate::embedder::batch_embed(parts.clone()).unwrap_or_default()
+        } else {
             crate::embedder::batch_embed(vec![question.to_string()])
                 .ok()
-                .and_then(|vectors| vectors.into_iter().next())
-        } else {
-            None
+                .unwrap_or_default()
         };
-        if let Some(qvec) = question_vector.as_ref() {
+        let question_vector: Option<Vec<f32>> = question_vectors.first().cloned();
+        for qvec in &question_vectors {
             if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
                 // CHEAP: fill cosine distances on the already-found symbol pool.
                 self.fill_entry_semantic_distances(&mut entry_candidates, &qvec_literal);
@@ -392,14 +408,23 @@ impl McpServer {
         // found with one cheap cosine pass over their existing embeddings. Recovers
         // the essential win (right answer first) without the ANN's corpus scan,
         // instead of degrading to a lexical-only ranking and a silent miss.
+        // REQ-AXO-902023 tier C.2 — composed questions ALWAYS get the per-sub-
+        // question min-distance re-rank (loop every vector), so the chunk ranking
+        // reflects the closest sub-question even under healthy pressure. Single
+        // questions keep tier-B behavior: cheap re-rank only when the corpus ANN
+        // was skipped (pressure / backlog).
         let mut semantic_rerank_applied = false;
-        if !semantic_allowed && !chunk_candidates.is_empty() {
-            if let Some(qvec) = question_vector.as_ref() {
+        let should_rerank_chunks =
+            (is_composed || !semantic_allowed) && !chunk_candidates.is_empty();
+        if should_rerank_chunks {
+            for qvec in &question_vectors {
                 if let Ok(qvec_literal) = crate::postgres::vector::vector_literal(qvec) {
                     self.fill_chunk_semantic_distances(&mut chunk_candidates, &qvec_literal);
                     semantic_rerank_applied = true;
-                    runtime.semantic_search_used = true;
                 }
+            }
+            if semantic_rerank_applied {
+                runtime.semantic_search_used = true;
             }
         }
         diagnostics.chunk_candidates_considered = chunk_candidates.len();
@@ -649,6 +674,10 @@ impl McpServer {
                 "project_scope": project.unwrap_or("*"),
                 "project_scope_variants": project_scope_variants,
                 "terms": terms_for_reasoning,
+                // REQ-AXO-902023 tier C.2 — null unless the question was split.
+                "composed_question": sub_questions
+                    .as_ref()
+                    .map(|parts| json!({ "sub_questions": parts })),
                 "graph_enabled": include_graph,
                 "soll_joined": should_join_soll,
                 "semantic_search_used": runtime.semantic_search_used,
@@ -1240,6 +1269,98 @@ impl McpServer {
                 Some(normalized)
             })
             .collect()
+    }
+
+    /// REQ-AXO-902023 tier C.2 — wh-interrogative cues that strongly OPEN a
+    /// question (EN + FR). Deliberately excludes weak mid-sentence words
+    /// (`is`/`are`/`do`) so the coordinator split stays high-precision.
+    const INTERROGATIVE_CUES: [&'static str; 19] = [
+        "how", "what", "why", "where", "when", "which", "who", "whose", "whom", "comment",
+        "pourquoi", "où", "quand", "quel", "quelle", "quels", "quelles", "qui", "combien",
+    ];
+
+    /// REQ-AXO-902023 tier C.2 — detect a composed question carrying ≥2 distinct
+    /// sub-questions and split it. Conservative (high precision): a false split
+    /// degrades a single question, so we only split on strong signals —
+    ///   1. ≥2 `?` terminators, each closing a substantive (≥2-word) clause; or
+    ///   2. a coordinator (` and ` / ` et ` / `; `) whose right side OPENS with an
+    ///      interrogative cue — a genuine second question, not a noun list
+    ///      ("list X and Y" never splits; "...work and why is Y slow" does).
+    /// Returns None when the question reads as a single ask.
+    fn split_composed_question(question: &str) -> Option<Vec<String>> {
+        let trimmed = question.trim();
+        if trimmed.len() < 12 {
+            return None;
+        }
+        // Rule 1 — multiple '?' terminators.
+        if trimmed.matches('?').count() >= 2 {
+            let parts: Vec<String> = trimmed
+                .split_inclusive('?')
+                .map(|segment| segment.trim())
+                .filter(|segment| {
+                    segment.ends_with('?')
+                        && segment.trim_end_matches('?').split_whitespace().count() >= 2
+                })
+                .map(|segment| segment.to_string())
+                .collect();
+            if parts.len() >= 2 {
+                return Some(parts);
+            }
+        }
+        // Rule 2 — coordinator + interrogative right side.
+        let parts = Self::split_on_interrogative_coordinator(trimmed);
+        if parts.len() >= 2 {
+            return Some(parts);
+        }
+        None
+    }
+
+    fn opens_with_interrogative(text: &str) -> bool {
+        let first = text
+            .trim_start()
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '\'')
+            .find(|tok| !tok.is_empty())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        Self::INTERROGATIVE_CUES.iter().any(|cue| *cue == first)
+    }
+
+    /// REQ-AXO-902023 tier C.2 — cut the question at each coordinator whose right
+    /// side opens with an interrogative cue. Substantive parts only (≥2 words).
+    fn split_on_interrogative_coordinator(question: &str) -> Vec<String> {
+        const COORDINATORS: [&str; 3] = [" and ", " et ", "; "];
+        let mut parts: Vec<String> = Vec::new();
+        let mut rest = question;
+        loop {
+            let mut best: Option<(usize, usize)> = None; // (cut byte index, coord len)
+            for coord in COORDINATORS {
+                let mut from = 0;
+                while let Some(pos) = rest[from..].find(coord) {
+                    let idx = from + pos;
+                    if Self::opens_with_interrogative(&rest[idx + coord.len()..]) {
+                        if best.map_or(true, |(b, _)| idx < b) {
+                            best = Some((idx, coord.len()));
+                        }
+                        break;
+                    }
+                    from = idx + coord.len();
+                }
+            }
+            match best {
+                Some((idx, coord_len)) => {
+                    let left = rest[..idx].trim();
+                    if left.split_whitespace().count() >= 2 {
+                        parts.push(left.to_string());
+                    }
+                    rest = rest[idx + coord_len..].trim();
+                }
+                None => break,
+            }
+        }
+        if !parts.is_empty() && rest.split_whitespace().count() >= 2 {
+            parts.push(rest.to_string());
+        }
+        parts
     }
 
     fn question_path_hints(question: &str) -> Vec<String> {
@@ -2184,7 +2305,12 @@ impl McpServer {
         }
         for candidate in candidates.iter_mut() {
             if let Some(dist) = dist_by_id.get(&candidate.id) {
-                candidate.semantic_distance = Some(*dist);
+                // REQ-AXO-902023 tier C.2 — keep the MIN across repeated calls so a
+                // composed question (one fill per sub-question vector) ranks each
+                // candidate by its CLOSEST sub-question. Single-call: existing None
+                // → `dist`, identical to the prior overwrite.
+                candidate.semantic_distance =
+                    Some(candidate.semantic_distance.map_or(*dist, |ex| ex.min(*dist)));
             }
         }
     }
@@ -2235,7 +2361,10 @@ impl McpServer {
         }
         for candidate in candidates.iter_mut() {
             if let Some(dist) = dist_by_id.get(&candidate.chunk_id) {
-                candidate.semantic_distance = Some(*dist);
+                // REQ-AXO-902023 tier C.2 — MIN across sub-question vectors (see
+                // fill_entry_semantic_distances). Single-call behavior unchanged.
+                candidate.semantic_distance =
+                    Some(candidate.semantic_distance.map_or(*dist, |ex| ex.min(*dist)));
             }
         }
     }
@@ -5490,6 +5619,61 @@ mod tests {
         );
         assert_eq!(McpServer::parse_wait_for_semantic(&json!(false)), None);
         assert_eq!(McpServer::parse_wait_for_semantic(&json!("soon")), None);
+    }
+
+    // REQ-AXO-902023 tier C.2 — composed-question split, high precision.
+    #[test]
+    fn split_composed_question_keeps_single_question_intact() {
+        assert_eq!(
+            McpServer::split_composed_question("How does admission control decide rejection?"),
+            None
+        );
+        // Noun list joined by "and" — right side not interrogative → no split.
+        assert_eq!(
+            McpServer::split_composed_question("List the symbols in catalog and the ones in dispatch"),
+            None
+        );
+        // Single comparison question with an embedded "and" → no split.
+        assert_eq!(
+            McpServer::split_composed_question(
+                "What is the difference between the graph and vector pipelines?"
+            ),
+            None
+        );
+        // Too short to be composed.
+        assert_eq!(McpServer::split_composed_question("why slow?"), None);
+    }
+
+    #[test]
+    fn split_composed_question_splits_on_multiple_terminators() {
+        let parts =
+            McpServer::split_composed_question("How does admission work? Why was the queue chosen?")
+                .expect("two '?' → composed");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "How does admission work?");
+        assert_eq!(parts[1], "Why was the queue chosen?");
+    }
+
+    #[test]
+    fn split_composed_question_splits_on_interrogative_coordinator() {
+        let parts = McpServer::split_composed_question(
+            "How does admission work and why was the queue chosen?",
+        )
+        .expect("coordinator + interrogative right → composed");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "How does admission work");
+        assert_eq!(parts[1], "why was the queue chosen?");
+    }
+
+    #[test]
+    fn split_composed_question_handles_french_cues() {
+        let parts = McpServer::split_composed_question(
+            "comment fonctionne l'admission et pourquoi la file est choisie ?",
+        )
+        .expect("FR comment/pourquoi → composed");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "comment fonctionne l'admission");
+        assert!(parts[1].starts_with("pourquoi la file"));
     }
 
     // REQ-AXO-901653 slice-5c — `retrieve_context_retains_adjacent_chunks_for_split_symbol`
