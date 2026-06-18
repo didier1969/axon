@@ -180,6 +180,16 @@ impl PhantomRuleEngine {
         let mut relations = Vec::new();
         let mut seen: HashMap<(String, String), bool> = HashMap::new();
 
+        // REQ-AXO-902024 — precompute line-start byte offsets ONCE so the per-match
+        // line number below is an O(log N) binary search instead of an O(N) re-scan
+        // of `content[..start]`. A content file dense with matched ids (a SOLL
+        // export: 8566 refs in 2.4 MB) otherwise made this O(matches × N) — a
+        // multi-second userspace spin that wedged plane A (no A1 guard catches it:
+        // the file is normal by size + max-line, only its match density is extreme).
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+
         for rule in &rules {
             for captures in rule.regex.captures_iter(content) {
                 let captured = captures
@@ -209,7 +219,9 @@ impl PhantomRuleEngine {
                 }
                 seen.insert(dedup_key, true);
 
-                let line = content[..captures.get(0).unwrap().start()].lines().count() + 1;
+                // REQ-AXO-902024 — O(log N) line lookup (see line_starts above).
+                let match_start = captures.get(0).unwrap().start();
+                let line = line_starts.partition_point(|&ls| ls <= match_start);
 
                 symbols.push(Symbol {
                     name: captured.clone(),
@@ -532,6 +544,15 @@ min_length = 10
 
         assert!(symbols.iter().all(|s| s.kind == "soll_ref"));
         assert!(relations.iter().all(|r| r.rel_type == "implements"));
+
+        // REQ-AXO-902024 — the O(log N) line lookup must yield the SAME line as
+        // the old O(N) `content[..start].lines().count() + 1`. Content starts with
+        // a newline, so line 1 is empty: CPT-AXO-054 is on line 2, the two REQs on
+        // lines 3 and 4.
+        let line_of = |name: &str| symbols.iter().find(|s| s.name == name).unwrap().start_line;
+        assert_eq!(line_of("CPT-AXO-054"), 2, "CPT ref line");
+        assert_eq!(line_of("REQ-AXO-345"), 3, "first REQ ref line");
+        assert_eq!(line_of("REQ-AXO-347"), 4, "second REQ ref line");
     }
 
     #[test]
