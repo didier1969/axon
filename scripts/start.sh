@@ -104,6 +104,12 @@ detect_gpu() {
     return 1
 }
 
+# REQ-AXO-902021 — honour an operator-pinned AXON_EMBEDDING_PROVIDER. The disk
+# corruption RCA (corrupted libnvinfer in the nix-store) crash-looped the
+# indexer with TensorRT forced on; the operator had no way to fall back to the
+# CUDA EP / CPU without editing start.sh. When the provider is pre-set we keep
+# it; otherwise we auto-select per GPU presence + runtime mode as before.
+_provider_override="${AXON_EMBEDDING_PROVIDER:-}"
 if detect_gpu; then
     # REQ-AXO-901978 (B1) — provision the GPU ORT artifact whenever a GPU is
     # present, INCLUDING brain_only / indexer_graph. Those modes run no batch
@@ -114,17 +120,20 @@ if detect_gpu; then
     # all CPU-embed bound). The BATCH-lane provider policy stays cpu for
     # non-semantic modes (canonical_embedding_provider_request_for_mode); only
     # the query lane resolves to GPU (effective_provider_request_for_lane).
-    export AXON_EMBEDDING_PROVIDER="tensorrt"
+    export AXON_EMBEDDING_PROVIDER="${_provider_override:-tensorrt}"
     for candidate in /usr/lib/wsl/lib/libnvidia-ml.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1; do
         [[ -f "$candidate" ]] && export AXON_NVML_LIBRARY_PATH="$candidate" && break
     done
 elif [[ "$RUNTIME_MODE" == indexer_full || "$RUNTIME_MODE" == indexer_vector ]]; then
-    export AXON_EMBEDDING_PROVIDER="cpu"
+    export AXON_EMBEDDING_PROVIDER="${_provider_override:-cpu}"
     export AXON_VECTOR_WORKERS=1
     export OMP_NUM_THREADS=4
     export OMP_WAIT_POLICY=PASSIVE
 else
-    export AXON_EMBEDDING_PROVIDER="cpu"
+    export AXON_EMBEDDING_PROVIDER="${_provider_override:-cpu}"
+fi
+if [[ -n "$_provider_override" ]]; then
+    echo "   embedding provider pinned by operator: $AXON_EMBEDDING_PROVIDER" >&2
 fi
 
 # --- Load per-instance runtime config ---
