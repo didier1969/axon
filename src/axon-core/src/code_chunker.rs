@@ -295,6 +295,21 @@ fn chunk_budget_ms() -> u64 {
         .filter(|v| *v > 0)
         .unwrap_or(CHUNK_BUDGET_MS_DEFAULT)
 }
+
+/// REQ-AXO-902024 fix C — wall-clock budget for chunking ALL of a file's symbols
+/// (see [`build_file_chunks`]). `chunk_budget_ms` guards a single huge symbol; this
+/// guards the symbol COUNT — a file that explodes into thousands of symbols (a
+/// SOLL export's phantom refs) drowns the per-symbol tokenizer encode without any
+/// single symbol tripping its own budget. Default 15 s: a real file chunks in
+/// well under it; a pathological one degrades to coarse chunks instead of wedging.
+const FILE_CHUNK_BUDGET_MS_DEFAULT: u64 = 15_000;
+fn file_chunk_budget_ms() -> u64 {
+    std::env::var("AXON_FILE_CHUNK_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(FILE_CHUNK_BUDGET_MS_DEFAULT)
+}
 /// Lines per chunk in the cheap fixed-window fallback (on budget bail).
 const CHEAP_WINDOW_LINES: usize = 200;
 
@@ -615,9 +630,97 @@ fn coarse_byte_window_chunks(
         .collect()
 }
 
-pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCodeChunk> {
+/// REQ-AXO-902024 fix B+C — build the chunks for ALL of a file's symbols in one
+/// pass. Splits `file_content` into lines ONCE (B: was re-split per symbol →
+/// O(symbols × N)), and enforces a per-FILE wall-clock budget (C): once spent,
+/// the remaining symbols fall back to coarse byte-window chunks (tokenizer-free)
+/// and a single WARN names the file for investigation — so a file dense in
+/// matched ids (a SOLL export → thousands of phantom symbols) or otherwise
+/// drowning the per-symbol encodes can NEVER wedge plane A. Returns
+/// `(symbol_index, chunk)` so the caller maps each chunk back to its symbol id.
+pub fn build_file_chunks(
+    symbols: &[&Symbol],
+    file_content: &str,
+) -> Vec<(usize, DerivedCodeChunk)> {
+    build_file_chunks_with_budget(symbols, file_content, file_chunk_budget_ms())
+}
+
+/// Testable seam for [`build_file_chunks`]: `budget_ms = 0` forces the coarse
+/// fallback for EVERY symbol deterministically (deadline already passed), so the
+/// never-wedge path is exercised without depending on wall-clock timing.
+pub fn build_file_chunks_with_budget(
+    symbols: &[&Symbol],
+    file_content: &str,
+    budget_ms: u64,
+) -> Vec<(usize, DerivedCodeChunk)> {
     let profile = active_chunk_profile();
     let lines: Vec<&str> = file_content.lines().collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
+    let mut out: Vec<(usize, DerivedCodeChunk)> = Vec::new();
+    let mut bailed = false;
+    for (i, sym) in symbols.iter().enumerate() {
+        if !bailed && std::time::Instant::now() >= deadline {
+            bailed = true;
+            tracing::warn!(
+                target: "pipeline_v2::chunk",
+                symbols = symbols.len(),
+                chunked_fine = i,
+                content_bytes = file_content.len(),
+                budget_ms = file_chunk_budget_ms(),
+                "REQ-AXO-902024 per-FILE chunk budget exceeded — remaining symbols fall back to coarse byte-window chunks (no tokenizer). INVESTIGATE this file (likely dense in matched ids / generated)."
+            );
+        }
+        if bailed {
+            let start = sym.start_line.saturating_sub(1).min(lines.len());
+            let end = sym.end_line.min(lines.len()).max(start);
+            let mut coarse = coarse_byte_window_chunks(sym, &lines, start, end, profile);
+            if coarse.is_empty() {
+                // single-line / empty-body symbol: emit one cheap byte-estimated
+                // chunk so the content is still indexed (coarse, not skipped).
+                let snippet = if start < lines.len() {
+                    lines[start].to_string()
+                } else {
+                    String::new()
+                };
+                let content = format_chunk_content(sym, "", &snippet, 1, 1);
+                coarse.push(DerivedCodeChunk {
+                    estimated_tokens: fallback_estimated_token_count(&content),
+                    content,
+                    part_index: 1,
+                    part_count: 1,
+                    chunk_path: "1/1".to_string(),
+                    start_line: sym.start_line,
+                    end_line: sym.end_line,
+                });
+            }
+            for chunk in coarse {
+                out.push((i, chunk));
+            }
+        } else {
+            for chunk in build_symbol_chunks_with_lines(sym, &lines, file_content) {
+                out.push((i, chunk));
+            }
+        }
+    }
+    out
+}
+
+pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCodeChunk> {
+    let lines: Vec<&str> = file_content.lines().collect();
+    build_symbol_chunks_with_lines(symbol, &lines, file_content)
+}
+
+/// REQ-AXO-902024 fix B — lines-aware variant. `build_symbol_chunks` re-split the
+/// whole file (`file_content.lines().collect()`, O(N)) on EVERY call, and it is
+/// called once per symbol → O(symbols × N) for the file. Callers that chunk many
+/// symbols of one file (see [`build_file_chunks`]) split once and reuse the slice.
+/// `file_content` is kept only for its O(1) byte length in the budget WARN.
+pub fn build_symbol_chunks_with_lines(
+    symbol: &Symbol,
+    lines: &[&str],
+    file_content: &str,
+) -> Vec<DerivedCodeChunk> {
+    let profile = active_chunk_profile();
     let start = symbol.start_line.saturating_sub(1).min(lines.len());
     let end = symbol.end_line.min(lines.len()).max(start);
 
@@ -633,7 +736,7 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         0
     };
     if body_byte_len > DEGENERATE_BODY_BYTES {
-        return coarse_byte_window_chunks(symbol, &lines, start, end, profile);
+        return coarse_byte_window_chunks(symbol, lines, start, end, profile);
     }
 
     let snippet = if start < end {
@@ -713,7 +816,7 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
     let (mut segments, bailed) = dp_segment_body(
         profile,
         symbol,
-        &lines,
+        lines,
         &repeated_context,
         body_start,
         end,
@@ -761,7 +864,7 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
             ceiling = MAX_CHUNKS_PER_SYMBOL,
             "REQ-AXO-901921 chunk fan-out exceeded per-symbol ceiling — coarse byte-window re-chunk to bound COUNT (budget-collapsed non-code data/log/markdown body)"
         );
-        return coarse_byte_window_chunks(symbol, &lines, start, end, profile);
+        return coarse_byte_window_chunks(symbol, lines, start, end, profile);
     }
     // REQ-AXO-901902 — bound the encode TIME for legitimate-but-large bodies in
     // the `MAX_PRECISE_ENCODE_CHUNKS`..`MAX_CHUNKS_PER_SYMBOL` band: keep their
@@ -786,7 +889,7 @@ pub fn build_symbol_chunks(symbol: &Symbol, file_content: &str) -> Vec<DerivedCo
         .enumerate()
         .map(|(index, segment)| {
             let part_index = index + 1;
-            let snippet = segment.snippet(&lines);
+            let snippet = segment.snippet(lines);
             let content =
                 format_chunk_content(symbol, &repeated_context, &snippet, part_index, part_count);
             DerivedCodeChunk {
@@ -950,6 +1053,69 @@ mod tests {
         assert!(should_accept_symbol_fast_path(profile, &small));
         assert!(!should_accept_symbol_fast_path(profile, &gray));
         assert!(should_measure_symbol_tokens(profile, &gray));
+    }
+
+    /// REQ-AXO-902024 fix B+C — `build_file_chunks` chunks every symbol of a file
+    /// (the lines-once / per-file-budget path that replaced the per-symbol
+    /// file re-split). Each chunk is tagged with its originating symbol index.
+    #[test]
+    fn build_file_chunks_covers_every_symbol() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let content = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let mk = |name: &str, line: usize| Symbol {
+            name: name.to_string(),
+            kind: "function".to_string(),
+            start_line: line,
+            end_line: line,
+            docstring: None,
+            is_entry_point: false,
+            is_public: false,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: Default::default(),
+            embedding: None,
+        };
+        let syms = [mk("a", 1), mk("b", 2), mk("c", 3)];
+        let refs: Vec<&Symbol> = syms.iter().collect();
+        let chunks = build_file_chunks(&refs, content);
+        let covered: std::collections::HashSet<usize> = chunks.iter().map(|(i, _)| *i).collect();
+        assert_eq!(covered.len(), 3, "every symbol index produced ≥1 chunk: {chunks:?}");
+        assert!(covered.contains(&0) && covered.contains(&1) && covered.contains(&2));
+    }
+
+    /// REQ-AXO-902024 fix C — the never-wedge guarantee: with the per-file budget
+    /// spent (budget_ms = 0), EVERY symbol still yields ≥1 chunk via the coarse,
+    /// tokenizer-free fallback — none is dropped, nothing spins. This is the
+    /// deterministic stand-in for a dense file that would otherwise wedge plane A.
+    #[test]
+    fn build_file_chunks_budget_zero_falls_back_coarse_for_all() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let content = "line one\nline two\nline three\nline four\n";
+        let mk = |name: &str, s: usize, e: usize| Symbol {
+            name: name.to_string(),
+            kind: "soll_ref".to_string(),
+            start_line: s,
+            end_line: e,
+            docstring: None,
+            is_entry_point: false,
+            is_public: false,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: Default::default(),
+            embedding: None,
+        };
+        // Mix of single-line (phantom-like) and multi-line symbols.
+        let syms = [mk("ref1", 1, 1), mk("ref2", 2, 2), mk("block", 1, 4)];
+        let refs: Vec<&Symbol> = syms.iter().collect();
+        let chunks = build_file_chunks_with_budget(&refs, content, 0);
+        let covered: std::collections::HashSet<usize> = chunks.iter().map(|(i, _)| *i).collect();
+        assert_eq!(
+            covered.len(),
+            3,
+            "budget=0 must still emit a coarse chunk for EVERY symbol (never drop/wedge): {chunks:?}"
+        );
     }
 
     /// REQ-AXO-901846 — root cause regression: two fused groups in the

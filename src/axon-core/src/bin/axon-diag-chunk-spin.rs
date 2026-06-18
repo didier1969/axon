@@ -40,7 +40,7 @@ use std::time::Instant;
 
 use axon_core::bench_pipeline_stages::collect_supported_files;
 use axon_core::code_chunker::{
-    active_chunk_profile, build_symbol_chunks, fuse_small_chunks, TaggedChunk,
+    active_chunk_profile, build_file_chunks, fuse_small_chunks, TaggedChunk,
 };
 use axon_core::indexing_policy::{is_minified, max_line_bytes, max_parse_bytes};
 use axon_core::parser::get_parser_for_file;
@@ -184,19 +184,20 @@ fn main() {
         symbols.extend(phantom_syms);
         total_symbols += symbols.len();
 
-        // step: BUILD (per-symbol chunking — the un-budgeted estimated_token_count
-        // on whole symbols lives here, code_chunker.rs:477)
+        // step: BUILD — faithful PRODUCTION path (REQ-AXO-902024): build_file_chunks
+        // splits lines once (fix B) and enforces the per-FILE budget (fix C), so a
+        // file dense in matched ids no longer wedges here. (Was a per-symbol
+        // build_symbol_chunks loop that re-split the file per symbol.)
         set_in_flight(in_flight, path, "build", file_start, idx);
-        let mut tagged: Vec<TaggedChunk> = Vec::new();
-        for sym in &symbols {
-            for chunk in build_symbol_chunks(sym, &content) {
-                tagged.push(TaggedChunk {
-                    symbol_id: format!("{}::{}", path.display(), sym.name),
-                    symbol_name: sym.name.clone(),
-                    chunk,
-                });
-            }
-        }
+        let sym_refs: Vec<&_> = symbols.iter().collect();
+        let tagged: Vec<TaggedChunk> = build_file_chunks(&sym_refs, &content)
+            .into_iter()
+            .map(|(i, chunk)| TaggedChunk {
+                symbol_id: format!("{}::{}", path.display(), symbols[i].name),
+                symbol_name: symbols[i].name.clone(),
+                chunk,
+            })
+            .collect();
 
         // step: FUSE (re-tokenizes combined groups — graph_ingestion.rs:987)
         set_in_flight(in_flight, path, "fuse", file_start, idx);

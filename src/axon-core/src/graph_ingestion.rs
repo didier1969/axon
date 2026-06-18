@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::code_chunker::build_symbol_chunks;
 use crate::graph::GraphStore;
 
 pub mod rows;
@@ -237,13 +236,6 @@ impl GraphStore {
             .replace('\\', "/");
 
         relative.replace('/', "::")
-    }
-
-    fn build_chunk_content(
-        symbol: &crate::parser::Symbol,
-        content: &str,
-    ) -> Vec<crate::code_chunker::DerivedCodeChunk> {
-        build_symbol_chunks(symbol, content)
     }
 
     fn stable_content_hash(value: &str) -> String {
@@ -927,6 +919,11 @@ impl GraphStore {
         let mut chunk_ids_emitted: Vec<String> = Vec::new();
 
         let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
+        // REQ-AXO-902024 fix B+C — collect the unique symbols, then chunk them in
+        // ONE pass (lines split once, per-FILE budget) instead of re-splitting the
+        // file per symbol and risking an unbounded spin on a dense file.
+        let mut unique_syms: Vec<&crate::parser::Symbol> = Vec::new();
+        let mut unique_ids: Vec<String> = Vec::new();
         for sym in symbols {
             let symbol_id = Self::symbol_id(project_code, path, &sym.name);
             if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -948,13 +945,15 @@ impl GraphStore {
                 target_id: symbol_id.clone(),
                 project_code: project_code.to_string(),
             });
-            for derived_chunk in Self::build_chunk_content(sym, content) {
-                tagged_chunks.push(crate::code_chunker::TaggedChunk {
-                    symbol_id: symbol_id.clone(),
-                    symbol_name: sym.name.clone(),
-                    chunk: derived_chunk,
-                });
-            }
+            unique_syms.push(sym);
+            unique_ids.push(symbol_id);
+        }
+        for (idx, derived_chunk) in crate::code_chunker::build_file_chunks(&unique_syms, content) {
+            tagged_chunks.push(crate::code_chunker::TaggedChunk {
+                symbol_id: unique_ids[idx].clone(),
+                symbol_name: unique_syms[idx].name.clone(),
+                chunk: derived_chunk,
+            });
         }
 
         let profile = crate::code_chunker::active_chunk_profile();
@@ -1161,6 +1160,10 @@ impl GraphStore {
 
             // Phase 1: collect symbols + per-symbol chunks as tagged items.
             let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
+            // REQ-AXO-902024 fix B+C — one-pass chunking (lines split once, per-FILE
+            // budget) over the unique symbols, never a per-symbol file re-split.
+            let mut unique_syms: Vec<&crate::parser::Symbol> = Vec::new();
+            let mut unique_ids: Vec<String> = Vec::new();
             for sym in &parsed.symbols {
                 let symbol_id = Self::symbol_id(project_code, &path_str, &sym.name);
                 if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -1182,13 +1185,17 @@ impl GraphStore {
                     target_id: symbol_id.clone(),
                     project_code: project_code.to_string(),
                 });
-                for derived_chunk in Self::build_chunk_content(sym, &parsed.content) {
-                    tagged_chunks.push(crate::code_chunker::TaggedChunk {
-                        symbol_id: symbol_id.clone(),
-                        symbol_name: sym.name.clone(),
-                        chunk: derived_chunk,
-                    });
-                }
+                unique_syms.push(sym);
+                unique_ids.push(symbol_id);
+            }
+            for (idx, derived_chunk) in
+                crate::code_chunker::build_file_chunks(&unique_syms, &parsed.content)
+            {
+                tagged_chunks.push(crate::code_chunker::TaggedChunk {
+                    symbol_id: unique_ids[idx].clone(),
+                    symbol_name: unique_syms[idx].name.clone(),
+                    chunk: derived_chunk,
+                });
             }
 
             // Phase 2: fuse small adjacent chunks into context groups.
