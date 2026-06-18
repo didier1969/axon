@@ -271,7 +271,13 @@ fn now_ms_for_tests() -> u64 {
 }
 
 fn wait_for_job_status(server: &McpServer, job_id: &str) -> Value {
-    for _ in 0..50 {
+    // REQ-AXO-902025 — the async mutation worker spawns a fresh `McpServer`
+    // (own PG handles) before running the mutation. Against the shared live PG
+    // (single-threaded harness, ~100 conns, indexer live) that setup can exceed
+    // the old 1s budget, timing the test out and — via the leaked env below —
+    // cascading async dispatch into every following sync-expecting test. 10s
+    // absorbs the contention without masking a genuinely stuck job.
+    for _ in 0..200 {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),

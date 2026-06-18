@@ -420,10 +420,14 @@ fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
 fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
     let _guard = env_lock();
     let site_root = tempdir().unwrap();
-    unsafe {
-        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
-        std::env::set_var("AXON_SOLL_SITE_ROOT", site_root.path());
-    }
+    // REQ-AXO-902025 — panic-safe RAII: a timeout/assert failure here must NOT
+    // leak AXON_MCP_MUTATION_JOBS=true into the following sync-expecting tests
+    // (the cascade root). The guards restore the prior value on unwind.
+    let _mj = crate::test_support::EnvVarGuard::set("AXON_MCP_MUTATION_JOBS", "true");
+    let _sr = crate::test_support::EnvVarGuard::set(
+        "AXON_SOLL_SITE_ROOT",
+        site_root.path().to_str().expect("temp path is utf-8"),
+    );
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -495,11 +499,7 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         Some("ok")
     );
     assert!(site_root.path().join("AXO/index.html").is_file());
-
-    unsafe {
-        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
-        std::env::remove_var("AXON_SOLL_SITE_ROOT");
-    }
+    // Env restored by the `_mj` / `_sr` guards on drop (panic-safe).
 }
 
 #[test]
