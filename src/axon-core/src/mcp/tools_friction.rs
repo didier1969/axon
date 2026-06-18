@@ -69,7 +69,10 @@ impl McpServer {
     /// call_count; latency_max_ms keeps the tail outlier. The observability
     /// surfaces themselves are skipped so they never self-inflate the stats.
     pub(crate) fn record_mcp_call(&self, tool: &str, response: &Value, latency_ms: i64) {
-        if tool == "mcp_friction_report" || tool == "mcp_telemetry_report" {
+        if tool == "mcp_friction_report"
+            || tool == "mcp_telemetry_report"
+            || tool == "mcp_feedback_report"
+        {
             return;
         }
         let data = response.get("data");
@@ -299,6 +302,129 @@ impl McpServer {
                 "open_count": open_count,
                 "regressed_count": regressed_count,
                 "privacy": "signature-only — no argument content is ever stored",
+            }
+        }))
+    }
+
+    /// REQ-AXO-902020 — `mcp_feedback_report`: the content-rich READ/triage
+    /// counterpart to `mcp_feedback` (write-only until now). Lists voluntary LLM
+    /// doléances from `axon.llm_feedback` (problem / proposed_solution /
+    /// severity / satisfaction), newest first, OPEN by default. Filters:
+    /// `project_code`, `category`, `severity`, `tool`, `window_hours` (default
+    /// 168 = 7d), `limit` (default 30), `include_resolved`. Optional
+    /// `mark_resolved = {id, resolved_by_req, note}` closes an item against the
+    /// SOLL fix — symmetric to `mcp_friction_report`. Closes the write-only gap
+    /// (PIL-AXO-002 / PIL-AXO-9003 closed-loop) so triage no longer needs raw SQL.
+    pub(crate) fn axon_mcp_feedback_report(&self, args: &Value) -> Option<Value> {
+        if let Some(mr) = args.get("mark_resolved") {
+            if let Some(id) = mr.get("id").and_then(Value::as_i64) {
+                let req = mr.get("resolved_by_req").and_then(Value::as_str).unwrap_or("");
+                let note = mr.get("note").and_then(Value::as_str).unwrap_or("");
+                let _ = self.graph_store.execute_param(
+                    "UPDATE axon.llm_feedback SET triage_status='resolved', resolved_at=now(),
+                       resolved_by_req=NULLIF(?,''), resolution_note=NULLIF(?,'')
+                     WHERE id=?",
+                    &json!([req, note, id]),
+                );
+            }
+        }
+        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let category = args.get("category").and_then(Value::as_str).unwrap_or("");
+        let severity = args.get("severity").and_then(Value::as_str).unwrap_or("");
+        let tool = args.get("tool").and_then(Value::as_str).unwrap_or("");
+        let window_hours = args.get("window_hours").and_then(Value::as_i64).unwrap_or(168).max(1);
+        let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(30).max(1);
+        let include_resolved = args
+            .get("include_resolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let rows = self
+            .graph_store
+            .query_json_param(
+                "SELECT id, created_at::text, llm_identity, category, severity, tool,
+                        project_code, problem, proposed_solution, satisfaction,
+                        triage_status, COALESCE(resolved_by_req,'')
+                 FROM axon.llm_feedback
+                 WHERE created_at > now() - make_interval(hours => ?)
+                   AND (? = '' OR project_code = ?)
+                   AND (? = '' OR category = ?)
+                   AND (? = '' OR severity = ?)
+                   AND (? = '' OR tool = ?)
+                   AND (? = 1 OR triage_status = 'open')
+                 ORDER BY (triage_status = 'open') DESC, created_at DESC
+                 LIMIT ?",
+                &json!([
+                    window_hours,
+                    project_code, project_code,
+                    category, category,
+                    severity, severity,
+                    tool, tool,
+                    if include_resolved { 1 } else { 0 },
+                    limit
+                ]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        let feedback: Vec<Value> = rows
+            .into_iter()
+            .map(|r| {
+                // PG renders every column as text through query_json_param; coerce
+                // id + satisfaction back to numbers so the LLM consumer gets the
+                // proper types (id is what mark_resolved expects as an integer).
+                let as_i64 = |cell: Option<&Value>| -> Value {
+                    cell.and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                        .map(Value::from)
+                        .unwrap_or(Value::Null)
+                };
+                json!({
+                    "id": as_i64(r.first()),
+                    "created_at": r.get(1).cloned().unwrap_or(Value::Null),
+                    "llm_identity": r.get(2).cloned().unwrap_or(Value::Null),
+                    "category": r.get(3).cloned().unwrap_or(Value::Null),
+                    "severity": r.get(4).cloned().unwrap_or(Value::Null),
+                    "tool": r.get(5).cloned().unwrap_or(Value::Null),
+                    "project_code": r.get(6).cloned().unwrap_or(Value::Null),
+                    "problem": r.get(7).cloned().unwrap_or(Value::Null),
+                    "proposed_solution": r.get(8).cloned().unwrap_or(Value::Null),
+                    "satisfaction": as_i64(r.get(9)),
+                    "triage_status": r.get(10).cloned().unwrap_or(Value::Null),
+                    "resolved_by_req": r.get(11).cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+
+        let open_count = feedback
+            .iter()
+            .filter(|f| f["triage_status"].as_str() == Some("open"))
+            .count();
+        let blocking_count = feedback
+            .iter()
+            .filter(|f| f["severity"].as_str() == Some("blocking"))
+            .count();
+        let report = format!(
+            "## 📨 MCP Feedback Report\n\n**Items (last {}h):** {} ({} open, {} blocking)\n**Triage:** fix an item, then `mcp_feedback_report mark_resolved={{id, resolved_by_req, note}}` to close it.\n",
+            window_hours,
+            feedback.len(),
+            open_count,
+            blocking_count,
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": format_standard_contract(
+                "ok",
+                "voluntary LLM feedback assembled (content-rich)",
+                "scope:mcp_surface",
+                &report,
+                &["triage the top blocking/open item, then mcp_feedback_report mark_resolved={id, resolved_by_req} to close the loop"],
+                "high",
+            )}],
+            "data": {
+                "feedback": feedback,
+                "open_count": open_count,
+                "blocking_count": blocking_count,
+                "window_hours": window_hours,
             }
         }))
     }

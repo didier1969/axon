@@ -1407,6 +1407,8 @@ impl McpServer {
             "mcp_telemetry_report" => self.axon_mcp_telemetry_report(arguments),
             // REQ-AXO-901966 — voluntary LLM feedback / doléance (content-rich).
             "mcp_feedback" => self.axon_mcp_feedback(arguments),
+            // REQ-AXO-902020 — content-rich READ/triage counterpart to mcp_feedback.
+            "mcp_feedback_report" => self.axon_mcp_feedback_report(arguments),
             "truth_check" => self.axon_truth_check(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
             // REQ-AXO-901676 — proportionate recovery: force delta / full rescan

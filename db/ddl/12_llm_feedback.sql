@@ -36,3 +36,17 @@ ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DE
 -- Recent-window + severity scans for the feedback report / triage.
 CREATE INDEX IF NOT EXISTS llm_feedback_recent_idx
     ON axon.llm_feedback (created_at DESC, severity, category);
+
+-- REQ-AXO-902020 — read/triage surface (mcp_feedback_report), symmetric to the
+-- friction log's mark_resolved. The original event content stays IMMUTABLE
+-- (PIL-AXO-9004); only this triage metadata is set, monotonically open→resolved.
+-- Idempotent ALTERs (same pattern as the `severity` follow-up above) bring any
+-- pre-existing table to the new shape without a drop.
+ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS triage_status   TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS resolved_at     TIMESTAMPTZ;
+ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS resolved_by_req TEXT;
+ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+
+-- Open-first triage scan.
+CREATE INDEX IF NOT EXISTS llm_feedback_triage_idx
+    ON axon.llm_feedback (triage_status, created_at DESC);

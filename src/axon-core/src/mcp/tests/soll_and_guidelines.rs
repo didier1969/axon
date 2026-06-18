@@ -353,6 +353,98 @@ fn test_mcp_feedback_records_voluntary_doleance() {
 }
 
 #[test]
+fn test_mcp_feedback_report_lists_filters_and_resolves() {
+    // REQ-AXO-902020 — content-rich READ/triage surface over axon.llm_feedback,
+    // symmetric to mcp_friction_report. Exercises the full catalog→dispatch→tool
+    // path (handle_request), so it also validates the wiring.
+    let server = create_test_server();
+    let write = |problem: &str, severity: &str, tool: &str, id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "mcp_feedback",
+                    "arguments": {
+                        "problem": problem,
+                        "severity": severity,
+                        "tool": tool,
+                        "project_code": "AXO"
+                    }
+                })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap();
+    };
+    write("FBR_PROBE blocking on inspect", "blocking", "inspect", 1);
+    write("FBR_PROBE minor on query", "minor", "query", 2);
+
+    let report = |args: Value| -> Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "mcp_feedback_report", "arguments": args })),
+                id: Some(json!(99)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // Default report: both probes present, open, one blocking.
+    let r = report(json!({ "project_code": "AXO" }));
+    let items = r["data"]["feedback"].as_array().unwrap();
+    let probe_ids: Vec<i64> = items
+        .iter()
+        .filter(|f| f["problem"].as_str().unwrap_or("").starts_with("FBR_PROBE"))
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(probe_ids.len(), 2, "both probes listed: {}", r["data"]);
+    assert!(
+        items
+            .iter()
+            .any(|f| f["severity"] == "blocking" && f["problem"].as_str().unwrap().contains("inspect")),
+        "content-rich row carries severity + problem"
+    );
+
+    // Severity filter narrows to the blocking probe.
+    let blk = report(json!({ "project_code": "AXO", "severity": "blocking" }));
+    let blk_probe: Vec<&Value> = blk["data"]["feedback"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["problem"].as_str().unwrap_or("").starts_with("FBR_PROBE"))
+        .collect();
+    assert_eq!(blk_probe.len(), 1, "severity=blocking filters to one probe");
+
+    // Resolve the blocking probe → open-only report drops it; include_resolved keeps it.
+    let blocking_id = blk_probe[0]["id"].as_i64().unwrap();
+    let _ = report(json!({ "mark_resolved": { "id": blocking_id, "resolved_by_req": "REQ-AXO-902020" } }));
+
+    let open_only = report(json!({ "project_code": "AXO" }));
+    assert!(
+        !open_only["data"]["feedback"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"].as_i64() == Some(blocking_id)),
+        "resolved item is excluded from the open-only report"
+    );
+    let with_resolved = report(json!({ "project_code": "AXO", "include_resolved": true }));
+    let resolved_row = with_resolved["data"]["feedback"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"].as_i64() == Some(blocking_id))
+        .expect("include_resolved surfaces the resolved item");
+    assert_eq!(resolved_row["triage_status"], "resolved");
+    assert_eq!(resolved_row["resolved_by_req"], "REQ-AXO-902020");
+}
+
+#[test]
 fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
     // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic

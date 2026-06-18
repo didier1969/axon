@@ -986,6 +986,33 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_feedback_report",
+                "description": "[SYSTEM/SOLL] REQ-AXO-902020 — content-rich READ/triage counterpart to `mcp_feedback` (which was write-only). Lists voluntary LLM doléances (problem / proposed_solution / severity / satisfaction) newest-first, OPEN by default, with severity/category/tool/project filters. Optional `mark_resolved` closes an item against the SOLL fix that resolved it — symmetric to `mcp_friction_report`. Use this to triage feedback instead of raw SQL on axon.llm_feedback.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Filter to one tenant; omit for the cross-tenant aggregate." },
+                        "category": { "type": "string", "enum": ["bug", "unclear_doc", "undocumented", "too_slow", "incomplete", "too_verbose", "other"], "description": "Filter by feedback category (optional)." },
+                        "severity": { "type": "string", "enum": ["blocking", "token_cost", "minor"], "description": "Filter by severity (optional)." },
+                        "tool": { "type": "string", "description": "Filter to feedback about one Axon tool (optional)." },
+                        "window_hours": { "type": "integer", "description": "Look-back window in hours (default 168 = 7 days)." },
+                        "limit": { "type": "integer", "description": "Max items returned, newest-first (default 30)." },
+                        "include_resolved": { "type": "boolean", "description": "Include already-triaged items (default false = open only)." },
+                        "mark_resolved": {
+                            "type": "object",
+                            "description": "Close a feedback item: {id, resolved_by_req, note}.",
+                            "properties": {
+                                "id": { "type": "integer" },
+                                "resolved_by_req": { "type": "string" },
+                                "note": { "type": "string" }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "sql",
                 "description": "[LLM/ADVANCED] Raw READ-ONLY SQL query interface (SELECT / WITH / EXPLAIN / SHOW / DESCRIBE / PRAGMA only — mutations are rejected). PG-only backend post-MIL-AXO-017. Use only after `schema_overview` or `query_examples`, when the product surface does not answer precisely enough. To write intent use `soll_manager`; to report a tool problem use `mcp_feedback`.",
                 // REQ-AXO-901949 — inputSchema derived from tool_contracts::SqlInput
