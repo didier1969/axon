@@ -401,7 +401,7 @@ impl McpServer {
                     && (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested))
         });
         let stage_started_at = Instant::now();
-        let relevant_soll_entities = if should_join_soll
+        let mut relevant_soll_entities = if should_join_soll
             && !runtime.should_skip_soll_join(route, rationale_requested)
         {
             let entities =
@@ -415,6 +415,24 @@ impl McpServer {
             excluded_because.push("soll_join_skipped_for_route".to_string());
             Vec::new()
         };
+        // REQ-AXO-901757 slice B3b — fuse the semantic SOLL arm. ANN over SOLL
+        // description embeddings surfaces governing intent that the graph-
+        // traceability join misses (no anchor / weak lexical overlap), which is
+        // exactly the NL-question case retrieve_context serves. Gated on the same
+        // join eligibility + semantic budget as the chunk lane, so `semantic=off`
+        // / pressure-critical / `include_soll=false` all still skip it.
+        if should_join_soll
+            && semantic_allowed
+            && !runtime.should_skip_soll_join(route, rationale_requested)
+        {
+            if let Some(qvec) = question_vector.as_ref() {
+                let ann_entities = self.collect_soll_entities_via_ann(qvec, project, top_k);
+                if !ann_entities.is_empty() {
+                    Self::merge_soll_entities(&mut relevant_soll_entities, ann_entities);
+                    diagnostics.soll_entities_selected = relevant_soll_entities.len();
+                }
+            }
+        }
         timings.soll_join_ms = stage_started_at.elapsed().as_millis() as u64;
 
         let stage_started_at = Instant::now();
@@ -3875,6 +3893,126 @@ impl McpServer {
         missing
     }
 
+    /// REQ-AXO-901757 slice B3b — semantic SOLL retrieval arm. ANN over SOLL
+    /// description embeddings (populated by the slice-B2 sweep) surfaces governing
+    /// intent (decisions / requirements / concepts) that is semantically relevant
+    /// to the question even when there is NO graph traceability from the entry
+    /// symbols — fusing the *why* with retrieval (VIS-AXO-001). The HNSW index is
+    /// global; project scoping happens on the `soll.Node` join. A distinct
+    /// `evidence_class` (`soll_semantic_ann`) lets the intent band and rationale
+    /// quality tell a semantic match from a traceability one.
+    fn collect_soll_entities_via_ann(
+        &self,
+        question_vector: &[f32],
+        project: Option<&str>,
+        limit: usize,
+    ) -> Vec<Value> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let hits = match self
+            .graph_store
+            .select_soll_nodes_by_ann(question_vector, limit.saturating_mul(4).max(8))
+        {
+            Ok(hits) if !hits.is_empty() => hits,
+            _ => return Vec::new(),
+        };
+        let dist_by_id: std::collections::HashMap<String, f64> = hits.iter().cloned().collect();
+        let id_list = hits
+            .iter()
+            .map(|(id, _)| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(n.project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let query = format!(
+            "SELECT n.id, n.type, COALESCE(n.title,''), COALESCE(n.description,''), \
+                    COALESCE(n.status,'') \
+             FROM soll.Node n \
+             WHERE n.id IN ({id_list}){project_filter}",
+        );
+        let raw = self
+            .graph_store
+            .query_json(&query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut entities = rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.first()?.as_str()?.to_string();
+                let dist = dist_by_id.get(&id).copied().unwrap_or(f64::MAX);
+                // cosine distance ∈ [0,2]; map to 0..90 so a semantic match sits
+                // just below the strongest traceability tiers (Symbol/File 95-100).
+                let score = (((2.0 - dist) / 2.0) * 90.0).round().clamp(0.0, 90.0) as i64;
+                Some((
+                    dist,
+                    json!({
+                        "id": id,
+                        "type": row.get(1)?.as_str()?.to_string(),
+                        "title": row.get(2).and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        "description": row.get(3).and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        "status": row.get(4).and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        "relation_type": "",
+                        "source_symbol": "",
+                        "artifact_type": "",
+                        "ranking_reasons": [format!("semantic_ann (cosine_distance={dist:.3})")],
+                        "ranking_score": score,
+                        "evidence_class": "soll_semantic_ann",
+                    }),
+                ))
+            })
+            .collect::<Vec<_>>();
+        entities.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        entities.truncate(limit);
+        entities.into_iter().map(|(_, entity)| entity).collect()
+    }
+
+    /// REQ-AXO-901757 slice B3b — fuse semantic ANN SOLL hits into the
+    /// traceability-derived intent band. Union by `id`: a node already present
+    /// from traceability keeps its (stronger) tier but gains the semantic
+    /// `ranking_reason` so the dual signal is visible; genuinely new semantic
+    /// nodes are appended. Traceability entities stay first (higher base score),
+    /// so the downstream type-partitioned classification is unaffected for them.
+    fn merge_soll_entities(base: &mut Vec<Value>, additions: Vec<Value>) {
+        for add in additions {
+            let Some(id) = add.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                continue;
+            };
+            if let Some(found) = base
+                .iter_mut()
+                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            {
+                if let (Some(reasons), Some(add_reasons)) = (
+                    found
+                        .get_mut("ranking_reasons")
+                        .and_then(|v| v.as_array_mut()),
+                    add.get("ranking_reasons").and_then(|v| v.as_array()),
+                ) {
+                    for reason in add_reasons {
+                        if !reasons.contains(reason) {
+                            reasons.push(reason.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+            base.push(add);
+        }
+    }
+
     fn classify_governing_entities(
         entities: &[Value],
         expected_type: &str,
@@ -4887,6 +5025,94 @@ mod tests {
             &seen_uris,
             &selected_source_parts
         ));
+    }
+
+    // REQ-AXO-901757 slice B3b — the semantic SOLL arm returns the node whose
+    // description embedding is nearest the question vector, project-scoped, with
+    // the distinct `soll_semantic_ann` evidence_class. Synthetic axis vectors
+    // (no embedder, GUI-PRO-004): a query on axis-k is closest to the node
+    // embedded on axis-k.
+    #[test]
+    fn collect_soll_entities_via_ann_returns_nearest_project_scoped() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        fn axis_vec(axis: usize) -> Vec<f32> {
+            let mut v = vec![0.0f32; crate::embedding_contract::DIMENSION];
+            v[axis] = 1.0;
+            v
+        }
+        for (id, axis) in [("REQ-TST-001", 0usize), ("REQ-TST-002", 1), ("REQ-TST-003", 2)] {
+            store
+                .execute(&format!(
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                     VALUES ('{id}', 'Requirement', 'TST', 'node {id}', 'semantic body', 'planned', '{{}}') \
+                     ON CONFLICT (id) DO NOTHING"
+                ))
+                .unwrap();
+            store
+                .upsert_soll_node_embedding(id, "TST", &format!("h-{axis}"), &axis_vec(axis), 0)
+                .unwrap();
+        }
+        let server = McpServer::new(store);
+
+        let hits = server.collect_soll_entities_via_ann(&axis_vec(1), Some("TST"), 3);
+        assert!(!hits.is_empty(), "semantic SOLL arm returns results");
+        assert_eq!(
+            hits[0].get("id").and_then(|v| v.as_str()),
+            Some("REQ-TST-002"),
+            "nearest SOLL node by embedding ranks first: {hits:?}"
+        );
+        assert_eq!(
+            hits[0].get("evidence_class").and_then(|v| v.as_str()),
+            Some("soll_semantic_ann"),
+            "semantic hits carry the distinct evidence_class"
+        );
+        // Project scoping: an unrelated project yields nothing.
+        assert!(
+            server
+                .collect_soll_entities_via_ann(&axis_vec(1), Some("ZZZ"), 3)
+                .is_empty(),
+            "ANN results are project-scoped on the soll.Node join"
+        );
+    }
+
+    // REQ-AXO-901757 slice B3b — fusion is a union by id: a node present from
+    // traceability keeps its tier but gains the semantic reason; a genuinely new
+    // semantic node is appended.
+    #[test]
+    fn merge_soll_entities_unions_by_id_and_annotates_reasons() {
+        let mut base = vec![json!({
+            "id": "REQ-AXO-1",
+            "type": "Requirement",
+            "ranking_reasons": ["direct_symbol_traceability"],
+            "ranking_score": 100,
+            "evidence_class": "soll_traceability",
+        })];
+        let additions = vec![
+            json!({
+                "id": "REQ-AXO-1",
+                "type": "Requirement",
+                "ranking_reasons": ["semantic_ann (cosine_distance=0.012)"],
+                "ranking_score": 88,
+                "evidence_class": "soll_semantic_ann",
+            }),
+            json!({
+                "id": "DEC-AXO-2",
+                "type": "Decision",
+                "ranking_reasons": ["semantic_ann (cosine_distance=0.100)"],
+                "ranking_score": 81,
+                "evidence_class": "soll_semantic_ann",
+            }),
+        ];
+        McpServer::merge_soll_entities(&mut base, additions);
+        assert_eq!(base.len(), 2, "duplicate id merged, new id appended");
+        let first = &base[0];
+        assert_eq!(first["evidence_class"], "soll_traceability", "traceability tier preserved");
+        let reasons = first["ranking_reasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 2, "semantic reason appended to the traceability node");
+        assert!(reasons
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").starts_with("semantic_ann")));
+        assert_eq!(base[1]["id"], "DEC-AXO-2", "new semantic node appended");
     }
 
     // REQ-AXO-901653 slice-5c — `retrieve_context_retains_adjacent_chunks_for_split_symbol`
