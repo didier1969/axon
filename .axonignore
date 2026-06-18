@@ -32,3 +32,10 @@ coverage/
 *.sqlite
 *.sqlite3
 /.worktrees/
+# REQ-AXO-902024 — generated SOLL export dumps: dense in SOLL ids (thousands of
+# phantom matches), pure regenerable artefacts with no source value. The dense
+# docs/vision/ ones are already gitignored; this class-level rule also keeps the
+# indexer off the tracked tiny docs/archive/soll-exports/ history and any future
+# export location. The A+B+C chunker fixes make them non-wedging regardless; this
+# just avoids spending any pipeline time on a zero-value generated dump.
+**/SOLL_EXPORT_*.md
