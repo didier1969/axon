@@ -25,7 +25,21 @@ pub(crate) struct IndexerLiveness {
     /// Fail-loud provenance: `pg_heartbeat` (fresh row), `pg_heartbeat_stale`
     /// (row present but past the window), `no_heartbeat` (row absent).
     pub(crate) source: &'static str,
+    /// REQ-AXO-902021 — operator/LLM-readable lifecycle verdict so `status`
+    /// distinguishes a crashed/abandoned indexer (a heartbeat row that WENT
+    /// stale = it was provably alive, then stopped publishing) from one that
+    /// never published (absent row), instead of a flat "idle" that hid the
+    /// crash-loop. `healthy` | `crashed_or_abandoned` | `never_launched`.
+    pub(crate) lifecycle: &'static str,
 }
+
+/// REQ-AXO-902021 — the heartbeat-provenance → lifecycle verdict mapping. A
+/// stale row is the crash/abandon signal: only a once-running indexer writes a
+/// row that can later go stale. An absent row means the indexer never published
+/// a heartbeat (never launched, or died before the first tick).
+pub(crate) const INDEXER_LIFECYCLE_HEALTHY: &str = "healthy";
+pub(crate) const INDEXER_LIFECYCLE_CRASHED_OR_ABANDONED: &str = "crashed_or_abandoned";
+pub(crate) const INDEXER_LIFECYCLE_NEVER_LAUNCHED: &str = "never_launched";
 
 /// Pure so the verdict is unit-tested without a live `GraphStore`.
 pub(crate) fn resolve_indexer_liveness(
@@ -59,6 +73,11 @@ pub(crate) fn resolve_indexer_liveness(
                 } else {
                     "pg_heartbeat_stale"
                 },
+                lifecycle: if fresh {
+                    INDEXER_LIFECYCLE_HEALTHY
+                } else {
+                    INDEXER_LIFECYCLE_CRASHED_OR_ABANDONED
+                },
                 feed,
             }
         }
@@ -72,6 +91,7 @@ pub(crate) fn resolve_indexer_liveness(
             ),
             ready: false,
             source: "no_heartbeat",
+            lifecycle: INDEXER_LIFECYCLE_NEVER_LAUNCHED,
         },
     }
 }
@@ -143,6 +163,7 @@ mod resolve_indexer_liveness_tests {
         assert!(live.feed.degraded_reason.is_none());
         assert!(live.ready);
         assert_eq!(live.source, "pg_heartbeat");
+        assert_eq!(live.lifecycle, INDEXER_LIFECYCLE_HEALTHY);
     }
 
     #[test]
@@ -160,6 +181,9 @@ mod resolve_indexer_liveness_tests {
         );
         assert!(!live.ready);
         assert_eq!(live.source, "pg_heartbeat_stale");
+        // REQ-AXO-902021 — a row that went stale = the indexer was provably
+        // alive then stopped publishing: crashed/abandoned, not a silent idle.
+        assert_eq!(live.lifecycle, INDEXER_LIFECYCLE_CRASHED_OR_ABANDONED);
     }
 
     #[test]
@@ -173,6 +197,9 @@ mod resolve_indexer_liveness_tests {
         );
         assert!(!live.ready);
         assert_eq!(live.source, "no_heartbeat");
+        // REQ-AXO-902021 — no row ever = the indexer never published a
+        // heartbeat (never launched, or died before the first tick).
+        assert_eq!(live.lifecycle, INDEXER_LIFECYCLE_NEVER_LAUNCHED);
     }
 
     #[test]

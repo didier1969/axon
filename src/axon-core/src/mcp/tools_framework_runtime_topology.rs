@@ -121,6 +121,7 @@ impl McpServer {
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );
         let indexer_liveness_source = indexer_liveness.source;
+        let indexer_lifecycle = indexer_liveness.lifecycle;
         let indexer_ready = indexer_liveness.ready;
         let indexer_feed = indexer_liveness.feed;
 
@@ -156,6 +157,11 @@ impl McpServer {
             // REQ-AXO-901859 — fail-loud provenance of the liveness verdict:
             // `pg_heartbeat` / `pg_heartbeat_stale` / `no_heartbeat`.
             "indexer_liveness_source": indexer_liveness_source,
+            // REQ-AXO-902021 — operator/LLM-readable lifecycle verdict so a
+            // crashed/abandoned indexer (stale heartbeat row) is no longer
+            // misreported as a silent idle: `healthy` / `crashed_or_abandoned`
+            // / `never_launched`. The age/reason lives in `indexer_feed`.
+            "indexer_lifecycle": indexer_lifecycle,
             "indexer_runtime": {
                 "available": !peer_runtime_telemetry.is_null(),
                 "telemetry_source": if peer_runtime_telemetry.is_null() {
