@@ -1,4 +1,4 @@
-use crate::service_guard::{self, ServicePressure};
+use crate::service_guard::ServicePressure;
 #[cfg(not(test))]
 use serde_json::Value;
 #[cfg(not(test))]
@@ -130,8 +130,11 @@ pub(super) struct RetrievalRuntimeState {
 }
 
 impl RetrievalRuntimeState {
-    pub(super) fn new(_server: &McpServer) -> Self {
-        let pressure = service_guard::current_pressure();
+    /// REQ-AXO-902023 tier C.1 — accept a caller-resolved pressure so the bounded
+    /// `wait_for_semantic` decision and the runtime state share one sample instead
+    /// of re-reading `current_pressure()` (which could disagree mid-call). The
+    /// caller (`axon_retrieve_context`) is the single construction site.
+    pub(super) fn new_with_pressure(_server: &McpServer, pressure: ServicePressure) -> Self {
         // REQ-AXO-901653 Slice 3b — queue helpers removed (tables dropped
         // post MIL-AXO-017 / REQ-AXO-289). Canonical pipeline_v2 path tracks
         // via Chunk + ChunkEmbedding directly.

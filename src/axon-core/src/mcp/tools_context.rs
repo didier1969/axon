@@ -24,6 +24,12 @@ use retrieval_model::{
 
 const DEFAULT_TOKEN_BUDGET: usize = 1400;
 const DEFAULT_TOP_K: usize = 8;
+/// REQ-AXO-902023 tier C.1 — bounded wait for semantic pressure recovery.
+/// Poll cadence, hard ceiling, and the implied budget when the caller passes
+/// `wait_for_semantic: true` (bool shorthand) instead of an explicit ms value.
+const WAIT_FOR_SEMANTIC_STEP_MS: u64 = 50;
+const MAX_WAIT_FOR_SEMANTIC_MS: u64 = 3000;
+const DEFAULT_WAIT_FOR_SEMANTIC_MS: u64 = 1000;
 /// REQ-AXO-901952 — upper bound on symbols pulled per file when resolving
 /// forward CONTAINS from the RAM snapshot (replaces the unbounded SQL `IN`
 /// scan). Generous: a single source file rarely declares more symbols.
@@ -257,9 +263,29 @@ impl McpServer {
         // expansion (kept gated on low pressure so a degraded backend never pays
         // the seq-scan cost). The old binary gate conflated the two and threw the
         // cheap signal away with the expensive one.
-        let pressure = crate::service_guard::current_pressure();
-        let semantic_corpus_allowed =
-            matches!(pressure, ServicePressure::Healthy | ServicePressure::Recovering);
+        // REQ-AXO-902023 tier C.1 (DEC-AXO-901642) — opt-in bounded wait. When the
+        // caller passes `wait_for_semantic` (ms, clamped to MAX) and the current
+        // pressure would degrade the corpus-wide ANN, poll `current_pressure()`
+        // over a short bounded window and proceed as soon as it recovers to
+        // Healthy/Recovering, instead of degrading immediately. Absent param =
+        // today's behavior (one sample, no wait). The resolved pressure is the
+        // single source threaded into both the corpus gate AND the runtime state
+        // (RetrievalRuntimeState previously re-sampled, which could disagree).
+        let wait_for_semantic_ms = args
+            .get("wait_for_semantic")
+            .and_then(Self::parse_wait_for_semantic)
+            .map(|ms| ms.min(MAX_WAIT_FOR_SEMANTIC_MS));
+        let (pressure, waited_for_semantic_ms) = Self::resolve_pressure_with_wait(
+            wait_for_semantic_ms,
+            WAIT_FOR_SEMANTIC_STEP_MS,
+            crate::service_guard::current_pressure,
+            |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        );
+        if waited_for_semantic_ms > 0 {
+            excluded_because
+                .push(format!("waited_{waited_for_semantic_ms}ms_for_semantic_pressure_recovery"));
+        }
+        let semantic_corpus_allowed = Self::semantic_corpus_pressure_ok(pressure);
         let question_vector: Option<Vec<f32>> = if !semantic_lexical_off {
             crate::embedder::batch_embed(vec![question.to_string()])
                 .ok()
@@ -301,7 +327,7 @@ impl McpServer {
             .unwrap_or(false);
 
         let stage_started_at = Instant::now();
-        let mut runtime = RetrievalRuntimeState::new(self);
+        let mut runtime = RetrievalRuntimeState::new_with_pressure(self, pressure);
         // REQ-AXO-901978 (A) — `semantic=lexical|off` disables the semantic CHUNK
         // lane too (not just the up-front entry-ranking embed), so the escape-hatch
         // genuinely avoids the embedding round-trip end-to-end. Short-circuits
@@ -4118,6 +4144,64 @@ impl McpServer {
     }
 
     /// REQ-AXO-902018 slice A (tier A, DEC-AXO-901642) — fail-loud degradation
+    /// REQ-AXO-902023 tier C.1 — does this pressure permit the corpus-wide
+    /// semantic ANN? Single predicate shared by the corpus gate and the bounded
+    /// wait, so both agree on what "recovered" means.
+    fn semantic_corpus_pressure_ok(pressure: ServicePressure) -> bool {
+        matches!(
+            pressure,
+            ServicePressure::Healthy | ServicePressure::Recovering
+        )
+    }
+
+    /// REQ-AXO-902023 tier C.1 — normalize the `wait_for_semantic` arg: an
+    /// explicit ms budget, or the bool shorthand `true` → DEFAULT budget. Any
+    /// other shape (false / string / 0 handled downstream) yields None = no wait.
+    fn parse_wait_for_semantic(value: &Value) -> Option<u64> {
+        if let Some(ms) = value.as_u64() {
+            return Some(ms);
+        }
+        if value.as_bool() == Some(true) {
+            return Some(DEFAULT_WAIT_FOR_SEMANTIC_MS);
+        }
+        None
+    }
+
+    /// REQ-AXO-902023 tier C.1 — bounded wait for semantic pressure recovery.
+    /// Samples pressure once; if no budget or it already permits the corpus ANN,
+    /// returns immediately (today's behavior). Otherwise polls every `step_ms`
+    /// (clamped to the remaining budget) until pressure recovers or the budget is
+    /// exhausted, returning the last sample plus the total waited. `sample` and
+    /// `sleep` are injected so the loop is unit-testable without wall-clock.
+    fn resolve_pressure_with_wait(
+        wait_ms: Option<u64>,
+        step_ms: u64,
+        mut sample: impl FnMut() -> ServicePressure,
+        mut sleep: impl FnMut(u64),
+    ) -> (ServicePressure, u64) {
+        let first = sample();
+        let budget = match wait_ms {
+            Some(budget) if budget > 0 => budget,
+            _ => return (first, 0),
+        };
+        if Self::semantic_corpus_pressure_ok(first) {
+            return (first, 0);
+        }
+        let step = step_ms.max(1);
+        let mut waited = 0u64;
+        let mut last = first;
+        while waited < budget {
+            let this_step = step.min(budget - waited);
+            sleep(this_step);
+            waited += this_step;
+            last = sample();
+            if Self::semantic_corpus_pressure_ok(last) {
+                break;
+            }
+        }
+        (last, waited)
+    }
+
     /// signal. When the corpus-wide semantic chunk search is skipped under service
     /// pressure / vector backlog, the contract (PIL-AXO-002) demands the
     /// degradation be surfaced as a distinct TRANSIENT_UNAVAILABILITY notice — not
@@ -5316,6 +5400,96 @@ mod tests {
             .is_none(),
             "a non-semantic reason is not a retrieval-degradation notice"
         );
+    }
+
+    // REQ-AXO-902023 tier C.1 — bounded `wait_for_semantic` recovery loop.
+    #[test]
+    fn resolve_pressure_with_wait_no_budget_samples_once() {
+        use super::ServicePressure;
+        use std::cell::Cell;
+        let samples = Cell::new(0u32);
+        let (pressure, waited) = McpServer::resolve_pressure_with_wait(
+            None,
+            10,
+            || {
+                samples.set(samples.get() + 1);
+                ServicePressure::Critical
+            },
+            |_| panic!("must not sleep without a budget"),
+        );
+        assert_eq!(pressure, ServicePressure::Critical);
+        assert_eq!(waited, 0);
+        assert_eq!(samples.get(), 1, "exactly one sample when no wait requested");
+    }
+
+    #[test]
+    fn resolve_pressure_with_wait_short_circuits_when_already_ok() {
+        use super::ServicePressure;
+        let (pressure, waited) = McpServer::resolve_pressure_with_wait(
+            Some(1000),
+            50,
+            || ServicePressure::Healthy,
+            |_| panic!("must not sleep when pressure already permits the corpus ANN"),
+        );
+        assert_eq!(pressure, ServicePressure::Healthy);
+        assert_eq!(waited, 0);
+    }
+
+    #[test]
+    fn resolve_pressure_with_wait_recovers_within_budget() {
+        use super::ServicePressure;
+        use std::cell::Cell;
+        let n = Cell::new(0u32);
+        let slept = Cell::new(0u64);
+        let (pressure, waited) = McpServer::resolve_pressure_with_wait(
+            Some(1000),
+            50,
+            || {
+                let c = n.get();
+                n.set(c + 1);
+                // Critical for the first 3 samples, then recovers.
+                if c < 3 {
+                    ServicePressure::Critical
+                } else {
+                    ServicePressure::Recovering
+                }
+            },
+            |ms| slept.set(slept.get() + ms),
+        );
+        assert_eq!(
+            pressure,
+            ServicePressure::Recovering,
+            "stops polling the instant pressure recovers"
+        );
+        assert_eq!(waited, 150, "three 50ms steps before recovery");
+        assert_eq!(slept.get(), 150, "slept exactly the waited budget");
+    }
+
+    #[test]
+    fn resolve_pressure_with_wait_exhausts_budget_and_clamps_last_step() {
+        use super::ServicePressure;
+        use std::cell::Cell;
+        let slept = Cell::new(0u64);
+        let (pressure, waited) = McpServer::resolve_pressure_with_wait(
+            Some(120),
+            50,
+            || ServicePressure::Critical,
+            |ms| slept.set(slept.get() + ms),
+        );
+        assert_eq!(pressure, ServicePressure::Critical, "never recovered");
+        assert_eq!(waited, 120, "50 + 50 + 20 (final step clamped to remaining)");
+        assert_eq!(slept.get(), 120);
+    }
+
+    #[test]
+    fn parse_wait_for_semantic_accepts_ms_and_bool_shorthand() {
+        assert_eq!(McpServer::parse_wait_for_semantic(&json!(750)), Some(750));
+        assert_eq!(
+            McpServer::parse_wait_for_semantic(&json!(true)),
+            Some(super::DEFAULT_WAIT_FOR_SEMANTIC_MS)
+        );
+        assert_eq!(McpServer::parse_wait_for_semantic(&json!(false)), None);
+        assert_eq!(McpServer::parse_wait_for_semantic(&json!("soon")), None);
     }
 
     // REQ-AXO-901653 slice-5c — `retrieve_context_retains_adjacent_chunks_for_split_symbol`

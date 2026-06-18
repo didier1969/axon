@@ -690,7 +690,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "top_k": { "type": "integer" },
                         "include_soll": { "type": "boolean" },
                         "include_graph": { "type": "boolean" },
-                        "semantic": { "type": "string", "enum": ["auto", "lexical", "semantic"], "description": "REQ-AXO-901978 — `lexical` skips the question embedding (FTS + structural only, fastest); default embeds (question-oriented)." }
+                        "semantic": { "type": "string", "enum": ["auto", "lexical", "semantic"], "description": "REQ-AXO-901978 — `lexical` skips the question embedding (FTS + structural only, fastest); default embeds (question-oriented)." },
+                        "wait_for_semantic": { "type": "integer", "description": "REQ-AXO-902023 tier C — opt-in bounded wait (ms, clamped to 3000). When service pressure would degrade the corpus-wide semantic ANN, poll until it recovers to Healthy/Recovering instead of degrading immediately. `true` = 1000ms; absent = no wait (one sample)." }
                     },
                     "required": ["question"]
                 }
