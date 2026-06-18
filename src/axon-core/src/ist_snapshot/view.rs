@@ -98,6 +98,22 @@ impl IstGraphView {
         snap.bfs_shortest_path(source_id, sink_id, max_depth, rel_filter)
     }
 
+    /// REQ-AXO-902019 — up to `max_paths` node-disjoint routes source→sink. The
+    /// first is the shortest path; the rest are independent alternates whose
+    /// count is the redundancy/multiplicity signal. `None` ⇒ cold cache.
+    pub fn disjoint_paths(
+        &self,
+        project: &str,
+        source_id: &str,
+        sink_id: &str,
+        max_depth: u32,
+        rel_filter: &[RelationType],
+        max_paths: usize,
+    ) -> Option<Vec<(Vec<String>, Vec<RelationType>)>> {
+        let snap = self.try_snapshot(project)?;
+        Some(snap.bfs_disjoint_paths(source_id, sink_id, max_depth, rel_filter, max_paths))
+    }
+
     /// REQ-AXO-91486 — Reciprocal CALLS cycle count (A↔B pairs). Migrates
     /// `get_circular_dependency_count_fast` from a SQL self-join to an
     /// in-memory linear scan.

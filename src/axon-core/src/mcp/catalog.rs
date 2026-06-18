@@ -652,7 +652,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "path",
-                "description": "[DX] Trace execution/dependency path between two symbols. Single anchor: topological neighborhood.",
+                "description": "[DX] Trace execution/dependency path between two symbols. Single anchor: topological neighborhood. With a sink, returns the shortest path plus node-disjoint alternates in `detours[]` and a `multiplicity` verdict (>1 route = redundancy candidate).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -660,6 +660,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "sink": { "type": "string", "description": "Optional target symbol." },
                         "project": { "type": "string" },
                         "depth": { "type": "integer", "description": "Maximum depth (default 6)." },
+                        "max_paths": { "type": "integer", "description": "REQ-AXO-902019 — how many node-disjoint routes to enumerate (default 3, max 5). >1 route surfaces in `detours[]` + `multiplicity` as a redundancy signal." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["source"]

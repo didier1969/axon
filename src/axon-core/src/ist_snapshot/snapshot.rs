@@ -663,6 +663,67 @@ impl IstGraph {
     ) -> Option<(Vec<String>, Vec<RelationType>)> {
         let start = self.index_of(source_id)?;
         let goal = self.index_of(sink_id)?;
+        self.bfs_shortest_path_excluding(
+            start,
+            goal,
+            max_depth,
+            rel_filter,
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    /// REQ-AXO-902019 — up to `max_paths` NODE-DISJOINT routes source→sink
+    /// (pairwise sharing no intermediate node). `len >= 2` independent routes is
+    /// a REDUNDANCY signal (GUI-PRO-107 lens L1) unless deliberate (perf
+    /// fast-path). Greedy Yen-lite: take the shortest, exclude its intermediates,
+    /// repeat. A direct edge (no intermediates) is the unique route → stops there.
+    pub fn bfs_disjoint_paths(
+        &self,
+        source_id: &str,
+        sink_id: &str,
+        max_depth: u32,
+        rel_filter: &[RelationType],
+        max_paths: usize,
+    ) -> Vec<(Vec<String>, Vec<RelationType>)> {
+        let (Some(start), Some(goal)) = (self.index_of(source_id), self.index_of(sink_id)) else {
+            return Vec::new();
+        };
+        let mut excluded: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut paths: Vec<(Vec<String>, Vec<RelationType>)> = Vec::new();
+        for _ in 0..max_paths.max(1) {
+            let Some((names, rels)) =
+                self.bfs_shortest_path_excluding(start, goal, max_depth, rel_filter, &excluded)
+            else {
+                break;
+            };
+            // A direct edge (source, sink) has no intermediate to exclude — it is
+            // the single route, so record it and stop enumerating alternates.
+            let is_direct = names.len() <= 2;
+            // Exclude this route's intermediate nodes so the next search yields a
+            // node-disjoint alternative (not the same path again).
+            for intermediate in names.iter().skip(1).rev().skip(1) {
+                if let Some(idx) = self.index_of(intermediate) {
+                    excluded.insert(idx);
+                }
+            }
+            paths.push((names, rels));
+            if is_direct {
+                break;
+            }
+        }
+        paths
+    }
+
+    /// Core BFS shared by `bfs_shortest_path` and `bfs_disjoint_paths`. Skips any
+    /// `excluded` intermediate node (start/goal are never excluded).
+    fn bfs_shortest_path_excluding(
+        &self,
+        start: u32,
+        goal: u32,
+        max_depth: u32,
+        rel_filter: &[RelationType],
+        excluded: &std::collections::HashSet<u32>,
+    ) -> Option<(Vec<String>, Vec<RelationType>)> {
         if start == goal {
             return Some((
                 vec![self.id_of(start).to_string()],
@@ -680,6 +741,10 @@ impl IstGraph {
             for node in &frontier {
                 for (target, rel) in self.forward_neighbors(*node) {
                     if !rel_filter.is_empty() && !rel_filter.contains(&rel) {
+                        continue;
+                    }
+                    // REQ-AXO-902019 — skip excluded intermediates (never the goal).
+                    if target != goal && excluded.contains(&target) {
                         continue;
                     }
                     if visited.insert(target) {
@@ -1306,6 +1371,85 @@ mod tests {
             .is_none());
         // Without filter, path exists.
         assert!(g.bfs_shortest_path("a", "c", 6, &[]).is_some());
+    }
+
+    // REQ-AXO-902019 — node-disjoint route enumeration (multiplicity signal).
+    #[test]
+    fn bfs_disjoint_paths_finds_two_independent_routes() {
+        // a→b→d and a→c→d : two node-disjoint routes (b/c distinct).
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "d", RelationType::Calls),
+            edge("a", "c", RelationType::Calls),
+            edge("c", "d", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let routes = g.bfs_disjoint_paths("a", "d", 6, &[], 3);
+        assert_eq!(routes.len(), 2, "two node-disjoint routes a→{{b,c}}→d");
+        // The two routes share no intermediate node.
+        let mids: Vec<&String> = routes
+            .iter()
+            .flat_map(|(ids, _)| ids.iter().skip(1).rev().skip(1))
+            .collect();
+        let unique: std::collections::HashSet<&&String> = mids.iter().collect();
+        assert_eq!(unique.len(), mids.len(), "intermediates are disjoint");
+    }
+
+    #[test]
+    fn bfs_disjoint_paths_single_linear_route_is_one() {
+        // a→b→c : only one route, no independent alternate.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+            node("c", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "b", RelationType::Calls),
+            edge("b", "c", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(g.bfs_disjoint_paths("a", "c", 6, &[], 3).len(), 1);
+    }
+
+    #[test]
+    fn bfs_disjoint_paths_direct_edge_is_single_route() {
+        // a→b direct : one route, enumeration stops (no intermediate to exclude).
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("b", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![edge("a", "b", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let routes = g.bfs_disjoint_paths("a", "b", 6, &[], 5);
+        assert_eq!(routes.len(), 1, "a direct edge is the single route");
+    }
+
+    #[test]
+    fn bfs_disjoint_paths_respects_max_paths_cap() {
+        // Three independent routes a→{x,y,z}→d ; cap at 2.
+        let nodes = vec![
+            node("a", "AXO", NodeKind::Function),
+            node("x", "AXO", NodeKind::Function),
+            node("y", "AXO", NodeKind::Function),
+            node("z", "AXO", NodeKind::Function),
+            node("d", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("a", "x", RelationType::Calls),
+            edge("x", "d", RelationType::Calls),
+            edge("a", "y", RelationType::Calls),
+            edge("y", "d", RelationType::Calls),
+            edge("a", "z", RelationType::Calls),
+            edge("z", "d", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        assert_eq!(g.bfs_disjoint_paths("a", "d", 6, &[], 2).len(), 2);
     }
 
     #[test]

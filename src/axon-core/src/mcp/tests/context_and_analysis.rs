@@ -1256,9 +1256,13 @@ fn test_path_uses_ram_snapshot_when_warm() {
     assert_eq!(path, vec!["ram_source_fn", "ram_mid_fn", "ram_sink_fn"]);
     let provenance = data["provenance"].as_str().unwrap_or_default();
     assert!(
-        provenance.contains("IstGraph::bfs_shortest_path"),
-        "provenance must reference RAM BFS, got: {provenance}"
+        provenance.contains("IstGraph::bfs_disjoint_paths"),
+        "provenance must reference RAM BFS (REQ-AXO-902019), got: {provenance}"
     );
+    // REQ-AXO-902019 — a single linear route reports multiplicity 1, no detours.
+    assert_eq!(data["multiplicity"]["route_count"].as_u64(), Some(1));
+    assert_eq!(data["multiplicity"]["has_independent_alternates"].as_bool(), Some(false));
+    assert_eq!(data["detours"].as_array().map(|a| a.len()), Some(0));
 }
 
 #[test]

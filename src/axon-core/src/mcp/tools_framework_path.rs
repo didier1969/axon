@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 use crate::ist_snapshot::process_view;
+use crate::ist_snapshot::RelationType;
 
 /// REQ-AXO-91510 — single-shot name materialization for a path's node ids.
 /// The BFS itself runs in RAM via IstGraphView ; this helper does ONE
@@ -59,6 +60,14 @@ impl McpServer {
             .and_then(|value| value.as_u64())
             .unwrap_or(6)
             .clamp(1, 12);
+        // REQ-AXO-902019 — how many node-disjoint routes to enumerate. >1 routes
+        // is the multiplicity/redundancy signal the caller asks for ("is there
+        // MORE than one path?"). Default 3, capped at 5 to bound the BFS cost.
+        let max_paths = args
+            .get("max_paths")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(3)
+            .clamp(1, 5) as usize;
         let mode = args.get("mode").and_then(|value| value.as_str());
 
         if sink.is_none() {
@@ -127,21 +136,53 @@ impl McpServer {
             return Some(Self::path_ram_unavailable_error(source, sink, depth, why));
         }
         let view = process_view();
-        let ram_result = view.shortest_path(
-            project.unwrap_or_default(),
-            &source_id,
-            &sink_id,
-            depth as u32,
-            &[],
-        );
+        // REQ-AXO-902019 — enumerate up to `max_paths` node-disjoint routes. The
+        // first is the shortest path (backward-compatible `path`/`edge_kinds`);
+        // the rest are independent alternates surfaced as `detours[]`, and their
+        // count drives the `multiplicity` verdict.
+        let ram_routes = view
+            .disjoint_paths(
+                project.unwrap_or_default(),
+                &source_id,
+                &sink_id,
+                depth as u32,
+                &[],
+                max_paths,
+            )
+            .unwrap_or_default();
 
         let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
         let surfaces_degraded: Vec<&'static str> = Vec::new();
 
-        // Authoritative answer from the in-memory IST snapshot. The BFS ran
-        // in RAM (CSR) ; one batch SELECT on ist.Symbol materializes display
-        // names for the resolved ids.
-        let resolved_path: Option<(Vec<String>, Vec<String>)> = ram_result.map(|(ids, rels)| {
+        // One batch SELECT on ist.Symbol materializes display names across the
+        // ids of EVERY route, so the per-route mapping is a cheap HashMap lookup.
+        let all_ids: Vec<String> = ram_routes
+            .iter()
+            .flat_map(|(ids, _)| ids.iter().cloned())
+            .collect();
+        let name_by_id: HashMap<String, String> = if all_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let lookup_sql = build_name_lookup_sql(&all_ids);
+            let raw = self
+                .graph_store
+                .query_json(&lookup_sql)
+                .unwrap_or_else(|_| "[]".to_string());
+            let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+            lookup_rows
+                .iter()
+                .filter_map(|row| {
+                    match (
+                        row.first().and_then(Value::as_str),
+                        row.get(1).and_then(Value::as_str),
+                    ) {
+                        (Some(id), Some(name)) => Some((id.to_string(), name.to_string())),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+        let map_route = |ids: &[String], rels: &[RelationType]| -> (Vec<String>, Vec<String>) {
             let kinds: Vec<String> = rels
                 .iter()
                 .enumerate()
@@ -153,27 +194,25 @@ impl McpServer {
                     }
                 })
                 .collect();
-            let lookup_sql = build_name_lookup_sql(&ids);
-            let raw = self
-                .graph_store
-                .query_json(&lookup_sql)
-                .unwrap_or_else(|_| "[]".to_string());
-            let lookup_rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-            let mut name_by_id: HashMap<String, String> = HashMap::new();
-            for row in &lookup_rows {
-                if let (Some(id), Some(name)) = (
-                    row.first().and_then(Value::as_str),
-                    row.get(1).and_then(Value::as_str),
-                ) {
-                    name_by_id.insert(id.to_string(), name.to_string());
-                }
-            }
             let displayed: Vec<String> = ids
                 .iter()
                 .map(|id| name_by_id.get(id).cloned().unwrap_or_else(|| id.clone()))
                 .collect();
             (displayed, kinds)
-        });
+        };
+        let resolved_path: Option<(Vec<String>, Vec<String>)> = ram_routes
+            .first()
+            .map(|(ids, rels)| map_route(ids, rels));
+        // Independent alternate routes (node-disjoint on intermediates).
+        let detours: Vec<Value> = ram_routes
+            .iter()
+            .skip(1)
+            .map(|(ids, rels)| {
+                let (names, kinds) = map_route(ids, rels);
+                json!({ "path": names, "edge_kinds": kinds })
+            })
+            .collect();
+        let route_multiplicity = ram_routes.len();
 
         let Some((path, edges)) = resolved_path else {
             return Some(json!({
@@ -229,17 +268,28 @@ impl McpServer {
                 }
             }));
         };
+        // REQ-AXO-902019 — surface the multiplicity verdict in the human report.
+        let multiplicity_line = if route_multiplicity > 1 {
+            format!(
+                "**Routes:** {} node-disjoint (redundancy candidate — verify it is not a deliberate fast-path)\n",
+                route_multiplicity
+            )
+        } else {
+            "**Routes:** 1 (no independent alternate within depth)\n".to_string()
+        };
         let evidence = format!(
             "**Source:** `{}`\n\
 **Sink:** `{}`\n\
 **Depth used:** {}\n\
 **Path:** {}\n\
-**Edges:** {}\n",
+**Edges:** {}\n\
+{}",
             source,
             sink,
             depth,
             path.join(" -> "),
-            edges.join(" -> ")
+            edges.join(" -> "),
+            multiplicity_line
         );
         let report = format!(
             "## 🧭 Axon Path\n\n{}",
@@ -271,13 +321,14 @@ impl McpServer {
         // inflate the bench `name`-key denominator without helping
         // LLM consumers.
         let path_len = path.len() as u64;
-        let provenance = "IstGraph::bfs_shortest_path (RAM CSR snapshot, PIL-AXO-9002)";
+        let provenance =
+            "IstGraph::bfs_disjoint_paths (RAM CSR snapshot, PIL-AXO-9002, REQ-AXO-902019)";
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
                 "surfaces_used": surfaces_used,
                 "surfaces_degraded": surfaces_degraded,
-                "total_available": 1,
+                "total_available": route_multiplicity,
                 "next_call_hint": format!("impact symbol={sink}"),
                 "pagination": {
                     "offset": 0,
@@ -292,7 +343,19 @@ impl McpServer {
                 "path_type": "bounded_call_path",
                 "path": path,
                 "edge_kinds": edges,
-                "detours": [],
+                // REQ-AXO-902019 — independent alternate routes + multiplicity
+                // verdict. >1 node-disjoint route = a redundancy candidate
+                // (GUI-PRO-107 L1) unless deliberate (perf fast-path).
+                "detours": detours,
+                "multiplicity": {
+                    "route_count": route_multiplicity,
+                    "has_independent_alternates": route_multiplicity > 1,
+                    "interpretation": if route_multiplicity > 1 {
+                        "multiple node-disjoint routes — redundancy candidate (verify it is not a deliberate fast-path) (GUI-PRO-107 L1)"
+                    } else {
+                        "single route — no independent alternate within depth"
+                    }
+                },
                 "confidence": "medium",
                 "provenance": provenance,
                 "evidence_sources": ["ist.Edge"],
