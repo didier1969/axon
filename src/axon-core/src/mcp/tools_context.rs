@@ -511,7 +511,10 @@ impl McpServer {
         timings.packet_assembly_ms = stage_started_at.elapsed().as_millis() as u64;
         timings.total_ms = started_at.elapsed().as_millis() as u64;
 
-        let packet = json!({
+        // REQ-AXO-902018 tier A — fail-loud degradation notice (DEC-AXO-901642).
+        let degradation_notice =
+            Self::build_degradation_notice(runtime.degraded_reason.as_deref(), runtime.pressure);
+        let mut packet = json!({
             "answer_sketch": answer_sketch,
             "direct_evidence": direct_evidence,
             "supporting_chunks": supporting_chunks,
@@ -572,6 +575,11 @@ impl McpServer {
                 "total": timings.total_ms,
             }
         });
+        if let Some(notice) = &degradation_notice {
+            if let Some(obj) = packet.as_object_mut() {
+                obj.insert("degradation".to_string(), notice.clone());
+            }
+        }
 
         // REQ-AXO-901752 — SRS slice 2: detect legacy proximity from
         // artifacts returned in the evidence packet.
@@ -603,9 +611,23 @@ impl McpServer {
         let scope = project
             .map(|value| format!("project:{value}"))
             .unwrap_or_else(|| "workspace:*".to_string());
+        // REQ-AXO-902018 tier A — banner the degradation at the HEAD of the human
+        // report, not buried in excluded_because (fail-loud, PIL-AXO-002).
+        let degradation_banner = degradation_notice
+            .as_ref()
+            .map(|n| {
+                format!(
+                    "> ⚠️ **Retrieval degraded ({}):** {} {}\n\n",
+                    n["class"].as_str().unwrap_or("DEGRADED"),
+                    n["impact"].as_str().unwrap_or_default(),
+                    n["remediation"].as_str().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
         let report = format!(
-            "### Context Retrieval: {}\n\n{}",
+            "### Context Retrieval: {}\n\n{}{}",
             question,
+            degradation_banner,
             format_standard_contract(
                 "ok",
                 "planner-driven evidence packet assembled",
@@ -4013,6 +4035,37 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902018 slice A (tier A, DEC-AXO-901642) — fail-loud degradation
+    /// signal. When the corpus-wide semantic chunk search is skipped under service
+    /// pressure / vector backlog, the contract (PIL-AXO-002) demands the
+    /// degradation be surfaced as a distinct TRANSIENT_UNAVAILABILITY notice — not
+    /// buried in `excluded_because` where the agent silently gets a lexical-only
+    /// answer and drifts back to grep (mcp_feedback #11). Returns None for the
+    /// caller's own `semantic=lexical|off` (a choice, not a degradation).
+    fn build_degradation_notice(
+        degraded_reason: Option<&str>,
+        pressure: ServicePressure,
+    ) -> Option<Value> {
+        let reason = degraded_reason?;
+        if !reason.starts_with("semantic_chunk_search_skipped") {
+            return None;
+        }
+        let backlog = reason.contains("vector_backlog");
+        let remediation = if backlog {
+            "Vector backlog: results improve once indexing catches up. Structural tools (query / inspect / impact / path) are unaffected."
+        } else {
+            "Transient under service pressure: retry shortly. Meanwhile rely on structural tools (query / inspect / impact / path); pass semantic=semantic to force the embed."
+        };
+        Some(json!({
+            "degraded": true,
+            "class": "TRANSIENT_UNAVAILABILITY",
+            "reason": reason,
+            "service_pressure": format!("{pressure:?}"),
+            "impact": "Corpus-wide semantic chunk search was skipped — evidence ranks by lexical + structural signals only. Reliability is reduced for capability / behaviour questions ('which component does X?').",
+            "remediation": remediation,
+        }))
+    }
+
     fn classify_governing_entities(
         entities: &[Value],
         expected_type: &str,
@@ -5113,6 +5166,43 @@ mod tests {
             .iter()
             .any(|r| r.as_str().unwrap_or("").starts_with("semantic_ann")));
         assert_eq!(base[1]["id"], "DEC-AXO-2", "new semantic node appended");
+    }
+
+    // REQ-AXO-902018 tier A — the degradation notice is emitted (fail-loud) only
+    // for pressure / backlog semantic skips, classified TRANSIENT_UNAVAILABILITY,
+    // and never for a non-degradation reason or no reason at all.
+    #[test]
+    fn build_degradation_notice_fails_loud_for_pressure_skip_only() {
+        use super::ServicePressure;
+
+        let crit = McpServer::build_degradation_notice(
+            Some("semantic_chunk_search_skipped_due_to_pressure_critical"),
+            ServicePressure::Critical,
+        )
+        .expect("pressure skip emits a notice");
+        assert_eq!(crit["class"], "TRANSIENT_UNAVAILABILITY");
+        assert_eq!(crit["degraded"], true);
+        assert!(crit["remediation"].as_str().unwrap().contains("retry"));
+
+        let backlog = McpServer::build_degradation_notice(
+            Some("semantic_chunk_search_skipped_due_to_vector_backlog"),
+            ServicePressure::Healthy,
+        )
+        .expect("backlog skip emits a notice");
+        assert!(backlog["remediation"].as_str().unwrap().contains("backlog"));
+
+        assert!(
+            McpServer::build_degradation_notice(None, ServicePressure::Healthy).is_none(),
+            "no reason → no notice"
+        );
+        assert!(
+            McpServer::build_degradation_notice(
+                Some("graph_expansion_disabled"),
+                ServicePressure::Critical
+            )
+            .is_none(),
+            "a non-semantic reason is not a retrieval-degradation notice"
+        );
     }
 
     // REQ-AXO-901653 slice-5c — `retrieve_context_retains_adjacent_chunks_for_split_symbol`
