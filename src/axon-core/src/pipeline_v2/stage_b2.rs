@@ -26,6 +26,20 @@ use tracing::warn;
 use super::metrics::StageMetrics;
 use super::stage_b1::ChunkForEmbedding;
 
+/// REQ-AXO-902033 — per-inference watchdog budget (ms). A normal B2 batch
+/// embeds in ms–seconds; the first inference may pay a one-off TensorRT engine
+/// build (~tens of seconds). A genuine hang never returns (minutes+). Default
+/// 180 s clears the engine-build cold-start without ever falsely killing a
+/// progressing inference. Override via `AXON_B2_INFERENCE_TIMEOUT_MS` (0
+/// disables the watchdog → legacy unbounded await).
+pub(crate) fn b2_inference_timeout_ms() -> u64 {
+    std::env::var("AXON_B2_INFERENCE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| if v == 0 { u64::MAX } else { v })
+        .unwrap_or(180_000)
+}
+
 /// Payload forwarded by B2 to B3 — chunk identity + the embedding the
 /// GPU produced + the `content_hash` source_hash that B3 records on the
 /// `ChunkEmbedding` row to spot stale embeddings.
@@ -202,8 +216,33 @@ pub fn spawn_b2_batched_worker(
             );
             let embedder_clone = embedder.clone();
             let started = Instant::now();
-            let join_result =
-                tokio::task::spawn_blocking(move || embedder_clone.embed_batch(&texts)).await;
+            // REQ-AXO-902033 — inference watchdog. The TensorRT EP intermittently
+            // hangs a single inference under concurrent Plane-A load (GPU pegged,
+            // no return). The blocking thread holds the embedder Mutex, so the
+            // next batch would deadlock on the lock — in-process recovery is
+            // impossible. Per DEC-AXO-901631's process-level GPU model, fail loud
+            // + exit so the supervisor (process-compose restart=on_failure,
+            // max_restarts=3) restarts the indexer; `embed_status='pending'` is the
+            // durable queue, so embedding resumes exactly where it stalled. The
+            // `B2 embed batch start` log (above) names the culprit batch.
+            let inference_budget = Duration::from_millis(b2_inference_timeout_ms());
+            let embed_fut = tokio::task::spawn_blocking(move || embedder_clone.embed_batch(&texts));
+            let join_result = match tokio::time::timeout(inference_budget, embed_fut).await {
+                Ok(jr) => jr,
+                Err(_elapsed) => {
+                    tracing::error!(
+                        target: "pipeline_v2::b2",
+                        n = batch.len(),
+                        max_bytes,
+                        timeout_ms = inference_budget.as_millis() as u64,
+                        first_id = %batch.first().map(|p| p.chunk_id.as_str()).unwrap_or(""),
+                        "B2 embed inference HANG — TensorRT did not return within budget; \
+                         exiting for supervisor restart (REQ-AXO-902033). pending chunks \
+                         resume from the durable queue on restart."
+                    );
+                    std::process::exit(75); // EX_TEMPFAIL — signals on_failure restart
+                }
+            };
 
             match join_result {
                 Ok(Ok(embeddings)) if embeddings.len() == batch.len() => {
@@ -603,5 +642,21 @@ mod tests {
             snap.errors_total, 4,
             "batch size mismatch must record all items as errors"
         );
+    }
+
+    // REQ-AXO-902033 — inference watchdog budget resolution. Run single-threaded
+    // (env is process-global); the suite already pins --test-threads=1.
+    #[test]
+    fn b2_inference_timeout_resolves_default_override_and_disable() {
+        unsafe { std::env::remove_var("AXON_B2_INFERENCE_TIMEOUT_MS") };
+        assert_eq!(b2_inference_timeout_ms(), 180_000, "default budget");
+
+        unsafe { std::env::set_var("AXON_B2_INFERENCE_TIMEOUT_MS", "5000") };
+        assert_eq!(b2_inference_timeout_ms(), 5_000, "explicit override honoured");
+
+        unsafe { std::env::set_var("AXON_B2_INFERENCE_TIMEOUT_MS", "0") };
+        assert_eq!(b2_inference_timeout_ms(), u64::MAX, "0 disables the watchdog");
+
+        unsafe { std::env::remove_var("AXON_B2_INFERENCE_TIMEOUT_MS") };
     }
 }
