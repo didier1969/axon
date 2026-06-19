@@ -341,10 +341,27 @@ pub fn spawn_pipeline_v2_indexer(
             "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — sorted-drain feeds B2)",
             counts_b.b2, counts_b.b3
         );
-        let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> = match GpuB2Embedder::try_new_cuda(
-            "indexer-pipeline-v2",
-            0,
-        ) {
+        // REQ-AXO-902027 — vet the GPU shared libraries in throwaway
+        // subprocesses BEFORE building the ORT session, so a corrupt /
+        // ABI-incompatible lib (e.g. a bad libnvinfer in the nix-store)
+        // surfaces as an EXPLICIT application-log line + a clean exit instead
+        // of a silent native SIGSEGV deep inside `try_new_cuda`. Same
+        // fallback policy as an init failure: hard-fail when a GPU provider was
+        // explicitly requested, else fall back to NoOp.
+        let gpu_preflight = crate::embedder::gpu_preflight::preflight_gpu_libraries();
+        if let Err(reason) = &gpu_preflight {
+            if gpu_provider_explicitly_requested() {
+                return Err(anyhow!(
+                    "pipeline_v2: GPU library pre-flight failed — refusing to build a GPU \
+                     session that would risk a silent native crash: {reason}"
+                ));
+            }
+            warn!(reason = %reason, "pipeline_v2: GPU library pre-flight failed, falling back to NoOpEmbedder");
+        }
+        let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> = if gpu_preflight.is_err() {
+            Arc::new(NoOpEmbedder)
+        } else {
+            match GpuB2Embedder::try_new_cuda("indexer-pipeline-v2", 0) {
             // DEC-AXO-901631 — the GPU session stays resident for the worker's
             // lifetime (no idle watchdog / sleep-wake). Single-GPU live↔dev
             // cohabitation is handled at the process level (PIL-AXO-004).
@@ -365,6 +382,7 @@ pub fn spawn_pipeline_v2_indexer(
                 }
                 warn!(error = %err, "pipeline_v2: GPU embedder init failed, falling back to NoOpEmbedder");
                 Arc::new(NoOpEmbedder)
+            }
             }
         };
         // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT

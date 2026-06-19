@@ -485,6 +485,13 @@ pub fn run_brain() -> anyhow::Result<()> {
 }
 
 pub fn run_indexer() -> anyhow::Result<()> {
+    // REQ-AXO-902027 — when this process was re-exec'd as a one-shot GPU
+    // dlopen probe (`axon-indexer --__gpu-lib-probe <path>`), load the lib and
+    // exit with the verdict BEFORE booting anything. A corrupt lib faults here,
+    // in the throwaway child, never in the live indexer.
+    if let Some(code) = crate::embedder::gpu_preflight::run_dlopen_probe_if_requested() {
+        std::process::exit(code);
+    }
     run(RuntimeBootProfile::indexer())
 }
 

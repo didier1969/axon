@@ -34,6 +34,8 @@ use tracing::{error, info};
 mod cpu_query_service;
 #[path = "embedder/gpu_backend.rs"]
 mod gpu_backend;
+#[path = "embedder/gpu_preflight.rs"]
+pub(crate) mod gpu_preflight;
 #[path = "embedder/gpu_policy.rs"]
 mod gpu_policy;
 #[path = "embedder/gpu_telemetry.rs"]
