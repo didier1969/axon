@@ -45,9 +45,16 @@ pub(crate) fn parse_probe_arg<I: IntoIterator<Item = String>>(args: I) -> Option
 /// If the current process was launched as a dlopen probe, perform the probe and
 /// return the exit code to use. Returns `None` for a normal indexer launch.
 ///
-/// The probe loads the library with eager symbol resolution (`RTLD_NOW`) so a
-/// corrupt `.so` (or a corrupt `DT_NEEDED` dependency) faults HERE, in the
-/// throwaway child, instead of inside the real indexer.
+/// The probe loads the library with LAZY binding (`RTLD_LAZY`): the loader still
+/// maps the `.so` AND eagerly loads its `DT_NEEDED` dependencies (so a corrupt
+/// `libnvinfer` pulled in by the TensorRT provider still faults HERE, in the
+/// throwaway child), but it does NOT eagerly resolve every undefined symbol.
+/// That matters because the ONNX Runtime provider libs
+/// (`libonnxruntime_providers_{cuda,tensorrt}.so`) legitimately carry undefined
+/// symbols (e.g. `Provider_GetHost`) that the ORT CORE lib resolves at runtime
+/// through its provider bridge — `RTLD_NOW` would FALSE-POSITIVE on those and
+/// wrongly refuse a perfectly healthy GPU stack (REQ-AXO-902027 regression
+/// caught in dev: the indexer never spawned its pipeline).
 pub(crate) fn run_dlopen_probe_if_requested() -> Option<i32> {
     let path = parse_probe_arg(std::env::args())?;
     // SAFETY: loading an arbitrary shared object can run initialisers; that is
@@ -55,8 +62,23 @@ pub(crate) fn run_dlopen_probe_if_requested() -> Option<i32> {
     let result = unsafe {
         #[cfg(unix)]
         {
-            use libloading::os::unix::{Library, RTLD_LOCAL, RTLD_NOW};
-            Library::open(Some(&path), RTLD_NOW | RTLD_LOCAL).map(|_| ())
+            use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_LAZY, RTLD_LOCAL};
+            // The ORT provider libs (cuda/tensorrt) carry undefined symbols
+            // (e.g. `Provider_GetHost`) that are EXPORTED by the ORT CORE lib
+            // and resolved at runtime through ORT's provider bridge — and the
+            // providers are linked BIND_NOW, so RTLD_LAZY alone still
+            // false-positives ("undefined symbol"). Load the CORE globally
+            // first (its exports enter the global scope) and keep it resident,
+            // THEN load the target so the provider's symbols resolve exactly as
+            // they do at runtime. A corrupt core / provider / DT_NEEDED dep
+            // (libnvinfer) still faults HERE in the throwaway child. When the
+            // target IS the core, the preload is skipped (would be redundant).
+            let _core_guard = std::env::var("ORT_DYLIB_PATH")
+                .ok()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty() && std::path::Path::new(c) != path.as_path())
+                .and_then(|c| Library::open(Some(c.as_str()), RTLD_GLOBAL | RTLD_LAZY).ok());
+            Library::open(Some(&path), RTLD_LAZY | RTLD_LOCAL).map(|_| ())
         }
         #[cfg(not(unix))]
         {

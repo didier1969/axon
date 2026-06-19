@@ -341,26 +341,20 @@ pub fn spawn_pipeline_v2_indexer(
             "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — sorted-drain feeds B2)",
             counts_b.b2, counts_b.b3
         );
-        // REQ-AXO-902027 — vet the GPU shared libraries in throwaway
-        // subprocesses BEFORE building the ORT session, so a corrupt /
-        // ABI-incompatible lib (e.g. a bad libnvinfer in the nix-store)
-        // surfaces as an EXPLICIT application-log line + a clean exit instead
-        // of a silent native SIGSEGV deep inside `try_new_cuda`. Same
-        // fallback policy as an init failure: hard-fail when a GPU provider was
-        // explicitly requested, else fall back to NoOp.
-        let gpu_preflight = crate::embedder::gpu_preflight::preflight_gpu_libraries();
-        if let Err(reason) = &gpu_preflight {
-            if gpu_provider_explicitly_requested() {
-                return Err(anyhow!(
-                    "pipeline_v2: GPU library pre-flight failed — refusing to build a GPU \
-                     session that would risk a silent native crash: {reason}"
-                ));
-            }
-            warn!(reason = %reason, "pipeline_v2: GPU library pre-flight failed, falling back to NoOpEmbedder");
+        // REQ-AXO-902027 — pre-flight is DIAGNOSTIC, not a gate. It loudly logs
+        // a GPU shared library that fails to load — turning a silent dmesg-only
+        // SIGSEGV deep inside `try_new_cuda` into a NAMED application-log line —
+        // but it does NOT block the GPU init. An isolated dlopen probe can
+        // false-positive on ORT's runtime-resolved provider symbols (the cuda /
+        // tensorrt providers resolve `Provider_GetHost` via the core lib), and
+        // BLOCKING on that wrongly downed a healthy indexer (regression caught
+        // in dev). `try_new_cuda` below stays the authoritative gate; if a lib
+        // is genuinely corrupt it crashes there, but this log already named the
+        // culprit instead of leaving only a dmesg trace.
+        if let Err(reason) = crate::embedder::gpu_preflight::preflight_gpu_libraries() {
+            tracing::error!(reason = %reason, "pipeline_v2: GPU library pre-flight flagged a lib — proceeding to GPU init anyway; if the process crashes during init, THIS names the culprit");
         }
-        let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> = if gpu_preflight.is_err() {
-            Arc::new(NoOpEmbedder)
-        } else {
+        let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> =
             match GpuB2Embedder::try_new_cuda("indexer-pipeline-v2", 0) {
             // DEC-AXO-901631 — the GPU session stays resident for the worker's
             // lifetime (no idle watchdog / sleep-wake). Single-GPU live↔dev
@@ -382,7 +376,6 @@ pub fn spawn_pipeline_v2_indexer(
                 }
                 warn!(error = %err, "pipeline_v2: GPU embedder init failed, falling back to NoOpEmbedder");
                 Arc::new(NoOpEmbedder)
-            }
             }
         };
         // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT
