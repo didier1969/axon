@@ -1,3 +1,25 @@
+//! SOLL MCP tools.
+//!
+//! ## SOLL read-path policy — two lanes by category (DEC-AXO-901646, REQ-AXO-902039)
+//!
+//! SOLL reads are split into two deliberately-consistent lanes; this is NOT an
+//! accidental hybrid (operator directive: "soit PG soit RAM, pas les deux" —
+//! pick one lane *per category*):
+//!
+//! * **RAM lane** — the canonical FUSED retrieval surface (`query`, `why`,
+//!   `retrieve_context`, `soll_query_context`, `soll_work_plan`) reads SOLL
+//!   through the in-RAM `SollSnapshotCache` (petgraph), co-resident with the IST
+//!   RAM graph so why↔code traversals stay at memory speed. This is where the
+//!   SOLL+IST fusion value lives (VIS-AXO-001 / PIL-AXO-9002).
+//! * **PG lane** — the specialised admin / reporting tools in this module
+//!   (tech_debt, completeness, docs generation, planning/revision, registry,
+//!   the raw `sql` pass-through, complex non-portable aggregates) read directly
+//!   from `soll.*` via PG. They are low-frequency, don't need fusion, and PG is
+//!   the authoritative writer — so a direct SELECT here is the deliberate,
+//!   correct choice, NOT a cache bypass to "fix". They are NOT migrated to RAM
+//!   (REQ-AXO-902029 rejected): 94 mechanical sites + cold-cache risk for a
+//!   metric-only gain, while the fusion already lives in the RAM lane.
+
 use anyhow::anyhow;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
