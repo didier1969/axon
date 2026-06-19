@@ -84,6 +84,9 @@ pub(crate) enum SollEntity {
     Guideline,
     Skill,
     PromptTemplate,
+    /// REQ-AXO-901727 (Option A) — tracks an incomplete technology migration
+    /// and (via HAS_REMNANT, follow-up slice) its per-file remnants.
+    TechnologyMigration,
 }
 
 /// `soll_manager.data` payload. Which fields are required depends on `action`

@@ -222,6 +222,7 @@ impl McpServer {
                     "guideline" => "Guideline",
                     "skill" => "Skill",                    // REQ-AXO-91578
                     "prompt_template" => "PromptTemplate", // REQ-AXO-91579
+                    "technology_migration" => "TechnologyMigration", // REQ-AXO-901727
                     other => {
                         let accepted = [
                             "vision",
@@ -235,6 +236,7 @@ impl McpServer {
                             "guideline",
                             "skill",
                             "prompt_template",
+                            "technology_migration",
                         ];
                         return Some(json!({
                             "content": [{
@@ -670,6 +672,7 @@ impl McpServer {
                     "Guideline" => "GUI",
                     "Skill" => "SKI",          // REQ-AXO-91578
                     "PromptTemplate" => "PRT", // REQ-AXO-91579
+                    "TechnologyMigration" => "TMG", // REQ-AXO-901727
                     other => other,
                 };
                 let target_prefix: String = attach_to.split('-').next().unwrap_or("").to_string();

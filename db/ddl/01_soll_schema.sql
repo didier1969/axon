@@ -58,9 +58,16 @@ CREATE TABLE IF NOT EXISTS soll.Registry (
     last_gui     BIGINT NOT NULL DEFAULT 0,  -- Guideline
     last_ski     BIGINT NOT NULL DEFAULT 0,  -- Skill          (REQ-AXO-91578)
     last_prt     BIGINT NOT NULL DEFAULT 0,  -- PromptTemplate  (REQ-AXO-91579)
+    last_tmg     BIGINT NOT NULL DEFAULT 0,  -- TechnologyMigration (REQ-AXO-901727)
     last_prv     BIGINT NOT NULL DEFAULT 0,  -- RevisionPreview (storage.rs direct alloc)
     last_rev     BIGINT NOT NULL DEFAULT 0   -- Revision        (storage.rs direct alloc)
 );
+
+-- REQ-AXO-901727 — TechnologyMigration entity (Option A). Existing Registry
+-- rows predate `last_tmg` (CREATE TABLE IF NOT EXISTS won't add it), so an
+-- idempotent additive ALTER converges live/dev/test. Additive (NOT a CHECK) =
+-- bootstrap-safe (cf feedback: a status CHECK in DDL would reject fixtures).
+ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_tmg BIGINT NOT NULL DEFAULT 0;
 
 -- Intent graph: nodes. metadata is JSONB (consumers query
 -- metadata->>'logical_key' — hard JSONB requirement, storage.rs:187).
@@ -323,6 +330,7 @@ BEGIN
         WHEN 'Guideline'      THEN 'GUI'
         WHEN 'Skill'          THEN 'SKI'
         WHEN 'PromptTemplate' THEN 'PRT'
+        WHEN 'TechnologyMigration' THEN 'TMG'  -- REQ-AXO-901727 (Option A)
         ELSE NULL
     END;
     IF v_prefix IS NULL THEN

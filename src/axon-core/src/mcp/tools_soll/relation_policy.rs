@@ -56,7 +56,8 @@ pub(crate) struct RelationPolicy {
 
 pub(super) const SOLL_RELATION_ENDPOINT_KINDS: &[&str] = &[
     // REQ-AXO-91578/91579 — SKI + PRT added to canonical endpoint kinds.
-    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "SKI", "PRT", "ART",
+    // REQ-AXO-901727 — TMG (TechnologyMigration) added (Option A).
+    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "SKI", "PRT", "TMG", "ART",
 ];
 
 pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
@@ -66,9 +67,8 @@ pub(super) fn relation_table_name(_relation_type: &str) -> Option<&'static str> 
 pub(super) fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     match prefix {
         // REQ-AXO-91578/91579 — SKI + PRT added to canonical entity prefix set.
-        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" | "SKI" | "PRT" => {
-            Some("soll.Node")
-        }
+        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" | "SKI" | "PRT"
+        | "TMG" => Some("soll.Node"),
         _ => None,
     }
 }
@@ -175,6 +175,30 @@ pub(super) fn relation_policy_for_pair(
                 role: ProjectionRole::Supporting,
                 parent_preference_rank: 50,
                 child_order_rank: 100,
+            },
+        }),
+        // REQ-AXO-901727 (Option A) — TechnologyMigration belongs to a Pillar
+        // for theming/queryability (like CPT/GUI→PIL) and REFINES the Decision
+        // that mandated the migration (e.g. the DuckDB→PG or AGE-retirement DEC).
+        // The HAS_REMNANT TMG→IST cross-graph edge is a follow-up slice (N2).
+        ("TMG", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 55,
+                child_order_rank: 110,
+            },
+        }),
+        ("TMG", "DEC") => Some(RelationPolicy {
+            allowed: &["REFINES"],
+            default: Some("REFINES"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 90,
+                child_order_rank: 120,
             },
         }),
         ("DEC", "REQ") => Some(RelationPolicy {
@@ -650,6 +674,7 @@ pub(super) fn graph_role_for_kind(kind: &str) -> &'static str {
         "VAL" => "evidence or proof that verifies a requirement",
         "STK" => "stakeholder source of demand or contribution",
         "GUI" => "guideline or policy constraint",
+        "TMG" => "technology migration tracking its incomplete-migration remnants",
         "ART" => "implementation or runtime artifact",
         _ => "soll graph node",
     }

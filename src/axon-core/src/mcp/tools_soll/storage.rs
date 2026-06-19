@@ -62,6 +62,7 @@ impl McpServer {
             "guideline" => ("GUI", "last_gui", Some("Guideline")),
             "skill" => ("SKI", "last_ski", Some("Skill")), // REQ-AXO-91578
             "prompt_template" => ("PRT", "last_prt", Some("PromptTemplate")), // REQ-AXO-91579
+            "technology_migration" => ("TMG", "last_tmg", Some("TechnologyMigration")), // REQ-AXO-901727
             "preview" => ("PRV", "last_prv", None),
             "revision" => ("REV", "last_rev", None),
             _ => return Err(anyhow!("Unknown id kind")),
@@ -179,6 +180,7 @@ impl McpServer {
             "guideline" => Some("Guideline"),
             "skill" => Some("Skill"),                    // REQ-AXO-91578
             "prompt_template" => Some("PromptTemplate"), // REQ-AXO-91579
+            "technology_migration" => Some("TechnologyMigration"), // REQ-AXO-901727
             _ => None,
         }
     }

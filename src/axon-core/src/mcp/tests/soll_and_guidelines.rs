@@ -4886,6 +4886,57 @@ fn test_axon_soll_manager_create_can_attach_requirement_to_pillar() {
     );
 }
 
+// REQ-AXO-901727 (Option A) — TechnologyMigration is a canonical SOLL entity:
+// it allocates a `TMG-AXO-NNN` id and attaches to a Pillar via BELONGS_TO.
+#[test]
+fn test_soll_manager_create_technology_migration_entity() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Pillar', 'Protect structure', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "technology_migration",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "DuckDB -> PostgreSQL migration",
+                    "description": "Tracks the incomplete DuckDB retirement remnants",
+                    "attach_to": "PIL-AXO-001",
+                    "relation_type": "BELONGS_TO"
+                }
+            }
+        })),
+        id: Some(json!(41727)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    let created_id = data["created_id"].as_str().expect("created_id");
+    assert!(
+        created_id.starts_with("TMG-AXO-"),
+        "TechnologyMigration allocates a TMG id, got: {created_id}"
+    );
+    assert_eq!(data["attached"].as_bool(), Some(true));
+    assert_eq!(data["applied_relation"].as_str(), Some("BELONGS_TO"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE id='{created_id}' AND type='TechnologyMigration'"
+            ))
+            .unwrap(),
+        1,
+        "node persisted with canonical type"
+    );
+}
+
 #[test]
 fn test_soll_manager_create_requirement_warns_on_missing_acceptance_criteria() {
     // REQ-AXO-901942 — proactive inline guard at creation, not a late
