@@ -588,6 +588,25 @@ impl McpServer {
             }
         }
         let _ = next_best_kind; // retained in data.truth_cockpit.next_best_action
+        // REQ-AXO-901757 slice C (AC4) — SOLL read RAM-coverage from the snapshot
+        // cache hit/miss counters. Ratio = ram_hits / (ram_hits + pg_loads).
+        let (soll_ram_hits, soll_pg_loads) = self.soll_cache().read_stats();
+        let soll_ram_ratio = {
+            let total = soll_ram_hits + soll_pg_loads;
+            if total == 0 {
+                1.0
+            } else {
+                soll_ram_hits as f64 / total as f64
+            }
+        };
+        if matches!(mode, Some("verbose") | Some("VERBOSE")) {
+            evidence.push_str(&format!(
+                "**SOLL read coverage:** {:.1}% RAM ({} RAM hits / {} PG loads)\n",
+                soll_ram_ratio * 100.0,
+                soll_ram_hits,
+                soll_pg_loads
+            ));
+        }
         if matches!(mode, Some("verbose") | Some("VERBOSE")) {
             evidence.push_str(&format!(
                 "**Public tools:** {}\n",
@@ -1246,6 +1265,16 @@ impl McpServer {
                     "oldest_semantic_pending_age_ms": oldest_semantic_pending_age_ms
                 },
                 "public_tools": public_tool_names,
+                // REQ-AXO-901757 slice C (AC4) — SOLL snapshot read RAM-coverage.
+                // Reads served from the RAM graph vs PG (re)loads (cold cache /
+                // invalidation). Raw `FROM soll.*` SELECTs that bypass the cache
+                // are the migration target tracked separately (slice C AC1-3).
+                "soll_read_coverage": {
+                    "ram_hits": soll_ram_hits,
+                    "pg_loads": soll_pg_loads,
+                    "ram_ratio": soll_ram_ratio,
+                    "scope": "soll_snapshot_cache (cache-routed reads; raw FROM soll.* SELECTs not yet counted)"
+                },
                 "async_policy": {
                     "mode": "allowlist",
                     "sync_by_default": true,
