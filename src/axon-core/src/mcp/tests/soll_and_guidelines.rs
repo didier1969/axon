@@ -4937,6 +4937,211 @@ fn test_soll_manager_create_technology_migration_entity() {
     );
 }
 
+// ── REQ-AXO-901727 N2/N3/N4 — HAS_REMNANT cross-graph edge + inventory ──
+
+/// Seed a TechnologyMigration node + two IST artifacts (one symbol, one file)
+/// for the tech-debt tests below.
+fn seed_tech_debt_fixture(server: &McpServer) {
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('TMG-AXO-001', 'TechnologyMigration', 'AXO', 'DuckDB -> PostgreSQL', 'residue', 'active', '{\"from_tech\":\"DuckDB\",\"to_tech\":\"PostgreSQL\",\"debt_policy\":\"full_clean\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Symbol (id, name, kind, project_code) VALUES ('AXO::resid::duck_fn', 'duck_fn', 'function', 'AXO') ON CONFLICT (id) DO NOTHING")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms) VALUES ('src/legacy/duck.rs', 'AXO', 0) ON CONFLICT (path) DO NOTHING")
+        .unwrap();
+}
+
+fn link_remnant_request(target_id: &str, target_kind: Option<&str>) -> JsonRpcRequest {
+    let mut data = json!({
+        "source_id": "TMG-AXO-001",
+        "target_id": target_id,
+        "relation_type": "HAS_REMNANT"
+    });
+    if let Some(kind) = target_kind {
+        data["target_kind"] = json!(kind);
+    }
+    JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            // `entity` is required by soll_manager for every action (unused by
+            // link); real LLM callers always pass it.
+            "arguments": { "action": "link", "entity": "technology_migration", "data": data }
+        })),
+        id: Some(json!(90230)),
+    }
+}
+
+// REQ-AXO-902030 (N2) — HAS_REMNANT is the only SOLL→IST edge. A TMG node links
+// to an IST symbol; target_kind is auto-detected; the edge is idempotent.
+#[test]
+fn test_link_has_remnant_creates_cross_graph_edge_to_symbol() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+
+    let response = server
+        .handle_request(link_remnant_request("AXO::resid::duck_fn", None))
+        .unwrap()
+        .result
+        .unwrap();
+    let data = response.get("data").expect("link data");
+    assert_eq!(data["status"].as_str(), Some("ok"));
+    assert_eq!(data["target_kind"].as_str(), Some("ist:symbol"));
+    assert_eq!(data["edges_created"].as_i64(), Some(1));
+
+    // Edge persisted in soll.Edge with the target_kind discriminator.
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE source_id='TMG-AXO-001' AND target_id='AXO::resid::duck_fn' AND relation_type='HAS_REMNANT' AND metadata->>'target_kind'='ist:symbol'")
+            .unwrap(),
+        1,
+        "cross-graph edge persisted with target_kind"
+    );
+
+    // Idempotent: second link is a no-op (edges_created=0).
+    let again = server
+        .handle_request(link_remnant_request("AXO::resid::duck_fn", None))
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(again["data"]["edges_created"].as_i64(), Some(0));
+}
+
+// REQ-AXO-902030 — an explicit target_kind hint for a FILE is honored.
+#[test]
+fn test_link_has_remnant_to_file_with_explicit_kind() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+
+    let response = server
+        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(response["data"]["target_kind"].as_str(), Some("ist:indexed_file"));
+}
+
+// REQ-AXO-902030 — source that is not a TechnologyMigration is rejected.
+#[test]
+fn test_link_has_remnant_rejects_non_migration_source() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-700', 'Requirement', 'AXO', 'not a migration', '', 'planned', '{}')")
+        .unwrap();
+
+    let mut req = link_remnant_request("AXO::resid::duck_fn", None);
+    req.params.as_mut().unwrap()["arguments"]["data"]["source_id"] = json!("REQ-AXO-700");
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_eq!(response["isError"].as_bool(), Some(true));
+    assert_eq!(response["data"]["status"].as_str(), Some("input_invalid"));
+    assert_eq!(
+        response["data"]["parameter_repair"]["category"].as_str(),
+        Some("source_not_a_migration")
+    );
+}
+
+// REQ-AXO-902030 — target absent from the IST is rejected (input_not_found).
+#[test]
+fn test_link_has_remnant_rejects_unknown_ist_target() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+
+    let response = server
+        .handle_request(link_remnant_request("AXO::does::not_exist", None))
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["isError"].as_bool(), Some(true));
+    assert_eq!(response["data"]["status"].as_str(), Some("input_not_found"));
+}
+
+// REQ-AXO-902031 (N3) — tech_debt_inventory lists migrations + remnants.
+#[test]
+fn test_tech_debt_inventory_lists_migrations_and_remnants() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+    server
+        .handle_request(link_remnant_request("AXO::resid::duck_fn", None))
+        .unwrap();
+    server
+        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "tech_debt_inventory",
+            "arguments": { "project_code": "AXO" }
+        })),
+        id: Some(json!(90231)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("inventory data");
+    assert_eq!(data["migration_count"].as_i64(), Some(1));
+    assert_eq!(data["total_remnants"].as_i64(), Some(2));
+    let migration = &data["migrations"][0];
+    assert_eq!(migration["id"].as_str(), Some("TMG-AXO-001"));
+    assert_eq!(migration["from_tech"].as_str(), Some("DuckDB"));
+    assert_eq!(migration["remnant_count"].as_i64(), Some(2));
+    assert_eq!(migration["by_target_kind"]["ist:symbol"].as_i64(), Some(1));
+    assert_eq!(migration["by_target_kind"]["ist:indexed_file"].as_i64(), Some(1));
+}
+
+// REQ-AXO-902032 (N4) — pre-flight residue helper resolves a file path (exact
+// or repo-relative suffix) back to its migration.
+#[test]
+fn test_migrations_with_remnant_path_resolves_residue() {
+    let server = create_test_server();
+    seed_tech_debt_fixture(&server);
+    server
+        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .unwrap();
+
+    let hits = server.migrations_with_remnant_path(&["src/legacy/duck.rs".to_string()]);
+    assert_eq!(hits.len(), 1, "edited residue file resolves to its migration");
+    assert_eq!(hits[0]["migration_id"].as_str(), Some("TMG-AXO-001"));
+    assert_eq!(hits[0]["debt_policy"].as_str(), Some("full_clean"));
+
+    // A clean (non-residue) path returns nothing — zero overhead path.
+    assert!(server
+        .migrations_with_remnant_path(&["src/clean.rs".to_string()])
+        .is_empty());
+}
+
+// REQ-AXO-902032 (N4) — work-plan signal surfaces active migrations with
+// residue, ranked by debt magnitude; absent when none.
+#[test]
+fn test_tech_debt_work_plan_signal() {
+    let server = create_test_server();
+    assert!(
+        server.tech_debt_work_plan_signal("AXO").is_none(),
+        "no migrations → no signal (zero overhead)"
+    );
+
+    seed_tech_debt_fixture(&server);
+    server
+        .handle_request(link_remnant_request("AXO::resid::duck_fn", None))
+        .unwrap();
+
+    let signal = server
+        .tech_debt_work_plan_signal("AXO")
+        .expect("signal present once residue exists");
+    assert_eq!(signal["active_migrations"].as_i64(), Some(1));
+    assert_eq!(signal["total_remnants"].as_i64(), Some(1));
+    assert_eq!(signal["migrations"][0]["id"].as_str(), Some("TMG-AXO-001"));
+}
+
 #[test]
 fn test_soll_manager_create_requirement_warns_on_missing_acceptance_criteria() {
     // REQ-AXO-901942 — proactive inline guard at creation, not a late

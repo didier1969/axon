@@ -252,6 +252,26 @@ impl McpServer {
         // all diff_paths. Non-blocking warning injected into the response.
         let legacy_proximity_value = self.detect_diff_paths_legacy_proximity(&diff_paths);
 
+        // REQ-AXO-902032 (N4) — tech-debt residue warning. If an edited file is
+        // a known HAS_REMNANT of an active TechnologyMigration, surface the
+        // migration + policy so the LLM resolves (or consciously keeps) the
+        // residue instead of re-discovering it by accident. Non-blocking.
+        let tech_debt_residue_value = {
+            let paths: Vec<String> = diff_paths
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            let hits = self.migrations_with_remnant_path(&paths);
+            if hits.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "hits": hits,
+                    "warning": "diff touches files flagged as residue of an incomplete technology migration — replace, document the hybrid policy, or run `tech_debt_inventory` for the full set"
+                }))
+            }
+        };
+
         if !incremental {
             let mut response = self.axon_commit_work(&json!({
                 "diff_paths": diff_paths,
@@ -260,9 +280,12 @@ impl McpServer {
                 "project_path": args.get("project_path"),
                 "dry_run": true
             }))?;
-            if let Some(lp) = &legacy_proximity_value {
-                if let Some(data) = response.get_mut("data") {
+            if let Some(data) = response.get_mut("data") {
+                if let Some(lp) = &legacy_proximity_value {
                     data["legacy_proximity"] = lp.clone();
+                }
+                if let Some(td) = &tech_debt_residue_value {
+                    data["tech_debt_residue"] = td.clone();
                 }
             }
             return Some(response);
@@ -338,6 +361,9 @@ impl McpServer {
         });
         if let Some(lp) = legacy_proximity_value {
             response["data"]["legacy_proximity"] = lp;
+        }
+        if let Some(td) = tech_debt_residue_value {
+            response["data"]["tech_debt_residue"] = td;
         }
         Some(response)
     }

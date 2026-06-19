@@ -666,7 +666,7 @@ impl McpServer {
             })
             .unwrap_or_default();
 
-        let data = json!({
+        let mut data = json!({
             "summary": {
                 "project_code": project_code,
                 "total_nodes": nodes.len(),
@@ -695,6 +695,15 @@ impl McpServer {
                 "actionable": actionable
             }
         });
+
+        // REQ-AXO-902032 (N4) — tech-debt weighting signal. Surface active
+        // TechnologyMigrations carrying unresolved HAS_REMNANT residue, ranked
+        // by debt magnitude (remnant_count DESC), so the planner weights
+        // incomplete migrations alongside the scored REQ waves. Budget-breached
+        // migrations are flagged. Zero migrations → no key (AC5: zero overhead).
+        if let Some(signal) = self.tech_debt_work_plan_signal(project_code) {
+            data["tech_debt_signal"] = signal;
+        }
 
         let text = if format == "json" {
             format!("SOLL work plan generated for {}.", project_code)

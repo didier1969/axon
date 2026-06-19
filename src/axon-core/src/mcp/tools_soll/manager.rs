@@ -1073,6 +1073,15 @@ impl McpServer {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
                 let explicit_rel = data.get("relation_type").and_then(|v| v.as_str());
+                // REQ-AXO-902030 (N2) — HAS_REMNANT is the ONLY SOLL→IST edge:
+                // a TechnologyMigration node pointing at an IST artifact (symbol
+                // / file / chunk). The target is not a SOLL node, so the
+                // SOLL↔SOLL classifier + cycle guard below cannot run. Intercept
+                // here and route to the dedicated cross-graph handler.
+                if explicit_rel.is_some_and(|r| r.eq_ignore_ascii_case("HAS_REMNANT")) {
+                    let target_kind = data.get("target_kind").and_then(|v| v.as_str());
+                    return self.link_has_remnant(src, tgt, target_kind);
+                }
                 let project_code = project_code_from_canonical_entity_id(src)
                     .or_else(|| project_code_from_canonical_entity_id(tgt));
                 let before_snapshot = project_code

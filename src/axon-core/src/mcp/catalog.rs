@@ -450,6 +450,22 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "tech_debt_inventory",
+                "description": "[SOLL] REQ-AXO-901727/902031 — queryable inventory of TechnologyMigration nodes and their HAS_REMNANT remnants (per-file/symbol/chunk leftover code of an incomplete migration) + progression. Replaces accidental shell re-discovery of residue. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "migration_id": { "type": "string", "description": "Optional: scope to one TechnologyMigration id (TMG-…)." },
+                        "from_tech": { "type": "string", "description": "Optional filter: source technology (matched against migration metadata.from_tech)." },
+                        "to_tech": { "type": "string", "description": "Optional filter: target technology (matched against migration metadata.to_tech)." },
+                        "status": { "type": "string", "description": "Optional migration-status filter (e.g. active, complete). Default: all." },
+                        "group_by": { "type": "string", "enum": ["file", "symbol", "chunk"], "description": "Optional: restrict the listed remnants to one IST target kind." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "soll_acyclic_audit",
                 "description": "[SOLL] REQ-AXO-91492 — enumerate strongly-connected components (size>1) and self-loops in the SOLL intentional graph for one project. Pre-requisite for activating the DEC-AXO-098 cycle validator on `soll_manager(action=link)`. Read-only ; no mutation.",
                 "inputSchema": {

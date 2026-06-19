@@ -29,6 +29,7 @@ mod query_context;
 mod relation_policy;
 mod shared;
 mod storage;
+mod tech_debt;
 mod workflow;
 
 use inference::*;
