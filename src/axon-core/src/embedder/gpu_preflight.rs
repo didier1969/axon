@@ -153,20 +153,29 @@ fn probe_in_subprocess(self_exe: &Path, lib: &Path) -> Result<(), String> {
 }
 
 /// The libraries to vet before a CUDA/TensorRT embedder session is built.
-/// Returns `(label, path)` pairs for the ones that are configured.
-fn gpu_libraries_to_check() -> Vec<(&'static str, PathBuf)> {
+/// Returns `(label, path, dlopen_probe)`. `dlopen_probe` is true ONLY for the
+/// ORT CORE lib — the provider libs are static-checked only (REQ-AXO-902040):
+/// an isolated `dlopen` of `libonnxruntime_providers_{cuda,tensorrt}.so` reports
+/// `undefined symbol: Provider_GetHost`, because that symbol is EXPORTED by the
+/// core and resolved at runtime through ORT's provider bridge (and the providers
+/// are linked BIND_NOW, so RTLD_LAZY doesn't help). Probing them in isolation
+/// therefore FALSE-POSITIVES on a perfectly healthy provider, spamming an ERROR
+/// at every GPU start. The core loads cleanly on its own, so it is the only one
+/// worth a dlopen probe; missing/truncated providers are still caught by the
+/// static (exists/size/ELF) check.
+fn gpu_libraries_to_check() -> Vec<(&'static str, PathBuf, bool)> {
     let mut out = Vec::new();
     if let Some(core) = std::env::var("ORT_DYLIB_PATH")
         .ok()
         .filter(|v| !v.trim().is_empty())
     {
-        out.push(("onnxruntime core", PathBuf::from(core)));
+        out.push(("onnxruntime core", PathBuf::from(core), true));
     }
     if let Some(cuda) = super::ort_cuda_provider_library_path() {
-        out.push(("onnxruntime CUDA provider", cuda));
+        out.push(("onnxruntime CUDA provider", cuda, false));
     }
     if let Some(trt) = super::gpu_backend::ort_tensorrt_provider_library_path() {
-        out.push(("onnxruntime TensorRT provider", trt));
+        out.push(("onnxruntime TensorRT provider", trt, false));
     }
     out
 }
@@ -183,16 +192,22 @@ pub(crate) fn preflight_gpu_libraries() -> Result<(), String> {
     if libs.is_empty() {
         return Ok(()); // no GPU libs configured → nothing to vet
     }
-    for (label, path) in libs {
+    for (label, path, dlopen_probe) in libs {
         if let Err(reason) = check_static(&path) {
             let msg = format!("{label} at {}: {reason}", path.display());
             tracing::error!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %reason, "GPU library pre-flight FAILED (static)");
             return Err(msg);
         }
-        if let Err(reason) = probe_in_subprocess(&self_exe, &path) {
-            let msg = format!("{label} at {}: {reason}", path.display());
-            tracing::error!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %reason, "GPU library pre-flight FAILED (dlopen probe)");
-            return Err(msg);
+        // REQ-AXO-902040 — only the ORT core is dlopen-probed; the provider libs
+        // can't be dlopen'd in isolation without false-positiving on the core's
+        // runtime-resolved symbols (see gpu_libraries_to_check), so for them the
+        // static check above is the whole vet.
+        if dlopen_probe {
+            if let Err(reason) = probe_in_subprocess(&self_exe, &path) {
+                let msg = format!("{label} at {}: {reason}", path.display());
+                tracing::error!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %reason, "GPU library pre-flight FAILED (dlopen probe)");
+                return Err(msg);
+            }
         }
         tracing::debug!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), "GPU library pre-flight ok");
     }
