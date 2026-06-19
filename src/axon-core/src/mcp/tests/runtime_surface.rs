@@ -602,9 +602,22 @@ fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
 
 #[test]
 fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_boundary() {
+    // REQ-AXO-902026 — isolate this test on its own ephemeral DB (cloned from
+    // `axon_test_template`) instead of two raw `GraphStore::new` calls. The raw
+    // path resolves to the SHARED PG and re-runs the GLOBAL schema bootstrap
+    // (CREATE EXTENSION/SCHEMA + the pgmq / ist.Chunk migration), which RACED a
+    // live runtime writing the same shared instance → intermittent
+    // "Writer Error" DDL failures (~1/3 runs). A private clone already carries
+    // the canonical schema, so the re-open is a fast `IF NOT EXISTS` no-op and
+    // never contends with the live DDL. Both store instances share the SAME
+    // clone URL, so the cross-runtime-boundary persistence under test is kept.
+    let test_db = crate::test_support::test_db::TestDb::create();
+    let db_url = test_db.url();
     let temp = tempdir().unwrap();
     let root = temp.path().join("graph-store");
-    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let store = Arc::new(
+        GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap(),
+    );
     let server = McpServer::new(store);
 
     let init_response = server
@@ -627,7 +640,9 @@ fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_
     assert_eq!(init_response["data"]["project_code"].as_str(), Some("NTO"));
     drop(server);
 
-    let reopened_store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let reopened_store = Arc::new(
+        GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap(),
+    );
     let reopened_server = McpServer::new(reopened_store);
 
     let lookup_response = reopened_server
