@@ -185,6 +185,21 @@ pub fn spawn_b2_batched_worker(
                 metrics.record_started();
             }
             let texts: Vec<String> = batch.iter().map(|p| p.content.clone()).collect();
+            // REQ-AXO-902033 — log the batch shape BEFORE the (blocking) GPU
+            // inference. The TensorRT EP intermittently hangs a single inference
+            // under concurrent Plane-A load (GPU pegged, no return). The last
+            // `B2 embed batch` line with no matching completion names the
+            // culprit batch shape/content for RCA.
+            let max_bytes = texts.iter().map(String::len).max().unwrap_or(0);
+            let total_bytes: usize = texts.iter().map(String::len).sum();
+            tracing::info!(
+                target: "pipeline_v2::b2",
+                n = batch.len(),
+                max_bytes,
+                total_bytes,
+                first_id = %batch.first().map(|p| p.chunk_id.as_str()).unwrap_or(""),
+                "B2 embed batch start"
+            );
             let embedder_clone = embedder.clone();
             let started = Instant::now();
             let join_result =
