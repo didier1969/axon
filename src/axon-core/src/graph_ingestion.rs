@@ -948,6 +948,17 @@ impl GraphStore {
             unique_syms.push(sym);
             unique_ids.push(symbol_id);
         }
+        // REQ-AXO-902024 — log the file BEFORE chunking so a chunker wedge
+        // (single dense symbol spinning the tokenizer past the between-symbols
+        // deadline) is auto-diagnosable: the last `chunking <path>` line before
+        // the CPU spin names the culprit. SPINPROBE-style dev diagnostic.
+        tracing::info!(
+            target: "pipeline_v2::chunk",
+            path = %path,
+            content_bytes = content.len(),
+            symbols = unique_syms.len(),
+            "chunking file"
+        );
         for (idx, derived_chunk) in crate::code_chunker::build_file_chunks(&unique_syms, content) {
             tagged_chunks.push(crate::code_chunker::TaggedChunk {
                 symbol_id: unique_ids[idx].clone(),
@@ -1188,6 +1199,15 @@ impl GraphStore {
                 unique_syms.push(sym);
                 unique_ids.push(symbol_id);
             }
+            // REQ-AXO-902024 — see twin log above: name the file before chunking
+            // so a chunker wedge is auto-diagnosable from the last line emitted.
+            tracing::info!(
+                target: "pipeline_v2::chunk",
+                path = %path_str,
+                content_bytes = parsed.content.len(),
+                symbols = unique_syms.len(),
+                "chunking file"
+            );
             for (idx, derived_chunk) in
                 crate::code_chunker::build_file_chunks(&unique_syms, &parsed.content)
             {
