@@ -80,6 +80,17 @@ impl RuntimeProfile {
         let sizing = recommend_sizing(cpu_cores, ram_total_gb, gpu_present);
         let recommended_workers = sizing.recommended_workers.max(1);
 
+        // REQ-AXO-902035 — operator/runtime override of the blocking-pool
+        // size (the vectorization-lane starvation lever). Kept out of the
+        // pure `recommend_sizing` so the sizing formula stays
+        // deterministically testable; the env read lives only at detection
+        // time. `0` / unparseable is ignored (falls back to the formula).
+        let max_blocking_threads = std::env::var("AXON_MAX_BLOCKING_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(sizing.max_blocking_threads);
+
         Self {
             cpu_cores,
             ram_total_gb,
@@ -87,7 +98,7 @@ impl RuntimeProfile {
             ingestion_memory_budget_gb,
             gpu_present,
             recommended_workers,
-            max_blocking_threads: sizing.max_blocking_threads,
+            max_blocking_threads,
             queue_capacity: sizing.queue_capacity,
         }
     }
@@ -157,8 +168,22 @@ fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> R
         base_workers
     };
 
-    let max_blocking_threads = ((recommended_workers as f64) * 0.75).ceil() as usize;
-    let max_blocking_threads = max_blocking_threads.clamp(4, 16);
+    // REQ-AXO-902035 — the blocking pool must cover EVERY concurrent
+    // `spawn_blocking` consumer in pipeline_v2, not just the graph CPU
+    // workers. Default topology fans out to A2 parse (8) + A3 upsert (2) +
+    // B2 GPU embed (1) + B3 upsert (2) + sorted-drain SELECT (1) + query
+    // embed (1) ≈ 15 concurrent blocking tasks. The old
+    // `ceil(0.75 × recommended_workers).clamp(4,16)` produced ~9 on a
+    // 16-core GPU host — SMALLER than that fan-out — so A's tree-sitter
+    // flood occupied the pool and starved the GPU dispatch + drain SELECT
+    // of a blocking slot, collapsing Plane B to ~95 ch/s vs ~235 ch/s idle
+    // (A-starves-B). Idle blocking threads park at ~0 cost, so we reserve
+    // graph workers PLUS a dedicated vectorization-lane budget. Class-level
+    // fix (PIL-AXO-007: Plane B is never starved by Plane A).
+    let vectorization_lane_reserve = if gpu_present { 12 } else { 4 };
+    let max_blocking_threads = recommended_workers
+        .saturating_add(vectorization_lane_reserve)
+        .clamp(12, 48);
 
     let queue_capacity = ram_budget_gb
         .saturating_mul(8_000)
@@ -407,6 +432,30 @@ mod tests {
         let sizing = recommend_sizing(32, 64, false);
         assert!(sizing.recommended_workers >= 16);
         assert_eq!(sizing.queue_capacity, 200_000);
+    }
+
+    #[test]
+    fn test_recommend_sizing_reserves_blocking_slots_for_gpu_vector_lane() {
+        // REQ-AXO-902035 — on a GPU host the blocking pool MUST exceed the
+        // default pipeline_v2 spawn_blocking fan-out (A2 8 + A3 2 + B2 1 +
+        // B3 2 + sorted-drain 1 + query 1 = 15) so Plane A's tree-sitter
+        // flood can never starve the GPU dispatch / drain SELECT of a
+        // blocking slot. The old ceil(0.75×workers).clamp(4,16) produced ~9
+        // here (the A-starves-B root cause).
+        let gpu = recommend_sizing(16, 32, true);
+        assert!(
+            gpu.max_blocking_threads >= 20,
+            "GPU host must reserve blocking slots for the vectorization lane, got {}",
+            gpu.max_blocking_threads
+        );
+        let cpu = recommend_sizing(16, 32, false);
+        assert!(cpu.max_blocking_threads >= 12);
+        assert!(
+            gpu.max_blocking_threads > cpu.max_blocking_threads,
+            "GPU host needs a larger blocking reserve ({}) than a CPU-only host ({})",
+            gpu.max_blocking_threads,
+            cpu.max_blocking_threads
+        );
     }
 
     #[test]

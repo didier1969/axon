@@ -182,8 +182,7 @@ fn build_store(_mode: EmbedderMode) -> Result<GraphStore> {
     GraphStore::new_with_database(&url, &url)
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     #[cfg(feature = "tokio-console")]
     console_subscriber::init();
 
@@ -196,13 +195,47 @@ async fn main() -> ExitCode {
             .init();
     }
 
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
+    // REQ-AXO-902035 — optional blocking-pool cap so the bench can be
+    // pinned to a PRODUCTION-like `max_blocking_threads` for controlled
+    // experiments (the production indexer caps it via
+    // runtime_profile::recommend_sizing). DEFAULT stays at tokio's standard
+    // 512-thread pool so the bench is never the bottleneck for routine
+    // throughput characterisation; set AXON_MAX_BLOCKING_THREADS to pin it
+    // (e.g. to reproduce / probe the A-starves-B contention). NB the bench's
+    // own synthetic demand-pull feeder adds a `spawn_blocking` consumer that
+    // production does not have, so a low cap stalls the bench harder than
+    // production — production fidelity is best measured on a real
+    // `axon-dev start full` run, not here.
+    const BENCH_DEFAULT_MAX_BLOCKING_THREADS: usize = 512;
+    let max_blocking_threads = std::env::var("AXON_MAX_BLOCKING_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(BENCH_DEFAULT_MAX_BLOCKING_THREADS);
+    eprintln!("axon-bench-pipeline-v2: max_blocking_threads={max_blocking_threads}");
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .max_blocking_threads(max_blocking_threads)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
         Err(err) => {
-            eprintln!("axon-bench-pipeline-v2: {err:?}");
-            ExitCode::FAILURE
+            eprintln!("axon-bench-pipeline-v2: runtime build failed: {err:?}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
+
+    rt.block_on(async {
+        match run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("axon-bench-pipeline-v2: {err:?}");
+                ExitCode::FAILURE
+            }
+        }
+    })
 }
 
 async fn run() -> Result<()> {
