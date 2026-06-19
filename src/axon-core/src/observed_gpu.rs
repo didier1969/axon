@@ -53,11 +53,18 @@ pub fn observed_self_compute() -> (&'static str, &'static str) {
     }
 }
 
-/// VRAM (MiB) held by `pid` according to `nvidia-smi --query-compute-apps`,
-/// or `None` when nvidia-smi is unavailable, times out, or lists no GPU
-/// footprint for that pid. `Some(mib)` with `mib > 0` is the canonical
-/// "this pid is doing GPU compute" signal.
+/// VRAM (MiB) held by `pid`. `Some(mib)` with `mib > 0` is the canonical
+/// "this pid is doing GPU compute" signal; `None` when no GPU telemetry is
+/// available or the pid holds no compute context.
+///
+/// REQ-AXO-902037 — prefer the NVML driver API (precise + WSL2-robust: NVML
+/// reports per-process memory where `nvidia-smi --query-compute-apps` masks
+/// it as `[N/A]`/`[Not Found]`). The `nvidia-smi` shell-out is now an
+/// explicit FALLBACK, used only when NVML is unavailable (no driver lib).
 pub fn observed_gpu_used_mib(pid: u32) -> Option<u64> {
+    if let Some(mib) = crate::embedder::gpu_process_used_mib_via_nvml(pid) {
+        return Some(mib);
+    }
     let stdout = run_compute_apps_query()?;
     parse_compute_apps_used_mib(&stdout, pid)
 }

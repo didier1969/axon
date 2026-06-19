@@ -50,14 +50,20 @@ pub(crate) fn clear_gpu_memory_snapshot_cache_for_tests() {
 }
 
 fn gpu_telemetry_backend() -> GpuTelemetryBackend {
+    // REQ-AXO-902037 — NVML (driver API) is the canonical GPU telemetry
+    // backend: precise, programmatic, WSL2-robust (per-process memory that
+    // `nvidia-smi --query-compute-apps` masks as `[N/A]`). `nvidia-smi` is now
+    // an EXPLICIT opt-in fallback only (`AXON_GPU_TELEMETRY_BACKEND=nvidia-smi`),
+    // never the silent default. Operator directive 2026-06-19: "nvidia-smi est
+    // trop peu précis, on utilise NVML".
     match std::env::var("AXON_GPU_TELEMETRY_BACKEND")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
     {
         Some("none") | Some("disabled") => GpuTelemetryBackend::None,
-        Some("nvml") => GpuTelemetryBackend::Nvml,
-        _ => GpuTelemetryBackend::NvidiaSmi,
+        Some("nvidia-smi") | Some("nvidia_smi") | Some("smi") => GpuTelemetryBackend::NvidiaSmi,
+        _ => GpuTelemetryBackend::Nvml,
     }
 }
 
@@ -227,6 +233,87 @@ fn current_gpu_utilization_snapshot_via_nvml() -> Option<GpuUtilizationSnapshot>
                 gpu_utilization_ratio: (utilization.gpu as f64 / 100.0).clamp(0.0, 1.0),
                 memory_utilization_ratio: (utilization.memory as f64 / 100.0).clamp(0.0, 1.0),
             })
+        } else {
+            None
+        };
+        let _ = nvml_shutdown();
+        result
+    }
+}
+
+/// REQ-AXO-902037 — NVML per-process compute-context info (v3 struct).
+#[repr(C)]
+struct NvmlProcessInfoV3 {
+    pid: u32,
+    used_gpu_memory: u64,
+    gpu_instance_id: u32,
+    compute_instance_id: u32,
+}
+
+/// REQ-AXO-902037 — VRAM (MiB) held by `pid` per the NVML driver API
+/// (`nvmlDeviceGetComputeRunningProcesses_v3`). Replaces the
+/// `nvidia-smi --query-compute-apps` shell-out, which WSL2 masks as `[N/A]`
+/// / `[Not Found]`; NVML reports per-process memory correctly there. Returns
+/// `Some(mib)` when `pid` holds a compute context (`mib` may be 0 when the
+/// driver reports the size as unavailable), `None` when NVML is unavailable
+/// or `pid` is absent. Mirrors `parse_compute_apps_used_mib`'s contract so
+/// the caller's GPU/CPU verdict (`mib > 0`) is unchanged.
+pub(crate) fn gpu_process_used_mib_via_nvml(pid: u32) -> Option<u64> {
+    type NvmlInitV2 = unsafe extern "C" fn() -> i32;
+    type NvmlShutdown = unsafe extern "C" fn() -> i32;
+    type NvmlDeviceGetHandleByIndexV2 =
+        unsafe extern "C" fn(u32, *mut *mut std::ffi::c_void) -> i32;
+    type NvmlDeviceGetComputeRunningProcessesV3 =
+        unsafe extern "C" fn(*mut std::ffi::c_void, *mut u32, *mut NvmlProcessInfoV3) -> i32;
+
+    const NVML_SUCCESS: i32 = 0;
+    const NVML_ERROR_INSUFFICIENT_SIZE: i32 = 7;
+    const NVML_VALUE_NOT_AVAILABLE: u64 = u64::MAX;
+
+    unsafe {
+        let library = Library::new(nvml_library_path()).ok()?;
+        let nvml_init: libloading::Symbol<'_, NvmlInitV2> = library.get(b"nvmlInit_v2").ok()?;
+        let nvml_shutdown: libloading::Symbol<'_, NvmlShutdown> =
+            library.get(b"nvmlShutdown").ok()?;
+        let nvml_device_get_handle_by_index: libloading::Symbol<'_, NvmlDeviceGetHandleByIndexV2> =
+            library.get(b"nvmlDeviceGetHandleByIndex_v2").ok()?;
+        let nvml_get_procs: libloading::Symbol<'_, NvmlDeviceGetComputeRunningProcessesV3> =
+            library.get(b"nvmlDeviceGetComputeRunningProcesses_v3").ok()?;
+
+        if nvml_init() != NVML_SUCCESS {
+            return None;
+        }
+
+        let mut device: *mut std::ffi::c_void = std::ptr::null_mut();
+        if nvml_device_get_handle_by_index(gpu_telemetry_device_index(), &mut device)
+            != NVML_SUCCESS
+        {
+            let _ = nvml_shutdown();
+            return None;
+        }
+
+        // Probe the process count first (count=0, infos=null → either SUCCESS
+        // with count=0, or INSUFFICIENT_SIZE with count set to the needed len).
+        let mut count: u32 = 0;
+        let probe = nvml_get_procs(device, &mut count, std::ptr::null_mut());
+        let result = if probe == NVML_SUCCESS && count == 0 {
+            None
+        } else if probe == NVML_SUCCESS || probe == NVML_ERROR_INSUFFICIENT_SIZE {
+            let cap = count.max(1) as usize;
+            let mut infos: Vec<NvmlProcessInfoV3> = Vec::with_capacity(cap);
+            let mut n = cap as u32;
+            if nvml_get_procs(device, &mut n, infos.as_mut_ptr()) == NVML_SUCCESS {
+                infos.set_len((n as usize).min(cap));
+                infos.iter().find(|p| p.pid == pid).map(|p| {
+                    if p.used_gpu_memory == NVML_VALUE_NOT_AVAILABLE {
+                        0
+                    } else {
+                        p.used_gpu_memory / (1024 * 1024)
+                    }
+                })
+            } else {
+                None
+            }
         } else {
             None
         };
